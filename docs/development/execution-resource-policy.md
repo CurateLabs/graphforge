@@ -51,6 +51,73 @@ Normalization returns structured [`GfError::Validation`](../../crates/graphforge
 Invalid settings never partially construct a runtime or authoritative spill
 state.
 
+## Retained read caches
+
+The query pool has budget `B`. Each hydrated generation's adjacency provider
+shares `B / 4` across decoded CSR shards, the node-label index and edge-property
+ID maps; its ordinal-identity handle gets `B / 8`, and retained property
+inventory structure and footer metadata get `B / 8`. The identity share
+includes both ordinal blocks and tombstone blocks: tombstones get
+`min(1 MiB, identity_share / 8)` and ordinals take the remainder. Identity
+descriptor metadata retains its separate fixed 16 MiB admission cap. A single decoded
+CSR shard may exceed the topology share, bounded by the shard admission limits.
+Label slots and dictionary arrays count allocated capacity, and optional views
+that do not fit are declined before allocation. The facade's
+`resource_diagnostics().retained_topology_bytes` reports the topology consumers
+and their shared ceiling. Optional view builds are serialized, but their
+buffers coexist with the shards they displace until publication; construction
+can therefore add one topology share temporarily. Slot growth can hold the old
+buffer beside its exact-sized replacement.
+
+A session reusing caller-supplied adjacency or ordinal-identity caches checks
+their configured ceilings against its own topology and identity shares, even
+when those caches are empty. An oversized supplied cache fails with
+`GF_RESOURCE_LIMIT`, naming the consumer, before identity pinning or inventory
+admission changes shared state. Compatible supplied authorities are retained;
+attachment never replaces them or raises their ceilings.
+
+An edge-record decode reserves active decoder scratch plus accumulated Arrow
+output before reading pages. Files run sequentially; each projected column can
+advance row groups independently, so active scratch sums each column's largest
+selected chunk. Complete chunk/page/dictionary/level allowances remain
+conservative. Uncompressed and Zstandard pages have admitted decoder bounds;
+Zstandard includes the two contexts that can overlap at a group transition.
+Other codecs fail before pages unless their native workspace has a justified
+bound. Fixed output counts full reader batch capacities, including the
+last partial batch; edge selection uses the bounded Selectors policy.
+Variable strings use unencoded value-size statistics; a footer that lacks them
+uses `num_values * uncompressed_size`. The envelope also covers a file's
+concat/filter copies. After decoding, the reservation transfers atomically to
+actual retained batches, and concatenation admits its additional copy before
+allocation. An estimate beyond the query pool fails with the named
+`ExpandExec hop read` consumer. Storage retains its encoded-footer, row-group
+and column admission caps; noncanonical nested/dictionary Arrow topology is
+refused rather than treated as scalar output.
+
+Property inventory admission counts route/path/map capacities and one
+`ParquetMetaData::memory_size()` plus two Arrow schema allowances per cached
+footer (the second schema allows merged route summaries). A footer beyond the
+shared inventory allowance fails with `GF_RESOURCE_LIMIT`, naming `property inventory
+metadata`, and is not cached. The budget includes every fragment rather than
+applying a separate limit to each one. Facade diagnostics expose admitted
+`retained_inventory_metadata_bytes`.
+
+The first resource-configured attachment establishes an inventory ceiling.
+Subsequent sessions sharing that inventory may tighten the ceiling but cannot
+raise it. An attachment requesting less than already admitted bytes fails;
+it preserves the existing authority. Admission of distinct catalog and provider
+inventories validates both under their budget locks before tightening either.
+Capture an independent inventory for
+readers that need independent budgets. Direct execution sessions apply the
+same policy to both catalog and provider inventories, including after mutation.
+
+These formulas bound the named caches and edge decoder. They do not establish
+a universal RSS ceiling: node/property decoder scratch,
+runtime buffers and allocator retention remain separate consumers. Reproduce
+the facade pressure, refusal and subprocess RSS checks with the Rust gate
+narrowed to `graphforge-api` tests `read_cache_budget` and `read_cache_rss`.
+Record observed RSS and workload results on the issue or PR, not in this page.
+
 ## Query spill (#1595)
 
 `SpillPolicy` decides where a query whose sort or aggregation exceeds

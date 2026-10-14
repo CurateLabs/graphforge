@@ -20,7 +20,9 @@ use std::fs::File;
 use std::path::Path;
 use std::sync::Arc;
 
+mod decode_budget;
 mod edge_ordinal;
+pub use decode_budget::edge_decode_admission_bytes;
 
 pub(crate) use self::edge_ordinal::EdgeIdRequest;
 
@@ -789,6 +791,12 @@ fn read_parquet_filtered_u64_attempt(
         options,
     )
     .map_err(parquet_err)?;
+    let builder = if matches!(kind, FilteredReadKind::Edge) {
+        builder
+            .with_row_selection_policy(parquet::arrow::arrow_reader::RowSelectionPolicy::Selectors)
+    } else {
+        builder
+    };
 
     // Fallback: a large requested fraction makes the Parquet-level filter
     // overhead a net loss — read plainly, then trim in memory so the public

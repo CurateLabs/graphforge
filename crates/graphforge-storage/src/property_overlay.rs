@@ -12,6 +12,7 @@ pub use fragment_cap::{MAX_PROPERTY_FRAGMENT_BYTES, MAX_PROPERTY_FRAGMENT_ROWS};
 pub(crate) mod bounded_object;
 pub use bounded_object::MAX_PROPERTY_OBJECT_BYTES;
 mod inventory;
+mod memory_budget;
 mod readonly_snapshot;
 pub(crate) use inventory::SnapshotScratch;
 #[cfg(test)]
@@ -190,6 +191,7 @@ pub struct PropertyFragment {
 /// retained through no-follow directory capabilities.
 #[derive(Debug)]
 pub struct AuthenticatedPropertyInventory {
+    memory_budget: memory_budget::InventoryMemoryBudget,
     generation_lease: Option<crate::ResolvedProjectGeneration>,
     root: Option<graphforge_filesystem::StableDirectory>,
     root_path: Option<PathBuf>,
@@ -312,6 +314,7 @@ struct AuthenticatedPropertyFragment {
     /// the first touch, which checks every part's content against the manifest.
     object: OnceLock<Result<FragmentObject, GfError>>,
     footer: OnceLock<Result<FragmentFooter, GfError>>,
+    footer_admission: OnceLock<Result<(), GfError>>,
     readonly_index: OnceLock<Result<Arc<readonly_snapshot::ReadonlyIndex>, GfError>>,
     /// Set once a targeted read has walked every key of this fragment and found
     /// it strictly sorted with no tombstone carrying values. The fragment's

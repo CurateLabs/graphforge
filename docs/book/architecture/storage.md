@@ -1107,16 +1107,20 @@ schema declarations return an error before Arrow's schema converter is invoked.
 Decoded offsets must start at zero, remain monotone, and end at the edge count.
 
 Opening checks shard metadata without reading payloads. Cloned readers share one
-cache. Retained decoded shards are bounded by bytes, not by count: a
-least-recently-used policy evicts within the reader's decoded-shard budget
-(`DEFAULT_DECODED_SHARD_CACHE_BYTES`, 1 GiB), so sequential traversal still pays
-one decode per shard while random-access frontiers (for example a two-hop
-`ExpandExec` frontier in neighbour order, #1518) stop paying one decode per
-row. A shard larger than the whole budget is impossible under the hard shard
-caps; if it were, it would still cache alone. Retained bytes therefore never
-exceed `max(budget, one shard)` and never scale with the graph (#1094). On a
-miss, the prior cached shards stay alive until the replacement fully
-validates; a failed read evicts nothing. Resource accounting must include the
+cache. Standalone opens use `STANDALONE_DECODED_SHARD_CACHE_BYTES` (64 MiB).
+Execution providers share one cache across their indexes within the `B / 4`
+topology allowance derived from query budget `B`; the node-label index and
+edge-property ID maps draw on that same allowance. Retained decoded shards are
+bounded by bytes, not by count: a least-recently-used policy evicts within the
+available cache allowance, so sequential traversal still pays one decode per
+shard while random-access frontiers (for example a two-hop `ExpandExec` frontier
+in neighbour order, #1518) stop paying one decode per row. A shard larger than
+the available allowance caches alone. Retained decoded bytes therefore never
+exceed `max(available allowance, one shard)` and never scale with the graph
+(#1094). Cursor walks retain no entries in this cache; each cursor's active
+decoded shard is a separate transient buffer. On a miss, the prior cached
+shards stay alive until the replacement fully validates; a failed read evicts
+nothing. Resource accounting must include the
 retained cache, the encoded file, Arrow's body buffer and decoded arrays, the
 new CSR vectors, parser/alignment allocations and the fixed Zstd decoder
 context. The pinned bulk Zstd decoder uses the supplied bounded destination

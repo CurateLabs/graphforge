@@ -423,7 +423,9 @@ pub use generation_diff::{
     GenerationDiffRequest, GenerationGraphDiff, GraphChangeStream, ReloadRequiredReason,
 };
 pub use graphforge_exec::validate_embedding_options;
-pub use graphforge_exec::{ExecutionResult, ExecutionStats, SendableRecordBatchStream};
+pub use graphforge_exec::{
+    ExecutionResult, ExecutionStats, RetainedTopologyBytes, SendableRecordBatchStream,
+};
 pub use graphforge_storage::{
     GraphDirectedness, ResearchAccessPolicyMetadata, ResearchCorpusSize, ResearchDiscoveryFacets,
     ResearchGeographicCoverage, ResearchProjectDiscoveryLimits, ResearchProjectDiscoveryQuery,
@@ -892,9 +894,16 @@ impl GraphForge {
             load_workspace_ontology(&resolved_generation)?;
         let (dir, workspace, graph_open_evidence) =
             hydrate_graph_workspace(&resolved_generation, false)?;
-        let property_inventory =
-            property_inventory_for_hydrated_generation(&resolved_generation, &dir)?;
-        let ordinal_identities = ordinal_identity_resolver(&resolved_generation, &dir)?;
+        let property_inventory = property_inventory_for_hydrated_generation(
+            &resolved_generation,
+            &dir,
+            resource_policy.memory_budget_bytes,
+        )?;
+        let ordinal_identities = ordinal_identity_resolver(
+            &resolved_generation,
+            &dir,
+            resource_policy.memory_budget_bytes,
+        )?;
         Ok(Self {
             identity: GraphIdentity::new(),
             path: None,
@@ -913,7 +922,12 @@ impl GraphForge {
             ordinal_identities,
             clock: Mutex::new(Arc::new(system_time_micros)),
             adjacency_provider: Arc::new(std::sync::RwLock::new(Arc::new(
-                adjacency_provider_for_graph(&dir, ontology_mode, Arc::clone(&property_inventory))?,
+                adjacency_provider_for_graph(
+                    &dir,
+                    ontology_mode,
+                    Arc::clone(&property_inventory),
+                    resource_policy.memory_budget_bytes,
+                )?,
             ))),
             adjacency_visibility: Arc::new(std::sync::RwLock::new(())),
             #[cfg(feature = "search")]
@@ -1038,6 +1052,24 @@ impl GraphForge {
     ) -> Result<Self, GfError> {
         let options = GraphForgeOptions::default();
         let (_, resource_policy) = options.clone().validate()?;
+        Self::open_resolved_with_lifecycle_resources(
+            container_dir,
+            resolved_generation,
+            read_only,
+            lifecycle_mode,
+            options,
+            resource_policy,
+        )
+    }
+
+    fn open_resolved_with_lifecycle_resources(
+        container_dir: PathBuf,
+        resolved_generation: ResolvedProjectGeneration,
+        read_only: bool,
+        lifecycle_mode: graphforge_storage::filesystem_admission::ProjectLifecycleMode,
+        options: GraphForgeOptions,
+        resource_policy: resource_policy::NormalizedResourcePolicy,
+    ) -> Result<Self, GfError> {
         let project_open_recovery = if read_only {
             graphforge_storage::ProjectOpenRecoveryEvidence::checkpoint_view(
                 resolved_generation.generation_uuid(),
@@ -1102,8 +1134,16 @@ impl GraphForge {
         let (dir, workspace, graph_open_evidence) =
             hydrate_graph_workspace(&resolved_generation, access.pins_published_tree())?;
         let (property_inventory, hydrated_inventory) =
-            property_and_graph_inventory_for_hydrated_generation(&resolved_generation, &dir)?;
-        let ordinal_identities = ordinal_identity_resolver(&resolved_generation, &dir)?;
+            property_and_graph_inventory_for_hydrated_generation(
+                &resolved_generation,
+                &dir,
+                resource_policy.memory_budget_bytes,
+            )?;
+        let ordinal_identities = ordinal_identity_resolver(
+            &resolved_generation,
+            &dir,
+            resource_policy.memory_budget_bytes,
+        )?;
 
         let runtime_catalog = load_runtime_catalog(&dir)?;
         let semantic_storage_bindings =
@@ -1175,8 +1215,12 @@ impl GraphForge {
         let construction_cpu_admission = resource_policy.construction_cpu_admission();
         let runtime = build_runtime(&resource_policy)?;
 
-        let adjacency_provider =
-            adjacency_provider_for_graph(&dir, ontology_mode, Arc::clone(&property_inventory))?;
+        let adjacency_provider = adjacency_provider_for_graph(
+            &dir,
+            ontology_mode,
+            Arc::clone(&property_inventory),
+            resource_policy.memory_budget_bytes,
+        )?;
         let graph = Self {
             identity: GraphIdentity::new(),
             path: Some(container_dir),
@@ -1381,6 +1425,7 @@ impl GraphForge {
                     &self.dir(),
                     self.ontology_mode,
                     self.property_inventory_for_session(),
+                    self.resource_policy.memory_budget_bytes,
                 )?);
         }
         Ok(())

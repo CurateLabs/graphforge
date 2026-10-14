@@ -634,6 +634,44 @@ fn the_ordinal_block_cache_never_exceeds_its_budget_and_evicts_oldest_first() {
     );
 }
 
+#[test]
+fn query_budget_bounds_ordinal_and_tombstone_caches_together() {
+    let budget = 16 * 1024 * 1024;
+    let share = crate::read_cache_budget::ReadCacheBudget::from_query_budget(budget).identity_bytes;
+    let limits = V4OrdinalIdentityLimits::for_query_memory_budget(budget);
+    assert_eq!(
+        (limits.max_ordinal_cache_bytes + limits.max_tombstone_cache_bytes) as u64,
+        share
+    );
+    let tombstoned = 17;
+    let blocks = 40;
+    let fixture = Fixture::new(&[blocks * RECORDS_PER_ORDINAL_BLOCK], &[tombstoned]);
+    let mut handle = fixture.open(limits);
+    for block in 0..blocks {
+        let live = block * RECORDS_PER_ORDINAL_BLOCK + 1;
+        let result = handle.lookup_node_uuids(&[live, tombstoned]).unwrap();
+        assert_eq!(
+            result.values,
+            vec![Some(Uuid::from_u128(u128::from(live))), None]
+        );
+        assert!(
+            result.metrics.retained_cache_bytes <= share,
+            "combined cache charge {} exceeds identity share {share}",
+            result.metrics.retained_cache_bytes
+        );
+    }
+    assert!(handle.ordinal_cache.charged_bytes > 0);
+    assert!(!handle.tombstone_cache.entries.is_empty());
+    assert!(
+        (handle.ordinal_cache.charged_bytes + handle.tombstone_cache.charged_bytes) as u64 <= share
+    );
+    let zero = V4OrdinalIdentityLimits::for_query_memory_budget(0);
+    assert_eq!(
+        zero.max_ordinal_cache_bytes + zero.max_tombstone_cache_bytes,
+        0
+    );
+}
+
 /// More blocks than the 16 a fixed 1 MiB cache held, so a sweep of them in
 /// order evicts each block before it is wanted again (#1984).
 const WIDE_FRONTIER_BLOCKS: u64 = 24;

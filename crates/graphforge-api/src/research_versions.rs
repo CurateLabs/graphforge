@@ -212,7 +212,11 @@ impl GraphForge {
                             "Project restore requires complete research".into(),
                         ));
                     }
-                    Some(view::materialize_writable(self, &source)?)
+                    Some(view::materialize_writable(
+                        self,
+                        &source,
+                        self.resource_policy.clone(),
+                    )?)
                 }
                 _ => None,
             }
@@ -322,8 +326,16 @@ impl GraphForge {
         &self,
         version_uuid: Uuid,
     ) -> Result<ResearchVersionView, GfError> {
+        self.open_research_version_with_resources(version_uuid, self.resource_policy.clone())
+    }
+
+    pub(crate) fn open_research_version_with_resources(
+        &self,
+        version_uuid: Uuid,
+        resource_policy: crate::NormalizedResourcePolicy,
+    ) -> Result<ResearchVersionView, GfError> {
         let version = self.research_version(version_uuid)?;
-        let graph = view::materialize(self, &version)?;
+        let graph = view::materialize_with_resources(self, &version, true, resource_policy)?;
         Ok(ResearchVersionView { version, graph })
     }
 }

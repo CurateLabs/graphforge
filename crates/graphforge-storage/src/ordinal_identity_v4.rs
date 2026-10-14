@@ -20,6 +20,8 @@ use serde::{Deserialize, Serialize};
 use sha2::Digest;
 use uuid::Uuid;
 
+use crate::read_cache_budget::{DEFAULT_QUERY_MEMORY_BUDGET_BYTES, ReadCacheBudget};
+
 /// Checksum-bearing wire version of the ordinal mapping authority.
 pub const ORDINAL_IDENTITY_V4: u32 = 6;
 /// Canonical location below a graph project.
@@ -44,20 +46,6 @@ pub const ORDINAL_BLOCK_RECORDS: u64 = ORDINAL_BLOCK_BYTES / UUID_WIDTH;
 const ORDINAL_BLOCK_BYTES_USIZE: usize = 64 * 1024;
 pub(crate) const MAX_MANIFEST_BYTES: u64 = 4 * 1024 * 1024;
 const STREAM_BYTES: usize = 1024 * 1024;
-/// Default byte budget of the authenticated ordinal-block cache one handle
-/// retains. It is the same budget the decoded CSR shard cache takes
-/// ([`crate::adjacency::DEFAULT_DECODED_SHARD_CACHE_BYTES`]), so identity and
-/// adjacency reads share one retained-memory scale. The cache fills lazily:
-/// only blocks a lookup actually read are charged, never the budget itself.
-/// A hop frontier that spans more blocks than a few-megabyte cache holds is
-/// then read and authenticated once per block per generation instead of once
-/// per lookup (#1984).
-pub const DEFAULT_ORDINAL_BLOCK_CACHE_BYTES: usize = 1024 * 1024 * 1024;
-
-const _: () = assert!(
-    DEFAULT_ORDINAL_BLOCK_CACHE_BYTES as u64 == crate::adjacency::DEFAULT_DECODED_SHARD_CACHE_BYTES,
-    "the ordinal identity block cache shares the decoded shard cache budget"
-);
 // BTree nodes, sorted request storage, caller-order output, and resolved-map
 // entries are charged conservatively rather than as payload-only scalars.
 const REQUEST_ENTRY_CHARGE: u64 = 128;
@@ -92,16 +80,41 @@ pub struct V4OrdinalIdentityLimits {
     pub max_descriptor_metadata_bytes: usize,
 }
 
-impl Default for V4OrdinalIdentityLimits {
-    fn default() -> Self {
+impl V4OrdinalIdentityLimits {
+    /// The limits of a handle opened under a query memory budget of
+    /// `query_budget_bytes`: the authenticated-block cache is the identity
+    /// share of the retained read caches,
+    /// [`ReadCacheBudget::from_query_budget`]`(query_budget_bytes).identity_bytes`
+    /// (`B / 8`, #1987). Tombstone blocks receive at most one eighth of
+    /// that share (capped at 1 MiB); ordinal blocks take the remainder, so
+    /// their combined cache charge cannot exceed the identity share.
+    /// The cache fills lazily: only blocks a lookup actually
+    /// read are charged, never the budget itself. A hop frontier that spans
+    /// more blocks than the cache holds is read and authenticated once per
+    /// block per generation instead of once per lookup (#1984), so the share
+    /// has to hold a traversal's working set; the formula, not a constant, is
+    /// what ties that to the memory the session was told it may use.
+    #[must_use]
+    pub fn for_query_memory_budget(query_budget_bytes: u64) -> Self {
+        let identity_bytes = ReadCacheBudget::from_query_budget(query_budget_bytes).identity_bytes;
+        let tombstone_bytes = (identity_bytes / 8).min(STREAM_BYTES as u64);
         Self {
             max_requested: 65_536,
             coalesce_gap_bytes: 4_096,
             max_coalesced_read_bytes: STREAM_BYTES,
-            max_tombstone_cache_bytes: STREAM_BYTES,
-            max_ordinal_cache_bytes: DEFAULT_ORDINAL_BLOCK_CACHE_BYTES,
+            max_tombstone_cache_bytes: usize::try_from(tombstone_bytes).unwrap_or(usize::MAX),
+            max_ordinal_cache_bytes: usize::try_from(identity_bytes - tombstone_bytes)
+                .unwrap_or(usize::MAX),
             max_descriptor_metadata_bytes: 16 * STREAM_BYTES,
         }
+    }
+}
+
+impl Default for V4OrdinalIdentityLimits {
+    /// The limits under the default session budget
+    /// ([`DEFAULT_QUERY_MEMORY_BUDGET_BYTES`]).
+    fn default() -> Self {
+        Self::for_query_memory_budget(DEFAULT_QUERY_MEMORY_BUDGET_BYTES)
     }
 }
 
@@ -1147,6 +1160,15 @@ impl V4OrdinalIdentityHandle {
     #[must_use]
     pub const fn max_requested_ids(&self) -> usize {
         self.limits.max_requested
+    }
+
+    /// Combined configured ceiling for retained ordinal and tombstone caches.
+    /// Session attachment checks this ceiling without modifying the authority.
+    #[must_use]
+    pub const fn cache_budget_bytes(&self) -> usize {
+        self.limits
+            .max_ordinal_cache_bytes
+            .saturating_add(self.limits.max_tombstone_cache_bytes)
     }
 
     /// Resolve a bounded caller batch while preserving caller order.

@@ -86,11 +86,16 @@ pub(crate) fn prepare(
         .get(head)
         .cloned()
         .ok_or_else(unavailable)?;
-    let mut graph = crate::research_versions::materialize_version_writable(owner, &version)?;
+    let graph = crate::research_versions::materialize_version_writable(
+        owner,
+        &version,
+        owner
+            .resource_policy
+            .clone()
+            .with_private_query_budget(64 * 1024 * 1024),
+    )?;
     // After materializing the authenticated head: the edit is a new commit.
     publication::commit(&mut version, vec![*head], None, None, None)?;
-    graph.resource_policy.memory_budget_bytes = 64 * 1024 * 1024;
-    graph.resource_policy.spill_enabled = false;
     Ok((graph, version))
 }
 

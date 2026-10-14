@@ -219,21 +219,23 @@ fn selected_view(
     let directory =
         std::sync::Arc::new(tempfile::tempdir().map_err(|e| GfError::Storage(e.to_string()))?);
     let generation = materialize_prepared_branch(root, &prepared, directory.path())?;
+    let mut resource_policy = owner
+        .resource_policy
+        .clone()
+        .with_private_query_budget(64 * 1024 * 1024);
+    resource_policy.batch_size = 256;
+    resource_policy.target_partitions = 1;
     let mut view = GraphForge::open_resolved_with_options(
         directory.path().to_path_buf(),
         generation.clone(),
         true,
         owner.write_options.clone(),
-        owner.resource_policy.clone(),
+        resource_policy,
         graphforge_storage::ProjectOpenRecoveryEvidence::checkpoint_view(
             generation.generation_uuid(),
         ),
     )?;
     view.lifecycle_mode = graphforge_storage::filesystem_admission::ProjectLifecycleMode::Ephemeral;
     view.research_materialization = Some(directory);
-    view.resource_policy.memory_budget_bytes = 64 * 1024 * 1024;
-    view.resource_policy.batch_size = 256;
-    view.resource_policy.target_partitions = 1;
-    view.resource_policy.spill_enabled = false;
     Ok((prepared, view))
 }

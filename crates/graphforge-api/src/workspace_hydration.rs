@@ -189,12 +189,21 @@ impl GraphForge {
         generation: &ResolvedProjectGeneration,
         graph_root: &Path,
     ) -> Result<PreparedGenerationReadAuthority, GfError> {
-        let properties = property_inventory_for_hydrated_generation(generation, graph_root)?;
-        let ordinal = ordinal_identity_handle(generation, graph_root)?;
+        let properties = property_inventory_for_hydrated_generation(
+            generation,
+            graph_root,
+            self.resource_policy.memory_budget_bytes,
+        )?;
+        let ordinal = ordinal_identity_handle(
+            generation,
+            graph_root,
+            self.resource_policy.memory_budget_bytes,
+        )?;
         let adjacency = Arc::new(adjacency_provider_for_graph(
             graph_root,
             self.ontology_mode,
             Arc::clone(&properties),
+            self.resource_policy.memory_budget_bytes,
         )?);
         Ok(PreparedGenerationReadAuthority {
             properties,
@@ -336,9 +345,14 @@ pub(super) fn decode_runtime_catalog<T: parquet::file::reader::ChunkReader + 'st
 pub(super) fn property_inventory_for_hydrated_generation(
     generation: &ResolvedProjectGeneration,
     hydrated_root: &Path,
+    query_memory_budget: u64,
 ) -> Result<Arc<graphforge_storage::AuthenticatedPropertyInventory>, GfError> {
-    property_and_graph_inventory_for_hydrated_generation(generation, hydrated_root)
-        .map(|(properties, _)| properties)
+    property_and_graph_inventory_for_hydrated_generation(
+        generation,
+        hydrated_root,
+        query_memory_budget,
+    )
+    .map(|(properties, _)| properties)
 }
 
 // Hydration authenticates the published base and journal before deriving this
@@ -347,6 +361,7 @@ pub(super) fn property_inventory_for_hydrated_generation(
 pub(super) fn property_and_graph_inventory_for_hydrated_generation(
     generation: &ResolvedProjectGeneration,
     hydrated_root: &Path,
+    query_memory_budget: u64,
 ) -> Result<
     (
         Arc<graphforge_storage::AuthenticatedPropertyInventory>,
@@ -368,18 +383,20 @@ pub(super) fn property_and_graph_inventory_for_hydrated_generation(
     // generations require a fresh inventory of their effective workspace.
     let (admitted, effective) = match inventory {
         Some(inventory) if !has_deltas => (
-            graphforge_storage::AuthenticatedPropertyInventory::from_resolved_generation(
+            graphforge_storage::AuthenticatedPropertyInventory::from_resolved_generation_with_query_memory_budget(
                 generation,
+                query_memory_budget,
             )?,
             graphforge_storage::GraphReadInventory::from_published(&inventory)?,
         ),
         _ => {
             let materialized = graphforge_storage::capture_graph_read_inventory(hydrated_root)?;
             let admitted =
-                graphforge_storage::AuthenticatedPropertyInventory::from_private_workspace_inventory(
+                graphforge_storage::AuthenticatedPropertyInventory::from_private_workspace_inventory_with_query_memory_budget(
                     generation,
                     hydrated_root,
                     materialized.clone(),
+                    query_memory_budget,
                 )?;
             (admitted, materialized)
         }
@@ -390,6 +407,7 @@ pub(super) fn property_and_graph_inventory_for_hydrated_generation(
 pub(super) fn ordinal_identity_handle(
     generation: &ResolvedProjectGeneration,
     graph_root: &Path,
+    memory_budget_bytes: u64,
 ) -> Result<Option<graphforge_storage::ordinal_identity_v4::V4OrdinalIdentityHandle>, GfError> {
     let Some(authority) = generation.authenticated_v4_ordinal_authority()? else {
         return Ok(None);
@@ -397,7 +415,10 @@ pub(super) fn ordinal_identity_handle(
     match authority
         .open(
             graph_root,
-            graphforge_storage::V4OrdinalIdentityLimits::default(),
+            // The identity share of the query memory budget (#1987).
+            graphforge_storage::V4OrdinalIdentityLimits::for_query_memory_budget(
+                memory_budget_bytes,
+            ),
         )
         .map_err(|error| GfError::Storage(error.to_string()))?
     {
@@ -413,9 +434,10 @@ pub(super) fn ordinal_identity_handle(
 pub(super) fn ordinal_identity_resolver(
     generation: &ResolvedProjectGeneration,
     graph_root: &Path,
+    memory_budget_bytes: u64,
 ) -> Result<Arc<graphforge_exec::V4OrdinalIdentityResolver>, GfError> {
     Ok(Arc::new(graphforge_exec::V4OrdinalIdentityResolver::new(
-        ordinal_identity_handle(generation, graph_root)?,
+        ordinal_identity_handle(generation, graph_root, memory_budget_bytes)?,
     )))
 }
 
@@ -423,8 +445,13 @@ pub(super) fn adjacency_provider_for_graph(
     dir: &Path,
     mode: OntologyMode,
     inventory: Arc<graphforge_storage::AuthenticatedPropertyInventory>,
+    memory_budget_bytes: u64,
 ) -> Result<graphforge_exec::PersistentAdjacencyProvider, GfError> {
+    inventory.set_query_memory_budget(memory_budget_bytes)?;
+    // The provider derives its decoded-shard and label-index share from the
+    // query memory budget (see `graphforge_storage::read_cache_budget`).
     let provider = graphforge_exec::PersistentAdjacencyProvider::new(dir.to_path_buf(), mode)
+        .with_memory_budget(memory_budget_bytes)
         .with_inventory(inventory);
     // A pinned view must not mutate its generation. Writable workspaces also
     // have concurrent readers that enumerate graph files, so lazy build temps

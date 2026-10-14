@@ -2,6 +2,7 @@
 
 use super::{CsrIndex, CsrRow, CsrShardRecord, ShardedCsrIndex, corrupt_index};
 use super::{GfError, read_authenticated_shard};
+use std::sync::atomic::Ordering;
 
 const EMPTY_ROW: CsrRow<'static> = CsrRow {
     edge_ids: &[],
@@ -214,11 +215,7 @@ impl<'a> CsrRowCursor<'a> {
 
     fn load(&self, record: &CsrShardRecord) -> Result<LoadedShard, GfError> {
         let csr = read_authenticated_shard(&self.index.root.join(&record.file), record)?;
-        self.index
-            .cache
-            .write()
-            .map_err(|_| GfError::Storage("CSR shard cache lock poisoned".into()))?
-            .decodes += 1;
+        self.index.owner.decodes.fetch_add(1, Ordering::Relaxed);
         let last_node = record.first_node + record.node_count - 1;
         Ok(LoadedShard {
             csr,
