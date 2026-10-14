@@ -190,7 +190,11 @@ impl GraphForge {
         graph_root: &Path,
     ) -> Result<PreparedGenerationReadAuthority, GfError> {
         let properties = property_inventory_for_hydrated_generation(generation, graph_root)?;
-        let ordinal = ordinal_identity_handle(generation, graph_root)?;
+        let ordinal = ordinal_identity_handle(
+            generation,
+            graph_root,
+            self.resource_policy.memory_budget_bytes,
+        )?;
         let adjacency = Arc::new(adjacency_provider_for_graph(
             graph_root,
             self.ontology_mode,
@@ -391,6 +395,7 @@ pub(super) fn property_and_graph_inventory_for_hydrated_generation(
 pub(super) fn ordinal_identity_handle(
     generation: &ResolvedProjectGeneration,
     graph_root: &Path,
+    memory_budget_bytes: u64,
 ) -> Result<Option<graphforge_storage::ordinal_identity_v4::V4OrdinalIdentityHandle>, GfError> {
     let Some(authority) = generation.authenticated_v4_ordinal_authority()? else {
         return Ok(None);
@@ -398,7 +403,10 @@ pub(super) fn ordinal_identity_handle(
     match authority
         .open(
             graph_root,
-            graphforge_storage::V4OrdinalIdentityLimits::default(),
+            // The identity share of the query memory budget (#1987).
+            graphforge_storage::V4OrdinalIdentityLimits::for_query_memory_budget(
+                memory_budget_bytes,
+            ),
         )
         .map_err(|error| GfError::Storage(error.to_string()))?
     {
@@ -414,9 +422,10 @@ pub(super) fn ordinal_identity_handle(
 pub(super) fn ordinal_identity_resolver(
     generation: &ResolvedProjectGeneration,
     graph_root: &Path,
+    memory_budget_bytes: u64,
 ) -> Result<Arc<graphforge_exec::V4OrdinalIdentityResolver>, GfError> {
     Ok(Arc::new(graphforge_exec::V4OrdinalIdentityResolver::new(
-        ordinal_identity_handle(generation, graph_root)?,
+        ordinal_identity_handle(generation, graph_root, memory_budget_bytes)?,
     )))
 }
 

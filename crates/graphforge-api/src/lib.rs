@@ -894,7 +894,11 @@ impl GraphForge {
             hydrate_graph_workspace(&resolved_generation, false)?;
         let property_inventory =
             property_inventory_for_hydrated_generation(&resolved_generation, &dir)?;
-        let ordinal_identities = ordinal_identity_resolver(&resolved_generation, &dir)?;
+        let ordinal_identities = ordinal_identity_resolver(
+            &resolved_generation,
+            &dir,
+            resource_policy.memory_budget_bytes,
+        )?;
         Ok(Self {
             identity: GraphIdentity::new(),
             path: None,
@@ -1108,7 +1112,11 @@ impl GraphForge {
             hydrate_graph_workspace(&resolved_generation, access.pins_published_tree())?;
         let (property_inventory, hydrated_inventory) =
             property_and_graph_inventory_for_hydrated_generation(&resolved_generation, &dir)?;
-        let ordinal_identities = ordinal_identity_resolver(&resolved_generation, &dir)?;
+        let ordinal_identities = ordinal_identity_resolver(
+            &resolved_generation,
+            &dir,
+            resource_policy.memory_budget_bytes,
+        )?;
 
         let runtime_catalog = load_runtime_catalog(&dir)?;
         let semantic_storage_bindings =

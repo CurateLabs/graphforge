@@ -605,7 +605,11 @@ fn publish_workspace_records_inner(
             if let Some(dir) = candidate_graph_root {
                 let properties =
                     crate::property_inventory_for_hydrated_generation(generation, dir)?;
-                let ordinal = crate::ordinal_identity_handle(generation, dir)?;
+                let ordinal = crate::ordinal_identity_handle(
+                    generation,
+                    dir,
+                    graph.resource_policy.memory_budget_bytes,
+                )?;
                 let mode = match configuration.ontology_mode {
                     WorkspaceOntologyMode::None => OntologyMode::Exploratory,
                     WorkspaceOntologyMode::Advisory => OntologyMode::Advisory,

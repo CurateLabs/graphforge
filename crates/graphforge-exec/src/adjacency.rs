@@ -1271,9 +1271,29 @@ pub struct PersistentAdjacencyProvider {
     /// generation moves.
     edge_id_maps: Mutex<Option<EdgeIdMapEntry>>,
     /// The decoded shards of every index above, one budget for all of them: the
-    /// topology share of the query memory budget, which the label index also
-    /// draws on (#1987). Without it each index held a budget of its own.
+    /// topology share of the query memory budget, which the label index and the
+    /// edge-id maps also draw on (#1987). Without it each held a budget of its
+    /// own.
     shard_cache: ShardCache,
+    /// What the label index and the edge-id maps retain now. Held for the whole
+    /// of a build, so two builds never size themselves against a stale figure
+    /// and together exceed the topology share. Always taken after the label or
+    /// map lock, never before.
+    retained: Mutex<RetainedViewBytes>,
+}
+
+/// The bytes the label index and the edge-id maps retain, each charged to the
+/// shard cache as external bytes so the shards give way to them.
+#[derive(Clone, Copy, Default)]
+struct RetainedViewBytes {
+    labels: u64,
+    maps: u64,
+}
+
+impl RetainedViewBytes {
+    fn total(self) -> u64 {
+        self.labels.saturating_add(self.maps)
+    }
 }
 
 /// The built (or declined) edge-id maps of one topology generation.
@@ -1314,6 +1334,7 @@ impl PersistentAdjacencyProvider {
             node_labels: Mutex::new(None),
             edge_id_maps: Mutex::new(None),
             shard_cache: ShardCache::new(ReadCacheBudget::DEFAULT.topology_bytes),
+            retained: Mutex::new(RetainedViewBytes::default()),
         }
     }
 
@@ -1679,7 +1700,7 @@ impl PersistentAdjacencyProvider {
                 !read_topology_generation(&self.dir).is_ok_and(|g| g == entry.generation)
             }) {
                 *labels = None;
-                self.shard_cache.set_external_bytes(0);
+                self.release_retained(|retained| retained.labels = 0);
             }
         }
         // The edge-id maps follow the counter the same way. The label guard is
@@ -1690,7 +1711,16 @@ impl PersistentAdjacencyProvider {
             !read_topology_generation(&self.dir).is_ok_and(|g| g == entry.generation)
         }) {
             *maps = None;
+            self.release_retained(|retained| retained.maps = 0);
         }
+    }
+
+    /// Update the retained-view figures under the accounting lock and charge
+    /// their sum to the shard cache.
+    fn release_retained(&self, update: impl FnOnce(&mut RetainedViewBytes)) {
+        let mut retained = self.retained.lock().expect("retained view bytes lock");
+        update(&mut retained);
+        self.shard_cache.set_external_bytes(retained.total());
     }
 
     fn drop_views(&self) {
@@ -1698,9 +1728,11 @@ impl PersistentAdjacencyProvider {
         self.indexes.lock().expect("adjacency index lock").clear();
         let mut labels = self.node_labels.lock().expect("node label index lock");
         *labels = None;
-        self.shard_cache.set_external_bytes(0);
+        self.release_retained(|retained| retained.labels = 0);
         drop(labels);
-        *self.edge_id_maps.lock().expect("edge id map lock") = None;
+        let mut maps = self.edge_id_maps.lock().expect("edge id map lock");
+        *maps = None;
+        self.release_retained(|retained| retained.maps = 0);
     }
 
     fn cache_shared_view(
@@ -1785,15 +1817,20 @@ impl AdjacencyProvider for PersistentAdjacencyProvider {
             return Ok(cached.index.clone());
         }
         let files = graphforge_storage::TopologyFiles::from_inventory(&inventory)?;
-        // The index and the decoded shards share the topology budget: a built
-        // index is subtracted from the shards' capacity, so together they never
-        // exceed it. A view handed out before the index is dropped keeps its
-        // `Arc` alive until that query ends; that in-flight copy is not charged.
-        let index =
-            graphforge_storage::NodeLabelIndex::build(&files, self.shard_cache.budget_bytes())?
-                .map(Arc::new);
-        self.shard_cache
-            .set_external_bytes(index.as_ref().map_or(0, |built| built.bytes()));
+        // The index, the edge-id maps and the decoded shards share the topology
+        // budget: the index may take what the maps leave, and what it holds is
+        // subtracted from the shards' capacity, so together they never exceed
+        // it. A view handed out before the index is dropped keeps its `Arc`
+        // alive until that query ends; that in-flight copy is not charged.
+        let mut retained = self.retained.lock().expect("retained view bytes lock");
+        let index = graphforge_storage::NodeLabelIndex::build(
+            &files,
+            self.shard_cache.budget_bytes().saturating_sub(retained.maps),
+        )?
+        .map(Arc::new);
+        retained.labels = index.as_ref().map_or(0, |built| built.bytes());
+        self.shard_cache.set_external_bytes(retained.total());
+        drop(retained);
         *entry = Some(LabelIndexEntry {
             generation,
             index: index.clone(),
@@ -1829,37 +1866,40 @@ impl AdjacencyProvider for PersistentAdjacencyProvider {
         {
             return Ok(slot.map.clone());
         }
-        // The maps and the label index share the provider's byte budget.
-        let held: u64 = entry
+        // The maps, the label index and the decoded shards share the topology
+        // budget: this map may take what the other routes' maps and the label
+        // index leave.
+        let mut retained = self.retained.lock().expect("retained view bytes lock");
+        let other_maps: u64 = entry
             .routes
             .iter()
             .filter(|(held_route, _)| held_route.as_str() != route)
             .filter_map(|(_, slot)| slot.map.as_ref())
             .map(|map| map.bytes())
-            .sum::<u64>()
-            .saturating_add(
-                self.node_labels
-                    .lock()
-                    .expect("node label index lock")
-                    .as_ref()
-                    .and_then(|labels| labels.index.as_ref())
-                    .map_or(0, |index| index.bytes()),
-            );
+            .sum();
         // A route without a current index is not remembered: a lazy index
         // rebuild replaces the manifest without moving the generation.
-        let map = match EdgeIdMap::build(
+        let map: Option<Arc<EdgeIdMap>> = match EdgeIdMap::build(
             &self.dir,
             inventory,
             route,
-            graphforge_storage::adjacency::DEFAULT_DECODED_SHARD_CACHE_BYTES.saturating_sub(held),
+            self.shard_cache
+                .budget_bytes()
+                .saturating_sub(retained.labels)
+                .saturating_sub(other_maps),
         )? {
             EdgeIdMapBuild::Built(map) => Some(Arc::from(map)),
             EdgeIdMapBuild::Declined => None,
             EdgeIdMapBuild::Unavailable => {
                 entry.routes.remove(route);
+                retained.maps = other_maps;
+                self.shard_cache.set_external_bytes(retained.total());
                 return Ok(None);
             }
         };
+        retained.maps = other_maps.saturating_add(map.as_ref().map_or(0, |built| built.bytes()));
+        self.shard_cache.set_external_bytes(retained.total());
+        drop(retained);
         entry.routes.insert(
             route.to_owned(),
             EdgeIdMapSlot {
