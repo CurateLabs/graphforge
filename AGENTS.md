@@ -44,7 +44,7 @@ See `docs/book/architecture/`.
 Iterate on the narrowest test that covers the change. Run `make check` before pushing. CI runs the full suite on every PR; do not reproduce it locally unless a CI failure needs it.
 
 ```bash
-make check                                    # fmt, clippy, ruff, mypy, workflow lint, repo checks; no tests
+make check                                    # fmt, clippy, ruff, ty, workflow lint, repo checks; no tests
 make test-rust ARGS="-p graphforge-storage"   # the CI Rust lane, narrowed to what changed
 make test-python                              # every Python binding suite, after rebuilding the wheel
 make test-node                                # every Node binding suite, after rebuilding the addon

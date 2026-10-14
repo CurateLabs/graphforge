@@ -12,8 +12,8 @@ format:  ## Format code with ruff
 format-check:  ## Check code formatting
 	uv run ruff format --check .
 
-type-check:  ## Run mypy type checker
-	uv run mypy crates/graphforge-bindings-py/python/graphforge --strict-optional --show-error-codes
+type-check:  ## Run ty type checker
+	uv run ty check
 
 security:  ## Run Bandit security scanner
 	uv run bandit -c pyproject.toml -r crates/graphforge-bindings-py/python
@@ -199,7 +199,7 @@ check:  ## Format, lint, and static checks for every surface (no test run)
 	cargo check --workspace --benches --locked
 	uv run ruff format --check .
 	uv run ruff check .
-	uv run mypy crates/graphforge-bindings-py/python/graphforge --strict-optional --show-error-codes
+	uv run ty check
 	uv run bandit -q -c pyproject.toml -r crates/graphforge-bindings-py/python
 	scripts/check-workflows.sh
 	scripts/ci/repo-checks.sh
@@ -224,7 +224,6 @@ test-scripts:  ## Run the scripts/ci self-test suites (needs uv sync --all-extra
 clean:  ## Clean up cache files
 	find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
 	find . -type d -name .pytest_cache -exec rm -rf {} + 2>/dev/null || true
-	find . -type d -name .mypy_cache -exec rm -rf {} + 2>/dev/null || true
 	find . -type f -name "*.pyc" -delete 2>/dev/null || true
 	rm -f test-results*.xml coverage.xml .coverage 2>/dev/null || true
 	rm -rf htmlcov/ build/coverage-rust/ crates/graphforge-bindings-node/coverage/ 2>/dev/null || true
