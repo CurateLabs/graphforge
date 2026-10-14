@@ -145,8 +145,9 @@ pub(crate) fn bind(
                 && let Some(source) = scan.source.downcast_ref::<GraphReadSource>()
             {
                 let provider = required(state)?.resolve(source)?;
-                // Restore the selected provider's public schema only in this
-                // execution clone; logical identity excludes observation counts.
+                // Bind the provider's query-facing schema in this execution
+                // clone. Property providers strip storage observation counts
+                // before exposing schemas or scan plans.
                 *scan = datafusion::logical_expr::TableScan::try_new(
                     scan.table_name.clone(),
                     provider_as_source(provider),

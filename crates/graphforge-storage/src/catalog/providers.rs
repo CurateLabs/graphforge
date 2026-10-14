@@ -8,7 +8,7 @@ use crate::schemas::EXPLORATORY_EDGE_SCHEMA;
 use crate::schemas::TOPOLOGY_NODES_SCHEMA;
 use crate::schemas::TYPED_EDGE_SCHEMA;
 use arrow::array::RecordBatch;
-use arrow::datatypes::SchemaRef;
+use arrow::datatypes::{Schema, SchemaRef};
 use async_trait::async_trait;
 use datafusion::datasource::TableProvider;
 use datafusion::datasource::TableType;
@@ -20,6 +20,13 @@ use datafusion_catalog::Session;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
+
+fn query_property_schema(schema: SchemaRef) -> SchemaRef {
+    let schema = Arc::unwrap_or_clone(schema);
+    let mut metadata = schema.metadata().clone();
+    metadata.remove(crate::property_overlay::PROPERTY_LIVE_SCHEMA_KEY);
+    Arc::new(Schema::new_with_metadata(schema.fields().clone(), metadata))
+}
 
 // ---------------------------------------------------------------------------
 // TopologyNodeTable
@@ -364,7 +371,7 @@ impl PropertyTable {
             project: dir.to_path_buf(),
             inventory: None,
             route: entity_type.to_owned(),
-            schema,
+            schema: query_property_schema(schema),
             keys_only: false,
         }
     }
@@ -409,7 +416,7 @@ impl PropertyTable {
             project: dir.to_path_buf(),
             inventory,
             route: stem.to_owned(),
-            schema,
+            schema: query_property_schema(schema),
             keys_only: false,
         })
     }
@@ -428,7 +435,7 @@ impl PropertyTable {
             project: dir.to_path_buf(),
             inventory: Some(inventory),
             route: stem.to_owned(),
-            schema,
+            schema: query_property_schema(schema),
             keys_only: false,
         })
     }
@@ -553,7 +560,7 @@ impl EdgePropertyTable {
             project: dir.to_path_buf(),
             inventory,
             route: rel_type.to_owned(),
-            schema,
+            schema: query_property_schema(schema),
             keys_only: false,
         })
     }
@@ -572,7 +579,7 @@ impl EdgePropertyTable {
             project: dir.to_path_buf(),
             inventory: Some(inventory),
             route: route.to_owned(),
-            schema,
+            schema: query_property_schema(schema),
             keys_only: false,
         })
     }
