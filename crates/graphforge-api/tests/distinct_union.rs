@@ -3,7 +3,7 @@
 use arrow::util::display::array_value_to_string;
 use graphforge_api::GraphForge;
 
-const DISTINCT_QUERIES: [(&str, &str, &[&str]); 3] = [
+const DISTINCT_QUERIES: [(&str, &str, &[&str]); 4] = [
     (
         "MATCH (n:P) RETURN n.id AS id UNION MATCH (m:Q) RETURN m.id AS id",
         "MATCH (n:P) RETURN n.id AS id UNION ALL MATCH (m:Q) RETURN m.id AS id",
@@ -17,6 +17,11 @@ const DISTINCT_QUERIES: [(&str, &str, &[&str]); 3] = [
     (
         "MATCH (n:P) RETURN n.id AS x UNION RETURN 1 AS x",
         "MATCH (n:P) RETURN n.id AS x UNION ALL RETURN 1 AS x",
+        &["1", "1", "2"],
+    ),
+    (
+        "MATCH ()-[r:R]->() RETURN r.w AS w UNION MATCH ()-[s:S]->() RETURN s.w AS w",
+        "MATCH ()-[r:R]->() RETURN r.w AS w UNION ALL MATCH ()-[s:S]->() RETURN s.w AS w",
         &["1", "1", "2"],
     ),
 ];
@@ -71,6 +76,11 @@ fn distinct_union_over_persisted_properties_matches_union_all_deduplicated() {
                 "CREATE (:P {id: 1, name: 'a'}), (:P {id: 2, name: 'b'}), (:Q {id: 3, name: 'a'})",
             )
             .expect("commit fixture nodes");
+        graph
+            .execute(
+                "CREATE (:E)-[:R {w: 1}]->(:F), (:E)-[:S {w: 1}]->(:F), (:E)-[:S {w: 2}]->(:F)",
+            )
+            .expect("commit fixture relationships");
         assert_queries(&graph);
     }
     let reopened = GraphForge::new(Some(path)).expect("reopen persistent graph");
