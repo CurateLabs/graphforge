@@ -231,6 +231,7 @@ fn wave11_low_level_expand_and_optional_schema_guards_fail_closed() {
         edge_filter: None,
         edge_var: 0,
         edge_list_demanded: true,
+        copy_input: None,
         out_schema: Arc::new(Schema::empty()),
         provider: Arc::new(PersistentAdjacencyProvider::new(
             dir.path().to_path_buf(),

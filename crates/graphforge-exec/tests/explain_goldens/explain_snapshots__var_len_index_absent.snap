@@ -5,7 +5,7 @@ ProjectionExec: expr=[1 as one]
   FilterExec: array_has(type_ids@0, 1073741824)
     RepartitionExec: partitioning=RoundRobinBatch(<N>), input_partitions=1
       ProjectionExec: expr=[type_ids@10 as type_ids]
-        VarLenExpandExec: rel=KNOWS, hops=1..2, adjacency=building
+        VarLenExpandExec: rel=KNOWS, hops=1..2, adjacency=building, copied=6
           HashJoinExec: mode=CollectLeft, join_type=Inner, on=[(node_uuid@0, node_uuid@0)], projection=[node_uuid@0, node_id@1, type_id@2, type_ids@3, created_at@4, updated_at@5, name@7]
             UuidBuildKeyTapExec: column=0
               CoalescePartitionsExec

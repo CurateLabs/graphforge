@@ -199,7 +199,7 @@ physical rewrite rules:
 | Node | Description |
 | ---------------------------- | ----------------------------------------------------------------------------------------------------- |
 | `ExpandExec` | Adjacency-backed single hop; one per hop for fixed multi-hop patterns (see below) |
-| `VarLenExpandExec` | Breadth-first expansion for `*min..max` patterns with relationship isomorphism |
+| `VarLenExpandExec` | Breadth-first expansion for `*min..max` patterns with relationship isomorphism; it asks its input for the seed, a bound destination and the columns its parent reads, and a nullable input column no one reads is null-filled instead of copied into every path |
 | `OntologyInferExec` | Pass-through that carries the inference rule into the plan and `explain()` |
 | `OptionalMatchExec` | Left-join semantics with Cypher null-shaping (distinct from SQL LEFT JOIN) |
 | `CorrelatedSeedExec` | The outer rows of a correlated `OPTIONAL MATCH` or `EXISTS`, bound by `OptionalMatchExec` to the rows it executed once |
@@ -251,6 +251,10 @@ materialization barriers. A correlated `OPTIONAL MATCH` or pattern predicate
 asks its outer plan for the columns its sub-plan reads through
 `CorrelatedSeedExec`, the columns its parent reads, and its join keys. A join
 keyed on every outer column therefore still demands the whole row. A
+variable-length expansion asks its input for its seed, a bound destination and the
+columns its parent reads (a per-relationship predicate reads one edge's properties,
+never an input column); an unread nullable input column is null-filled rather than
+copied into every path, and `explain()` shows the narrowed node as `copied=N`. A
 destination-identity-only hop carries the CSR
 neighbor `node_id` directly and resolves `node_uuid` through the facade's exact
 generation-pinned v4 ordinal authority. It opens neither edge topology nor

@@ -25,6 +25,7 @@ use super::edge_filter::Wanted;
 use super::grow_reservation;
 use super::hash_table_bytes;
 use super::output_batch_rows;
+use super::push_input_columns;
 use super::send_chunk;
 use super::topology_for_provider;
 use super::u64_column;
@@ -658,9 +659,7 @@ fn materialise_reached(
             .collect::<Result<Vec<_>, _>>()?,
     );
     let mut columns = Vec::with_capacity(input.num_columns() + node_batch.num_columns() + 1);
-    for col in input.columns() {
-        columns.push(take(col, &src_take, None).map_err(|e| exec_err(e.to_string()))?);
-    }
+    push_input_columns(cfg, input, &src_take, &mut columns)?;
     for col in node_batch.columns() {
         columns.push(take(col, &dst_take, None).map_err(|e| exec_err(e.to_string()))?);
     }

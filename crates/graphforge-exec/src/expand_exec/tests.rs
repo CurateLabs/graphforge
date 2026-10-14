@@ -643,3 +643,266 @@ fn an_identity_answer_of_the_wrong_length_is_an_error() {
     .expect("a short answer must fail");
     assert!(error.to_string().contains("1 of 3"), "{error}");
 }
+
+/// A variable-length expansion over four input columns: the seed `var_0.node_id`
+/// (0), a nullable `var_0.name` (1), a nullable `var_0.age` (2), and a bound
+/// destination `var_9.node_id` (3). Its output appends the edge list as column 4
+/// (a reachability search appends the hop count there instead).
+fn variable_length_over_wide_input(reachability: bool) -> VarLenExpandExec {
+    use datafusion::datasource::memory::MemorySourceConfig;
+    use datafusion::logical_expr::LogicalPlanBuilder;
+    use datafusion::logical_expr::logical_plan::LogicalTableSource;
+
+    let seed_side = Arc::new(arrow::datatypes::Schema::new(vec![
+        Field::new("node_id", DataType::UInt64, false),
+        Field::new("name", DataType::Utf8, true),
+        Field::new("age", DataType::Int64, true),
+    ]));
+    let end_side = Arc::new(arrow::datatypes::Schema::new(vec![Field::new(
+        "node_id",
+        DataType::UInt64,
+        false,
+    )]));
+    let scan = |name: &str, schema: &Arc<arrow::datatypes::Schema>| {
+        LogicalPlanBuilder::scan(
+            name,
+            Arc::new(LogicalTableSource::new(Arc::clone(schema))),
+            None,
+        )
+        .unwrap()
+        .build()
+        .unwrap()
+    };
+    let logical = LogicalPlanBuilder::from(scan("var_0", &seed_side))
+        .cross_join(scan("var_9", &end_side))
+        .unwrap()
+        .build()
+        .unwrap();
+    let physical_schema = Arc::new(logical.schema().as_arrow().clone());
+    let input =
+        MemorySourceConfig::try_new_exec(&[vec![]], Arc::clone(&physical_schema), None).unwrap();
+    let mut node = VarLenExpandNode::new(
+        Arc::new(logical),
+        "KNOWS",
+        1,
+        Some(3),
+        0,
+        1,
+        2,
+        Direction::Out,
+        None,
+        vec![],
+        graphforge_plan::var_len_edge_list_field(&[]),
+    )
+    .with_bound_destination(Some("var_9".to_string()));
+    if reachability {
+        node = node.into_reachability();
+    }
+    let dir = tempfile::TempDir::new().unwrap();
+    let provider: Arc<dyn AdjacencyProvider> = Arc::new(
+        adjacency::PersistentAdjacencyProvider::new(dir.path().to_path_buf(), OntologyMode::Strict),
+    );
+    VarLenExpandExec::new(
+        &node,
+        input,
+        provider,
+        dir.path().to_path_buf(),
+        OntologyMode::Strict,
+    )
+}
+
+fn narrowed(exec: &VarLenExpandExec, required: &[usize]) -> Arc<dyn ExecutionPlan> {
+    exec.with_required_output(&required.iter().copied().collect())
+}
+
+fn variable_length_of(plan: &Arc<dyn ExecutionPlan>) -> &VarLenExpandExec {
+    plan.downcast_ref::<VarLenExpandExec>()
+        .expect("a variable-length expansion")
+}
+
+fn copied_mask(plan: &Arc<dyn ExecutionPlan>) -> Option<Vec<bool>> {
+    variable_length_of(plan)
+        .copy_input
+        .as_ref()
+        .map(|mask| mask.to_vec())
+}
+
+fn displayed(plan: &Arc<dyn ExecutionPlan>) -> String {
+    datafusion::physical_plan::displayable(plan.as_ref())
+        .indent(false)
+        .to_string()
+}
+
+/// The expansion asks its input for the seed, the bound destination and the
+/// input columns its parent reads, and nothing else. Its own edge list is the
+/// last output column, not an input column, so demanding it asks for no input.
+/// (A per-relationship predicate reads one edge's struct, never an input column,
+/// so it adds no demand.) (#1984)
+#[test]
+fn a_variable_length_expansion_demands_its_seed_destination_and_what_the_parent_reads() {
+    use std::collections::BTreeSet;
+
+    let exec = variable_length_over_wide_input(false);
+    let demand = |required: &[usize]| exec.input_demand(&required.iter().copied().collect());
+
+    assert_eq!(demand(&[]), BTreeSet::from([0, 3]));
+    assert_eq!(demand(&[4]), BTreeSet::from([0, 3]));
+    assert_eq!(demand(&[1, 4]), BTreeSet::from([0, 1, 3]));
+    assert_eq!(demand(&[2]), BTreeSet::from([0, 2, 3]));
+    assert_eq!(demand(&[0, 1, 2, 3, 4]), BTreeSet::from([0, 1, 2, 3]));
+
+    // Without a bound destination only the seed is needed.
+    let mut unbound = variable_length_over_wide_input(false);
+    unbound.bound_dst_col_idx = None;
+    assert_eq!(
+        unbound.input_demand(&BTreeSet::from([4])),
+        BTreeSet::from([0])
+    );
+}
+
+/// An input column no operator above reads is not copied into the emitted
+/// rows; the seed, the bound destination and the columns the parent reads are.
+#[test]
+fn a_variable_length_expansion_copies_only_the_columns_its_parent_reads() {
+    let exec = variable_length_over_wide_input(false);
+
+    let nothing_read = narrowed(&exec, &[4]);
+    assert_eq!(
+        copied_mask(&nothing_read),
+        Some(vec![true, false, false, true]),
+        "the identity columns are not nullable, so they are copied regardless"
+    );
+    assert!(
+        displayed(&nothing_read).contains(", copied=2"),
+        "{}",
+        displayed(&nothing_read)
+    );
+
+    let name_read = narrowed(&exec, &[1, 4]);
+    assert_eq!(copied_mask(&name_read), Some(vec![true, true, false, true]));
+    assert!(
+        displayed(&name_read).contains(", copied=3"),
+        "{}",
+        displayed(&name_read)
+    );
+
+    let age_read = narrowed(&exec, &[2]);
+    assert_eq!(copied_mask(&age_read), Some(vec![true, false, true, true]));
+
+    let all_read = narrowed(&exec, &[0, 1, 2, 3, 4]);
+    assert_eq!(copied_mask(&all_read), None, "nothing to skip");
+    assert!(
+        !displayed(&all_read).contains("copied="),
+        "{}",
+        displayed(&all_read)
+    );
+
+    assert_eq!(
+        nothing_read.schema(),
+        exec.schema(),
+        "a narrowed expansion keeps every column position"
+    );
+}
+
+/// The trails of an expansion whose parent never reads them are produced from
+/// the adjacency alone; a reachability search always needs its hop count.
+#[test]
+fn the_edge_list_is_read_only_when_a_parent_reads_it() {
+    let trails = variable_length_over_wide_input(false);
+    assert!(!variable_length_of(&narrowed(&trails, &[1])).edge_list_demanded);
+    assert!(variable_length_of(&narrowed(&trails, &[1, 4])).edge_list_demanded);
+    assert!(
+        trails.edge_list_demanded,
+        "an expansion nobody narrowed reads it"
+    );
+
+    let reachability = variable_length_over_wide_input(true);
+    let hops_unread = narrowed(&reachability, &[1]);
+    assert!(variable_length_of(&hops_unread).edge_list_demanded);
+    assert!(displayed(&hops_unread).contains("mode=reachability"));
+    assert_eq!(
+        copied_mask(&hops_unread),
+        Some(vec![true, true, false, true])
+    );
+}
+
+/// The columns an emitted row copies from its input row: the selected rows'
+/// values for a demanded column, nulls of the output's own type for a skipped
+/// one.
+#[test]
+fn a_skipped_input_column_is_emitted_as_nulls_and_a_demanded_one_is_taken() {
+    use arrow::array::Int64Array;
+
+    let input_schema = Arc::new(arrow::datatypes::Schema::new(vec![
+        Field::new("node_id", DataType::UInt64, false),
+        Field::new("name", DataType::Utf8, true),
+        Field::new("age", DataType::Int64, true),
+    ]));
+    let input = RecordBatch::try_new(
+        Arc::clone(&input_schema),
+        vec![
+            Arc::new(UInt64Array::from(vec![10, 20, 30])),
+            Arc::new(StringArray::from(vec!["a", "b", "c"])),
+            Arc::new(Int64Array::from(vec![1, 2, 3])),
+        ],
+    )
+    .unwrap();
+    let dir = tempfile::TempDir::new().unwrap();
+    let config = |copy_input: Option<Arc<[bool]>>| ExpandConfig {
+        capture_epoch: 0,
+        rel_type_name: "KNOWS".into(),
+        direction: Direction::Out,
+        min_hops: 1,
+        max_hops: Some(2),
+        dir: dir.path().to_path_buf(),
+        mode: OntologyMode::Strict,
+        src_col_idx: 0,
+        bound_dst_col_idx: None,
+        reverse_edge_list: false,
+        expansion: VarLenMode::Trails,
+        edge_filter: None,
+        edge_var: 0,
+        edge_list_demanded: true,
+        copy_input,
+        out_schema: Arc::clone(&input_schema),
+        provider: Arc::new(adjacency::PersistentAdjacencyProvider::new(
+            dir.path().to_path_buf(),
+            OntologyMode::Strict,
+        )),
+        lifecycle: Default::default(),
+    };
+    let take = UInt32Array::from(vec![2, 0, 0]);
+
+    let mut copied_all = Vec::new();
+    push_input_columns(&config(None), &input, &take, &mut copied_all).unwrap();
+    assert_eq!(copied_all.len(), 3);
+    let names = copied_all[1]
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    assert_eq!(
+        names.iter().collect::<Vec<_>>(),
+        [Some("c"), Some("a"), Some("a")]
+    );
+
+    let mut columns = Vec::new();
+    push_input_columns(
+        &config(Some(Arc::from(vec![true, false, true]))),
+        &input,
+        &take,
+        &mut columns,
+    )
+    .unwrap();
+    assert_eq!(columns.len(), 3, "every column keeps its position");
+    let ids = columns[0].as_any().downcast_ref::<UInt64Array>().unwrap();
+    assert_eq!(ids.values(), &[30, 10, 10]);
+    assert_eq!(columns[1].data_type(), &DataType::Utf8);
+    assert_eq!(columns[1].len(), 3);
+    assert_eq!(
+        columns[1].null_count(),
+        3,
+        "the skipped column is all nulls"
+    );
+    let ages = columns[2].as_any().downcast_ref::<Int64Array>().unwrap();
+    assert_eq!(ages.values(), &[3, 1, 1]);
+}
