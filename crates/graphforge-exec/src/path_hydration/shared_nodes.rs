@@ -7,12 +7,13 @@
 //! per operator and per execution: it starts empty, dies with the plan, and is
 //! charged to the query memory pool for as long as it lives.
 //!
-//! Concurrent partitions all start with an empty set, so reads are single
-//! flight and combining: the first caller that misses becomes the leader and
-//! hydrates the union of every uuid the waiting callers registered, then all
-//! of them are served from the stored block. A node's hydrated row depends
-//! only on its uuid, never on the other uuids of a call, so an answer
-//! assembled from a shared block equals the answer of a per-batch call.
+//! Concurrent partitions all start with an empty set, so each uuid is claimed
+//! by the first call that misses it. A call reads its own claims, publishes
+//! them to the set, and only then waits for the uuids other calls claimed:
+//! disjoint reads run in parallel exactly as without sharing, and a node two
+//! calls both need is read once. A node's hydrated row depends only on its
+//! uuid, never on the other uuids of a call, so an answer assembled from
+//! shared blocks equals the answer of a per-batch call.
 use super::{
     Invocation, allocation_bytes, hash_table_bytes, hydrate_path_node_children, unique_path_uuids,
 };
@@ -48,9 +49,8 @@ pub(super) struct SharedNodes {
 struct State {
     index: HashMap<Uuid, Slot>,
     blocks: Vec<Block>,
-    /// Uuids waiting callers need, folded into the next leader's read.
-    pending: HashSet<Uuid>,
-    in_flight: bool,
+    /// Uuids some call is reading right now.
+    claimed: HashSet<Uuid>,
     /// The set reached its cap or the pool refused it: callers that miss
     /// hydrate their own batch, exactly as without sharing.
     exhausted: bool,
@@ -74,21 +74,34 @@ enum Turn {
     },
     /// The set cannot take more; hydrate the whole batch directly.
     Bypass,
-    /// This call reads `union`; `own` of its uuids were missing.
-    Lead { union: Vec<Uuid>, own: usize },
+    /// This call claimed `mine`, sorted, and reads them.
+    Read { mine: Vec<Uuid> },
 }
 
-/// Clears `in_flight` and wakes waiters when a leader finishes, errors or
-/// panics.
-struct LeaderGuard<'a>(&'a SharedNodes);
-impl Drop for LeaderGuard<'_> {
+/// A block this call read that the set could not keep, with its sorted uuids.
+struct Local {
+    block: Block,
+    uuids: Vec<Uuid>,
+}
+
+/// Uuids claimed for reading; unclaims them and wakes waiters when the read
+/// finishes, errors or panics.
+struct Claim<'a> {
+    shared: &'a SharedNodes,
+    uuids: Vec<Uuid>,
+}
+impl Drop for Claim<'_> {
     fn drop(&mut self) {
-        self.0
+        let mut state = self
+            .shared
             .state
             .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .in_flight = false;
-        self.0.ready.notify_all();
+            .unwrap_or_else(PoisonError::into_inner);
+        for uuid in &self.uuids {
+            state.claimed.remove(uuid);
+        }
+        drop(state);
+        self.shared.ready.notify_all();
     }
 }
 
@@ -130,8 +143,7 @@ impl SharedNodes {
             state: Mutex::new(State {
                 index: HashMap::new(),
                 blocks: Vec::new(),
-                pending: HashSet::new(),
-                in_flight: false,
+                claimed: HashSet::new(),
                 exhausted: false,
                 reservation: ChunkedReservation::register("path_node_sharing", pool),
                 array_bytes: 0,
@@ -162,109 +174,115 @@ impl SharedNodes {
         scratch.take(allocation_bytes::<Uuid>(flat.len())?)?;
         scratch.take(allocation_bytes::<(usize, usize)>(flat.len())?)?;
         let unique = unique_path_uuids(flat);
-        match self.next_turn(h, flat, &unique)? {
-            Turn::Hit { blocks, positions } => {
-                h.resource.record("shared_hits", unique.len() as u64);
-                assemble(&blocks, &positions)
-            }
-            Turn::Bypass => {
-                h.resource.record("shared_bypass", 1);
-                drop(unique);
-                scratch.release();
-                hydrate_path_node_children(h, flat, batch_size)
-            }
-            Turn::Lead { union, own } => {
-                let leader = LeaderGuard(self);
-                h.resource
-                    .record("shared_hits", (unique.len() - own) as u64);
-                drop(unique);
-                scratch.release();
-                let children = hydrate_path_node_children(h, &union, batch_size)?;
-                scratch.take(allocation_bytes::<(usize, usize)>(flat.len())?)?;
-                let block: Block = Arc::from(children);
-                let (blocks, positions) = self.publish(flat, &union, &block)?;
-                drop(leader);
-                assemble(&blocks, &positions)
+        let mut local: Option<Local> = None;
+        let mut read = 0;
+        loop {
+            match self.next_turn(h, flat, &unique, local.as_ref())? {
+                Turn::Hit { blocks, positions } => {
+                    h.resource
+                        .record("shared_hits", (unique.len() - read) as u64);
+                    return assemble(&blocks, &positions);
+                }
+                Turn::Bypass => {
+                    h.resource.record("shared_bypass", 1);
+                    drop((unique, local));
+                    scratch.release();
+                    return hydrate_path_node_children(h, flat, batch_size);
+                }
+                Turn::Read { mine } => {
+                    read += mine.len();
+                    let claim = Claim {
+                        shared: self,
+                        uuids: mine,
+                    };
+                    let mut claim_scratch = Scratch { h, bytes: 0 };
+                    claim_scratch.take(hash_table_bytes::<Uuid>(claim.uuids.len())?)?;
+                    let children = hydrate_path_node_children(h, &claim.uuids, batch_size)?;
+                    let block: Block = Arc::from(children);
+                    local = self.publish(&claim, &block);
+                    if let Some(kept) = &local {
+                        scratch.take(allocation_bytes::<Uuid>(kept.uuids.len())?)?;
+                    }
+                }
             }
         }
     }
 
-    /// Wait for the set to answer, or elect this call to read for everyone.
-    fn next_turn(&self, h: &Invocation<'_>, flat: &[Uuid], unique: &[Uuid]) -> Result<Turn> {
+    /// Claim what no call is reading yet, or wait for the calls that are.
+    fn next_turn(
+        &self,
+        h: &Invocation<'_>,
+        flat: &[Uuid],
+        unique: &[Uuid],
+        local: Option<&Local>,
+    ) -> Result<Turn> {
         let mut state = self.lock();
         loop {
             let missing: Vec<Uuid> = unique
                 .iter()
-                .filter(|uuid| !state.index.contains_key(*uuid))
+                .filter(|uuid| {
+                    !state.index.contains_key(*uuid)
+                        && !local.is_some_and(|l| l.uuids.binary_search(uuid).is_ok())
+                })
                 .copied()
                 .collect();
             if missing.is_empty() {
+                let mut blocks = state.blocks.clone();
+                let own = local.map(|l| {
+                    blocks.push(Arc::clone(&l.block));
+                    blocks.len() - 1
+                });
                 let positions = flat
                     .iter()
-                    .map(|uuid| {
-                        let (block, row) = state.index[uuid];
-                        (block as usize, row as usize)
+                    .map(|uuid| match state.index.get(uuid) {
+                        Some(&(block, row)) => Ok((block as usize, row as usize)),
+                        None => local_position(own, local, uuid),
                     })
-                    .collect();
-                return Ok(Turn::Hit {
-                    blocks: state.blocks.clone(),
-                    positions,
-                });
+                    .collect::<Result<Positions>>()?;
+                return Ok(Turn::Hit { blocks, positions });
             }
             if state.exhausted {
                 return Ok(Turn::Bypass);
             }
-            if state.in_flight {
-                state.pending.extend(missing);
-                state = self
-                    .ready
-                    .wait_timeout(state, WAIT_SLICE)
-                    .expect("shared path nodes poisoned")
-                    .0;
-                h.resource.check()?;
-                continue;
+            let mut mine: Vec<Uuid> = missing
+                .into_iter()
+                .filter(|uuid| state.claimed.insert(*uuid))
+                .collect();
+            if !mine.is_empty() {
+                mine.sort_unstable();
+                return Ok(Turn::Read { mine });
             }
-            state.in_flight = true;
-            let own = missing.len();
-            let mut union: Vec<Uuid> = state.pending.drain().collect();
-            union.extend(missing);
-            union.sort_unstable();
-            union.dedup();
-            union.retain(|uuid| !state.index.contains_key(uuid));
-            return Ok(Turn::Lead { union, own });
+            state = self
+                .ready
+                .wait_timeout(state, WAIT_SLICE)
+                .expect("shared path nodes poisoned")
+                .0;
+            h.resource.check()?;
         }
     }
 
-    /// Store the leader's block when the cap and the pool allow it, and
-    /// address `flat` in the blocks that answer it.
-    fn publish(
-        &self,
-        flat: &[Uuid],
-        union: &[Uuid],
-        block: &Block,
-    ) -> Result<(Vec<Block>, Positions)> {
-        let mut state = self.lock();
-        let stored = state.store(block, union, self.cap);
-        let mut blocks = state.blocks.clone();
-        let local = if stored {
-            None
-        } else {
-            blocks.push(Arc::clone(block));
-            Some(blocks.len() - 1)
-        };
-        let positions = flat
-            .iter()
-            .map(|uuid| match state.index.get(uuid) {
-                Some(&(block, row)) => Ok((block as usize, row as usize)),
-                None => match (local, union.binary_search(uuid)) {
-                    (Some(local), Ok(row)) => Ok((local, row)),
-                    _ => Err(DataFusionError::Internal(
-                        "cypher_path_nodes: hydrated block does not hold a requested node".into(),
-                    )),
-                },
-            })
-            .collect::<Result<Vec<_>>>()?;
-        Ok((blocks, positions))
+    /// Store the block a call read when the cap and the pool allow it;
+    /// otherwise hand it back for the call to answer from.
+    fn publish(&self, claim: &Claim<'_>, block: &Block) -> Option<Local> {
+        let stored = self.lock().store(block, &claim.uuids, self.cap);
+        (!stored).then(|| Local {
+            block: Arc::clone(block),
+            uuids: claim.uuids.clone(),
+        })
+    }
+}
+
+/// `(block, row)` of `uuid` in the block this call kept for itself.
+fn local_position(
+    own: Option<usize>,
+    local: Option<&Local>,
+    uuid: &Uuid,
+) -> Result<(usize, usize)> {
+    match (own, local.map(|l| l.uuids.binary_search(uuid))) {
+        (Some(block), Some(Ok(row))) => Ok((block, row)),
+        _ => Err(DataFusionError::Internal(
+            "cypher_path_nodes: hydrated block does not hold a requested node".into(),
+        )),
     }
 }
 
@@ -311,7 +329,6 @@ impl State {
 
     fn exhaust(&mut self) -> bool {
         self.exhausted = true;
-        self.pending.clear();
         false
     }
 }
