@@ -851,6 +851,12 @@ impl ExecutionSession {
                     crate::traversal_destination::is_frontier_endpoint_uuid,
                 ),
             ))
+            // A LEFT join whose build side nothing sizes stayed a hash join so
+            // the rules above could prune its probe scan to the build side's
+            // keys; plan it as a join that can spill now they have (#1985).
+            .with_physical_optimizer_rule(Arc::new(crate::join_memory::UnsizedBuildJoinRule::new(
+                crate::sort_runs::sort_run_bytes(memory_budget, resources.target_partitions),
+            )))
             .build();
         let ctx = SessionContext::new_with_state(state);
         let semantic_composition_fingerprint = catalog
@@ -1442,8 +1448,6 @@ impl ExecutionSession {
 
         let task_ctx = self.ctx.task_ctx();
         let memory_reserved_before = task_ctx.memory_pool().reserved();
-        self.memory_peak
-            .store(memory_reserved_before, std::sync::atomic::Ordering::Relaxed);
         let collected =
             path_hydration::collect_guarded(Arc::clone(&physical), Arc::clone(&task_ctx)).await;
         path_hydration::cancel_plan(&physical);

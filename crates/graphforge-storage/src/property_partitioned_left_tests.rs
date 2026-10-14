@@ -751,3 +751,117 @@ fn identity_only_enrichment_keeps_its_partitioned_join_without_a_uuid_set() {
         SanityCheckPlan::new().optimize(optimized, &config).unwrap();
     }
 }
+
+/// Whether the approval rules leave `plan` unchanged.
+fn rules_leave_unchanged(
+    plan: &Arc<dyn ExecutionPlan>,
+    selected_endpoint: fn(&dyn ExecutionPlan, usize) -> bool,
+) -> bool {
+    let config = ConfigOptions::default();
+    let ordinary = PropertyFilterApprovalRule
+        .optimize(Arc::clone(plan), &config)
+        .unwrap();
+    let selected = SelectedEndpointPropertyFilterApprovalRule::new(selected_endpoint)
+        .optimize(Arc::clone(plan), &config)
+        .unwrap();
+    Arc::ptr_eq(plan, &ordinary) && Arc::ptr_eq(plan, &selected)
+}
+
+/// The predicate the memory rule uses to keep a hash join with an unknown build
+/// side must say exactly what the approval rules do with the plan: a join it
+/// holds for is pruned to its preserved keys, and one it rejects is left whole.
+fn assert_predicate_matches_rules(
+    plan: &Arc<dyn ExecutionPlan>,
+    selected_endpoint: fn(&dyn ExecutionPlan, usize) -> bool,
+    expected: bool,
+) {
+    let join = plan.downcast_ref::<HashJoinExec>().unwrap();
+    assert_eq!(
+        PropertyFilterApprovalRule::prunes_probe_scan_to_build_keys(join, selected_endpoint),
+        expected
+    );
+    assert_eq!(
+        rules_leave_unchanged(plan, selected_endpoint),
+        !expected,
+        "the approval rules must prune the join exactly when the predicate holds"
+    );
+}
+
+fn no_selected_endpoint(_: &dyn ExecutionPlan, _: usize) -> bool {
+    false
+}
+
+fn first_column_is_selected(_: &dyn ExecutionPlan, index: usize) -> bool {
+    index == 0
+}
+
+#[test]
+fn the_predicate_holds_for_a_partitioned_enrichment_the_rules_prune() {
+    for partitions in [1, 2, 4] {
+        let plan = enrichment(property_scan(None, None), partitions);
+        assert_predicate_matches_rules(&plan, no_selected_endpoint, true);
+        let hidden_key = enrichment_with_projection(property_scan(None, None), partitions, vec![2]);
+        assert_predicate_matches_rules(&hidden_key, no_selected_endpoint, true);
+    }
+}
+
+#[test]
+fn the_predicate_holds_for_a_collect_left_enrichment_the_rules_prune() {
+    let frontier = input_with_values(&[Some([1; 16]), Some([2; 16])]);
+    for partitions in [2, 4] {
+        let plan = collect_left_enrichment(
+            Arc::clone(&frontier),
+            round_robin(Arc::new(property_scan(None, None)), partitions),
+            vec![0, 1, 2],
+        );
+        assert_predicate_matches_rules(&plan, no_selected_endpoint, true);
+    }
+}
+
+#[test]
+fn a_key_only_scan_is_pruned_only_for_a_proven_selected_endpoint() {
+    for partitions in [1, 2, 4] {
+        let plan = enrichment_with_projection(key_only_property_scan(), partitions, vec![1]);
+        assert_predicate_matches_rules(&plan, first_column_is_selected, true);
+        assert_predicate_matches_rules(&plan, no_selected_endpoint, false);
+    }
+}
+
+#[test]
+fn the_predicate_rejects_joins_the_rules_leave_whole() {
+    // A scan with a limit or an equality is not pruned by a frontier.
+    for partitions in [1, 2, 4] {
+        let limited = enrichment(property_scan(Some(4), None), partitions);
+        assert_predicate_matches_rules(&limited, no_selected_endpoint, false);
+    }
+
+    // A probe that is not a property scan has nothing to prune.
+    let frontier = input_with_values(&[Some([1; 16]), Some([2; 16])]);
+    let not_a_scan = collect_left_enrichment(
+        Arc::clone(&frontier),
+        input_with_values(&[Some([1; 16])]),
+        vec![0, 1],
+    );
+    assert_predicate_matches_rules(&not_a_scan, no_selected_endpoint, false);
+
+    // Only a LEFT join keeps every preserved row while the scan is pruned.
+    let key: Arc<dyn PhysicalExpr> = Arc::new(Column::new("node_uuid", 0));
+    let inner: Arc<dyn ExecutionPlan> = Arc::new(
+        HashJoinExec::try_new(
+            Arc::clone(&frontier),
+            round_robin(Arc::new(property_scan(None, None)), 2),
+            vec![(Arc::clone(&key), key)],
+            None,
+            &JoinType::Inner,
+            Some(vec![0, 1, 2]),
+            PartitionMode::CollectLeft,
+            NullEquality::NullEqualsNothing,
+            false,
+        )
+        .unwrap(),
+    );
+    let join = inner.downcast_ref::<HashJoinExec>().unwrap();
+    assert!(
+        !PropertyFilterApprovalRule::prunes_probe_scan_to_build_keys(join, no_selected_endpoint)
+    );
+}

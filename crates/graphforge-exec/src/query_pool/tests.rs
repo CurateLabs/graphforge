@@ -226,8 +226,10 @@ fn only_a_bulk_release_by_a_spilling_aggregate_grants_anything() {
     let sorter = MemoryConsumer::new("ExternalSorter[0]")
         .with_can_spill(true)
         .register(&pool);
-    sorter.try_grow(8 * MIB).unwrap();
-    sorter.shrink(8 * MIB);
+    // The sibling's earlier bulk release established its 10 MiB floor.
+    // This ordinary request fits alongside that floor and producer headroom.
+    sorter.try_grow(4 * MIB).unwrap();
+    sorter.shrink(4 * MIB);
     sibling.try_grow(64 * MIB).unwrap();
     assert!(sorter.try_grow(MIB).is_err(), "a sort is not granted");
     sibling.shrink(64 * MIB);
@@ -346,6 +348,59 @@ fn a_consumer_that_cannot_spill_is_refused_only_at_the_limit_of_the_pool() {
     // limit by what the other consumer took from it.
     idle.try_grow(3 * MIB).unwrap();
     assert_eq!(pool.reserved(), 67 * MIB);
+}
+
+/// A sort is kept three quarters of the pool short of the limit, so the consumer that
+/// cannot spill and grows with the data (the path state of a variable-length
+/// expansion, #1985) is served from the memory the sorts leave: a sort buffers
+/// until it is refused, and without the headroom it holds the pool.
+#[test]
+fn a_sort_is_kept_short_of_the_memory_a_consumer_that_cannot_spill_may_take() {
+    let pool = query_pool(64 * MIB);
+    let sort = |partition: usize| {
+        MemoryConsumer::new(format!("ExternalSorter[{partition}]"))
+            .with_can_spill(true)
+            .register(&pool)
+    };
+    let first = sort(0);
+    let second = sort(1);
+    first.try_grow(10 * MIB).unwrap();
+    second.try_grow(6 * MIB).unwrap();
+    assert_eq!(pool.reserved(), 16 * MIB);
+
+    // Three quarters of the pool is left to the consumers that cannot spill, so the
+    // sorts are refused and spill.
+    assert!(is_refused(first.try_grow(MIB)));
+    assert!(is_refused(second.try_grow(MIB)));
+
+    // The path state of an expansion is served up to the limit of the pool.
+    let path_state = MemoryConsumer::new("VarLenExpand path state").register(&pool);
+    path_state.try_grow(48 * MIB).unwrap();
+    assert_eq!(pool.reserved(), 64 * MIB);
+    assert!(is_refused(path_state.try_grow(1)));
+
+    // The merge reservation of a sort cannot spill and is not held back: the
+    // headroom is for exactly such a consumer.
+    first.shrink(10 * MIB);
+    second.shrink(6 * MIB);
+    let merge = MemoryConsumer::new("ExternalSorterMerge[0]").register(&pool);
+    merge.try_grow(10 * MIB).unwrap();
+    assert_eq!(pool.reserved(), 58 * MIB);
+}
+
+/// The headroom is a sort's alone: an exchange and an aggregate that has not
+/// spilled fill the pool as they did before it.
+#[test]
+fn the_headroom_of_the_sorts_leaves_the_other_consumers_that_spill_unbounded() {
+    let pool = query_pool(64 * MIB);
+    let repartition = exchange(&pool, 0);
+    repartition.try_grow(64 * MIB).unwrap();
+    assert_eq!(pool.reserved(), 64 * MIB);
+    repartition.shrink(64 * MIB);
+
+    let grouped = aggregate(&pool, 0);
+    grouped.try_grow(64 * MIB).unwrap();
+    assert_eq!(pool.reserved(), 64 * MIB);
 }
 
 /// A pool 10 MiB past its limit by the loan of a sort: the pool is full, a
@@ -567,4 +622,27 @@ async fn datafusion_names_the_consumer_of_a_grouped_aggregate_as_the_pool_expect
             .any(|name| name.starts_with(AGGREGATE_CONSUMER_PREFIX)),
         "no spilling consumer named {AGGREGATE_CONSUMER_PREFIX}: {names:?}"
     );
+}
+
+/// Existing nonspilling reservations fill the intended headroom. They are
+/// counted once; failed reservations and releases preserve the real pool cap.
+#[test]
+fn sort_headroom_counts_memory_already_held_by_nonspilling_consumers() {
+    let pool = query_pool(128 * MIB);
+    let retained = MemoryConsumer::new("VarLenExpand path state").register(&pool);
+    retained.try_grow(27 * MIB).unwrap();
+    let sort = MemoryConsumer::new("ExternalSorter[0]")
+        .with_can_spill(true)
+        .register(&pool);
+    sort.try_grow(16 * MIB).unwrap();
+    sort.try_grow(16 * MIB).unwrap();
+    assert_eq!(pool.reserved(), 59 * MIB);
+    assert!(is_refused(sort.try_grow(1)));
+    retained.try_grow(69 * MIB).unwrap();
+    assert_eq!(pool.reserved(), 128 * MIB);
+    assert!(is_refused(retained.try_grow(1)));
+    assert!(is_refused(sort.try_grow(1)));
+    retained.shrink(96 * MIB);
+    assert_eq!(pool.reserved(), 32 * MIB);
+    assert!(is_refused(sort.try_grow(1)));
 }

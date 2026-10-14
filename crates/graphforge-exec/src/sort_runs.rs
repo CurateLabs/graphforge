@@ -21,7 +21,9 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
+use arrow::array::{Array, AsArray, make_array};
 use arrow::compute::concat_batches;
+use arrow::datatypes::DataType;
 use arrow::datatypes::SchemaRef;
 use arrow::record_batch::RecordBatch;
 use datafusion::common::config::ConfigOptions;
@@ -105,15 +107,40 @@ impl PhysicalOptimizerRule for SortRunCoalesceRule {
 pub(crate) struct SortRunCoalesceExec {
     input: Arc<dyn ExecutionPlan>,
     run_bytes: usize,
+    force_sort: bool,
     props: Arc<PlanProperties>,
 }
 
 impl SortRunCoalesceExec {
-    fn new(input: Arc<dyn ExecutionPlan>, run_bytes: usize) -> Self {
-        let props = Arc::clone(input.properties());
+    pub(crate) fn new(input: Arc<dyn ExecutionPlan>, run_bytes: usize) -> Self {
+        Self::with_force_sort(input, run_bytes, false)
+    }
+
+    /// Hide input ordering when the following sort must drain its input before
+    /// yielding. SortExec otherwise bypasses materialization at execution time.
+    pub(crate) fn with_force_sort(
+        input: Arc<dyn ExecutionPlan>,
+        run_bytes: usize,
+        force_sort: bool,
+    ) -> Self {
+        let props = if force_sort {
+            // Constants and equivalence proofs can also satisfy an ordering.
+            // Publish no ordering proof when runtime materialization is required.
+            let equivalence = datafusion::physical_expr::EquivalenceProperties::new(input.schema());
+            Arc::new(
+                input
+                    .properties()
+                    .as_ref()
+                    .clone()
+                    .with_eq_properties(equivalence),
+            )
+        } else {
+            Arc::clone(input.properties())
+        };
         Self {
             input,
             run_bytes,
+            force_sort,
             props,
         }
     }
@@ -151,7 +178,11 @@ impl ExecutionPlan for SortRunCoalesceExec {
         mut children: Vec<Arc<dyn ExecutionPlan>>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         match (children.pop(), children.is_empty()) {
-            (Some(input), true) => Ok(Arc::new(Self::new(input, self.run_bytes))),
+            (Some(input), true) => Ok(Arc::new(Self::with_force_sort(
+                input,
+                self.run_bytes,
+                self.force_sort,
+            ))),
             _ => Err(DataFusionError::Internal(
                 "SortRunCoalesceExec requires exactly one child".into(),
             )),
@@ -171,6 +202,8 @@ impl ExecutionPlan for SortRunCoalesceExec {
             input: Some(input),
             run_bytes: self.run_bytes,
             buffered: Vec::new(),
+            buffered_bytes: 0,
+            pending: None,
             reservation,
         }))
     }
@@ -181,21 +214,147 @@ struct SortRunCoalesceStream {
     input: Option<SendableRecordBatchStream>,
     run_bytes: usize,
     buffered: Vec<RecordBatch>,
+    buffered_bytes: usize,
+    // Slices share the source allocation. Keep and charge that allocation until
+    // the last compact window has been emitted; never give those slices to a sort.
+    pending: Option<(RecordBatch, usize)>,
     reservation: MemoryReservation,
 }
 
 impl SortRunCoalesceStream {
-    fn flush(&mut self) -> Option<Result<RecordBatch>> {
+    fn fail(&mut self, error: DataFusionError) -> Poll<Option<Result<RecordBatch>>> {
+        self.input = None;
+        self.pending = None;
+        self.buffered.clear();
+        self.buffered_bytes = 0;
+        self.reservation.free();
+        Poll::Ready(Some(Err(error)))
+    }
+
+    fn flush(&mut self) -> Result<RecordBatch> {
+        let copied = if self.buffered.len() > 1 {
+            // The source batches coexist with their concatenation. Admit the
+            // extra copy before allocating it, including allocation rounding.
+            let copied = self
+                .buffered_bytes
+                .saturating_add(self.schema.fields().len() * 512);
+            self.reservation.try_grow(copied)?;
+            copied
+        } else {
+            0
+        };
         let run = match self.buffered.len() {
-            0 => return None,
             1 => Ok(self.buffered.pop().expect("one buffered batch")),
             _ => concat_batches(&self.schema, &self.buffered)
                 .map_err(|error| DataFusionError::ArrowError(Box::new(error), None)),
         };
         self.buffered.clear();
-        // The sorter reserves the run itself once it receives it.
-        self.reservation.free();
-        Some(run)
+        self.reservation.shrink(self.buffered_bytes + copied);
+        self.buffered_bytes = 0;
+        run
+    }
+
+    fn compact_window(&mut self) -> Result<RecordBatch> {
+        let (source, offset) = self.pending.as_ref().expect("pending source");
+        let remaining = source.num_rows() - offset;
+        let mut low = 1;
+        let mut high = remaining;
+        // The copy allowance covers buffer rounding and array metadata. A
+        // single wide row is indivisible and is admitted against the pool.
+        while low < high {
+            let middle = low + (high - low).div_ceil(2);
+            if compact_charge(&source.slice(*offset, middle)) <= self.run_bytes {
+                low = middle;
+            } else {
+                high = middle - 1;
+            }
+        }
+        let window = source.slice(*offset, low);
+        let admitted = compact_charge(&window);
+        self.reservation.try_grow(admitted)?;
+        // Arrow concatenation with one batch returns a sharing slice. The empty
+        // second batch forces an actual copy with only the selected values.
+        let empty = RecordBatch::new_empty(Arc::clone(&self.schema));
+        let copied = concat_batches(&self.schema, [&window, &empty])
+            .map_err(|error| DataFusionError::ArrowError(Box::new(error), None))?;
+        let columns = copied
+            .columns()
+            .iter()
+            .map(|array| compact_views(array.to_data()).map(make_array))
+            .collect::<Result<Vec<_>>>()?;
+        let compact = RecordBatch::try_new(Arc::clone(&self.schema), columns)?;
+        drop(copied);
+        drop(window);
+        let actual = compact.get_array_memory_size();
+        if actual > admitted {
+            self.reservation.try_grow(actual - admitted)?;
+        } else {
+            self.reservation.shrink(admitted - actual);
+        }
+        if low == remaining {
+            let (source, _) = self.pending.take().expect("pending source");
+            let held = source.get_array_memory_size();
+            drop(source);
+            self.reservation.shrink(held);
+        } else {
+            self.pending.as_mut().expect("pending source").1 += low;
+        }
+        // Ownership transfers to the downstream sorter, which reserves this run.
+        self.reservation.shrink(actual);
+        Ok(compact)
+    }
+}
+
+/// Conservative compact-copy admission. Nested/dictionary children can retain
+/// more than a row window, so Arrow's slice estimate deliberately overcounts
+/// them; the retained size is reconciled after allocation. This bounds copied
+/// variable-width values rather than counting their original shared buffers.
+fn compact_charge(batch: &RecordBatch) -> usize {
+    batch.columns().iter().fold(0usize, |bytes, array| {
+        let data = array.to_data();
+        let metadata = data
+            .get_array_memory_size()
+            .saturating_sub(data.get_buffer_memory_size());
+        let selected = match array.data_type() {
+            DataType::Utf8View => array
+                .as_string_view()
+                .iter()
+                .map(|value| value.map_or(0, str::len))
+                .sum::<usize>()
+                .saturating_add(array.len() * 17),
+            DataType::BinaryView => array
+                .as_binary_view()
+                .iter()
+                .map(|value| value.map_or(0, <[u8]>::len))
+                .sum::<usize>()
+                .saturating_add(array.len() * 17),
+            _ => data
+                .get_slice_memory_size()
+                .unwrap_or_else(|_| data.get_buffer_memory_size()),
+        };
+        bytes
+            .saturating_add(selected.saturating_mul(2))
+            .saturating_add(metadata)
+            .saturating_add(512)
+    })
+}
+
+// Byte-view concatenation shares its backing buffers. Collect only the views
+// this window references, including when they are nested inside another array.
+fn compact_views(data: arrow::array::ArrayData) -> Result<arrow::array::ArrayData> {
+    match data.data_type() {
+        DataType::Utf8View => Ok(make_array(data).as_string_view().gc().to_data()),
+        DataType::BinaryView => Ok(make_array(data).as_binary_view().gc().to_data()),
+        _ if data.child_data().is_empty() => Ok(data),
+        _ => {
+            let children = data
+                .child_data()
+                .iter()
+                .cloned()
+                .map(compact_views)
+                .collect::<Result<Vec<_>>>()?;
+            Ok(data.into_builder().child_data(children).build()?)
+        }
     }
 }
 
@@ -204,33 +363,55 @@ impl Stream for SortRunCoalesceStream {
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         loop {
+            if self.pending.is_some() {
+                return match self.compact_window() {
+                    Ok(run) => Poll::Ready(Some(Ok(run))),
+                    Err(error) => self.fail(error),
+                };
+            }
             let Some(input) = self.input.as_mut() else {
                 return Poll::Ready(None);
             };
             match input.poll_next_unpin(cx) {
                 Poll::Pending => return Poll::Pending,
-                Poll::Ready(Some(Err(error))) => {
-                    self.input = None;
-                    self.buffered.clear();
-                    self.reservation.free();
-                    return Poll::Ready(Some(Err(error)));
-                }
+                Poll::Ready(Some(Err(error))) => return self.fail(error),
                 Poll::Ready(Some(Ok(batch))) => {
                     if batch.num_rows() == 0 {
                         continue;
                     }
                     let size = batch.get_array_memory_size();
-                    // A full pool ends the run early instead of failing: the
-                    // sorter downstream is the operator that can spill.
-                    let accounted = self.reservation.try_grow(size).is_ok();
+                    if let Err(error) = self.reservation.try_grow(size) {
+                        return self.fail(error);
+                    }
+                    if size > self.run_bytes && batch.num_rows() > 1 {
+                        self.pending = Some((batch, 0));
+                        if !self.buffered.is_empty() {
+                            return match self.flush() {
+                                Ok(run) => Poll::Ready(Some(Ok(run))),
+                                Err(error) => self.fail(error),
+                            };
+                        }
+                        continue;
+                    }
+                    self.buffered_bytes += size;
                     self.buffered.push(batch);
-                    if !accounted || self.reservation.size() >= self.run_bytes {
-                        return Poll::Ready(self.flush());
+                    if self.buffered_bytes >= self.run_bytes {
+                        return match self.flush() {
+                            Ok(run) => Poll::Ready(Some(Ok(run))),
+                            Err(error) => self.fail(error),
+                        };
                     }
                 }
                 Poll::Ready(None) => {
                     self.input = None;
-                    return Poll::Ready(self.flush());
+                    return if self.buffered.is_empty() {
+                        Poll::Ready(None)
+                    } else {
+                        match self.flush() {
+                            Ok(run) => Poll::Ready(Some(Ok(run))),
+                            Err(error) => self.fail(error),
+                        }
+                    };
                 }
             }
         }
@@ -242,3 +423,6 @@ impl RecordBatchStream for SortRunCoalesceStream {
         Arc::clone(&self.schema)
     }
 }
+
+#[cfg(test)]
+mod tests;
