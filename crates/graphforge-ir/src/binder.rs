@@ -10,6 +10,7 @@
 
 mod collect_identity;
 mod expressions;
+mod extremum_rematch;
 mod patterns;
 mod projection;
 mod unsupported;
@@ -340,6 +341,10 @@ impl Binder {
         }
         let mut plan = state.builder.build();
         collect_identity::narrow_node_collects(&mut plan);
+        {
+            let catalog = self.catalog.lock().expect("staged runtime catalog poisoned");
+            extremum_rematch::rematch_extremum(&mut plan, &catalog, &mut state.next_var);
+        }
         Ok(plan)
     }
 
