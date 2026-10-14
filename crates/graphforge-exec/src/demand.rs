@@ -1431,6 +1431,39 @@ fn rewrite_materialization(
     plan.with_new_children(vec![child])
 }
 
+/// Demand through a correlated sub-plan and the seed leaf that feeds it.
+///
+/// A correlated `OPTIONAL MATCH` seeds its sub-plan with its own outer rows, and
+/// the sub-plan reads only some of their columns. The seed leaf records what
+/// the sub-plan above it asks for; the join rewrites the sub-plan first to learn
+/// which columns that is, then asks its outer input for them on top of its own
+/// demand. Returns `None` when `plan` is neither.
+fn rewrite_correlated_materialization(
+    plan: &Arc<dyn ExecutionPlan>,
+    required: &BTreeSet<usize>,
+) -> Result<Option<Arc<dyn ExecutionPlan>>> {
+    use crate::CorrelatedSeedExec;
+    use crate::row_exec::correlated_seed_demand;
+
+    if let Some(seed) = plan.downcast_ref::<CorrelatedSeedExec>() {
+        return Ok(Some(Arc::new(seed.with_demand(required.clone()))));
+    }
+    let Some(optional) = plan.downcast_ref::<OptionalMatchExec>() else {
+        return Ok(None);
+    };
+    let Some(seed) = optional.correlated_seed_id() else {
+        return Ok(None);
+    };
+    let (mut left_required, right_required) = optional.input_demand(required);
+    let children = plan.children();
+    let right = rewrite_materialization(Arc::clone(children[1]), &right_required)?;
+    left_required.extend(correlated_seed_demand(&right, seed));
+    let left = rewrite_materialization(Arc::clone(children[0]), &left_required)?;
+    Arc::clone(plan)
+        .with_new_children(vec![left, right])
+        .map(Some)
+}
+
 /// Split demand across the two inputs of an `OPTIONAL MATCH` or a hash join
 /// whose output is its left columns followed by its right columns.
 ///
@@ -1443,6 +1476,9 @@ fn rewrite_join_materialization(
     plan: &Arc<dyn ExecutionPlan>,
     required: &BTreeSet<usize>,
 ) -> Result<Option<Arc<dyn ExecutionPlan>>> {
+    if let Some(rewritten) = rewrite_correlated_materialization(plan, required)? {
+        return Ok(Some(rewritten));
+    }
     let (left_required, right_required) =
         if let Some(optional) = plan.downcast_ref::<OptionalMatchExec>() {
             optional.input_demand(required)
@@ -2022,6 +2058,96 @@ mod tests {
     use datafusion::physical_plan::stream::EmptyRecordBatchStream;
 
     use super::*;
+
+    #[test]
+    fn correlated_optional_match_demands_the_outer_columns_its_sub_plan_reads() {
+        use arrow::datatypes::{DataType, Field};
+        use datafusion::common::DFSchema;
+        use datafusion::logical_expr::LogicalPlanBuilder;
+        use datafusion::logical_expr::logical_plan::LogicalTableSource;
+        use datafusion::physical_expr::expressions::Column;
+        use graphforge_plan::{CorrelatedSeedNode, OptionalMatchNode};
+
+        use crate::row_exec::{CorrelatedSeedExec, OptionalMatchExec};
+
+        let outer_schema = Arc::new(Schema::new(vec![
+            Field::new("a", DataType::UInt64, false),
+            Field::new("b", DataType::UInt64, false),
+            Field::new("c", DataType::UInt64, false),
+        ]));
+        let inner_schema = Arc::new(Schema::new(vec![
+            Field::new("a", DataType::UInt64, false),
+            Field::new("x", DataType::UInt64, false),
+        ]));
+        let scan = |name: &str, schema: &Arc<Schema>| {
+            let source = Arc::new(LogicalTableSource::new(Arc::clone(schema)));
+            Arc::new(
+                LogicalPlanBuilder::scan(name, source, None)
+                    .unwrap()
+                    .build()
+                    .unwrap(),
+            )
+        };
+        let seed_node = |schema: &Arc<Schema>| {
+            CorrelatedSeedNode::new(Arc::new(
+                DFSchema::try_from_qualified_schema("var_0", schema).unwrap(),
+            ))
+        };
+        let seed = seed_node(&outer_schema);
+        // The outer rows join the sub-plan's column 0 on column 0 and the output
+        // appends the sub-plan's column 1: output columns are a, b, c, x.
+        let node = OptionalMatchNode::new(
+            scan("var_0", &outer_schema),
+            scan("var_1", &inner_schema),
+            vec![(0, 0)],
+            vec![1],
+        )
+        .with_correlated_seed(seed.id());
+
+        // The sub-plan reads outer columns `a` and `c` through its seed leaf.
+        let seed_leaf: Arc<dyn ExecutionPlan> = Arc::new(CorrelatedSeedExec::new(&seed));
+        let inner: Arc<dyn ExecutionPlan> = Arc::new(
+            ProjectionExec::try_new(
+                vec![
+                    (
+                        Arc::new(Column::new("a", 0)) as Arc<dyn PhysicalExpr>,
+                        "a".to_owned(),
+                    ),
+                    (Arc::new(Column::new("c", 2)), "x".to_owned()),
+                ],
+                seed_leaf,
+            )
+            .unwrap(),
+        );
+        // A stand-in outer leaf of another seed records what it is asked for.
+        let outer: Arc<dyn ExecutionPlan> =
+            Arc::new(CorrelatedSeedExec::new(&seed_node(&outer_schema)));
+        let optional: Arc<dyn ExecutionPlan> =
+            Arc::new(OptionalMatchExec::new(&node, outer, inner));
+
+        let demanded = |required: &[usize]| {
+            let required = required.iter().copied().collect::<BTreeSet<_>>();
+            let rewritten = rewrite_materialization(Arc::clone(&optional), &required).unwrap();
+            let children = rewritten.children();
+            let leaf_demand = |plan: &Arc<dyn ExecutionPlan>| {
+                let mut pending = vec![Arc::clone(plan)];
+                while let Some(plan) = pending.pop() {
+                    if let Some(leaf) = plan.downcast_ref::<CorrelatedSeedExec>() {
+                        return leaf.demanded_columns().into_iter().collect::<Vec<_>>();
+                    }
+                    pending.extend(plan.children().into_iter().cloned());
+                }
+                panic!("no seed leaf");
+            };
+            (leaf_demand(children[0]), leaf_demand(children[1]))
+        };
+
+        // Output `x` needs the key and what the sub-plan reads: `a` and `c`,
+        // never the unread `b`, from both the outer input and the seed.
+        assert_eq!(demanded(&[3]), (vec![0, 2], vec![0, 2]));
+        // The outer's own output columns widen only the outer input.
+        assert_eq!(demanded(&[1, 3]), (vec![0, 1, 2], vec![0, 2]));
+    }
 
     #[test]
     fn capture_accounts_for_every_hop_filter_and_storage_outcome() {

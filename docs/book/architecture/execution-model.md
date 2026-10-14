@@ -247,7 +247,11 @@ execution paths consume it through a single `AdjacencyProvider` abstraction:
 
 `ExpandExec` receives exact physical column demand through projections, filters,
 sorts, and limits; unknown or multi-input physical operators are conservative
-materialization barriers. A destination-identity-only hop carries the CSR
+materialization barriers. A correlated `OPTIONAL MATCH` or pattern predicate
+asks its outer plan for the columns its sub-plan reads through
+`CorrelatedSeedExec`, the columns its parent reads, and its join keys. A join
+keyed on every outer column therefore still demands the whole row. A
+destination-identity-only hop carries the CSR
 neighbor `node_id` directly and resolves `node_uuid` through the facade's exact
 generation-pinned v4 ordinal authority. It opens neither edge topology nor
 destination-node Parquet. Lookup batches are sorted and deduplicated within the

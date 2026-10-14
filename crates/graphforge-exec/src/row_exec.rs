@@ -90,22 +90,21 @@ impl OptionalMatchExec {
     ///
     /// The output is the outer columns followed by `inner_keep_idx` inner
     /// columns. Beyond the demanded output, the join reads the key columns of
-    /// both sides. A correlated sub-plan is seeded with every outer column, so
-    /// it demands the whole outer row.
+    /// both sides. A correlated sub-plan is seeded with the executed outer
+    /// rows, so the outer side must also produce whatever the sub-plan reads
+    /// through its [`CorrelatedSeedExec`] leaves; that demand is only known
+    /// once the inner plan has been rewritten, so the caller adds
+    /// [`correlated_seed_demand`] to the returned outer set.
     pub(crate) fn input_demand(
         &self,
         required: &BTreeSet<usize>,
     ) -> (BTreeSet<usize>, BTreeSet<usize>) {
         let outer_width = self.outer.schema().fields().len();
-        let mut outer_required = if self.correlated_seed.is_some() {
-            (0..outer_width).collect::<BTreeSet<_>>()
-        } else {
-            required
-                .iter()
-                .copied()
-                .filter(|index| *index < outer_width)
-                .collect()
-        };
+        let mut outer_required: BTreeSet<usize> = required
+            .iter()
+            .copied()
+            .filter(|index| *index < outer_width)
+            .collect();
         let mut inner_required = BTreeSet::new();
         for &(outer_key, inner_key) in &self.join_keys {
             outer_required.insert(outer_key);
@@ -119,6 +118,27 @@ impl OptionalMatchExec {
         );
         (outer_required, inner_required)
     }
+
+    /// The seed id the inner plan reads the outer rows through, when the
+    /// sub-plan is correlated.
+    pub(crate) fn correlated_seed_id(&self) -> Option<u64> {
+        self.correlated_seed
+    }
+}
+
+/// The outer columns the sub-plan `inner` reads through its
+/// [`CorrelatedSeedExec`] leaves bound to `seed`: the union of what each leaf
+/// was asked to produce, and every column for a leaf no demand reached.
+pub(crate) fn correlated_seed_demand(inner: &Arc<dyn ExecutionPlan>, seed: u64) -> BTreeSet<usize> {
+    let mut demand = BTreeSet::new();
+    let mut pending = vec![inner];
+    while let Some(plan) = pending.pop() {
+        match plan.downcast_ref::<CorrelatedSeedExec>() {
+            Some(leaf) if leaf.seed == seed => demand.extend(leaf.demanded_columns()),
+            _ => pending.extend(plan.children()),
+        }
+    }
+    demand
 }
 
 impl fmt::Debug for OptionalMatchExec {
@@ -255,6 +275,9 @@ pub struct CorrelatedSeedExec {
     seed: u64,
     schema: SchemaRef,
     rows: Option<Vec<RecordBatch>>,
+    /// The output columns the sub-plan above this leaf reads, once the demand
+    /// pass has run; `None` means every column.
+    demanded: Option<BTreeSet<usize>>,
     props: Arc<PlanProperties>,
 }
 
@@ -277,8 +300,31 @@ impl CorrelatedSeedExec {
             seed,
             schema,
             rows,
+            demanded: None,
             props,
         }
+    }
+
+    /// This leaf recording that the sub-plan above it reads only `demanded`
+    /// of its columns.
+    pub(crate) fn with_demand(&self, demanded: BTreeSet<usize>) -> Self {
+        let width = self.schema.fields().len();
+        let mut leaf = Self::with_rows(self.seed, self.schema.clone(), self.rows.clone());
+        leaf.demanded = Some(
+            demanded
+                .into_iter()
+                .filter(|index| *index < width)
+                .collect(),
+        );
+        leaf
+    }
+
+    /// The columns the sub-plan above this leaf reads: the recorded demand,
+    /// or every column when none was recorded.
+    pub(crate) fn demanded_columns(&self) -> BTreeSet<usize> {
+        self.demanded
+            .clone()
+            .unwrap_or_else(|| (0..self.schema.fields().len()).collect())
     }
 }
 
@@ -290,7 +336,13 @@ impl fmt::Debug for CorrelatedSeedExec {
 
 impl DisplayAs for CorrelatedSeedExec {
     fn fmt_as(&self, _t: DisplayFormatType, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "CorrelatedSeedExec")
+        write!(f, "CorrelatedSeedExec")?;
+        match &self.demanded {
+            Some(demanded) if demanded.len() < self.schema.fields().len() => {
+                write!(f, ": projection={{{}}}", demanded.len())
+            }
+            _ => Ok(()),
+        }
     }
 }
 
