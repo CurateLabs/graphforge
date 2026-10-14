@@ -24,10 +24,11 @@ use parquet::file::properties::WriterProperties;
 use sha2::Digest;
 
 use crate::property_overlay::{
-    PROPERTY_GENERATION_KEY, PROPERTY_KIND_KEY, PROPERTY_ORDINAL_KEY, PROPERTY_OVERLAY_FORMAT,
-    PROPERTY_OVERLAY_FORMAT_KEY, PROPERTY_ROUTE_KEY, PROPERTY_TOMBSTONE_FIELD,
+    PROPERTY_GENERATION_KEY, PROPERTY_KIND_KEY, PROPERTY_LIVE_SCHEMA_KEY, PROPERTY_ORDINAL_KEY,
+    PROPERTY_OVERLAY_FORMAT, PROPERTY_OVERLAY_FORMAT_KEY, PROPERTY_ROUTE_KEY,
+    PROPERTY_TOMBSTONE_FIELD,
 };
-use crate::{AuthenticatedPropertyInventory, PropertyFragmentId, PropertyTable};
+use crate::{AuthenticatedPropertyInventory, EdgePropertyTable, PropertyFragmentId, PropertyTable};
 
 fn sha256_hex(bytes: &[u8]) -> String {
     let digest = sha2::Sha256::digest(bytes);
@@ -45,26 +46,53 @@ fn write_property_route(
     rows_per_fragment: usize,
     value: &str,
 ) -> Arc<AuthenticatedPropertyInventory> {
-    let route_dir = root.join("properties/Person");
+    write_property_route_with_metadata(
+        root,
+        crate::PropertyRouteKind::Node,
+        rows,
+        rows_per_fragment,
+        value,
+        &[],
+    )
+}
+
+fn write_property_route_with_metadata(
+    root: &std::path::Path,
+    kind: crate::PropertyRouteKind,
+    rows: usize,
+    rows_per_fragment: usize,
+    value: &str,
+    extra_metadata: &[(&str, &str)],
+) -> Arc<AuthenticatedPropertyInventory> {
+    let (directory, kind_name, uuid_field) = match kind {
+        crate::PropertyRouteKind::Node => ("properties", "node", "node_uuid"),
+        crate::PropertyRouteKind::Edge => ("edge_properties", "edge", "edge_uuid"),
+    };
+    let route_dir = root.join(directory).join("Person");
     fs::create_dir_all(&route_dir).unwrap();
     let mut entries = Vec::new();
     let mut start = 0_usize;
     let mut ordinal = 0_u64;
     while start < rows {
         let count = rows_per_fragment.min(rows - start);
-        let metadata = HashMap::from([
+        let mut metadata = HashMap::from([
             (
                 PROPERTY_OVERLAY_FORMAT_KEY.into(),
                 PROPERTY_OVERLAY_FORMAT.into(),
             ),
             (PROPERTY_ROUTE_KEY.into(), "Person".into()),
-            (PROPERTY_KIND_KEY.into(), "node".into()),
+            (PROPERTY_KIND_KEY.into(), kind_name.into()),
             (PROPERTY_GENERATION_KEY.into(), "1".into()),
             (PROPERTY_ORDINAL_KEY.into(), ordinal.to_string()),
         ]);
+        metadata.extend(
+            extra_metadata
+                .iter()
+                .map(|(key, value)| ((*key).to_owned(), (*value).to_owned())),
+        );
         let schema = Arc::new(Schema::new_with_metadata(
             vec![
-                Field::new("node_uuid", DataType::FixedSizeBinary(16), false),
+                Field::new(uuid_field, DataType::FixedSizeBinary(16), false),
                 Field::new(PROPERTY_TOMBSTONE_FIELD, DataType::Boolean, false),
                 Field::new("value", DataType::Utf8, false),
             ],
@@ -97,7 +125,7 @@ fn write_property_route(
         writer.close().unwrap();
         let bytes = fs::read(&path).unwrap();
         entries.push(crate::GraphFileEntry {
-            relative_path: format!("properties/Person/{}", id.file_name()),
+            relative_path: format!("{directory}/Person/{}", id.file_name()),
             byte_length: u64::try_from(bytes.len()).unwrap(),
             content_sha256: sha256_hex(&bytes),
             content_xxh64: crate::corruption_checksum::checksum(&bytes),
@@ -124,6 +152,56 @@ fn property_session(
     let table = PropertyTable::open_authenticated(root, "Person", inventory).unwrap();
     context.register_table("props", Arc::new(table)).unwrap();
     context
+}
+
+#[tokio::test]
+async fn scan_batches_carry_the_schema_the_scan_advertises() {
+    // #2027: fragments carry live-schema observation metadata that the
+    // query-facing schema omits; every emitted batch must match the stream.
+    let live = r#"{"format":"graphforge-property-live-schema/1","counts":{"value":3}}"#;
+    for kind in [
+        crate::PropertyRouteKind::Node,
+        crate::PropertyRouteKind::Edge,
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let inventory = write_property_route_with_metadata(
+            root.path(),
+            kind,
+            3,
+            3,
+            "x",
+            &[(PROPERTY_LIVE_SCHEMA_KEY, live)],
+        );
+        let table: Arc<dyn TableProvider> = match kind {
+            crate::PropertyRouteKind::Node => Arc::new(
+                PropertyTable::open_authenticated(root.path(), "Person", inventory).unwrap(),
+            ),
+            crate::PropertyRouteKind::Edge => Arc::new(
+                EdgePropertyTable::open_authenticated(root.path(), "Person", inventory).unwrap(),
+            ),
+        };
+        assert!(
+            !table
+                .schema()
+                .metadata()
+                .contains_key(PROPERTY_LIVE_SCHEMA_KEY),
+            "{kind:?} provider schema"
+        );
+        let context = SessionContext::new();
+        let state = context.state();
+        let all_columns = (0..table.schema().fields().len()).collect::<Vec<_>>();
+        for projection in [None, Some(&all_columns)] {
+            let plan = table.scan(&state, projection, &[], None).await.unwrap();
+            let schema = plan.schema();
+            let batches = datafusion::physical_plan::collect(plan, context.task_ctx())
+                .await
+                .unwrap();
+            assert_eq!(batches.iter().map(RecordBatch::num_rows).sum::<usize>(), 3);
+            for batch in &batches {
+                assert_eq!(batch.schema(), schema, "{kind:?} batch schema");
+            }
+        }
+    }
 }
 
 #[tokio::test]

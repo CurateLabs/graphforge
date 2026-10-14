@@ -94,8 +94,9 @@ impl GraphReadSource {
     }
 }
 
-/// Remove storage-observation metadata from logical schema identity. The bound
-/// physical provider retains its original schema and metadata.
+/// Normalize storage-observation metadata out of logical schema identity.
+/// Property providers already strip this key at their query-schema boundary;
+/// this keeps descriptors stable if a storage schema is supplied directly.
 #[must_use]
 pub fn semantic_read_schema(schema: &SchemaRef) -> SchemaRef {
     let mut metadata = schema.metadata().clone();

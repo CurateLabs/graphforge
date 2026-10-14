@@ -4,7 +4,7 @@ use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use arrow::array::RecordBatch;
+use arrow::array::{RecordBatch, RecordBatchOptions};
 use arrow::datatypes::SchemaRef;
 use datafusion::common::stats::Precision;
 use datafusion::common::{ColumnStatistics, Statistics};
@@ -560,6 +560,7 @@ impl ExecutionPlan for PropertyOverlayExec {
         let digest_context = self.digest_context.clone();
         let lifecycle_context = self.lifecycle_context.clone();
         let uuid_nominations = self.uuid_nominations.clone();
+        let output_schema = Arc::clone(&self.schema);
         tokio::spawn(async move {
             for nomination in &uuid_nominations {
                 let ready = tokio::select! {
@@ -606,6 +607,15 @@ impl ExecutionPlan for PropertyOverlayExec {
                 let limit = remaining;
                 let mut replay_after_validation = false;
                 let send = |batch: RecordBatch| {
+                    // Batches decode under the route's inventory schema, which
+                    // carries storage observation metadata; emit them under
+                    // the query-facing schema this stream advertises.
+                    let batch = RecordBatch::try_new_with_options(
+                        Arc::clone(&output_schema),
+                        batch.columns().to_vec(),
+                        &RecordBatchOptions::new().with_row_count(Some(batch.num_rows())),
+                    )
+                    .map_err(|error| DataFusionError::ArrowError(Box::new(error), None))?;
                     sender.blocking_send(Ok(batch)).map_err(|_| {
                         DataFusionError::Execution("property scan consumer closed".into())
                     })
