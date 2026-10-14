@@ -39,6 +39,36 @@ pub(crate) struct PropertyScanOptions<'a> {
     /// An equality the scan answers from footer statistics. The plan keeps the
     /// filter above the scan, so the scan may return more rows than match.
     pub(crate) equality: Option<crate::property_overlay::PropertyEquality>,
+    /// Output partitions the scan exposes. Each reads a disjoint UUID interval
+    /// of the route, so a key's base, mutation and tombstone rows meet in one
+    /// partition. A scan with a limit or an equality, or without a route
+    /// inventory, keeps one partition.
+    pub(crate) partitions: usize,
+}
+
+/// The fewest route rows worth one output partition: below this the per-partition
+/// footer and cursor setup costs more than the parallel decode saves.
+const MIN_ROWS_PER_PARTITION: usize = 8_192;
+
+/// How many output partitions a scan of `route` should expose when the session
+/// allows `target_partitions`: one per [`MIN_ROWS_PER_PARTITION`] of the route's
+/// manifest row estimate, at most the target, and never fewer than one.
+pub(crate) fn partitions_for_route(
+    target_partitions: usize,
+    inventory: Option<&crate::AuthenticatedPropertyInventory>,
+    is_edge: bool,
+    route: &str,
+) -> usize {
+    let Some(inventory) = inventory else {
+        return 1;
+    };
+    let kind = if is_edge {
+        crate::PropertyRouteKind::Edge
+    } else {
+        crate::PropertyRouteKind::Node
+    };
+    let by_size = inventory.route_row_estimate(kind, route) / MIN_ROWS_PER_PARTITION;
+    target_partitions.min(by_size).max(1)
 }
 
 #[derive(Clone)]
@@ -52,6 +82,8 @@ pub(crate) struct PropertyOverlayExec {
     limit: Option<usize>,
     batch_size: usize,
     planned_rows: Option<usize>,
+    /// Output partitions; partition `i` reads the `i`-th UUID interval of the route.
+    partitions: usize,
     equality: Option<crate::property_overlay::PropertyEquality>,
     /// Whether a current persisted equality index answers `equality`.
     equality_index: bool,
@@ -62,6 +94,8 @@ pub(crate) struct PropertyOverlayExec {
     digest_context: graphforge_core::hash_observation::operation::Context,
     metrics: Option<ExecutionPlanMetricsSet>,
     work_counts: Option<([Count; 3], Gauge)>,
+    /// Partition streams started, under lifecycle measurement.
+    partitions_executed: Option<Count>,
     lifecycle_context: crate::lifecycle_io::CaptureContext,
 }
 
@@ -126,10 +160,18 @@ impl PropertyOverlayExec {
                 Ok::<_, DataFusionError>(options.limit.map_or(rows, |limit| rows.min(limit)))
             })
             .transpose()?;
+        // A limit holds rows back until the whole route validates and an
+        // equality reads by statistics, both of which want one ordered stream;
+        // a scan without a pinned inventory has no footers to cut.
+        let partitions = if options.limit.is_some() || options.equality.is_some() {
+            1
+        } else {
+            inventory.as_ref().map_or(1, |_| options.partitions.max(1))
+        };
         let props = Arc::new(
             PlanProperties::new(
                 EquivalenceProperties::new(Arc::clone(&schema)),
-                Partitioning::UnknownPartitioning(1),
+                Partitioning::UnknownPartitioning(partitions),
                 EmissionType::Incremental,
                 Boundedness::Bounded,
             )
@@ -137,7 +179,7 @@ impl PropertyOverlayExec {
             // backpressured channel, so polling never blocks the async worker.
             .with_scheduling_type(SchedulingType::Cooperative),
         );
-        let (metrics, work_counts) = if crate::lifecycle_io::is_active() {
+        let (metrics, work_counts, partitions_executed) = if crate::lifecycle_io::is_active() {
             let metrics = ExecutionPlanMetricsSet::new();
             let work_counts = [
                 "property_spill_bytes",
@@ -146,9 +188,14 @@ impl PropertyOverlayExec {
             ]
             .map(|name| MetricBuilder::new(&metrics).counter(name, 0));
             let decoder_peak = MetricBuilder::new(&metrics).gauge("property_decoder_peak_bytes", 0);
-            (Some(metrics), Some((work_counts, decoder_peak)))
+            let executed = MetricBuilder::new(&metrics).counter("property_partitions_executed", 0);
+            (
+                Some(metrics),
+                Some((work_counts, decoder_peak)),
+                Some(executed),
+            )
         } else {
-            (None, None)
+            (None, None, None)
         };
         let equality_bound = match (&options.equality, inventory.as_deref(), is_edge) {
             (Some(equality), Some(inventory), false) => {
@@ -181,6 +228,7 @@ impl PropertyOverlayExec {
             limit: options.limit,
             batch_size: options.batch_size.max(1),
             planned_rows,
+            partitions,
             equality: options.equality,
             equality_index,
             uuid_filters: Vec::new(),
@@ -188,6 +236,7 @@ impl PropertyOverlayExec {
             props,
             metrics,
             work_counts,
+            partitions_executed,
             #[cfg(any(test, feature = "test-support"))]
             digest_context: graphforge_core::hash_observation::operation::Context::capture(),
             lifecycle_context: crate::lifecycle_io::CaptureContext::current(),
@@ -426,6 +475,9 @@ pub(crate) struct PropertyUuidFilterCandidate {
 impl DisplayAs for PropertyOverlayExec {
     fn fmt_as(&self, _: DisplayFormatType, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "PropertyOverlayExec: route={}", self.route)?;
+        if self.partitions > 1 {
+            write!(f, ", partitions={}", self.partitions)?;
+        }
         if let Some(equality) = &self.equality {
             write!(f, ", equality={}={:?}", equality.column, equality.value)?;
             if self.equality_index {
@@ -466,7 +518,12 @@ impl ExecutionPlan for PropertyOverlayExec {
         partition: Option<usize>,
     ) -> Result<Arc<Statistics>, DataFusionError> {
         let rows = match partition {
-            None | Some(0) => self.planned_rows,
+            None => self.planned_rows,
+            // The cuts balance rows by footer statistics, not exactly, so a
+            // partition's share is an estimate of the route's rows.
+            Some(partition) if partition < self.partitions => {
+                self.planned_rows.map(|rows| rows.div_ceil(self.partitions))
+            }
             Some(_) => None,
         };
         let num_rows = match rows {
@@ -540,11 +597,16 @@ impl ExecutionPlan for PropertyOverlayExec {
         partition: usize,
         _context: Arc<TaskContext>,
     ) -> Result<SendableRecordBatchStream, DataFusionError> {
-        if partition != 0 {
-            return Err(DataFusionError::Internal(
-                "PropertyOverlayExec has one partition".into(),
-            ));
+        if partition >= self.partitions {
+            return Err(DataFusionError::Internal(format!(
+                "PropertyOverlayExec has {} partitions, not partition {partition}",
+                self.partitions
+            )));
         }
+        if let Some(executed) = &self.partitions_executed {
+            executed.add(1);
+        }
+        let partitions = self.partitions;
         let (sender, receiver) = tokio::sync::mpsc::channel(2);
         let project = self.project.clone();
         let inventory = self.inventory.clone();
@@ -628,6 +690,22 @@ impl ExecutionPlan for PropertyOverlayExec {
                     )
                 };
                 let mut total_work = None::<crate::PropertyOverlayMetrics>;
+                // Every partition cuts the route the same way from the same
+                // pinned footers, so the intervals tile the key space: a key's
+                // base, mutation and tombstone rows are read by one partition.
+                let interval = match partition_interval_of(
+                    inventory.as_deref(),
+                    is_edge,
+                    &route,
+                    partitions,
+                    partition,
+                ) {
+                    Ok(interval) => interval,
+                    Err(error) => {
+                        let _ = sender.blocking_send(Err(error));
+                        return;
+                    }
+                };
                 let first_pass = crate::catalog::visit_property_overlay_batched_selected(
                     &project,
                     inventory.as_deref(),
@@ -637,6 +715,7 @@ impl ExecutionPlan for PropertyOverlayExec {
                     selected_properties.as_ref(),
                     equality.as_ref(),
                     &uuid_sets,
+                    interval,
                     |batch| {
                         let mut batch = project_batch(batch)?;
                         if let Some(rows) = remaining.as_mut() {
@@ -692,6 +771,7 @@ impl ExecutionPlan for PropertyOverlayExec {
                             selected_properties.as_ref(),
                             equality.as_ref(),
                             &uuid_sets,
+                            interval,
                             |batch| {
                                 let mut batch = project_batch(batch)?;
                                 let Some(rows) = replay_remaining.as_mut() else {
@@ -758,6 +838,35 @@ impl ExecutionPlan for PropertyOverlayExec {
     }
 }
 
+/// The UUID interval partition `partition` of `partitions` reads, or `None`
+/// when the scan has one partition and reads the whole route.
+fn partition_interval_of(
+    inventory: Option<&crate::AuthenticatedPropertyInventory>,
+    is_edge: bool,
+    route: &str,
+    partitions: usize,
+    partition: usize,
+) -> Result<Option<crate::uuid_set::UuidInterval>, DataFusionError> {
+    let Some(inventory) = inventory.filter(|_| partitions > 1) else {
+        return Ok(None);
+    };
+    let kind = if is_edge {
+        crate::PropertyRouteKind::Edge
+    } else {
+        crate::PropertyRouteKind::Node
+    };
+    let cuts = inventory
+        .route_partition_cuts(kind, route, partitions)
+        .map_err(|error| DataFusionError::External(Box::new(error)))?;
+    Ok(Some(crate::property_overlay::partition_interval(
+        &cuts, partition,
+    )))
+}
+
 #[cfg(test)]
 #[path = "property_scan_tests.rs"]
 mod property_scan_tests;
+
+#[cfg(test)]
+#[path = "property_scan_partition_tests.rs"]
+mod property_scan_partition_tests;

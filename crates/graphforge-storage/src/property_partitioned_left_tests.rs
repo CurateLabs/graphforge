@@ -91,6 +91,7 @@ fn key_only_property_scan() -> PropertyOverlayExec {
             batch_size: 16,
             footer_statistics: false,
             equality: None,
+            partitions: 1,
         },
     )
     .unwrap()
@@ -626,6 +627,7 @@ fn identity_only_enrichment_keeps_its_partitioned_join_without_a_uuid_set() {
                 batch_size: 16,
                 footer_statistics: false,
                 equality: None,
+                partitions: 1,
             },
         )
         .unwrap();

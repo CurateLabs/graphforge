@@ -111,6 +111,7 @@ where
         selected_properties,
         None,
         &[],
+        None,
         visit,
     )
 }
@@ -120,7 +121,12 @@ where
 const MAX_EQUALITY_CANDIDATES: usize = 1 << 18;
 
 /// Visit a route's newest live rows, optionally only those that can satisfy a
-/// pushed-down equality. The read streams the fragments and writes nothing.
+/// pushed-down equality, optionally only those whose key lies in `interval`.
+/// The read streams the fragments and writes nothing.
+///
+/// An interval confines the whole merge to its keys, so a key's base, mutation
+/// and tombstone rows are all read or none are: reading every interval of a
+/// tiling visits each live row exactly once.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(crate) fn visit_property_overlay_batched_selected<F>(
     dir: &Path,
@@ -131,6 +137,7 @@ pub(crate) fn visit_property_overlay_batched_selected<F>(
     selected_properties: Option<&std::collections::BTreeSet<String>>,
     equality: Option<&crate::property_overlay::PropertyEquality>,
     uuid_sets: &[&dyn crate::uuid_set::UuidMembership],
+    interval: Option<crate::uuid_set::UuidInterval>,
     mut visit: F,
 ) -> Result<Option<crate::PropertyOverlayMetrics>, DataFusionError>
 where
@@ -200,6 +207,14 @@ where
             candidates: candidate_uuids.as_ref(),
         },
     );
+    let ranged = interval.map(|interval| {
+        crate::uuid_set::UuidRange::new(
+            interval,
+            uuid_filter
+                .as_ref()
+                .map(|uuids| uuids as &dyn crate::uuid_set::UuidMembership),
+        )
+    });
     // The compared column is needed to check the winner of each candidate.
     let streamed_properties = match (equality, selected_properties) {
         (Some(equality), Some(selected)) => {
@@ -212,14 +227,17 @@ where
     let mut rows = Vec::with_capacity(batch_size.max(1));
     let mut stopped = false;
     let mut failure = None;
-    if uuid_filter.as_ref().is_none_or(|uuids| !uuids.is_empty()) {
+    let membership: Option<&dyn crate::uuid_set::UuidMembership> = match (&ranged, &uuid_filter) {
+        (Some(ranged), _) => Some(ranged),
+        (None, Some(uuids)) => Some(uuids),
+        (None, None) => None,
+    };
+    if membership.is_none_or(|uuids| !uuids.is_empty()) {
         let read = crate::property_overlay::RouteRead {
             kind,
             route: stem,
             selected_properties: streamed_properties.as_ref(),
-            uuids: uuid_filter
-                .as_ref()
-                .map(|uuids| uuids as &dyn crate::uuid_set::UuidMembership),
+            uuids: membership,
             limits,
             collect,
         };
