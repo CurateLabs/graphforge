@@ -248,20 +248,15 @@ impl AdjacencyProvider for LabelsOverride {
     }
 }
 
-/// Expand `seeds` one hop over `KNOWS`, demanding only the destination's
-/// `node_id` and `type_ids`, and return each reached row as
-/// `(node_id, type_ids)`, sorted.
-async fn expand_destination_labels(
+/// A one-hop `KNOWS` expansion of `seeds` that demands every output column.
+fn ring_expand_exec(
     provider: &Arc<dyn AdjacencyProvider>,
     resource: &read_resource::GraphReadContext,
     seeds: &[u64],
-) -> Result<Vec<(u64, Vec<u32>)>, GfError> {
-    use arrow::array::{Array, ListArray};
+) -> ExpandExec {
     use datafusion::datasource::memory::MemorySourceConfig;
-    use datafusion::execution::context::SessionContext;
     use datafusion::logical_expr::LogicalPlanBuilder;
     use datafusion::logical_expr::logical_plan::LogicalTableSource;
-    use datafusion::physical_plan::collect;
 
     let frontier = Arc::new(arrow::datatypes::Schema::new(vec![Field::new(
         "node_id",
@@ -307,7 +302,22 @@ async fn expand_destination_labels(
     )
     .unwrap();
     let input = MemorySourceConfig::try_new_exec(&[vec![batch]], frontier, None).unwrap();
-    let exec = ExpandExec::new(&node, input, Arc::clone(provider), None, false, resource);
+    ExpandExec::new(&node, input, Arc::clone(provider), None, false, resource)
+}
+
+/// Expand `seeds` one hop over `KNOWS`, demanding only the destination's
+/// `node_id` and `type_ids`, and return each reached row as
+/// `(node_id, type_ids)`, sorted.
+async fn expand_destination_labels(
+    provider: &Arc<dyn AdjacencyProvider>,
+    resource: &read_resource::GraphReadContext,
+    seeds: &[u64],
+) -> Result<Vec<(u64, Vec<u32>)>, GfError> {
+    use arrow::array::{Array, ListArray};
+    use datafusion::execution::context::SessionContext;
+    use datafusion::physical_plan::collect;
+
+    let exec = ring_expand_exec(provider, resource, seeds);
     let width = exec.schema().fields().len();
     let node_id = width - 6 + 1;
     let type_ids = width - 6 + 3;
@@ -905,4 +915,289 @@ fn a_skipped_input_column_is_emitted_as_nulls_and_a_demanded_one_is_taken() {
     );
     let ages = columns[2].as_any().downcast_ref::<Int64Array>().unwrap();
     assert_eq!(ages.values(), &[3, 1, 1]);
+}
+
+/// A pool that tells its consumers apart: what each named consumer holds now,
+/// the most it ever held, and what every other consumer held at that moment.
+#[derive(Debug)]
+struct ConsumerPool {
+    inner: datafusion::execution::memory_pool::GreedyMemoryPool,
+    held: std::sync::Mutex<std::collections::BTreeMap<String, Held>>,
+}
+
+#[derive(Debug, Default)]
+struct Held {
+    now: usize,
+    peak: usize,
+    /// What the rest of the pool held when this consumer was at its peak.
+    others_at_peak: usize,
+}
+
+impl ConsumerPool {
+    fn new(limit: usize) -> Arc<Self> {
+        Arc::new(Self {
+            inner: datafusion::execution::memory_pool::GreedyMemoryPool::new(limit),
+            held: std::sync::Mutex::default(),
+        })
+    }
+
+    /// Bytes the pool still has reserved, by every consumer.
+    fn leaked(&self) -> usize {
+        datafusion::execution::memory_pool::MemoryPool::reserved(&self.inner)
+    }
+
+    /// Records that `consumer` now holds `now`; the inner pool already agrees.
+    fn record(&self, consumer: &str, now: usize) {
+        let total = self.leaked();
+        let mut held = self.held.lock().unwrap();
+        let entry = held.entry(consumer.to_owned()).or_default();
+        entry.now = now;
+        if now > entry.peak {
+            entry.peak = now;
+            entry.others_at_peak = total.saturating_sub(now);
+        }
+    }
+
+    fn now(&self, consumer: &str) -> usize {
+        self.held.lock().unwrap().get(consumer).map_or(0, |e| e.now)
+    }
+
+    fn peak(&self, consumer: &str) -> usize {
+        self.held
+            .lock()
+            .unwrap()
+            .get(consumer)
+            .map_or(0, |e| e.peak)
+    }
+
+    /// What the other consumers held while `consumer` was at its peak.
+    fn others_at_peak(&self, consumer: &str) -> usize {
+        self.held
+            .lock()
+            .unwrap()
+            .get(consumer)
+            .map_or(0, |e| e.others_at_peak)
+    }
+}
+
+impl std::fmt::Display for ConsumerPool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ConsumerPool({})", self.inner)
+    }
+}
+
+impl datafusion::execution::memory_pool::MemoryPool for ConsumerPool {
+    fn grow(
+        &self,
+        reservation: &datafusion::execution::memory_pool::MemoryReservation,
+        additional: usize,
+    ) {
+        self.inner.grow(reservation, additional);
+        // The reservation's own size is updated after the pool is told.
+        self.record(
+            reservation.consumer().name(),
+            reservation.size() + additional,
+        );
+    }
+
+    fn shrink(
+        &self,
+        reservation: &datafusion::execution::memory_pool::MemoryReservation,
+        shrink: usize,
+    ) {
+        self.inner.shrink(reservation, shrink);
+        self.record(
+            reservation.consumer().name(),
+            reservation.size().saturating_sub(shrink),
+        );
+    }
+
+    fn try_grow(
+        &self,
+        reservation: &datafusion::execution::memory_pool::MemoryReservation,
+        additional: usize,
+    ) -> datafusion::error::Result<()> {
+        self.inner.try_grow(reservation, additional)?;
+        self.record(
+            reservation.consumer().name(),
+            reservation.size() + additional,
+        );
+        Ok(())
+    }
+
+    fn reserved(&self) -> usize {
+        self.leaked()
+    }
+
+    fn name(&self) -> &str {
+        "ConsumerPool"
+    }
+
+    fn memory_limit(&self) -> datafusion::execution::memory_pool::MemoryLimit {
+        self.inner.memory_limit()
+    }
+}
+
+/// `rows` rows of one `UInt64` column.
+fn counting_batch(rows: usize) -> RecordBatch {
+    let schema = Arc::new(arrow::datatypes::Schema::new(vec![Field::new(
+        "v",
+        DataType::UInt64,
+        false,
+    )]));
+    RecordBatch::try_new(
+        schema,
+        vec![Arc::new(UInt64Array::from_iter_values(0..rows as u64))],
+    )
+    .unwrap()
+}
+
+fn hop_read_reservation(
+    pool: &Arc<ConsumerPool>,
+) -> std::sync::Mutex<crate::chunked_reservation::ChunkedReservation> {
+    let pool: Arc<dyn datafusion::execution::memory_pool::MemoryPool> = pool.clone();
+    std::sync::Mutex::new(crate::chunked_reservation::ChunkedReservation::register(
+        HOP_READ_CONSUMER,
+        &pool,
+    ))
+}
+
+/// The pool's chunk for a budget of 8 MiB: `8 MiB / 512`, the 16 KiB floor.
+const SMALL_POOL: usize = 8 * 1024 * 1024;
+const SMALL_POOL_CHUNK: usize = 16 * 1024;
+
+/// A hop read holds the decoded batches (`D` bytes). Joined from several
+/// batches it holds the copy as well while it is built, `2D` at the peak, and
+/// `D` after; a lone batch is shared, so it holds `D` throughout. The pool
+/// sees those bytes rounded up to its chunk, and gets them back when the chunk
+/// ends (#1987).
+#[test]
+fn a_hop_read_is_charged_its_decoded_bytes_and_the_copy_it_joins() {
+    let pool = ConsumerPool::new(SMALL_POOL);
+    let reservation = hop_read_reservation(&pool);
+
+    let batches: Vec<_> = (0..3).map(|_| counting_batch(4096)).collect();
+    let decoded = batches_bytes(&batches);
+    assert!(decoded >= 3 * 4096 * 8, "{decoded}");
+    let mut charge = HopReadCharge::new(&reservation);
+    let joined = concat_charged(&mut charge, batches).unwrap();
+    assert_eq!(joined.num_rows(), 3 * 4096);
+    assert_eq!(charge.held, decoded, "the joined copy replaces the batches");
+    assert!(
+        joined.get_array_memory_size() <= decoded,
+        "the copy is no larger than the batches it joins"
+    );
+    let peak = pool.peak(HOP_READ_CONSUMER);
+    assert!(peak >= 2 * decoded, "{peak} < 2 * {decoded}");
+    assert!(peak <= 2 * decoded + SMALL_POOL_CHUNK, "{peak}");
+    drop(charge);
+    assert!(pool.now(HOP_READ_CONSUMER) <= 2 * SMALL_POOL_CHUNK);
+
+    let lone = vec![counting_batch(4096)];
+    let decoded = batches_bytes(&lone);
+    let before = pool.peak(HOP_READ_CONSUMER);
+    let mut charge = HopReadCharge::new(&reservation);
+    let shared = concat_charged(&mut charge, lone).unwrap();
+    assert_eq!(shared.num_rows(), 4096);
+    assert_eq!(charge.held, decoded);
+    assert!(
+        pool.peak(HOP_READ_CONSUMER) <= before.max(decoded + 2 * SMALL_POOL_CHUNK),
+        "a lone batch is not charged twice"
+    );
+    drop(charge);
+
+    drop(reservation);
+    assert_eq!(pool.now(HOP_READ_CONSUMER), 0);
+    assert_eq!(pool.leaked(), 0);
+}
+
+/// A read the budget cannot hold fails with the pool's typed error naming the
+/// hop read, before the copy is allocated, and leaves nothing charged.
+#[test]
+fn a_hop_read_over_the_budget_fails_before_the_copy() {
+    let pool = ConsumerPool::new(64 * 1024);
+    let reservation = hop_read_reservation(&pool);
+    let batches: Vec<_> = (0..3).map(|_| counting_batch(2048)).collect();
+    let decoded = batches_bytes(&batches);
+    // One copy fits; two do not.
+    assert!(decoded > 32 * 1024 && decoded <= 64 * 1024, "{decoded}");
+    let mut charge = HopReadCharge::new(&reservation);
+    let error = concat_charged(&mut charge, batches)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains(HOP_READ_CONSUMER) && error.contains("Resources exhausted"),
+        "{error}"
+    );
+    assert_eq!(
+        charge.held, decoded,
+        "the failed copy charge is not recorded"
+    );
+    drop(charge);
+    drop(reservation);
+    assert_eq!(pool.leaked(), 0);
+}
+
+/// One expansion over a ring, run in a pool of `pool`.
+async fn expand_ring_in(
+    pool: Arc<ConsumerPool>,
+    provider: &Arc<dyn AdjacencyProvider>,
+    resource: &read_resource::GraphReadContext,
+    seeds: &[u64],
+) -> Result<usize, GfError> {
+    use datafusion::execution::runtime_env::RuntimeEnvBuilder;
+    use datafusion::physical_plan::{ExecutionPlan, collect};
+    use datafusion::prelude::{SessionConfig, SessionContext};
+
+    let runtime = RuntimeEnvBuilder::new()
+        .with_memory_pool(pool)
+        .build_arc()
+        .unwrap();
+    let context = SessionContext::new_with_config_rt(SessionConfig::new(), runtime);
+    let exec: Arc<dyn ExecutionPlan> = Arc::new(ring_expand_exec(provider, resource, seeds));
+    collect(exec, context.task_ctx())
+        .await
+        .map(|batches| batches.iter().map(RecordBatch::num_rows).sum())
+        .map_err(|error| GfError::Execution(error.to_string()))
+}
+
+/// The edge and destination-node reads of a real expansion are charged to the
+/// pool under the hop-read name and released when the chunk ends, and a budget
+/// that holds everything but those reads fails the query naming them (#1987).
+#[tokio::test]
+async fn a_single_hop_expansion_charges_its_reads_and_fails_typed_over_budget() {
+    const NODES: usize = 4_000;
+    let dir = tempfile::TempDir::new().unwrap();
+    let ids = labelled_ring(dir.path(), NODES);
+    let (provider, resource, _inventory) = open_ring_provider(dir.path());
+
+    let pool = ConsumerPool::new(SMALL_POOL);
+    let rows = expand_ring_in(Arc::clone(&pool), &provider, &resource, &ids)
+        .await
+        .unwrap();
+    assert_eq!(rows, 2 * NODES);
+    let read = pool.peak(HOP_READ_CONSUMER);
+    let others = pool.others_at_peak(HOP_READ_CONSUMER);
+    eprintln!("hop read peak {read}, other consumers {others}");
+    assert!(
+        read >= 4 * SMALL_POOL_CHUNK,
+        "the reads are too small to tell from the pool's chunk: {read}"
+    );
+    assert!(
+        pool.now(HOP_READ_CONSUMER) <= 2 * SMALL_POOL_CHUNK,
+        "the chunk's reads were not released"
+    );
+
+    // What else the query holds while it reads fits; half of the reads does not.
+    let limit = others + read / 2;
+    let pool = ConsumerPool::new(limit);
+    let error = expand_ring_in(Arc::clone(&pool), &provider, &resource, &ids)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains(HOP_READ_CONSUMER) && error.contains("Resources exhausted"),
+        "{error}"
+    );
+    assert_eq!(pool.leaked(), 0, "a reservation leaked");
 }

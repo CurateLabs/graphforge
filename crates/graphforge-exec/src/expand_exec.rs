@@ -1829,6 +1829,10 @@ impl ExpandExec {
             ordinal_identity_required: self.ordinal_identity_required,
             edge_predicate: self.edge_predicate.clone(),
             reservation: std::sync::Mutex::new(crate::fast_path::expand_reservation(context)),
+            read_reservation: std::sync::Mutex::new(ChunkedReservation::register(
+                HOP_READ_CONSUMER,
+                context.memory_pool(),
+            )),
         }
     }
 }
@@ -2216,6 +2220,91 @@ struct SingleHopConfig {
     /// #1688 candidate C: the memory-pool reservation for held batches.
     /// Memory-pool reservation for the batches this hop holds (ADR 0050).
     reservation: std::sync::Mutex<datafusion::execution::memory_pool::MemoryReservation>,
+    /// Memory-pool reservation for the edge and destination-node reads one
+    /// chunk holds while it assembles its output (#1987). Separate from
+    /// `reservation`, which is resized absolutely to the held input and output.
+    read_reservation: std::sync::Mutex<ChunkedReservation>,
+}
+
+/// What a single-hop chunk has charged to [`SingleHopConfig::read_reservation`],
+/// released when the chunk ends, by whatever path it ends.
+struct HopReadCharge<'a> {
+    reservation: &'a std::sync::Mutex<ChunkedReservation>,
+    held: usize,
+}
+
+impl<'a> HopReadCharge<'a> {
+    fn new(reservation: &'a std::sync::Mutex<ChunkedReservation>) -> Self {
+        Self {
+            reservation,
+            held: 0,
+        }
+    }
+
+    /// Charge `bytes` that are now live. Fails, naming [`HOP_READ_CONSUMER`],
+    /// when the pool cannot hold them; the failed charge is not recorded.
+    fn charge(&mut self, bytes: usize) -> Result<(), GfError> {
+        self.reservation
+            .lock()
+            .map_err(|_| GfError::Execution("ExpandExec hop read reservation poisoned".into()))?
+            .try_grow(bytes)
+            .map_err(GfError::from_execution_error)?;
+        self.held += bytes;
+        Ok(())
+    }
+
+    /// Release `bytes` that are no longer live.
+    fn release(&mut self, bytes: usize) {
+        let bytes = bytes.min(self.held);
+        if let Ok(mut reservation) = self.reservation.lock() {
+            reservation.shrink(bytes);
+            self.held -= bytes;
+        }
+    }
+}
+
+impl Drop for HopReadCharge<'_> {
+    fn drop(&mut self) {
+        self.release(self.held);
+    }
+}
+
+/// The pool consumer a single-hop chunk's edge and destination-node reads
+/// charge: the decoded batches, their concatenation, and the id-to-row tables.
+const HOP_READ_CONSUMER: &str = "ExpandExec hop read";
+
+/// Bytes the decoded `batches` hold.
+fn batches_bytes(batches: &[RecordBatch]) -> usize {
+    batches
+        .iter()
+        .map(RecordBatch::get_array_memory_size)
+        .fold(0, usize::saturating_add)
+}
+
+/// The rows of `batches` as one batch, charging `charge` for every live copy.
+/// A lone batch is shared, not copied, so its charge stays; otherwise the copy
+/// is charged before it is allocated, so an over-budget read fails before the
+/// copy, and the decoded batches' charge is released once they are dropped.
+/// Fails, typed, when the pool cannot hold the charge.
+fn concat_charged(
+    charge: &mut HopReadCharge<'_>,
+    batches: Vec<RecordBatch>,
+) -> Result<RecordBatch, GfError> {
+    let decoded = batches_bytes(&batches);
+    charge.charge(decoded)?;
+    if let [only] = batches.as_slice() {
+        return Ok(only.clone());
+    }
+    let schema = batches
+        .first()
+        .map(RecordBatch::schema)
+        .ok_or_else(|| GfError::Execution("Expand: scan returned no batches".into()))?;
+    charge.charge(decoded)?;
+    let joined = arrow::compute::concat_batches(&schema, &batches)
+        .map_err(|error| GfError::Execution(error.to_string()))?;
+    drop(batches);
+    charge.release(decoded);
+    Ok(joined)
 }
 
 impl SingleHopConfig {
@@ -2311,7 +2400,7 @@ fn expand_single_hop_chunk(
 ) -> Result<RecordBatch, GfError> {
     use std::collections::HashMap;
 
-    use arrow::compute::{concat_batches, take};
+    use arrow::compute::take;
 
     let exec_err = |m: String| GfError::Execution(m);
 
@@ -2326,6 +2415,9 @@ fn expand_single_hop_chunk(
         )));
     }
     let src_ids = u64_column(input, cfg.src_col_idx)?;
+    // Everything this chunk reads from the edge and node files is charged to the
+    // pool until the chunk ends (#1987).
+    let mut read_charge = HopReadCharge::new(&cfg.read_reservation);
 
     // The adjacency view: directional for Out/In, merged for Undirected
     // (dedup per input row happens in the emit pass below).
@@ -2631,11 +2723,7 @@ fn expand_single_hop_chunk(
             }
             .map_err(|e| exec_err(e.to_string()))?;
         drop(edge_permit);
-        let edge_schema = edge_batches
-            .first()
-            .map(RecordBatch::schema)
-            .ok_or_else(|| exec_err("Expand: edge scan returned no batches".into()))?;
-        Some(concat_batches(&edge_schema, &edge_batches).map_err(|e| exec_err(e.to_string()))?)
+        Some(concat_charged(&mut read_charge, edge_batches)?)
     };
     // Position of each traversed edge within the edge batch, by `edge_id`.
     let edge_row: HashMap<u64, usize> = match edge_batch.as_ref() {
@@ -2651,6 +2739,10 @@ fn expand_single_hop_chunk(
         }
         None => HashMap::new(),
     };
+    read_charge.charge(hash_table_bytes(
+        edge_row.capacity(),
+        std::mem::size_of::<(u64, usize)>(),
+    ))?;
     let edge_uuids = edge_batch
         .as_ref()
         .filter(|_| relationship_properties_required)
@@ -2832,10 +2924,10 @@ fn expand_single_hop_chunk(
         }
         .map_err(|e| exec_err(e.to_string()))?;
         drop(node_permit);
-        let Some(first) = node_batches.first() else {
+        if node_batches.is_empty() {
             return Ok(RecordBatch::new_empty(cfg.out_schema.clone()));
-        };
-        concat_batches(&first.schema(), &node_batches).map_err(|e| exec_err(e.to_string()))?
+        }
+        concat_charged(&mut read_charge, node_batches)?
     };
     let node_id_index = node_batch
         .schema()
@@ -2847,6 +2939,10 @@ fn expand_single_hop_chunk(
         .enumerate()
         .filter_map(|(i, id)| id.map(|v| (v, i)))
         .collect();
+    read_charge.charge(hash_table_bytes(
+        node_row.capacity(),
+        std::mem::size_of::<(u64, usize)>(),
+    ))?;
 
     // Pass 2: convert triples into take indices against the FILTERED edge
     // batch (edge_row maps edge_id -> position within it).
