@@ -1,4 +1,5 @@
 use super::*;
+use arrow::array::StringArray;
 use arrow::datatypes::DataType;
 use arrow::datatypes::Field;
 use std::sync::Arc;

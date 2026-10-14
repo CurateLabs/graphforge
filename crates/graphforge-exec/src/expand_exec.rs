@@ -13,18 +13,11 @@ use arrow::array::Array;
 use arrow::array::ArrayRef;
 use arrow::array::FixedSizeBinaryArray;
 use arrow::array::FixedSizeBinaryBuilder;
-use arrow::array::ListBuilder;
 use arrow::array::RecordBatch;
-use arrow::array::StringArray;
-use arrow::array::TimestampMicrosecondArray;
 use arrow::array::UInt32Array;
-use arrow::array::UInt32Builder;
 use arrow::array::UInt64Array;
 use arrow::array::new_null_array;
-use arrow::datatypes::DataType;
-use arrow::datatypes::Field;
 use arrow::datatypes::SchemaRef;
-use arrow::datatypes::TimeUnit;
 use datafusion::common::DataFusionError;
 use datafusion::execution::TaskContext;
 use datafusion::logical_expr::UserDefinedLogicalNode;
@@ -934,8 +927,6 @@ fn charge(
 /// The struct fields of the edge-list column, past the four topology fields:
 /// the relation's persisted edge properties (#755).
 fn edge_list_prop_fields(cfg: &ExpandConfig) -> Result<Vec<arrow::datatypes::FieldRef>, GfError> {
-    use arrow::datatypes::DataType;
-
     let exec_err = |m: String| GfError::Execution(m);
     let edge_field = cfg
         .out_schema
@@ -1415,7 +1406,6 @@ pub(super) fn build_edge_list_column(
         ArrayRef, FixedSizeBinaryArray, ListArray, StringArray, StructArray, new_empty_array,
     };
     use arrow::buffer::OffsetBuffer;
-    use arrow::datatypes::DataType;
 
     let exec_err = |m: String| GfError::Execution(m);
 

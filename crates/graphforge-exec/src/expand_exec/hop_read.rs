@@ -1,6 +1,10 @@
 //! Admission and ownership of single-hop read buffers.
 
-use super::*;
+use super::SingleHopConfig;
+use crate::chunked_reservation::ChunkedReservation;
+use arrow::array::RecordBatch;
+use datafusion::error::DataFusionError;
+use graphforge_core::GfError;
 
 /// What a single-hop chunk has charged to [`SingleHopConfig::read_reservation`],
 /// released when the chunk ends, by whatever path it ends.
