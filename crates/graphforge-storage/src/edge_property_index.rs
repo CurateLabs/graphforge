@@ -45,6 +45,16 @@
 //! request and the by-id lookup reads more id blobs, still bounded by the
 //! request's own spread.
 //!
+//! A statement that reads properties by id calls the lookup many times, and
+//! each call used to read the manifest again and decode every id page its
+//! request might hit, so the same pages were decoded once per call. An
+//! [`EdgeIdMap`] decodes the id pages of a route once and keeps, for every edge
+//! id, the shard and row that hold it; a lookup through it reads only the
+//! property pages of its rows. The holder keeps one map per route and project
+//! generation, charges its bytes to the same budget as the decoded adjacency
+//! shards, and discards it when the generation moves. A map that would not fit
+//! the budget is declined and counted, and lookups keep the path above.
+//!
 //! An index is current only while its source digest equals the route's. Its ids
 //! are addressable only while the topology digest recorded beside them equals
 //! the route's canonical edge topology digest as well, because an id is a
@@ -157,7 +167,7 @@ struct ShardEntry {
     id_max: Option<u64>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct Manifest {
     format: String,
     route: String,
@@ -1007,11 +1017,22 @@ pub struct EdgeIdMap {
     bytes: u64,
 }
 
+/// What [`EdgeIdMap::build`] made of a route.
+#[derive(Debug)]
+pub enum EdgeIdMapBuild {
+    /// The map of the route's current index.
+    Built(EdgeIdMap),
+    /// The route has no current index that answers by id. This can change
+    /// without the project generation moving (a lazy index rebuild replaces
+    /// the manifest), so a holder does not remember it.
+    Unavailable,
+    /// The map would not fit the budget. Recorded in the I/O counters, and
+    /// decided before any id page is read.
+    Declined,
+}
+
 impl EdgeIdMap {
-    /// Build the map of `route`, `None` when the route has no current index
-    /// that answers by id (the lookup then reports why), or when the map would
-    /// not fit `budget_bytes`. A declined map is recorded in the I/O counters
-    /// and read before any id page is.
+    /// Build the map of `route`, or say why there is none.
     ///
     /// # Errors
     /// A manifest or a page that fails its checksum or does not decode, an id
@@ -1021,16 +1042,16 @@ impl EdgeIdMap {
         inventory: &AuthenticatedPropertyInventory,
         route: &str,
         budget_bytes: u64,
-    ) -> Result<Option<Self>, GfError> {
+    ) -> Result<EdgeIdMapBuild, GfError> {
         if !inventory.has_property_route(PropertyRouteKind::Edge, route) {
-            return Ok(None);
+            return Ok(EdgeIdMapBuild::Unavailable);
         }
         let Some(current) = current_manifest(project_dir, inventory, route)? else {
-            return Ok(None);
+            return Ok(EdgeIdMapBuild::Unavailable);
         };
         let manifest = current.manifest;
         if !ids_are_current(&manifest, inventory, route) {
-            return Ok(None);
+            return Ok(EdgeIdMapBuild::Unavailable);
         }
         let rows = manifest
             .shards
@@ -1042,17 +1063,28 @@ impl EdgeIdMap {
             .saturating_add(manifest_resident_bytes(&manifest));
         if estimate > budget_bytes {
             crate::io_stats::record_edge_property_id_map_decline();
-            return Ok(None);
+            return Ok(EdgeIdMapBuild::Declined);
         }
         let pack_dir = index_dir(project_dir).join(&manifest.pack_dir);
+        Self::decode(route, manifest, pack_dir, rows).map(EdgeIdMapBuild::Built)
+    }
+
+    /// The map of a manifest whose ids are current, read from every page of
+    /// every shard's id blob. Each page is checked against its shard's seal as
+    /// it is read, and each id against the shard's range.
+    fn decode(
+        route: &str,
+        manifest: Manifest,
+        pack_dir: PathBuf,
+        rows: u64,
+    ) -> Result<Self, GfError> {
         let mut packs = PackHandles::new(pack_dir.clone(), manifest.page_rows);
         let mut locations = Vec::with_capacity(
             usize::try_from(rows).map_err(|_| validation("manifest row counts overflow"))?,
         );
         let mut pages_decoded = 0_u64;
         for (index, shard) in manifest.shards.iter().enumerate() {
-            let (Some(seal), Some(min), Some(max)) = (shard.ids, shard.id_min, shard.id_max)
-            else {
+            let (Some(seal), Some(min), Some(max)) = (shard.ids, shard.id_min, shard.id_max) else {
                 return Err(validation("manifest ids are incomplete"));
             };
             let shard_index =
@@ -1086,13 +1118,13 @@ impl EdgeIdMap {
         let bytes = (locations.capacity() * std::mem::size_of::<IdLocation>()) as u64
             + manifest_resident_bytes(&manifest);
         crate::io_stats::record_edge_property_id_map_build(bytes);
-        Ok(Some(Self {
+        Ok(Self {
             route: route.to_owned(),
             manifest,
             pack_dir,
             locations,
             bytes,
-        }))
+        })
     }
 
     /// Resident bytes of the map, which its holder charges to its budget.
@@ -1141,7 +1173,10 @@ impl EdgeIdMap {
         let mut by_shard: BTreeMap<u32, (Vec<u64>, Vec<usize>)> = BTreeMap::new();
         for target in targets {
             let first = self.locations.partition_point(|entry| entry.id < *target);
-            let Some(location) = self.locations.get(first).filter(|entry| entry.id == *target)
+            let Some(location) = self
+                .locations
+                .get(first)
+                .filter(|entry| entry.id == *target)
             else {
                 continue;
             };

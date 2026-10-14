@@ -239,6 +239,24 @@ addressable reads the UUID key exactly as before. Variable-length expansion, the
 reachability mode and any statement that demands another stored field of the
 edge (its UUID, its timestamps, a whole-edge return) stay on the UUID key.
 
+A statement calls the by-id lookup many times (a hop reads one frontier chunk
+at a time, a reachability search one level at a time), and each call used to
+re-read the manifest and decode the id pages of every shard whose id range
+holds a target. Ids follow the UUID order inside a shard and the ranges of
+shards overlap, so a call decoded about 19 times the id pages it needed, and
+one IC5 statement spent 36.5% of its samples there. The persistent adjacency
+provider therefore keeps an `EdgeIdMap` per route: every id of the current index
+and the shard and row that hold it, built once from the id pages (each checked
+against its directory entry and its shard's range) and reused by every lookup of
+the project generation, across statements. A lookup through the map reads only
+the property pages of the rows it wants, still checked page by page. The map is
+charged to the budget of the decoded adjacency shards, and a route whose map
+would not fit is declined, counted in `edge_property_id_map_declines`, and read
+by the per-call path. The provider discards its maps when the project generation
+moves; it caches an index that cannot answer by id only until the next call,
+because `rebuild_property_indexes` replaces a manifest without moving the
+generation. An id that two rows hold is refused when asked for, as before.
+
 The reachability mode of variable-length expansion (S6b, #1984) is the third
 consumer. Its pushed `ALL(e IN r WHERE p)` predicate does not need positional access:
 for each search level it resolves the UUIDs of that level's frontier relationships,
@@ -305,11 +323,12 @@ relation, now read from the index.
   shard: 0.8 MB for the 3.1 million rows of the SF1 FinBench edge route and 0.5 MB
   for the 4.0 million rows of the SF1 IC route.
 - A lookup reads the directory of a blob and the pages it needs out of its pack,
-  not the blob and not the pack, and decodes only those pages. Each lookup
-  re-reads the directories it needs; nothing caches a directory or a decoded
-  page across lookups, so a page that several lookups of one statement want is
-  read and decoded once per lookup. A cache is a follow-up and needs its memory
-  accounted in the query pool.
+  not the blob and not the pack, and decodes only those pages. Property pages
+  are not cached across lookups: a page that several lookups of one statement
+  want is read and decoded once per lookup. Id pages are decoded once per
+  generation into the `EdgeIdMap` (16 bytes per row: 8 for the id, 8 for its
+  shard and row, so 64 MB for the 4.0 million rows of the SF1 IC route), charged
+  to the decoded-shard budget.
 - Ids add 8 bytes per row before compression and 16 bytes per shard of bounds.
   Adding them changes no existing byte of an index without ids.
 - A topology-only mutation (an edge with no properties) leaves the UUID key

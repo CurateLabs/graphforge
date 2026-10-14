@@ -423,12 +423,8 @@ pub fn snapshot() -> Option<IoSnapshot> {
         edge_property_id_pages_decoded: counters
             .edge_property_id_pages_decoded
             .load(Ordering::Relaxed),
-        edge_property_id_map_builds: counters
-            .edge_property_id_map_builds
-            .load(Ordering::Relaxed),
-        edge_property_id_map_bytes: counters
-            .edge_property_id_map_bytes
-            .load(Ordering::Relaxed),
+        edge_property_id_map_builds: counters.edge_property_id_map_builds.load(Ordering::Relaxed),
+        edge_property_id_map_bytes: counters.edge_property_id_map_bytes.load(Ordering::Relaxed),
         edge_property_id_map_hits: counters.edge_property_id_map_hits.load(Ordering::Relaxed),
         edge_property_id_map_declines: counters
             .edge_property_id_map_declines

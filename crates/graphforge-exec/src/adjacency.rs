@@ -1272,9 +1272,9 @@ pub struct PersistentAdjacencyProvider {
 struct EdgeIdMapEntry {
     generation: u64,
     /// Per route: the digests of the index the answer was made for, and the
-    /// map, `None` when the route has no index that answers by id or the map
-    /// would exceed the provider byte budget. An answer made for other digests
-    /// than the inventory now authenticates is made again.
+    /// map, `None` when the map would exceed the provider byte budget. An
+    /// answer made for other digests than the inventory now authenticates is
+    /// made again.
     routes: HashMap<String, EdgeIdMapSlot>,
 }
 
@@ -1770,12 +1770,15 @@ impl AdjacencyProvider for PersistentAdjacencyProvider {
         inventory: &graphforge_storage::AuthenticatedPropertyInventory,
         route: &str,
     ) -> Result<Option<Arc<graphforge_storage::edge_property_index::EdgeIdMap>>, GfError> {
-        use graphforge_storage::edge_property_index::EdgeIdMap;
+        use graphforge_storage::edge_property_index::{EdgeIdMap, EdgeIdMapBuild};
         // The build is serialized so concurrent partitions share one map.
         let mut maps = self.edge_id_maps.lock().expect("edge id map lock");
         // Read before building, as for the label index.
         let generation = read_topology_generation(&self.dir)?;
-        if maps.as_ref().is_some_and(|entry| entry.generation != generation) {
+        if maps
+            .as_ref()
+            .is_some_and(|entry| entry.generation != generation)
+        {
             *maps = None;
         }
         let entry = maps.get_or_insert_with(|| EdgeIdMapEntry {
@@ -1783,7 +1786,11 @@ impl AdjacencyProvider for PersistentAdjacencyProvider {
             routes: HashMap::new(),
         });
         let currency = EdgeIdMap::currency(inventory, route);
-        if let Some(slot) = entry.routes.get(route).filter(|slot| slot.currency == currency) {
+        if let Some(slot) = entry
+            .routes
+            .get(route)
+            .filter(|slot| slot.currency == currency)
+        {
             return Ok(slot.map.clone());
         }
         // The maps and the label index share the provider's byte budget.
@@ -1802,14 +1809,21 @@ impl AdjacencyProvider for PersistentAdjacencyProvider {
                     .and_then(|labels| labels.index.as_ref())
                     .map_or(0, |index| index.bytes()),
             );
-        let map = EdgeIdMap::build(
+        // A route without a current index is not remembered: a lazy index
+        // rebuild replaces the manifest without moving the generation.
+        let map = match EdgeIdMap::build(
             &self.dir,
             inventory,
             route,
-            graphforge_storage::adjacency::DEFAULT_DECODED_SHARD_CACHE_BYTES
-                .saturating_sub(held),
-        )?
-        .map(Arc::new);
+            graphforge_storage::adjacency::DEFAULT_DECODED_SHARD_CACHE_BYTES.saturating_sub(held),
+        )? {
+            EdgeIdMapBuild::Built(map) => Some(Arc::new(map)),
+            EdgeIdMapBuild::Declined => None,
+            EdgeIdMapBuild::Unavailable => {
+                entry.routes.remove(route);
+                return Ok(None);
+            }
+        };
         entry.routes.insert(
             route.to_owned(),
             EdgeIdMapSlot {
