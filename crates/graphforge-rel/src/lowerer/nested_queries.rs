@@ -703,12 +703,7 @@ impl GraphPlanLowerer {
             return Ok(None);
         };
         Ok(Some(seeded_optional_match(
-            input,
-            child_plan,
-            seed_id,
-            join_keys,
-            &child_vm,
-            var_map,
+            input, child_plan, seed_id, join_keys, &child_vm, var_map,
         )))
     }
 
