@@ -36,16 +36,26 @@ and none of them is required to begin.
 
 ## Installation
 
-Python 3.10+ or Node.js 20+. The docs target **v0.6.0**:
+**Python 3.10+**
 
 ```bash
-python -m pip install graphforge==0.6.0
-npm install @curatelabs/graphforge@0.6.0 apache-arrow   # Node
+python -m pip install --pre graphforge # latest pre-release
 ```
 
-Until v0.6.0 is published, install the newest release candidate instead with
-`python -m pip install --pre graphforge` or
-`npm install @curatelabs/graphforge@next apache-arrow`.
+```bash
+python -m pip install graphforge # latest release
+```
+
+**Node.js 20+**
+
+```bash
+npm install @curatelabs/graphforge@next apache-arrow # latest pre-release
+```
+
+```bash
+npm install @curatelabs/graphforge apache-arrow  # latest release
+```
+.
 [Releases](https://github.com/CurateLabs/graphforge/releases) lists what is
 available, and the [installation guide](docs/guide/installation.md) covers
 candidates and source builds. Before v1.0.0 there is no backward-compatibility
