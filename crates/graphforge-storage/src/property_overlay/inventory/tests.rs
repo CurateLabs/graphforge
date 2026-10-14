@@ -1153,6 +1153,16 @@ fn retained_fragment_footers_share_one_budget_and_refuse_before_caching_more() {
         fragment.footer.get().unwrap().is_err(),
         "the refused parsed footer must be dropped"
     );
+    tight.set_query_memory_budget(512 << 20).unwrap();
+    let error = tight
+        .route_schema(PropertyRouteKind::Node, "Route3")
+        .unwrap_err();
+    assert_eq!(
+        error.code(),
+        "GF_RESOURCE_LIMIT",
+        "a larger attachment cannot raise the existing ceiling"
+    );
+    assert_eq!(tight.retained_metadata_bytes(), limit);
     assert!(
         tight.set_query_memory_budget(0).is_err(),
         "zero is not unlimited"

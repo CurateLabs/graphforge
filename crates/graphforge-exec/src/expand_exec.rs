@@ -927,6 +927,8 @@ fn charge(
 /// The struct fields of the edge-list column, past the four topology fields:
 /// the relation's persisted edge properties (#755).
 fn edge_list_prop_fields(cfg: &ExpandConfig) -> Result<Vec<arrow::datatypes::FieldRef>, GfError> {
+    use arrow::datatypes::DataType;
+
     let exec_err = |m: String| GfError::Execution(m);
     let edge_field = cfg
         .out_schema
@@ -1406,6 +1408,7 @@ pub(super) fn build_edge_list_column(
         ArrayRef, FixedSizeBinaryArray, ListArray, StringArray, StructArray, new_empty_array,
     };
     use arrow::buffer::OffsetBuffer;
+    use arrow::datatypes::DataType;
 
     let exec_err = |m: String| GfError::Execution(m);
 

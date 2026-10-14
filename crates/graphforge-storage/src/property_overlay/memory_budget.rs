@@ -17,6 +17,7 @@ pub(super) struct InventoryMemoryBudget(Mutex<Bytes>);
 #[derive(Debug)]
 struct Bytes {
     limit: usize,
+    configured: bool,
     structure: usize,
     footers: usize,
 }
@@ -25,6 +26,7 @@ impl Default for InventoryMemoryBudget {
     fn default() -> Self {
         Self(Mutex::new(Bytes {
             limit: usize::try_from(ReadCacheBudget::DEFAULT.inventory_bytes).unwrap_or(usize::MAX),
+            configured: false,
             structure: 0,
             footers: 0,
         }))
@@ -46,11 +48,17 @@ impl InventoryMemoryBudget {
             .0
             .lock()
             .expect("property inventory memory budget lock");
+        let limit = if bytes.configured {
+            bytes.limit.min(limit)
+        } else {
+            limit
+        };
         let requested = structure.saturating_add(bytes.footers);
         if requested > limit {
             return Err(refusal(requested, limit));
         }
         bytes.limit = limit;
+        bytes.configured = true;
         bytes.structure = structure;
         Ok(())
     }
@@ -146,6 +154,9 @@ impl AuthenticatedPropertyInventory {
 
     /// Set the inventory share of the configured query budget before reads.
     /// Cached footers and route/path/map structure draw on this one ceiling.
+    /// The first explicit configuration replaces the default. Later shared
+    /// attachments may only lower it; independent captures can use different
+    /// budgets without raising another active reader's allowance.
     ///
     /// # Errors
     /// Fails with `GF_RESOURCE_LIMIT`, naming property inventory metadata, if

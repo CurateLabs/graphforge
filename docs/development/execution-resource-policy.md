@@ -83,6 +83,13 @@ metadata`, and is not cached. The budget includes every fragment rather than
 applying a separate limit to each one. Facade diagnostics expose admitted
 `retained_inventory_metadata_bytes`.
 
+The first resource-configured attachment establishes an inventory ceiling.
+Subsequent sessions sharing that inventory may tighten the ceiling but cannot
+raise it. An attachment requesting less than already admitted bytes fails;
+it preserves the existing authority. Capture an independent inventory for
+readers that need independent budgets. Direct execution sessions apply the
+same policy to both catalog and provider inventories, including after mutation.
+
 These formulas bound the named caches and edge decoder. They do not establish
 a universal RSS ceiling: node/property decoder scratch,
 runtime buffers and allocator retention remain separate consumers. Reproduce

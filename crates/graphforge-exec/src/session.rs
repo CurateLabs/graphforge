@@ -749,6 +749,17 @@ impl ExecutionSession {
         // A facade-shared provider (#832) is revalidated here — once per
         // session — so its memoized state is as fresh as a per-query
         // provider's, while loaded views amortize across queries.
+        // Catalogs and providers may be shared across sessions. Inventory
+        // admission is monotonic, so a larger later session cannot raise the
+        // allowance on an authority already attached to a smaller session.
+        if let Some(inventory) = catalog.admitted_inventory() {
+            inventory.set_query_memory_budget(resources.memory_budget_bytes)?;
+        }
+        if let Some(provider) = &shared_provider
+            && let Some(inventory) = provider.admitted_inventory()
+        {
+            inventory.set_query_memory_budget(resources.memory_budget_bytes)?;
+        }
         let owns_provider = shared_provider.is_none();
         let adjacency_provider = shared_provider.map_or_else(
             || {
@@ -874,6 +885,7 @@ impl ExecutionSession {
         let inventory = self.catalog.admitted_inventory().ok_or_else(|| {
             GfError::Storage("refreshed session lacks admitted graph inventory".into())
         })?;
+        inventory.set_query_memory_budget(self.memory_budget_bytes)?;
         let private = tempfile::Builder::new()
             .prefix("graphforge-session-adjacency-")
             .tempdir()
