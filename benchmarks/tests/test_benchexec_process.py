@@ -152,6 +152,20 @@ class ResultsFinalTests(ScratchTest):
         (cgroup / "cgroup.procs").write_text("", encoding="ascii")
         self.assertEqual(benchexec_process.wait_for_phase_trees_state([cgroup]), "unverified")
 
+    def test_a_cgroup_benchexec_removed_is_an_empty_tree(self) -> None:
+        removed = self.scratch / "benchmark_removed"
+        live = self.scratch / "benchmark_live"
+        live.mkdir()
+        (live / "cgroup.events").write_text("populated 0\nfrozen 0\n", encoding="ascii")
+        self.assertEqual(benchexec_process.wait_for_phase_trees_state([removed, live]), "empty")
+        (live / "cgroup.events").write_text("populated 1\nfrozen 0\n", encoding="ascii")
+        self.assertEqual(
+            benchexec_process.wait_for_phase_trees_state(
+                [removed, live], timeout_seconds=0.01, poll_seconds=0.001
+            ),
+            "alive",
+        )
+
 
 class RunBoundedTests(ScratchTest):
     def test_a_run_that_exits_returns_its_own_status(self) -> None:

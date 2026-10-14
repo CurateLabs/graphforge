@@ -91,6 +91,12 @@ def wait_for_phase_trees_state(
         for cgroup in cgroups:
             try:
                 events = (cgroup / "cgroup.events").read_text(encoding="ascii")
+            except FileNotFoundError:
+                # BenchExec removes its run cgroup when the run ends, and the kernel
+                # refuses to remove a populated cgroup, so a removed tree is empty.
+                if cgroup.exists():
+                    return "unverified"
+                continue
             except OSError:
                 return "unverified"
             values = dict(
