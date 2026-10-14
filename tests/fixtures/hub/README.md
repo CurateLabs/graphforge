@@ -28,6 +28,20 @@ cargo run -p graphforge-cli --example generate_hub_fixture -- --rebuild-source
 cargo run -p graphforge-cli --example generate_hub_fixture -- --update
 ```
 
+Generate and check artifacts for a public HTTPS preview data origin:
+
+```bash
+cargo run -p graphforge-cli --example generate_hub_fixture -- --update \
+  --location-base https://preview-data.example.org/objects/sha256/ --output-dir /tmp/hub-preview
+cargo run -p graphforge-cli --example generate_hub_fixture -- \
+  --location-base https://preview-data.example.org/objects/sha256/ --output-dir /tmp/hub-preview
+```
+
+Both modes require the same base. It must be a canonical, credential-free HTTPS
+URL with a public host, no query or fragment, and a trailing `/`. Check mode
+rejects a different base or a changed location, even if the manifest digest is
+recomputed. No flags still checks the production fixture at the default base.
+
 After the artifacts change, regenerate the shared verification receipts as
 described in `tests/fixtures/portable-v2/README.md`.
 
@@ -70,14 +84,14 @@ manifest. The check also verifies that every module package resolves, through
 `resolve_discovered_ontology_module`, to exactly the advertised module identity.
 
 `fixture.json` binds the checked-in source tree, the compiled generator source,
-and the package, transport, summary, module, manifest, and byte-length
+the selected location base, and the package, transport, summary, module, manifest, and byte-length
 identities. It does not accept a caller-supplied Git commit. The invoking
 checkout commit is the review and release provenance evidence.
 
 Object locations are transport, never identity. `generate` takes a location base
 (default `https://data.graphforge.sh/objects/sha256/`); a different base changes
-only `objects[].locations`, the manifest and refs digests that cover them, and
-nothing else: the summary bytes and the `summary` and `ontology` descriptors are
+`objects[].locations`, the manifest and refs digests that cover them, and fixture
+metadata: the summary bytes and the `summary` and `ontology` descriptors are
 identical.
 
 ## What downstream may copy
