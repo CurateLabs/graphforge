@@ -7763,7 +7763,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 Used by:
 - alloc-no-stdlib 2.0.4
 - alloc-no-stdlib 3.0.0
-- brotli 8.0.3
+- brotli 8.0.4
 - brotli-decompressor 5.0.3
 - brotli-decompressor 6.0.1
 
@@ -8207,7 +8207,7 @@ third-party/chromium/LICENSE.
 ## MIT License
 
 Used by:
-- brotli 8.0.3
+- brotli 8.0.4
 
 ```
 Copyright (c) 2009, 2010, 2013-2016 by the Brotli Authors.
