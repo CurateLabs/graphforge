@@ -646,3 +646,94 @@ fn sort_headroom_counts_memory_already_held_by_nonspilling_consumers() {
     assert_eq!(pool.reserved(), 32 * MIB);
     assert!(is_refused(sort.try_grow(1)));
 }
+
+#[test]
+fn an_empty_sort_can_start_beyond_headroom_but_never_beyond_the_real_pool() {
+    let pool = query_pool(64 * MIB);
+    let sorter = |partition| {
+        MemoryConsumer::new(format!("ExternalSorter[{partition}]"))
+            .with_can_spill(true)
+            .register(&pool)
+    };
+    let sibling = sorter(0);
+    sibling.try_grow(16 * MIB).unwrap();
+    let starting = sorter(1);
+    starting.try_grow(8 * MIB).unwrap();
+    assert_eq!(pool.reserved(), 24 * MIB);
+    // Once it has a batch to spill, ordinary producer headroom applies.
+    assert!(is_refused(starting.try_grow(1)));
+    let oversized = sorter(2);
+    assert!(is_refused(oversized.try_grow(40 * MIB + 1)));
+    assert_eq!(pool.reserved(), 24 * MIB);
+    drop((sibling, starting, oversized));
+    assert_eq!(pool.reserved(), 0);
+}
+
+/// A sibling's buffered runs must not make an empty external sorter fail
+/// before it can spill. This reproduces the SF1 IC3 first-buffer refusal.
+#[tokio::test]
+async fn a_real_external_sort_starts_and_spills_while_a_sibling_holds_the_buffer_share() {
+    use datafusion::datasource::memory::MemorySourceConfig;
+    use datafusion::physical_expr::PhysicalSortExpr;
+    use datafusion::physical_expr::expressions::Column;
+    use datafusion::physical_plan::ExecutionPlan;
+    use datafusion::physical_plan::sorts::sort::SortExec;
+    use futures::StreamExt;
+
+    let pool = Arc::new(QueryMemoryPool::new(64 * MIB));
+    let dynamic: Arc<dyn MemoryPool> = Arc::clone(&pool) as Arc<dyn MemoryPool>;
+    let sibling = MemoryConsumer::new("ExternalSorter[sibling]")
+        .with_can_spill(true)
+        .register(&dynamic);
+    sibling.try_grow(15 * MIB).unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let runtime = RuntimeEnvBuilder::new()
+        .with_memory_pool(dynamic)
+        .with_temp_file_path(directory.path().to_path_buf())
+        .build_arc()
+        .unwrap();
+    let context = SessionContext::new_with_config_rt(
+        SessionConfig::new().with_sort_spill_reservation_bytes(MIB),
+        runtime,
+    );
+    let schema = Arc::new(Schema::new(vec![Field::new("k", DataType::Int64, false)]));
+    let rows = 131_072_i64;
+    let batches = [rows, 0]
+        .into_iter()
+        .map(|offset| {
+            RecordBatch::try_new(
+                Arc::clone(&schema),
+                vec![Arc::new(Int64Array::from_iter_values(
+                    (offset..offset + rows).rev(),
+                ))],
+            )
+            .unwrap()
+        })
+        .collect::<Vec<_>>();
+    let source = MemorySourceConfig::try_new_exec(&[batches], schema, None).unwrap();
+    let sort = SortExec::new(
+        [PhysicalSortExpr::new_default(Arc::new(Column::new("k", 0)))].into(),
+        source,
+    );
+    let mut stream = sort.execute(0, context.task_ctx()).unwrap();
+    let mut expected = 0_i64;
+    while let Some(batch) = stream.next().await {
+        let batch = batch.unwrap();
+        let values = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        for value in values.values() {
+            assert_eq!(*value, expected);
+            expected += 1;
+        }
+    }
+    drop(stream);
+    assert_eq!(expected, 2 * rows);
+    assert!(sort.metrics().unwrap().spill_count().unwrap() > 0);
+    assert!(pool.peak_gauge().load(std::sync::atomic::Ordering::Relaxed) <= 64 * MIB);
+    assert_eq!(pool.reserved(), 15 * MIB);
+    drop(sibling);
+    assert_eq!(pool.reserved(), 0);
+}

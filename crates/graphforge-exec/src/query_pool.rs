@@ -95,6 +95,10 @@
 //! inputs and merge reservations draw on the producer share.
 //! Memory already held by consumers that cannot spill counts toward this
 //! headroom; reserving it again could refuse an empty sort's first batch.
+//! An empty sort also needs its first batch before it can spill: that request
+//! sees the real pool limit and the aggregate floors, without sort headroom.
+//! Once the reservation holds a batch, the headroom applies again so its next
+//! refusal triggers a spill instead of a fatal first-batch error.
 //! The headroom is a heuristic, not a reservation: it bounds what the sorts
 //! take, and no more than that.
 //!
@@ -123,9 +127,9 @@ pub(crate) const AGGREGATE_CONSUMER_PREFIX: &str = "GroupedHashAggregateStream";
 /// `ExternalSorterMerge`, which cannot spill, is not matched.
 const SORT_CONSUMER_PREFIX: &str = "ExternalSorter[";
 
-/// Sort buffers take at most this fraction while the nonspilling producer
-/// share is unfilled. It leaves room for wide input batches, path state and
-/// merge reservations before the next input poll can trigger a sorter spill.
+/// Target fraction for buffered sorts while the nonspilling producer share
+/// is unfilled. Empty sorts admit their first batch against the real cap;
+/// later input can trigger a spill while preserving producer headroom.
 const SORT_POOL_SHARE_DENOMINATOR: usize = 4;
 
 /// The most the pool reserves for one aggregate that has spilled, the size of
@@ -219,10 +223,10 @@ impl QueryMemoryPool {
         consumer.can_spill() && consumer.name().starts_with(SORT_CONSUMER_PREFIX)
     }
 
-    /// The bytes of the pool that `consumer` is kept from: the headroom the
-    /// consumers that cannot spill may take, for a sort.
-    fn headroom(&self, consumer: &MemoryConsumer, state: &State) -> usize {
-        if Self::is_sort(consumer) {
+    /// Keep buffered sorts short of the producer share. An empty reservation
+    /// cannot spill, so its first bounded input must see the real pool limit.
+    fn headroom(&self, reservation: &MemoryReservation, state: &State) -> usize {
+        if Self::is_sort(reservation.consumer()) && reservation.size() > 0 {
             self.pool_size
                 .saturating_sub(self.pool_size / SORT_POOL_SHARE_DENOMINATOR)
                 .saturating_sub(state.non_spilling_reserved)
@@ -338,7 +342,7 @@ impl MemoryPool for QueryMemoryPool {
             (
                 state.reserved,
                 self.unfilled_floors_except(&state, id)
-                    .saturating_add(self.headroom(reservation.consumer(), &state)),
+                    .saturating_add(self.headroom(reservation, &state)),
             )
         } else {
             (state.reserved.saturating_sub(Self::lent(&state)), 0)
