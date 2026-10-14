@@ -81,14 +81,37 @@
 //! free memory and the loan, as it did before the floor, and fails when the pool
 //! has neither.
 //!
+//! # The headroom of the sorts
+//!
+//! A sort buffers its input until the pool refuses it, so left alone it holds
+//! the whole pool, and a consumer that cannot spill and grows with the data
+//! (the path state of a variable-length expansion, a hash join's build side) is
+//! refused by the next request and fails the query. A query that plans several
+//! sort-merge joins runs several sorts at once, each reserving its merge memory
+//! up front, which makes this the usual way a sort-merge plan fails in a small
+//! pool. A sort can always spill instead, so the pool keeps it short of the
+//! limit by the unfilled producer share: three quarters of the pool. One
+//! quarter remains for sort buffers ([`SORT_POOL_SHARE_DENOMINATOR`]); their
+//! inputs and merge reservations draw on the producer share.
+//! Memory already held by consumers that cannot spill counts toward this
+//! headroom; reserving it again could refuse an empty sort's first batch.
+//! An empty sort also needs its first batch before it can spill: that request
+//! sees the real pool limit and the aggregate floors, without sort headroom.
+//! Once the reservation holds a batch, the headroom applies again so its next
+//! refusal triggers a spill instead of a fatal first-batch error.
+//! The headroom is a heuristic, not a reservation: it bounds what the sorts
+//! take, and no more than that.
+//!
 //! Everything else is first-come within the pool limit, as in DataFusion's
 //! greedy pool: sorts reserve their merge memory up front, and only grouped
-//! aggregates, identified by name, are affected. Other consumers that can spill
-//! (sorts, joins) get no floor; they are neither capped nor guaranteed here.
+//! aggregates and sorts, identified by name, are affected. Other consumers that
+//! can spill (exchanges, joins) get no floor; they are neither capped nor
+//! guaranteed here.
 
 use std::collections::HashMap;
 use std::fmt::{self, Display, Formatter};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use datafusion::common::{DataFusionError, Result};
 use datafusion::execution::memory_pool::{
@@ -98,6 +121,16 @@ use datafusion::execution::memory_pool::{
 /// DataFusion's name prefix for the memory consumer of a grouped hash
 /// aggregate, the only spillable consumer that reserves memory to spill.
 pub(crate) const AGGREGATE_CONSUMER_PREFIX: &str = "GroupedHashAggregateStream";
+
+/// DataFusion's name prefix for the memory consumer of one partition of a sort.
+/// The prefix includes the bracket so that the merge reservation of the sort,
+/// `ExternalSorterMerge`, which cannot spill, is not matched.
+const SORT_CONSUMER_PREFIX: &str = "ExternalSorter[";
+
+/// Target fraction for buffered sorts while the nonspilling producer share
+/// is unfilled. Empty sorts admit their first batch against the real cap;
+/// later input can trigger a spill while preserving producer headroom.
+const SORT_POOL_SHARE_DENOMINATOR: usize = 4;
 
 /// The most the pool reserves for one aggregate that has spilled, the size of
 /// the reserve DataFusion's sort sets aside to merge its spills
@@ -110,12 +143,18 @@ const SPILLER_FLOOR_BYTES: usize = 10 * 1024 * 1024;
 pub(crate) struct QueryMemoryPool {
     pool_size: usize,
     state: Mutex<State>,
+    /// The most bytes the pool has had reserved since it was created.
+    /// Shared so the owner of a pool the runtime has taken over (and
+    /// wrapped) can still read it.
+    peak: Arc<AtomicUsize>,
 }
 
 #[derive(Debug, Default)]
 struct State {
     /// Bytes reserved by every consumer.
     reserved: usize,
+    /// Bytes already held by consumers that cannot spill, filling sort headroom.
+    non_spilling_reserved: usize,
     /// The grouped aggregate consumers that have spilled, by consumer id.
     spillers: HashMap<usize, Spiller>,
 }
@@ -148,7 +187,24 @@ impl QueryMemoryPool {
         Self {
             pool_size,
             state: Mutex::new(State::default()),
+            peak: Arc::new(AtomicUsize::new(0)),
         }
+    }
+
+    /// The pool's high-water mark of reserved bytes. The pool raises it with
+    /// every reservation it serves, loans and unconditional growth included;
+    /// repeated and concurrent reads share it without resetting it.
+    pub(crate) fn peak_gauge(&self) -> Arc<AtomicUsize> {
+        Arc::clone(&self.peak)
+    }
+
+    /// Adds `additional` to the reserved total and raises the high-water mark.
+    fn reserve(&self, state: &mut State, reservation: &MemoryReservation, additional: usize) {
+        state.reserved += additional;
+        if !reservation.consumer().can_spill() {
+            state.non_spilling_reserved += additional;
+        }
+        self.peak.fetch_max(state.reserved, Ordering::Relaxed);
     }
 
     fn locked(&self) -> MutexGuard<'_, State> {
@@ -161,6 +217,22 @@ impl QueryMemoryPool {
 
     fn is_spilling_aggregate(consumer: &MemoryConsumer) -> bool {
         consumer.can_spill() && consumer.name().starts_with(AGGREGATE_CONSUMER_PREFIX)
+    }
+
+    fn is_sort(consumer: &MemoryConsumer) -> bool {
+        consumer.can_spill() && consumer.name().starts_with(SORT_CONSUMER_PREFIX)
+    }
+
+    /// Keep buffered sorts short of the producer share. An empty reservation
+    /// cannot spill, so its first bounded input must see the real pool limit.
+    fn headroom(&self, reservation: &MemoryReservation, state: &State) -> usize {
+        if Self::is_sort(reservation.consumer()) && reservation.size() > 0 {
+            self.pool_size
+                .saturating_sub(self.pool_size / SORT_POOL_SHARE_DENOMINATOR)
+                .saturating_sub(state.non_spilling_reserved)
+        } else {
+            0
+        }
     }
 
     /// The bytes the pool reserves for each of `spillers` aggregates: the
@@ -207,7 +279,7 @@ impl MemoryPool for QueryMemoryPool {
 
     fn grow(&self, reservation: &MemoryReservation, additional: usize) {
         let mut state = self.locked();
-        state.reserved += additional;
+        self.reserve(&mut state, reservation, additional);
         if let Some(spiller) = state.spillers.get_mut(&reservation.consumer().id()) {
             spiller.held += additional;
         }
@@ -216,6 +288,9 @@ impl MemoryPool for QueryMemoryPool {
     fn shrink(&self, reservation: &MemoryReservation, shrink: usize) {
         let mut state = self.locked();
         state.reserved = state.reserved.saturating_sub(shrink);
+        if !reservation.consumer().can_spill() {
+            state.non_spilling_reserved = state.non_spilling_reserved.saturating_sub(shrink);
+        }
         let id = reservation.consumer().id();
         if let Some(spiller) = state.spillers.get_mut(&id) {
             spiller.held = spiller.held.saturating_sub(shrink);
@@ -264,7 +339,11 @@ impl MemoryPool for QueryMemoryPool {
         // the loans do not count against: they are bytes the pool stopped
         // counting and took back, and they are repaid within a spill.
         let (reserved, others) = if reservation.consumer().can_spill() {
-            (state.reserved, self.unfilled_floors_except(&state, id))
+            (
+                state.reserved,
+                self.unfilled_floors_except(&state, id)
+                    .saturating_add(self.headroom(reservation, &state)),
+            )
         } else {
             (state.reserved.saturating_sub(Self::lent(&state)), 0)
         };
@@ -304,7 +383,7 @@ impl MemoryPool for QueryMemoryPool {
                 spiller.grant = Grant::Lent(additional);
             }
         }
-        state.reserved += additional;
+        self.reserve(&mut state, reservation, additional);
         if let Some(spiller) = state.spillers.get_mut(&id) {
             spiller.held += additional;
         }

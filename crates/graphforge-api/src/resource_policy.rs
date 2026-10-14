@@ -267,13 +267,11 @@ fn logical_cpus() -> usize {
         .clamp(MIN_THREADS, MAX_THREADS)
 }
 
-/// Query memory each default DataFusion partition is sized for. A sort
-/// partition reserves `sort_spill_reservation_bytes` (10 MiB in DataFusion
-/// 54) plus GraphForge's 1 MiB minimum run before it holds any data
-/// (`graphforge-exec` `sort_runs`), all from the one `memory_budget` pool.
-/// 32 MiB per partition keeps one sort's up-front reservations near a third of
-/// the pool, so default queries spill rather than fail as partitions grow
-/// with the machine.
+/// Query memory each default DataFusion partition is sized for. A sort's
+/// initial merge reserve is capped at one eighth of its partition's budget
+/// share (and DataFusion's 10 MiB default); its input runs also draw from the
+/// same pool (`graphforge-exec` `sort_runs`). 32 MiB per partition leaves room
+/// for merge buffers and upstream producers as concurrency grows.
 const QUERY_PARTITION_MEMORY_BYTES: u64 = 32 * 1024 * 1024;
 
 /// Automatic-mode defaults, derived from the machine and the memory budget,
@@ -827,6 +825,49 @@ mod tests {
                 DEFAULT_MEMORY_BUDGET_BYTES,
                 MemoryBudgetSource::DerivedWithoutHostLimit
             )
+        );
+    }
+
+    /// The whole derivation from a fake cgroup tree: the `memory.max` the
+    /// process runs under, read through the same parser the host uses, decides
+    /// the query pool (#1985). `import_session::memory_budget` tests the parser
+    /// against more hierarchies; this pins that its answer is what the policy
+    /// divides.
+    #[test]
+    fn a_cgroup_memory_max_sets_the_derived_query_budget() {
+        use crate::import_session::memory_budget::process_memory_limit_bytes;
+
+        let meminfo = "MemTotal: 125829120 kB\n";
+        let self_cgroup = "0::/user.slice/run-1.scope\n";
+        let derive = |memory_max: &str| {
+            let memory_max = memory_max.to_owned();
+            let read = move |path: &str| {
+                (path == "/sys/fs/cgroup/user.slice/run-1.scope/memory.max")
+                    .then(|| memory_max.clone())
+            };
+            ExecutionResourcePolicy::default()
+                .normalize_with_host_memory_limit(|| {
+                    process_memory_limit_bytes(Some(meminfo), Some(self_cgroup), &read)
+                })
+                .expect("derived")
+        };
+
+        let limited = derive("4294967296\n");
+        assert_eq!(limited.memory_budget_bytes, 2 * GIB);
+        assert_eq!(
+            limited.memory_budget_source,
+            MemoryBudgetSource::DerivedFromHostLimit {
+                host_limit_bytes: 4 * GIB
+            }
+        );
+        // `max` is no limit: the 120 GiB machine decides, up to the cap.
+        let unlimited = derive("max\n");
+        assert_eq!(unlimited.memory_budget_bytes, 32 * GIB);
+        assert_eq!(
+            unlimited.memory_budget_source,
+            MemoryBudgetSource::DerivedFromHostLimit {
+                host_limit_bytes: 120 * GIB
+            }
         );
     }
 
