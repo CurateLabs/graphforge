@@ -1,4 +1,5 @@
-//! Traversal execution and generation-pinned ordinal identity.
+//! Traversal execution. The generation-pinned ordinal identity the operators
+//! resolve destinations through lives in `ordinal_identity`.
 
 use crate::ValueAt;
 use crate::adjacency;
@@ -56,16 +57,14 @@ use input_columns::copy_mask;
 use input_columns::push_input_columns;
 use metrics::ExpandMetrics;
 use metrics::PartitionMetrics;
+pub use ordinal_identity::V4OrdinalIdentityResolver;
+pub(crate) use ordinal_identity::V4OrdinalIdentitySession;
 use reachability::reach_bfs;
 use std::collections::BTreeSet;
 use std::fmt;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::Mutex;
-use std::sync::RwLock;
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering;
 
 // ---------------------------------------------------------------------------
 // Partitioning shared by the traversal operators
@@ -1523,143 +1522,6 @@ pub(super) fn build_edge_list_column(
 // ExpandExec — adjacency-backed single-hop expansion (#763)
 // ---------------------------------------------------------------------------
 
-/// Generation-pinned destination-identity resolver shared by every query and
-/// hop of one facade. Replacement is atomic with facade generation adoption;
-/// execution never rediscovers mutable identity files by path.
-#[derive(Debug, Default)]
-pub struct V4OrdinalIdentityResolver {
-    handle: RwLock<
-        Option<Arc<Mutex<graphforge_storage::ordinal_identity_v4::V4OrdinalIdentityHandle>>>,
-    >,
-}
-
-pub(super) struct V4OrdinalIdentityPin {
-    pub(super) session: Option<Arc<V4OrdinalIdentitySession>>,
-    pub(super) required: bool,
-}
-
-impl V4OrdinalIdentityResolver {
-    /// Construct a resolver for an optional admitted generation facet.
-    #[must_use]
-    pub fn new(
-        handle: Option<graphforge_storage::ordinal_identity_v4::V4OrdinalIdentityHandle>,
-    ) -> Self {
-        Self {
-            handle: RwLock::new(handle.map(|handle| Arc::new(Mutex::new(handle)))),
-        }
-    }
-
-    /// Replace the exact generation served by subsequent sessions.
-    pub fn replace(
-        &self,
-        handle: Option<graphforge_storage::ordinal_identity_v4::V4OrdinalIdentityHandle>,
-    ) {
-        *self.handle.write().expect("ordinal identity lock poisoned") =
-            handle.map(|handle| Arc::new(Mutex::new(handle)));
-    }
-
-    /// The exact generation this resolver serves, revalidated (by stat, no
-    /// artifact bytes) for one caller outside query execution, such as search
-    /// membership projection. `None` when the facade has no ordinal authority.
-    ///
-    /// # Errors
-    /// Returns the refusal when the retained artifacts no longer match the
-    /// generation the handle authenticated.
-    pub fn revalidated_handle(
-        &self,
-    ) -> Result<
-        Option<Arc<Mutex<graphforge_storage::ordinal_identity_v4::V4OrdinalIdentityHandle>>>,
-        GfError,
-    > {
-        let handle = self
-            .handle
-            .read()
-            .expect("ordinal identity lock poisoned")
-            .clone();
-        if let Some(handle) = &handle {
-            handle
-                .lock()
-                .expect("ordinal identity handle poisoned")
-                .revalidate_for_session()
-                .map_err(GfError::from)?;
-        }
-        Ok(handle)
-    }
-
-    pub(super) fn pin(&self) -> Result<V4OrdinalIdentityPin, GfError> {
-        let handle = self
-            .handle
-            .read()
-            .expect("ordinal identity lock poisoned")
-            .clone();
-        let Some(handle) = handle else {
-            return Ok(V4OrdinalIdentityPin {
-                session: None,
-                required: false,
-            });
-        };
-        let revalidation = handle
-            .lock()
-            .expect("ordinal identity handle poisoned")
-            .revalidate_for_session()
-            .map_err(GfError::from)?;
-        Ok(V4OrdinalIdentityPin {
-            session: Some(Arc::new(V4OrdinalIdentitySession {
-                handle,
-                revalidation,
-                attribution_available: AtomicBool::new(true),
-            })),
-            required: true,
-        })
-    }
-}
-
-/// One exact, already-authenticated ordinal authority pinned for the lifetime
-/// of an execution session.
-#[derive(Debug)]
-pub(crate) struct V4OrdinalIdentitySession {
-    handle: Arc<Mutex<graphforge_storage::ordinal_identity_v4::V4OrdinalIdentityHandle>>,
-    revalidation: graphforge_storage::V4OrdinalRevalidationMetrics,
-    attribution_available: AtomicBool,
-}
-
-impl V4OrdinalIdentitySession {
-    pub(crate) fn max_requested_ids(&self) -> usize {
-        self.handle
-            .lock()
-            .expect("ordinal identity handle poisoned")
-            .max_requested_ids()
-    }
-
-    /// Whether node-ordinal order is UUID order. The first call reads and
-    /// authenticates every ordinal block once; a corrupted block is an error,
-    /// never an "unordered" answer.
-    pub(crate) fn uuid_order_matches_ordinals(&self) -> Result<bool, GfError> {
-        self.handle
-            .lock()
-            .expect("ordinal identity handle poisoned")
-            .uuid_order_matches_ordinals()
-            .map_err(GfError::from)
-    }
-
-    pub(crate) fn lookup_node_uuids(
-        &self,
-        requested: &[u64],
-    ) -> Result<graphforge_storage::V4OrdinalLookup, GfError> {
-        let mut lookup = self
-            .handle
-            .lock()
-            .expect("ordinal identity handle poisoned")
-            .lookup_node_uuids_pinned(requested)
-            .map_err(GfError::from)?;
-        if self.attribution_available.swap(false, Ordering::AcqRel) {
-            lookup.metrics.revalidation_calls = self.revalidation.calls;
-            lookup.metrics.revalidation_bytes = self.revalidation.bytes_read;
-        }
-        Ok(lookup)
-    }
-}
-
 /// Physical node for adjacency-backed single-hop expansion, the physical
 /// counterpart of [`graphforge_plan::ExpandNode`].
 ///
@@ -3030,6 +2892,7 @@ mod edge_predicate;
 mod edge_properties;
 mod input_columns;
 pub(crate) mod metrics;
+mod ordinal_identity;
 mod reachability;
 #[cfg(test)]
 mod tests;
