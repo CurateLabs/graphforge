@@ -4,7 +4,6 @@ target
 **/.venv
 **/target
 **/__pycache__
-**/.mypy_cache
 **/.pytest_cache
 **/.ruff_cache
 build

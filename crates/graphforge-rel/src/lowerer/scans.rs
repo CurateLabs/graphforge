@@ -3,8 +3,8 @@
 use super::{
     Arc, DfExpr, EXPLORATORY_EDGE_SCHEMA, EntityTypeId, GraphPlanLowerer, HashMap, JoinType,
     LogicalPlan, LogicalPlanBuilder, LoweringError, LoweringSnapshot, MapUnsupportedExpr,
-    OntologyMode, RecordBatch, RelationTypeId, TOPOLOGY_NODES_SCHEMA, TYPED_EDGE_SCHEMA, VarId,
-    VarMap, var_alias,
+    OntologyMode, PropertyPhase, RecordBatch, RelationTypeId, TOPOLOGY_NODES_SCHEMA,
+    TYPED_EDGE_SCHEMA, VarId, VarMap, var_alias,
 };
 
 impl GraphPlanLowerer {
@@ -88,11 +88,25 @@ impl GraphPlanLowerer {
         ty: Option<EntityTypeId>,
         scan: LogicalPlan,
     ) -> Result<LogicalPlan, LoweringError> {
+        self.join_node_properties_in(PropertyPhase::All, var, ty, scan)
+    }
+
+    /// [`Self::join_node_properties`] for the columns of one
+    /// [`PropertyPhase`]. A scan joined in [`PropertyPhase::Early`] and again in
+    /// [`PropertyPhase::Late`] has each column joined once: the early join
+    /// leaves the late columns out and the late join finds them absent.
+    pub(super) fn join_node_properties_in(
+        &self,
+        phase: PropertyPhase,
+        var: VarId,
+        ty: Option<EntityTypeId>,
+        scan: LogicalPlan,
+    ) -> Result<LogicalPlan, LoweringError> {
         use datafusion::common::Column;
         use datafusion::logical_expr::col;
 
         if self.semantic_node_property_columns().is_some() {
-            return self.join_semantic_node_properties(var, ty, scan);
+            return self.join_semantic_node_properties_in(phase, var, ty, scan);
         }
 
         let Some(dir) = self.read_snapshot() else {
@@ -102,6 +116,12 @@ impl GraphPlanLowerer {
             return Ok(scan); // no single property table applies (see prop_table_stem)
         };
         if dir.property_schemas_omitted {
+            if phase == PropertyPhase::Late {
+                // Without stored schemas every column is read whole at bind
+                // time (`lower_plan` refuses a demand-pruned plan on such a
+                // snapshot), so nothing is left for the late join.
+                return Ok(scan);
+            }
             if !dir.node_properties.contains_key(&stem) {
                 return Ok(scan); // no stored route to join
             }
@@ -160,10 +180,10 @@ impl GraphPlanLowerer {
         // identity, labels and existence. Keeping it would scan the route's whole
         // key column, and again each time an already-enriched variable is matched
         // again, with no payload for storage to nominate a narrower scan against.
-        // `join_semantic_node_properties` makes the same cut for semantic routes.
+        // `join_semantic_node_properties_in` makes the same cut for semantic routes.
         let prop_cols: Vec<String> = prop_cols
             .into_iter()
-            .filter(|name| self.node_property_needed(var, name))
+            .filter(|name| self.node_property_needed(phase, var, name))
             .collect();
         if prop_cols.is_empty() {
             return Ok(scan);

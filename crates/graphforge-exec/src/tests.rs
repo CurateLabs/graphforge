@@ -4,6 +4,7 @@ use crate::create_exec::GraphCreateExec;
 use crate::expand_exec::EdgePropSource;
 use crate::expand_exec::ExpandConfig;
 use crate::expand_exec::build_edge_list_column;
+use crate::expand_exec::metrics::ExpandMetrics;
 use crate::row_exec::OptionalConfig;
 use crate::row_exec::optional_join;
 use crate::session::ExecutionSession;
@@ -238,6 +239,7 @@ fn wave11_low_level_expand_and_optional_schema_guards_fail_closed() {
             OntologyMode::Exploratory,
         )),
         lifecycle: Default::default(),
+        metrics: ExpandMetrics::default().partition(0),
     };
     assert!(
         build_edge_list_column(&cfg, &[], &HashMap::new(), &EdgePropSource::empty())

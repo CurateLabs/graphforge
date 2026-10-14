@@ -1122,8 +1122,18 @@ impl DistinctIndex {
 
     /// Heap bytes held by the index (the struct itself is counted by its owner).
     pub(super) fn heap_size(&self) -> usize {
-        self.heads.capacity() * (std::mem::size_of::<u64>() + std::mem::size_of::<usize>() + 1)
-            + self.links.capacity() * std::mem::size_of::<usize>()
+        // HashMap::capacity counts usable entries, not the empty buckets and
+        // control bytes the table also allocates. Charge a conservative bound
+        // for both, including the trailing control group, rather than silently
+        // omitting that storage from the aggregate's reservation.
+        let table = if self.heads.capacity() == 0 {
+            0
+        } else {
+            2 * self.heads.capacity()
+                * (std::mem::size_of::<u64>() + std::mem::size_of::<usize>() + 1)
+                + 16
+        };
+        table + self.links.capacity() * std::mem::size_of::<usize>()
     }
 }
 

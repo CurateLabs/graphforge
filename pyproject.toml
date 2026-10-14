@@ -230,40 +230,24 @@ exclude_lines = [
 [tool.coverage.html]
 directory = "htmlcov"
 
-[tool.mypy]
-python_version = "3.10"
-warn_return_any = true
-warn_unused_configs = true
-disallow_untyped_defs = false  # Gradually enable this
-check_untyped_defs = true
-no_implicit_optional = true
-warn_redundant_casts = true
-warn_unused_ignores = true
-warn_no_return = true
-warn_unreachable = true
-strict_equality = true
-show_error_codes = true
-show_column_numbers = true
-pretty = true
+# Keep type-check scope on the public Python binding and its native-extension stub.
+[tool.ty.environment]
+python-version = "3.10"
+root = ["crates/graphforge-bindings-py/python"]
 
-# Start with loose settings and tighten over time
-disallow_any_generics = false
-disallow_subclassing_any = false
-disallow_untyped_calls = false
-disallow_incomplete_defs = false
+[tool.ty.src]
+include = ["crates/graphforge-bindings-py/python/graphforge"]
 
-[[tool.mypy.overrides]]
-module = "tests.*"
-disallow_untyped_defs = false
-check_untyped_defs = false
+[tool.ty.rules]
+# Preserve the corresponding mypy warnings where ty provides an equivalent.
+unsound-return-statement = "error"
+redundant-cast = "error"
+redundant-condition-strict = "error"
+unused-ignore-comment = "error"
+unused-type-ignore-comment = "error"
 
-[[tool.mypy.overrides]]
-module = [
-    "lark.*",
-    "msgpack.*",
-    "zstandard.*",
-]
-ignore_missing_imports = true
+[tool.ty.terminal]
+error-on-warning = true
 
 [tool.bandit]
 # Security scanning configuration
@@ -283,7 +267,7 @@ skips = ["**/tests/**", "**/*_test.py", "**/conftest.py"]
 
 [dependency-groups]
 dev = [
-    "mypy>=1.8.0",
+    "ty==0.0.87",
     "types-PyYAML>=6.0",
     "types-python-dateutil>=2.8",
     "bandit[toml]>=1.7.0",
