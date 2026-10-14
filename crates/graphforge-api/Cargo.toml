@@ -63,7 +63,7 @@ fs4 = "1.1"
 uuid = { workspace = true }
 
 [dev-dependencies]
-brotli = "8.0.3"
+brotli = "9.0.0"
 # Assessment-only IPC codec experiments; production writers remain unchanged.
 arrow = { workspace = true, features = ["ipc_compression"] }
 cucumber = { workspace = true }
