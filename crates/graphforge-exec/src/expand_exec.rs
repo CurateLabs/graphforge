@@ -745,6 +745,7 @@ async fn expand_bfs(
 
     // --- Obtain the directed adjacency the traversal needs (#762). ---
     let mut adjacency = {
+        let _compute = cfg.metrics.compute();
         let _capture = cfg.lifecycle.attach();
         adjacency::AdjacencyReader::for_capture(
             cfg.provider.as_ref(),
@@ -1015,8 +1016,6 @@ fn load_chunk_sources(
     // opens the file).
     let edge_records = if cfg.edge_list_demanded {
         let edge_batches = read_traversed_edges(cfg, &traversed)?;
-        cfg.metrics
-            .edge_rows(edge_batches.iter().map(RecordBatch::num_rows).sum());
         charge(
             reservation,
             &mut temporary,
@@ -1219,7 +1218,7 @@ fn read_traversed_edges(
                 .map_err(|e| exec_err(e.to_string()))?,
         );
     }
-    match cfg.provider.admitted_inventory() {
+    let batches = match cfg.provider.admitted_inventory() {
         Some(inventory) => graphforge_storage::read_edges_filtered_projected_from_inventory(
             &inventory,
             &cfg.rel_type_name,
@@ -1237,7 +1236,10 @@ fn read_traversed_edges(
             None,
         ),
     }
-    .map_err(|e| exec_err(e.to_string()))
+    .map_err(|e| exec_err(e.to_string()))?;
+    cfg.metrics
+        .edge_rows(batches.iter().map(RecordBatch::num_rows).sum());
+    Ok(batches)
 }
 
 /// BFS one source seed over `adjacency`, with per-path relationship
@@ -2338,6 +2340,8 @@ fn expand_single_hop_chunk(
         requested.sort_unstable();
         let (resolved, identity_metrics) = if uuid_required {
             let lookup = ordinal_identities.lookup_node_uuids(&requested)?;
+            cfg.metrics
+                .destination_rows(lookup.values.iter().filter(|uuid| uuid.is_some()).count());
             (lookup.values, lookup.metrics)
         } else {
             (
@@ -2906,3 +2910,6 @@ fn topology_for_provider(
         None => graphforge_storage::TopologyFiles::discover_legacy(legacy_root),
     }
 }
+
+#[cfg(test)]
+mod metrics_tests;

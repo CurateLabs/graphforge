@@ -69,6 +69,7 @@ pub(super) async fn reach_bfs(
         )));
     }
     let mut adjacency = {
+        let _compute = cfg.metrics.compute();
         let _capture = cfg.lifecycle.attach();
         adjacency::AdjacencyReader::for_capture(
             cfg.provider.as_ref(),

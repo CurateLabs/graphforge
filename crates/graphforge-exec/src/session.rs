@@ -1638,10 +1638,9 @@ impl ExecutionSession {
     ) -> Result<String, GfError> {
         let resolved_plan = self.resolve_row_count_expressions(plan, params).await?;
         let (physical, _) = self.plan_physical(&resolved_plan, params).await?;
-        let collected =
-            path_hydration::collect_guarded(Arc::clone(&physical), self.ctx.task_ctx()).await;
-        path_hydration::cancel_plan(&physical);
-        collected.map_err(GfError::from_execution_error)?;
+        path_hydration::drain_guarded(Arc::clone(&physical), self.ctx.task_ctx())
+            .await
+            .map_err(GfError::from_execution_error)?;
         Ok(
             datafusion::physical_plan::display::DisplayableExecutionPlan::with_metrics(
                 physical.as_ref(),

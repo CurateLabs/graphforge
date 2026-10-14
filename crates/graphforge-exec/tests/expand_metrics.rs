@@ -223,3 +223,45 @@ async fn optional_match_inner_operators_keep_their_metrics_below_a_correlated_se
         "{text}"
     );
 }
+
+#[tokio::test]
+async fn filtered_reachability_counts_edge_identity_reads() {
+    let dir = TempDir::new().unwrap();
+    let rc = seed(dir.path()).await;
+    let set = bind("MATCH ()-[r:KNOWS]->() SET r.w = 1", &rc);
+    session(dir.path(), &rc)
+        .execute_write_statement(&set)
+        .await
+        .unwrap();
+    let plan = bind(
+        "MATCH (a:Person {name: 'Alice'})-[r:KNOWS*1..2]->(b:Person) \
+         WHERE ALL(e IN r WHERE e.w > 0) RETURN DISTINCT b.name AS bn",
+        &rc,
+    );
+    // Statement-created properties have no edge-id index: the edge filter
+    // must read public edge identities to find the property values.
+    let text = session(dir.path(), &rc)
+        .explain_analyze_with_params(&plan, &HashMap::new())
+        .await
+        .unwrap();
+    assert!(text.contains("mode=reachability"), "{text}");
+    let expands = operators(&text, "VarLenExpandExec");
+    assert_eq!(expands.len(), 1, "{text}");
+    assert_eq!(count(&expands[0], "output_rows"), 3, "{text}");
+    // Alice->Bob/Carol and Carol->Dave are the candidates whose destinations
+    // were not already visited. Bob->Carol needs no predicate read.
+    assert_eq!(count(&expands[0], "edge_rows_read"), 3, "{text}");
+}
+
+#[tokio::test]
+async fn trail_edge_reads_are_counted_once_at_the_shared_read_site() {
+    let (text, rows) = analyze(
+        "MATCH (a:Person {name: 'Alice'})-[r:KNOWS*1..2]->(b:Person) \
+         RETURN size(r) AS hops, b.name AS bn",
+    )
+    .await;
+    assert_eq!(rows, 4);
+    let expands = operators(&text, "VarLenExpandExec");
+    assert_eq!(expands.len(), 1, "{text}");
+    assert_eq!(count(&expands[0], "edge_rows_read"), 4, "{text}");
+}
