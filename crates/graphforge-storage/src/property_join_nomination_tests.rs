@@ -246,6 +246,7 @@ fn property_scan(limit: Option<usize>, equality: Option<PropertyEquality>) -> Pr
             batch_size: 16,
             footer_statistics: false,
             equality,
+            partitions: 1,
         },
     )
     .unwrap()
@@ -291,6 +292,7 @@ fn left_join_with_wrong_uuid_index() -> Arc<dyn ExecutionPlan> {
                 batch_size: 16,
                 footer_statistics: false,
                 equality: None,
+                partitions: 1,
             },
         )
         .unwrap(),

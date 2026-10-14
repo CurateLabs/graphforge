@@ -91,6 +91,7 @@ fn key_only_property_scan() -> PropertyOverlayExec {
             batch_size: 16,
             footer_statistics: false,
             equality: None,
+            partitions: 1,
         },
     )
     .unwrap()
@@ -376,6 +377,91 @@ fn selected_key_only_scan_supports_existing_collect_left_and_right_shapes() {
     );
 }
 
+/// A scan that splits its route into UUID ranges reaches a CollectLeft build
+/// side behind the merge DataFusion adds, because that join needs one build
+/// partition. The merge only interleaves the partitions' batches, so the rule
+/// still nominates the scan's reads from the frontier and keeps the scan on
+/// every one of its partitions.
+#[test]
+fn a_partitioned_scan_behind_a_merge_still_takes_the_frontiers_nomination() {
+    use crate::property_scan::property_scan_partition_tests::layered;
+
+    let config = ConfigOptions::default();
+    let (route, _) = layered();
+    let inventory = route.inventory();
+    let scan = route.scan(&inventory, 4);
+    assert_eq!(scan.properties().output_partitioning().partition_count(), 4);
+    let build: Arc<dyn ExecutionPlan> = Arc::new(CoalescePartitionsExec::new(scan));
+    let scan_key = build.schema().index_of("node_uuid").unwrap();
+    let payload = build.schema().index_of("ident").unwrap();
+    let build_width = build.schema().fields().len();
+
+    let frontier = input_with_values(&[Some([1; 16]), Some([2; 16])]);
+    let probe: Arc<dyn ExecutionPlan> =
+        Arc::new(RepartitionExec::try_new(frontier, Partitioning::RoundRobinBatch(2)).unwrap());
+    let original: Arc<dyn ExecutionPlan> = Arc::new(
+        HashJoinExec::try_new(
+            build,
+            probe,
+            vec![(
+                Arc::new(Column::new("node_uuid", scan_key)) as Arc<dyn PhysicalExpr>,
+                Arc::new(Column::new("node_uuid", 0)) as Arc<dyn PhysicalExpr>,
+            )],
+            None,
+            &JoinType::Right,
+            Some(vec![payload, build_width]),
+            PartitionMode::CollectLeft,
+            NullEquality::NullEqualsNothing,
+            false,
+        )
+        .unwrap(),
+    );
+    SanityCheckPlan::new()
+        .optimize(original.clone(), &config)
+        .unwrap();
+
+    let optimized = SelectedEndpointPropertyFilterApprovalRule::new(|_, index| index == 0)
+        .optimize(original.clone(), &config)
+        .unwrap();
+    assert!(
+        !Arc::ptr_eq(&original, &optimized),
+        "the merge must not hide the scan from the rule"
+    );
+    assert_eq!(optimized.schema().as_ref(), original.schema().as_ref());
+    let restored = optimized.downcast_ref::<RepartitionExec>().unwrap();
+    assert_eq!(restored.partitioning(), &Partitioning::RoundRobinBatch(2));
+    let merged = restored.input().downcast_ref::<RepartitionExec>().unwrap();
+    assert_eq!(merged.partitioning(), &Partitioning::RoundRobinBatch(1));
+    let join = merged.input().downcast_ref::<HashJoinExec>().unwrap();
+    assert_eq!(*join.join_type(), JoinType::Left);
+    assert_eq!(*join.partition_mode(), PartitionMode::Partitioned);
+
+    // The frontier streams through the tap and is hashed, never concatenated.
+    let build = join.left().downcast_ref::<RepartitionExec>().unwrap();
+    assert!(
+        build
+            .input()
+            .downcast_ref::<UuidBuildKeyTapExec>()
+            .is_some()
+    );
+    // The scan keeps its partitions, carries the tap's nomination, and its
+    // output is hashed into the join's partitions.
+    let probe = join.right().downcast_ref::<RepartitionExec>().unwrap();
+    assert!(matches!(probe.partitioning(), Partitioning::Hash(_, 2)));
+    let nominated = probe.input().downcast_ref::<PropertyOverlayExec>().unwrap();
+    assert_eq!(
+        nominated
+            .properties()
+            .output_partitioning()
+            .partition_count(),
+        4
+    );
+    assert_eq!(nominated.fresh_selected_endpoint_uuid_column(), None);
+    SanityCheckPlan::new()
+        .optimize(Arc::clone(&optimized), &config)
+        .unwrap();
+}
+
 #[test]
 fn partitioned_left_enrichment_excludes_scan_limits_and_equalities() {
     let config = ConfigOptions::default();
@@ -626,6 +712,7 @@ fn identity_only_enrichment_keeps_its_partitioned_join_without_a_uuid_set() {
                 batch_size: 16,
                 footer_statistics: false,
                 equality: None,
+                partitions: 1,
             },
         )
         .unwrap();

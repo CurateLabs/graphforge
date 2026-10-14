@@ -461,3 +461,130 @@ fn a_stop_request_ends_the_merge_early() {
         .unwrap();
     assert_eq!(seen, 3);
 }
+
+/// Read the route once per partition interval and concatenate the partitions
+/// in order. Each interval is a `UuidRange` over the optional `inner` set.
+fn partitioned(
+    inventory: &AuthenticatedPropertyInventory,
+    partitions: usize,
+    inner: Option<&dyn crate::uuid_set::UuidMembership>,
+) -> (Vec<PropertySnapshotRow>, Vec<PropertyOverlayMetrics>) {
+    let cuts = inventory
+        .route_partition_cuts(PropertyRouteKind::Node, "Person", partitions)
+        .unwrap();
+    let mut rows = Vec::new();
+    let mut all_metrics = Vec::new();
+    for index in 0..partitions {
+        let range =
+            crate::uuid_set::UuidRange::new(super::super::partition_interval(&cuts, index), inner);
+        let (part, metrics) = streamed(inventory, Some(&range));
+        rows.extend(part);
+        all_metrics.push(metrics);
+    }
+    (rows, all_metrics)
+}
+
+#[test]
+fn key_range_partitions_return_the_rows_of_the_whole_route() {
+    let fixture = layered();
+    let inventory = fixture.inventory();
+    let (expected, whole) = streamed(&inventory, None);
+    assert_eq!(expected.len(), 79);
+    for partitions in [1, 2, 3, 4, 7, 16] {
+        let (rows, metrics) = partitioned(&inventory, partitions, None);
+        assert_eq!(
+            rows, expected,
+            "{partitions} partitions: the same rows in the same order"
+        );
+        // Newest-wins resolution never crosses a partition: a key's base,
+        // mutation and tombstone rows all land in one interval, so the shadow
+        // and tombstone counts add up to the unpartitioned counts.
+        let sum =
+            |field: fn(&PropertyOverlayMetrics) -> u64| -> u64 { metrics.iter().map(field).sum() };
+        assert_eq!(sum(|m| m.logical_rows), whole.logical_rows, "{partitions}");
+        assert_eq!(sum(|m| m.tombstones), whole.tombstones, "{partitions}");
+        assert_eq!(
+            sum(|m| m.physical_rows),
+            whole.physical_rows,
+            "{partitions}: every physical row is decoded by exactly one partition"
+        );
+    }
+}
+
+#[test]
+fn key_range_partitions_resolve_mutations_and_tombstones_inside_one_interval() {
+    let fixture = layered();
+    let inventory = fixture.inventory();
+    let cuts = inventory
+        .route_partition_cuts(PropertyRouteKind::Node, "Person", 4)
+        .unwrap();
+    assert_eq!(cuts.len(), 3, "80 keys split four ways");
+    let interval_of = |key: u8| {
+        (0..4)
+            .find(|&index| {
+                let (low, high) = super::super::partition_interval(&cuts, index);
+                let key = uuid(key);
+                low <= key && high.is_none_or(|high| key < high)
+            })
+            .unwrap()
+    };
+    // The layered fixture rewrites 5, 17, 45 and 79, deletes 5 and 60 and
+    // resurrects 5. The cuts fall between those keys, so the mutations and
+    // tombstones of different keys land in different partitions.
+    let touched = [5, 17, 45, 60, 79].map(interval_of);
+    assert!(
+        touched.iter().collect::<BTreeSet<_>>().len() >= 3,
+        "touched keys span the cuts: {touched:?} for {cuts:?}"
+    );
+    let (rows, _) = partitioned(&inventory, 4, None);
+    assert_eq!(rows, streamed(&inventory, None).0);
+    let five = rows.iter().find(|row| row.uuid == uuid(5)).unwrap();
+    assert_eq!(five.values["name"], IrLiteral::Str("resurrected".into()));
+    assert!(rows.iter().all(|row| row.uuid != uuid(60)));
+}
+
+#[test]
+fn key_range_partitions_compose_with_a_target_set() {
+    let fixture = layered();
+    let inventory = fixture.inventory();
+    let targets: BTreeSet<_> = [5, 17, 45, 60, 70, 99].map(uuid).into_iter().collect();
+    let (expected, _) = streamed(&inventory, Some(&targets));
+    assert_eq!(expected.len(), 4);
+    for partitions in [2, 4, 8] {
+        let (rows, _) = partitioned(&inventory, partitions, Some(&targets));
+        assert_eq!(rows, expected, "{partitions} partitions");
+    }
+}
+
+#[test]
+fn partition_cuts_balance_the_route_rows() {
+    let fixture = layered();
+    let inventory = fixture.inventory();
+    let (_, metrics) = partitioned(&inventory, 4, None);
+    let rows = metrics.iter().map(|m| m.logical_rows).collect::<Vec<_>>();
+    assert_eq!(rows.iter().sum::<u64>(), 79);
+    let (low, high) = (rows.iter().min().unwrap(), rows.iter().max().unwrap());
+    assert!(
+        *high <= *low * 2 + 2,
+        "partitions are row-balanced, got {rows:?}"
+    );
+}
+
+#[test]
+fn a_route_without_fragments_has_no_cuts() {
+    let fixture = Fixture::new();
+    let inventory = fixture.inventory();
+    assert!(
+        inventory
+            .route_partition_cuts(PropertyRouteKind::Node, "Person", 4)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        layered()
+            .inventory()
+            .route_partition_cuts(PropertyRouteKind::Node, "Person", 1)
+            .unwrap()
+            .is_empty()
+    );
+}

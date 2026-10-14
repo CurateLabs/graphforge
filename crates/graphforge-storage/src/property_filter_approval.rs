@@ -337,7 +337,7 @@ fn nominate_collect_left_right_inner(
     if partitions < 2 {
         return Ok(None);
     }
-    let Some(scan) = join.left().downcast_ref::<PropertyOverlayExec>() else {
+    let Some(scan) = scan_through_merge(join.left()) else {
         return Ok(None);
     };
     let uuid_index = if selected_endpoint {
@@ -398,7 +398,7 @@ fn nominate_collect_left_right_inner(
     }) else {
         return Ok(None);
     };
-    let Some(swapped_scan) = swapped_join.right().downcast_ref::<PropertyOverlayExec>() else {
+    let Some(swapped_scan) = scan_through_merge(swapped_join.right()) else {
         return Ok(None);
     };
 
@@ -464,6 +464,28 @@ fn rebuild_swapped_as_partitioned(
         .reset_state()
         .recompute_properties()
         .build_exec()
+}
+
+/// The property scan a CollectLeft build side reads, whether directly or
+/// through the merge DataFusion adds above a scan that exposes several
+/// partitions.
+///
+/// A CollectLeft join needs its build side in one partition, so a scan that
+/// splits its route into UUID ranges reaches the join behind a
+/// `CoalescePartitionsExec`. The merge only interleaves the partitions'
+/// batches; it cannot change which rows the scan produces, so the scan beneath
+/// it is the build side exactly as a single-partition scan is. A merge that
+/// holds back rows (a fetch) is not recognised.
+fn scan_through_merge(plan: &Arc<dyn ExecutionPlan>) -> Option<&PropertyOverlayExec> {
+    if let Some(scan) = plan.downcast_ref::<PropertyOverlayExec>() {
+        return Some(scan);
+    }
+    let merge = plan.downcast_ref::<CoalescePartitionsExec>()?;
+    if merge.fetch().is_some() {
+        return None;
+    }
+    let scan = merge.input().downcast_ref::<PropertyOverlayExec>()?;
+    (merge.schema().as_ref() == scan.schema().as_ref()).then_some(scan)
 }
 
 fn collect_left_right_is_eligible(join: &HashJoinExec) -> bool {

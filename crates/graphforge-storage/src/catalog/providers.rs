@@ -508,6 +508,7 @@ impl PropertyTable {
             Some(selected),
             None,
             &[&targets],
+            None,
             visit,
         )
         .map(|_| ())
@@ -650,6 +651,12 @@ impl TableProvider for EdgePropertyTable {
                     batch_size: state.config().batch_size(),
                     footer_statistics: !self.keys_only,
                     equality: None,
+                    partitions: crate::property_scan::partitions_for_route(
+                        state.config().target_partitions(),
+                        self.inventory.as_deref(),
+                        true,
+                        &self.route,
+                    ),
                 },
             )?,
         ))
@@ -688,6 +695,12 @@ impl TableProvider for PropertyTable {
                     equality: filters
                         .iter()
                         .find_map(|filter| property_equality(filter, &self.schema)),
+                    partitions: crate::property_scan::partitions_for_route(
+                        state.config().target_partitions(),
+                        self.inventory.as_deref(),
+                        false,
+                        &self.route,
+                    ),
                 },
             )?,
         ))

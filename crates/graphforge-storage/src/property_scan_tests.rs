@@ -357,6 +357,7 @@ fn property_uuid_join(
             batch_size: 16,
             footer_statistics: true,
             equality: None,
+            partitions: 1,
         },
     )
     .unwrap();
