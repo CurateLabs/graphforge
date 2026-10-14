@@ -128,7 +128,6 @@ fn only_equalities_on_stored_columns_of_the_declared_type_are_offered() {
         // The route stores `ident` as Int64.
         col("n.ident").eq(lit("7")),
         col("n.ident").eq(lit(7_i32)),
-        col("n.ident").gt(lit(7_i64)),
         col("n.ident").eq(col("n.name")),
         col("n.ident").eq(lit(datafusion::common::ScalarValue::Int64(None))),
         // Not a column of the property scan.
@@ -595,4 +594,154 @@ fn an_anchor_is_set_once_and_never_by_an_unsupported_equality() {
     let (after, transformed) = rewritten(joined(node_scan("n"), "n", col("p.ident").eq(lit("7"))));
     assert!(!transformed);
     assert_eq!(node_anchor(&after, "n"), None);
+}
+
+/// An ordering comparison as Cypher lowers it: the `cypher_cmp_pred` UDF.
+fn cypher_ordering(left: Expr, right: Expr, code: i8) -> Expr {
+    crate::expr::comparison_predicate(left, right, code)
+}
+
+#[test]
+fn a_range_reaches_the_property_scan_in_either_operand_order() {
+    let ident = || col("n.ident");
+    for (predicate, offered) in [
+        (ident().gt(lit(7_i64)), col("p.ident").gt(lit(7_i64))),
+        (ident().lt_eq(lit(7_i64)), col("p.ident").lt_eq(lit(7_i64))),
+        // `7 < ident` is `ident > 7`.
+        (lit(7_i64).lt(ident()), col("p.ident").gt(lit(7_i64))),
+        (lit(7_i64).gt_eq(ident()), col("p.ident").lt_eq(lit(7_i64))),
+        (
+            cypher_ordering(ident(), lit(7_i64), 0),
+            col("p.ident").lt(lit(7_i64)),
+        ),
+        (
+            cypher_ordering(ident(), lit(7_i64), 3),
+            col("p.ident").gt_eq(lit(7_i64)),
+        ),
+        (
+            cypher_ordering(lit(7_i64), ident(), 0),
+            col("p.ident").gt(lit(7_i64)),
+        ),
+        (
+            cypher_ordering(lit(7_i64), ident(), 1),
+            col("p.ident").gt_eq(lit(7_i64)),
+        ),
+        (
+            cypher_ordering(col("n.name"), lit("k"), 2),
+            col("p.name").gt(lit("k")),
+        ),
+    ] {
+        let (after, transformed) = rewritten(plan(
+            GraphReadTable::Properties("Entity".into()),
+            JoinType::Left,
+            true,
+            predicate.clone(),
+        ));
+        assert!(transformed, "{predicate}");
+        assert_eq!(scan_filters(&after), vec![offered], "{predicate}");
+        // The predicate stays above the scan: the hint only chooses what to read.
+        let LogicalPlan::Filter(filter) = &after else {
+            panic!("the filter stays: {after}");
+        };
+        assert_eq!(filter.predicate, predicate);
+    }
+}
+
+#[test]
+fn both_bounds_of_a_range_are_offered_with_an_equality_on_another_column() {
+    let predicate = cypher_ordering(col("n.ident"), lit(7_i64), 3)
+        .and(cypher_ordering(col("n.ident"), lit(70_i64), 0))
+        .and(col("n.name").eq(lit("ada")));
+    let (after, transformed) = rewritten(plan(
+        GraphReadTable::Properties("Entity".into()),
+        JoinType::Left,
+        true,
+        predicate,
+    ));
+    assert!(transformed);
+    assert_eq!(
+        scan_filters(&after),
+        vec![
+            col("p.ident").gt_eq(lit(7_i64)),
+            col("p.ident").lt(lit(70_i64)),
+            col("p.name").eq(lit("ada")),
+        ]
+    );
+}
+
+#[test]
+fn a_range_is_offered_only_on_a_stored_column_of_the_literals_type() {
+    for predicate in [
+        // The route stores `ident` as Int64 and `name` as Utf8.
+        cypher_ordering(col("n.ident"), lit("7"), 2),
+        cypher_ordering(col("n.ident"), lit(7_i32), 2),
+        cypher_ordering(col("n.ident"), lit(7.5_f64), 2),
+        cypher_ordering(col("n.name"), lit(7_i64), 2),
+        cypher_ordering(col("n.ident"), lit(datafusion::common::ScalarValue::Int64(None)), 2),
+        // Two columns, or work on the column, say nothing a statistic can bound.
+        cypher_ordering(col("n.ident"), col("n.name"), 2),
+        cypher_ordering(col("n.ident") + lit(1_i64), lit(7_i64), 2),
+        // Not a column of the property scan.
+        cypher_ordering(col("n.node_uuid"), lit(7_i64), 2),
+        // A code that is not an ordering.
+        cypher_ordering(col("n.ident"), lit(7_i64), 9),
+    ] {
+        let (after, transformed) = rewritten(plan(
+            GraphReadTable::Properties("Entity".into()),
+            JoinType::Left,
+            true,
+            predicate.clone(),
+        ));
+        assert!(!transformed, "{predicate}");
+        assert!(scan_filters(&after).is_empty(), "{predicate}");
+    }
+}
+
+/// A range hint skips groups; it does not turn a left join into an inner join.
+/// The comparison is NULL, never true, for a missing property, but the join
+/// the pattern wrote keeps every row the filter above it decides.
+#[test]
+fn a_range_does_not_promote_the_left_join_or_anchor_the_node_scan() {
+    let (after, transformed) = rewritten(plan(
+        GraphReadTable::Properties("Entity".into()),
+        JoinType::Left,
+        true,
+        cypher_ordering(col("n.ident"), lit(7_i64), 2),
+    ));
+    assert!(transformed);
+    assert_eq!(join_types(&after), vec![JoinType::Left]);
+    assert_eq!(node_anchor(&after, "n"), None);
+
+    let (anchored, _) = rewritten(joined(
+        node_scan("n"),
+        "n",
+        cypher_ordering(col("p.ident"), lit(7_i64), 2),
+    ));
+    assert_eq!(node_anchor(&anchored, "n"), None);
+}
+
+#[test]
+fn a_range_beside_an_equality_leaves_the_equality_to_anchor() {
+    let (after, _) = rewritten(joined(
+        node_scan("n"),
+        "n",
+        cypher_ordering(col("p.ident"), lit(1_i64), 3).and(col("p.name").eq(lit("ada"))),
+    ));
+    assert_eq!(
+        node_anchor(&after, "n"),
+        entity_anchor(col("p.name").eq(lit("ada")))
+    );
+}
+
+#[test]
+fn a_range_on_the_non_nullable_side_of_the_join_is_not_offered() {
+    for join in [JoinType::Inner, JoinType::Right, JoinType::Full] {
+        let (_, transformed) = rewritten(plan(
+            GraphReadTable::Properties("Entity".into()),
+            join,
+            true,
+            cypher_ordering(col("n.ident"), lit(7_i64), 2),
+        ));
+        assert!(!transformed, "{join:?}");
+    }
 }

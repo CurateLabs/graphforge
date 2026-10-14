@@ -84,6 +84,12 @@ pub(crate) fn cypher_or_operands(
     value_semantics::cypher_or_operands(function)
 }
 
+/// `left <code> right` as the `cypher_cmp_pred` UDF, where `code` is 0 for `<`,
+/// 1 for `<=`, 2 for `>` and 3 for `>=`.
+pub(crate) fn comparison_predicate(left: DfExpr, right: DfExpr, code: i8) -> DfExpr {
+    CYPHER_CMP_PRED.call(vec![left, right, lit(code)])
+}
+
 pub(crate) fn is_comparison_predicate(
     function: &datafusion::logical_expr::expr::ScalarFunction,
 ) -> bool {
@@ -1899,7 +1905,7 @@ impl<'a> ExprLowerer<'a> {
                     BinaryOpKind::Gt => 2i8,
                     _ => 3i8,
                 };
-                CYPHER_CMP_PRED.call(vec![l, r, lit(code)])
+                comparison_predicate(l, r, code)
             }
             // Boolean operators require boolean (or null/unknown) operands. A
             // proven non-boolean is an openCypher InvalidArgumentType (#956);

@@ -8,7 +8,11 @@
 //!
 //! This rule runs last and offers each `column = literal` conjunct to the
 //! property scan that supplies the column, through the `Properties` source's
-//! own pushdown declaration. The filter stays where it is and still decides
+//! own pushdown declaration. A range conjunct (`<`, `<=`, `>`, `>=` against a
+//! literal, in either operand order) is offered the same way, so the scan can
+//! skip the row groups whose footer statistics rule the range out (#1982); only
+//! an equality anchors the node scan or promotes the join. The filter stays
+//! where it is and still decides
 //! which rows survive. A single strict equality through column-only projections
 //! also admits an INNER join: NULL-extended rows cannot pass that equality.
 //! The scan may use the hint to return
@@ -28,7 +32,7 @@
 use std::sync::Arc;
 
 use datafusion::common::tree_node::Transformed;
-use datafusion::common::{Column, Result};
+use datafusion::common::{Column, Result, ScalarValue};
 use datafusion::logical_expr::utils::split_conjunction;
 use datafusion::logical_expr::{
     Expr, Filter, Join, JoinType, LogicalPlan, Operator, Projection, TableProviderFilterPushDown,
@@ -40,27 +44,94 @@ use graphforge_plan::{GraphReadAnchor, GraphReadSource, GraphReadTable};
 #[derive(Debug)]
 pub struct StoredEqualityHints;
 
-/// A `column = literal` conjunct, normalised to that operand order.
-fn equality(expr: &Expr) -> Option<(Column, Expr)> {
-    let Expr::BinaryExpr(binary) = expr else {
-        return None;
-    };
-    if binary.op != Operator::Eq {
-        return None;
+/// A `column OP literal` conjunct, normalised to that operand order, where `OP`
+/// is `=` or an ordering comparison.
+#[derive(Clone)]
+struct Conjunct {
+    column: Column,
+    op: Operator,
+    literal: Expr,
+}
+
+impl Conjunct {
+    fn predicate(&self) -> Expr {
+        Expr::BinaryExpr(datafusion::logical_expr::BinaryExpr::new(
+            Box::new(Expr::Column(self.column.clone())),
+            self.op,
+            Box::new(self.literal.clone()),
+        ))
     }
-    match (binary.left.as_ref(), binary.right.as_ref()) {
-        (Expr::Column(column), literal @ Expr::Literal(value, _))
-        | (literal @ Expr::Literal(value, _), Expr::Column(column))
-            if !value.is_null() =>
-        {
-            Some((column.clone(), literal.clone()))
+
+    fn on(&self, column: Column) -> Self {
+        Self {
+            column,
+            op: self.op,
+            literal: self.literal.clone(),
         }
-        _ => None,
+    }
+
+    fn is_equality(&self) -> bool {
+        self.op == Operator::Eq
     }
 }
 
-fn comparison(column: &Column, literal: &Expr) -> Expr {
-    Expr::Column(column.clone()).eq(literal.clone())
+/// The operator `literal OP column` becomes when `column` is written first.
+fn mirrored(op: Operator) -> Operator {
+    match op {
+        Operator::Lt => Operator::Gt,
+        Operator::LtEq => Operator::GtEq,
+        Operator::Gt => Operator::Lt,
+        Operator::GtEq => Operator::LtEq,
+        other => other,
+    }
+}
+
+/// A `column = literal` or `column <, <=, >, >= literal` conjunct. Cypher
+/// lowers an ordering comparison to the `cypher_cmp_pred` UDF, which is
+/// NULL (so never true) when either operand is NULL or the operands cannot be
+/// ordered; a native comparison is accepted too.
+fn conjunct(expr: &Expr) -> Option<Conjunct> {
+    let (left, op, right) = match expr {
+        Expr::BinaryExpr(binary)
+            if matches!(
+                binary.op,
+                Operator::Eq | Operator::Lt | Operator::LtEq | Operator::Gt | Operator::GtEq
+            ) =>
+        {
+            (binary.left.as_ref(), binary.op, binary.right.as_ref())
+        }
+        Expr::ScalarFunction(function) if crate::expr::is_comparison_predicate(function) => {
+            let [left, right, Expr::Literal(code, _)] = function.args.as_slice() else {
+                return None;
+            };
+            let op = match code {
+                ScalarValue::Int8(Some(0)) => Operator::Lt,
+                ScalarValue::Int8(Some(1)) => Operator::LtEq,
+                ScalarValue::Int8(Some(2)) => Operator::Gt,
+                ScalarValue::Int8(Some(3)) => Operator::GtEq,
+                _ => return None,
+            };
+            (left, op, right)
+        }
+        _ => return None,
+    };
+    match (left, right) {
+        (Expr::Column(column), literal @ Expr::Literal(value, _)) if !value.is_null() => {
+            Some(Conjunct {
+                column: column.clone(),
+                op,
+                literal: literal.clone(),
+            })
+        }
+        (literal @ Expr::Literal(value, _), Expr::Column(column)) if !value.is_null() => {
+            Some(Conjunct {
+                column: column.clone(),
+                op: mirrored(op),
+                literal: literal.clone(),
+            })
+        }
+        _ => None,
+    }
 }
 
 fn projected_column(mut expr: &Expr) -> Option<&Column> {
@@ -78,17 +149,17 @@ fn projected_column(mut expr: &Expr) -> Option<&Column> {
 /// scan took a hint.
 fn hint(
     plan: &LogicalPlan,
-    wanted: &[(Column, Expr)],
+    wanted: &[Conjunct],
     strict_equality: bool,
 ) -> Result<Option<LogicalPlan>> {
     match plan {
         LogicalPlan::Projection(projection) => {
             let mapped = wanted
                 .iter()
-                .filter_map(|(column, literal)| {
-                    let index = projection.schema.index_of_column(column).ok()?;
+                .filter_map(|conjunct| {
+                    let index = projection.schema.index_of_column(&conjunct.column).ok()?;
                     let inner = projected_column(&projection.expr[index])?;
-                    Some((inner.clone(), literal.clone()))
+                    Some(conjunct.on(inner.clone()))
                 })
                 .collect::<Vec<_>>();
             if mapped.is_empty() {
@@ -110,9 +181,9 @@ fn hint(
         LogicalPlan::Join(join) if join.join_type == JoinType::Left => {
             let right = wanted
                 .iter()
-                .filter(|(column, _)| {
-                    join.right.schema().index_of_column(column).is_ok()
-                        && join.left.schema().index_of_column(column).is_err()
+                .filter(|conjunct| {
+                    join.right.schema().index_of_column(&conjunct.column).is_ok()
+                        && join.left.schema().index_of_column(&conjunct.column).is_err()
                 })
                 .cloned()
                 .collect::<Vec<_>>();
@@ -150,11 +221,11 @@ fn hint(
             };
             let mut filters = scan.filters.clone();
             let mut admitted = false;
-            for (column, literal) in wanted {
-                if column.relation.as_ref() != Some(&scan.table_name) {
+            for conjunct in wanted {
+                if conjunct.column.relation.as_ref() != Some(&scan.table_name) {
                     continue;
                 }
-                let predicate = comparison(column, literal);
+                let predicate = conjunct.predicate();
                 let supported = datafusion::logical_expr::TableSource::supports_filters_pushdown(
                     source,
                     &[&predicate],
@@ -182,8 +253,8 @@ fn hint(
 }
 
 /// The equality a node-property scan will use, as an anchor for the node
-/// scan it joins: the first pushed filter the source supports, which is the
-/// one the bound provider picks.
+/// scan it joins: the first pushed equality the source supports, which is the
+/// one the bound provider picks. A range never anchors a node scan.
 fn anchor_of(right: &LogicalPlan) -> Option<GraphReadAnchor> {
     let LogicalPlan::TableScan(scan) = right else {
         return None;
@@ -193,7 +264,8 @@ fn anchor_of(right: &LogicalPlan) -> Option<GraphReadAnchor> {
         return None;
     };
     let equality = scan.filters.iter().find(|filter| {
-        datafusion::logical_expr::TableSource::supports_filters_pushdown(source, &[*filter])
+        conjunct(filter).is_some_and(|conjunct| conjunct.is_equality())
+            && datafusion::logical_expr::TableSource::supports_filters_pushdown(source, &[*filter])
             .is_ok_and(|support| {
                 support
                     .iter()
@@ -309,12 +381,13 @@ impl OptimizerRule for StoredEqualityHints {
         };
         let wanted = split_conjunction(&filter.predicate)
             .into_iter()
-            .filter_map(equality)
+            .filter_map(conjunct)
             .collect::<Vec<_>>();
         if wanted.is_empty() {
             return Ok(Transformed::no(plan));
         }
-        let strict_equality = equality(&filter.predicate).is_some();
+        let strict_equality =
+            conjunct(&filter.predicate).is_some_and(|conjunct| conjunct.is_equality());
         match hint(&filter.input, &wanted, strict_equality)? {
             Some(input) => Ok(Transformed::yes(LogicalPlan::Filter(Filter::try_new(
                 filter.predicate.clone(),

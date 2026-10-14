@@ -766,8 +766,9 @@ fn property_equality(
 
 /// The comparisons `column <, <=, >, >= literal` (and `BETWEEN`) that the
 /// filters place on one stored property column, against a literal of the
-/// column's own Arrow type: integers, UTC microsecond timestamps and strings.
-/// Floats are left to the plan, where NaN ordering decides.
+/// column's own Arrow type: integers and strings.
+/// Floats are left to the plan, where NaN ordering decides, and so are temporal
+/// values, which are stored as several leaf columns rather than one ordered one.
 ///
 /// The range only narrows what the scan decodes; every filter stays above it.
 fn property_range(
@@ -867,9 +868,7 @@ fn range_value(
     use crate::property_overlay::RangeValue;
     use datafusion::scalar::ScalarValue;
     let value = match literal {
-        ScalarValue::Int64(Some(value)) | ScalarValue::TimestampMicrosecond(Some(value), _) => {
-            RangeValue::Int(*value)
-        }
+        ScalarValue::Int64(Some(value)) => RangeValue::Int(*value),
         ScalarValue::Utf8(Some(value)) => RangeValue::Str(value.clone()),
         _ => return None,
     };

@@ -112,10 +112,11 @@ impl TableSource for GraphReadSource {
         self.schema.clone()
     }
 
-    /// A node property route can answer `column = literal` from footer
-    /// statistics. The filter stays in the plan, so the pushdown is a hint:
-    /// the bound provider returns every row the equality can select and the
-    /// plan's own filter decides which of them match.
+    /// A node property route can answer `column = literal`, and the range
+    /// comparisons `<`, `<=`, `>`, `>=`, from footer statistics. The filter
+    /// stays in the plan, so the pushdown is a hint: the bound provider returns
+    /// every row the predicate can select and the plan's own filter decides
+    /// which of them match.
     fn supports_filters_pushdown(
         &self,
         filters: &[&Expr],
@@ -124,7 +125,7 @@ impl TableSource for GraphReadSource {
             .iter()
             .map(|filter| {
                 if matches!(self.table, GraphReadTable::Properties(_))
-                    && is_stored_equality(filter, &self.schema)
+                    && is_stored_comparison(filter, &self.schema)
                 {
                     TableProviderFilterPushDown::Inexact
                 } else {
@@ -136,14 +137,20 @@ impl TableSource for GraphReadSource {
 }
 
 /// `column = literal` on a stored column of the literal's own Arrow type, for
-/// the types whose equality needs no coercion.
-fn is_stored_equality(filter: &Expr, schema: &SchemaRef) -> bool {
+/// the types whose equality needs no coercion, or `column <, <=, >, >= literal`
+/// on an integer or string column. Floats and temporal structs are not offered:
+/// NaN ordering and instant comparison are decided by the plan's own filter.
+fn is_stored_comparison(filter: &Expr, schema: &SchemaRef) -> bool {
     use datafusion::common::ScalarValue;
     use datafusion::logical_expr::Operator;
     let Expr::BinaryExpr(binary) = filter else {
         return false;
     };
-    if binary.op != Operator::Eq {
+    let ordering = matches!(
+        binary.op,
+        Operator::Lt | Operator::LtEq | Operator::Gt | Operator::GtEq
+    );
+    if binary.op != Operator::Eq && !ordering {
         return false;
     }
     let ((Expr::Column(column), Expr::Literal(literal, _))
@@ -155,7 +162,7 @@ fn is_stored_equality(filter: &Expr, schema: &SchemaRef) -> bool {
     let data_type = match literal {
         ScalarValue::Int64(Some(_)) => datafusion::arrow::datatypes::DataType::Int64,
         ScalarValue::Utf8(Some(_)) => datafusion::arrow::datatypes::DataType::Utf8,
-        ScalarValue::Boolean(Some(_)) => datafusion::arrow::datatypes::DataType::Boolean,
+        ScalarValue::Boolean(Some(_)) if !ordering => datafusion::arrow::datatypes::DataType::Boolean,
         _ => return false,
     };
     schema

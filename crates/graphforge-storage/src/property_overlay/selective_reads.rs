@@ -68,12 +68,13 @@ impl PropertyEquality {
     }
 }
 
-/// A property value a range predicate orders without coercion. Integers and
-/// UTC microsecond timestamps are both stored as `INT64`, so they share a
-/// variant; the scan accepts a bound only against a column of the same type.
+/// A property value a range predicate orders without coercion. The scan accepts
+/// a bound only against a column of the same Arrow type. Cypher temporal values
+/// are stored as structs of several leaf columns, not one ordered leaf, so
+/// their footer statistics do not bound an instant and they are not offered.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum RangeValue {
-    /// A 64-bit integer, or a timestamp in microseconds since the epoch.
+    /// A 64-bit integer.
     Int(i64),
     /// A string, ordered by its UTF-8 bytes.
     Str(String),
