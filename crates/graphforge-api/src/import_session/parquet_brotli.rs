@@ -161,7 +161,10 @@ pub(super) fn workspace_bytes(page_bytes: u64) -> u64 {
     const CONTEXT_MAP_BYTES: u64 = 256 * 64 + 256 * 4 + 256;
     const DEFAULT_WINDOW_BYTES: u64 = 1 << 22;
     const LARGEST_WINDOW_BYTES: u64 = 1 << 24;
-    const RING_SLACK_BYTES: u64 = 42 + 24 + 16;
+    // brotli-decompressor 6 allocates the ring buffer with a 542-byte
+    // write-ahead slack (255-byte transform prefix + 32-byte word + 255-byte
+    // suffix) plus the 24-byte maximum dictionary word; 5.x used 42.
+    const RING_SLACK_BYTES: u64 = 542 + 24 + 16;
     let code = u64::try_from(std::mem::size_of::<HuffmanCode>()).unwrap_or(u64::MAX);
     let tables = HUFFMAN_TABLE_CODES
         .saturating_mul(

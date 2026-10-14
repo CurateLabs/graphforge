@@ -20,7 +20,7 @@ python3 scripts/generate_third_party_notices.py
 - Apache License 2.0 (326)
 - MIT License (78)
 - Unicode License v3 (19)
-- BSD 3-Clause "New" or "Revised" License (10)
+- BSD 3-Clause "New" or "Revised" License (13)
 - ISC License (4)
 - zlib License (3)
 - BSD 2-Clause "Simplified" License (1)
@@ -7092,7 +7092,7 @@ Used by:
 - serde 1.0.229
 - serde_core 1.0.229
 - serde_derive 1.0.229
-- serde_json 1.0.151
+- serde_json 1.0.154
 - serde_yaml_ng 0.9.36
 - shlex 2.0.1
 - simdutf8 0.1.5
@@ -7721,7 +7721,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ## BSD 3-Clause "New" or "Revised" License
 
 Used by:
-- zstd 0.14.0
+- zstd 0.14.2
 - zstd-safe 8.1.0
 - zstd-sys 2.1.1+zstd.1.5.7
 
@@ -7762,8 +7762,10 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 Used by:
 - alloc-no-stdlib 2.0.4
+- alloc-no-stdlib 3.0.0
 - brotli 8.0.3
 - brotli-decompressor 5.0.3
+- brotli-decompressor 6.0.1
 
 ```
 Copyright (c) 2016 Dropbox, Inc.
@@ -7825,6 +7827,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 Used by:
 - alloc-stdlib 0.2.2
+- alloc-stdlib 0.3.0
 - sha1_smol 1.0.1
 
 ```

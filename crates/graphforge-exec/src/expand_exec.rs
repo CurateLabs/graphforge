@@ -2722,10 +2722,11 @@ fn expand_single_hop_chunk(
             .len()
             .saturating_add(1_usize.saturating_sub(node_key_already_demanded)),
     );
-    // A destination demanded for identity and labels only is answered from the
-    // provider's label index; any other demand reads the node files.
-    let labelled_destination = if required.is_some() {
-        destination_labels::synthesise_destination_batch(
+    // A destination demanded for nothing beyond identity and labels is answered
+    // from the label index and the ordinal identity authority; any other demand
+    // reads the node files. The edge columns above are independent of this.
+    let synthesised_destination = if required.is_some() {
+        destination_rows::synthesise_destination_batch(
             cfg.provider.as_ref(),
             cfg.ordinal_identities.as_ref(),
             &cfg.out_schema,
@@ -2736,13 +2737,15 @@ fn expand_single_hop_chunk(
     } else {
         None
     };
-    let node_batch = if let Some(destination) = labelled_destination {
+    let node_batch = if let Some(destination) = synthesised_destination {
         drop(node_permit);
-        demand::record_label_index_rows(
-            cfg.capture_epoch,
-            cfg.edge_var,
-            destination.batch.num_rows(),
-        );
+        if destination.label_index_used {
+            demand::record_label_index_rows(
+                cfg.capture_epoch,
+                cfg.edge_var,
+                destination.batch.num_rows(),
+            );
+        }
         for lookup in &destination.identity_lookups {
             demand::record_identity_lookup(cfg.capture_epoch, cfg.edge_var, lookup);
         }
@@ -2908,7 +2911,7 @@ fn expand_single_hop_chunk(
     Ok(output)
 }
 
-mod destination_labels;
+mod destination_rows;
 mod edge_filter;
 mod edge_predicate;
 mod edge_properties;
