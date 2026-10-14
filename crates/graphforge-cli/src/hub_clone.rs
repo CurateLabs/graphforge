@@ -32,13 +32,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use url::Url;
 
-#[cfg(test)]
-use crate::hub_http::fetch;
 use crate::hub_http::{
-    HttpResponse, HttpTransport, MAX_METADATA_BYTES, RETRY_POLICY, RetryPolicy, Transport,
-    endpoint, fetch_once, fetch_with_attempts, hash_reader, limit_error, network, parse_input,
-    parse_input_at, read_bounded, storage, validate_url, validation,
+    DiscoveryCredentials, HttpResponse, HttpTransport, MAX_METADATA_BYTES, RETRY_POLICY,
+    RetryPolicy, Transport, endpoint, fetch_discovery_with_attempts, fetch_once,
+    fetch_with_attempts, hash_reader, limit_error, network, parse_input_at, read_bounded, storage,
+    validate_url, validation,
 };
+#[cfg(test)]
+use crate::hub_http::{fetch, parse_input};
 
 mod module_fetch;
 pub(crate) use module_fetch::{ModuleFetchArgs, run_module_fetch};
@@ -56,6 +57,15 @@ const CLONE_CONTRACT: &str = "graphforge-hub-clone/1";
 pub(crate) struct CloneArgs {
     /// Canonical owner/repository name or an HTTPS Hub repository URL.
     pub repository: String,
+    /// Hub base URL for an owner/repository name; explicit repository URLs name their own Hub.
+    #[arg(long)]
+    pub hub: Option<String>,
+    /// Read a Hub bearer token from this environment variable (opt-in, noninteractive).
+    #[arg(long)]
+    pub token_env: Option<String>,
+    /// Read the separate x-vercel-protection-bypass secret from this environment variable.
+    #[arg(long)]
+    pub protection_bypass_env: Option<String>,
     /// New project directory; defaults to the repository name.
     pub destination: Option<PathBuf>,
     /// Explicit local OTLP collector base URL. Clone telemetry is otherwise disabled.
@@ -264,6 +274,7 @@ fn classify_failure(error: &graphforge_api::GfError) -> Failure {
         "hub.network" | "hub.unsafe_location" => Failure::Network,
         "hub.limit_exceeded" | "hub.package.limit_exceeded" => Failure::ResourceLimit,
         "hub.invalid_identity"
+        | "hub.auth_denied"
         | "hub.malformed_response"
         | "hub.unsupported_future"
         | "hub.missing_ref"
@@ -994,6 +1005,7 @@ pub(crate) fn run_clone(
     let mut stderr = std::io::stderr();
     let mut env = CloneEnv {
         retry: RETRY_POLICY,
+        credential_lookup: |name| std::env::var(name),
         cancelled: if attached {
             &INTERRUPTED
         } else {
@@ -1054,6 +1066,7 @@ fn available_space(path: &Path) -> std::io::Result<u64> {
 /// Process-level effects of one clone: retry bound, cancellation, the free
 /// space probe, and progress output. Tests inject each of them.
 struct CloneEnv<'a> {
+    credential_lookup: fn(&str) -> Result<String, std::env::VarError>,
     retry: RetryPolicy,
     cancelled: &'a AtomicBool,
     available_space: fn(&Path) -> std::io::Result<u64>,
@@ -1065,6 +1078,7 @@ impl CloneEnv<'_> {
     fn quiet<'a>() -> CloneEnv<'a> {
         CloneEnv {
             retry: TEST_RETRY_POLICY,
+            credential_lookup: |name| std::env::var(name),
             cancelled: &NEVER_CANCELLED,
             available_space,
             progress: CloneProgress::new(None),
@@ -1658,7 +1672,7 @@ fn run_clone_job(
         None,
         1,
         || {
-            let (identity, base) = parse_input(&args.repository)?;
+            let (identity, base) = parse_input_at(&args.repository, args.hub.as_deref())?;
             let destination =
                 requested_destination.unwrap_or_else(|| PathBuf::from(&identity.repository));
             if std::fs::symlink_metadata(&destination).is_ok() {
@@ -1677,6 +1691,12 @@ fn run_clone_job(
     if let Some(finished) = finished {
         return Ok(finished);
     }
+    let credentials = DiscoveryCredentials::load(
+        &base,
+        args.token_env.as_deref(),
+        args.protection_bypass_env.as_deref(),
+        env.credential_lookup,
+    )?;
     profile.handoff(
         ComponentKind::Cli,
         ComponentKind::NetworkTransport,
@@ -1692,11 +1712,10 @@ fn run_clone_job(
         1,
         || {
             let bytes = read_bounded(
-                fetch_with_attempts(
+                fetch_discovery_with_attempts(
                     transport,
                     &endpoint(&base, "refs"),
-                    None,
-                    None,
+                    credentials.as_ref(),
                     MAX_METADATA_BYTES as u64,
                     &mut refs_attempts,
                     &env.retry,
@@ -1720,11 +1739,10 @@ fn run_clone_job(
         1,
         || {
             let bytes = read_bounded(
-                fetch_with_attempts(
+                fetch_discovery_with_attempts(
                     transport,
                     &endpoint(&base, "manifest"),
-                    None,
-                    None,
+                    credentials.as_ref(),
                     MAX_METADATA_BYTES as u64,
                     &mut manifest_attempts,
                     &env.retry,
@@ -2232,3 +2250,6 @@ mod transfer_tests;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod auth_tests;

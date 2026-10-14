@@ -16,6 +16,9 @@ use ureq::unversioned::transport::{
 };
 use url::Url;
 
+mod discovery_auth;
+pub(crate) use discovery_auth::{DiscoveryCredentials, fetch_discovery_with_attempts};
+
 pub(crate) const DEFAULT_HUB: &str = "https://graphforge.sh";
 pub(crate) const MAX_METADATA_BYTES: usize = 16 * 1024 * 1024;
 pub(crate) const MAX_REDIRECTS: usize = 4;
@@ -114,6 +117,19 @@ pub(crate) trait Transport {
         if_range: Option<&str>,
         limit: u64,
     ) -> Result<HttpResponse, graphforge_api::GfError>;
+
+    /// Send an initial discovery request with explicit, sensitive headers.
+    /// This must never install default headers on the shared agent.
+    fn get_discovery(
+        &self,
+        _url: &Url,
+        _headers: &[(&str, ureq::http::HeaderValue)],
+        _limit: u64,
+    ) -> Result<HttpResponse, graphforge_api::GfError> {
+        Err(network(
+            "transport does not support authenticated discovery",
+        ))
+    }
 
     /// Send one request without following redirects and read at most `limit`
     /// response body bytes. Writes (`POST`, `PUT`) and `HEAD` use this path.
@@ -261,13 +277,14 @@ impl ureq::unversioned::transport::Transport for IdleTransport {
     }
 }
 
-impl Transport for HttpTransport {
-    fn get(
+impl HttpTransport {
+    fn get_with_headers(
         &self,
         url: &Url,
         range: Option<u64>,
         if_range: Option<&str>,
         limit: u64,
+        headers: &[(&str, ureq::http::HeaderValue)],
     ) -> Result<HttpResponse, graphforge_api::GfError> {
         let mut request = self.agent.get(url.as_str());
         if let Some(offset) = range {
@@ -275,6 +292,9 @@ impl Transport for HttpTransport {
         }
         if let Some(validator) = if_range {
             request = request.header("If-Range", validator);
+        }
+        for (name, value) in headers {
+            request = request.header(*name, value.clone());
         }
         let response = request.call().map_err(|_| network("request failed"))?;
         let status = response.status().as_u16();
@@ -302,6 +322,28 @@ impl Transport for HttpTransport {
             body: Box::new(body.into_reader().take(limit.saturating_add(1))),
         })
     }
+}
+
+impl Transport for HttpTransport {
+    fn get(
+        &self,
+        url: &Url,
+        range: Option<u64>,
+        if_range: Option<&str>,
+        limit: u64,
+    ) -> Result<HttpResponse, graphforge_api::GfError> {
+        self.get_with_headers(url, range, if_range, limit, &[])
+    }
+
+    fn get_discovery(
+        &self,
+        url: &Url,
+        headers: &[(&str, ureq::http::HeaderValue)],
+        limit: u64,
+    ) -> Result<HttpResponse, graphforge_api::GfError> {
+        self.get_with_headers(url, None, None, limit, headers)
+    }
+
     fn exchange(
         &self,
         request: &HubRequest,
@@ -579,9 +621,18 @@ pub(crate) fn fetch_with_attempts(
     attempts: &mut u32,
     policy: &RetryPolicy,
 ) -> Result<HttpResponse, graphforge_api::GfError> {
+    retry_read(policy, || {
+        fetch_once(transport, start, range, if_range, limit, attempts)
+    })
+}
+
+fn retry_read(
+    policy: &RetryPolicy,
+    mut fetch: impl FnMut() -> Result<HttpResponse, FetchFailure>,
+) -> Result<HttpResponse, graphforge_api::GfError> {
     let mut failures = 0;
     loop {
-        match fetch_once(transport, start, range, if_range, limit, attempts) {
+        match fetch() {
             Ok(response) => return Ok(response),
             Err(failure) => {
                 failures += 1;
@@ -603,17 +654,38 @@ pub(crate) fn fetch_once(
     limit: u64,
     attempts: &mut u32,
 ) -> Result<HttpResponse, FetchFailure> {
+    fetch_once_inner(transport, start, range, if_range, limit, attempts, None)
+}
+
+fn fetch_once_inner(
+    transport: &dyn Transport,
+    start: &Url,
+    range: Option<u64>,
+    if_range: Option<&str>,
+    limit: u64,
+    attempts: &mut u32,
+    credentials: Option<&DiscoveryCredentials>,
+) -> Result<HttpResponse, FetchFailure> {
     let mut url = start.clone();
     for hop in 0..=MAX_REDIRECTS {
         transport.validate(&url)?;
         *attempts = attempts.saturating_add(1);
-        let response = transport
-            .get(&url, range, if_range, limit)
-            .map_err(|error| FetchFailure {
-                transient: is_network(&error),
-                error,
-                status: None,
-            })?;
+        // Only the initial discovery request may carry credentials. Even a
+        // same-origin redirect uses the ordinary credential-free read path.
+        let response = if hop == 0 {
+            if let Some(credentials) = credentials {
+                transport.get_discovery(&url, credentials.headers_for(&url)?, limit)
+            } else {
+                transport.get(&url, range, if_range, limit)
+            }
+        } else {
+            transport.get(&url, range, if_range, limit)
+        }
+        .map_err(|error| FetchFailure {
+            transient: is_network(&error),
+            error,
+            status: None,
+        })?;
         if matches!(response.status, 301 | 302 | 303 | 307 | 308) {
             if hop == MAX_REDIRECTS {
                 return Err(network("redirect limit exceeded").into());

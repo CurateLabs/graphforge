@@ -256,6 +256,9 @@ fn the_object_bound_is_the_publish_cumulative_bound() {
 
 fn clone_args(destination: &Path) -> CloneArgs {
     CloneArgs {
+        hub: None,
+        token_env: None,
+        protection_bypass_env: None,
         repository: "openalex/openalex".into(),
         destination: Some(destination.to_path_buf()),
         telemetry_endpoint: None,
