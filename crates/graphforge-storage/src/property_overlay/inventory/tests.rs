@@ -1068,3 +1068,93 @@ fn segmented_inventory_rejects_missing_parts_and_changed_admitted_payload() {
             .is_err()
     );
 }
+
+#[test]
+fn retained_fragment_footers_share_one_budget_and_refuse_before_caching_more() {
+    let root = TempDir::new().unwrap();
+    fs::create_dir_all(root.path().join("properties")).unwrap();
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("node_uuid", DataType::FixedSizeBinary(16), false),
+        Field::new("value", DataType::Int64, false),
+    ]));
+    for index in 0..8 {
+        let path = root.path().join(format!("properties/Route{index}.parquet"));
+        let mut writer =
+            ArrowWriter::try_new(File::create(path).unwrap(), Arc::clone(&schema), None).unwrap();
+        let uuid = graphforge_core::uuid::Uuid::from_u128(index + 1);
+        let batch = arrow::record_batch::RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(
+                    FixedSizeBinaryArray::try_from_iter([uuid.as_bytes().as_slice()].into_iter())
+                        .unwrap(),
+                ),
+                Arc::new(Int64Array::from(vec![1])),
+            ],
+        )
+        .unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+    }
+    let capture = || {
+        let inventory = crate::capture_graph_read_inventory(root.path()).unwrap();
+        let entries = inventory
+            .files
+            .into_iter()
+            .map(|entry| {
+                let relative = PathBuf::from(&entry.relative_path);
+                (entry, relative)
+            })
+            .collect();
+        AuthenticatedPropertyInventory::admit_read_entries(
+            root.path(),
+            entries,
+            None,
+            None,
+            false,
+            None,
+            FragmentAdmission::FirstTouch,
+        )
+        .unwrap()
+    };
+    let roomy = capture();
+    roomy.set_query_memory_budget(512 << 20).unwrap();
+    let structure = roomy.retained_metadata_bytes();
+    roomy
+        .route_schema(PropertyRouteKind::Node, "Route0")
+        .unwrap()
+        .unwrap();
+    let footer_charge = roomy.retained_metadata_bytes() - structure;
+    assert!(footer_charge > 0);
+
+    let limit = structure + 2 * footer_charge;
+    let tight = capture();
+    tight.set_query_memory_budget((limit as u64) * 8).unwrap();
+    for route in ["Route0", "Route1"] {
+        tight
+            .route_schema(PropertyRouteKind::Node, route)
+            .unwrap()
+            .unwrap();
+    }
+    assert_eq!(tight.retained_metadata_bytes(), limit);
+    for _ in 0..2 {
+        let error = tight
+            .route_schema(PropertyRouteKind::Node, "Route2")
+            .unwrap_err();
+        assert_eq!(error.code(), "GF_RESOURCE_LIMIT");
+        assert!(
+            error.to_string().contains("property inventory metadata"),
+            "{error}"
+        );
+        assert!(tight.retained_metadata_bytes() <= limit);
+    }
+    let fragment = &tight.routes[&(PropertyRouteKind::Node, "Route2".into())][0];
+    assert!(
+        fragment.footer.get().unwrap().is_err(),
+        "the refused parsed footer must be dropped"
+    );
+    assert!(
+        tight.set_query_memory_budget(0).is_err(),
+        "zero is not unlimited"
+    );
+}

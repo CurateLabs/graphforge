@@ -435,6 +435,7 @@ pub(super) fn adjacency_provider_for_graph(
     inventory: Arc<graphforge_storage::AuthenticatedPropertyInventory>,
     memory_budget_bytes: u64,
 ) -> Result<graphforge_exec::PersistentAdjacencyProvider, GfError> {
+    inventory.set_query_memory_budget(memory_budget_bytes)?;
     // The provider derives its decoded-shard and label-index share from the
     // query memory budget (see `graphforge_storage::read_cache_budget`).
     let provider = graphforge_exec::PersistentAdjacencyProvider::new(dir.to_path_buf(), mode)

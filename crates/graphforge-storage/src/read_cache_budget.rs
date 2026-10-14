@@ -15,10 +15,11 @@
 //! ```text
 //! retained read caches R = B / 2
 //! topology share       P = R / 2 = B / 4   decoded shards + label index + edge-id maps
-//! identity share       I = R / 2 = B / 4   authenticated ordinal blocks
+//! identity share       I = R / 4 = B / 8   authenticated ordinal blocks
+//! inventory share      M = R / 4 = B / 8   route/path structure + cached property footers
 //! ```
 //!
-//! so a provider and its identity handle together retain at most `B / 2`
+//! so a provider, identity handle and property inventory together retain at most `B / 2`
 //! (plus one decoded shard, below 24 MiB, when a single shard exceeds the
 //! topology share). The pool and these retained caches therefore account for
 //! `B + B / 2`; this is not a process-RSS bound. Decoder scratch, catalog
@@ -42,16 +43,22 @@
 //!   [`ShardCache::set_external_bytes`](crate::adjacency::ShardCache::set_external_bytes),
 //!   evicting least-recently-used shards when a view is built or dropped.
 //!
+//! Retained inventory structure and memoized Parquet/Arrow metadata share `M`;
+//! pressure refuses another footer with `GF_RESOURCE_LIMIT` naming property
+//! inventory metadata, before that parsed footer is retained. Decoder scratch
+//! for one footer remains separate, under the storage admission limits.
+//!
 //! The identity blocks have their own share, `I`, enforced by the handle's
 //! `max_ordinal_cache_bytes`
 //! ([`V4OrdinalIdentityLimits::for_query_memory_budget`](crate::V4OrdinalIdentityLimits::for_query_memory_budget)).
 //!
 //! The bound is per provider and per identity handle. A session builds one pair
-//! per hydrated graph generation, so `g` live generations retain at most
+//! per hydrated graph generation with one inventory, so `g` live generations retain at most
 //! `g * B / 2`.
 //!
-//! At the 512 MiB default `B` each share is 128 MiB, at the 2 GiB a 4 GiB
-//! cgroup derives each is 512 MiB.
+//! At the 512 MiB default `B`, topology gets 128 MiB and identity/inventory
+//! each get 64 MiB. At the 2 GiB a 4 GiB cgroup derives, those are 512 MiB
+//! and 256 MiB respectively.
 
 /// The default session memory budget: 512 MiB, the pool size a session gets
 /// when no resource policy states one.
@@ -62,6 +69,8 @@ pub const DEFAULT_QUERY_MEMORY_BUDGET_BYTES: u64 = 512 * 1024 * 1024;
 pub struct ReadCacheBudget {
     /// Decoded CSR shards, the label index and the edge-id maps.
     pub topology_bytes: u64,
+    /// Retained property inventory structure and Parquet footers.
+    pub inventory_bytes: u64,
     /// Authenticated ordinal-identity blocks.
     pub identity_bytes: u64,
 }
@@ -73,17 +82,18 @@ impl ReadCacheBudget {
         let share = query_budget_bytes / 4;
         Self {
             topology_bytes: share,
-            identity_bytes: share,
+            identity_bytes: query_budget_bytes / 8,
+            inventory_bytes: query_budget_bytes / 8,
         }
     }
 
     /// The shares of [`DEFAULT_QUERY_MEMORY_BUDGET_BYTES`].
     pub const DEFAULT: Self = Self::from_query_budget(DEFAULT_QUERY_MEMORY_BUDGET_BYTES);
 
-    /// Everything both caches may retain together: `B / 2`.
+    /// Everything the caches and inventory may retain together: `B / 2`.
     #[must_use]
     pub const fn total_bytes(&self) -> u64 {
-        self.topology_bytes + self.identity_bytes
+        self.topology_bytes + self.identity_bytes + self.inventory_bytes
     }
 }
 
@@ -92,7 +102,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn two_shares_sum_to_half_the_query_budget() {
+    fn retained_shares_sum_to_half_the_query_budget() {
         for budget in [
             16 << 20,
             DEFAULT_QUERY_MEMORY_BUDGET_BYTES,
@@ -101,7 +111,8 @@ mod tests {
         ] {
             let shares = ReadCacheBudget::from_query_budget(budget);
             assert_eq!(shares.topology_bytes, budget / 4);
-            assert_eq!(shares.identity_bytes, budget / 4);
+            assert_eq!(shares.identity_bytes, budget / 8);
+            assert_eq!(shares.inventory_bytes, budget / 8);
             assert_eq!(shares.total_bytes(), budget / 2);
         }
         assert_eq!(

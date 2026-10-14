@@ -30,6 +30,9 @@ impl GraphForge {
             construction_cpu_in_use: self.construction_cpu_admission.in_use(),
             construction_cpu_peak: self.construction_cpu_admission.peak(),
             observed_logical_cpus: self.resource_policy.observed_logical_cpus,
+            retained_inventory_metadata_bytes: self
+                .property_inventory_for_session()
+                .retained_metadata_bytes(),
             retained_topology_bytes: self
                 .adjacency_provider_for_session()
                 .retained_topology_bytes(),

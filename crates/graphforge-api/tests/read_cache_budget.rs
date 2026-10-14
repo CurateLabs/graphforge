@@ -252,6 +252,12 @@ fn the_topology_caches_together_stay_within_their_share_of_the_budget() {
         }
         let held = retained(&tight);
         assert_eq!(held.budget, tight_share(), "{held:?}");
+        assert!(
+            tight
+                .resource_diagnostics()
+                .retained_inventory_metadata_bytes as u64
+                <= ReadCacheBudget::from_query_budget(TIGHT_BUDGET).inventory_bytes
+        );
         assert_eq!(held.label_index, all.label_index, "{held:?}");
         assert_eq!(held.edge_id_maps, all.edge_id_maps, "{held:?}");
         // The shard cache retains at most its capacity, `P` less the label

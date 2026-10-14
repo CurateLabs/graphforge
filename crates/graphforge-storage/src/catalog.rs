@@ -928,6 +928,16 @@ fn admit_parquet_edges(leading: &[u8], footer: &[u8], length: u64) -> Result<(),
 pub(crate) fn admitted_parquet_source<T: parquet::file::reader::ChunkReader + 'static>(
     source: T,
 ) -> Result<ParquetRecordBatchReaderBuilder<T>, DataFusionError> {
+    preflight_parquet_source(&source)?;
+    let builder = ParquetRecordBatchReaderBuilder::try_new(source).map_err(parquet_err)?;
+    admit_decoded_parquet(&builder)?;
+    Ok(builder)
+}
+
+/// Check encoded metadata size before any logical-source footer is decoded.
+pub(crate) fn preflight_parquet_source<T: parquet::file::reader::ChunkReader>(
+    source: &T,
+) -> Result<(), DataFusionError> {
     let length = source.len();
     if length < 12 {
         return Err(DataFusionError::Execution(
@@ -937,9 +947,7 @@ pub(crate) fn admitted_parquet_source<T: parquet::file::reader::ChunkReader + 's
     let leading = source.get_bytes(0, 4).map_err(parquet_err)?;
     let footer = source.get_bytes(length - 8, 8).map_err(parquet_err)?;
     admit_parquet_edges(&leading, &footer, length)?;
-    let builder = ParquetRecordBatchReaderBuilder::try_new(source).map_err(parquet_err)?;
-    admit_decoded_parquet(&builder)?;
-    Ok(builder)
+    Ok(())
 }
 
 fn admit_decoded_parquet<T: parquet::file::reader::ChunkReader + 'static>(

@@ -203,6 +203,8 @@ pub struct ResourcePolicyDiagnostics {
     pub observed_logical_cpus: usize,
     /// Bytes retained by the adjacency provider against its share of the query budget.
     pub retained_topology_bytes: graphforge_exec::RetainedTopologyBytes,
+    /// Admitted route/path structure and memoized property footer metadata.
+    pub retained_inventory_metadata_bytes: usize,
 }
 
 /// Fail-closed ceiling that still preserves concurrent same-instance reads

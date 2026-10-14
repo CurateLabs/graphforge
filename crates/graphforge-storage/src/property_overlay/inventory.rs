@@ -724,6 +724,7 @@ impl AuthenticatedPropertyInventory {
     ) -> Result<Self, GfError> {
         let Some(participant) = generation.declared_graph_files_participant()? else {
             return Ok(Self {
+                memory_budget: super::memory_budget::InventoryMemoryBudget::default(),
                 root: None,
                 root_path: None,
                 generation_lease: Some(generation.clone()),
@@ -936,6 +937,7 @@ impl AuthenticatedPropertyInventory {
         cancelled: Option<&std::sync::atomic::AtomicBool>,
         admission: FragmentAdmission,
     ) -> Result<Self, GfError> {
+        let memory_budget = super::memory_budget::InventoryMemoryBudget::default();
         let root = graphforge_filesystem::StableDirectory::open(root_path).map_err(io_error)?;
         #[cfg(test)]
         let handle_counts = Arc::new(FragmentHandleCounts::default());
@@ -984,7 +986,7 @@ impl AuthenticatedPropertyInventory {
             if admission == FragmentAdmission::Eager {
                 // Footers are already decoded; summarize now so a conflicting
                 // route is refused at admission exactly as before.
-                let outcome = summarize_route(&root, *kind, route, fragments);
+                let outcome = summarize_route(&root, *kind, route, fragments, &memory_budget);
                 if let Err(error) = &outcome {
                     return Err(error.clone());
                 }
@@ -993,6 +995,7 @@ impl AuthenticatedPropertyInventory {
             route_summaries.insert((*kind, route.clone()), summary);
         }
         Ok(Self {
+            memory_budget,
             generation_lease: None,
             root: Some(root),
             root_path: Some(root_path.to_path_buf()),
@@ -1021,13 +1024,14 @@ impl AuthenticatedPropertyInventory {
         kind: PropertyRouteKind,
         route: &str,
     ) -> Result<Option<Arc<RouteSummary>>, GfError> {
+        self.ensure_structural_admission()?;
         let key = (kind, route.to_owned());
         let Some(cell) = self.route_summaries.get(&key) else {
             return Ok(None);
         };
         let root = self.retained_root()?;
         let fragments = self.routes.get(&key).map_or(&[][..], Vec::as_slice);
-        cell.get_or_init(|| summarize_route(root, kind, route, fragments))
+        cell.get_or_init(|| summarize_route(root, kind, route, fragments, &self.memory_budget))
             .clone()
             .map(Some)
     }
@@ -1039,7 +1043,13 @@ impl AuthenticatedPropertyInventory {
         kind: PropertyRouteKind,
         route: &str,
     ) -> Result<&'a FragmentFooter, GfError> {
-        fragment_footer(self.retained_root()?, fragment, kind, route)
+        fragment_footer(
+            self.retained_root()?,
+            fragment,
+            kind,
+            route,
+            &self.memory_budget,
+        )
     }
 
     fn retained_root(&self) -> Result<&graphforge_filesystem::StableDirectory, GfError> {
@@ -1172,29 +1182,6 @@ impl AuthenticatedPropertyInventory {
         } else {
             usize::try_from(bytes / 16).unwrap_or(usize::MAX).max(1)
         }
-    }
-
-    /// Sound upper bound on logical rows for one route.
-    ///
-    /// The newest-wins merge and tombstones can only remove physical fragment
-    /// rows, so their admitted footer counts are a safe planning estimate. It
-    /// is deliberately not advertised as an exact logical count.
-    ///
-    /// # Errors
-    /// Propagates content admission and footer errors.
-    pub fn route_row_upper_bound(
-        &self,
-        kind: PropertyRouteKind,
-        route: &str,
-    ) -> Result<usize, GfError> {
-        let Some(fragments) = self.routes.get(&(kind, route.to_owned())) else {
-            return Ok(0);
-        };
-        let root = self.retained_root()?;
-        fragments.iter().try_fold(0usize, |rows, fragment| {
-            let physical_rows = fragment_footer(root, fragment, kind, route)?.physical_rows;
-            Ok(rows.saturating_add(physical_rows))
-        })
     }
 }
 
@@ -1858,6 +1845,8 @@ impl PropertyAdmission<'_> {
             crate::catalog::admitted_parquet_source(reader)
                 .map_err(|error| GfError::Storage(error.to_string()))?
         } else {
+            crate::catalog::preflight_parquet_source(&reader)
+                .map_err(GfError::from_execution_error)?;
             ParquetRecordBatchReaderBuilder::try_new(reader).map_err(parquet_error)?
         };
         let physical_rows = usize::try_from(builder.metadata().file_metadata().num_rows())
@@ -1894,6 +1883,7 @@ impl PropertyAdmission<'_> {
                 metadata,
                 uuid_range,
             })),
+            footer_admission: OnceLock::new(),
             readonly_index: OnceLock::new(),
             keys_validated: std::sync::atomic::AtomicBool::new(false),
             authentication_bytes,
@@ -1981,6 +1971,7 @@ fn first_touch_fragment(
         parts,
         object: OnceLock::new(),
         footer: OnceLock::new(),
+        footer_admission: OnceLock::new(),
         readonly_index: OnceLock::new(),
         keys_validated: std::sync::atomic::AtomicBool::new(false),
         authentication_bytes: 0,
@@ -2098,6 +2089,7 @@ fn decode_fragment_footer<R: parquet::file::reader::ChunkReader + 'static>(
     kind: PropertyRouteKind,
     route: &str,
 ) -> Result<FragmentFooter, GfError> {
+    crate::catalog::preflight_parquet_source(&source).map_err(GfError::from_execution_error)?;
     let builder = ParquetRecordBatchReaderBuilder::try_new(source).map_err(parquet_error)?;
     let physical_rows = usize::try_from(builder.metadata().file_metadata().num_rows())
         .map_err(|_| corrupt("property fragment row count is not representable"))?;
@@ -2126,12 +2118,13 @@ fn fragment_footer<'a>(
     fragment: &'a AuthenticatedPropertyFragment,
     kind: PropertyRouteKind,
     route: &str,
+    budget: &super::memory_budget::InventoryMemoryBudget,
 ) -> Result<&'a FragmentFooter, GfError> {
-    fragment
+    let footer = fragment
         .footer
         .get_or_init(|| {
             let object = fragment_object(root, fragment)?;
-            match object.envelope {
+            let footer = match object.envelope {
                 None => {
                     let file = open_retained_under(root, &fragment.physical_relative)?;
                     if graphforge_filesystem::file_identity(&file).map_err(io_error)?
@@ -2172,10 +2165,14 @@ fn fragment_footer<'a>(
                     );
                     footer
                 }
-            }
+            }?;
+            super::memory_budget::admit_footer(budget, fragment, &footer)?;
+            Ok(footer)
         })
         .as_ref()
-        .map_err(Clone::clone)
+        .map_err(Clone::clone)?;
+    super::memory_budget::admit_footer(budget, fragment, footer)?;
+    Ok(footer)
 }
 
 /// Merge the footers of one route into its canonical schema, validating the
@@ -2185,10 +2182,11 @@ fn summarize_route(
     kind: PropertyRouteKind,
     route: &str,
     fragments: &[AuthenticatedPropertyFragment],
+    budget: &super::memory_budget::InventoryMemoryBudget,
 ) -> RouteSummaryOutcome {
     let footers = fragments
         .iter()
-        .map(|fragment| fragment_footer(root, fragment, kind, route))
+        .map(|fragment| fragment_footer(root, fragment, kind, route, budget))
         .collect::<Result<Vec<_>, GfError>>()?;
     let inputs = footers
         .iter()

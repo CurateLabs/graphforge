@@ -55,7 +55,8 @@ state.
 
 The query pool has budget `B`. Each hydrated generation's adjacency provider
 shares `B / 4` across decoded CSR shards, the node-label index and edge-property
-ID maps; its ordinal-identity handle gets another `B / 4`. A single decoded
+ID maps; its ordinal-identity handle gets `B / 8`, and retained property
+inventory structure and footer metadata get `B / 8`. A single decoded
 CSR shard may exceed the topology share, bounded by the shard admission limits.
 Label slots and dictionary arrays count allocated capacity, and optional views
 that do not fit are declined before allocation. The facade's
@@ -74,8 +75,16 @@ lacks them uses `num_values * uncompressed_size`. An estimate beyond the query
 pool fails with the named `ExpandExec hop read` consumer. The ordinary storage
 reader also enforces its encoded-footer, row-group and column admission caps.
 
+Property inventory admission counts route/path/map capacities and twice
+`ParquetMetaData::memory_size()` plus Arrow schema storage per cached footer
+(the second copy allows merged route summaries). A footer beyond the shared
+inventory allowance fails with `GF_RESOURCE_LIMIT`, naming `property inventory
+metadata`, and is not cached. The budget includes every fragment rather than
+applying a separate limit to each one. Facade diagnostics expose admitted
+`retained_inventory_metadata_bytes`.
+
 These formulas bound the named caches and edge decoder. They do not establish
-a universal RSS ceiling: inventory metadata, node/property decoder scratch,
+a universal RSS ceiling: node/property decoder scratch,
 runtime buffers and allocator retention remain separate consumers. Reproduce
 the facade pressure, refusal and subprocess RSS checks with the Rust gate
 narrowed to `graphforge-api` tests `read_cache_budget` and `read_cache_rss`.
