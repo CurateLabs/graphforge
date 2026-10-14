@@ -62,6 +62,15 @@ fn apply_configuration(bytes: &mut Bytes, limit: usize, structure: usize) {
 }
 
 impl InventoryMemoryBudget {
+    pub(super) fn for_query_memory_budget(query_budget: u64) -> Self {
+        let budget = Self::default();
+        let limit =
+            usize::try_from(ReadCacheBudget::from_query_budget(query_budget).inventory_bytes)
+                .unwrap_or(usize::MAX);
+        budget.configure(limit, 0).expect("an empty inventory fits");
+        budget
+    }
+
     fn configure(&self, limit: usize, structure: usize) -> Result<(), GfError> {
         let mut bytes = self
             .0

@@ -91,10 +91,11 @@ impl<'a> FacadeMutationLifecycle<'a> {
             &self.graph.dir().topology_files()?,
         )?;
         let inventory = Arc::new(
-            graphforge_storage::AuthenticatedPropertyInventory::from_materialized_inventory(
+            graphforge_storage::AuthenticatedPropertyInventory::from_materialized_inventory_with_query_memory_budget(
                 &self.parent,
                 &self.graph.dir(),
                 inventory,
+                self.graph.resource_policy.memory_budget_bytes,
             )?,
         );
         let adjacency = Arc::new(crate::adjacency_provider_for_graph(

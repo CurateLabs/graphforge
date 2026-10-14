@@ -1,5 +1,7 @@
 //! Inventory for authenticated property overlays.
 
+mod generation_capture;
+
 #[cfg(test)]
 use super::{FragmentHandleCounts, TestMutationBarrier};
 
@@ -19,6 +21,21 @@ use super::{
     RouteSummaryOutcome, Seek, Serialize, Write, corrupt, fs, io_error, json_error, parquet_error,
     retained_read_at, validate_fragment_schema,
 };
+
+#[derive(Clone, Copy)]
+struct InventoryAdmission {
+    fragments: FragmentAdmission,
+    query_memory_budget: Option<u64>,
+}
+
+impl From<FragmentAdmission> for InventoryAdmission {
+    fn from(fragments: FragmentAdmission) -> Self {
+        Self {
+            fragments,
+            query_memory_budget: None,
+        }
+    }
+}
 
 impl AuthenticatedPropertyInventory {
     /// Authenticate the current property authority of a project or materialized
@@ -496,57 +513,6 @@ impl AuthenticatedPropertyInventory {
         }
     }
 
-    /// Resolve property authority from a pinned project generation.
-    ///
-    /// Expanded V1 generations retain files beneath their authenticated graph
-    /// tree. Compact V2 generations retain the exact digest-addressed CAS
-    /// object named by each authenticated manifest entry.
-    pub fn from_resolved_generation(
-        generation: &crate::ResolvedProjectGeneration,
-    ) -> Result<Self, GfError> {
-        Self::from_resolved_generation_route(generation, None)
-    }
-
-    /// Admit the private replay workspace of a pinned delta-bearing generation.
-    ///
-    /// The retained files come from `root`, while the generation lease remains
-    /// the immutable authority that owns the verified base plus delta run.
-    pub fn from_materialized_generation(
-        generation: &crate::ResolvedProjectGeneration,
-        root: &Path,
-        entries: Vec<crate::GraphFileEntry>,
-    ) -> Result<Self, GfError> {
-        let mut admitted = Self::from_entries_at_root(root, entries)?;
-        admitted.seed_semantic_property_schemas(generation)?;
-        admitted.generation_lease = Some(generation.clone());
-        Ok(admitted)
-    }
-
-    /// Admit a materialized workspace with its explicit captured layout authority.
-    pub fn from_materialized_inventory(
-        generation: &crate::ResolvedProjectGeneration,
-        root: &Path,
-        inventory: crate::GraphFilesInventory,
-    ) -> Result<Self, GfError> {
-        let mut admitted = Self::from_inventory_at_root(root, inventory, None)?;
-        admitted.seed_semantic_property_schemas(generation)?;
-        admitted.generation_lease = Some(generation.clone());
-        Ok(admitted)
-    }
-
-    /// Admit checksum-only private replay files under their owning immutable generation.
-    /// This read authority cannot be serialized as a CAS publication inventory.
-    pub fn from_private_workspace_inventory(
-        generation: &crate::ResolvedProjectGeneration,
-        root: &Path,
-        inventory: crate::GraphReadInventory,
-    ) -> Result<Self, GfError> {
-        let mut admitted = Self::from_read_inventory_at_root(root, inventory, None)?;
-        admitted.seed_semantic_property_schemas(generation)?;
-        admitted.generation_lease = Some(generation.clone());
-        Ok(admitted)
-    }
-
     fn from_read_inventory_at_root(
         root: &Path,
         inventory: crate::GraphReadInventory,
@@ -561,6 +527,20 @@ impl AuthenticatedPropertyInventory {
         root: &Path,
         inventory: crate::GraphReadInventory,
         requested_routes: Option<&std::collections::BTreeSet<(PropertyRouteKind, String)>>,
+    ) -> Result<Self, GfError> {
+        Self::from_read_inventory_at_root_for_routes_with_budget(
+            root,
+            inventory,
+            requested_routes,
+            None,
+        )
+    }
+
+    fn from_read_inventory_at_root_for_routes_with_budget(
+        root: &Path,
+        inventory: crate::GraphReadInventory,
+        requested_routes: Option<&std::collections::BTreeSet<(PropertyRouteKind, String)>>,
+        query_memory_budget: Option<u64>,
     ) -> Result<Self, GfError> {
         let table = inventory.authenticate_routes(root)?;
         for relative in &inventory.path_names {
@@ -629,7 +609,10 @@ impl AuthenticatedPropertyInventory {
             table.as_ref(),
             false,
             None,
-            FragmentAdmission::Eager,
+            InventoryAdmission {
+                fragments: FragmentAdmission::Eager,
+                query_memory_budget,
+            },
         )?;
         admitted.edge_routes = edge_routes;
         if requested_routes.is_some() {
@@ -655,6 +638,24 @@ impl AuthenticatedPropertyInventory {
         requested_route: Option<(PropertyRouteKind, &str)>,
         admit_resources: bool,
         cancelled: Option<&std::sync::atomic::AtomicBool>,
+    ) -> Result<Self, GfError> {
+        Self::from_inventory_at_root_with_admission_and_budget(
+            root,
+            inventory,
+            requested_route,
+            admit_resources,
+            cancelled,
+            None,
+        )
+    }
+
+    fn from_inventory_at_root_with_admission_and_budget(
+        root: &Path,
+        inventory: crate::GraphFilesInventory,
+        requested_route: Option<(PropertyRouteKind, &str)>,
+        admit_resources: bool,
+        cancelled: Option<&std::sync::atomic::AtomicBool>,
+        query_memory_budget: Option<u64>,
     ) -> Result<Self, GfError> {
         check_import_cancelled(cancelled)?;
         let table = crate::route_component::authenticate_manifest_routes(
@@ -697,149 +698,13 @@ impl AuthenticatedPropertyInventory {
             table.as_ref(),
             admit_resources,
             cancelled,
-            FragmentAdmission::Eager,
+            InventoryAdmission {
+                fragments: FragmentAdmission::Eager,
+                query_memory_budget,
+            },
         )?;
         admitted.edge_routes = topology.edge_routes;
         admitted.node_files = topology.node_files;
-        Ok(admitted)
-    }
-
-    /// Resolve one route without opening or hashing authenticated entries for
-    /// unrelated routes in the pinned generation inventory.
-    pub fn from_resolved_generation_for_route(
-        generation: &crate::ResolvedProjectGeneration,
-        kind: PropertyRouteKind,
-        route: &str,
-    ) -> Result<Self, GfError> {
-        Self::from_resolved_generation_route(generation, Some((kind, route)))
-    }
-
-    #[expect(
-        clippy::too_many_lines,
-        reason = "one constructor per participant version, each binding its own root and route authority"
-    )]
-    pub(super) fn from_resolved_generation_route(
-        generation: &crate::ResolvedProjectGeneration,
-        requested_route: Option<(PropertyRouteKind, &str)>,
-    ) -> Result<Self, GfError> {
-        let Some(participant) = generation.declared_graph_files_participant()? else {
-            return Ok(Self {
-                memory_budget: super::memory_budget::InventoryMemoryBudget::default(),
-                root: None,
-                root_path: None,
-                generation_lease: Some(generation.clone()),
-                routes: BTreeMap::new(),
-                edge_routes: BTreeMap::new(),
-                node_files: requested_route.is_none().then(Vec::new),
-                schemas: BTreeMap::new(),
-                route_summaries: BTreeMap::new(),
-                node_topology_files: requested_route.is_none().then(Vec::new),
-                authority_bytes: 0,
-                authority_block_equivalents: 0,
-                authority_read_calls: 0,
-                #[cfg(test)]
-                handle_counts: Arc::new(FragmentHandleCounts::default()),
-                #[cfg(test)]
-                late_decoder_failure_row_countdown: Arc::new(AtomicU64::new(0)),
-                #[cfg(test)]
-                mutation_barrier: Mutex::new(None),
-            });
-        };
-        // Payload content is admitted on first touch (or, for property
-        // fragments, when each fragment is admitted below).
-        let inventory = generation
-            .unadmitted_graph_files_inventory()?
-            .ok_or_else(|| {
-                corrupt("declared graph-files participant has no authenticated inventory")
-            })?;
-        let mut admitted = match participant {
-            crate::graph_files::GraphFilesParticipant::V1(_) => {
-                let root = generation.graph_tree_root();
-                let route_table = crate::route_component::authenticate_manifest_routes(
-                    inventory.format_version,
-                    &inventory.files,
-                    |entry| {
-                        let mut retained =
-                            crate::graph_files::resolve_v1_inventory_entry_retained(&root, entry)?;
-                        retained.file.rewind().map_err(io_error)?;
-                        let mut bytes = Vec::new();
-                        retained
-                            .file
-                            .take(entry.byte_length + 1)
-                            .read_to_end(&mut bytes)
-                            .map_err(io_error)?;
-                        Ok(bytes)
-                    },
-                )?;
-                let topology = topology_authority(
-                    &root,
-                    &inventory.files,
-                    route_table.as_ref(),
-                    false,
-                    requested_route,
-                    None,
-                )?;
-                let entries = resolve_versioned_property_entries_for_route(
-                    &root,
-                    inventory.files,
-                    requested_route,
-                    route_table.as_ref(),
-                    None,
-                )?;
-                let mut admitted =
-                    Self::admit_entries(&root, entries, requested_route, route_table.as_ref())?;
-                admitted.edge_routes = topology.edge_routes;
-                admitted.node_files = topology.node_files;
-                Ok::<Self, GfError>(admitted)
-            }
-            crate::graph_files::GraphFilesParticipant::V2(_) => {
-                let root = generation.container_root();
-                let route_table = crate::route_component::authenticate_manifest_routes(
-                    inventory.format_version,
-                    &inventory.files,
-                    |entry| {
-                        crate::graph_object_store::read_graph_control_object_by_digest(
-                            root,
-                            &entry.content_sha256,
-                            64 * 1024 * 1024,
-                        )
-                    },
-                )?;
-                let topology = topology_authority(
-                    root,
-                    &inventory.files,
-                    route_table.as_ref(),
-                    true,
-                    requested_route,
-                    None,
-                )?;
-                let entries = inventory
-                    .files
-                    .into_iter()
-                    .map(|entry| {
-                        let path = crate::graph_object_path(root, &entry.content_sha256)?;
-                        let relative = path
-                            .strip_prefix(root)
-                            .map_err(|_| corrupt("graph object path escaped its container"))?;
-                        Ok((entry, relative.to_path_buf()))
-                    })
-                    .collect::<Result<Vec<_>, GfError>>()?;
-                let mut admitted = Self::admit_entries_with_admission(
-                    root,
-                    entries,
-                    requested_route,
-                    route_table.as_ref(),
-                    false,
-                    None,
-                    FragmentAdmission::FirstTouch,
-                )?;
-                admitted.edge_routes = topology.edge_routes;
-                admitted.node_files = topology.node_files;
-                Ok::<Self, GfError>(admitted)
-            }
-        }?;
-        admitted.seed_semantic_property_schemas(generation)?;
-        admitted.generation_lease = Some(generation.clone());
         Ok(admitted)
     }
 
@@ -890,7 +755,7 @@ impl AuthenticatedPropertyInventory {
             route_table,
             false,
             None,
-            FragmentAdmission::Eager,
+            FragmentAdmission::Eager.into(),
         )
     }
 
@@ -901,7 +766,7 @@ impl AuthenticatedPropertyInventory {
         route_table: Option<&crate::route_component::RouteTable>,
         admit_resources: bool,
         cancelled: Option<&std::sync::atomic::AtomicBool>,
-        admission: FragmentAdmission,
+        admission: InventoryAdmission,
     ) -> Result<Self, GfError> {
         let entries = entries
             .into_iter()
@@ -935,9 +800,16 @@ impl AuthenticatedPropertyInventory {
         route_table: Option<&crate::route_component::RouteTable>,
         admit_resources: bool,
         cancelled: Option<&std::sync::atomic::AtomicBool>,
-        admission: FragmentAdmission,
+        admission: InventoryAdmission,
     ) -> Result<Self, GfError> {
-        let memory_budget = super::memory_budget::InventoryMemoryBudget::default();
+        let InventoryAdmission {
+            fragments: admission,
+            query_memory_budget,
+        } = admission;
+        let memory_budget = query_memory_budget.map_or_else(
+            super::memory_budget::InventoryMemoryBudget::default,
+            super::memory_budget::InventoryMemoryBudget::for_query_memory_budget,
+        );
         let root = graphforge_filesystem::StableDirectory::open(root_path).map_err(io_error)?;
         #[cfg(test)]
         let handle_counts = Arc::new(FragmentHandleCounts::default());

@@ -1115,7 +1115,7 @@ fn capture_lazy_footer_inventory(root: &Path) -> AuthenticatedPropertyInventory 
         None,
         false,
         None,
-        FragmentAdmission::FirstTouch,
+        FragmentAdmission::FirstTouch.into(),
     )
     .unwrap()
 }
@@ -1215,6 +1215,161 @@ fn metadata_heavy_footer_fits_once_but_a_second_footer_exceeds_the_fixed_share()
     }
     let refused = &tight.routes[&(PropertyRouteKind::Node, "Route1".into())][0];
     assert!(refused.footer.get().unwrap().is_err());
+}
+
+fn metadata_heavy_generation_fixture(
+    row_groups: usize,
+    routes: usize,
+) -> (TempDir, TempDir, crate::ResolvedProjectGeneration) {
+    let source = metadata_heavy_footer_fixture(row_groups);
+    for route in 2..routes {
+        fs::copy(
+            source.path().join("properties/Route0.parquet"),
+            source
+                .path()
+                .join(format!("properties/Route{route}.parquet")),
+        )
+        .unwrap();
+    }
+    let (_, graph_files) = crate::capture_graph_files(source.path()).unwrap();
+    let mut participants = crate::empty_workspace_participants().unwrap();
+    participants.insert(0, graph_files);
+    let container = TempDir::new().unwrap();
+    crate::open_or_initialize_project(container.path()).unwrap();
+    let request = crate::ProjectGenerationRequest {
+        transaction_uuid: graphforge_core::uuid::Uuid::now_v7(),
+        generation_uuid: graphforge_core::uuid::Uuid::now_v7(),
+        capabilities: vec![
+            crate::ProjectCapability {
+                capability_id: crate::GRAPH_CAPABILITY_ID.into(),
+                capability_version: crate::GRAPH_CAPABILITY_VERSION,
+            },
+            crate::ProjectCapability {
+                capability_id: "workspace".into(),
+                capability_version: 1,
+            },
+        ],
+        participants,
+    };
+    let crate::ProjectStageOutcome::Staged(staged) =
+        crate::stage_project_generation_with_graph_tree(
+            container.path(),
+            &request,
+            Some(source.path()),
+        )
+        .unwrap()
+    else {
+        panic!("fresh footer fixture unexpectedly replayed");
+    };
+    staged
+        .validate(|_| Ok(()), |_, _| Ok(()))
+        .unwrap()
+        .publish()
+        .unwrap();
+    let generation = crate::resolve_project_generation(container.path()).unwrap();
+    (source, container, generation)
+}
+
+#[test]
+fn eager_generation_footers_use_the_query_share_before_capture() {
+    const ROW_GROUPS: usize = 1200;
+    const ROUTES: usize = 64;
+    const QUERY_BUDGET: u64 = 2 << 30;
+    let (source, _container, generation) = metadata_heavy_generation_fixture(ROW_GROUPS, ROUTES);
+    let (materialized_inventory, _) = crate::capture_graph_files(source.path()).unwrap();
+    assert!(matches!(
+        generation.declared_graph_files_participant().unwrap(),
+        Some(crate::GraphFilesParticipant::V1(_))
+    ));
+    let private_inventory = crate::capture_graph_read_inventory(source.path()).unwrap();
+    for error in [
+        AuthenticatedPropertyInventory::from_resolved_generation(&generation).unwrap_err(),
+        AuthenticatedPropertyInventory::from_private_workspace_inventory(
+            &generation,
+            source.path(),
+            private_inventory.clone(),
+        )
+        .unwrap_err(),
+        AuthenticatedPropertyInventory::from_materialized_inventory(
+            &generation,
+            source.path(),
+            materialized_inventory.clone(),
+        )
+        .unwrap_err(),
+    ] {
+        assert_eq!(error.code(), "GF_RESOURCE_LIMIT");
+        assert!(error.to_string().contains("property inventory metadata"));
+    }
+    let resolved =
+        AuthenticatedPropertyInventory::from_resolved_generation_with_query_memory_budget(
+            &generation,
+            QUERY_BUDGET,
+        )
+        .expect("the final share must apply before eager V1 footer admission");
+    let private =
+        AuthenticatedPropertyInventory::from_private_workspace_inventory_with_query_memory_budget(
+            &generation,
+            source.path(),
+            private_inventory.clone(),
+            QUERY_BUDGET,
+        )
+        .expect("the final share must apply before eager replay footer admission");
+    let materialized =
+        AuthenticatedPropertyInventory::from_materialized_inventory_with_query_memory_budget(
+            &generation,
+            source.path(),
+            materialized_inventory.clone(),
+            QUERY_BUDGET,
+        )
+        .expect("the final share must apply before eager materialized footer admission");
+    for inventory in [&resolved, &private, &materialized] {
+        let retained = inventory.retained_metadata_bytes();
+        assert!(
+            retained > crate::read_cache_budget::ReadCacheBudget::DEFAULT.inventory_bytes as usize,
+            "real retained footers must exceed the standalone allowance: {retained}"
+        );
+        assert!(
+            retained
+                <= crate::read_cache_budget::ReadCacheBudget::from_query_budget(QUERY_BUDGET)
+                    .inventory_bytes as usize
+        );
+        assert_eq!(
+            inventory.generation_uuid(),
+            Some(generation.generation_uuid())
+        );
+        for route in 0..ROUTES {
+            assert_eq!(
+                inventory
+                    .route_row_upper_bound(PropertyRouteKind::Node, &format!("Route{route}"))
+                    .unwrap(),
+                ROW_GROUPS
+            );
+        }
+        assert_eq!(inventory.retained_metadata_bytes(), retained);
+    }
+    for error in [
+        AuthenticatedPropertyInventory::from_resolved_generation_with_query_memory_budget(
+            &generation,
+            512 << 20,
+        )
+        .unwrap_err(),
+        AuthenticatedPropertyInventory::from_materialized_inventory_with_query_memory_budget(
+            &generation,
+            source.path(),
+            materialized_inventory,
+            512 << 20,
+        )
+        .unwrap_err(),
+        AuthenticatedPropertyInventory::from_private_workspace_inventory_with_query_memory_budget(
+            &generation,
+            source.path(),
+            private_inventory,
+            512 << 20,
+        )
+        .unwrap_err(),
+    ] {
+        assert_eq!(error.code(), "GF_RESOURCE_LIMIT");
+    }
 }
 
 #[test]

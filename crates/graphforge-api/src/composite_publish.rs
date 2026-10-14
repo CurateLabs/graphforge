@@ -227,8 +227,11 @@ impl GraphForge {
         let recorded_at = (self.clock.lock().expect("clock lock poisoned"))()?;
 
         let publication = (|| -> Result<RecordBatch, GfError> {
-            let property_inventory =
-                crate::property_inventory_for_hydrated_generation(parent, &dir)?;
+            let property_inventory = crate::property_inventory_for_hydrated_generation(
+                parent,
+                &dir,
+                self.resource_policy.memory_budget_bytes,
+            )?;
             #[cfg(test)]
             after_property_inventory_capture_for_test();
             apply_graph_mutations(

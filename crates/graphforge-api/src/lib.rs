@@ -894,8 +894,11 @@ impl GraphForge {
             load_workspace_ontology(&resolved_generation)?;
         let (dir, workspace, graph_open_evidence) =
             hydrate_graph_workspace(&resolved_generation, false)?;
-        let property_inventory =
-            property_inventory_for_hydrated_generation(&resolved_generation, &dir)?;
+        let property_inventory = property_inventory_for_hydrated_generation(
+            &resolved_generation,
+            &dir,
+            resource_policy.memory_budget_bytes,
+        )?;
         let ordinal_identities = ordinal_identity_resolver(
             &resolved_generation,
             &dir,
@@ -1131,7 +1134,11 @@ impl GraphForge {
         let (dir, workspace, graph_open_evidence) =
             hydrate_graph_workspace(&resolved_generation, access.pins_published_tree())?;
         let (property_inventory, hydrated_inventory) =
-            property_and_graph_inventory_for_hydrated_generation(&resolved_generation, &dir)?;
+            property_and_graph_inventory_for_hydrated_generation(
+                &resolved_generation,
+                &dir,
+                resource_policy.memory_budget_bytes,
+            )?;
         let ordinal_identities = ordinal_identity_resolver(
             &resolved_generation,
             &dir,

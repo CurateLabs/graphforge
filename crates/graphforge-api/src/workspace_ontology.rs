@@ -257,8 +257,11 @@ impl GraphForge {
                 ));
             }
             let candidate = crate::hydrate_graph_workspace(&parent, false)?;
-            let inventory =
-                crate::property_inventory_for_hydrated_generation(&parent, &candidate.0)?;
+            let inventory = crate::property_inventory_for_hydrated_generation(
+                &parent,
+                &candidate.0,
+                self.resource_policy.memory_budget_bytes,
+            )?;
             let authority = graphforge_storage::TopologyFileAuthority::from_inventory(
                 &candidate.0,
                 &inventory,
@@ -334,8 +337,11 @@ impl GraphForge {
                     prepared,
                 );
             }
-            let inventory =
-                crate::property_inventory_for_hydrated_generation(&self.resolved_generation, &dir)?;
+            let inventory = crate::property_inventory_for_hydrated_generation(
+                &self.resolved_generation,
+                &dir,
+                self.resource_policy.memory_budget_bytes,
+            )?;
             self.replace_workspace_owner(crate::GraphWorkspace::new(dir, workspace, &inventory)?);
             self.graph_open_evidence = evidence;
             self.identity_probe.invalidate();
@@ -603,8 +609,11 @@ fn publish_workspace_records_inner(
     let mut prepare =
         |generation: &graphforge_storage::ResolvedProjectGeneration| -> Result<(), GfError> {
             if let Some(dir) = candidate_graph_root {
-                let properties =
-                    crate::property_inventory_for_hydrated_generation(generation, dir)?;
+                let properties = crate::property_inventory_for_hydrated_generation(
+                    generation,
+                    dir,
+                    graph.resource_policy.memory_budget_bytes,
+                )?;
                 let ordinal = crate::ordinal_identity_handle(
                     generation,
                     dir,

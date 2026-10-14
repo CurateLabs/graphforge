@@ -464,10 +464,11 @@ impl GraphForge {
         self.dir().topology.restore(topology.clone());
         let projected_generation = self.generation_for_read()?;
         let projected_inventory = Arc::new(
-            graphforge_storage::AuthenticatedPropertyInventory::from_materialized_inventory(
+            graphforge_storage::AuthenticatedPropertyInventory::from_materialized_inventory_with_query_memory_budget(
                 &projected_generation,
                 &self.dir(),
                 graphforge_storage::capture_graph_files_with_topology(&self.dir(), topology)?.0,
+                self.resource_policy.memory_budget_bytes,
             )?,
         );
         *self

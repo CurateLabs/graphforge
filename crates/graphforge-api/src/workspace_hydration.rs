@@ -189,7 +189,11 @@ impl GraphForge {
         generation: &ResolvedProjectGeneration,
         graph_root: &Path,
     ) -> Result<PreparedGenerationReadAuthority, GfError> {
-        let properties = property_inventory_for_hydrated_generation(generation, graph_root)?;
+        let properties = property_inventory_for_hydrated_generation(
+            generation,
+            graph_root,
+            self.resource_policy.memory_budget_bytes,
+        )?;
         let ordinal = ordinal_identity_handle(
             generation,
             graph_root,
@@ -341,9 +345,14 @@ pub(super) fn decode_runtime_catalog<T: parquet::file::reader::ChunkReader + 'st
 pub(super) fn property_inventory_for_hydrated_generation(
     generation: &ResolvedProjectGeneration,
     hydrated_root: &Path,
+    query_memory_budget: u64,
 ) -> Result<Arc<graphforge_storage::AuthenticatedPropertyInventory>, GfError> {
-    property_and_graph_inventory_for_hydrated_generation(generation, hydrated_root)
-        .map(|(properties, _)| properties)
+    property_and_graph_inventory_for_hydrated_generation(
+        generation,
+        hydrated_root,
+        query_memory_budget,
+    )
+    .map(|(properties, _)| properties)
 }
 
 // Hydration authenticates the published base and journal before deriving this
@@ -352,6 +361,7 @@ pub(super) fn property_inventory_for_hydrated_generation(
 pub(super) fn property_and_graph_inventory_for_hydrated_generation(
     generation: &ResolvedProjectGeneration,
     hydrated_root: &Path,
+    query_memory_budget: u64,
 ) -> Result<
     (
         Arc<graphforge_storage::AuthenticatedPropertyInventory>,
@@ -373,18 +383,20 @@ pub(super) fn property_and_graph_inventory_for_hydrated_generation(
     // generations require a fresh inventory of their effective workspace.
     let (admitted, effective) = match inventory {
         Some(inventory) if !has_deltas => (
-            graphforge_storage::AuthenticatedPropertyInventory::from_resolved_generation(
+            graphforge_storage::AuthenticatedPropertyInventory::from_resolved_generation_with_query_memory_budget(
                 generation,
+                query_memory_budget,
             )?,
             graphforge_storage::GraphReadInventory::from_published(&inventory)?,
         ),
         _ => {
             let materialized = graphforge_storage::capture_graph_read_inventory(hydrated_root)?;
             let admitted =
-                graphforge_storage::AuthenticatedPropertyInventory::from_private_workspace_inventory(
+                graphforge_storage::AuthenticatedPropertyInventory::from_private_workspace_inventory_with_query_memory_budget(
                     generation,
                     hydrated_root,
                     materialized.clone(),
+                    query_memory_budget,
                 )?;
             (admitted, materialized)
         }
