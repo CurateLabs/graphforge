@@ -26,7 +26,8 @@ use arrow::array::{ArrayRef, FixedSizeBinaryBuilder, RecordBatch, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema};
 use graphforge_storage::AuthenticatedPropertyInventory;
 use graphforge_storage::edge_property_index::{
-    EdgePropertyIdLookup, EdgePropertyLookup, lookup_edge_properties, lookup_edge_properties_by_id,
+    EdgeIdMap, EdgePropertyIdLookup, EdgePropertyLookup, lookup_edge_properties,
+    lookup_edge_properties_by_id,
 };
 
 use crate::GfError;
@@ -106,13 +107,15 @@ pub(crate) fn indexed_edge_property_batches_by_id(
     route: &str,
     targets: &BTreeSet<u64>,
     property_names: &[String],
+    map: Option<&EdgeIdMap>,
     owners: &mut BTreeSet<u64>,
 ) -> Result<Option<Vec<RecordBatch>>, GfError> {
-    let rows = match lookup_edge_properties_by_id(dir, inventory, route, targets, property_names)? {
-        EdgePropertyIdLookup::Absent => return Ok(Some(Vec::new())),
-        EdgePropertyIdLookup::NotAddressable => return Ok(None),
-        EdgePropertyIdLookup::Indexed(rows) => rows,
-    };
+    let rows =
+        match lookup_edge_properties_by_id(dir, inventory, route, targets, property_names, map)? {
+            EdgePropertyIdLookup::Absent => return Ok(Some(Vec::new())),
+            EdgePropertyIdLookup::NotAddressable => return Ok(None),
+            EdgePropertyIdLookup::Indexed(rows) => rows,
+        };
     if rows.ids.iter().any(|id| !owners.insert(*id)) {
         return Err(GfError::Project {
             code: graphforge_core::ProjectErrorCode::ProjectCorrupt,

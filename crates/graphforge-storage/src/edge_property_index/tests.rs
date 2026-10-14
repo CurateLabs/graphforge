@@ -1008,3 +1008,187 @@ fn a_manifest_written_before_pages_is_refused_until_the_index_is_rebuilt() {
     assert_eq!(error.code(), "GF_VALIDATION", "{error}");
     assert!(error.to_string().contains("rebuild_property_indexes"));
 }
+
+/// Ids that run against the UUID order and spread over every shard, so the id
+/// ranges of the shards overlap.
+fn scattered_ids(rows: usize) -> Vec<u64> {
+    (0..rows as u64)
+        .map(|row| (row * 7_919) % 100_003 + 1)
+        .collect()
+}
+
+/// The map of a built index, read from packs written below `dir`.
+fn id_map_of(built: &Built, dir: &Path) -> EdgeIdMap {
+    let directory = write_packs(dir, &built.packs);
+    let rows = built.manifest.shards.iter().map(|shard| shard.rows).sum();
+    EdgeIdMap::decode("route", built.manifest.clone(), directory, rows).unwrap()
+}
+
+#[test]
+fn an_id_map_answers_by_id_as_the_shards_do() {
+    let rows = 9_000;
+    let ids = scattered_ids(rows);
+    let built = build_with(
+        &[fragment(0, rows, 4)],
+        &[Some(ids.clone())],
+        Some("topology"),
+    )
+    .expect("indexed");
+    assert!(built.manifest.shards.len() >= 3, "several shards");
+    let dir = tempfile::tempdir().unwrap();
+    let map = id_map_of(&built, dir.path());
+
+    // Every 61st row, ids that no row holds, and the least and greatest id.
+    let mut targets: BTreeSet<u64> = (0..rows).step_by(61).map(|row| ids[row]).collect();
+    targets.extend([0, 100_004, u64::MAX]);
+    let expected: BTreeMap<u64, i64> = (0..rows)
+        .step_by(61)
+        .map(|row| (ids[row], row as i64 * 3))
+        .collect();
+    let properties = ["timestamp".to_owned(), "memo".to_owned()];
+    let EdgePropertyIdLookup::Indexed(found) = map.lookup(&targets, &properties).unwrap() else {
+        panic!("a map answers by id");
+    };
+    assert_eq!(found.ids, expected.keys().copied().collect::<Vec<_>>());
+    let (name, timestamps) = &found.columns[0];
+    assert_eq!(name, "timestamp");
+    assert_eq!(
+        int64s(timestamps),
+        expected.values().copied().collect::<Vec<_>>()
+    );
+    let (name, memos) = &found.columns[1];
+    assert_eq!(name, "memo");
+    assert!(
+        memos
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap()
+            .iter()
+            .all(|memo| memo == Some("mmmm"))
+    );
+
+    // The answer is the one a read of every shard gives.
+    let directory = dir.path().join("route.packs");
+    let mut packs = PackHandles::new(directory, built.manifest.page_rows);
+    let demanded = demanded_columns(&built.manifest, &properties);
+    let target_list: Vec<u64> = targets.iter().copied().collect();
+    let mut hits = Vec::new();
+    for shard in &built.manifest.shards {
+        let range = (shard.id_min.unwrap(), shard.id_max.unwrap());
+        if let Some(hit) = read_hit_shard_by_id(
+            &mut packs,
+            shard,
+            shard.ids.unwrap(),
+            range,
+            &target_list,
+            &demanded,
+        )
+        .unwrap()
+        {
+            hits.push(hit);
+        }
+    }
+    let (direct_ids, direct_columns) = assemble(&hits, &demanded).unwrap();
+    assert_eq!(found.ids, direct_ids);
+    for ((_, from_map), (_, direct)) in found.columns.iter().zip(&direct_columns) {
+        assert_eq!(from_map.to_data(), direct.to_data());
+    }
+}
+
+#[test]
+fn an_id_map_reads_only_the_property_pages_that_hold_its_rows() {
+    let rows = 2_000;
+    let ids = scattered_ids(rows);
+    let built = build_with(
+        &[fragment(0, rows, 4)],
+        &[Some(ids.clone())],
+        Some("topology"),
+    )
+    .expect("indexed");
+    assert_eq!(built.manifest.shards.len(), 1);
+    let shard = &built.manifest.shards[0];
+    let timestamps = column_named(&built.manifest, shard, "timestamp");
+    let dir = tempfile::tempdir().unwrap();
+    let map = id_map_of(&built, dir.path());
+    // A page of the timestamp blob holding none of the rows asked for is damaged
+    // after the map was built; the map never needs it.
+    flip_page(&dir.path().join("route.packs"), timestamps, rows, 0, 7);
+    let properties = ["timestamp".to_owned()];
+    let targets: BTreeSet<u64> = [ids[3], ids[1_500]].into();
+    let EdgePropertyIdLookup::Indexed(found) = map.lookup(&targets, &properties).unwrap() else {
+        panic!("a map answers by id");
+    };
+    let mut expected = [(ids[3], 9_i64), (ids[1_500], 4_500)];
+    expected.sort_unstable();
+    assert_eq!(found.ids, expected.map(|(id, _)| id));
+    assert_eq!(
+        int64s(&found.columns[0].1),
+        expected.map(|(_, value)| value)
+    );
+    // A row on the damaged page is refused, not answered.
+    let damaged: BTreeSet<u64> = [ids[7 * 128 + 2]].into();
+    let error = map
+        .lookup(&damaged, &properties)
+        .err()
+        .expect("a damaged property page is refused");
+    assert_eq!(error.code(), "GF_VALIDATION", "{error}");
+}
+
+#[test]
+fn an_id_map_refuses_an_id_two_rows_hold() {
+    let rows = 6_000;
+    let mut ids = scattered_ids(rows);
+    // Rows 5 and 5,000 lie in different shards and hold one id.
+    ids[5_000] = ids[5];
+    let built = build_with(
+        &[fragment(0, rows, 4)],
+        &[Some(ids.clone())],
+        Some("topology"),
+    )
+    .expect("indexed");
+    assert!(built.manifest.shards.len() >= 2);
+    let dir = tempfile::tempdir().unwrap();
+    let map = id_map_of(&built, dir.path());
+    let properties = ["timestamp".to_owned()];
+    let error = map
+        .lookup(&[ids[5]].into(), &properties)
+        .err()
+        .expect("an id with two owners is refused");
+    assert!(
+        matches!(
+            error,
+            GfError::Project {
+                code: graphforge_core::ProjectErrorCode::ProjectCorrupt,
+                ..
+            }
+        ),
+        "{error}"
+    );
+    // The ids around it are still answered.
+    let EdgePropertyIdLookup::Indexed(found) = map
+        .lookup(&[ids[6]].into(), &properties)
+        .expect("other ids are answered")
+    else {
+        panic!("a map answers by id");
+    };
+    assert_eq!(found.ids, [ids[6]]);
+}
+
+#[test]
+fn an_id_map_is_larger_than_the_pages_it_replaces_only_by_its_estimate() {
+    let rows = 9_000;
+    let built = build_with(
+        &[fragment(0, rows, 4)],
+        &[Some(scattered_ids(rows))],
+        Some("topology"),
+    )
+    .expect("indexed");
+    let dir = tempfile::tempdir().unwrap();
+    let map = id_map_of(&built, dir.path());
+    // The estimate a build decides on before it reads a page is what the built
+    // map then holds, to the vector's capacity.
+    let estimate = rows as u64 * std::mem::size_of::<IdLocation>() as u64
+        + manifest_resident_bytes(&built.manifest);
+    assert!(map.bytes() >= estimate, "{} < {estimate}", map.bytes());
+    assert!(map.bytes() < estimate + estimate / 4);
+}

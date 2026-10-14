@@ -825,6 +825,24 @@ pub trait AdjacencyProvider: Send + Sync {
     fn node_labels(&self) -> Result<Option<Arc<graphforge_storage::NodeLabelIndex>>, GfError> {
         Ok(None)
     }
+
+    /// The edge-id map of the edge-property index of `route` as `inventory`
+    /// authenticates it, shared by every operation over this generation (#1984).
+    ///
+    /// `Ok(None)` means this provider does not serve one (the default, no
+    /// current index that answers by edge id, or a map that would exceed the
+    /// provider byte budget, which is recorded in the I/O counters);
+    /// the caller then reads the index directly, which stays the authority.
+    ///
+    /// # Errors
+    /// Returns [`GfError`] when the authenticated index cannot be read as a map.
+    fn edge_property_id_map(
+        &self,
+        _inventory: &graphforge_storage::AuthenticatedPropertyInventory,
+        _route: &str,
+    ) -> Result<Option<Arc<graphforge_storage::edge_property_index::EdgeIdMap>>, GfError> {
+        Ok(None)
+    }
 }
 
 /// Operation-scoped adjacency view carrying already-admitted graph metadata.
@@ -873,6 +891,14 @@ impl AdjacencyProvider for AdmittedAdjacencyProvider<'_> {
 
     fn node_labels(&self) -> Result<Option<Arc<graphforge_storage::NodeLabelIndex>>, GfError> {
         self.provider.node_labels()
+    }
+
+    fn edge_property_id_map(
+        &self,
+        inventory: &graphforge_storage::AuthenticatedPropertyInventory,
+        route: &str,
+    ) -> Result<Option<Arc<graphforge_storage::edge_property_index::EdgeIdMap>>, GfError> {
+        self.provider.edge_property_id_map(inventory, route)
     }
 }
 
@@ -1236,6 +1262,25 @@ pub struct PersistentAdjacencyProvider {
     /// first demand and keyed by the topology generation it was built at.
     /// Dropped with `cache` and when the generation moves.
     node_labels: Mutex<Option<LabelIndexEntry>>,
+    /// The edge-id map of each edge-property route, built on first demand and
+    /// keyed by the topology generation. Dropped with `cache` and when the
+    /// generation moves.
+    edge_id_maps: Mutex<Option<EdgeIdMapEntry>>,
+}
+
+/// The built (or declined) edge-id maps of one topology generation.
+struct EdgeIdMapEntry {
+    generation: u64,
+    /// Per route: the digests of the index the answer was made for, and the
+    /// map, `None` when the map would exceed the provider byte budget. An
+    /// answer made for other digests than the inventory now authenticates is
+    /// made again.
+    routes: HashMap<String, EdgeIdMapSlot>,
+}
+
+struct EdgeIdMapSlot {
+    currency: (Option<String>, Option<String>),
+    map: Option<Arc<graphforge_storage::edge_property_index::EdgeIdMap>>,
 }
 
 /// One built (or declined) label index and the topology generation it describes.
@@ -1259,6 +1304,7 @@ impl PersistentAdjacencyProvider {
             cache: Mutex::new(HashMap::new()),
             indexes: Mutex::new(HashMap::new()),
             node_labels: Mutex::new(None),
+            edge_id_maps: Mutex::new(None),
         }
     }
 
@@ -1603,11 +1649,22 @@ impl PersistentAdjacencyProvider {
         // The label index is keyed by generation alone: it does not depend on
         // the CSR state above, so it follows the counter even when that state
         // was never read.
-        let mut labels = self.node_labels.lock().expect("node label index lock");
-        if labels.as_ref().is_some_and(|entry| {
+        {
+            let mut labels = self.node_labels.lock().expect("node label index lock");
+            if labels.as_ref().is_some_and(|entry| {
+                !read_topology_generation(&self.dir).is_ok_and(|g| g == entry.generation)
+            }) {
+                *labels = None;
+            }
+        }
+        // The edge-id maps follow the counter the same way. The label guard is
+        // released first: building a map holds the maps lock and then reads the
+        // label index, so taking the two in the other order could deadlock.
+        let mut maps = self.edge_id_maps.lock().expect("edge id map lock");
+        if maps.as_ref().is_some_and(|entry| {
             !read_topology_generation(&self.dir).is_ok_and(|g| g == entry.generation)
         }) {
-            *labels = None;
+            *maps = None;
         }
     }
 
@@ -1615,6 +1672,7 @@ impl PersistentAdjacencyProvider {
         self.cache.lock().expect("adjacency cache lock").clear();
         self.indexes.lock().expect("adjacency index lock").clear();
         *self.node_labels.lock().expect("node label index lock") = None;
+        *self.edge_id_maps.lock().expect("edge id map lock") = None;
     }
 
     fn cache_shared_view(
@@ -1709,6 +1767,75 @@ impl AdjacencyProvider for PersistentAdjacencyProvider {
             index: index.clone(),
         });
         Ok(index)
+    }
+
+    fn edge_property_id_map(
+        &self,
+        inventory: &graphforge_storage::AuthenticatedPropertyInventory,
+        route: &str,
+    ) -> Result<Option<Arc<graphforge_storage::edge_property_index::EdgeIdMap>>, GfError> {
+        use graphforge_storage::edge_property_index::{EdgeIdMap, EdgeIdMapBuild};
+        // The build is serialized so concurrent partitions share one map.
+        let mut maps = self.edge_id_maps.lock().expect("edge id map lock");
+        // Read before building, as for the label index.
+        let generation = read_topology_generation(&self.dir)?;
+        if maps
+            .as_ref()
+            .is_some_and(|entry| entry.generation != generation)
+        {
+            *maps = None;
+        }
+        let entry = maps.get_or_insert_with(|| EdgeIdMapEntry {
+            generation,
+            routes: HashMap::new(),
+        });
+        let currency = EdgeIdMap::currency(inventory, route);
+        if let Some(slot) = entry
+            .routes
+            .get(route)
+            .filter(|slot| slot.currency == currency)
+        {
+            return Ok(slot.map.clone());
+        }
+        // The maps and the label index share the provider's byte budget.
+        let held: u64 = entry
+            .routes
+            .iter()
+            .filter(|(held_route, _)| held_route.as_str() != route)
+            .filter_map(|(_, slot)| slot.map.as_ref())
+            .map(|map| map.bytes())
+            .sum::<u64>()
+            .saturating_add(
+                self.node_labels
+                    .lock()
+                    .expect("node label index lock")
+                    .as_ref()
+                    .and_then(|labels| labels.index.as_ref())
+                    .map_or(0, |index| index.bytes()),
+            );
+        // A route without a current index is not remembered: a lazy index
+        // rebuild replaces the manifest without moving the generation.
+        let map = match EdgeIdMap::build(
+            &self.dir,
+            inventory,
+            route,
+            graphforge_storage::adjacency::DEFAULT_DECODED_SHARD_CACHE_BYTES.saturating_sub(held),
+        )? {
+            EdgeIdMapBuild::Built(map) => Some(Arc::from(map)),
+            EdgeIdMapBuild::Declined => None,
+            EdgeIdMapBuild::Unavailable => {
+                entry.routes.remove(route);
+                return Ok(None);
+            }
+        };
+        entry.routes.insert(
+            route.to_owned(),
+            EdgeIdMapSlot {
+                currency,
+                map: map.clone(),
+            },
+        );
+        Ok(map)
     }
 
     fn adjacency(

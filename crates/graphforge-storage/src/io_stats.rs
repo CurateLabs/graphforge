@@ -177,6 +177,11 @@ pub(crate) struct Counters {
     node_label_index_builds: AtomicU64,
     node_label_index_bytes: AtomicU64,
     node_label_index_lookups: AtomicU64,
+    edge_property_id_pages_decoded: AtomicU64,
+    edge_property_id_map_builds: AtomicU64,
+    edge_property_id_map_bytes: AtomicU64,
+    edge_property_id_map_hits: AtomicU64,
+    edge_property_id_map_declines: AtomicU64,
 }
 
 /// A point-in-time copy of requested I/O counters. Difference two
@@ -308,6 +313,20 @@ pub struct IoSnapshot {
     /// Destination-label lookups answered from a label index, one per
     /// expansion chunk that read no node file.
     pub node_label_index_lookups: u64,
+    /// Edge-id pages of the edge-property index that were read, verified and
+    /// decoded: one pass over every page when an id map is built, and the
+    /// pages a lookup needs when it runs without a map.
+    pub edge_property_id_pages_decoded: u64,
+    /// Edge-id maps built from the authenticated id pages of one route.
+    pub edge_property_id_map_builds: u64,
+    /// Resident bytes of the id maps counted by `edge_property_id_map_builds`.
+    pub edge_property_id_map_bytes: u64,
+    /// By-id edge-property lookups answered from an id map, which read no id
+    /// page.
+    pub edge_property_id_map_hits: u64,
+    /// Id maps not built because they would not fit the byte budget; the
+    /// lookups of that route read the id pages they need on every call.
+    pub edge_property_id_map_declines: u64,
 }
 
 /// Capture requested counters, or report an unavailable observation.
@@ -401,6 +420,15 @@ pub fn snapshot() -> Option<IoSnapshot> {
         node_label_index_builds: counters.node_label_index_builds.load(Ordering::Relaxed),
         node_label_index_bytes: counters.node_label_index_bytes.load(Ordering::Relaxed),
         node_label_index_lookups: counters.node_label_index_lookups.load(Ordering::Relaxed),
+        edge_property_id_pages_decoded: counters
+            .edge_property_id_pages_decoded
+            .load(Ordering::Relaxed),
+        edge_property_id_map_builds: counters.edge_property_id_map_builds.load(Ordering::Relaxed),
+        edge_property_id_map_bytes: counters.edge_property_id_map_bytes.load(Ordering::Relaxed),
+        edge_property_id_map_hits: counters.edge_property_id_map_hits.load(Ordering::Relaxed),
+        edge_property_id_map_declines: counters
+            .edge_property_id_map_declines
+            .load(Ordering::Relaxed),
     })
 }
 
@@ -527,6 +555,21 @@ pub fn reset() {
         counters
             .node_label_index_lookups
             .store(0, Ordering::Relaxed);
+        counters
+            .edge_property_id_pages_decoded
+            .store(0, Ordering::Relaxed);
+        counters
+            .edge_property_id_map_builds
+            .store(0, Ordering::Relaxed);
+        counters
+            .edge_property_id_map_bytes
+            .store(0, Ordering::Relaxed);
+        counters
+            .edge_property_id_map_hits
+            .store(0, Ordering::Relaxed);
+        counters
+            .edge_property_id_map_declines
+            .store(0, Ordering::Relaxed);
     });
 }
 
@@ -578,6 +621,45 @@ pub(crate) fn record_node_label_index_lookup() {
     let _ = crate::lifecycle_io::with_io_stats(|counters| {
         counters
             .node_label_index_lookups
+            .fetch_add(1, Ordering::Relaxed);
+    });
+}
+
+/// Record `pages` edge-id pages read, verified and decoded.
+pub(crate) fn record_edge_property_id_pages(pages: u64) {
+    let _ = crate::lifecycle_io::with_io_stats(|counters| {
+        counters
+            .edge_property_id_pages_decoded
+            .fetch_add(pages, Ordering::Relaxed);
+    });
+}
+
+/// Record one edge-id map build and its resident size.
+pub(crate) fn record_edge_property_id_map_build(bytes: u64) {
+    let _ = crate::lifecycle_io::with_io_stats(|counters| {
+        counters
+            .edge_property_id_map_builds
+            .fetch_add(1, Ordering::Relaxed);
+        counters
+            .edge_property_id_map_bytes
+            .fetch_add(bytes, Ordering::Relaxed);
+    });
+}
+
+/// Record one by-id lookup answered from an edge-id map.
+pub(crate) fn record_edge_property_id_map_hit() {
+    let _ = crate::lifecycle_io::with_io_stats(|counters| {
+        counters
+            .edge_property_id_map_hits
+            .fetch_add(1, Ordering::Relaxed);
+    });
+}
+
+/// Record one edge-id map that did not fit its byte budget.
+pub(crate) fn record_edge_property_id_map_decline() {
+    let _ = crate::lifecycle_io::with_io_stats(|counters| {
+        counters
+            .edge_property_id_map_declines
             .fetch_add(1, Ordering::Relaxed);
     });
 }

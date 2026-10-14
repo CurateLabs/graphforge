@@ -875,11 +875,13 @@ fn a_one_hop_property_read_does_not_read_the_edge_uuid_blob() {
     assert_eq!(digests(&built.project), before, "the read rebuilt");
 }
 
-/// A blob is read a page at a time, and each page carries its own checksum: a
-/// page the statement does not read cannot refuse it, and a page it does read
-/// refuses it. Shard 0 holds the edges with the smallest edge ids, in the order
-/// of the small route's slots, so the frontier edges in it lie `STRIDE / 2` rows
-/// apart from row 0, and a page between or after them holds none.
+/// A property blob is read a page at a time, and each page carries its own
+/// checksum: a page the statement does not read cannot refuse it, and a page it
+/// does read refuses it. Shard 0 holds the edges with the smallest edge ids, in
+/// the order of the small route's slots, so the frontier edges in it lie
+/// `STRIDE / 2` rows apart from row 0, and a page between or after them holds
+/// none. The edge ids are not read this way: see
+/// `a_damaged_id_page_refuses_every_statement_that_addresses_the_route_by_id`.
 #[test]
 fn a_damaged_page_refuses_only_the_statements_that_read_it() {
     let _serial = serial();
@@ -897,13 +899,10 @@ fn a_damaged_page_refuses_only_the_statements_that_read_it() {
         .rev()
         .find(|page| !occupied.contains(page))
         .expect("a page of shard 0 holds no frontier edge");
-    let ids = column_blob(&manifest, 0, None);
     let timestamps = column_blob(&manifest, 0, Some("timestamp"));
-    for (blob, key_width) in [(ids, 8), (timestamps, 0)] {
-        let extent = &page_extents(&built.project, blob, rows, page_rows, key_width)
-            [usize::try_from(unread).unwrap()];
-        corrupt_blob_at(&built.project, blob, (extent.start + extent.end) / 2);
-    }
+    let extent = &page_extents(&built.project, timestamps, rows, page_rows, 0)
+        [usize::try_from(unread).unwrap()];
+    corrupt_blob_at(&built.project, timestamps, (extent.start + extent.end) / 2);
     let forge = open(&built.project, 1);
     let sum = scalar_i64(&run(&forge, SUM_TIMESTAMPS, 0));
     assert_eq!(sum, frontier_timestamps());
@@ -916,6 +915,42 @@ fn a_damaged_page_refuses_only_the_statements_that_read_it() {
     let error = refusal(&forge, SUM_TIMESTAMPS, 0);
     assert_eq!(error.code(), "GF_VALIDATION", "{error}");
     // A statement that reads no edge property is unaffected.
+    let count = scalar_i64(&run(&forge, NO_PROPERTY, 0));
+    assert_eq!(count, FRONTIER as i64);
+    drop(forge);
+    assert_eq!(digests(&built.project), before, "the read rebuilt");
+}
+
+/// The id map of a generation is decoded from every page of the edge ids, once,
+/// and each page is authenticated as it is read. A damaged id page therefore
+/// refuses every statement that addresses the route by id, whichever rows the
+/// statement wants, and is not remembered: the next statement reads it again.
+/// A statement that reads no edge property never builds the map.
+#[test]
+fn a_damaged_id_page_refuses_every_statement_that_addresses_the_route_by_id() {
+    let _serial = serial();
+    let built = build(SMALL_EDGES);
+    let before = digests(&built.project);
+    let manifest = manifest(&built.project);
+    let page_rows = manifest["page_rows"].as_u64().expect("a page size");
+    let rows = manifest["shards"][0]["rows"].as_u64().unwrap();
+    let occupied = (0..rows)
+        .step_by(STRIDE / 2)
+        .map(|row| row / page_rows)
+        .collect::<Vec<_>>();
+    let unread = (0..rows.div_ceil(page_rows))
+        .rev()
+        .find(|page| !occupied.contains(page))
+        .expect("a page of shard 0 holds no frontier edge");
+    let ids = column_blob(&manifest, 0, None);
+    let extent =
+        &page_extents(&built.project, ids, rows, page_rows, 8)[usize::try_from(unread).unwrap()];
+    corrupt_blob_at(&built.project, ids, (extent.start + extent.end) / 2);
+    let forge = open(&built.project, 1);
+    for _ in 0..2 {
+        let error = refusal(&forge, SUM_TIMESTAMPS, 0);
+        assert_eq!(error.code(), "GF_VALIDATION", "{error}");
+    }
     let count = scalar_i64(&run(&forge, NO_PROPERTY, 0));
     assert_eq!(count, FRONTIER as i64);
     drop(forge);
