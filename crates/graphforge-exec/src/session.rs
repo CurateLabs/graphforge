@@ -649,6 +649,30 @@ fn validate_provider_memory_budget(
     Ok(())
 }
 
+/// Resolve the session's provider after shared inventory admission.
+fn session_adjacency_provider(
+    catalog: &GraphCatalog,
+    dir: &std::path::Path,
+    mode: OntologyMode,
+    shared: Option<Arc<PersistentAdjacencyProvider>>,
+    memory_budget_bytes: u64,
+) -> Arc<PersistentAdjacencyProvider> {
+    shared.map_or_else(
+        || {
+            let provider = PersistentAdjacencyProvider::new(dir.to_path_buf(), mode)
+                .with_memory_budget(memory_budget_bytes);
+            Arc::new(match catalog.admitted_inventory() {
+                Some(inventory) => provider.with_inventory(inventory),
+                None => provider,
+            })
+        },
+        |provider| {
+            provider.revalidate();
+            provider
+        },
+    )
+}
+
 impl ExecutionSession {
     /// Remove mutation permission while retaining this session's read authority.
     #[must_use]
@@ -820,19 +844,12 @@ impl ExecutionSession {
         // provider's, while loaded views amortize across queries.
         admit_inventory_memory(&catalog, shared_provider.as_deref(), resources)?;
         let owns_provider = shared_provider.is_none();
-        let adjacency_provider = shared_provider.map_or_else(
-            || {
-                let provider = PersistentAdjacencyProvider::new(dir.clone(), mode)
-                    .with_memory_budget(resources.memory_budget_bytes);
-                Arc::new(match catalog.admitted_inventory() {
-                    Some(inventory) => provider.with_inventory(inventory),
-                    None => provider,
-                })
-            },
-            |p| {
-                p.revalidate();
-                p
-            },
+        let adjacency_provider = session_adjacency_provider(
+            &catalog,
+            &dir,
+            mode,
+            shared_provider,
+            resources.memory_budget_bytes,
         );
         let owned_adjacency = owns_provider.then(|| {
             Arc::new(OwnedSessionAdjacency(RwLock::new(Arc::clone(
