@@ -152,6 +152,7 @@ pub(crate) struct Counters {
     edge_page_rows_selected: AtomicU64,
     edge_exact_rows_selected: AtomicU64,
     edge_validation_fallbacks: AtomicU64,
+    property_rows_requested: AtomicU64,
     property_uuid_selections: AtomicU64,
     property_uuid_rows_decoded: AtomicU64,
     property_uuid_pages_considered: AtomicU64,
@@ -254,6 +255,10 @@ pub struct IoSnapshot {
     pub edge_exact_rows_selected: u64,
     /// Dense edge selections rejected by post-read validation.
     pub edge_validation_fallbacks: u64,
+    /// Node UUIDs a nominated property-overlay read asked the property store
+    /// for, summed over every route read. An unnominated or abandoned read names
+    /// none and counts nothing.
+    pub property_rows_requested: u64,
     /// Property-fragment reads that located wanted rows by decoding the UUID
     /// column.
     pub property_uuid_selections: u64,
@@ -371,6 +376,7 @@ pub fn snapshot() -> Option<IoSnapshot> {
         edge_page_rows_selected: counters.edge_page_rows_selected.load(Ordering::Relaxed),
         edge_exact_rows_selected: counters.edge_exact_rows_selected.load(Ordering::Relaxed),
         edge_validation_fallbacks: counters.edge_validation_fallbacks.load(Ordering::Relaxed),
+        property_rows_requested: counters.property_rows_requested.load(Ordering::Relaxed),
         property_uuid_selections: counters.property_uuid_selections.load(Ordering::Relaxed),
         property_uuid_rows_decoded: counters.property_uuid_rows_decoded.load(Ordering::Relaxed),
         property_uuid_pages_considered: counters
@@ -492,6 +498,7 @@ pub fn reset() {
         counters
             .edge_validation_fallbacks
             .store(0, Ordering::Relaxed);
+        counters.property_rows_requested.store(0, Ordering::Relaxed);
         counters
             .property_uuid_selections
             .store(0, Ordering::Relaxed);
@@ -812,6 +819,15 @@ pub(crate) fn record_edge_dense_pruning(pruning: FilteredReadPruning) {
         counters
             .edge_validation_fallbacks
             .fetch_add(pruning.validation_fallbacks, Ordering::Relaxed);
+    });
+}
+
+/// Record a nominated property-overlay read that names `rows` node UUIDs.
+pub(crate) fn record_property_rows_requested(rows: u64) {
+    let _ = crate::lifecycle_io::with_io_stats(|counters| {
+        counters
+            .property_rows_requested
+            .fetch_add(rows, Ordering::Relaxed);
     });
 }
 

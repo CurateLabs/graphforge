@@ -698,3 +698,647 @@ fn a_counted_and_collected_node_demands_nothing_while_its_group_key_demands_what
     assert_eq!(needed(&demand, post), Vec::<&str>::new());
     assert_eq!(needed(&demand, person), Vec::<&str>::new());
 }
+
+// ---------------------------------------------------------------------------
+// Late columns: read only by the final projection, after the Limit.
+// ---------------------------------------------------------------------------
+
+const OTHER: u32 = 5;
+const LIMIT: GraphOp = GraphOp::Limit { count: 20 };
+
+fn names_with_other() -> HashMap<PropertyId, String> {
+    let mut names = names();
+    names.insert(property(OTHER), "other".to_owned());
+    names
+}
+
+fn projecting(exprs: Vec<ExprId>) -> GraphOp {
+    GraphOp::Project {
+        items: exprs
+            .into_iter()
+            .enumerate()
+            .map(|(index, expr)| ProjectItem {
+                expr,
+                alias: Some(format!("c{index}")),
+                out_var: None,
+            })
+            .collect(),
+        distinct: false,
+    }
+}
+
+fn sorted_by(expr: ExprId) -> GraphOp {
+    GraphOp::Sort {
+        keys: vec![SortKey {
+            expr,
+            order: SortOrder::Asc,
+            nulls_first: false,
+        }],
+    }
+}
+
+fn filtering(predicate: ExprId) -> GraphOp {
+    GraphOp::Filter { predicate }
+}
+
+/// `(early, late)` columns of `v` out of `name`, `title`, `other`.
+fn split(demand: &NodePropertyDemand, v: VarId) -> (Vec<&'static str>, Vec<&'static str>) {
+    let pick = |test: fn(&NodePropertyDemand, VarId, &str) -> bool| {
+        ["name", "title", "other"]
+            .into_iter()
+            .filter(|column| test(demand, v, column))
+            .collect::<Vec<_>>()
+    };
+    (
+        pick(NodePropertyDemand::needs_early),
+        pick(NodePropertyDemand::needs_late),
+    )
+}
+
+fn deferred(ops: Vec<GraphOp>, exprs: ExprArena) -> NodePropertyDemand {
+    node_property_demand(&plan_of(ops, exprs), &names_with_other())
+}
+
+#[test]
+fn a_column_only_the_final_projection_reads_is_late() {
+    // MATCH (n), (m) ORDER BY n.name RETURN n.name, n.title, m.name LIMIT 20
+    let mut exprs = ExprArena::new();
+    let sort_name = read(&mut exprs, N, NAME);
+    let (n_name, n_title, m_name) = (
+        read(&mut exprs, N, NAME),
+        read(&mut exprs, N, TITLE),
+        read(&mut exprs, M, NAME),
+    );
+    let ops = vec![
+        scan(N),
+        scan(M),
+        sorted_by(sort_name),
+        projecting(vec![n_name, n_title, m_name]),
+        LIMIT,
+    ];
+    let demand = deferred(ops, exprs);
+    assert_eq!(split(&demand, N), (vec!["name"], vec!["title"]));
+    assert_eq!(split(&demand, M), (vec![], vec!["name"]));
+    assert!(demand.defers(N) && demand.defers(M));
+    assert_eq!(demand.deferred_projection(), Some(3));
+    // `needs` is the union, so a lowerer that ignores the split reads everything.
+    assert_eq!(needed(&demand, N), vec!["name", "title"]);
+}
+
+#[test]
+fn a_column_a_filter_also_reads_is_early() {
+    // MATCH (n) WHERE n.title = n.name RETURN n.title LIMIT 20
+    let mut exprs = ExprArena::new();
+    let (a, b) = (read(&mut exprs, N, TITLE), read(&mut exprs, N, NAME));
+    let predicate = binary(&mut exprs, BinaryOpKind::Eq, a, b);
+    let title = read(&mut exprs, N, TITLE);
+    let ops = vec![
+        scan(N),
+        filtering(predicate),
+        projecting(vec![title]),
+        LIMIT,
+    ];
+    let demand = deferred(ops, exprs);
+    assert_eq!(split(&demand, N), (vec!["name", "title"], vec![]));
+    assert!(!demand.defers(N));
+    assert_eq!(demand.deferred_projection(), None);
+}
+
+#[test]
+fn a_column_a_sort_key_reads_through_a_function_is_early() {
+    // MATCH (n) RETURN n.name, n.title ORDER BY toInteger(n.name) LIMIT 20
+    let mut exprs = ExprArena::new();
+    let key = read(&mut exprs, N, NAME);
+    let key = call(&mut exprs, "toInteger", vec![key]);
+    let (name, title) = (read(&mut exprs, N, NAME), read(&mut exprs, N, TITLE));
+    let ops = vec![
+        scan(N),
+        sorted_by(key),
+        projecting(vec![name, title]),
+        LIMIT,
+    ];
+    let demand = deferred(ops, exprs);
+    assert_eq!(split(&demand, N), (vec!["name"], vec!["title"]));
+}
+
+#[test]
+fn a_skip_before_the_limit_keeps_the_deferral() {
+    let mut exprs = ExprArena::new();
+    let title = read(&mut exprs, N, TITLE);
+    let ops = vec![
+        scan(N),
+        projecting(vec![title]),
+        GraphOp::Skip { count: 3 },
+        LIMIT,
+    ];
+    let demand = deferred(ops, exprs);
+    assert_eq!(split(&demand, N), (vec![], vec!["title"]));
+    assert_eq!(demand.deferred_projection(), Some(1));
+}
+
+#[test]
+fn a_coalesce_over_late_columns_stays_late() {
+    // RETURN coalesce(n.name, n.title) LIMIT 20
+    let mut exprs = ExprArena::new();
+    let (a, b) = (read(&mut exprs, N, NAME), read(&mut exprs, N, TITLE));
+    let value = call(&mut exprs, "coalesce", vec![a, b]);
+    let ops = vec![scan(N), projecting(vec![value]), LIMIT];
+    let demand = deferred(ops, exprs);
+    assert_eq!(split(&demand, N), (vec![], vec!["name", "title"]));
+}
+
+#[test]
+fn a_node_the_projection_returns_whole_has_no_late_column() {
+    // RETURN n, n.name LIMIT 20
+    let mut exprs = ExprArena::new();
+    let (whole, name) = (var(&mut exprs, N), read(&mut exprs, N, NAME));
+    let ops = vec![scan(N), projecting(vec![whole, name]), LIMIT];
+    let demand = deferred(ops, exprs);
+    assert_eq!(split(&demand, N), (vec!["name", "title", "other"], vec![]));
+    assert_eq!(demand.deferred_projection(), None);
+}
+
+#[test]
+fn a_node_a_sort_observes_whole_has_no_late_column() {
+    // ORDER BY n RETURN n.name LIMIT 20
+    let mut exprs = ExprArena::new();
+    let key = var(&mut exprs, N);
+    let name = read(&mut exprs, N, NAME);
+    let ops = vec![scan(N), sorted_by(key), projecting(vec![name]), LIMIT];
+    let demand = deferred(ops, exprs);
+    assert_eq!(split(&demand, N), (vec!["name", "title", "other"], vec![]));
+    assert_eq!(demand.deferred_projection(), None);
+}
+
+#[test]
+fn a_property_the_catalog_cannot_name_is_not_late() {
+    // RETURN n.<unresolved>, n.name LIMIT 20
+    let mut exprs = ExprArena::new();
+    let unresolved = read(&mut exprs, N, UNRESOLVED);
+    let name = read(&mut exprs, N, NAME);
+    let ops = vec![scan(N), projecting(vec![unresolved, name]), LIMIT];
+    let demand = deferred(ops, exprs);
+    assert_eq!(split(&demand, N), (vec!["name", "title", "other"], vec![]));
+    assert_eq!(demand.deferred_projection(), None);
+}
+
+/// Plans whose final projection must be read at bind time: no `LIMIT`, a
+/// `LIMIT` the planner cannot count, a `DISTINCT` projection, or an operator
+/// between the scan and the projection that reads, groups or renames the node.
+#[test]
+fn a_plan_that_cannot_defer_reads_every_column_at_bind_time() {
+    type Build = Box<dyn FnOnce(&mut ExprArena) -> Vec<GraphOp>>;
+    let projected = |exprs: &mut ExprArena| read(exprs, N, TITLE);
+    let cases: Vec<(&str, Build)> = vec![
+        (
+            "no LIMIT",
+            Box::new(move |exprs| vec![scan(N), projecting(vec![projected(exprs)])]),
+        ),
+        (
+            "SKIP without LIMIT",
+            Box::new(move |exprs| {
+                vec![
+                    scan(N),
+                    projecting(vec![projected(exprs)]),
+                    GraphOp::Skip { count: 1 },
+                ]
+            }),
+        ),
+        (
+            "LIMIT $param",
+            Box::new(move |exprs| {
+                vec![
+                    scan(N),
+                    projecting(vec![projected(exprs)]),
+                    GraphOp::LimitParam {
+                        name: "limit".into(),
+                    },
+                ]
+            }),
+        ),
+        (
+            "LIMIT expression",
+            Box::new(move |exprs| {
+                let count = exprs.push(IrExpr::Literal(IrLiteral::Int(3)));
+                vec![
+                    scan(N),
+                    projecting(vec![projected(exprs)]),
+                    GraphOp::LimitExpr { expr: count },
+                ]
+            }),
+        ),
+        (
+            "SKIP $param before LIMIT",
+            Box::new(move |exprs| {
+                vec![
+                    scan(N),
+                    projecting(vec![projected(exprs)]),
+                    GraphOp::SkipParam {
+                        name: "skip".into(),
+                    },
+                    LIMIT,
+                ]
+            }),
+        ),
+        (
+            "DISTINCT projection",
+            Box::new(move |exprs| {
+                let title = projected(exprs);
+                vec![
+                    scan(N),
+                    GraphOp::Project {
+                        items: vec![ProjectItem {
+                            expr: title,
+                            alias: Some("t".into()),
+                            out_var: None,
+                        }],
+                        distinct: true,
+                    },
+                    LIMIT,
+                ]
+            }),
+        ),
+        (
+            "aggregate below the projection",
+            Box::new(move |exprs| {
+                let n = var(exprs, N);
+                vec![
+                    scan(N),
+                    aggregate(AggFunc::Count, Some(n)),
+                    projecting(vec![projected(exprs)]),
+                    LIMIT,
+                ]
+            }),
+        ),
+        (
+            "WITH below the projection",
+            Box::new(move |exprs| {
+                let n = var(exprs, N);
+                vec![
+                    scan(N),
+                    keeping(n, None),
+                    projecting(vec![projected(exprs)]),
+                    LIMIT,
+                ]
+            }),
+        ),
+        (
+            "rename",
+            Box::new(move |exprs| {
+                let n = var(exprs, N);
+                let title = read(exprs, M, TITLE);
+                vec![
+                    scan(N),
+                    keeping(n, Some(M)),
+                    scan(M),
+                    projecting(vec![title]),
+                    LIMIT,
+                ]
+            }),
+        ),
+        (
+            "scanned twice",
+            Box::new(move |exprs| {
+                vec![scan(N), scan(N), projecting(vec![projected(exprs)]), LIMIT]
+            }),
+        ),
+        (
+            "scanned again in an OPTIONAL MATCH",
+            Box::new(move |exprs| {
+                vec![
+                    scan(N),
+                    GraphOp::Optional {
+                        child: Box::new(plan_of(vec![scan(N)], ExprArena::new())),
+                    },
+                    projecting(vec![projected(exprs)]),
+                    LIMIT,
+                ]
+            }),
+        ),
+    ];
+    for (case, build) in cases {
+        let mut exprs = ExprArena::new();
+        let ops = build(&mut exprs);
+        let demand = deferred(ops, exprs);
+        assert!(!demand.defers(N), "{case}");
+        assert_eq!(demand.deferred_projection(), None, "{case}");
+        assert!(!demand.needs_late(N, "title"), "{case}");
+    }
+}
+
+#[test]
+fn a_node_scanned_after_an_unwind_defers_while_the_collected_one_does_not() {
+    // MATCH (n) WITH collect(n) AS ns UNWIND ns AS m MATCH (m) RETURN n.title?, m.title LIMIT 20
+    // The collect holds the node whole, so `n` reads every column; the
+    // unwound alias is a fresh scan that only the projection reads.
+    let mut exprs = ExprArena::new();
+    let list = VarId(3);
+    let node = var(&mut exprs, N);
+    let ns = var(&mut exprs, list);
+    let m_title = read(&mut exprs, M, TITLE);
+    let ops = vec![
+        scan(N),
+        GraphOp::Aggregate {
+            group_by: Vec::new(),
+            group_aliases: Vec::new(),
+            group_vars: Vec::new(),
+            aggs: vec![AggExpr {
+                func: AggFunc::Collect,
+                arg: Some(node),
+                percentile: None,
+                alias: "ns".into(),
+                out_var: Some(list),
+            }],
+        },
+        GraphOp::Unwind {
+            list_expr: ns,
+            alias: M,
+        },
+        scan(M),
+        projecting(vec![m_title]),
+        LIMIT,
+    ];
+    let demand = deferred(ops, exprs);
+    assert_eq!(split(&demand, M), (vec![], vec!["title"]));
+    assert!(!demand.defers(N));
+    assert_eq!(demand.deferred_projection(), Some(4));
+}
+
+#[test]
+fn a_later_use_of_the_node_in_an_expansion_does_not_make_its_columns_early() {
+    // Expansions and relationship uniqueness carry identity, not properties.
+    let mut exprs = ExprArena::new();
+    let title = read(&mut exprs, M, TITLE);
+    let ops = vec![
+        scan(N),
+        scan(M),
+        GraphOp::RelationshipUnique {
+            edge: VarId(7),
+            prior_edges: Vec::new(),
+        },
+        projecting(vec![title]),
+        LIMIT,
+    ];
+    let demand = deferred(ops, exprs);
+    assert_eq!(split(&demand, M), (vec![], vec!["title"]));
+}
+
+#[test]
+fn an_unmodelled_operator_defeats_the_deferral() {
+    // A procedure call (or any operator the analysis does not model) can read
+    // any node whole.
+    let mut exprs = ExprArena::new();
+    let title = read(&mut exprs, N, TITLE);
+    let ops = vec![
+        scan(N),
+        GraphOp::Delete {
+            vars: vec![N],
+            exprs: Vec::new(),
+            detach: false,
+        },
+        projecting(vec![title]),
+        LIMIT,
+    ];
+    let demand = deferred(ops, exprs);
+    assert_eq!(demand.deferred_projection(), None);
+    assert!(demand.needs_early(N, "title"));
+    assert!(!demand.needs_late(N, "title"));
+}
+
+#[test]
+fn everything_has_no_late_column() {
+    let demand = NodePropertyDemand::everything();
+    assert!(demand.needs_early(N, "title"));
+    assert!(!demand.needs_late(N, "title"));
+    assert!(!demand.defers(N));
+    assert_eq!(demand.deferred_projection(), None);
+}
+
+// ---------------------------------------------------------------------------
+// The LDBC interactive shapes, bound from Cypher.
+// ---------------------------------------------------------------------------
+
+mod interactive_shapes {
+    use super::*;
+    use crate::{Binder, OntologyMode, RuntimeCatalog};
+    use std::sync::{Arc, Mutex};
+
+    const COLUMNS: [&str; 9] = [
+        "id",
+        "firstName",
+        "lastName",
+        "content",
+        "imageFile",
+        "creationDate",
+        "name",
+        "workFrom",
+        "title",
+    ];
+
+    struct Bound {
+        plan: GraphPlan,
+        demand: NodePropertyDemand,
+    }
+
+    fn bind(query: &str) -> Bound {
+        let catalog = Arc::new(Mutex::new(RuntimeCatalog::new()));
+        let binder = Binder::new(None, Arc::clone(&catalog), OntologyMode::Exploratory);
+        let ast = graphforge_cypher::parse(query).expect("query parses");
+        let plan = binder.bind(&ast).expect("query binds");
+        let names: HashMap<PropertyId, String> = catalog
+            .lock()
+            .unwrap()
+            .property_names()
+            .map(|(id, name)| (PropertyId::runtime(id), name.to_owned()))
+            .collect();
+        let demand = node_property_demand(&plan, &names);
+        Bound { plan, demand }
+    }
+
+    /// The variable of the `index`th top-level node scan.
+    fn scanned(plan: &GraphPlan, index: usize) -> VarId {
+        plan.ops
+            .iter()
+            .filter_map(|op| match op {
+                GraphOp::NodeScan { var, .. } => Some(*var),
+                _ => None,
+            })
+            .nth(index)
+            .expect("node scan")
+    }
+
+    fn early(demand: &NodePropertyDemand, v: VarId) -> Vec<&'static str> {
+        COLUMNS
+            .into_iter()
+            .filter(|column| demand.needs_early(v, column))
+            .collect()
+    }
+
+    fn late(demand: &NodePropertyDemand, v: VarId) -> Vec<&'static str> {
+        COLUMNS
+            .into_iter()
+            .filter(|column| demand.needs_late(v, column))
+            .collect()
+    }
+
+    #[test]
+    fn friend_names_and_message_text_are_late_for_the_recent_messages_query() {
+        let Bound { plan, demand } = bind(
+            "MATCH (:Person {id: 17592186052613})-[:KNOWS]-(friend:Person)<-[:HAS_CREATOR]-(message) \
+             WHERE (message:Post OR message:Comment) AND message.creationDate <= 1354060800000 \
+             RETURN friend.id AS personId, friend.firstName AS personFirstName, \
+             friend.lastName AS personLastName, message.id AS postOrCommentId, \
+             coalesce(message.content, message.imageFile) AS postOrCommentContent, \
+             message.creationDate AS postOrCommentCreationDate \
+             ORDER BY postOrCommentCreationDate DESC, toInteger(postOrCommentId) ASC LIMIT 20",
+        );
+        let (person, friend, message) = (scanned(&plan, 0), scanned(&plan, 1), scanned(&plan, 2));
+        // The start person is filtered by id: nothing left to defer.
+        assert_eq!(late(&demand, person), Vec::<&str>::new());
+        // The friend's columns are all returned and none is a sort key.
+        assert_eq!(late(&demand, friend), vec!["id", "firstName", "lastName"]);
+        assert_eq!(early(&demand, friend), Vec::<&str>::new());
+        // The message id and creation date are filter or sort keys.
+        assert_eq!(early(&demand, message), vec!["id", "creationDate"]);
+        assert_eq!(late(&demand, message), vec!["content", "imageFile"]);
+        assert_eq!(demand.deferred_projection(), Some(plan.ops.len() - 2));
+    }
+
+    #[test]
+    fn a_collected_and_unwound_friend_defers_its_columns() {
+        let Bound { plan, demand } = bind(
+            "MATCH (root:Person {id: 13194139542834})-[:KNOWS*1..2]-(friend:Person) \
+             WHERE NOT friend = root WITH collect(DISTINCT friend) AS friends \
+             UNWIND friends AS friend MATCH (friend)<-[:HAS_CREATOR]-(message) \
+             WHERE (message:Post OR message:Comment) AND message.creationDate < 1324080000000 \
+             RETURN friend.id AS personId, friend.firstName AS personFirstName, \
+             friend.lastName AS personLastName, message.id AS commentOrPostId, \
+             coalesce(message.content, message.imageFile) AS commentOrPostContent, \
+             message.creationDate AS commentOrPostCreationDate \
+             ORDER BY commentOrPostCreationDate DESC, commentOrPostId ASC LIMIT 20",
+        );
+        // The friend the collect holds is read at bind time, but only the
+        // columns the unwound friend's projection returns: the collected value
+        // does not carry the friend's other stored properties.
+        let collected = scanned(&plan, 1);
+        assert!(!demand.defers(collected));
+        assert!(demand.narrows_collected_value(collected));
+        assert_eq!(
+            early(&demand, collected),
+            vec!["id", "firstName", "lastName"]
+        );
+        // The unwound friend, matched again, is read only by the projection.
+        let unwound = scanned(&plan, 2);
+        assert_eq!(late(&demand, unwound), vec!["id", "firstName", "lastName"]);
+        assert_eq!(early(&demand, unwound), Vec::<&str>::new());
+        let message = scanned(&plan, 3);
+        assert_eq!(early(&demand, message), vec!["id", "creationDate"]);
+        assert_eq!(late(&demand, message), vec!["content", "imageFile"]);
+    }
+
+    /// The collected node whose value is read whole by anything but the
+    /// unwound friend's own property accesses keeps every column.
+    fn collected_value_is_whole(query: &str) {
+        let Bound { plan, demand } = bind(query);
+        let collected = scanned(&plan, 1);
+        assert!(
+            !demand.narrows_collected_value(collected),
+            "the collected value is read whole: {query}"
+        );
+        assert!(demand.needs(collected, "someColumnNobodyNamed"));
+    }
+
+    #[test]
+    fn a_collected_list_read_elsewhere_keeps_every_column_of_its_nodes() {
+        collected_value_is_whole(
+            "MATCH (root:Person {id: 1})-[:KNOWS*1..2]-(friend:Person) \
+             WHERE NOT friend = root WITH collect(DISTINCT friend) AS friends \
+             UNWIND friends AS other RETURN other.id, size(friends) LIMIT 5",
+        );
+    }
+
+    #[test]
+    fn an_unwound_friend_returned_whole_keeps_every_column_of_the_collected_node() {
+        collected_value_is_whole(
+            "MATCH (root:Person {id: 1})-[:KNOWS*1..2]-(friend:Person) \
+             WHERE NOT friend = root WITH collect(DISTINCT friend) AS friends \
+             UNWIND friends AS other RETURN other, other.id LIMIT 5",
+        );
+    }
+
+    #[test]
+    fn a_collected_list_that_is_not_unwound_keeps_every_column_of_its_nodes() {
+        collected_value_is_whole(
+            "MATCH (root:Person {id: 1})-[:KNOWS*1..2]-(friend:Person) \
+             WHERE NOT friend = root WITH collect(DISTINCT friend) AS friends \
+             RETURN friends",
+        );
+    }
+
+    #[test]
+    fn a_collected_list_unwound_and_collected_again_keeps_every_column() {
+        collected_value_is_whole(
+            "MATCH (root:Person {id: 1})-[:KNOWS*1..2]-(friend:Person) \
+             WHERE NOT friend = root WITH collect(DISTINCT friend) AS friends \
+             UNWIND friends AS other WITH collect(other) AS again RETURN again",
+        );
+    }
+
+    #[test]
+    fn a_collected_node_unwound_for_its_properties_keeps_only_those_columns() {
+        let Bound { plan, demand } = bind(
+            "MATCH (root:Person {id: 1})-[:KNOWS*1..2]-(friend:Person) \
+             WHERE NOT friend = root WITH collect(DISTINCT friend) AS friends \
+             UNWIND friends AS other \
+             RETURN other.id, other.lastName ORDER BY other.firstName LIMIT 5",
+        );
+        let collected = scanned(&plan, 1);
+        assert!(demand.narrows_collected_value(collected));
+        // The sort reads `firstName` and the projection `id` and `lastName`.
+        assert_eq!(
+            early(&demand, collected),
+            vec!["id", "firstName", "lastName"]
+        );
+        assert!(!demand.needs(collected, "content"));
+    }
+
+    #[test]
+    fn a_sort_key_column_stays_early_for_the_recent_employment_query() {
+        let Bound { plan, demand } = bind(
+            "MATCH (person:Person {id: 30786325583618})-[:KNOWS*1..2]-(friend:Person) \
+             WHERE NOT(person = friend) WITH DISTINCT friend \
+             MATCH (friend)-[workAt:WORK_AT]->(company:Company)-[:IS_LOCATED_IN]->(:Country {name: 'Laos'}) \
+             WHERE workAt.workFrom < 2010 \
+             RETURN friend.id AS personId, friend.firstName AS personFirstName, \
+             friend.lastName AS personLastName, company.name AS organizationName, \
+             workAt.workFrom AS organizationWorkFromYear \
+             ORDER BY organizationWorkFromYear ASC, toInteger(personId) ASC, organizationName DESC LIMIT 10",
+        );
+        let company = scanned(&plan, 3);
+        // `company.name` is an ORDER BY key, so it is read before the Limit.
+        assert_eq!(early(&demand, company), vec!["name"]);
+        assert_eq!(late(&demand, company), Vec::<&str>::new());
+        // The friend passes through `WITH DISTINCT`, which shares its demand
+        // across the alias, so none of its columns is deferred.
+        for index in [1, 2] {
+            let friend = scanned(&plan, index);
+            assert_eq!(late(&demand, friend), Vec::<&str>::new());
+        }
+    }
+
+    #[test]
+    fn a_plan_that_orders_an_aggregate_defers_nothing() {
+        let Bound { plan, demand } = bind(
+            "MATCH (person:Person {id: 1})-[:KNOWS*1..2]-(friend) WHERE NOT person = friend \
+             WITH DISTINCT friend MATCH (friend)<-[membership:HAS_MEMBER]-(forum) \
+             WHERE membership.joinDate > 5 WITH forum, collect(friend) AS friends \
+             OPTIONAL MATCH (friend)<-[:HAS_CREATOR]-(post)<-[:CONTAINER_OF]-(forum) \
+             WHERE friend IN friends WITH forum, count(post) AS postCount \
+             RETURN forum.title AS forumName, postCount ORDER BY postCount DESC, forum.id ASC LIMIT 20",
+        );
+        assert_eq!(demand.deferred_projection(), None);
+        for index in 0..4 {
+            assert_eq!(late(&demand, scanned(&plan, index)), Vec::<&str>::new());
+        }
+    }
+}
