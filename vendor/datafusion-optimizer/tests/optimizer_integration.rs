@@ -277,15 +277,36 @@ fn intersect() -> Result<()> {
     format!("{plan}"),
     @r"
     LeftSemi Join: left.col_int32 = test.col_int32, left.col_utf8 = test.col_utf8
-      Aggregate: groupBy=[[left.col_int32, left.col_utf8]], aggr=[[]]
-        LeftSemi Join: left.col_int32 = right.col_int32, left.col_utf8 = right.col_utf8
-          Aggregate: groupBy=[[left.col_int32, left.col_utf8]], aggr=[[]]
-            SubqueryAlias: left
-              TableScan: test projection=[col_int32, col_utf8]
-          SubqueryAlias: right
+      LeftSemi Join: left.col_int32 = right.col_int32, left.col_utf8 = right.col_utf8
+        Aggregate: groupBy=[[left.col_int32, left.col_utf8]], aggr=[[]]
+          SubqueryAlias: left
             TableScan: test projection=[col_int32, col_utf8]
+        SubqueryAlias: right
+          TableScan: test projection=[col_int32, col_utf8]
       TableScan: test projection=[col_int32, col_utf8]
     "
+    );
+    Ok(())
+}
+
+#[test]
+fn union_of_filtered_scans_keeps_unqualified_output_labels() -> Result<()> {
+    let sql = "SELECT col_int32, col_utf8 FROM test WHERE col_int32 = 1 \
+    UNION SELECT col_int32, col_utf8 FROM test WHERE col_int32 = 2";
+    let plan = test_sql(sql)?;
+
+    let labels: Vec<_> = plan
+        .schema()
+        .iter()
+        .map(|(qualifier, field)| (qualifier.cloned(), field.name().clone()))
+        .collect();
+    assert_eq!(
+        labels,
+        vec![
+            (None, "col_int32".to_string()),
+            (None, "col_utf8".to_string())
+        ],
+        "plan:\n{plan}"
     );
     Ok(())
 }

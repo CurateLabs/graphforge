@@ -29,7 +29,9 @@ use datafusion_common::alias::AliasGenerator;
 use datafusion_common::config::ConfigOptions;
 use datafusion_common::instant::Instant;
 use datafusion_common::tree_node::{Transformed, TreeNodeRewriter};
-use datafusion_common::{DFSchema, DataFusionError, HashSet, Result, internal_err};
+use datafusion_common::{
+    DFSchema, DFSchemaRef, DataFusionError, HashSet, Result, internal_err,
+};
 use datafusion_expr::logical_plan::LogicalPlan;
 
 use crate::common_subexpr_eliminate::CommonSubexprEliminate;
@@ -323,6 +325,10 @@ struct Rewriter<'a> {
     apply_order: ApplyOrder,
     rule: &'a dyn OptimizerRule,
     config: &'a dyn OptimizerConfig,
+    /// GraphForge: for each node `f_down` has entered and `f_up` has not yet left,
+    /// the output schemas of its inputs as they were before its subtree was
+    /// rewritten. See `GRAPHFORGE.md`.
+    input_schemas: Vec<Vec<DFSchemaRef>>,
 }
 
 impl<'a> Rewriter<'a> {
@@ -335,6 +341,7 @@ impl<'a> Rewriter<'a> {
             apply_order,
             rule,
             config,
+            input_schemas: vec![],
         }
     }
 }
@@ -343,18 +350,49 @@ impl TreeNodeRewriter for Rewriter<'_> {
     type Node = LogicalPlan;
 
     fn f_down(&mut self, node: LogicalPlan) -> Result<Transformed<LogicalPlan>> {
-        if self.apply_order == ApplyOrder::TopDown {
-            self.rule.rewrite(node, self.config)
+        let node = if self.apply_order == ApplyOrder::TopDown {
+            self.rule.rewrite(node, self.config)?
         } else {
-            Ok(Transformed::no(node))
-        }
+            Transformed::no(node)
+        };
+        // GraphForge: remember what the inputs looked like before they are visited.
+        self.input_schemas.push(
+            node.data
+                .inputs()
+                .iter()
+                .map(|input| Arc::clone(input.schema()))
+                .collect(),
+        );
+        Ok(node)
     }
 
     fn f_up(&mut self, node: LogicalPlan) -> Result<Transformed<LogicalPlan>> {
-        if self.apply_order == ApplyOrder::BottomUp {
-            self.rule.rewrite(node, self.config)
+        // GraphForge: a rule may replace an input with a plan whose output columns
+        // differ, which leaves this node's cached schema describing the old input.
+        // `map_children` keeps that cached schema, so rebuild it from the new
+        // inputs before the parent, or a later rule, reads it. apache/datafusion
+        // #22903 makes the same repair in the in-place rewrite path of 55.0.0.
+        let Some(input_schemas) = self.input_schemas.pop() else {
+            return internal_err!(
+                "optimizer rewrite left a plan node without its input schemas"
+            );
+        };
+        let inputs_changed_schema = node
+            .inputs()
+            .iter()
+            .zip(&input_schemas)
+            .any(|(input, before)| {
+                !Arc::ptr_eq(input.schema(), before) && input.schema() != before
+            });
+        let node = if inputs_changed_schema {
+            Transformed::yes(node.recompute_schema()?)
         } else {
-            Ok(Transformed::no(node))
+            Transformed::no(node)
+        };
+        if self.apply_order == ApplyOrder::BottomUp {
+            node.transform_data(|node| self.rule.rewrite(node, self.config))
+        } else {
+            Ok(node)
         }
     }
 }
@@ -516,13 +554,15 @@ mod tests {
 
     use datafusion_common::tree_node::Transformed;
     use datafusion_common::{
-        DFSchema, DFSchemaRef, DataFusionError, Result, assert_contains, plan_err,
+        Column, DFSchema, DFSchemaRef, DataFusionError, Result, assert_contains, plan_err,
     };
     use datafusion_expr::logical_plan::EmptyRelation;
-    use datafusion_expr::{LogicalPlan, LogicalPlanBuilder, Projection, col, lit};
+    use datafusion_expr::{
+        Expr, JoinType, LogicalPlan, LogicalPlanBuilder, Projection, col, lit,
+    };
 
     use crate::optimizer::Optimizer;
-    use crate::test::test_table_scan;
+    use crate::test::{test_table_scan, test_table_scan_with_name};
     use crate::{OptimizerConfig, OptimizerContext, OptimizerRule};
 
     use super::ApplyOrder;
@@ -603,6 +643,43 @@ mod tests {
         let optimized_plan = opt.optimize(plan, &config, &observe)?;
         // metadata was removed
         assert_eq!(optimized_plan.schema().as_ref(), input_schema.as_ref());
+        Ok(())
+    }
+
+    /// GraphForge: a rule that narrows a join input must leave the join, and every
+    /// ancestor of it, with the schema its inputs now produce. See `GRAPHFORGE.md`.
+    #[test]
+    fn rewriting_a_child_recomputes_the_parent_schema() -> Result<()> {
+        for apply_order in [ApplyOrder::TopDown, ApplyOrder::BottomUp] {
+            let left = LogicalPlanBuilder::from(test_table_scan_with_name("left")?)
+                .project(vec![col("left.a"), col("left.b"), col("left.c")])?
+                .build()?;
+            let right = LogicalPlanBuilder::from(test_table_scan_with_name("right")?)
+                .project(vec![col("right.a"), col("right.b"), col("right.c")])?
+                .build()?;
+            let plan = LogicalPlanBuilder::from(left)
+                .join_on(right, JoinType::Inner, [col("left.a").eq(col("right.a"))])?
+                .project(vec![col("left.a"), col("right.a")])?
+                .build()?;
+
+            let opt = Optimizer::with_rules(vec![Arc::new(KeepFirstColumnOverScan {
+                apply_order,
+            })]);
+            let config = OptimizerContext::new().with_skip_failing_rules(false);
+            let optimized = opt.optimize(plan, &config, &observe)?;
+
+            let join = optimized.inputs()[0];
+            assert!(matches!(join, LogicalPlan::Join(_)), "{apply_order:?}");
+            assert_eq!(
+                join.schema().fields().len(),
+                2,
+                "{apply_order:?}: the join kept the schema from before its inputs were narrowed"
+            );
+            assert!(join.schema().has_column(&Column::new(Some("left"), "a")));
+            assert!(join.schema().has_column(&Column::new(Some("right"), "a")));
+            let rebuilt = join.clone().recompute_schema()?;
+            assert_eq!(join.schema(), rebuilt.schema(), "{apply_order:?}");
+        }
         Ok(())
     }
 
@@ -720,6 +797,46 @@ mod tests {
             Ok(Transformed::yes(
                 LogicalPlanBuilder::from(table_scan).build()?,
             ))
+        }
+    }
+
+    /// Narrows every projection that reads straight from a table scan to its first
+    /// column, so the plan above it must be rebuilt for a narrower input.
+    #[derive(Debug)]
+    struct KeepFirstColumnOverScan {
+        apply_order: ApplyOrder,
+    }
+
+    impl OptimizerRule for KeepFirstColumnOverScan {
+        fn name(&self) -> &str {
+            "keep_first_column_over_scan"
+        }
+
+        fn apply_order(&self) -> Option<ApplyOrder> {
+            Some(self.apply_order)
+        }
+
+        fn supports_rewrite(&self) -> bool {
+            true
+        }
+
+        fn rewrite(
+            &self,
+            plan: LogicalPlan,
+            _config: &dyn OptimizerConfig,
+        ) -> Result<Transformed<LogicalPlan>> {
+            let LogicalPlan::Projection(projection) = plan else {
+                return Ok(Transformed::no(plan));
+            };
+            if projection.expr.len() == 1
+                || !matches!(projection.input.as_ref(), LogicalPlan::TableScan(_))
+            {
+                return Ok(Transformed::no(LogicalPlan::Projection(projection)));
+            }
+            let first = Expr::from(Column::from(projection.schema.qualified_field(0)));
+            Ok(Transformed::yes(LogicalPlan::Projection(
+                Projection::try_new(vec![first], Arc::clone(&projection.input))?,
+            )))
         }
     }
 
