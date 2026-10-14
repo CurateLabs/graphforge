@@ -305,14 +305,15 @@ fn optional_child_with_shared_var_excludes_outer_columns() {
         .downcast_ref::<OptionalMatchNode>()
         .expect("OptionalMatchNode");
 
-    // The shared var_0 is a join key, so the inner output drops all 6 of its
-    // columns — keeping only the exploratory edge (var_1, 8 cols) and dst
-    // (var_2, 6).
+    // The pattern re-matches var_0 and reads only its identity, so the seed is
+    // narrowed to that one column and it is the single join key. The inner
+    // output still drops all 6 of var_0's columns — keeping only the
+    // exploratory edge (var_1, 8 cols) and dst (var_2, 6).
     assert!(node.correlated_seed.is_some(), "the shared node is seeded");
     assert_eq!(
         node.join_keys.len(),
-        6,
-        "every outer field identifies its seed row"
+        1,
+        "only the re-matched node's identity joins the seed back"
     );
     let schema = UserDefinedLogicalNodeCore::schema(node);
     // outer var_0 (6) ++ inner kept (edge 8 + var_2 6 = 14) = 20.
