@@ -575,8 +575,8 @@ pub struct ExecutionSession {
     /// read → write → read must observe post-write adjacency.
     pub(super) adjacency_provider: Arc<PersistentAdjacencyProvider>,
     owned_adjacency: Option<Arc<OwnedSessionAdjacency>>,
-    /// High-water mark of the query memory pool, which an execution resets when
-    /// it starts and reports in its [`ExecutionStats`].
+    /// Cumulative session-pool high-water mark reported in [`ExecutionStats`].
+    /// Repeated and concurrent reads share this gauge without resetting it.
     memory_peak: Arc<std::sync::atomic::AtomicUsize>,
     /// Differential-test strategy, absent from ordinary builds.
     #[cfg(feature = "differential-testing")]
