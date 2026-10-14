@@ -30,7 +30,7 @@ members = [
 # workspace test run never lint or test code we do not own. Cargo matches each
 # `exclude` entry as a literal path (a `vendor/*` glob is not recognised), so list
 # every vendored crate here.
-exclude = ["vendor/datafusion-physical-plan"]
+exclude = ["vendor/datafusion-physical-plan", "vendor/datafusion-optimizer"]
 
 [workspace.package]
 version = "0.6.0-rc.5"
@@ -103,8 +103,16 @@ divan = { version = "5", package = "codspeed-divan-compat" }
 # vendored copy of datafusion-physical-plan 54.1.0 with that one change applied;
 # see vendor/datafusion-physical-plan/GRAPHFORGE.md, including the condition for
 # deleting it. Crates published to crates.io do not carry [patch] sections.
+#
+# datafusion-optimizer 54.1.0 leaves a Join with a stale cached schema when the
+# leaf-expression push-down rewrites one of its inputs, which makes
+# optimize_projections fail (apache/datafusion#22895, fixed upstream by #22903 in
+# 55.0.0 only). Builds from this repository use a vendored copy of
+# datafusion-optimizer 54.1.0 with that one change applied; see
+# vendor/datafusion-optimizer/GRAPHFORGE.md.
 [patch.crates-io]
 datafusion-physical-plan = { path = "vendor/datafusion-physical-plan" }
+datafusion-optimizer = { path = "vendor/datafusion-optimizer" }
 
 # --------------------------------------------------------------
 # Workspace-wide lint policy
