@@ -481,7 +481,11 @@ fn external_bytes_reduce_the_shard_capacity() {
 
     cache.set_external_bytes(shard + shard / 2);
     assert_eq!(cache.external_bytes(), shard + shard / 2);
-    assert_eq!(cache.retained_bytes(), shard, "only one shard fits the rest");
+    assert_eq!(
+        cache.retained_bytes(),
+        shard,
+        "only one shard fits the rest"
+    );
     read_every_row(&index, &expected);
     assert!(cache.retained_bytes() + cache.external_bytes() <= cache.budget_bytes());
 
@@ -502,7 +506,11 @@ fn dropping_an_index_releases_its_decoded_shards() {
     read_every_row(&index, &expected);
     assert_eq!(cache.retained_bytes(), shard * 3);
     drop(index);
-    assert_eq!(cache.retained_bytes(), shard * 3, "a clone still serves them");
+    assert_eq!(
+        cache.retained_bytes(),
+        shard * 3,
+        "a clone still serves them"
+    );
     assert_eq!(clone.shard_decode_count(), 3);
     drop(clone);
     assert_eq!(cache.retained_bytes(), 0);

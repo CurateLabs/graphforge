@@ -913,7 +913,12 @@ impl GraphForge {
             ordinal_identities,
             clock: Mutex::new(Arc::new(system_time_micros)),
             adjacency_provider: Arc::new(std::sync::RwLock::new(Arc::new(
-                adjacency_provider_for_graph(&dir, ontology_mode, Arc::clone(&property_inventory))?,
+                adjacency_provider_for_graph(
+                    &dir,
+                    ontology_mode,
+                    Arc::clone(&property_inventory),
+                    resource_policy.memory_budget_bytes,
+                )?,
             ))),
             adjacency_visibility: Arc::new(std::sync::RwLock::new(())),
             #[cfg(feature = "search")]
@@ -1175,8 +1180,12 @@ impl GraphForge {
         let construction_cpu_admission = resource_policy.construction_cpu_admission();
         let runtime = build_runtime(&resource_policy)?;
 
-        let adjacency_provider =
-            adjacency_provider_for_graph(&dir, ontology_mode, Arc::clone(&property_inventory))?;
+        let adjacency_provider = adjacency_provider_for_graph(
+            &dir,
+            ontology_mode,
+            Arc::clone(&property_inventory),
+            resource_policy.memory_budget_bytes,
+        )?;
         let graph = Self {
             identity: GraphIdentity::new(),
             path: Some(container_dir),
@@ -1381,6 +1390,7 @@ impl GraphForge {
                     &self.dir(),
                     self.ontology_mode,
                     self.property_inventory_for_session(),
+                    self.resource_policy.memory_budget_bytes,
                 )?);
         }
         Ok(())

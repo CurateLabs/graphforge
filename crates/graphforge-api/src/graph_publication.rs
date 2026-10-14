@@ -460,6 +460,7 @@ impl GraphForge {
             &self.dir(),
             self.ontology_mode,
             std::sync::Arc::clone(&inventory),
+            self.resource_policy.memory_budget_bytes,
         )?);
         *self
             .property_authority

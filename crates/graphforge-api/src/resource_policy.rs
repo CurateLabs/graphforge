@@ -209,7 +209,8 @@ pub(crate) const DEFAULT_MAX_CONCURRENT_HEAVY_QUERIES: usize = 64;
 const DEFAULT_BATCH_SIZE: usize = 8_192;
 /// Floor of the derived query budget: what every instance had before the
 /// budget followed the host, so deriving never shrinks the pool.
-pub(crate) const DEFAULT_MEMORY_BUDGET_BYTES: u64 = 512 * 1024 * 1024;
+pub(crate) const DEFAULT_MEMORY_BUDGET_BYTES: u64 =
+    graphforge_storage::read_cache_budget::DEFAULT_QUERY_MEMORY_BUDGET_BYTES;
 /// Share of the process memory limit the query pool may account. The rest
 /// covers what the pool does not see: Arrow buffers held by operators that do
 /// not reserve, the page cache of the scans, sort and spill buffers, and the

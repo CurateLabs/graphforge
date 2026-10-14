@@ -122,6 +122,7 @@ impl GraphForge {
                 workspace.path(),
                 execution_mode,
                 self.property_inventory_for_session(),
+                self.resource_policy.memory_budget_bytes,
             )?)
         };
         let session =

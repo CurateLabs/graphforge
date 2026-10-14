@@ -386,6 +386,7 @@ impl GraphForge {
                 &self.dir(),
                 self.ontology_mode,
                 self.property_inventory_for_session(),
+                self.resource_policy.memory_budget_bytes,
             )?);
         Ok(())
     }
@@ -614,6 +615,7 @@ fn publish_workspace_records_inner(
                     dir,
                     mode,
                     std::sync::Arc::clone(&properties),
+                    graph.resource_policy.memory_budget_bytes,
                 )?);
                 prepared_candidate = Some(crate::PreparedGenerationReadAuthority {
                     properties,

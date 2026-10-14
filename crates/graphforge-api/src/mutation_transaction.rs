@@ -101,6 +101,7 @@ impl<'a> FacadeMutationLifecycle<'a> {
             &self.graph.dir(),
             self.graph.ontology_mode,
             Arc::clone(&inventory),
+            self.graph.resource_policy.memory_budget_bytes,
         )?);
         *self
             .graph

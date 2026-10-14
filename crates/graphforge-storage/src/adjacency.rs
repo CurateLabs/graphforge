@@ -355,10 +355,7 @@ impl ShardedCsrIndex {
     /// Open the current shard manifest beside the logical `.csr` path, with a
     /// decoded-shard cache of its own ([`STANDALONE_DECODED_SHARD_CACHE_BYTES`]).
     pub fn open(path: &Path) -> Result<Self, GfError> {
-        Self::open_with_cache(
-            path,
-            &ShardCache::new(STANDALONE_DECODED_SHARD_CACHE_BYTES),
-        )
+        Self::open_with_cache(path, &ShardCache::new(STANDALONE_DECODED_SHARD_CACHE_BYTES))
     }
 
     /// Open the current shard manifest beside the logical `.csr` path, retaining
@@ -598,7 +595,12 @@ impl ShardedCsrIndex {
         let csr = read_authenticated_shard(&path, record)?;
         let output = map(csr.row(node_id - record.first_node));
         self.owner.decodes.fetch_add(1, Ordering::Relaxed);
-        cache.insert(self.owner.id, record.file.clone(), csr, record.decoded_bytes);
+        cache.insert(
+            self.owner.id,
+            record.file.clone(),
+            csr,
+            record.decoded_bytes,
+        );
         Ok(output)
     }
 

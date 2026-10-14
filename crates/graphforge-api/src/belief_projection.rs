@@ -432,6 +432,7 @@ impl GraphForge {
                 &projected.dir(),
                 projected.ontology_mode,
                 projected.property_inventory_for_session(),
+                projected.resource_policy.memory_budget_bytes,
             )?);
         let current = self.generation_for_read()?;
         if current.generation_uuid() != source_generation_uuid {

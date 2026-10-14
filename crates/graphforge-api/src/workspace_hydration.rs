@@ -195,6 +195,7 @@ impl GraphForge {
             graph_root,
             self.ontology_mode,
             Arc::clone(&properties),
+            self.resource_policy.memory_budget_bytes,
         )?);
         Ok(PreparedGenerationReadAuthority {
             properties,
@@ -423,8 +424,12 @@ pub(super) fn adjacency_provider_for_graph(
     dir: &Path,
     mode: OntologyMode,
     inventory: Arc<graphforge_storage::AuthenticatedPropertyInventory>,
+    memory_budget_bytes: u64,
 ) -> Result<graphforge_exec::PersistentAdjacencyProvider, GfError> {
+    // The provider derives its decoded-shard and label-index share from the
+    // query memory budget (see `graphforge_storage::read_cache_budget`).
     let provider = graphforge_exec::PersistentAdjacencyProvider::new(dir.to_path_buf(), mode)
+        .with_memory_budget(memory_budget_bytes)
         .with_inventory(inventory);
     // A pinned view must not mutate its generation. Writable workspaces also
     // have concurrent readers that enumerate graph files, so lazy build temps

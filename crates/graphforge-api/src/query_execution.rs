@@ -530,6 +530,7 @@ impl GraphForge {
                 &dir,
                 execution_mode,
                 self.property_inventory_for_session(),
+                self.resource_policy.memory_budget_bytes,
             )?)
         };
         let session = ExecutionSession::new_with_target_provider_resources_and_identity(
@@ -727,6 +728,7 @@ impl GraphForge {
                 workspace.path(),
                 execution_mode,
                 self.property_inventory_for_session(),
+                self.resource_policy.memory_budget_bytes,
             )?)
         };
         let session = ExecutionSession::new_with_target_provider_resources_and_identity(
