@@ -67,10 +67,22 @@ fn regenerate(source: &Path, expected: &Path, location_base: &str) -> Result<(),
     }
     if let Err(error) = std::fs::rename(&staged, expected) {
         if exists {
-            std::fs::rename(&previous, expected)
-                .map_err(|restore| format!("{error}; restore failed: {restore}"))?;
+            restore_output(staging, expected).map_err(|restore| format!("{error}; {restore}"))?;
         }
         return Err(error.to_string());
+    }
+    Ok(())
+}
+
+// Keep the backup recoverable if another writer prevents restoration.
+fn restore_output(staging: tempfile::TempDir, expected: &Path) -> Result<(), String> {
+    let previous = staging.path().join("previous");
+    if let Err(error) = std::fs::rename(&previous, expected) {
+        let retained = staging.keep();
+        return Err(format!(
+            "restore failed: {error}; previous output preserved at {}",
+            retained.join("previous").display()
+        ));
     }
     Ok(())
 }
@@ -156,5 +168,27 @@ mod tests {
             );
         }
         assert_eq!(std::fs::read_dir(&source).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn failed_restoration_preserves_the_backup_and_reports_its_path() {
+        let workspace = tempfile::tempdir().unwrap();
+        let expected = workspace.path().join("output");
+        std::fs::create_dir(&expected).unwrap();
+        std::fs::write(expected.join("another-writer"), b"new").unwrap();
+        let staging = tempfile::tempdir_in(workspace.path()).unwrap();
+        let staged_path = staging.path().to_path_buf();
+        let previous = staging.path().join("previous");
+        std::fs::create_dir(&previous).unwrap();
+        std::fs::write(previous.join("sentinel"), b"old").unwrap();
+        let error = restore_output(staging, &expected).unwrap_err();
+        assert!(error.contains("restore failed"), "{error}");
+        assert!(error.contains(previous.to_str().unwrap()), "{error}");
+        assert_eq!(std::fs::read(previous.join("sentinel")).unwrap(), b"old");
+        assert_eq!(
+            std::fs::read(expected.join("another-writer")).unwrap(),
+            b"new"
+        );
+        std::fs::remove_dir_all(staged_path).unwrap();
     }
 }
