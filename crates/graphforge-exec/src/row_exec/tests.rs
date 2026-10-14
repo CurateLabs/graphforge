@@ -212,6 +212,7 @@ fn wave11_unwind_explode_preserves_order_and_enforces_list_contract() {
         input_schema: input_schema.clone(),
         input_dfschema: Arc::new(DFSchema::try_from(input_schema.as_ref().clone()).unwrap()),
         out_schema,
+        required_output: None,
     };
     let exploded = unwind_explode(&cfg, &[batch]).unwrap();
     assert_eq!(exploded.num_rows(), 3);
@@ -238,6 +239,8 @@ fn wave11_unwind_explode_preserves_order_and_enforces_list_contract() {
             Field::new("items", DataType::Int64, false),
             Field::new("item", DataType::Int64, true),
         ])),
+
+        required_output: None,
     };
     let scalar =
         RecordBatch::try_new(scalar_schema, vec![Arc::new(Int64Array::from(vec![1]))]).unwrap();
@@ -258,6 +261,8 @@ fn wave11_unwind_explode_preserves_order_and_enforces_list_contract() {
             Field::new("node_uuid", DataType::FixedSizeBinary(16), true),
             Field::new("node_id", DataType::UInt64, true),
         ])),
+
+        required_output: None,
     };
     let primitive_lists =
         ListArray::from_iter_primitive::<arrow::datatypes::Int64Type, _, _>([Some(vec![Some(1)])]);
@@ -275,6 +280,149 @@ fn wave11_unwind_explode_preserves_order_and_enforces_list_contract() {
             .to_string()
             .contains("requires a struct element")
     );
+}
+
+#[test]
+fn unwind_explode_copies_only_the_columns_the_parent_reads() {
+    use arrow::array::{Array, Int64Array, ListArray, StringArray};
+    use arrow::datatypes::Field;
+    use datafusion::common::DFSchema;
+    use datafusion::logical_expr::col;
+
+    let list_field = Arc::new(Field::new("item", DataType::Int64, true));
+    let list_type = DataType::List(list_field);
+    let input_schema = Arc::new(Schema::new(vec![
+        Field::new("name", DataType::Utf8, false),
+        Field::new("wide", DataType::Utf8, true),
+        Field::new("items", list_type.clone(), true),
+        Field::new("tag", DataType::Int64, false),
+    ]));
+    let out_schema = Arc::new(Schema::new(vec![
+        Field::new("name", DataType::Utf8, false),
+        Field::new("wide", DataType::Utf8, true),
+        Field::new("items", list_type, true),
+        Field::new("tag", DataType::Int64, false),
+        Field::new("item", DataType::Int64, true),
+    ]));
+    let lists = ListArray::from_iter_primitive::<arrow::datatypes::Int64Type, _, _>([
+        Some(vec![Some(3), Some(4)]),
+        None,
+        Some(vec![Some(8)]),
+    ]);
+    let batch = RecordBatch::try_new(
+        input_schema.clone(),
+        vec![
+            Arc::new(StringArray::from(vec!["a", "b", "c"])),
+            Arc::new(StringArray::from(vec!["wa", "wb", "wc"])),
+            Arc::new(lists),
+            Arc::new(Int64Array::from(vec![10, 20, 30])),
+        ],
+    )
+    .unwrap();
+    let explode = |required_output: Option<std::collections::BTreeSet<usize>>| {
+        let cfg = UnwindConfig {
+            list_expr: col("items"),
+            input_schema: input_schema.clone(),
+            input_dfschema: Arc::new(DFSchema::try_from(input_schema.as_ref().clone()).unwrap()),
+            out_schema: out_schema.clone(),
+            required_output,
+        };
+        unwind_explode(&cfg, std::slice::from_ref(&batch)).unwrap()
+    };
+
+    // The parent reads `name` (0) and the element (4). `wide` and `items` are
+    // nullable and unread, so they are not copied. `tag` is not nullable, so a
+    // null array cannot stand in for it and it is copied.
+    let narrow = explode(Some([0, 4].into()));
+    let full = explode(None);
+    assert_eq!(narrow.schema(), out_schema);
+    assert_eq!(narrow.num_rows(), 3);
+    for demanded in [0, 3, 4] {
+        assert_eq!(
+            narrow.column(demanded).as_ref(),
+            full.column(demanded).as_ref(),
+            "column {demanded} must be unchanged"
+        );
+    }
+    for skipped in [1, 2] {
+        assert_eq!(narrow.column(skipped).null_count(), 3, "column {skipped}");
+    }
+    assert_eq!(full.column(1).null_count(), 0);
+    assert_eq!(full.column(2).null_count(), 0);
+    let names = narrow
+        .column(0)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    assert_eq!(names.iter().flatten().collect::<Vec<_>>(), ["a", "a", "c"]);
+    let items = narrow
+        .column(4)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .unwrap();
+    assert_eq!(items.values(), &[3, 4, 8]);
+
+    // Demanding every column copies every column.
+    let every = explode(Some([0, 1, 2, 3, 4].into()));
+    assert_eq!(every, full);
+}
+
+#[test]
+fn unwind_exec_demands_the_list_column_even_when_its_parent_does_not_read_it() {
+    use arrow::datatypes::Field;
+    use datafusion::logical_expr::logical_plan::LogicalTableSource;
+    use datafusion::logical_expr::{LogicalPlanBuilder, col};
+    use datafusion::physical_plan::empty::EmptyExec;
+
+    let list_type = DataType::List(Arc::new(Field::new("item", DataType::Int64, true)));
+    let input_schema = Arc::new(Schema::new(vec![
+        Field::new("name", DataType::Utf8, false),
+        Field::new("wide", DataType::Utf8, true),
+        Field::new("items", list_type, true),
+        Field::new("tag", DataType::Int64, true),
+    ]));
+    let scan = LogicalPlanBuilder::scan(
+        "var_0",
+        Arc::new(LogicalTableSource::new(input_schema.clone())),
+        None,
+    )
+    .unwrap()
+    .build()
+    .unwrap();
+    let node = UnwindNode::new(
+        Arc::new(scan),
+        col("items"),
+        "var_1",
+        &Field::new("elem", DataType::Int64, true),
+    );
+    let exec = UnwindExec::new(&node, Arc::new(EmptyExec::new(input_schema)));
+    let element = 4;
+
+    // The parent reads the element and `name`; the list column is demanded of
+    // the input because the explosion reads it, and nothing else is.
+    assert_eq!(
+        exec.input_demand(&[0, element].into()).unwrap(),
+        [0, 2].into()
+    );
+    // A parent that reads only the element still demands the list.
+    assert_eq!(exec.input_demand(&[element].into()).unwrap(), [2].into());
+    // A parent that reads the list keeps it once.
+    assert_eq!(exec.input_demand(&[2, element].into()).unwrap(), [2].into());
+
+    // The rewritten node prints how many input columns it still copies.
+    assert!(!format!("{}", display_plan(&exec)).contains("copied="));
+    let narrowed = exec.with_required_output([0, 2, element].into());
+    assert!(
+        display_plan(narrowed.as_ref()).contains("copied=2"),
+        "{}",
+        display_plan(narrowed.as_ref())
+    );
+}
+
+fn display_plan(plan: &dyn ExecutionPlan) -> String {
+    datafusion::physical_plan::displayable(plan)
+        .indent(false)
+        .to_string()
 }
 
 fn seed_exec(seed: u64, schema: &Arc<Schema>) -> Arc<dyn ExecutionPlan> {

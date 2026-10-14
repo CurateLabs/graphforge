@@ -203,7 +203,7 @@ physical rewrite rules:
 | `OntologyInferExec` | Pass-through that carries the inference rule into the plan and `explain()` |
 | `OptionalMatchExec` | Left-join semantics with Cypher null-shaping (distinct from SQL LEFT JOIN) |
 | `CorrelatedSeedExec` | The outer rows of a correlated `OPTIONAL MATCH` or `EXISTS`, bound by `OptionalMatchExec` to the rows it executed once |
-| `UnwindExec` | Cypher list unwinding |
+| `UnwindExec` | Cypher list unwinding; a nullable input column its parent does not read is null-filled instead of repeated for each element |
 | `EdgeCountExec` | `count(r)` answered from the adjacency edge-entry count |
 | `OrderedOneHopExec` | One hop `ORDER BY` destination UUID `LIMIT k`, emitted in ordinal order |
 | `OrderedTwoHopPathCountExec` | Two-hop equivalent, counting path multiplicity per destination |
