@@ -1287,28 +1287,26 @@ fn collect_expr_columns(expr: &Arc<dyn PhysicalExpr>, required: &mut BTreeSet<us
     );
 }
 
-/// Record whether a variable-length expansion's trailing edge list is read.
+/// Narrow a variable-length expansion to the columns that are read.
 ///
-/// The traversal reads its input columns whole: the seed, the bound
-/// destination and every column the rows carry forward. Only the trailing edge
-/// list is optional, and it is the one column that reads the edge file.
+/// The traversal reads the seed column and the bound destination, and carries
+/// every other input column into each emitted path for the parent. So the input
+/// is asked for the seed, the bound destination and the columns the parent
+/// demands; a nullable input column nobody reads is not copied per path. The
+/// trailing edge list is optional too, and it is the one column that reads the
+/// edge file.
 fn rewrite_var_len_materialization(
     plan: &Arc<dyn ExecutionPlan>,
     var_len: &VarLenExpandExec,
     required: &BTreeSet<usize>,
 ) -> Result<Arc<dyn ExecutionPlan>> {
-    let width = var_len.schema().fields().len();
-    let edge_list_demanded = width
-        .checked_sub(1)
-        .is_some_and(|last| required.contains(&last));
-    let input = Arc::clone(plan.children()[0]);
-    let all_input = (0..input.schema().fields().len()).collect::<BTreeSet<_>>();
-    let child = rewrite_materialization(input, &all_input)?;
+    let child_required = var_len.input_demand(required);
+    let child = rewrite_materialization(Arc::clone(plan.children()[0]), &child_required)?;
     let rebuilt = Arc::clone(plan).with_new_children(vec![child])?;
     let var_len = rebuilt.downcast_ref::<VarLenExpandExec>().ok_or_else(|| {
         DataFusionError::Internal("VarLenExpandExec rewrite changed physical type".into())
     })?;
-    Ok(var_len.with_edge_list_demanded(edge_list_demanded))
+    Ok(var_len.with_required_output(required))
 }
 
 /// The input rows are copied once per element, so the columns nobody reads are

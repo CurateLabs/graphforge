@@ -52,6 +52,7 @@ use graphforge_ir::Direction;
 use graphforge_plan::VarLenExpandNode;
 use graphforge_plan::VarLenMode;
 use reachability::reach_bfs;
+use std::collections::BTreeSet;
 use std::fmt;
 use std::path::Path;
 use std::path::PathBuf;
@@ -158,6 +159,11 @@ pub struct VarLenExpandExec {
     /// edge file: the trails come from the adjacency's edge ids alone and the
     /// column holds nulls.
     edge_list_demanded: bool,
+    /// Which input columns the emitted rows copy, indexed by input column.
+    /// `None` copies them all. A column outside the mask is nullable and no
+    /// operator above reads it, so its emitted rows carry nulls and the
+    /// copy per path is skipped (#1984).
+    copy_input: Option<Arc<[bool]>>,
     schema: SchemaRef,
     props: Arc<PlanProperties>,
     /// Adjacency source for the BFS — the session-scoped provider injected
@@ -212,6 +218,7 @@ impl VarLenExpandExec {
             expansion: node.mode,
             edge_var: node.edge_var,
             edge_list_demanded: true,
+            copy_input: None,
             schema,
             props,
             provider,
@@ -220,11 +227,45 @@ impl VarLenExpandExec {
         }
     }
 
-    /// Declare whether any operator above reads the edge-list column.
+    /// The input columns this expansion needs in order to produce the
+    /// `required` output columns: the demanded input columns, the seed, and the
+    /// bound destination. The per-edge filter reads one edge's properties, never
+    /// an input column.
+    pub(super) fn input_demand(&self, required: &BTreeSet<usize>) -> BTreeSet<usize> {
+        let input_width = self.input.schema().fields().len();
+        let mut demand: BTreeSet<usize> = required
+            .iter()
+            .copied()
+            .filter(|index| *index < input_width)
+            .collect();
+        demand.insert(self.src_col_idx);
+        demand.extend(self.bound_dst_col_idx);
+        demand
+    }
+
+    /// The same expansion emitting only the `required` output columns. Call it
+    /// on a node whose input was already narrowed to
+    /// [`Self::input_demand`].
     ///
-    /// Only a trail expansion has one; a reachability expansion produces hop
-    /// counts and keeps its plan unchanged.
-    pub(super) fn with_edge_list_demanded(&self, demanded: bool) -> Arc<dyn ExecutionPlan> {
+    /// The trailing edge list is read only when demanded (a reachability
+    /// expansion has none to skip). An input column nobody reads is carried as
+    /// nulls instead of being copied once per path; a non-nullable one is
+    /// still copied, since a null array cannot stand in for it.
+    pub(super) fn with_required_output(
+        &self,
+        required: &BTreeSet<usize>,
+    ) -> Arc<dyn ExecutionPlan> {
+        let input_width = self.input.schema().fields().len();
+        let edge_list_demanded = self
+            .schema
+            .fields()
+            .len()
+            .checked_sub(1)
+            .is_some_and(|last| required.contains(&last));
+        let copy_input: Vec<bool> = (0..input_width)
+            .map(|index| required.contains(&index) || !self.schema.field(index).is_nullable())
+            .collect();
+        let narrowed = copy_input.iter().any(|copied| !copied);
         Arc::new(Self {
             input: Arc::clone(&self.input),
             rel_type_name: self.rel_type_name.clone(),
@@ -238,7 +279,8 @@ impl VarLenExpandExec {
             reverse_edge_list: self.reverse_edge_list,
             expansion: self.expansion,
             edge_var: self.edge_var,
-            edge_list_demanded: demanded || self.expansion != VarLenMode::Trails,
+            edge_list_demanded: edge_list_demanded || self.expansion != VarLenMode::Trails,
+            copy_input: narrowed.then(|| Arc::from(copy_input)),
             schema: Arc::clone(&self.schema),
             props: Arc::clone(&self.props),
             provider: Arc::clone(&self.provider),
@@ -295,6 +337,10 @@ impl DisplayAs for VarLenExpandExec {
         if let Some(filter) = &self.edge_filter {
             write!(f, ", edge_filter={}", filter.predicate())?;
         }
+        // Printed only for a narrowed node so an unmasked plan reads as before.
+        if let Some(copied) = &self.copy_input {
+            write!(f, ", copied={}", copied.iter().filter(|c| **c).count())?;
+        }
         Ok(())
     }
 }
@@ -335,6 +381,7 @@ impl ExecutionPlan for VarLenExpandExec {
             expansion: self.expansion,
             edge_var: self.edge_var,
             edge_list_demanded: self.edge_list_demanded,
+            copy_input: self.copy_input.clone(),
             schema: self.schema.clone(),
             props,
             provider: self.provider.clone(),
@@ -388,6 +435,7 @@ impl ExecutionPlan for VarLenExpandExec {
             expansion: self.expansion,
             edge_var: self.edge_var,
             edge_list_demanded: self.edge_list_demanded,
+            copy_input: self.copy_input.clone(),
             out_schema: self.schema.clone(),
             provider: self.provider.clone(),
             capture_epoch: self.capture_epoch,
@@ -518,6 +566,8 @@ pub(super) struct ExpandConfig {
     /// Whether the trailing edge-list column is read above this expansion; see
     /// [`VarLenExpandExec`]. Always true for a reachability expansion.
     pub(super) edge_list_demanded: bool,
+    /// Which input columns the emitted rows copy; see [`VarLenExpandExec`].
+    pub(super) copy_input: Option<Arc<[bool]>>,
     pub(super) out_schema: SchemaRef,
     /// Adjacency source (#762) — moved into the `'static` execute future.
     pub(super) provider: Arc<dyn AdjacencyProvider>,
@@ -1045,6 +1095,30 @@ fn load_chunk_sources(
     }))
 }
 
+/// Append the input columns of the rows `src_take` selects, one value per
+/// emitted row. A column the expansion's parent never reads is appended as nulls
+/// instead of being copied once per path (see [`VarLenExpandExec`]).
+pub(super) fn push_input_columns(
+    cfg: &ExpandConfig,
+    input: &RecordBatch,
+    src_take: &arrow::array::UInt32Array,
+    columns: &mut Vec<ArrayRef>,
+) -> Result<(), GfError> {
+    for (index, column) in input.columns().iter().enumerate() {
+        let skipped = cfg
+            .copy_input
+            .as_ref()
+            .is_some_and(|copied| copied.get(index) == Some(&false));
+        columns.push(if skipped {
+            new_null_array(cfg.out_schema.field(index).data_type(), src_take.len())
+        } else {
+            arrow::compute::take(column, src_take, None)
+                .map_err(|error| GfError::Execution(error.to_string()))?
+        });
+    }
+    Ok(())
+}
+
 /// Build one output batch for `emissions` (a bounded slice of the traversal)
 /// from sources that cover them. The returned batch is charged until
 /// [`send_chunk`] hands it on.
@@ -1085,9 +1159,7 @@ fn materialise_chunk(
     // --- Materialise the output batch via `take` on input + node columns. ---
     let mut columns =
         Vec::with_capacity(input.num_columns() + sources.node_batch.num_columns() + 1);
-    for col in input.columns() {
-        columns.push(take(col, &src_take, None).map_err(|e| exec_err(e.to_string()))?);
-    }
+    push_input_columns(cfg, input, &src_take, &mut columns)?;
     for col in sources.node_batch.columns() {
         columns.push(take(col, &dst_take, None).map_err(|e| exec_err(e.to_string()))?);
     }
