@@ -54,6 +54,62 @@ fn route_nomination(scan: &PropertyOverlayExec) -> Arc<UuidBuildKeyNomination> {
 #[derive(Debug, Default)]
 pub struct PropertyFilterApprovalRule;
 
+impl PropertyFilterApprovalRule {
+    /// Whether `join` is a LEFT enrichment of a property scan that the approval
+    /// rules prune to the keys its preserved side produces.
+    ///
+    /// The check is made before the final plan exists, so it names the join's
+    /// shape and leaves the final plan's exchanges and partition counts to the
+    /// rules themselves: a LEFT join on one UUID key whose probe side is a
+    /// property scan, directly or behind its hash exchange, that a nomination may
+    /// prune by that key. [`PropertyFilterApprovalRule`] prunes a scan that
+    /// projects property payload; [`SelectedEndpointPropertyFilterApprovalRule`]
+    /// also prunes a key-only scan when `selected_endpoint` proves the preserved
+    /// side's key column is an expansion endpoint, as it does for that rule. A
+    /// hash join this holds for reads only its preserved side's keys from the
+    /// scan; planning it any other way forgoes the pruning.
+    #[must_use]
+    pub fn prunes_probe_scan_to_build_keys(
+        join: &HashJoinExec,
+        selected_endpoint: impl Fn(&dyn ExecutionPlan, usize) -> bool,
+    ) -> bool {
+        if *join.join_type() != JoinType::Left || join.on().len() != 1 {
+            return false;
+        }
+        let probe = join.right().as_ref();
+        let scan = probe.downcast_ref::<PropertyOverlayExec>().or_else(|| {
+            probe
+                .downcast_ref::<RepartitionExec>()?
+                .input()
+                .downcast_ref::<PropertyOverlayExec>()
+        });
+        let Some(scan) = scan else {
+            return false;
+        };
+        let (build, probe_key) = &join.on()[0];
+        let (Some(build), Some(probe_key)) = (
+            build.downcast_ref::<Column>(),
+            probe_key.downcast_ref::<Column>(),
+        ) else {
+            return false;
+        };
+        let uuid_keys = join
+            .left()
+            .schema()
+            .fields()
+            .get(build.index())
+            .is_some_and(|field| {
+                field.data_type() == &arrow::datatypes::DataType::FixedSizeBinary(16)
+            });
+        if !uuid_keys {
+            return false;
+        }
+        scan.nomination_uuid_column() == Some(probe_key.index())
+            || (scan.fresh_selected_endpoint_uuid_column() == Some(probe_key.index())
+                && selected_endpoint(join.left().as_ref(), build.index()))
+    }
+}
+
 /// Opt-in authority for a selected expansion endpoint whose UUID is hidden by
 /// a join projection. The callback is supplied by the execution crate, which
 /// owns the expansion node and can prove the exact output-column lineage.

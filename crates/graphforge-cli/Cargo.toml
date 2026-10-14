@@ -15,6 +15,10 @@ categories = ["command-line-utilities", "database"]
 name = "gf"
 path = "src/main.rs"
 
+[[example]]
+name = "generate_hub_fixture"
+test = true
+
 [dependencies]
 arrow = { workspace = true }
 graphforge-api = { version = "0.6.0-rc.5", path = "../graphforge-api", default-features = false, features = ["knowledge", "search", "provenance", "portable", "discovery", "research"] }

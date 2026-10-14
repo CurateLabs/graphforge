@@ -468,6 +468,30 @@ fn correlated_seed_fails_closed_until_the_outer_rows_are_bound() {
 }
 
 #[test]
+fn a_bound_seed_stops_holding_its_rows_once_released() {
+    use arrow::datatypes::Field;
+
+    let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::UInt64, false)]));
+    let rows = RecordBatch::try_new(
+        schema.clone(),
+        vec![Arc::new(UInt64Array::from(vec![4, 5]))],
+    )
+    .unwrap();
+    let (bound, handle) = bind_seed_rows(seed_exec(7, &schema), 7, &[rows]).unwrap();
+    assert_eq!(seed_rows(&bound).unwrap()[0].num_rows(), 2);
+
+    // The executed plan stays reachable for EXPLAIN ANALYZE, so the rows must
+    // not stay alive with it, and a late execution must not see an empty seed.
+    handle.release();
+    assert!(handle.get().is_none());
+    let error = seed_rows(&bound).unwrap_err().to_string();
+    assert!(
+        error.contains("after its outer rows were released"),
+        "{error}"
+    );
+}
+
+#[test]
 fn binding_a_correlated_seed_leaves_other_seeds_and_requires_its_own_leaf() {
     use arrow::datatypes::Field;
 
@@ -615,4 +639,162 @@ fn correlated_seed_demand_is_what_the_sub_plan_reads_through_its_leaves() {
         demand_of(vec![leaf(3, Some(&[])), leaf(3, Some(&[]))], 3),
         Vec::<usize>::new()
     );
+}
+
+/// An inner plan with a real correlated-seed child, stopped at its first poll.
+/// Binding must retain the real outer rows before this plan stalls or panics.
+#[derive(Debug)]
+struct InterruptedSeedExec {
+    input: Arc<dyn ExecutionPlan>,
+    panic_on_poll: bool,
+}
+
+impl DisplayAs for InterruptedSeedExec {
+    fn fmt_as(&self, _: DisplayFormatType, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "InterruptedSeedExec")
+    }
+}
+
+impl ExecutionPlan for InterruptedSeedExec {
+    fn name(&self) -> &str {
+        "InterruptedSeedExec"
+    }
+
+    fn properties(&self) -> &Arc<PlanProperties> {
+        self.input.properties()
+    }
+
+    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
+        vec![&self.input]
+    }
+
+    fn with_new_children(
+        self: Arc<Self>,
+        children: Vec<Arc<dyn ExecutionPlan>>,
+    ) -> Result<Arc<dyn ExecutionPlan>, DataFusionError> {
+        assert_eq!(children.len(), 1);
+        Ok(Arc::new(Self {
+            input: Arc::clone(&children[0]),
+            panic_on_poll: self.panic_on_poll,
+        }))
+    }
+
+    fn execute(
+        &self,
+        partition: usize,
+        _: Arc<TaskContext>,
+    ) -> Result<SendableRecordBatchStream, DataFusionError> {
+        assert_eq!(partition, 0);
+        let panic_on_poll = self.panic_on_poll;
+        let stream = futures::stream::poll_fn(move |_| {
+            assert!(!panic_on_poll, "interrupted optional inner poll");
+            std::task::Poll::<Option<Result<RecordBatch, DataFusionError>>>::Pending
+        });
+        Ok(Box::pin(RecordBatchStreamAdapter::new(
+            self.schema(),
+            stream,
+        )))
+    }
+}
+
+fn interrupted_optional(
+    panic_on_poll: bool,
+) -> (
+    Arc<OptionalMatchExec>,
+    std::sync::Weak<dyn arrow::array::Array>,
+) {
+    use arrow::datatypes::Field;
+    use datafusion::datasource::memory::MemorySourceConfig;
+
+    let schema = Arc::new(Schema::new(vec![Field::new(
+        "key",
+        DataType::UInt64,
+        false,
+    )]));
+    let column: arrow::array::ArrayRef = Arc::new(UInt64Array::from(vec![1, 2, 3]));
+    let weak = Arc::downgrade(&column);
+    let batch = RecordBatch::try_new(Arc::clone(&schema), vec![column]).unwrap();
+    let outer =
+        MemorySourceConfig::try_new_exec(&[vec![batch]], Arc::clone(&schema), None).unwrap();
+    let inner: Arc<dyn ExecutionPlan> = Arc::new(InterruptedSeedExec {
+        input: seed_exec(7, &schema),
+        panic_on_poll,
+    });
+    let node = OptionalMatchNode::new(
+        qualified_scan("var_0", &schema),
+        qualified_scan("var_1", &schema),
+        vec![(0, 0)],
+        vec![],
+    )
+    .with_correlated_seed(7);
+    (Arc::new(OptionalMatchExec::new(&node, outer, inner)), weak)
+}
+
+fn displayed_seed_rows(optional: &OptionalMatchExec) -> SeedRows {
+    optional
+        .executed_inner
+        .get()
+        .expect("the bound inner must remain for display")
+        .children()[0]
+        .downcast_ref::<CorrelatedSeedExec>()
+        .expect("bound seed leaf")
+        .rows
+        .clone()
+        .expect("the leaf was bound")
+}
+
+#[tokio::test]
+async fn cancelled_optional_collection_releases_displayed_seed_buffers() {
+    use futures::StreamExt;
+    let (optional, weak) = interrupted_optional(false);
+    // The MemorySource itself legitimately owns the array throughout this
+    // test. Execution must return to that baseline while the Optional plan,
+    // including its stored bound inner, remains alive.
+    let baseline = weak.strong_count();
+    assert_eq!(baseline, 1);
+    let context = datafusion::prelude::SessionContext::new();
+    let mut stream = optional.execute(0, context.task_ctx()).unwrap();
+    assert!(futures::poll!(stream.next()).is_pending());
+    let rows = displayed_seed_rows(&optional);
+    assert!(rows.get().is_some());
+    assert!(weak.strong_count() > baseline);
+    drop(stream);
+    assert!(
+        rows.get().is_none(),
+        "cancelled execution retained the bound seed rows"
+    );
+    assert_eq!(
+        weak.strong_count(),
+        baseline,
+        "execution leaked outer buffers into the display plan"
+    );
+    assert!(optional.executed_inner.get().is_some());
+}
+
+#[tokio::test]
+async fn panicking_optional_collection_releases_displayed_seed_buffers() {
+    use futures::FutureExt;
+    let (optional, weak) = interrupted_optional(true);
+    let baseline = weak.strong_count();
+    assert_eq!(baseline, 1);
+    let context = datafusion::prelude::SessionContext::new();
+    let plan: Arc<dyn ExecutionPlan> = optional.clone();
+    let outcome = std::panic::AssertUnwindSafe(collect(plan, context.task_ctx()))
+        .catch_unwind()
+        .await;
+    assert!(
+        outcome.is_err(),
+        "the inner poll must panic after the seed was bound"
+    );
+    let rows = displayed_seed_rows(&optional);
+    assert!(
+        rows.get().is_none(),
+        "unwound execution retained the bound seed rows"
+    );
+    assert_eq!(
+        weak.strong_count(),
+        baseline,
+        "execution leaked outer buffers into the display plan"
+    );
+    assert!(optional.executed_inner.get().is_some());
 }

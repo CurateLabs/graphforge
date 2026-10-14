@@ -242,6 +242,11 @@ pub struct ExecutionStats {
     pub rows_produced: u64,
     /// Wall-clock time taken for execution, in milliseconds.
     pub execution_time_ms: u64,
+    /// Cumulative session-pool reservation high-water mark observed when the
+    /// read query completes, including loans and unconditional growth. Repeated
+    /// or concurrent reads on one session share this gauge. The facade creates
+    /// a fresh session per query; other execution paths leave it zero.
+    pub peak_memory_bytes: u64,
     /// Actual node-topology work performed while initializing a write context.
     /// These counters are scoped to that phase; later staging and publication
     /// work is accounted for by their own evidence.

@@ -443,13 +443,22 @@ impl Default for SessionResourceConfig {
 /// RAM-backed on some hosts.
 fn session_runtime(
     resources: &SessionResourceConfig,
-) -> Result<Arc<datafusion::execution::runtime_env::RuntimeEnv>, GfError> {
+) -> Result<
+    (
+        Arc<datafusion::execution::runtime_env::RuntimeEnv>,
+        Arc<std::sync::atomic::AtomicUsize>,
+    ),
+    GfError,
+> {
     let memory_budget = usize::try_from(resources.memory_budget_bytes).unwrap_or(usize::MAX);
     // DataFusion's greedy pool, reporting its top consumers on exhaustion as
     // `with_memory_limit` does, and a spilling aggregate keeping the memory it
-    // has just released long enough to sort it (#1985).
+    // has just released long enough to sort it (#1985). The pool's high-water
+    // mark is returned beside the runtime that now owns the pool.
+    let query_pool = crate::query_pool::QueryMemoryPool::new(memory_budget);
+    let memory_peak = query_pool.peak_gauge();
     let pool = datafusion::execution::memory_pool::TrackConsumersPool::new(
-        crate::query_pool::QueryMemoryPool::new(memory_budget),
+        query_pool,
         std::num::NonZeroUsize::new(5).expect("five is not zero"),
     );
     let mut runtime_builder = datafusion::execution::runtime_env::RuntimeEnvBuilder::new()
@@ -469,10 +478,25 @@ fn session_runtime(
     }
     // A spilling runtime creates its temporary directory here, so a full or
     // read-only volume is an error for this query, not a panic.
-    runtime_builder
+    let runtime = runtime_builder
         .build()
         .map(Arc::new)
-        .map_err(|error| GfError::Storage(format!("query runtime: {error}")))
+        .map_err(|error| GfError::Storage(format!("query runtime: {error}")))?;
+    Ok((runtime, memory_peak))
+}
+
+fn size_sort_merge_reservation(
+    config: &mut datafusion::prelude::SessionConfig,
+    memory_budget: usize,
+    target_partitions: usize,
+) {
+    // Several spillable join inputs can sort concurrently. Keep each merge
+    // reserve within its partition's budget share instead of letting the fixed
+    // default consume most of a small query pool.
+    let execution = &mut config.options_mut().execution;
+    execution.sort_spill_reservation_bytes = execution
+        .sort_spill_reservation_bytes
+        .min(memory_budget / target_partitions.max(1) / 8);
 }
 
 struct QueryEvidenceStream {
@@ -570,6 +594,9 @@ pub struct ExecutionSession {
     /// derives its retained topology caches from it, and a provider rebuilt
     /// after a mutation takes the same one (#1987).
     memory_budget_bytes: u64,
+    /// Cumulative session-pool high-water mark reported in [`ExecutionStats`].
+    /// Repeated and concurrent reads share this gauge without resetting it.
+    memory_peak: Arc<std::sync::atomic::AtomicUsize>,
     /// Differential-test strategy, absent from ordinary builds.
     #[cfg(feature = "differential-testing")]
     relational_fixed_hop_reference: bool,
@@ -828,7 +855,8 @@ impl ExecutionSession {
             .use_row_number_estimates_to_optimize_partitioning = true;
 
         let memory_budget = usize::try_from(resources.memory_budget_bytes).unwrap_or(usize::MAX);
-        let runtime_env = session_runtime(resources)?;
+        size_sort_merge_reservation(&mut config, memory_budget, resources.target_partitions);
+        let (runtime_env, memory_peak) = session_runtime(resources)?;
         let state = SessionStateBuilder::new()
             .with_default_features()
             .with_config(config)
@@ -863,6 +891,12 @@ impl ExecutionSession {
                     crate::traversal_destination::is_frontier_endpoint_uuid,
                 ),
             ))
+            // A LEFT join whose build side nothing sizes stayed a hash join so
+            // the rules above could prune its probe scan to the build side's
+            // keys; plan it as a join that can spill now they have (#1985).
+            .with_physical_optimizer_rule(Arc::new(crate::join_memory::UnsizedBuildJoinRule::new(
+                crate::sort_runs::sort_run_bytes(memory_budget, resources.target_partitions),
+            )))
             .build();
         let ctx = SessionContext::new_with_state(state);
         let semantic_composition_fingerprint = catalog
@@ -880,6 +914,7 @@ impl ExecutionSession {
             adjacency_provider,
             owned_adjacency,
             memory_budget_bytes: resources.memory_budget_bytes,
+            memory_peak,
             #[cfg(feature = "differential-testing")]
             relational_fixed_hop_reference: false,
         })
@@ -1275,6 +1310,7 @@ impl ExecutionSession {
                     rows_produced,
                     execution_time_ms: 0,
                     write_initialization: initialization_work,
+                    ..ExecutionStats::default()
                 },
                 side_effects,
                 mutation_receipt,
@@ -1289,6 +1325,7 @@ impl ExecutionSession {
                 rows_produced: 1,
                 execution_time_ms: 0,
                 write_initialization: initialization_work,
+                ..ExecutionStats::default()
             },
             side_effects,
             mutation_receipt,
@@ -1457,6 +1494,7 @@ impl ExecutionSession {
         let collected =
             path_hydration::collect_guarded(Arc::clone(&physical), Arc::clone(&task_ctx)).await;
         path_hydration::cancel_plan(&physical);
+        let memory_peak_bytes = self.memory_peak.load(std::sync::atomic::Ordering::Relaxed);
         let memory_reserved_after = task_ctx.memory_pool().reserved();
         let returned_batch_bytes = collected.as_ref().map_or(0, |batches| {
             batches
@@ -1490,6 +1528,7 @@ impl ExecutionSession {
             stats: ExecutionStats {
                 rows_produced,
                 execution_time_ms: 0,
+                peak_memory_bytes: u64::try_from(memory_peak_bytes).unwrap_or(u64::MAX),
                 ..ExecutionStats::default()
             },
             side_effects: None,
@@ -1651,6 +1690,31 @@ impl ExecutionSession {
         Ok(datafusion::physical_plan::displayable(physical.as_ref())
             .indent(false)
             .to_string())
+    }
+
+    /// Execute a read [`GraphPlan`] with `params` and render the physical plan
+    /// with the metrics the operators recorded (`EXPLAIN ANALYZE`). The rows
+    /// are produced and discarded.
+    ///
+    /// # Errors
+    /// Returns [`GfError`] if lowering, planning or execution fails.
+    pub async fn explain_analyze_with_params(
+        &self,
+        plan: &GraphPlan,
+        params: &HashMap<String, graphforge_ir::IrLiteral>,
+    ) -> Result<String, GfError> {
+        let resolved_plan = self.resolve_row_count_expressions(plan, params).await?;
+        let (physical, _) = self.plan_physical(&resolved_plan, params).await?;
+        path_hydration::drain_guarded(Arc::clone(&physical), self.ctx.task_ctx())
+            .await
+            .map_err(GfError::from_execution_error)?;
+        Ok(
+            datafusion::physical_plan::display::DisplayableExecutionPlan::with_metrics(
+                physical.as_ref(),
+            )
+            .indent(false)
+            .to_string(),
+        )
     }
 
     /// Lower `plan`, bind `$name` parameters, and build the physical plan —

@@ -882,6 +882,7 @@ fn a_skipped_input_column_is_emitted_as_nulls_and_a_demanded_one_is_taken() {
             OntologyMode::Strict,
         )),
         lifecycle: Default::default(),
+        metrics: ExpandMetrics::default().partition(0),
     };
     let take = UInt32Array::from(vec![2, 0, 0]);
 

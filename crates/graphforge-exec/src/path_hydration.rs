@@ -774,3 +774,28 @@ pub(crate) async fn collect_guarded(
         Err(payload) => Err(crate::task_panic::from_unwind(payload.as_ref(), &plan)),
     }
 }
+
+/// Execute a complete query for its metrics, dropping each output batch before
+/// polling the next. Keep query-level cancellation and panic mapping identical
+/// to the collecting read path.
+pub(crate) async fn drain_guarded(
+    physical: Arc<dyn datafusion::physical_plan::ExecutionPlan>,
+    context: Arc<datafusion::execution::TaskContext>,
+) -> Result<()> {
+    use futures::StreamExt;
+
+    let _guard = QueryGuard(Arc::clone(&physical));
+    let plan = Arc::clone(&physical);
+    let drained = futures::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(async move {
+        let mut stream = datafusion::physical_plan::execute_stream(physical, context)?;
+        while let Some(batch) = stream.next().await {
+            drop(batch?);
+        }
+        Ok(())
+    }))
+    .await;
+    match drained {
+        Ok(result) => result.map_err(|error| crate::task_panic::from_task_error(error, &plan)),
+        Err(payload) => Err(crate::task_panic::from_unwind(payload.as_ref(), &plan)),
+    }
+}
