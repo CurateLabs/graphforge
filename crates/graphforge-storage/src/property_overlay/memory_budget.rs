@@ -205,6 +205,9 @@ impl AuthenticatedPropertyInventory {
             bytes = bytes
                 .saturating_add(fragments.capacity() * size_of::<AuthenticatedPropertyFragment>());
             for fragment in fragments {
+                // Three cells may memoize the named resource refusal. Their
+                // diagnostic is at most 128 bytes; allow allocation slack.
+                bytes = bytes.saturating_add(3 * 256);
                 bytes = bytes.saturating_add(
                     fragment.entry.relative_path.capacity() + fragment.physical_relative.capacity(),
                 );
