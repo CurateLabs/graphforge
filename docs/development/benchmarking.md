@@ -101,6 +101,83 @@ BenchExec-run phase's largest process high-water mark; on-disk bytes from the
 product's storage-attribution receipt; node and edge counts from the driver's
 reconciliation after reopen.
 
+### Early-beta SF1 reproduction
+
+The 2026-10-14 maintainer decision on [#1982](https://github.com/CurateLabs/graphforge/issues/1982),
+[#1914](https://github.com/CurateLabs/graphforge/issues/1914) and
+[#952](https://github.com/CurateLabs/graphforge/issues/952)
+sets p50 ≤30 seconds for each supported SF1 SNB Interactive and FinBench read variant.
+This supersedes the sub-second floor; M16 / #2042 owns later optimization and
+measuring the upgrade's effects. SNB BI has no latency floor.
+
+All three beta suites use the approved 120-second per-call timeout; preserve repository
+defaults (Interactive/FinBench 300, BI 600). Copy externally, changing only `query_timeout_seconds`:
+
+```bash
+export BETA_SOURCE=/home/ubuntu/gf-budget-finish
+export BETA_TARGET=/home/ubuntu/gf-beta-scorecard-target
+export BETA_SPECS=/home/ubuntu/gf-beta-evidence/parent-baseline-specs
+python3 - <<'PYTHON'
+import hashlib, json, os
+from pathlib import Path
+source = Path(os.environ['BETA_SOURCE']) / 'benchmarks/profiles/gdc'
+copies = Path(os.environ['BETA_SPECS']); copies.mkdir(parents=True, exist_ok=True)
+for suite in ('snb-interactive', 'finbench-transaction', 'snb-bi'):
+    original = source / f'{suite}-scorecard-ladder-spec.json'
+    document = json.loads(original.read_text())
+    document['query_timeout_seconds'] = 120
+    copied = copies / original.name
+    copied.write_text(json.dumps(document, indent=2) + '\n')
+    print(suite, hashlib.sha256(original.read_bytes()).hexdigest(),
+          hashlib.sha256(copied.read_bytes()).hexdigest())
+PYTHON
+```
+
+With an external `--ladder`, unchanged `profile_root: "."` resolves against the frozen
+source's `benchmarks` root. Verify the original and copied digests below before launch:
+
+| Suite | Original ladder SHA-256 | External 120-second ladder SHA-256 |
+| --- | --- | --- |
+| `snb-interactive` | `f07357735603caf3d99961622e0fbfc9054f32a802dad7a4be3c44951e31880a` | `88cc7e24a7f37b11afa5842e87acf646e6b359a989ed579854b9cfa3e42d8011` |
+| `finbench-transaction` | `30b624ea26da7ce87267d37554d0d944141f0ad02c9978e6ba11b02e3cfda6d3` | `7c328b596bfa0a1eefec2e12d1306ce8f6d9f2ea0c4430ddc7c5568c122c8716` |
+| `snb-bi` | `a0b19ecd83d7696c9defb30379dfa4cde7b49770624773bb9298e17ba1d8a4e3` | `d2fe5067b346f04988d69abfcabc8b2591eda22971667740e535e16c7b99ea3e` |
+
+Freeze a clean merged-main checkout; record source identity and executable hashes
+after the locked build, and verify them before each serial suite.
+Use fresh external work/output paths, a durable supported process-root filesystem,
+the pinned cache and a verified quiet-host launch window.
+The host labels below describe OVHC-AGENCY with NVMe storage; replace them with
+your measured host identity and storage medium when reproducing elsewhere:
+
+```bash
+make -C "$BETA_SOURCE/benchmarks" gdc-scorecard-binaries HOST_TARGET_DIR="$BETA_TARGET"
+cd "$BETA_SOURCE/benchmarks"
+for suite in snb-interactive finbench-transaction snb-bi; do
+  systemd-run --user --scope --slice=benchexec -p Delegate=yes \
+    env PYTHONPATH=harness uv run --locked python -m graphforge_bench.gdc_rung run \
+    --ladder "$BETA_SPECS/$suite-scorecard-ladder-spec.json" \
+    --output-dir "/home/ubuntu/gf-beta-evidence/parent-baseline-final/evidence/$suite" \
+    --work-root "/home/ubuntu/gf-beta-evidence/parent-baseline-final/work/$suite" \
+    --dataset-cache /home/ubuntu/gdc-cache --gf "$BETA_TARGET/release/gf" \
+    --driver "$BETA_TARGET/release/graphforge-benchmark-gdc-scorecard" \
+    --benchexec-python /usr/bin/python3 --reserved-headroom-bytes 85899345920 \
+    --quiet-host-wait-seconds 3600 --through sf1 --host-label OVHC-AGENCY --storage-medium NVMe
+done
+```
+
+Each native phase retains the 4 GiB envelope; convert/load/query share the four-hour
+SUT wall backstop. Workload/reference construction precedes those phases and remains
+outside their memory limit: never wrap the whole ladder command in a 4 GiB cgroup.
+Admission retains the 80 GiB disk reserve; independently allow space for the rung.
+Require all 600 Interactive and 10,689 FinBench bindings to complete and match their
+references. Separately assert each complete variant's nearest-rank p50 ≤30 seconds;
+the runner and aggregate card median do not enforce this criterion. Disclose all
+660 BI binding statuses, failures and unrun samples honestly; SF1 BI remains unchecked.
+Successful through-SF1 runs leave the remaining ladders open and do not replace
+SF10 attempts or final cards. Failed rungs retain the normal stop/card behavior.
+Attach raw outputs, receipts, executable digests and assessments to the owning issues.
+This section records method and input hashes, without asserting measured results.
+
 ## AssertionLedger merge comparison
 
 The ignored test
