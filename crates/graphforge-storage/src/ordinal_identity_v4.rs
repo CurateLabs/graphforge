@@ -85,7 +85,10 @@ impl V4OrdinalIdentityLimits {
     /// `query_budget_bytes`: the authenticated-block cache is the identity
     /// share of the retained read caches,
     /// [`ReadCacheBudget::from_query_budget`]`(query_budget_bytes).identity_bytes`
-    /// (`B / 4`, #1987). The cache fills lazily: only blocks a lookup actually
+    /// (`B / 8`, #1987). Tombstone blocks receive at most one eighth of
+    /// that share (capped at 1 MiB); ordinal blocks take the remainder, so
+    /// their combined cache charge cannot exceed the identity share.
+    /// The cache fills lazily: only blocks a lookup actually
     /// read are charged, never the budget itself. A hop frontier that spans
     /// more blocks than the cache holds is read and authenticated once per
     /// block per generation instead of once per lookup (#1984), so the share
@@ -94,12 +97,14 @@ impl V4OrdinalIdentityLimits {
     #[must_use]
     pub fn for_query_memory_budget(query_budget_bytes: u64) -> Self {
         let identity_bytes = ReadCacheBudget::from_query_budget(query_budget_bytes).identity_bytes;
+        let tombstone_bytes = (identity_bytes / 8).min(STREAM_BYTES as u64);
         Self {
             max_requested: 65_536,
             coalesce_gap_bytes: 4_096,
             max_coalesced_read_bytes: STREAM_BYTES,
-            max_tombstone_cache_bytes: STREAM_BYTES,
-            max_ordinal_cache_bytes: usize::try_from(identity_bytes).unwrap_or(usize::MAX),
+            max_tombstone_cache_bytes: usize::try_from(tombstone_bytes).unwrap_or(usize::MAX),
+            max_ordinal_cache_bytes: usize::try_from(identity_bytes - tombstone_bytes)
+                .unwrap_or(usize::MAX),
             max_descriptor_metadata_bytes: 16 * STREAM_BYTES,
         }
     }

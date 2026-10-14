@@ -56,7 +56,10 @@ state.
 The query pool has budget `B`. Each hydrated generation's adjacency provider
 shares `B / 4` across decoded CSR shards, the node-label index and edge-property
 ID maps; its ordinal-identity handle gets `B / 8`, and retained property
-inventory structure and footer metadata get `B / 8`. A single decoded
+inventory structure and footer metadata get `B / 8`. The identity share
+includes both ordinal blocks and tombstone blocks: tombstones get
+`min(1 MiB, identity_share / 8)` and ordinals take the remainder. Identity
+descriptor metadata retains its separate fixed 16 MiB admission cap. A single decoded
 CSR shard may exceed the topology share, bounded by the shard admission limits.
 Label slots and dictionary arrays count allocated capacity, and optional views
 that do not fit are declined before allocation. The facade's

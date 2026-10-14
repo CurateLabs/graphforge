@@ -15,11 +15,11 @@
 //! ```text
 //! retained read caches R = B / 2
 //! topology share       P = R / 2 = B / 4   decoded shards + label index + edge-id maps
-//! identity share       I = R / 4 = B / 8   authenticated ordinal blocks
+//! identity share       I = R / 4 = B / 8   authenticated ordinal + tombstone blocks
 //! inventory share      M = R / 4 = B / 8   route/path structure + cached property footers
 //! ```
 //!
-//! so a provider, identity handle and property inventory together retain at most `B / 2`
+//! so the named caches and inventory of one generation together retain at most `B / 2`
 //! (plus one decoded shard, below 24 MiB, when a single shard exceeds the
 //! topology share). The pool and these retained caches therefore account for
 //! `B + B / 2`; this is not a process-RSS bound. Decoder scratch, catalog
@@ -48,9 +48,13 @@
 //! inventory metadata, before that parsed footer is retained. Decoder scratch
 //! for one footer remains separate, under the storage admission limits.
 //!
-//! The identity blocks have their own share, `I`, enforced by the handle's
-//! `max_ordinal_cache_bytes`
+//! The identity blocks and tombstone blocks split share `I`: tombstones get
+//! `min(1 MiB, I / 8)` and ordinals get the remainder. The handle enforces
+//! both byte ceilings
 //! ([`V4OrdinalIdentityLimits::for_query_memory_budget`](crate::V4OrdinalIdentityLimits::for_query_memory_budget)).
+//!
+//! Identity descriptor metadata has a separate fixed 16 MiB admission cap per
+//! handle; it is not part of the block-cache share or a universal RSS claim.
 //!
 //! The bound is per provider and per identity handle. A session builds one pair
 //! per hydrated graph generation with one inventory, so `g` live generations retain at most
