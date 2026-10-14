@@ -646,7 +646,7 @@ impl GraphPlanLowerer {
                 var_map,
             ) {
                 current =
-                    self.lower_bound_end_expansion(from_bound_end, op, current, exprs, var_map)?;
+                    self.lower_bound_end_expansion(&from_bound_end, op, current, exprs, var_map)?;
                 // The scan and the expansion were lowered together.
                 next += 1;
                 continue;
@@ -790,7 +790,7 @@ impl GraphPlanLowerer {
     /// property join of the scan that the search replaced.
     fn lower_bound_end_expansion(
         &self,
-        expansion: BoundEndExpansion,
+        expansion: &BoundEndExpansion,
         scan: &GraphOp,
         current: LogicalPlan,
         exprs: &ExprArena,
