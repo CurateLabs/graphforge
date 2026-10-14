@@ -4,12 +4,10 @@
 Start with the [Advanced introduction](advanced.md) for GraphForge terminology,
 or [Basic](overview.md#basic) for a guided first graph.
 
-These instructions target **v0.6.0**. Check the
-[GitHub releases](https://github.com/CurateLabs/graphforge/releases) for the
-available artifact before installing. The final-version commands below require
-v0.6.0 to have been published. While it is being prepared, use an explicitly
-published candidate or a source build; do not substitute an older package and
-assume it implements these docs.
+These docs describe **v0.6.0**. Until it is published, install the latest
+pre-release: the latest release is older and does not implement everything
+described here. [GitHub releases](https://github.com/CurateLabs/graphforge/releases)
+lists what is available; a [source build](#build-from-source) also works.
 
 The site maintains one current documentation set. Before v1.0.0, GraphForge
 does not guarantee backward compatibility, legacy APIs, or project migration.
@@ -31,17 +29,22 @@ Activate it using the command for your shell (`source .venv/bin/activate` on
 POSIX shells; `.venv\Scripts\Activate.ps1` in PowerShell), then install:
 
 ```bash
-python -m pip install graphforge==0.6.0
+python -m pip install --pre graphforge # latest pre-release
+```
+
+```bash
+python -m pip install graphforge # latest release
+```
+
+Check which version you got:
+
+```bash
 python -c "import graphforge; print(graphforge.__version__)"
 ```
 
-The imported version must match the release you selected. Native wheels include
-the Rust engine; pip installs PyArrow automatically as a runtime dependency. pandas
-and Polars are optional and are not needed for the first graph.
-
-For an available release candidate, use its exact PyPI version. Canonical
-`0.6.0-rc.N` is spelled `0.6.0rcN` on PyPI, with `N` replaced by the published
-candidate number. Verify that candidate exists before choosing it.
+Native wheels include the Rust engine; pip installs PyArrow automatically as a
+runtime dependency. pandas and Polars are optional and are not needed for the
+first graph.
 
 Continue with [Your first graph](quickstart.md), [an agent](work-with-an-agent.md),
 or [a notebook](use-a-notebook.md).
@@ -51,18 +54,25 @@ or [a notebook](use-a-notebook.md).
 Use Node.js 20 or newer and a platform with a matching native package:
 
 ```bash
-npm install @curatelabs/graphforge@0.6.0 apache-arrow
-npm ls @curatelabs/graphforge
+npm install @curatelabs/graphforge@next apache-arrow # latest pre-release
 ```
 
-`apache-arrow` provides result decoding for the
+```bash
+npm install @curatelabs/graphforge apache-arrow # latest release
+```
+
+`npm ls @curatelabs/graphforge` shows which version you got. `apache-arrow`
+provides result decoding for the
 [Node integration example](integrate-graphforge.md#node-and-typescript).
-For an available candidate, use the exact npm version `0.6.0-rc.N`.
 
 The separate CLI package can be invoked without a global install:
 
 ```bash
-npx @curatelabs/graphforge-cli@0.6.0 --help
+npx @curatelabs/graphforge-cli@next --help # latest pre-release
+```
+
+```bash
+npx @curatelabs/graphforge-cli --help # latest release
 ```
 
 The Python package provides `graphforge`; the npm CLI provides both

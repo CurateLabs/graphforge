@@ -6,8 +6,8 @@ or [Basic](overview.md#basic) for a guided first graph.
 
 Use a local Jupyter notebook to build a graph, run queries, and inspect tables.
 The first task is the same [basic citation graph](quickstart.md) used by scripts
-and agents. This guide targets v0.6.0; check [package availability](installation.md)
-before installing.
+and agents. This guide describes v0.6.0; until it is published, install the
+latest pre-release as shown below and in [Installation](installation.md).
 
 ## Start a local notebook
 
@@ -26,14 +26,14 @@ Activate it with `source .venv/bin/activate` in a POSIX shell or
 the notebook tools and GraphForge:
 
 ```bash
-python -m pip install jupyterlab ipykernel graphforge==0.6.0
+python -m pip install jupyterlab ipykernel
+python -m pip install --pre graphforge
 python -m ipykernel install --sys-prefix --name graphforge --display-name "Python (GraphForge)"
 jupyter lab
 ```
 
-This final-version command applies once the release is published. During
-candidate evaluation, use the exact available candidate version from
-[Installation](installation.md) in place of `0.6.0`.
+`--pre` installs the latest GraphForge pre-release; drop it for the latest
+release once v0.6.0 is published.
 
 JupyterLab opens in your browser; if it does not, open the local URL printed
 in the terminal. Keep that terminal running. In the launcher, create a notebook
@@ -53,8 +53,8 @@ print(graphforge.__version__)
 
 Check that the executable is inside your `.venv` and the package version is
 the one you installed. If you already use another notebook environment, select
-its intended kernel and run `%pip install graphforge==0.6.0` in a cell, with
-the same candidate-version substitution when needed. Restart the kernel after
+its intended kernel and run `%pip install --pre graphforge` in a cell (without
+`--pre` for the latest release). Restart the kernel after
 changing the native package version, then check it again.
 
 ## Get your first graph answer
