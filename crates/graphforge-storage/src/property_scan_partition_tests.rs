@@ -36,7 +36,7 @@ fn key(id: u16) -> [u8; 16] {
     u128::from(id).to_be_bytes()
 }
 
-struct Route {
+pub(crate) struct Route {
     dir: TempDir,
     entries: Vec<crate::GraphFileEntry>,
     sizes: Vec<u64>,
@@ -126,7 +126,7 @@ impl Route {
         });
     }
 
-    fn inventory(&self) -> Arc<AuthenticatedPropertyInventory> {
+    pub(crate) fn inventory(&self) -> Arc<AuthenticatedPropertyInventory> {
         Arc::new(
             AuthenticatedPropertyInventory::from_entries_at_root(
                 self.dir.path(),
@@ -136,7 +136,7 @@ impl Route {
         )
     }
 
-    fn scan(
+    pub(crate) fn scan(
         &self,
         inventory: &Arc<AuthenticatedPropertyInventory>,
         partitions: usize,
@@ -177,7 +177,7 @@ impl Route {
 
 /// Four disjoint base fragments over keys 0..256, then mutation fragments that
 /// reach across the whole key space: rewrites, deletions, and a resurrection.
-fn layered() -> (Route, BTreeMap<u16, Resolved>) {
+pub(crate) fn layered() -> (Route, BTreeMap<u16, Resolved>) {
     let mut route = Route::new();
     let mut expected = BTreeMap::new();
     for slice in 0_u16..4 {

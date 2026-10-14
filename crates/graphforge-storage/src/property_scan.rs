@@ -53,6 +53,11 @@ const MIN_ROWS_PER_PARTITION: usize = 8_192;
 /// How many output partitions a scan of `route` should expose when the session
 /// allows `target_partitions`: one per [`MIN_ROWS_PER_PARTITION`] of the route's
 /// manifest row estimate, at most the target, and never fewer than one.
+///
+/// The estimate is the fragments' byte length divided by 16 (see
+/// `route_row_estimate`), not an exact row count. Wide payloads make it
+/// overestimate, which the target bounds; a partition that ends up with no rows
+/// emits none.
 pub(crate) fn partitions_for_route(
     target_partitions: usize,
     inventory: Option<&crate::AuthenticatedPropertyInventory>,
@@ -93,10 +98,39 @@ pub(crate) struct PropertyOverlayExec {
     #[cfg(any(test, feature = "test-support"))]
     digest_context: graphforge_core::hash_observation::operation::Context,
     metrics: Option<ExecutionPlanMetricsSet>,
-    work_counts: Option<([Count; 3], Gauge)>,
+    work_counts: Option<WorkCounts>,
     /// Partition streams started, under lifecycle measurement.
     partitions_executed: Option<Count>,
     lifecycle_context: crate::lifecycle_io::CaptureContext,
+}
+
+/// Work counters and the decoder-peak gauge a scan reports under lifecycle
+/// measurement.
+type WorkCounts = ([Count; 3], Gauge);
+
+/// The counters a scan reports under lifecycle measurement, or none outside it.
+fn lifecycle_metrics() -> (
+    Option<ExecutionPlanMetricsSet>,
+    Option<WorkCounts>,
+    Option<Count>,
+) {
+    if !crate::lifecycle_io::is_active() {
+        return (None, None, None);
+    }
+    let metrics = ExecutionPlanMetricsSet::new();
+    let work_counts = [
+        "property_spill_bytes",
+        "property_authentication_bytes",
+        "property_physical_rows",
+    ]
+    .map(|name| MetricBuilder::new(&metrics).counter(name, 0));
+    let decoder_peak = MetricBuilder::new(&metrics).gauge("property_decoder_peak_bytes", 0);
+    let executed = MetricBuilder::new(&metrics).counter("property_partitions_executed", 0);
+    (
+        Some(metrics),
+        Some((work_counts, decoder_peak)),
+        Some(executed),
+    )
 }
 
 impl fmt::Debug for PropertyOverlayExec {
@@ -179,24 +213,7 @@ impl PropertyOverlayExec {
             // backpressured channel, so polling never blocks the async worker.
             .with_scheduling_type(SchedulingType::Cooperative),
         );
-        let (metrics, work_counts, partitions_executed) = if crate::lifecycle_io::is_active() {
-            let metrics = ExecutionPlanMetricsSet::new();
-            let work_counts = [
-                "property_spill_bytes",
-                "property_authentication_bytes",
-                "property_physical_rows",
-            ]
-            .map(|name| MetricBuilder::new(&metrics).counter(name, 0));
-            let decoder_peak = MetricBuilder::new(&metrics).gauge("property_decoder_peak_bytes", 0);
-            let executed = MetricBuilder::new(&metrics).counter("property_partitions_executed", 0);
-            (
-                Some(metrics),
-                Some((work_counts, decoder_peak)),
-                Some(executed),
-            )
-        } else {
-            (None, None, None)
-        };
+        let (metrics, work_counts, partitions_executed) = lifecycle_metrics();
         let equality_bound = match (&options.equality, inventory.as_deref(), is_edge) {
             (Some(equality), Some(inventory), false) => {
                 crate::property_equality_index::matching_rows_bound(
@@ -869,4 +886,4 @@ mod property_scan_tests;
 
 #[cfg(test)]
 #[path = "property_scan_partition_tests.rs"]
-mod property_scan_partition_tests;
+pub(crate) mod property_scan_partition_tests;

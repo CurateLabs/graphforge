@@ -257,7 +257,7 @@ impl<'a> UuidRange<'a> {
 impl UuidMembership for UuidRange<'_> {
     /// An upper bound: the inner set's size, or unbounded without one.
     fn len(&self) -> usize {
-        self.inner.map_or(usize::MAX, |inner| inner.len())
+        self.inner.map_or(usize::MAX, UuidMembership::len)
     }
 
     fn contains_uuid(&self, uuid: &[u8; 16]) -> bool {
@@ -265,7 +265,7 @@ impl UuidMembership for UuidRange<'_> {
     }
 
     fn is_empty(&self) -> bool {
-        self.top().is_none() || self.inner.is_some_and(|inner| inner.is_empty())
+        self.top().is_none() || self.inner.is_some_and(UuidMembership::is_empty)
     }
 
     fn min_uuid(&self) -> Option<[u8; 16]> {
