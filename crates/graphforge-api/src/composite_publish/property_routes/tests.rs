@@ -6,6 +6,48 @@ use std::collections::{BTreeMap, HashMap};
 use tempfile::TempDir;
 use uuid::Uuid;
 
+/// Edges the fixture writes, as `row + 1` for `row` in `0..EDGES`.
+const EDGES: u128 = 129;
+/// Sequences of the fixture's repeated rewrite; each adds one fragment per
+/// owner route.
+const SEQUENCES: i64 = 4;
+/// The routes the probe asks about: the guessed owner and the exploratory one.
+const CANDIDATE_ROUTES: [&str; 2] = ["_exploratory", "REL0"];
+
+/// The route the fixture writes edge `row` to.
+fn fixture_route(row: u128) -> &'static str {
+    if row % 2 == 0 { "_exploratory" } else { "REL0" }
+}
+
+/// The footer UUID range of a fragment holding every fixture edge of `route`.
+fn fixture_range(route: &str) -> (u128, u128) {
+    let ids = (0..EDGES)
+        .filter(|row| fixture_route(*row) == route)
+        .map(|row| row + 1);
+    (ids.clone().min().unwrap(), ids.max().unwrap())
+}
+
+/// The fragments an owner probe for edges `1..=targets` must open: those whose
+/// footer range can hold a target. A fragment whose range holds none is skipped
+/// without being opened. Each candidate route has `fragments_per_route`
+/// fragments, all over the route's full fixture range. The probe also stops
+/// opening older fragments of a route once newer ones answer every target a
+/// range holds; here each route leaves the other route's targets unanswered, and
+/// those lie inside its range, so no fragment drops out for that reason.
+fn fragments_whose_range_holds_a_target(targets: u128, fragments_per_route: usize) -> u64 {
+    CANDIDATE_ROUTES
+        .iter()
+        .map(|route| {
+            let (low, high) = fixture_range(route);
+            if (1..=targets).any(|target| (low..=high).contains(&target)) {
+                fragments_per_route as u64
+            } else {
+                0
+            }
+        })
+        .sum()
+}
+
 #[test]
 fn edge_owner_probe_bounds_selected_routes_and_refuses_ambiguity() {
     let graph = GraphForge::new(None).unwrap();
@@ -15,12 +57,11 @@ fn edge_owner_probe_bounds_selected_routes_and_refuses_ambiguity() {
         let mut writer =
             graphforge_storage::GraphWriter::open_at(root.path(), OntologyMode::Exploratory, 1)
                 .unwrap();
-        for row in 0..129_u128 {
-            let route = if row % 2 == 0 { "_exploratory" } else { "REL0" };
+        for row in 0..EDGES {
             writer
                 .set_edge_properties(
                     &Uuid::from_u128(row + 1),
-                    Some(route),
+                    Some(fixture_route(row)),
                     HashMap::from([("weight".into(), IrLiteral::Int(row as i64))]),
                 )
                 .unwrap();
@@ -44,7 +85,7 @@ fn edge_owner_probe_bounds_selected_routes_and_refuses_ambiguity() {
                     .0,
             )
             .unwrap();
-        for targets in [1, 16, 129_u128] {
+        for targets in [1, 16, EDGES] {
             let mut owners = (1..=targets)
                 .map(|id| (Uuid::from_u128(id), "REL0".to_owned()))
                 .collect();
@@ -63,13 +104,17 @@ fn edge_owner_probe_bounds_selected_routes_and_refuses_ambiguity() {
             assert_eq!(work.target_memberships, 2 * targets as usize);
             assert_eq!(work.resolved_targets, targets as usize);
             assert_eq!(work.route_name_bytes, "_exploratoryREL0".len());
-            assert_eq!(work.fragments_considered, 2);
-            assert_eq!(work.row_groups_considered, 2);
+            // One single-row-group fragment per route: the probe opens exactly
+            // those whose footer range can hold a wanted edge. For a single
+            // target below the REL0 range that is the exploratory fragment alone.
+            let opened = fragments_whose_range_holds_a_target(targets, 1);
+            assert_eq!(work.fragments_considered, opened, "targets={targets}");
+            assert_eq!(work.row_groups_considered, opened, "targets={targets}");
             assert!(work.physical_bytes <= 64 * 1024, "{work:?}");
             assert!(work.authenticated_snapshot_bytes <= 16 * 1024, "{work:?}");
             assert!(work.decoder_peak_bytes <= 32 * 1024, "{work:?}");
             eprintln!("owner-probe unrelated={unrelated_rows} targets={targets}: {work:?}");
-            if targets == 129 {
+            if targets == EDGES {
                 if let Some(reference) = reference_work {
                     assert_eq!(
                         work, reference,
@@ -81,19 +126,18 @@ fn edge_owner_probe_bounds_selected_routes_and_refuses_ambiguity() {
             }
         }
         drop(inventory);
-        for sequence in 2..=4 {
+        for sequence in 2..=SEQUENCES {
             let mut writer = graphforge_storage::GraphWriter::open_at(
                 root.path(),
                 OntologyMode::Exploratory,
                 sequence,
             )
             .unwrap();
-            for row in 0..129_u128 {
-                let route = if row % 2 == 0 { "_exploratory" } else { "REL0" };
+            for row in 0..EDGES {
                 writer
                     .set_edge_properties(
                         &Uuid::from_u128(row + 1),
-                        Some(route),
+                        Some(fixture_route(row)),
                         HashMap::from([("weight".into(), IrLiteral::Int(sequence))]),
                     )
                     .unwrap();
@@ -109,13 +153,15 @@ fn edge_owner_probe_bounds_selected_routes_and_refuses_ambiguity() {
                     .0,
             )
             .unwrap();
-        let mut owners = (1..=129)
+        let mut owners = (1..=EDGES)
             .map(|id| (Uuid::from_u128(id), "REL0".to_owned()))
             .collect();
         let work = resolve_existing_edge_property_owners(&inventory, &mut owners).unwrap();
-        assert_eq!(work.fragments_considered, 8);
-        assert_eq!(work.row_groups_considered, 8);
-        assert_eq!(work.resolved_targets, 129);
+        let opened = fragments_whose_range_holds_a_target(EDGES, SEQUENCES as usize);
+        assert_eq!(opened, 8, "four fragments for each of two routes");
+        assert_eq!(work.fragments_considered, opened);
+        assert_eq!(work.row_groups_considered, opened);
+        assert_eq!(work.resolved_targets, EDGES as usize);
         assert!(work.physical_bytes <= 256 * 1024, "{work:?}");
         assert!(work.authenticated_snapshot_bytes <= 64 * 1024, "{work:?}");
         assert!(
