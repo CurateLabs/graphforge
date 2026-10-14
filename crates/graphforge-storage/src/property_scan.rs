@@ -2,7 +2,7 @@
 
 use std::fmt;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use arrow::array::{RecordBatch, RecordBatchOptions};
 use arrow::datatypes::SchemaRef;
@@ -89,6 +89,10 @@ pub(crate) struct PropertyOverlayExec {
     planned_rows: Option<usize>,
     /// Output partitions; partition `i` reads the `i`-th UUID interval of the route.
     partitions: usize,
+    /// The route's partition cuts, computed once and shared by every partition
+    /// and every copy of this scan (copies differ only in pruning hints, never
+    /// in route, inventory or partition count).
+    cuts: Arc<SharedCuts>,
     equality: Option<crate::property_overlay::PropertyEquality>,
     /// Whether a current persisted equality index answers `equality`.
     equality_index: bool,
@@ -246,6 +250,7 @@ impl PropertyOverlayExec {
             batch_size: options.batch_size.max(1),
             planned_rows,
             partitions,
+            cuts: Arc::default(),
             equality: options.equality,
             equality_index,
             uuid_filters: Vec::new(),
@@ -624,6 +629,7 @@ impl ExecutionPlan for PropertyOverlayExec {
             executed.add(1);
         }
         let partitions = self.partitions;
+        let cuts = Arc::clone(&self.cuts);
         let (sender, receiver) = tokio::sync::mpsc::channel(2);
         let project = self.project.clone();
         let inventory = self.inventory.clone();
@@ -721,6 +727,7 @@ impl ExecutionPlan for PropertyOverlayExec {
                 // pinned footers, so the intervals tile the key space: a key's
                 // base, mutation and tombstone rows are read by one partition.
                 let interval = match partition_interval_of(
+                    &cuts,
                     inventory.as_deref(),
                     is_edge,
                     &route,
@@ -865,9 +872,34 @@ impl ExecutionPlan for PropertyOverlayExec {
     }
 }
 
+/// The cuts that split one route's UUID space into the scan's partitions.
+///
+/// Every partition needs the same cuts, and deriving them walks every fragment
+/// footer, so the first partition to ask computes them while the others wait,
+/// and all share the result. A failure is not kept: the next partition retries
+/// and reports its own error.
+#[derive(Default)]
+struct SharedCuts(Mutex<Option<Arc<Vec<[u8; 16]>>>>);
+
+impl SharedCuts {
+    fn get_or_compute(
+        &self,
+        compute: impl FnOnce() -> Result<Vec<[u8; 16]>, crate::GfError>,
+    ) -> Result<Arc<Vec<[u8; 16]>>, DataFusionError> {
+        let mut slot = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(cuts) = slot.as_ref() {
+            return Ok(Arc::clone(cuts));
+        }
+        let cuts = Arc::new(compute().map_err(|error| DataFusionError::External(Box::new(error)))?);
+        *slot = Some(Arc::clone(&cuts));
+        Ok(cuts)
+    }
+}
+
 /// The UUID interval partition `partition` of `partitions` reads, or `None`
 /// when the scan has one partition and reads the whole route.
 fn partition_interval_of(
+    cuts: &SharedCuts,
     inventory: Option<&crate::AuthenticatedPropertyInventory>,
     is_edge: bool,
     route: &str,
@@ -882,9 +914,7 @@ fn partition_interval_of(
     } else {
         crate::PropertyRouteKind::Node
     };
-    let cuts = inventory
-        .route_partition_cuts(kind, route, partitions)
-        .map_err(|error| DataFusionError::External(Box::new(error)))?;
+    let cuts = cuts.get_or_compute(|| inventory.route_partition_cuts(kind, route, partitions))?;
     Ok(Some(crate::property_overlay::partition_interval(
         &cuts, partition,
     )))

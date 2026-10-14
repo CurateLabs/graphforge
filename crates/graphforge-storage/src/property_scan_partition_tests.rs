@@ -571,3 +571,45 @@ fn a_small_route_keeps_one_partition_and_a_large_one_takes_the_session_target() 
     );
     assert_eq!(partitions_for_route(1, Some(&manifest), false, "Person"), 1);
 }
+
+#[test]
+fn partitions_started_together_derive_the_route_cuts_once() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let shared = super::SharedCuts::default();
+    let computed = AtomicUsize::new(0);
+    let answers = std::thread::scope(|scope| {
+        let workers = (0..8)
+            .map(|_| {
+                scope.spawn(|| {
+                    shared
+                        .get_or_compute(|| {
+                            computed.fetch_add(1, Ordering::SeqCst);
+                            // Hold the computation long enough that every
+                            // other worker reaches the cache while it runs.
+                            std::thread::sleep(std::time::Duration::from_millis(50));
+                            Ok(vec![key(10), key(20)])
+                        })
+                        .expect("cuts")
+                })
+            })
+            .collect::<Vec<_>>();
+        workers
+            .into_iter()
+            .map(|worker| worker.join().expect("worker"))
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(computed.load(Ordering::SeqCst), 1, "one partition derives");
+    assert!(answers.iter().all(|cuts| **cuts == vec![key(10), key(20)]));
+}
+
+#[test]
+fn a_failed_cut_derivation_is_not_remembered() {
+    let shared = super::SharedCuts::default();
+    let failed = shared.get_or_compute(|| Err(crate::GfError::Validation("footer refused".into())));
+    assert!(failed.is_err(), "the failure reaches the caller");
+    let recovered = shared
+        .get_or_compute(|| Ok(vec![key(5)]))
+        .expect("a later partition derives the cuts");
+    assert_eq!(*recovered, vec![key(5)]);
+}
