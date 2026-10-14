@@ -66,7 +66,12 @@ fn targeted_presence_retains_removed_owner_without_reviving_values() {
     }
     let inventory =
         AuthenticatedPropertyInventory::from_entries_at_root(root.path(), entries.clone()).unwrap();
-    let targets = BTreeSet::from([[1; 16], [2; 16], [3; 16]]);
+    // The absent target sorts between the two keys, inside both fragments' ranges,
+    // so the older fragment (which still holds the removed owner's value 7) is
+    // opened and merged under the newer tombstone.
+    let mut between = [1; 16];
+    between[15] = 2;
+    let targets = BTreeSet::from([[1; 16], [2; 16], between]);
     let (live, live_work) = read_authenticated_property_snapshots_for_inventory(
         &inventory,
         PropertyRouteKind::Edge,
@@ -89,6 +94,19 @@ fn targeted_presence_retains_removed_owner_without_reviving_values() {
     );
     assert_eq!(work.fragments_considered, 2);
     assert_eq!(work.tombstones, 1);
+    // Once the newest fragment resolves keys 1 and 2, the only unresolved key (3)
+    // lies outside the older fragment's range [1, 2], so that fragment is skipped.
+    let beyond = BTreeSet::from([[1; 16], [2; 16], [3; 16]]);
+    let (skipped_live, skipped_work) = read_authenticated_property_snapshots_for_inventory(
+        &inventory,
+        PropertyRouteKind::Edge,
+        "REL",
+        &beyond,
+    )
+    .unwrap();
+    assert_eq!(skipped_live, live);
+    assert_eq!(skipped_work.fragments_considered, 1);
+    assert_eq!(skipped_work.tombstones, 1);
     let selected = read_authenticated_property_targets_for_inventory(
         &inventory,
         PropertyRouteKind::Edge,
@@ -230,12 +248,13 @@ fn targeted_reader_validates_unselected_rows_before_value_pruning() {
     }
 }
 
-#[test]
-fn targeted_reader_validates_older_generations_after_target_resolves() {
+/// Writes one `Person` fragment per generation, each holding exactly the given
+/// UUIDs in the given order, so a test controls both the key ranges and sortedness.
+fn write_person_generations(generations: &[(u64, Vec<[u8; 16]>)]) -> TempDir {
     let dir = TempDir::new().unwrap();
     let route_dir = dir.path().join("properties/Person");
     fs::create_dir_all(&route_dir).unwrap();
-    for (generation, uuids) in [(1, vec![[2; 16], [1; 16]]), (2, vec![[9; 16]])] {
+    for (generation, uuids) in generations.iter().cloned() {
         let id = PropertyFragmentId {
             generation,
             ordinal: 0,
@@ -278,14 +297,40 @@ fn targeted_reader_validates_older_generations_after_target_resolves() {
         writer.write(&batch).unwrap();
         writer.close().unwrap();
     }
+    dir
+}
+
+#[test]
+fn targeted_reader_validates_older_generations_that_can_hold_an_unresolved_target() {
+    // Generation 1 is deliberately unsorted. Generation 2 resolves key 9, but key
+    // 1 is still unresolved and lies in generation 1's range, so generation 1 is
+    // opened and its ordering is validated.
+    let dir = write_person_generations(&[(1, vec![[2; 16], [1; 16]]), (2, vec![[9; 16]])]);
     let error = read_authenticated_property_snapshots_for(
+        dir.path(),
+        PropertyRouteKind::Node,
+        "Person",
+        &BTreeSet::from([[9; 16], [1; 16]]),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("strictly sorted"), "{error}");
+}
+
+#[test]
+fn targeted_reader_skips_older_generations_that_cannot_hold_an_unresolved_target() {
+    // The same unsorted generation 1, but every target resolves in generation 2
+    // and generation 1's footer range [1, 2] cannot hold key 9. A fragment that
+    // cannot hold a wanted key is not opened, so it is neither read nor validated.
+    let dir = write_person_generations(&[(1, vec![[2; 16], [1; 16]]), (2, vec![[9; 16]])]);
+    let (rows, work) = read_authenticated_property_snapshots_for(
         dir.path(),
         PropertyRouteKind::Node,
         "Person",
         &BTreeSet::from([[9; 16]]),
     )
-    .unwrap_err();
-    assert!(error.to_string().contains("strictly sorted"), "{error}");
+    .unwrap();
+    assert_eq!(rows.keys().copied().collect::<Vec<_>>(), vec![[9; 16]]);
+    assert_eq!(work.fragments_considered, 1);
 }
 
 #[test]
