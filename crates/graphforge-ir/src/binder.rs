@@ -16,6 +16,7 @@ mod projection;
 mod unsupported;
 mod writes;
 
+pub(crate) use self::collect_identity::node_struct_operand;
 use self::patterns::strip_parens;
 use self::projection::expr_contains_aggregate;
 use crate::catalog::RuntimeCatalog;

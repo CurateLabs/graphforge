@@ -9,6 +9,7 @@ use arrow::array::{
     Array, BooleanArray, FixedSizeBinaryArray, Int64Array, RecordBatch, StringArray,
 };
 use arrow::datatypes::{DataType, Field, Schema};
+use datafusion::datasource::memory::MemorySourceConfig;
 use datafusion::execution::TaskContext;
 use datafusion::physical_plan::ExecutionPlan;
 use futures::StreamExt;
@@ -20,6 +21,7 @@ use tempfile::TempDir;
 use super::{
     MIN_ROWS_PER_PARTITION, PropertyOverlayExec, PropertyScanOptions, partitions_for_route,
 };
+use crate::property_join_nomination::{UuidBuildKeyNomination, UuidBuildKeyTapExec};
 use crate::property_overlay::{
     PROPERTY_GENERATION_KEY, PROPERTY_KIND_KEY, PROPERTY_ORDINAL_KEY, PROPERTY_OVERLAY_FORMAT,
     PROPERTY_OVERLAY_FORMAT_KEY, PROPERTY_ROUTE_KEY, PROPERTY_TOMBSTONE_FIELD, partition_interval,
@@ -150,28 +152,35 @@ impl Route {
         partitions: usize,
         limit: Option<usize>,
     ) -> Arc<dyn ExecutionPlan> {
+        Arc::new(self.scan_exec(inventory, partitions, limit))
+    }
+
+    fn scan_exec(
+        &self,
+        inventory: &Arc<AuthenticatedPropertyInventory>,
+        partitions: usize,
+        limit: Option<usize>,
+    ) -> PropertyOverlayExec {
         let schema = inventory
             .route_schema(PropertyRouteKind::Node, "Person")
             .unwrap()
             .unwrap();
-        Arc::new(
-            PropertyOverlayExec::try_new(
-                self.dir.path().to_path_buf(),
-                Some(Arc::clone(inventory)),
-                "Person".into(),
-                false,
-                schema,
-                PropertyScanOptions {
-                    projection: None,
-                    limit,
-                    batch_size: 7,
-                    footer_statistics: true,
-                    equality: None,
-                    partitions,
-                },
-            )
-            .unwrap(),
+        PropertyOverlayExec::try_new(
+            self.dir.path().to_path_buf(),
+            Some(Arc::clone(inventory)),
+            "Person".into(),
+            false,
+            schema,
+            PropertyScanOptions {
+                projection: None,
+                limit,
+                batch_size: 7,
+                footer_statistics: true,
+                equality: None,
+                partitions,
+            },
         )
+        .unwrap()
     }
 }
 
@@ -398,6 +407,69 @@ async fn each_partition_started_is_counted_and_a_missing_partition_is_refused() 
         "a single-partition scan has partition 0 only"
     );
     assert_eq!(executed(&split), 4, "a refused partition is not counted");
+}
+
+/// A nomination completed by the build keys `keys`, as a join's build side
+/// publishes it.
+async fn completed_nomination(keys: &[u16]) -> Arc<UuidBuildKeyNomination> {
+    let schema = Arc::new(Schema::new(vec![Field::new(
+        "node_uuid",
+        DataType::FixedSizeBinary(16),
+        false,
+    )]));
+    let ids = FixedSizeBinaryArray::try_from_iter(keys.iter().map(|id| key(*id))).unwrap();
+    let batch = RecordBatch::try_new(Arc::clone(&schema), vec![Arc::new(ids)]).unwrap();
+    let input = MemorySourceConfig::try_new_exec(&[vec![batch]], schema, None).unwrap();
+    let nomination = UuidBuildKeyNomination::new();
+    let tap = Arc::new(UuidBuildKeyTapExec::new(input, 0, Arc::clone(&nomination)));
+    let mut stream = tap.execute(0, Arc::new(TaskContext::default())).unwrap();
+    while let Some(batch) = stream.next().await {
+        batch.unwrap();
+    }
+    nomination
+}
+
+#[tokio::test]
+async fn a_nominated_read_requests_its_keys_once_however_many_partitions_read_them() {
+    let (route, expected) = layered();
+    let inventory = route.inventory();
+    // Keys spread over every quarter of the key space, so each partition of a
+    // four-way scan holds some of them.
+    let wanted = [3_u16, 40, 70, 100, 130, 160, 200, 230, 250];
+    let nomination = completed_nomination(&wanted).await;
+    let model = wanted
+        .iter()
+        .filter_map(|id| expected.get(id).map(|resolved| (*id, *resolved)))
+        .collect::<Vec<_>>();
+
+    for partitions in [1, 4] {
+        let _capture = crate::lifecycle_io::CaptureScope::install();
+        crate::io_stats::reset();
+        let plan = Arc::new(
+            route
+                .scan_exec(&inventory, partitions, None)
+                .with_uuid_nomination(Arc::clone(&nomination)),
+        ) as Arc<dyn ExecutionPlan>;
+        assert_eq!(
+            plan.properties().output_partitioning().partition_count(),
+            partitions
+        );
+        let mut rows = all_rows(&plan)
+            .await
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        rows.sort();
+        assert_eq!(rows, model, "{partitions} partitions: the nominated rows");
+        let requested = crate::io_stats::snapshot()
+            .expect("the I/O capture is installed")
+            .property_rows_requested;
+        assert_eq!(
+            requested,
+            wanted.len() as u64,
+            "{partitions} partitions: one request for the nominated keys, not one per partition"
+        );
+    }
 }
 
 #[tokio::test]
