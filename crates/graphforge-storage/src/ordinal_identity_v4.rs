@@ -52,8 +52,12 @@ const STREAM_BYTES: usize = 1024 * 1024;
 /// A hop frontier that spans more blocks than a few-megabyte cache holds is
 /// then read and authenticated once per block per generation instead of once
 /// per lookup (#1984).
-pub const DEFAULT_ORDINAL_BLOCK_CACHE_BYTES: usize =
-    crate::adjacency::DEFAULT_DECODED_SHARD_CACHE_BYTES as usize;
+pub const DEFAULT_ORDINAL_BLOCK_CACHE_BYTES: usize = 1024 * 1024 * 1024;
+
+const _: () = assert!(
+    DEFAULT_ORDINAL_BLOCK_CACHE_BYTES as u64 == crate::adjacency::DEFAULT_DECODED_SHARD_CACHE_BYTES,
+    "the ordinal identity block cache shares the decoded shard cache budget"
+);
 // BTree nodes, sorted request storage, caller-order output, and resolved-map
 // entries are charged conservatively rather than as payload-only scalars.
 const REQUEST_ENTRY_CHARGE: u64 = 128;
