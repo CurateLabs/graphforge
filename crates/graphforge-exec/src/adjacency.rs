@@ -1649,13 +1649,17 @@ impl PersistentAdjacencyProvider {
         // The label index is keyed by generation alone: it does not depend on
         // the CSR state above, so it follows the counter even when that state
         // was never read.
-        let mut labels = self.node_labels.lock().expect("node label index lock");
-        if labels.as_ref().is_some_and(|entry| {
-            !read_topology_generation(&self.dir).is_ok_and(|g| g == entry.generation)
-        }) {
-            *labels = None;
+        {
+            let mut labels = self.node_labels.lock().expect("node label index lock");
+            if labels.as_ref().is_some_and(|entry| {
+                !read_topology_generation(&self.dir).is_ok_and(|g| g == entry.generation)
+            }) {
+                *labels = None;
+            }
         }
-        // The edge-id maps follow the counter the same way.
+        // The edge-id maps follow the counter the same way. The label guard is
+        // released first: building a map holds the maps lock and then reads the
+        // label index, so taking the two in the other order could deadlock.
         let mut maps = self.edge_id_maps.lock().expect("edge id map lock");
         if maps.as_ref().is_some_and(|entry| {
             !read_topology_generation(&self.dir).is_ok_and(|g| g == entry.generation)
