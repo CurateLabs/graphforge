@@ -33,6 +33,11 @@ impl<'a> HopReadCharge<'a> {
         Ok(())
     }
 
+    #[cfg(test)]
+    pub(super) fn held_bytes(&self) -> usize {
+        self.held
+    }
+
     /// Release `bytes` that are no longer live.
     pub(super) fn release(&mut self, bytes: usize) {
         let bytes = bytes.min(self.held);
@@ -54,7 +59,7 @@ impl Drop for HopReadCharge<'_> {
 pub(super) const HOP_READ_CONSUMER: &str = "ExpandExec hop read";
 
 /// Bytes the decoded `batches` hold.
-fn batches_bytes(batches: &[RecordBatch]) -> usize {
+pub(super) fn batches_bytes(batches: &[RecordBatch]) -> usize {
     batches
         .iter()
         .map(RecordBatch::get_array_memory_size)

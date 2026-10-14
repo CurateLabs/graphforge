@@ -1,3 +1,4 @@
+use super::hop_read::batches_bytes;
 use super::*;
 use arrow::array::StringArray;
 use arrow::datatypes::DataType;
@@ -1083,7 +1084,11 @@ fn a_hop_read_is_charged_its_decoded_bytes_and_the_copy_it_joins() {
     let mut charge = HopReadCharge::new(&reservation);
     let joined = concat_charged(&mut charge, batches).unwrap();
     assert_eq!(joined.num_rows(), 3 * 4096);
-    assert_eq!(charge.held, decoded, "the joined copy replaces the batches");
+    assert_eq!(
+        charge.held_bytes(),
+        decoded,
+        "the joined copy replaces the batches"
+    );
     assert!(
         joined.get_array_memory_size() <= decoded,
         "the copy is no larger than the batches it joins"
@@ -1100,7 +1105,7 @@ fn a_hop_read_is_charged_its_decoded_bytes_and_the_copy_it_joins() {
     let mut charge = HopReadCharge::new(&reservation);
     let shared = concat_charged(&mut charge, lone).unwrap();
     assert_eq!(shared.num_rows(), 4096);
-    assert_eq!(charge.held, decoded);
+    assert_eq!(charge.held_bytes(), decoded);
     assert!(
         pool.peak(HOP_READ_CONSUMER) <= before.max(decoded + 2 * SMALL_POOL_CHUNK),
         "a lone batch is not charged twice"
@@ -1131,7 +1136,8 @@ fn a_hop_read_over_the_budget_fails_before_the_copy() {
         "{error}"
     );
     assert_eq!(
-        charge.held, decoded,
+        charge.held_bytes(),
+        decoded,
         "the failed copy charge is not recorded"
     );
     drop(charge);
