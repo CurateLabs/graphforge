@@ -507,51 +507,48 @@ fn each_column_the_parent_reads_is_one_more_column_copied() {
 
 /// The columns the expansion copies are bounded by the columns the parent
 /// reads and the identity columns, however wide the input: the forty carried
-/// columns are not copied.
+/// columns are not copied. At four partitions the expansion runs on every
+/// partition of a four-way input, with no exchange above it fanning a single
+/// stream out, so the partitioned results above are the results of a
+/// multi-partition expansion.
 #[test]
 fn the_expansion_copies_a_bounded_number_of_columns_over_wide_input() {
-    let forge = forge(1);
-    let query = format!(
-        "MATCH (a:W) {} MATCH (a)-[:K*1..3]->(b:W) RETURN w, b.id AS b",
-        with("a", "w", PROPERTIES)
-    );
-    let copied = copied_columns(&forge, &query);
-    assert!(
-        copied <= 7,
-        "the expansion copies {copied} columns for a parent that reads one projected column"
-    );
-}
-
-/// At four partitions the expansion runs on every partition of a four-way
-/// input: no exchange above it fans a single stream out. The partitioned
-/// results above are therefore the results of a multi-partition expansion.
-#[test]
-fn the_partitioned_expansion_reads_a_multi_partition_input() {
-    let forge = forge(4);
-    let query = format!(
-        "MATCH (a:W) {} MATCH (a)-[:K*1..3]->(b:W) RETURN w, b.id AS b",
-        with("a", "w", PROPERTIES)
-    );
-    let plan = forge
-        .explain_stage(&query, ExplainStage::PhysicalPlan)
-        .expect("plan");
-    let lines: Vec<&str> = plan.lines().collect();
-    let expansion = lines
-        .iter()
-        .position(|line| line.trim_start().starts_with("VarLenExpandExec:"))
-        .unwrap_or_else(|| panic!("no expansion in the plan:\n{plan}"));
-    let depth = |line: &str| line.len() - line.trim_start().len();
-    assert!(
-        lines[expansion + 1..]
+    for partitions in PARTITIONS {
+        let forge = forge(partitions);
+        let query = format!(
+            "MATCH (a:W) {} MATCH (a)-[:K*1..3]->(b:W) RETURN w, b.id AS b",
+            with("a", "w", PROPERTIES)
+        );
+        let copied = copied_columns(&forge, &query);
+        assert!(
+            copied <= 7,
+            "the expansion copies {copied} columns for a parent that reads one projected column \
+             at {partitions} partitions"
+        );
+        if partitions == 1 {
+            continue;
+        }
+        let plan = forge
+            .explain_stage(&query, ExplainStage::PhysicalPlan)
+            .expect("plan");
+        let lines: Vec<&str> = plan.lines().collect();
+        let expansion = lines
             .iter()
-            .take_while(|line| depth(line) > depth(lines[expansion]))
-            .any(|line| line.contains("RoundRobinBatch(4)")),
-        "the expansion's input is not four-way:\n{plan}"
-    );
-    assert!(
-        !lines[..expansion]
-            .iter()
-            .any(|line| line.contains("RepartitionExec") && line.contains("input_partitions=1")),
-        "an exchange above the expansion fans a single stream out:\n{plan}"
-    );
+            .position(|line| line.trim_start().starts_with("VarLenExpandExec:"))
+            .unwrap_or_else(|| panic!("no expansion in the plan:\n{plan}"));
+        let depth = |line: &str| line.len() - line.trim_start().len();
+        assert!(
+            lines[expansion + 1..]
+                .iter()
+                .take_while(|line| depth(line) > depth(lines[expansion]))
+                .any(|line| line.contains(&format!("RoundRobinBatch({partitions})"))),
+            "the expansion's input is not {partitions}-way:\n{plan}"
+        );
+        assert!(
+            !lines[..expansion].iter().any(|line| {
+                line.contains("RepartitionExec") && line.contains("input_partitions=1")
+            }),
+            "an exchange above the expansion fans a single stream out:\n{plan}"
+        );
+    }
 }
