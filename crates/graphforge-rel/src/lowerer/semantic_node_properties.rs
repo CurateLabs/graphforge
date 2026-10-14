@@ -1,5 +1,7 @@
 //! Composition-bound node properties follow immutable primary storage ownership.
-use super::{GraphPlanLowerer, LoweringError, MapUnsupportedExpr, VarId, var_alias};
+use super::{
+    GraphPlanLowerer, LoweringError, MapUnsupportedExpr, PropertyPhase, VarId, var_alias,
+};
 use datafusion::{
     common::Column,
     logical_expr::{Expr, JoinType, LogicalPlan, LogicalPlanBuilder, col},
@@ -44,7 +46,7 @@ impl GraphPlanLowerer {
         selected
     }
 
-    /// [`Self::join_semantic_node_properties`] for a snapshot without property
+    /// [`Self::join_semantic_node_properties_in`] for a snapshot without property
     /// schemas: join each stored route by `node_uuid` alone.
     fn join_semantic_route_keys(
         &self,
@@ -70,8 +72,9 @@ impl GraphPlanLowerer {
         Ok(joined)
     }
 
-    pub(super) fn join_semantic_node_properties(
+    pub(super) fn join_semantic_node_properties_in(
         &self,
+        phase: PropertyPhase,
         var: VarId,
         ty: Option<super::EntityTypeId>,
         scan: LogicalPlan,
@@ -79,6 +82,11 @@ impl GraphPlanLowerer {
         let snapshot = self.read_snapshot().expect("admitted semantic snapshot");
         let alias = var_alias(var);
         if snapshot.property_schemas_omitted {
+            // Every column is read whole at bind time on such a snapshot (the
+            // lowering refuses a demand-pruned plan), so nothing is left late.
+            if phase == PropertyPhase::Late {
+                return Ok(scan);
+            }
             return self.join_semantic_route_keys(&alias, scan);
         }
         let mut projections: Vec<Expr> = scan
@@ -119,7 +127,7 @@ impl GraphPlanLowerer {
             // would scan the route's whole key column to say so. A property read
             // on this variable still joins, and authenticates, every route that
             // owns one of its columns.
-            columns.retain(|field| self.node_property_needed(var, field.name()));
+            columns.retain(|field| self.node_property_needed(phase, var, field.name()));
             if columns.is_empty() {
                 continue;
             }

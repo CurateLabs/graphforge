@@ -26,8 +26,26 @@
 //!
 //! Every other use, `RETURN n`, `properties(n)`, `n + 1`, `ORDER BY n`, a
 //! path, a write or a procedure call included, demands the whole node.
+//!
+//! # Late columns
+//!
+//! A plan that ends `.. Sort, Project, [Skip,] Limit` reads some columns only
+//! to build its returned rows: nothing before the `Limit` filters, orders or
+//! groups on them. [`NodePropertyDemand::needs_late`] names those columns, so
+//! a lowerer reads them for the rows the `Limit` keeps instead of for every
+//! row that reaches it. A column is late only when all of these hold for its
+//! variable:
+//!
+//! - the variable is scanned once in the whole plan, in the run of scans,
+//!   expansions, filters and sorts directly below the final `Project`;
+//! - it is not renamed or passed through a `WITH`, an aggregate group key or
+//!   an alias that shares its demand;
+//! - nothing observes it whole, before or in the `Project`;
+//! - the final `Project` is the only reader of the column.
+//!
+//! Every other column of the variable is early: [`NodePropertyDemand::needs_early`].
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::hash::BuildHasher;
 
 use crate::{ExprArena, ExprId, GraphOp, GraphPlan, IrExpr, PropertyId, VarId};
@@ -69,8 +87,12 @@ pub struct NodePropertyDemand {
     /// Every variable demands every column (an operator the analysis does not
     /// model, such as a write or a procedure call, can read any node).
     all: bool,
-    /// The merged demand of each alias class, keyed by every member.
+    /// The merged early demand of each alias class, keyed by every member.
     vars: HashMap<VarId, VarDemand>,
+    /// The columns only the final projection reads, per deferrable variable.
+    late: HashMap<VarId, BTreeSet<String>>,
+    /// The index of the final `Project` when some column is late.
+    deferred_projection: Option<usize>,
 }
 
 impl Default for NodePropertyDemand {
@@ -80,24 +102,63 @@ impl Default for NodePropertyDemand {
 }
 
 impl NodePropertyDemand {
-    /// Every variable demands every property column.
+    /// Every variable demands every property column, and none is late.
     #[must_use]
     pub fn everything() -> Self {
         Self {
             all: true,
             vars: HashMap::new(),
+            late: HashMap::new(),
+            deferred_projection: None,
         }
     }
 
     /// Whether the plan can observe property column `column` of node variable
-    /// `var`.
+    /// `var`, early or late.
     #[must_use]
     pub fn needs(&self, var: VarId, column: &str) -> bool {
+        self.needs_early(var, column) || self.needs_late(var, column)
+    }
+
+    /// Whether the plan observes `column` of `var` before its final
+    /// projection: in a filter, a sort key, a group key, an aggregate, a
+    /// later pattern or any other operator.
+    #[must_use]
+    pub fn needs_early(&self, var: VarId, column: &str) -> bool {
         self.all
             || self
                 .vars
                 .get(&var)
                 .is_some_and(|demand| demand.needs(column))
+    }
+
+    /// Whether `column` of `var` is observed only by the final projection, so
+    /// it can be read after the plan's `Limit` for the rows it keeps.
+    #[must_use]
+    pub fn needs_late(&self, var: VarId, column: &str) -> bool {
+        !self.all
+            && self
+                .late
+                .get(&var)
+                .is_some_and(|columns| columns.contains(column))
+    }
+
+    /// Whether any column of `var` is late.
+    #[must_use]
+    pub fn defers(&self, var: VarId) -> bool {
+        !self.all
+            && self
+                .late
+                .get(&var)
+                .is_some_and(|columns| !columns.is_empty())
+    }
+
+    /// The index in the plan's operators of the final `Project`, when some
+    /// variable has a late column. The `Project` is followed by the plan's
+    /// optional `Skip` and its `Limit`, which are the last operators.
+    #[must_use]
+    pub fn deferred_projection(&self) -> Option<usize> {
+        self.deferred_projection
     }
 }
 
@@ -108,14 +169,98 @@ pub fn node_property_demand<S: BuildHasher>(
     plan: &GraphPlan,
     property_names: &HashMap<PropertyId, String, S>,
 ) -> NodePropertyDemand {
-    let mut collector = Collector {
-        property_names,
-        all: false,
-        demands: HashMap::new(),
-        links: Vec::new(),
+    let mut base = Collector::new(property_names);
+    let Some(deferral) = Deferral::of(plan) else {
+        base.plan(plan);
+        return base.finish(HashMap::new(), None);
     };
-    collector.plan(plan);
-    collector.finish()
+    // The final projection is collected on its own: what only it reads is late.
+    let mut projection = Collector::new(property_names);
+    for (index, op) in plan.ops.iter().enumerate() {
+        if index == deferral.project {
+            projection.op(&plan.exprs, op);
+        } else {
+            base.op(&plan.exprs, op);
+        }
+    }
+    let mut late: HashMap<VarId, BTreeSet<String>> = HashMap::new();
+    let projected = std::mem::take(&mut projection.demands);
+    for (var, demand) in projected {
+        let early = base.demands.get(&var);
+        let deferrable = !base.all
+            && deferral.scanned.contains(&var)
+            && base.scans.get(&var) == Some(&1)
+            && !base.links.iter().any(|(a, b)| *a == var || *b == var)
+            && !matches!(early, Some(VarDemand::All));
+        match demand {
+            VarDemand::Names(columns) if deferrable => {
+                let columns: BTreeSet<String> = columns
+                    .into_iter()
+                    .filter(|column| !early.is_some_and(|early| early.needs(column)))
+                    .collect();
+                if !columns.is_empty() {
+                    late.insert(var, columns);
+                }
+            }
+            other => base.demand(var, other),
+        }
+    }
+    let project = (!late.is_empty()).then_some(deferral.project);
+    base.finish(late, project)
+}
+
+/// Where a plan's final projection may be read late.
+struct Deferral {
+    /// The index of the final `Project`.
+    project: usize,
+    /// The node variables scanned in the run of operators directly below it.
+    scanned: HashSet<VarId>,
+}
+
+impl Deferral {
+    /// The plan ends `.. Project { distinct: false }, [Skip,] Limit` with at
+    /// least one node scan directly below the `Project`.
+    ///
+    /// The run below the `Project` is made of scans, expansions, filters and
+    /// sorts. Any other operator (a `WITH`, an aggregate, an `UNWIND`, an
+    /// optional or existential sub-plan, a union, a write) ends it: a variable
+    /// bound before that operator keeps its early read.
+    fn of(plan: &GraphPlan) -> Option<Self> {
+        let ops = &plan.ops;
+        let mut end = ops.len().checked_sub(1)?;
+        if !matches!(ops[end], GraphOp::Limit { .. }) {
+            return None;
+        }
+        if end > 0 && matches!(ops[end - 1], GraphOp::Skip { .. }) {
+            end -= 1;
+        }
+        let project = end.checked_sub(1)?;
+        if !matches!(
+            ops[project],
+            GraphOp::Project {
+                distinct: false,
+                ..
+            }
+        ) {
+            return None;
+        }
+        let mut scanned = HashSet::new();
+        for op in ops[..project].iter().rev() {
+            match op {
+                GraphOp::NodeScan { var, .. } => {
+                    scanned.insert(*var);
+                }
+                GraphOp::EdgeScan { .. }
+                | GraphOp::TypedEdgeScan { .. }
+                | GraphOp::Expand { .. }
+                | GraphOp::RelationshipUnique { .. }
+                | GraphOp::Filter { .. }
+                | GraphOp::Sort { .. } => {}
+                _ => break,
+            }
+        }
+        (!scanned.is_empty()).then_some(Self { project, scanned })
+    }
 }
 
 struct Collector<'a, S> {
@@ -124,9 +269,21 @@ struct Collector<'a, S> {
     demands: HashMap<VarId, VarDemand>,
     /// Pairs of variables that name the same node.
     links: Vec<(VarId, VarId)>,
+    /// How many times each variable is scanned, nested plans included.
+    scans: HashMap<VarId, u32>,
 }
 
-impl<S: BuildHasher> Collector<'_, S> {
+impl<'a, S: BuildHasher> Collector<'a, S> {
+    fn new(property_names: &'a HashMap<PropertyId, String, S>) -> Self {
+        Self {
+            property_names,
+            all: false,
+            demands: HashMap::new(),
+            links: Vec::new(),
+            scans: HashMap::new(),
+        }
+    }
+
     fn demand(&mut self, var: VarId, demand: VarDemand) {
         match self.demands.get_mut(&var) {
             Some(existing) => existing.merge(demand),
@@ -145,11 +302,18 @@ impl<S: BuildHasher> Collector<'_, S> {
     }
 
     fn plan(&mut self, plan: &GraphPlan) {
-        let exprs = &plan.exprs;
         for op in &plan.ops {
+            self.op(&plan.exprs, op);
+        }
+    }
+
+    fn op(&mut self, exprs: &ExprArena, op: &GraphOp) {
+        {
             match op {
-                GraphOp::NodeScan { .. }
-                | GraphOp::EdgeScan { .. }
+                GraphOp::NodeScan { var, .. } => {
+                    *self.scans.entry(*var).or_default() += 1;
+                }
+                GraphOp::EdgeScan { .. }
                 | GraphOp::TypedEdgeScan { .. }
                 | GraphOp::Expand { .. }
                 | GraphOp::RelationshipUnique { .. }
@@ -335,7 +499,11 @@ impl<S: BuildHasher> Collector<'_, S> {
     }
 
     /// Merge each alias class's demand into every member.
-    fn finish(self) -> NodePropertyDemand {
+    fn finish(
+        self,
+        late: HashMap<VarId, BTreeSet<String>>,
+        deferred_projection: Option<usize>,
+    ) -> NodePropertyDemand {
         let Self {
             all,
             demands,
@@ -365,7 +533,12 @@ impl<S: BuildHasher> Collector<'_, S> {
                 vars.insert(var, demand.clone());
             }
         }
-        NodePropertyDemand { all, vars }
+        NodePropertyDemand {
+            all,
+            vars,
+            late,
+            deferred_projection,
+        }
     }
 }
 

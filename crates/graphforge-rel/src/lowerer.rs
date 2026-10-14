@@ -55,6 +55,7 @@ use datafusion::logical_expr::{
     Expr as DfExpr, ExprFunctionExt, ExprSchemable, Extension, JoinType, LogicalPlanBuilder,
     SortExpr,
 };
+use datafusion::functions_window::expr_fn::row_number;
 
 use graphforge_core::{GfError, OntologyMode};
 use graphforge_ir::arrow_schema::{
@@ -77,6 +78,55 @@ use crate::LogicalPlan;
 use crate::expr::{ExprLowerer, LoweringError, VarMap, list_index_range};
 
 const INPUT_ORDER_COLUMN_PREFIX: &str = "__gf_input_order_";
+
+/// The hidden column that carries a row's position through the join that reads
+/// its deferred node properties (see [`GraphPlanLowerer::lower_deferred_tail`]).
+const LATE_ROW_COLUMN: &str = "__gf_late_row";
+
+/// The node variables whose RETURN-only property columns a statement reads
+/// after its `Limit` (see [`GraphPlanLowerer::lower_deferred_tail`]).
+struct LateJoins {
+    /// The index in the plan's operators of the final `Project`; the `Skip`
+    /// and `Limit` after it are the plan's last operators.
+    project: usize,
+    /// Each node variable with a late column, with the label its scan carries.
+    nodes: Vec<(VarId, Option<EntityTypeId>)>,
+}
+
+impl LateJoins {
+    /// The late joins of `plan`, or `None` when `demand` defers nothing.
+    ///
+    /// A deferred variable is scanned exactly once in the whole statement, so
+    /// its top-level `NodeScan` is the only place its label is known.
+    fn of(plan: &GraphPlan, demand: &NodePropertyDemand) -> Option<Self> {
+        let project = demand.deferred_projection()?;
+        let nodes = plan
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                GraphOp::NodeScan { var, ty, .. } if demand.defers(*var) => Some((*var, *ty)),
+                _ => None,
+            })
+            .collect();
+        Some(Self { project, nodes })
+    }
+}
+
+/// Which of a node variable's property columns an enrichment reads.
+///
+/// A node variable's columns split by when the plan first observes them: those
+/// read before the plan's `Sort` and `Limit` (a filter, a sort key, a group
+/// key, a later pattern) are `Early`, and those read only by the final
+/// projection are `Late`, joined after the `Limit` for the rows it keeps.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PropertyPhase {
+    /// Every column the plan observes, whenever it observes it.
+    All,
+    /// The columns observed before the final projection.
+    Early,
+    /// The columns observed only by the final projection.
+    Late,
+}
 
 /// Convert an underlying planner error into the relational facade's stable
 /// unsupported-expression diagnostic without duplicating formatting logic at
@@ -283,12 +333,18 @@ impl GraphPlanLowerer {
     }
 
     /// Whether the plan being lowered can observe property column `column` of
-    /// node variable `var`, so its enrichment must read it.
-    fn node_property_needed(&self, var: VarId, column: &str) -> bool {
-        self.node_property_demand
+    /// node variable `var` in `phase`, so the enrichment of that phase must
+    /// read it.
+    fn node_property_needed(&self, phase: PropertyPhase, var: VarId, column: &str) -> bool {
+        let demand = self
+            .node_property_demand
             .read()
-            .expect("node property demand lock poisoned")
-            .needs(var, column)
+            .expect("node property demand lock poisoned");
+        match phase {
+            PropertyPhase::All => demand.needs(var, column),
+            PropertyPhase::Early => demand.needs_early(var, column),
+            PropertyPhase::Late => demand.needs_late(var, column),
+        }
     }
 
     /// Build an `ExprLowerer` for the current plan, seeded with the resolved
@@ -402,12 +458,12 @@ impl GraphPlanLowerer {
         // plan's NodeScans before lowering its expressions.
         *self.node_shapes.write().expect("node shapes lock poisoned") =
             self.build_node_shapes(&plan.ops);
-        self.set_node_property_demand(graphforge_ir::node_property_demand(
-            plan,
-            &self.prop_names(),
-        ));
+        let demand = graphforge_ir::node_property_demand(plan, &self.prop_names());
+        let late = LateJoins::of(plan, &demand);
+        self.set_node_property_demand(demand);
         let mut var_map = VarMap::new();
-        let lowered = self.lower_pipeline(&plan.ops, &plan.exprs, &mut var_map);
+        let lowered =
+            self.lower_pipeline_deferring(&plan.ops, &plan.exprs, &mut var_map, late.as_ref());
         let lowered = lowered.map(|lowered| self.wrap_structural_fast_path(plan, lowered));
         lowered
             .and_then(|plan| self.attach_graph_contract(plan))
@@ -610,6 +666,23 @@ impl GraphPlanLowerer {
         exprs: &ExprArena,
         var_map: &mut VarMap,
     ) -> Result<LogicalPlan, LoweringError> {
+        self.lower_pipeline_deferring(ops, exprs, var_map, None)
+    }
+
+    /// [`lower_pipeline`](Self::lower_pipeline), reading the node properties
+    /// that only the final projection observes after the plan's `Limit`
+    /// instead of before it (`late`; see [`Self::lower_deferred_tail`]).
+    ///
+    /// Only [`lower_plan`](Self::lower_plan) passes `late`: it is the one entry
+    /// point whose node property demand covers the whole statement, and its
+    /// final `Project`, `Skip` and `Limit` are the statement's.
+    fn lower_pipeline_deferring(
+        &self,
+        ops: &[GraphOp],
+        exprs: &ExprArena,
+        var_map: &mut VarMap,
+        late: Option<&LateJoins>,
+    ) -> Result<LogicalPlan, LoweringError> {
         let mut reachability = graphforge_ir::reachability_expansions(ops, exprs);
         let order = reachability.lowering_order(ops.len());
         let ordered: Vec<&GraphOp> = order.iter().map(|&index| &ops[index]).collect();
@@ -627,6 +700,18 @@ impl GraphPlanLowerer {
             .build()
             .map_unsupported_expr()?;
 
+        // The final `Project`, `Skip` and `Limit` are the last operators of the
+        // plan and `lowering_order` only moves an expansion behind its hoisted
+        // destination operators, so they lower in plan order; the deferred
+        // tail relies on that and refuses a plan that breaks it.
+        if let Some(late) = late
+            && !(late.project..ops.len()).eq(order[late.project.min(order.len())..].iter().copied())
+        {
+            return Err(LoweringError::UnsupportedExpr(
+                "the lowering order moved the operators after a deferred projection".to_owned(),
+            ));
+        }
+        let mut deferred_tail = late.is_none();
         let decorrelate = self.may_decorrelate(&ordered, reachability.is_empty());
         let mut next = 0;
         while next < ordered.len() {
@@ -636,6 +721,21 @@ impl GraphPlanLowerer {
             let index = order[i];
             if reachability.is_vacuous_uniqueness(index) {
                 continue;
+            }
+            if let Some(late) = late
+                && index == late.project
+            {
+                deferred_tail = true;
+                if let Some(tail) = self.lower_deferred_tail(
+                    late,
+                    ops,
+                    &mut reachability,
+                    &current,
+                    exprs,
+                    var_map,
+                )? {
+                    return Ok(tail);
+                }
             }
             if let Some(from_bound_end) = self.bound_end_expansion(
                 &ordered[i..],
@@ -686,6 +786,14 @@ impl GraphPlanLowerer {
                 current = plan;
                 next += consumed;
             }
+        }
+        if !deferred_tail {
+            // The enrichments left the deferred columns for the tail; losing it
+            // would plan them as absent, so this is an error rather than a
+            // plan.
+            return Err(LoweringError::UnsupportedExpr(
+                "the final projection of a deferred plan was not lowered".to_owned(),
+            ));
         }
         Ok(current)
     }
@@ -813,6 +921,89 @@ impl GraphPlanLowerer {
         // `scan_var` is now bound, so this applies its label and joins its
         // properties instead of scanning.
         self.lower_op_with_arena(scan, searched, exprs, var_map, false, false, None, None)
+    }
+
+    /// Lower the final `Project`, `Skip` and `Limit` of a statement some of
+    /// whose node property columns only the projection reads, joining those
+    /// columns after the `Limit` for the rows it keeps.
+    ///
+    /// The plan below the projection ends in a `Sort` and carries every column
+    /// a filter, a sort key or a later pattern observes. Hoisting the `Skip`
+    /// and `Limit` below the projection is the move DataFusion itself makes
+    /// for a row-wise projection: it keeps the same rows in the same order.
+    /// The kept rows are numbered in that order, joined to their properties,
+    /// and sorted by the number. The join emits its rows in an order of its
+    /// own choosing, and a re-sort by the `Sort` keys would permute rows that
+    /// tie on them, so the number is the only thing that gives the order back
+    /// exactly. The projection then drops the number: it selects exactly its
+    /// own items.
+    ///
+    /// Returns `None` when no late column exists in the stored schemas, so the
+    /// plan keeps its original shape.
+    fn lower_deferred_tail(
+        &self,
+        late: &LateJoins,
+        ops: &[GraphOp],
+        reachability: &mut graphforge_ir::ReachabilityPlan,
+        current: &LogicalPlan,
+        exprs: &ExprArena,
+        var_map: &mut VarMap,
+    ) -> Result<Option<LogicalPlan>, LoweringError> {
+        let mut bounded = current.clone();
+        for op in &ops[late.project + 1..] {
+            bounded = match op {
+                GraphOp::Skip { count } => lower_skip(*count, bounded)?,
+                GraphOp::Limit { count } => lower_limit(*count, bounded)?,
+                other => {
+                    return Err(LoweringError::UnsupportedExpr(format!(
+                        "an operator after a deferred projection is not a skip or limit: {other:?}"
+                    )));
+                }
+            };
+        }
+        let ranked = LogicalPlanBuilder::from(bounded)
+            .window(vec![row_number().alias(LATE_ROW_COLUMN)])
+            .and_then(LogicalPlanBuilder::build)
+            .map_unsupported_expr()?;
+        let width = ranked.schema().fields().len();
+        let mut joined = ranked;
+        for &(var, ty) in &late.nodes {
+            // The join keys on the variable's `node_uuid`. A plan that lost it
+            // between the scan and the projection must not fall back to
+            // reading the columns whole.
+            let qualifier = datafusion::common::TableReference::bare(var_alias(var));
+            if joined
+                .schema()
+                .field_with_name(Some(&qualifier), "node_uuid")
+                .is_err()
+            {
+                return Err(LoweringError::UnboundVar(var.0));
+            }
+            joined = self.join_node_properties_in(PropertyPhase::Late, var, ty, joined)?;
+        }
+        if joined.schema().fields().len() == width {
+            return Ok(None);
+        }
+        let ordered = LogicalPlanBuilder::from(joined)
+            .sort(vec![SortExpr::new(
+                datafusion::logical_expr::col(LATE_ROW_COLUMN),
+                true,
+                false,
+            )])
+            .and_then(LogicalPlanBuilder::build)
+            .map_unsupported_expr()?;
+        self.lower_pipeline_op(
+            late.project,
+            &ops[late.project],
+            reachability,
+            ordered,
+            exprs,
+            var_map,
+            false,
+            false,
+            None,
+        )
+        .map(Some)
     }
 
     /// Lower the operator at `index` of a pipeline whose reachability analysis
@@ -1036,19 +1227,19 @@ impl GraphPlanLowerer {
                     return match ty {
                         Some(type_id) => {
                             let filtered = filter_node_by_type(input, alias, *type_id)?;
-                            self.join_node_properties(*var, *ty, filtered)
+                            self.join_node_properties_in(PropertyPhase::Early, *var, *ty, filtered)
                         }
                         // An already-bound but UNLABELLED node (e.g. the dst of
                         // `(n)-[r]->(x)`) still needs its properties joined so a
                         // later `x.prop` / `WHERE x.p = …` resolves. In
                         // exploratory mode `join_node_properties` routes to
                         // `_untyped` (#889); a no-op otherwise.
-                        None => self.join_node_properties(*var, None, input),
+                        None => self.join_node_properties_in(PropertyPhase::Early, *var, None, input),
                     };
                 }
                 let scan =
                     lower_node_scan(*var, *ty, var_map, self.read_snapshot(), pending_nodes)?;
-                let scan = self.join_node_properties(*var, *ty, scan)?;
+                let scan = self.join_node_properties_in(PropertyPhase::Early, *var, *ty, scan)?;
                 // Multi-pattern MATCH: comma-separated patterns (`MATCH (a), (b)`)
                 // lower to consecutive *fresh* NodeScans. The first replaces the
                 // column-less base; a later disconnected scan is a CROSS PRODUCT

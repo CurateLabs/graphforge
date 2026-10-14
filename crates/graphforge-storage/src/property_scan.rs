@@ -684,6 +684,11 @@ impl ExecutionPlan for PropertyOverlayExec {
                     .filter_map(|nomination| nomination.ids())
                     .map(|ids| ids as &dyn crate::uuid_set::UuidMembership)
                     .collect::<Vec<_>>();
+                // The read wants only the keys every nomination admits, so the
+                // smallest set bounds it; no nomination means an unpruned read.
+                if let Some(wanted) = uuid_sets.iter().map(|set| set.len()).min() {
+                    crate::io_stats::record_property_rows_requested(wanted as u64);
+                }
                 let selected_properties = projection
                     .as_ref()
                     .map(|names| names.iter().cloned().collect());
