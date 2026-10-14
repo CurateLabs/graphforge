@@ -347,6 +347,22 @@ impl GraphPlanLowerer {
         }
     }
 
+    /// Restrict the columns a node's bare value carries to the ones the plan
+    /// reads for it, when the plan collects the node as a whole value and only
+    /// reads columns from the unwound copies. The scan joins exactly those
+    /// columns, so a shape listing any other column would name a field that no
+    /// operator produces. Every shape of the node must go through here, the
+    /// scan's own and each copy a `WITH` forwards under a new variable.
+    fn narrow_collected_shape(&self, var: VarId, shape: &mut crate::expr::NodeShape) {
+        let demand = self
+            .node_property_demand
+            .read()
+            .expect("node property demand lock poisoned");
+        if demand.narrows_collected_value(var) {
+            shape.prop_names.retain(|name| demand.needs(var, name));
+        }
+    }
+
     /// Build an `ExprLowerer` for the current plan, seeded with the resolved
     /// `PropId → name` map.
     fn expr_lowerer<'b>(&self, arena: &'b ExprArena, var_map: &'b VarMap) -> ExprLowerer<'b> {
@@ -460,22 +476,15 @@ impl GraphPlanLowerer {
             self.build_node_shapes(&plan.ops);
         let demand = graphforge_ir::node_property_demand(plan, &self.prop_names());
         let late = LateJoins::of(plan, &demand);
-        // A node the plan collects as a whole value and only reads columns
-        // from after unwinding carries just those columns in the collected
-        // struct; the others were never read for it.
+        self.set_node_property_demand(demand);
         for (var, shape) in self
             .node_shapes
             .write()
             .expect("node shapes lock poisoned")
             .iter_mut()
         {
-            if demand.narrows_collected_value(VarId(*var)) {
-                shape
-                    .prop_names
-                    .retain(|name| demand.needs(VarId(*var), name));
-            }
+            self.narrow_collected_shape(VarId(*var), shape);
         }
-        self.set_node_property_demand(demand);
         let mut var_map = VarMap::new();
         let lowered =
             self.lower_pipeline_deferring(&plan.ops, &plan.exprs, &mut var_map, late.as_ref());
@@ -1851,8 +1860,9 @@ impl GraphPlanLowerer {
                             var_alias(output_var)
                         };
                         if output_var != *v
-                            && let Some(shape) = node_shapes.get(&v.0).cloned()
+                            && let Some(mut shape) = node_shapes.get(&v.0).cloned()
                         {
+                            self.narrow_collected_shape(output_var, &mut shape);
                             forwarded_node_shapes.push((output_var.0, shape));
                         }
                         if !keep_input_for_where || output_prefix != prefix {

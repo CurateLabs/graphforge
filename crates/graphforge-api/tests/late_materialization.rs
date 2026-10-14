@@ -149,6 +149,15 @@ fn edges() -> Vec<Edge> {
             work_from: None,
         });
     }
+    // Message `i` is liked by person `i mod people`.
+    for i in 0..MESSAGES {
+        edges.push(Edge {
+            ty: "LIKES",
+            source: i % PERSONS.len(),
+            target: FIRST_MESSAGE + i,
+            work_from: None,
+        });
+    }
     edges
 }
 
@@ -1435,4 +1444,50 @@ fn a_collected_node_carries_only_the_columns_its_unwound_copy_reads() {
         vec![vec![people.len().to_string()]],
         "{returned}"
     );
+}
+
+const ZOMBIE_LIKES: &str = "MATCH (country:Country {name: 'Laos'})<-[:IS_LOCATED_IN]-(:Company)<-[:WORK_AT]-(zombie:Person) WHERE zombie.id < 100 WITH country, zombie OPTIONAL MATCH (zombie)<-[:HAS_CREATOR]-(message) WHERE (message:Post OR message:Comment) AND message.creationDate < 1000 WITH country, zombie, count(message) AS messageCount WITH country, zombie, 12 * (2020 - zombie.id) + 1 AS months, messageCount WHERE messageCount / months < 100 WITH country, collect(zombie) AS zombies UNWIND zombies AS zombie OPTIONAL MATCH (zombie)<-[:HAS_CREATOR]-(message)<-[:LIKES]-(likerZombie:Person) WHERE (message:Post OR message:Comment) WITH zombie, count(likerZombie) AS zombieLikeCount OPTIONAL MATCH (zombie)<-[:HAS_CREATOR]-(message)<-[:LIKES]-(likerPerson:Person) WHERE (message:Post OR message:Comment) AND likerPerson.id < 1000 WITH zombie, zombieLikeCount, count(likerPerson) AS totalLikeCount RETURN zombie.id AS zombieId, zombieLikeCount, totalLikeCount ORDER BY zombieId ASC LIMIT 100";
+
+/// A collected node that is only unwound, then bound again by a later
+/// pattern whose other nodes are unlabeled. The collected node reaches the
+/// aggregate under the variable a `WITH` gave it, not the one its scan bound,
+/// so the columns its value carries must follow the demand there too.
+#[test]
+fn a_collected_node_rebound_by_a_later_pattern_reads_its_own_columns() {
+    let _serial = serial();
+    let engines = Engines::new();
+    let single = durable_single_partition();
+
+    let plan = physical_plan(&single.graph, ZOMBIE_LIKES);
+    assert_eq!(
+        collected_fields(&plan),
+        ["id", "labels", "node_uuid"],
+        "the collected zombie holds the one column that is read:\n{plan}"
+    );
+
+    // Every person who works for a company in Laos, once, with the likes on
+    // the messages they created: each message has exactly one liker.
+    let edges = edges();
+    let workers: std::collections::BTreeSet<usize> = edges
+        .iter()
+        .filter(|edge| edge.ty == "WORK_AT")
+        .map(|edge| edge.source)
+        .collect();
+    let expected: Vec<Vec<String>> = workers
+        .into_iter()
+        .map(|worker| {
+            let likes = (0..MESSAGES)
+                .filter(|&i| author(i) == worker)
+                .filter(|&i| {
+                    edges
+                        .iter()
+                        .any(|edge| edge.ty == "LIKES" && edge.target == FIRST_MESSAGE + i)
+                })
+                .count()
+                .to_string();
+            vec![PERSONS[worker].0.to_string(), likes.clone(), likes]
+        })
+        .collect();
+    assert_eq!(expected.len(), 3, "bob, cat and dan work in Laos");
+    assert_eq!(engines.rows(ZOMBIE_LIKES), expected, "{ZOMBIE_LIKES}");
 }
