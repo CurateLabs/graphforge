@@ -468,6 +468,30 @@ fn correlated_seed_fails_closed_until_the_outer_rows_are_bound() {
 }
 
 #[test]
+fn a_bound_seed_stops_holding_its_rows_once_released() {
+    use arrow::datatypes::Field;
+
+    let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::UInt64, false)]));
+    let rows = RecordBatch::try_new(
+        schema.clone(),
+        vec![Arc::new(UInt64Array::from(vec![4, 5]))],
+    )
+    .unwrap();
+    let (bound, handle) = bind_seed_rows(seed_exec(7, &schema), 7, &[rows]).unwrap();
+    assert_eq!(seed_rows(&bound).unwrap()[0].num_rows(), 2);
+
+    // The executed plan stays reachable for EXPLAIN ANALYZE, so the rows must
+    // not stay alive with it, and a late execution must not see an empty seed.
+    handle.release();
+    assert!(handle.get().is_none());
+    let error = seed_rows(&bound).unwrap_err().to_string();
+    assert!(
+        error.contains("after its outer rows were released"),
+        "{error}"
+    );
+}
+
+#[test]
 fn binding_a_correlated_seed_leaves_other_seeds_and_requires_its_own_leaf() {
     use arrow::datatypes::Field;
 

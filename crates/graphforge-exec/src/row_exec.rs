@@ -179,7 +179,10 @@ impl ExecutionPlan for OptionalMatchExec {
     }
 
     fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
-        vec![&self.outer, self.executed_inner.get().unwrap_or(&self.inner)]
+        vec![
+            &self.outer,
+            self.executed_inner.get().unwrap_or(&self.inner),
+        ]
     }
 
     fn metrics(&self) -> Option<MetricsSet> {

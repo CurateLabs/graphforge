@@ -1642,11 +1642,13 @@ impl ExecutionSession {
             path_hydration::collect_guarded(Arc::clone(&physical), self.ctx.task_ctx()).await;
         path_hydration::cancel_plan(&physical);
         collected.map_err(GfError::from_execution_error)?;
-        Ok(datafusion::physical_plan::display::DisplayableExecutionPlan::with_metrics(
-            physical.as_ref(),
+        Ok(
+            datafusion::physical_plan::display::DisplayableExecutionPlan::with_metrics(
+                physical.as_ref(),
+            )
+            .indent(false)
+            .to_string(),
         )
-        .indent(false)
-        .to_string())
     }
 
     /// Lower `plan`, bind `$name` parameters, and build the physical plan —

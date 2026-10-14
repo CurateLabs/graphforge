@@ -40,8 +40,7 @@ impl ExpandMetrics {
 
     /// Register the counters of one partition's execution.
     pub(crate) fn partition(&self, partition: usize) -> PartitionMetrics {
-        let counter =
-            |name: &'static str| MetricBuilder::new(&self.set).counter(name, partition);
+        let counter = |name: &'static str| MetricBuilder::new(&self.set).counter(name, partition);
         PartitionMetrics {
             baseline: BaselineMetrics::new(&self.set, partition),
             input_rows: counter("input_rows"),
