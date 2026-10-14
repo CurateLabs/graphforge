@@ -2226,103 +2226,6 @@ struct SingleHopConfig {
     read_reservation: std::sync::Mutex<ChunkedReservation>,
 }
 
-/// What a single-hop chunk has charged to [`SingleHopConfig::read_reservation`],
-/// released when the chunk ends, by whatever path it ends.
-struct HopReadCharge<'a> {
-    reservation: &'a std::sync::Mutex<ChunkedReservation>,
-    held: usize,
-}
-
-impl<'a> HopReadCharge<'a> {
-    fn new(reservation: &'a std::sync::Mutex<ChunkedReservation>) -> Self {
-        Self {
-            reservation,
-            held: 0,
-        }
-    }
-
-    /// Charge `bytes` that are now live. Fails, naming [`HOP_READ_CONSUMER`],
-    /// when the pool cannot hold them; the failed charge is not recorded.
-    fn charge(&mut self, bytes: usize) -> Result<(), GfError> {
-        self.reservation
-            .lock()
-            .map_err(|_| GfError::Execution("ExpandExec hop read reservation poisoned".into()))?
-            .try_grow(bytes)
-            .map_err(GfError::from_execution_error)?;
-        self.held += bytes;
-        Ok(())
-    }
-
-    /// Release `bytes` that are no longer live.
-    fn release(&mut self, bytes: usize) {
-        let bytes = bytes.min(self.held);
-        if let Ok(mut reservation) = self.reservation.lock() {
-            reservation.shrink(bytes);
-            self.held -= bytes;
-        }
-    }
-}
-
-impl Drop for HopReadCharge<'_> {
-    fn drop(&mut self) {
-        self.release(self.held);
-    }
-}
-
-/// The pool consumer a single-hop chunk's edge and destination-node reads
-/// charge: the decoded batches, their concatenation, and the id-to-row tables.
-const HOP_READ_CONSUMER: &str = "ExpandExec hop read";
-
-/// Bytes the decoded `batches` hold.
-fn batches_bytes(batches: &[RecordBatch]) -> usize {
-    batches
-        .iter()
-        .map(RecordBatch::get_array_memory_size)
-        .fold(0, usize::saturating_add)
-}
-
-/// The rows of `batches` as one batch, charging `charge` for every live copy.
-/// A lone batch is shared, not copied, so its charge stays; otherwise the copy
-/// is charged before it is allocated, so an over-budget read fails before the
-/// copy, and the decoded batches' charge is released once they are dropped.
-/// Fails, typed, when the pool cannot hold the charge.
-fn concat_charged(
-    charge: &mut HopReadCharge<'_>,
-    batches: Vec<RecordBatch>,
-) -> Result<RecordBatch, GfError> {
-    let decoded = batches_bytes(&batches);
-    charge.charge(decoded)?;
-    if let [only] = batches.as_slice() {
-        return Ok(only.clone());
-    }
-    let schema = batches
-        .first()
-        .map(RecordBatch::schema)
-        .ok_or_else(|| GfError::Execution("Expand: scan returned no batches".into()))?;
-    charge.charge(decoded)?;
-    let joined = arrow::compute::concat_batches(&schema, &batches)
-        .map_err(|error| GfError::Execution(error.to_string()))?;
-    drop(batches);
-    charge.release(decoded);
-    Ok(joined)
-}
-
-impl SingleHopConfig {
-    /// Charge the held input batch and the output batch to the session memory pool.
-    fn account(
-        &self,
-        held: Option<&RecordBatch>,
-        output: &RecordBatch,
-    ) -> Result<(), DataFusionError> {
-        let bytes =
-            held.map_or(0, RecordBatch::get_array_memory_size) + output.get_array_memory_size();
-        self.reservation
-            .lock()
-            .map_err(|_| DataFusionError::Internal("ExpandExec reservation poisoned".into()))?
-            .try_resize(bytes)
-    }
-}
-
 /// Resumable position within one input batch. Keeping the raw adjacency offset
 /// and undirected per-row dedup set lets an upstream fixed hop yield bounded
 /// batches without losing high-degree neighbors when a chunk boundary lands
@@ -2685,6 +2588,27 @@ fn expand_single_hop_chunk(
         None
     } else {
         let admitted_inventory = cfg.provider.admitted_inventory();
+        // Admit decoder scratch before Parquet reads allocate it. The estimate
+        // includes dictionary expansion and the returned buffers; retain it
+        // through concatenation until the owned result has its own charge.
+        let decode_bytes = if let Some(inventory) = admitted_inventory.as_deref() {
+            let projection = if required.is_some() {
+                edge_projection.clone()
+            } else {
+                (0..edge_topology_width).collect()
+            };
+            graphforge_storage::edge_decode_admission_bytes(
+                inventory,
+                &cfg.rel_type_name,
+                cfg.mode,
+                &traversed,
+                &projection,
+            )
+            .map_err(GfError::from_execution_error)?
+        } else {
+            0
+        };
+        read_charge.charge(decode_bytes)?;
         let edge_batches =
             if let Some(inventory) = admitted_inventory.as_deref().filter(|_| required.is_some()) {
                 graphforge_storage::read_edges_filtered_projected_from_inventory(
@@ -2723,7 +2647,9 @@ fn expand_single_hop_chunk(
             }
             .map_err(|e| exec_err(e.to_string()))?;
         drop(edge_permit);
-        Some(concat_charged(&mut read_charge, edge_batches)?)
+        let edge_batch = concat_charged(&mut read_charge, edge_batches)?;
+        read_charge.release(decode_bytes);
+        Some(edge_batch)
     };
     // Position of each traversed edge within the edge batch, by `edge_id`.
     let edge_row: HashMap<u64, usize> = match edge_batch.as_ref() {
@@ -3076,7 +3002,9 @@ mod destination_rows;
 mod edge_filter;
 mod edge_predicate;
 mod edge_properties;
+mod hop_read;
 mod input_columns;
+use hop_read::{HOP_READ_CONSUMER, HopReadCharge, concat_charged};
 mod reachability;
 #[cfg(test)]
 mod tests;
