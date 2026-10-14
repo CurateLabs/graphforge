@@ -192,7 +192,11 @@ impl AuthenticatedPropertyInventory {
         // BTree nodes hold spare entries and links. Three times entry storage
         // plus 64 bytes per entry covers that slack; vectors count capacity.
         let mut bytes = size_of::<Self>();
-        bytes = bytes.saturating_add(self.root_path.as_ref().map_or(0, |path| path.capacity()));
+        bytes = bytes.saturating_add(
+            self.root_path
+                .as_ref()
+                .map_or(0, std::path::PathBuf::capacity),
+        );
         for ((_, route), fragments) in &self.routes {
             bytes = bytes.saturating_add(
                 3 * (size_of::<(String, Vec<AuthenticatedPropertyFragment>)>() + 64),

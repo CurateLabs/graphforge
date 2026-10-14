@@ -109,17 +109,16 @@ fn file_bytes(
         ids.len().saturating_mul(2) > nonnegative(reader.metadata().file_metadata().num_rows())?;
     let mut bytes = 0usize;
     for group in reader.metadata().row_groups() {
-        if !full_read {
-            if let Some(Statistics::Int64(statistics)) = group.column(key).statistics() {
-                if let (Some(&low), Some(&high)) = (statistics.min_opt(), statistics.max_opt()) {
-                    // Canonical UInt64 ids are represented by Parquet INT64;
-                    // compare their original unsigned bit patterns.
-                    let low = low.cast_unsigned();
-                    let high = high.cast_unsigned();
-                    if low <= high && !ids.iter().any(|id| *id >= low && *id <= high) {
-                        continue;
-                    }
-                }
+        if !full_read
+            && let Some(Statistics::Int64(statistics)) = group.column(key).statistics()
+            && let (Some(&low), Some(&high)) = (statistics.min_opt(), statistics.max_opt())
+        {
+            // Canonical UInt64 ids are represented by Parquet INT64;
+            // compare their original unsigned bit patterns.
+            let low = low.cast_unsigned();
+            let high = high.cast_unsigned();
+            if low <= high && !ids.iter().any(|id| *id >= low && *id <= high) {
+                continue;
             }
         }
         for &column in &columns {
