@@ -1,0 +1,89 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
+[package]
+name = "datafusion-optimizer"
+description = "DataFusion Query Optimizer"
+keywords = ["datafusion", "query", "optimizer"]
+readme = "README.md"
+version = { workspace = true }
+edition = { workspace = true }
+homepage = { workspace = true }
+repository = { workspace = true }
+license = { workspace = true }
+authors = { workspace = true }
+rust-version = { workspace = true }
+
+[package.metadata.docs.rs]
+all-features = true
+
+# Note: add additional linter rules in lib.rs.
+# Rust does not support workspace + new linter rules in subcrates yet
+# https://github.com/rust-lang/cargo/issues/13157
+[lints]
+workspace = true
+
+[lib]
+name = "datafusion_optimizer"
+
+[features]
+recursive_protection = ["dep:recursive"]
+
+# Note -- please DO NOT add a dependency here to any of the datafusion-functions
+# crates. While it is tempting to try and add an optimizer pass that uses
+# datafusion-functions Doing so makes it harder for downstream crates to
+# provide their own function library and smaller install footprint.
+#
+# If you want to add special handling for a specific function, use the methods
+# on the ScalarUDFImpl or AggregateUDFImpl traits (or add a new method to those
+# traits).
+[dependencies]
+arrow = { workspace = true }
+chrono = { workspace = true }
+datafusion-common = { workspace = true, default-features = true }
+datafusion-expr = { workspace = true }
+datafusion-expr-common = { workspace = true }
+datafusion-physical-expr = { workspace = true }
+indexmap = { workspace = true }
+itertools = { workspace = true }
+log = { workspace = true }
+recursive = { workspace = true, optional = true }
+regex = { workspace = true }
+regex-syntax = "0.8.9"
+
+[dev-dependencies]
+async-trait = { workspace = true }
+criterion = { workspace = true }
+ctor = { workspace = true }
+datafusion-functions-aggregate = { workspace = true }
+datafusion-functions-window = { workspace = true }
+datafusion-functions-window-common = { workspace = true }
+datafusion-sql = { workspace = true }
+env_logger = { workspace = true }
+insta = { workspace = true }
+
+[[bench]]
+name = "projection_unnecessary"
+harness = false
+
+[[bench]]
+name = "optimize_projections"
+harness = false
+
+[[bench]]
+name = "unions_to_filter"
+harness = false
