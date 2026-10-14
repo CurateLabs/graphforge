@@ -244,21 +244,21 @@ impl ExecutionPlan for OptionalMatchExec {
             metrics.outer_rows.add(row_count(&outer_batches));
             // A correlated sub-plan starts from the rows just collected, not
             // from a second evaluation of the outer plan (#1919).
-            let (inner, seed_rows) = match correlated_seed {
+            let (inner, seed_release) = match correlated_seed {
                 Some(seed) => {
                     let _timer = metrics.baseline.elapsed_compute().timer();
                     let (bound, rows) = bind_seed_rows(inner, seed, &outer_batches)?;
+                    let release = SeedReleaseGuard(rows);
                     // Keep the copy that runs: its operators own the metrics.
                     let _ = executed_inner.set(Arc::clone(&bound));
-                    (bound, Some(rows))
+                    (bound, Some(release))
                 }
                 None => (inner, None),
             };
             let collected = collect(inner, context).await;
-            // The executed copy stays for display; it must not keep the rows.
-            if let Some(rows) = seed_rows {
-                rows.release();
-            }
+            // The executed copy stays for display; release its rows on success
+            // or error here, and on cancellation or panic through the guard.
+            drop(seed_release);
             let inner_batches = collected?;
             metrics.inner_rows.add(row_count(&inner_batches));
             let _timer = metrics.baseline.elapsed_compute().timer();
@@ -296,6 +296,17 @@ impl SeedRows {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take();
+    }
+}
+
+/// One execution's ownership of the bound seed rows. The display plan keeps
+/// the bound leaves, so dropping the execution must release their buffers even
+/// when collection is cancelled or unwinds before returning.
+struct SeedReleaseGuard(SeedRows);
+
+impl Drop for SeedReleaseGuard {
+    fn drop(&mut self) {
+        self.0.release();
     }
 }
 
