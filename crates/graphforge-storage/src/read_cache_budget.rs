@@ -25,6 +25,9 @@
 //! inventory, allocator retention and runtime overhead need separate admission
 //! or measurement. Building a label index can also temporarily hold its old
 //! slot buffer beside its replacement (at most twice the admitted slot bytes).
+//! Optional view builds temporarily coexist with the shard cache they displace;
+//! the accounting lock serializes those builds, so one admitted view of at
+//! most `P` can be in construction beside at most `P` cached shard bytes.
 //!
 //! # Symmetric accounting inside the topology share
 //!

@@ -60,7 +60,10 @@ CSR shard may exceed the topology share, bounded by the shard admission limits.
 Label slots and dictionary arrays count allocated capacity, and optional views
 that do not fit are declined before allocation. The facade's
 `resource_diagnostics().retained_topology_bytes` reports the topology consumers
-and their shared ceiling.
+and their shared ceiling. Optional view builds are serialized, but their
+buffers coexist with the shards they displace until publication; construction
+can therefore add one topology share temporarily. Slot growth can hold the old
+buffer beside its exact-sized replacement.
 
 An edge-record decode reserves a conservative metadata-derived estimate before
 reading pages: four times compressed pages, uncompressed pages, reconstructed
