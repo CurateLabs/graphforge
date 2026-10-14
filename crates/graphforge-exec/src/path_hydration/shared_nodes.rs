@@ -222,7 +222,7 @@ impl SharedNodes {
                 .iter()
                 .filter(|uuid| {
                     !state.index.contains_key(*uuid)
-                        && !local.is_some_and(|l| l.uuids.binary_search(uuid).is_ok())
+                        && local.is_none_or(|l| l.uuids.binary_search(uuid).is_err())
                 })
                 .copied()
                 .collect();
