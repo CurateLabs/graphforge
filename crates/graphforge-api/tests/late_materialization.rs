@@ -1204,3 +1204,134 @@ fn projection_functions_run_for_the_kept_rows() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Decorrelated expansions
+// ---------------------------------------------------------------------------
+
+/// Every message once, under its creator, when `barrier` is empty: the creators
+/// are aggregated, then each one's messages are expanded. With no barrier after
+/// the aggregation the planner expands every creator's relationships once and
+/// joins them back instead of expanding per row; a sort after it keeps the
+/// per-row form. `tail` follows the projection.
+fn creator_messages(barrier: &str, columns: &str, tail: &str) -> String {
+    format!(
+        "MATCH (m)-[:HAS_CREATOR]->(p:Person) WITH p, count(*) AS n {barrier} MATCH (p)<-[:HAS_CREATOR]-(message) WHERE (message:Post OR message:Comment) RETURN p.id AS personId, p.firstName AS name, message.id AS id, message.creationDate AS date{columns} ORDER BY date DESC, id ASC {tail}"
+    )
+}
+
+const MESSAGE_TEXT: &str = ", coalesce(message.content, message.imageFile) AS text";
+
+fn anchored_expansions(plan: &str) -> usize {
+    plan.lines()
+        .filter(|line| line.trim_start().starts_with("AnchoredExpansionExec"))
+        .count()
+}
+
+/// The messages of every creator in the order `date DESC, id ASC`, with the
+/// creator's id and first name and the message's text.
+fn creator_message_rows() -> Vec<Vec<String>> {
+    messages_of(&[1, 2, 3], |_| true)
+        .into_iter()
+        .map(|(creator, i)| {
+            let (id, first, _) = PERSONS[creator];
+            vec![
+                id.to_string(),
+                first.to_owned(),
+                message_id(i).to_string(),
+                date(i).to_string(),
+                shown(i),
+            ]
+        })
+        .collect()
+}
+
+/// A message's text is read above the limit when its expansion is the
+/// decorrelated one: the variables bound inside the expansion keep the
+/// `node_uuid` the deferred read joins on, and the rows, their order and the
+/// number of rows the read requests are those of the per-row form.
+#[test]
+fn a_decorrelated_expansion_defers_the_text_of_its_messages() {
+    let _serial = serial();
+    let engines = Engines::new();
+    let single = durable_single_partition();
+    let reference = creator_message_rows();
+
+    for (tail, skip, take) in [("LIMIT 5", 0usize, 5usize), ("SKIP 4 LIMIT 6", 4, 6)] {
+        let expected = reference[skip..skip + take].to_vec();
+        let decorrelated = creator_messages("", MESSAGE_TEXT, tail);
+        let per_row = creator_messages("ORDER BY p.id", MESSAGE_TEXT, tail);
+        for (graph, name) in [
+            (&engines.durable.graph, "several partitions"),
+            (&single.graph, "one partition"),
+        ] {
+            let plan = physical_plan(graph, &decorrelated);
+            assert_eq!(
+                anchored_expansions(&plan),
+                1,
+                "{name}, {tail}: the expansion is decorrelated\n{plan}"
+            );
+            assert!(
+                plan.contains("BoundedWindowAggExec") && plan.contains("__gf_late_row"),
+                "{name}, {tail}: the text is read after the limit\n{plan}"
+            );
+            let shape = overlays_around_sort(&plan, skip + take);
+            assert!(
+                shape.above_sort >= 1,
+                "{name}, {tail}: a read sits above the sort\n{plan}"
+            );
+            assert_eq!(
+                rows(graph, &decorrelated),
+                expected,
+                "{name}, {tail}: decorrelated rows"
+            );
+
+            let plan = physical_plan(graph, &per_row);
+            assert_eq!(
+                anchored_expansions(&plan),
+                0,
+                "{name}, {tail}: the sorted aggregation keeps the expansion per row\n{plan}"
+            );
+            assert!(
+                plan.contains("__gf_late_row"),
+                "{name}, {tail}: the per-row form defers the read too\n{plan}"
+            );
+            assert_eq!(
+                rows(graph, &per_row),
+                expected,
+                "{name}, {tail}: per-row rows"
+            );
+        }
+        assert_eq!(
+            rows(&engines.memory, &decorrelated),
+            expected,
+            "{tail}: in-memory rows"
+        );
+        assert_eq!(
+            rows(&engines.memory, &per_row),
+            expected,
+            "{tail}: in-memory per-row rows"
+        );
+    }
+
+    // The deferred read asks for the kept rows only, however many messages the
+    // decorrelated expansion produced.
+    for n in [3usize, 7] {
+        let with_text = creator_messages("", MESSAGE_TEXT, &format!("LIMIT {n}"));
+        let plan = physical_plan(&single.graph, &with_text);
+        assert_eq!(anchored_expansions(&plan), 1, "LIMIT {n}\n{plan}");
+        let (kept, requested) = rows_and_requested(&single.graph, &with_text);
+        assert_eq!(kept.len(), n);
+        // `name` is the aggregated creator's own property and rides the
+        // aggregation; only the message text is read late.
+        let (_, with_name) = rows_and_requested(
+            &single.graph,
+            &creator_messages("", "", &format!("LIMIT {n}")),
+        );
+        assert_eq!(
+            requested,
+            with_name + n as u64,
+            "the message text is read for exactly the {n} kept rows"
+        );
+    }
+}
