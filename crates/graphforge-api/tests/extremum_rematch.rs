@@ -441,3 +441,89 @@ fn numeric_edge_cases_match_the_stage_that_expands_again() {
         );
     }
 }
+
+#[test]
+fn a_user_alias_matching_the_collected_rows_name_keeps_its_result() {
+    let query = "MATCH (a:P)-[r:R]->(m) WITH a, max(r.w) AS _extremum_rematch_7 \
+        MATCH (a)-[r:R]->(m) WHERE r.w = _extremum_rematch_7 \
+        WITH a, min(m.id) AS latest RETURN latest";
+    for partitions in PARTITIONS {
+        let forge = GraphForge::new_with_options(
+            None,
+            GraphForgeOptions {
+                resource: ExecutionResourcePolicy {
+                    target_partitions: Some(partitions),
+                    batch_size: Some(2),
+                    ..ExecutionResourcePolicy::default()
+                },
+                ..GraphForgeOptions::default()
+            },
+        )
+        .unwrap();
+        forge.execute("CREATE (a:P)-[:R {w: 7}]->(:M {id: 9}), (a)-[:R {w: 7}]->(:M {id: 3}), (a)-[:R {w: 2}]->(:M {id: 1})").unwrap();
+        let plan = physical_plan(&forge, query);
+        assert!(rematches(&plan), "{plan}");
+        assert_eq!(expansions(&plan), 1, "{plan}");
+        assert_eq!(
+            rows(&forge, query),
+            table(&[&["3"]]),
+            "{partitions} partitions"
+        );
+    }
+}
+
+#[test]
+fn the_second_aggregate_can_merge_first_stage_groups() {
+    let rewritten = ic7("")
+        .replace(
+            "WITH person, liker, likeTime, min(message.id)",
+            "WITH person, min(message.id)",
+        )
+        .replace(
+            "RETURN person.id AS personId, liker.id AS likerId, likeTime, latestMessageId",
+            "RETURN person.id AS personId, latestMessageId",
+        );
+    let expanded = rewritten.replace(
+        "AND like.creationDate = likeTime",
+        "AND like.creationDate = likeTime AND like.creationDate IS NOT NULL",
+    );
+    for partitions in PARTITIONS {
+        let forge = forge(partitions);
+        assert!(rematches(&physical_plan(&forge, &rewritten)));
+        assert!(!rematches(&physical_plan(&forge, &expanded)));
+        let expected = table(&[&["1", "100"], &["2", "102"], &["3", "201"]]);
+        assert_eq!(rows(&forge, &rewritten), expected);
+        assert_eq!(rows(&forge, &expanded), expected);
+    }
+}
+
+#[test]
+fn heterogeneous_extrema_and_tie_breaks_keep_cypher_order() {
+    let rewritten = "MATCH (a:P)-[r:R]->(m) WITH a, max(r.w) AS t \
+        MATCH (a)-[r:R]->(m) WHERE r.w = t \
+        WITH a, min(m.id) AS latest RETURN a.key, tostring(latest) AS latest";
+    let expanded = rewritten.replace("WHERE r.w = t", "WHERE r.w = t AND r.w IS NOT NULL");
+    for partitions in PARTITIONS {
+        let forge = GraphForge::new_with_options(
+            None,
+            GraphForgeOptions {
+                resource: ExecutionResourcePolicy {
+                    target_partitions: Some(partitions),
+                    batch_size: Some(2),
+                    ..ExecutionResourcePolicy::default()
+                },
+                ..GraphForgeOptions::default()
+            },
+        )
+        .unwrap();
+        // Numbers order above booleans and strings. At the maximum, 8 and
+        // 8.0 tie; their ids are heterogeneous and 'a' orders before numbers.
+        // NULL extrema remove their group; NULL ids keep a surviving group.
+        forge.execute("CREATE (a:P {key: 'mixed'})-[:R {w: 8}]->(:M {id: 'a'}), (a)-[:R {w: 8.0}]->(:M {id: 3}), (a)-[:R {w: true}]->(:M {id: '0'}), (a)-[:R {w: 'zzz'}]->(:M {id: '0'}), (b:P {key: 'null-extremum'})-[:R]->(:M {id: 1}), (c:P {key: 'null-id'})-[:R {w: 4}]->(:M)").unwrap();
+        assert!(rematches(&physical_plan(&forge, rewritten)));
+        assert!(!rematches(&physical_plan(&forge, &expanded)));
+        let expected = table(&[&["mixed", "a"], &["null-id", "null"]]);
+        assert_eq!(rows(&forge, rewritten), expected, "{partitions} partitions");
+        assert_eq!(rows(&forge, &expanded), expected, "{partitions} partitions");
+    }
+}

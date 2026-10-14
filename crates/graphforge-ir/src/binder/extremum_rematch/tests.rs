@@ -266,3 +266,45 @@ fn a_query_with_one_stage_is_untouched() {
     let plan = bind("MATCH (a:P)<-[:OWNS]-(m) WITH a, max(m.w) AS t RETURN a.id, t");
     assert_eq!(rematch_collects(&plan), 0);
 }
+
+#[test]
+fn a_user_extremum_alias_cannot_shadow_the_collected_rows() {
+    let query = "MATCH (a:P)-[r:R]->(m) WITH a, max(r.w) AS t \
+        MATCH (a)-[r:R]->(m) WHERE r.w = t \
+        WITH a, min(m.id) AS latest RETURN latest";
+    let baseline = bind(query);
+    let collect_alias = baseline
+        .ops
+        .iter()
+        .find_map(|op| {
+            let GraphOp::Aggregate { aggs, .. } = op else {
+                return None;
+            };
+            aggs.iter()
+                .find(|agg| agg.func == AggFunc::Collect)
+                .map(|agg| agg.alias.clone())
+        })
+        .expect("the baseline rewrites");
+    let collision = query
+        .replace(" AS t", &format!(" AS {collect_alias}"))
+        .replace("r.w = t", &format!("r.w = {collect_alias}"));
+    let plan = bind(&collision);
+    assert_eq!(
+        rematch_collects(&plan),
+        1,
+        "the exact same query still rewrites"
+    );
+    let GraphOp::Aggregate { aggs, .. } = plan
+        .ops
+        .iter()
+        .find(|op| matches!(op, GraphOp::Aggregate { .. }))
+        .unwrap()
+    else {
+        unreachable!()
+    };
+    assert_eq!(aggs[0].alias, collect_alias);
+    assert_ne!(
+        aggs[0].alias, aggs[1].alias,
+        "physical aggregate columns must be distinct"
+    );
+}

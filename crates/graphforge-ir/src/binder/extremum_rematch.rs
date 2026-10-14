@@ -79,7 +79,14 @@
 //!
 //! The collected list holds one two-field map per first-stage row of the
 //! group, where the original streams `max` in constant space. That is the
-//! price of a single expansion; `collect` has no spill path.
+//! price of a single expansion; `collect` has no spill path. Retained nested
+//! values are compacted to their own buffers, and the aggregate reports their
+//! buffers and collection capacities to DataFusion's query memory reservation.
+//! A group that cannot fit the query pool fails with a resource-exhaustion
+//! error instead of retaining the complete group. Memory checks occur after
+//! each input batch, so a batch's transient allocations can exceed the pool;
+//! the pool is not a hard cap on the process's resident memory. A query that
+//! the original streaming `max` answered in a small pool can therefore fail.
 
 use crate::catalog::RuntimeCatalog;
 use crate::reachability::{conjuncts, visit};
@@ -635,6 +642,30 @@ fn apply(plan: &mut GraphPlan, found: &Found, next_var: &mut u32) {
     let item_var = VarId(*next_var + 1);
     *next_var += 2;
 
+    // Aggregate aliases are physical column names, unlike VarIds. A user can
+    // name `max(e)` exactly like our generated list, so select an unused name
+    // in the aggregate that introduces it before adding the new expression.
+    let GraphOp::Aggregate {
+        aggs,
+        group_aliases,
+        ..
+    } = &plan.ops[found.first_agg]
+    else {
+        unreachable!("detect proved the first aggregate");
+    };
+    let stem = format!("_extremum_rematch_{}", list_var.0);
+    let mut list_alias = stem.clone();
+    let mut suffix = 0;
+    while aggs.iter().any(|agg| agg.alias == list_alias)
+        || group_aliases
+            .iter()
+            .flatten()
+            .any(|alias| *alias == list_alias)
+    {
+        suffix += 1;
+        list_alias = format!("{stem}_{suffix}");
+    }
+
     let exprs = &mut plan.exprs;
     let id_base = exprs.push(IrExpr::VarRef(found.id_var));
     let id_access = exprs.push(IrExpr::PropertyAccess {
@@ -679,7 +710,7 @@ fn apply(plan: &mut GraphPlan, found: &Found, next_var: &mut u32) {
             func: AggFunc::Collect,
             arg: Some(row),
             percentile: None,
-            alias: format!("_extremum_rematch_{}", list_var.0),
+            alias: list_alias,
             out_var: Some(list_var),
         });
     }
