@@ -36,8 +36,7 @@ use datafusion::physical_plan::{
 use futures::Stream;
 use futures::task::AtomicWaker;
 
-use crate::row_exec::correlated_seed_demand;
-use crate::{CorrelatedSeedExec, ExpandExec, OptionalMatchExec, VarLenExpandExec};
+use crate::{ExpandExec, OptionalMatchExec, VarLenExpandExec};
 
 /// Per-hop deterministic work counters.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -1413,6 +1412,9 @@ fn rewrite_correlated_materialization(
     plan: &Arc<dyn ExecutionPlan>,
     required: &BTreeSet<usize>,
 ) -> Result<Option<Arc<dyn ExecutionPlan>>> {
+    use crate::CorrelatedSeedExec;
+    use crate::row_exec::correlated_seed_demand;
+
     if let Some(seed) = plan.downcast_ref::<CorrelatedSeedExec>() {
         return Ok(Some(Arc::new(seed.with_demand(required.clone()))));
     }
