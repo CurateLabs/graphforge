@@ -322,7 +322,11 @@ fn an_anchor_is_expanded_once_however_many_rows_carry_it() {
         let (result, snapshot) = demand::capture(|| forge.execute(&rewritten));
         let result = result.expect("rewritten form");
         assert_eq!(
-            result.batches.iter().map(|b| b.num_rows()).sum::<usize>(),
+            result
+                .batches
+                .iter()
+                .map(arrow::array::RecordBatch::num_rows)
+                .sum::<usize>(),
             expected.len()
         );
         assert_eq!(
