@@ -711,7 +711,7 @@ fn pins_property(exprs: &ExprArena, id: ExprId, var: VarId) -> bool {
 }
 
 /// Call `visit_node` on `id` and every expression below it.
-fn visit(exprs: &ExprArena, id: ExprId, visit_node: &mut impl FnMut(&IrExpr)) {
+pub(crate) fn visit(exprs: &ExprArena, id: ExprId, visit_node: &mut impl FnMut(&IrExpr)) {
     let expr = exprs.get(id);
     visit_node(expr);
     match expr {

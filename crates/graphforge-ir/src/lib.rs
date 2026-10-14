@@ -522,6 +522,9 @@ mod tests {
     }
 }
 
+pub mod expression_vars;
+pub use expression_vars::{calls_volatile_function, referenced_vars};
+
 pub mod lowering_snapshot;
 pub use lowering_snapshot::LoweringSnapshot;
 

@@ -11,6 +11,7 @@
 //! | [`VarLenExpandNode`] | Variable-length graph expansion |
 //! | [`OptionalMatchNode`] | Optional graph-pattern matching |
 //! | [`CorrelatedSeedNode`] | The outer rows a correlated sub-plan starts from |
+//! | [`AnchoredExpansionNode`] | A pattern expanded once per distinct anchor, joined back to the rows that bound it |
 //! | [`PathUniqueNode`] | Path uniqueness constraints |
 //! | [`OntologyInferNode`] | Ontology-derived relation expansion |
 //! | [`GraphMergeNode`] | Match-or-create graph patterns |
@@ -59,6 +60,9 @@ macro_rules! impl_partial_ord {
 }
 
 pub mod fast_path;
+
+mod anchored_expansion;
+pub use anchored_expansion::AnchoredExpansionNode;
 
 // ---------------------------------------------------------------------------
 // Shared helpers

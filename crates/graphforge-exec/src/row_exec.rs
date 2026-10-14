@@ -746,5 +746,8 @@ fn unwind_explode(
     RecordBatch::try_new(cfg.out_schema.clone(), columns).map_err(|e| exec_err(e.to_string()))
 }
 
+mod anchored_expansion;
+pub use anchored_expansion::AnchoredExpansionExec;
+
 #[cfg(test)]
 mod tests;

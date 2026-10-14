@@ -18,7 +18,7 @@ use crate::path_hydration;
 use crate::physical_schema_fallback;
 use crate::read_resource;
 use crate::row_exec::UnwindExec;
-use crate::row_exec::{CorrelatedSeedExec, OptionalMatchExec};
+use crate::row_exec::{AnchoredExpansionExec, CorrelatedSeedExec, OptionalMatchExec};
 use crate::write_driver;
 use crate::write_exec::GraphDeleteExec;
 use crate::write_exec::GraphRemoveExec;
@@ -314,6 +314,23 @@ impl ExtensionPlanner for GraphForgeExtensionPlanner {
                 ));
             };
             return Ok(Some(Arc::new(OptionalMatchExec::new(opt, outer, inner))));
+        }
+        if let Some(anchored) = node
+            .as_any()
+            .downcast_ref::<graphforge_plan::AnchoredExpansionNode>()
+        {
+            // inputs() order is [input, expansion], so physical_inputs matches.
+            let (Some(input), Some(expansion)) = (
+                physical_inputs.first().cloned(),
+                physical_inputs.get(1).cloned(),
+            ) else {
+                return Err(DataFusionError::Internal(
+                    "AnchoredExpansion requires two physical inputs".into(),
+                ));
+            };
+            return Ok(Some(Arc::new(AnchoredExpansionExec::try_new(
+                anchored, input, expansion,
+            )?)));
         }
         if let Some(seed) = node
             .as_any()
