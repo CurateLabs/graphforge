@@ -139,8 +139,8 @@ const SPILLER_FLOOR_BYTES: usize = 10 * 1024 * 1024;
 pub(crate) struct QueryMemoryPool {
     pool_size: usize,
     state: Mutex<State>,
-    /// The most bytes the pool has had reserved since the gauge was last
-    /// reset. Shared so the owner of a pool the runtime has taken over (and
+    /// The most bytes the pool has had reserved since it was created.
+    /// Shared so the owner of a pool the runtime has taken over (and
     /// wrapped) can still read it.
     peak: Arc<AtomicUsize>,
 }
@@ -189,7 +189,7 @@ impl QueryMemoryPool {
 
     /// The pool's high-water mark of reserved bytes. The pool raises it with
     /// every reservation it serves, loans and unconditional growth included;
-    /// the owner resets it to start a new measurement.
+    /// repeated and concurrent reads share it without resetting it.
     pub(crate) fn peak_gauge(&self) -> Arc<AtomicUsize> {
         Arc::clone(&self.peak)
     }

@@ -1,19 +1,25 @@
 ---
 source: crates/graphforge-exec/tests/explain_snapshots.rs
+assertion_line: 122
 ---
 ProjectionExec: expr=[name@0 as bn]
   RepartitionExec: partitioning=RoundRobinBatch(<N>), input_partitions=1
     RepartitionExec: partitioning=RoundRobinBatch(<N>), input_partitions=2
-      HashJoinExec: mode=Partitioned, join_type=Left, on=[(node_uuid@0, node_uuid@0)], projection=[name@2]
-        RepartitionExec: partitioning=Hash([node_uuid@0], 2), input_partitions=1
-          UuidBuildKeyTapExec: column=0
-            CoalescePartitionsExec
-              FilterExec: array_has(type_ids@1, 1073741824), projection=[node_uuid@0]
-                RepartitionExec: partitioning=RoundRobinBatch(<N>), input_partitions=1
-                  ProjectionExec: expr=[node_uuid@10 as node_uuid, type_ids@13 as type_ids]
-                    ExpandExec: rel=KNOWS, dir=->, adjacency=building, identity=legacy, fetch=all, demand_batch=all, projection=2, cancel=none
-                      FilterExec: array_has(type_ids@1, 1073741824)
-                        OrderedPartitionStreamExec: input_partitions=3
-                          GraphForgeParquetExec: fragments=3, batch_size=8192, limit=none
-        RepartitionExec: partitioning=Hash([node_uuid@0], 2), input_partitions=1
-          PropertyOverlayExec: route=_untyped
+      ProjectionExec: expr=[name@2 as name]
+        SortMergeJoinExec: join_type=Left, on=[(node_uuid@0, node_uuid@0)]
+          SortExec: expr=[node_uuid@0 ASC], preserve_partitioning=[true]
+            SortRunCoalesceExec: run_bytes=16777216
+              RepartitionExec: partitioning=Hash([node_uuid@0], 2), input_partitions=1
+                UuidBuildKeyTapExec: column=0
+                  CoalescePartitionsExec
+                    FilterExec: array_has(type_ids@1, 1073741824), projection=[node_uuid@0]
+                      RepartitionExec: partitioning=RoundRobinBatch(<N>), input_partitions=1
+                        ProjectionExec: expr=[node_uuid@10 as node_uuid, type_ids@13 as type_ids]
+                          ExpandExec: rel=KNOWS, dir=->, adjacency=building, identity=legacy, fetch=all, demand_batch=all, projection=2, cancel=none
+                            FilterExec: array_has(type_ids@1, 1073741824)
+                              OrderedPartitionStreamExec: input_partitions=3
+                                GraphForgeParquetExec: fragments=3, batch_size=8192, limit=none
+          SortExec: expr=[node_uuid@0 ASC], preserve_partitioning=[true]
+            SortRunCoalesceExec: run_bytes=16777216
+              RepartitionExec: partitioning=Hash([node_uuid@0], 2), input_partitions=1
+                PropertyOverlayExec: route=_untyped

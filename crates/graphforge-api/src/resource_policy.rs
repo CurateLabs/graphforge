@@ -267,13 +267,11 @@ fn logical_cpus() -> usize {
         .clamp(MIN_THREADS, MAX_THREADS)
 }
 
-/// Query memory each default DataFusion partition is sized for. A sort
-/// partition reserves `sort_spill_reservation_bytes` (10 MiB in DataFusion
-/// 54) plus GraphForge's 1 MiB minimum run before it holds any data
-/// (`graphforge-exec` `sort_runs`), all from the one `memory_budget` pool.
-/// 32 MiB per partition keeps one sort's up-front reservations near a third of
-/// the pool, so default queries spill rather than fail as partitions grow
-/// with the machine.
+/// Query memory each default DataFusion partition is sized for. A sort's
+/// initial merge reserve is capped at one eighth of its partition's budget
+/// share (and DataFusion's 10 MiB default); its input runs also draw from the
+/// same pool (`graphforge-exec` `sort_runs`). 32 MiB per partition leaves room
+/// for merge buffers and upstream producers as concurrency grows.
 const QUERY_PARTITION_MEMORY_BYTES: u64 = 32 * 1024 * 1024;
 
 /// Automatic-mode defaults, derived from the machine and the memory budget,

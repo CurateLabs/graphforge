@@ -484,6 +484,20 @@ fn session_runtime(
     Ok((runtime, memory_peak))
 }
 
+fn size_sort_merge_reservation(
+    config: &mut datafusion::prelude::SessionConfig,
+    memory_budget: usize,
+    target_partitions: usize,
+) {
+    // Several spillable join inputs can sort concurrently. Keep each merge
+    // reserve within its partition's budget share instead of letting the fixed
+    // default consume most of a small query pool.
+    let execution = &mut config.options_mut().execution;
+    execution.sort_spill_reservation_bytes = execution
+        .sort_spill_reservation_bytes
+        .min(memory_budget / target_partitions.max(1) / 8);
+}
+
 struct QueryEvidenceStream {
     inner: Option<SendableRecordBatchStream>,
     physical: Arc<dyn ExecutionPlan>,
@@ -816,6 +830,7 @@ impl ExecutionSession {
             .use_row_number_estimates_to_optimize_partitioning = true;
 
         let memory_budget = usize::try_from(resources.memory_budget_bytes).unwrap_or(usize::MAX);
+        size_sort_merge_reservation(&mut config, memory_budget, resources.target_partitions);
         let (runtime_env, memory_peak) = session_runtime(resources)?;
         let state = SessionStateBuilder::new()
             .with_default_features()
