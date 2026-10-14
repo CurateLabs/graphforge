@@ -15,7 +15,9 @@
 //! * `input_rows`: rows received from the input.
 //! * `adjacency_entries_examined`: adjacency entries the traversal looked at,
 //!   before any edge filter, uniqueness or destination check.
-//! * `edge_rows_read`: relationship rows a storage read returned.
+//! * `edge_rows_read`: topology/identity rows returned by edge-file reads.
+//!   Separate edge-property batches (including by-id indexed reads) are excluded;
+//!   their read and materialization time is included in `elapsed_compute`.
 //! * `destination_rows_read`: destination node rows a storage read (or the
 //!   identity authority) returned.
 
