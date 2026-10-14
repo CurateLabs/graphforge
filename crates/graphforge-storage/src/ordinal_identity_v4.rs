@@ -44,6 +44,16 @@ pub const ORDINAL_BLOCK_RECORDS: u64 = ORDINAL_BLOCK_BYTES / UUID_WIDTH;
 const ORDINAL_BLOCK_BYTES_USIZE: usize = 64 * 1024;
 pub(crate) const MAX_MANIFEST_BYTES: u64 = 4 * 1024 * 1024;
 const STREAM_BYTES: usize = 1024 * 1024;
+/// Default byte budget of the authenticated ordinal-block cache one handle
+/// retains. It is the same budget the decoded CSR shard cache takes
+/// ([`crate::adjacency::DEFAULT_DECODED_SHARD_CACHE_BYTES`]), so identity and
+/// adjacency reads share one retained-memory scale. The cache fills lazily:
+/// only blocks a lookup actually read are charged, never the budget itself.
+/// A hop frontier that spans more blocks than a few-megabyte cache holds is
+/// then read and authenticated once per block per generation instead of once
+/// per lookup (#1984).
+pub const DEFAULT_ORDINAL_BLOCK_CACHE_BYTES: usize =
+    crate::adjacency::DEFAULT_DECODED_SHARD_CACHE_BYTES as usize;
 // BTree nodes, sorted request storage, caller-order output, and resolved-map
 // entries are charged conservatively rather than as payload-only scalars.
 const REQUEST_ENTRY_CHARGE: u64 = 128;
@@ -85,7 +95,7 @@ impl Default for V4OrdinalIdentityLimits {
             coalesce_gap_bytes: 4_096,
             max_coalesced_read_bytes: STREAM_BYTES,
             max_tombstone_cache_bytes: STREAM_BYTES,
-            max_ordinal_cache_bytes: STREAM_BYTES,
+            max_ordinal_cache_bytes: DEFAULT_ORDINAL_BLOCK_CACHE_BYTES,
             max_descriptor_metadata_bytes: 16 * STREAM_BYTES,
         }
     }
@@ -517,7 +527,9 @@ pub struct V4OrdinalLookupMetrics {
     pub tombstoned: u64,
     /// Maximum anonymous request/index buffer charged by this lookup.
     pub peak_buffer_bytes: u64,
-    /// Maximum retained tombstone-cache charge, including container metadata.
+    /// Maximum retained cache charge: the tombstone cache including container
+    /// metadata, plus the authenticated ordinal blocks the handle holds. The
+    /// ordinal part never exceeds `max_ordinal_cache_bytes`.
     pub retained_cache_bytes: u64,
     /// Maximum transient tombstone decode/clone charge.
     pub transient_buffer_bytes: u64,
@@ -1185,10 +1197,10 @@ impl V4OrdinalIdentityHandle {
         }
         let mut metrics = V4OrdinalLookupMetrics {
             requested: requested.len() as u64,
-            // The request, plus the ordinal blocks the handle already holds.
-            peak_buffer_bytes: (requested.len() as u64)
-                .saturating_mul(REQUEST_ENTRY_CHARGE)
-                .saturating_add(self.ordinal_cache.charged_bytes as u64),
+            // The request only. Authenticated ordinal blocks the handle holds
+            // are retained, not transient: they are bounded by
+            // `max_ordinal_cache_bytes` and reported in `retained_cache_bytes`.
+            peak_buffer_bytes: (requested.len() as u64).saturating_mul(REQUEST_ENTRY_CHARGE),
             retained_cache_bytes: (self.tombstone_cache.charged_bytes
                 + self.ordinal_cache.charged_bytes) as u64,
             ..Default::default()
