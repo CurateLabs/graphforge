@@ -240,7 +240,10 @@ fn a_property_projection_is_the_same_at_every_partition_count() {
         .map(|path| {
             format!(
                 "[{}]",
-                path.iter().map(|node| tag(*node)).collect::<Vec<_>>().join(", ")
+                path.iter()
+                    .map(|node| tag(*node))
+                    .collect::<Vec<_>>()
+                    .join(", ")
             )
         })
         .collect::<Vec<_>>();
