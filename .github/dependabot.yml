@@ -39,7 +39,7 @@ updates:
         patterns:
           - "pytest*"
           - "ruff*"
-          - "mypy*"
+          - "ty"
           - "hypothesis*"
         update-types:
           - "minor"

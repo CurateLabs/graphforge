@@ -90,11 +90,27 @@ make test-unit
 cargo fmt --all
 cargo clippy --workspace -- -D warnings
 
-# Python tooling (ruff / mypy via make targets)
+# Python tooling (ruff / ty via make targets)
 make format
 make lint
 make type-check
 ```
+
+Python type checking uses the pinned ty development dependency. `make type-check`,
+`make check`, and the local pre-commit `ty` hook use the same `pyproject.toml`
+configuration: Python 3.10 and the public binding package, including
+`_graphforge_rs.pyi`. Run `uv sync --locked --all-extras` to install the development
+environment first. The existing CI lint job runs this check; pre-commit.ci leaves
+it to that job because the hook needs the project environment.
+
+The migration retains unsafe-return, redundant-cast, unused-ignore, and redundant
+condition diagnostics. Ty checks unannotated function bodies by default. Its
+comparison and unreachable-code coverage currently differs from mypy: the
+redundant-condition rules cover boolean conditions, but do not replace all of
+mypy's `strict_equality` and `warn_unreachable` diagnostics. See
+[Astral's migration guide](https://docs.astral.sh/ty/coming-from-mypy-or-pyright/)
+for the rule mapping. Ty's `strict-equality-semantics` option controls inference
+and narrowing; it is not an equivalent of mypy's `strict_equality` check.
 
 ---
 
