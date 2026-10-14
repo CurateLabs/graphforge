@@ -51,6 +51,8 @@ use graphforge_core::OntologyMode;
 use graphforge_ir::Direction;
 use graphforge_plan::VarLenExpandNode;
 use graphforge_plan::VarLenMode;
+use input_columns::copy_mask;
+use input_columns::push_input_columns;
 use reachability::reach_bfs;
 use std::collections::BTreeSet;
 use std::fmt;
@@ -262,10 +264,6 @@ impl VarLenExpandExec {
             .len()
             .checked_sub(1)
             .is_some_and(|last| required.contains(&last));
-        let copy_input: Vec<bool> = (0..input_width)
-            .map(|index| required.contains(&index) || !self.schema.field(index).is_nullable())
-            .collect();
-        let narrowed = copy_input.iter().any(|copied| !copied);
         Arc::new(Self {
             input: Arc::clone(&self.input),
             rel_type_name: self.rel_type_name.clone(),
@@ -280,7 +278,7 @@ impl VarLenExpandExec {
             expansion: self.expansion,
             edge_var: self.edge_var,
             edge_list_demanded: edge_list_demanded || self.expansion != VarLenMode::Trails,
-            copy_input: narrowed.then(|| Arc::from(copy_input)),
+            copy_input: copy_mask(&self.schema, input_width, required),
             schema: Arc::clone(&self.schema),
             props: Arc::clone(&self.props),
             provider: Arc::clone(&self.provider),
@@ -1093,30 +1091,6 @@ fn load_chunk_sources(
         edge_props,
         charged,
     }))
-}
-
-/// Append the input columns of the rows `src_take` selects, one value per
-/// emitted row. A column the expansion's parent never reads is appended as nulls
-/// instead of being copied once per path (see [`VarLenExpandExec`]).
-pub(super) fn push_input_columns(
-    cfg: &ExpandConfig,
-    input: &RecordBatch,
-    src_take: &arrow::array::UInt32Array,
-    columns: &mut Vec<ArrayRef>,
-) -> Result<(), GfError> {
-    for (index, column) in input.columns().iter().enumerate() {
-        let skipped = cfg
-            .copy_input
-            .as_ref()
-            .is_some_and(|copied| copied.get(index) == Some(&false));
-        columns.push(if skipped {
-            new_null_array(cfg.out_schema.field(index).data_type(), src_take.len())
-        } else {
-            arrow::compute::take(column, src_take, None)
-                .map_err(|error| GfError::Execution(error.to_string()))?
-        });
-    }
-    Ok(())
 }
 
 /// Build one output batch for `emissions` (a bounded slice of the traversal)
@@ -3006,6 +2980,7 @@ mod destination_rows;
 mod edge_filter;
 mod edge_predicate;
 mod edge_properties;
+mod input_columns;
 mod reachability;
 #[cfg(test)]
 mod tests;
