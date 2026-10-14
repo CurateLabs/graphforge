@@ -40,7 +40,7 @@ use scans::{
     enrich_bound_node_identity, enrich_bound_node_identity_preserving_null, filter_node_by_type,
     lower_edge_scan, lower_node_scan, lower_typed_edge_scan,
 };
-use traversal::lower_expand;
+use traversal::{lower_expand, lower_var_len_expand_from_bound_end};
 
 use graphforge_ir::LoweringSnapshot;
 use std::collections::{HashMap, HashSet};
@@ -637,6 +637,20 @@ impl GraphPlanLowerer {
             if reachability.is_vacuous_uniqueness(index) {
                 continue;
             }
+            if let Some(from_bound_end) = self.bound_end_expansion(
+                &ordered[i..],
+                order[i + 1..].first().copied(),
+                &reachability,
+                &current,
+                exprs,
+                var_map,
+            ) {
+                current =
+                    self.lower_bound_end_expansion(&from_bound_end, op, current, exprs, var_map)?;
+                // The scan and the expansion were lowered together.
+                next += 1;
+                continue;
+            }
             // A scan of a node an aggregation or `DISTINCT` already bound may
             // start a pattern that is expanded once per distinct node instead
             // of once per row (#1984).
@@ -674,6 +688,131 @@ impl GraphPlanLowerer {
             }
         }
         Ok(current)
+    }
+
+    /// Decide whether the `NodeScan` at the head of `ops` and the
+    /// variable-length `Expand` after it are planned from the expansion's
+    /// bound end (#1984).
+    ///
+    /// `MATCH (s:L)-[r:T*lo..hi]->(d)` where `d` is bound by an earlier clause
+    /// would otherwise scan every `s` and search from each of them, only to
+    /// keep the trails that end at `d`. Every trail that ends at `d` is also a
+    /// trail that starts at `d` in the opposite direction, so the search runs
+    /// from `d` instead and the scan of `s` becomes a label filter on its
+    /// result.
+    ///
+    /// The rewrite applies only where the result is the same set of rows: an
+    /// unbound relationship variable (a bound one is compared with the list
+    /// the search produces), trail semantics (the reachability search keeps its
+    /// own shape), no inference rules (their provenance events name the
+    /// traversal), and a bound end the search can seed from. A later `Filter`
+    /// that mentions `s` keeps the original shape, since such a filter
+    /// narrows the scan of `s` below the cost of the search from `d`.
+    fn bound_end_expansion(
+        &self,
+        ops: &[&GraphOp],
+        expand_index: Option<usize>,
+        reachability: &graphforge_ir::ReachabilityPlan,
+        current: &LogicalPlan,
+        exprs: &ExprArena,
+        var_map: &VarMap,
+    ) -> Option<BoundEndExpansion> {
+        let (
+            GraphOp::NodeScan { var: scan, .. },
+            GraphOp::Expand {
+                src,
+                edge,
+                dst,
+                rel_ty,
+                dir,
+                min_hops,
+                max_hops,
+            },
+        ) = (ops.first().copied()?, ops.get(1).copied()?)
+        else {
+            return None;
+        };
+        let expand_index = expand_index?;
+        let is_variable_length = *min_hops != 1 || *max_hops != Some(1);
+        if src != scan
+            || dst == scan
+            || !is_variable_length
+            || reachability.expansion_at(expand_index).is_some()
+            || var_map.get(*scan).is_some()
+            || var_map.get(*edge).is_some()
+            || *edge == *scan
+            || *edge == *dst
+        {
+            return None;
+        }
+        if rel_ty
+            .and_then(|rt| self.inference_rules.get(&rt))
+            .is_some_and(|rules| !rules.is_empty())
+        {
+            return None;
+        }
+        // The search seeds from `var_<dst>.node_id` of the plan built so far.
+        let bound_alias = var_alias(*dst);
+        if var_map.get(*dst) != Some(bound_alias.as_str())
+            || current
+                .schema()
+                .index_of_column_by_name(
+                    Some(&datafusion::common::TableReference::bare(bound_alias)),
+                    "node_id",
+                )
+                .is_none()
+        {
+            return None;
+        }
+        let filters_scan = ops[2..].iter().any(|later| {
+            matches!(
+                later,
+                GraphOp::Filter { predicate }
+                    if graphforge_ir::reachability::mentions_var(exprs, *predicate, *scan)
+            )
+        });
+        if filters_scan {
+            return None;
+        }
+        Some(BoundEndExpansion {
+            scan_var: *scan,
+            edge: *edge,
+            bound_var: *dst,
+            rel_ty: *rel_ty,
+            dir: *dir,
+            min_hops: *min_hops,
+            max_hops: *max_hops,
+        })
+    }
+
+    /// Lower the pair [`bound_end_expansion`](Self::bound_end_expansion)
+    /// accepted: the search from the bound end, then the label filter and
+    /// property join of the scan that the search replaced.
+    fn lower_bound_end_expansion(
+        &self,
+        expansion: &BoundEndExpansion,
+        scan: &GraphOp,
+        current: LogicalPlan,
+        exprs: &ExprArena,
+        var_map: &mut VarMap,
+    ) -> Result<LogicalPlan, LoweringError> {
+        let searched = lower_var_len_expand_from_bound_end(
+            expansion.scan_var,
+            expansion.edge,
+            expansion.bound_var,
+            expansion.rel_ty,
+            expansion.dir,
+            expansion.min_hops,
+            expansion.max_hops,
+            current,
+            var_map,
+            &self.type_id_to_rel_name,
+            &self.inference_rules,
+            self.read_snapshot.as_ref().map(|(s, m)| (s, *m)),
+        )?;
+        // `scan_var` is now bound, so this applies its label and joins its
+        // properties instead of scanning.
+        self.lower_op_with_arena(scan, searched, exprs, var_map, false, false, None, None)
     }
 
     /// Lower the operator at `index` of a pipeline whose reachability analysis
@@ -2321,6 +2460,17 @@ fn build_entity_id_map(
 // ---------------------------------------------------------------------------
 // Scan operator lowering (#576)
 // ---------------------------------------------------------------------------
+
+/// A variable-length expansion that is searched from its bound end.
+struct BoundEndExpansion {
+    scan_var: VarId,
+    edge: VarId,
+    bound_var: VarId,
+    rel_ty: Option<RelationTypeId>,
+    dir: Direction,
+    min_hops: u16,
+    max_hops: Option<u16>,
+}
 
 /// Produce a plan alias string for a `VarId`.
 fn var_alias(var: VarId) -> String {

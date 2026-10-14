@@ -176,6 +176,19 @@ pub enum Direction {
     Undirected,
 }
 
+impl Direction {
+    /// The direction of the same relationship read from its other end:
+    /// `(a)-[:R]->(b)` is `(b)<-[:R]-(a)`.
+    #[must_use]
+    pub const fn reversed(self) -> Self {
+        match self {
+            Self::Out => Self::In,
+            Self::In => Self::Out,
+            Self::Undirected => Self::Undirected,
+        }
+    }
+}
+
 /// Sort direction for ORDER BY keys.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SortOrder {
@@ -391,6 +404,16 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
+
+    #[test]
+    fn direction_reversal_swaps_the_ends_of_a_directed_edge() {
+        assert_eq!(Direction::Out.reversed(), Direction::In);
+        assert_eq!(Direction::In.reversed(), Direction::Out);
+        assert_eq!(Direction::Undirected.reversed(), Direction::Undirected);
+        for dir in [Direction::Out, Direction::In, Direction::Undirected] {
+            assert_eq!(dir.reversed().reversed(), dir);
+        }
+    }
 
     #[test]
     fn ir_version_display() {

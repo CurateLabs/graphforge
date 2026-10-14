@@ -304,6 +304,13 @@ pub struct VarLenExpandNode {
     /// paths before they are materialised (#1986). `None` when the destination
     /// is not already bound.
     pub bound_destination: Option<String>,
+    /// Whether each emitted relationship list is returned in reverse order.
+    ///
+    /// Set when the traversal is seeded from the far end of the pattern's
+    /// relationship (the lowerer swaps `src_var` and `dst_var` and reverses
+    /// `direction`, #1984): reversing each path restores the order the pattern
+    /// as written would have produced.
+    pub reverse_edge_list: bool,
     /// How rows are produced; fixes the trailing column of the schema.
     pub mode: VarLenMode,
     /// Predicate every traversed edge must satisfy. Only meaningful, and only
@@ -317,6 +324,14 @@ impl VarLenExpandNode {
     #[must_use]
     pub fn with_bound_destination(mut self, alias: Option<String>) -> Self {
         self.bound_destination = alias;
+        self
+    }
+
+    /// Return each emitted relationship list in reverse order; see
+    /// [`reverse_edge_list`](Self::reverse_edge_list).
+    #[must_use]
+    pub fn with_reversed_edge_list(mut self, reversed: bool) -> Self {
+        self.reverse_edge_list = reversed;
         self
     }
 
@@ -402,6 +417,7 @@ impl VarLenExpandNode {
             rel_ty,
             read_contract: None,
             bound_destination: None,
+            reverse_edge_list: false,
             mode: VarLenMode::Trails,
             edge_filter: None,
             schema,
@@ -479,6 +495,9 @@ impl UserDefinedLogicalNodeCore for VarLenExpandNode {
         if self.mode == VarLenMode::Reachability {
             f.write_str(", mode=reachability")?;
         }
+        if self.reverse_edge_list {
+            f.write_str(", edge_list=reversed")?;
+        }
         if let Some(filter) = &self.edge_filter {
             write!(f, ", edge_filter={}", filter.predicate)?;
         }
@@ -519,6 +538,7 @@ impl UserDefinedLogicalNodeCore for VarLenExpandNode {
         .with_read_contract(self.read_contract.clone())
         .with_bound_destination(self.bound_destination.clone());
         node.mode = self.mode;
+        node.reverse_edge_list = self.reverse_edge_list;
         node.edge_filter.clone_from(&self.edge_filter);
         Ok(node)
     }
@@ -2111,6 +2131,32 @@ mod tests {
         let n = var_len("KNOWS", 1, Some(3));
         assert_eq!(UserDefinedLogicalNodeCore::name(&n), "VarLenExpand");
         assert_eq!(UserDefinedLogicalNodeCore::inputs(&n).len(), 1);
+    }
+
+    #[test]
+    fn var_len_expand_edge_list_reversal_is_explained_and_survives_a_rewrite() {
+        let plain = var_len("KNOWS", 1, Some(3));
+        assert!(!plain.reverse_edge_list);
+        let explain = |node: &VarLenExpandNode| wrap(node.clone()).display().to_string();
+        assert!(!explain(&plain).contains("edge_list"));
+
+        let reversed = plain.with_reversed_edge_list(true);
+        assert!(reversed.reverse_edge_list);
+        assert!(
+            explain(&reversed).ends_with(", edge_list=reversed"),
+            "{}",
+            explain(&reversed)
+        );
+
+        // An optimizer rule rebuilds the node through `with_exprs_and_inputs`.
+        let rebuilt = UserDefinedLogicalNodeCore::with_exprs_and_inputs(
+            &reversed,
+            vec![],
+            vec![(*empty_plan()).clone()],
+        )
+        .unwrap();
+        assert!(rebuilt.reverse_edge_list);
+        assert!(!rebuilt.with_reversed_edge_list(false).reverse_edge_list);
     }
 
     #[test]
