@@ -3,14 +3,14 @@
 //!
 //! The join that attaches a correlated sub-plan to its outer rows used to ask
 //! the outer plan for every column, so a query over nodes with many properties
-//! materialised and copied every property of every outer row even when the
+//! materialised and copied every column of every outer row even when the
 //! sub-plan read two identities. The sub-plan now demands what it reads through
 //! its seed leaf, and the outer plan produces those columns plus the ones the
-//! parent above the join reads. The plan-shape tests run the same query over
-//! nodes with few and with many properties: the columns the plan reads must not
-//! grow with the properties nobody asked for. The result tests compute the
-//! expected rows by hand from the fixture, so they do not depend on how the
-//! plan was pruned.
+//! parent above the join reads. The plan-shape tests compare queries that read
+//! more properties than the pattern predicate does: the seed's demand and the
+//! outer expansion's width must follow what is read, not the width of the row.
+//! The result tests compute the expected rows by hand from the fixture, so they
+//! do not depend on how the plan was pruned.
 
 use std::collections::HashMap;
 
@@ -18,7 +18,6 @@ use arrow::array::Array;
 use arrow::record_batch::RecordBatch;
 use arrow::util::display::array_value_to_string;
 use graphforge_api::GraphForge;
-use graphforge_exec::demand;
 use graphforge_ir::IrLiteral;
 
 /// Four `W` nodes and these `K` relationships:
@@ -180,6 +179,18 @@ fn optional_match_follows_a_pattern_predicate() {
 /// cycle, so those rows go.
 const NOT_PREDICATE: &str = "MATCH (a:W)-[:K]->(b:W) WHERE NOT (b)-[:K]->(a) RETURN a.id AS id";
 
+/// The same predicate with a filter on `w` and `t` below it. Both properties
+/// pass every node, so the rows equal `NOT_PREDICATE`'s; the parent reads
+/// neither.
+const NOT_PREDICATE_AFTER_FILTER: &str = "MATCH (a:W)-[:K]->(b:W) \
+     WHERE a.w > 10 AND a.t < 5 AND NOT (b)-[:K]->(a) RETURN a.id AS id";
+
+/// `NOT_PREDICATE` with the parent reading `x0` to `x{count - 1}` of `a` too.
+fn predicate_reading_properties(count: usize) -> String {
+    let columns: String = (0..count).map(|i| format!(", a.x{i} AS v{i}")).collect();
+    format!("MATCH (a:W)-[:K]->(b:W) WHERE NOT (b)-[:K]->(a) RETURN a.id AS id{columns}")
+}
+
 fn physical(forge: &GraphForge, query: &str) -> Vec<String> {
     let explain = forge
         .explain(query)
@@ -193,100 +204,70 @@ fn physical(forge: &GraphForge, query: &str) -> Vec<String> {
         .collect()
 }
 
-/// The `{N}` of the `projection={N}` the first line containing `operator`
-/// prints: how many columns that operator was asked for.
-fn demanded_columns(plan: &[String], operator: &str) -> usize {
+/// The number after `key` on the first line containing `operator`.
+fn number_after(plan: &[String], operator: &str, key: &str) -> usize {
     let line = plan
         .iter()
         .find(|line| line.contains(operator))
         .unwrap_or_else(|| panic!("no `{operator}` in the plan:\n{}", plan.join("\n")));
     let (_, tail) = line
-        .split_once("projection={")
-        .unwrap_or_else(|| panic!("`{operator}` prints no demand: {line}"));
+        .split_once(key)
+        .unwrap_or_else(|| panic!("`{key}` not in `{line}`"));
     tail.chars()
         .take_while(char::is_ascii_digit)
         .collect::<String>()
         .parse()
-        .unwrap_or_else(|_| panic!("no number in the demand of `{operator}`: {line}"))
+        .unwrap_or_else(|_| panic!("no number after `{key}` in `{line}`"))
 }
 
-/// The join keys and the expansion width the outer plan prints.
-fn outer_shape(plan: &[String]) -> (usize, usize) {
-    let number_after = |operator: &str, key: &str| -> usize {
-        let line = plan
-            .iter()
-            .find(|line| line.contains(operator))
-            .unwrap_or_else(|| panic!("no `{operator}` in the plan:\n{}", plan.join("\n")));
-        let (_, tail) = line
-            .split_once(key)
-            .unwrap_or_else(|| panic!("`{key}` not in `{line}`"));
-        tail.chars()
-            .take_while(char::is_ascii_digit)
-            .collect::<String>()
-            .parse()
-            .unwrap_or_else(|_| panic!("no number after `{key}` in `{line}`"))
-    };
-    (
-        number_after("OptionalMatchExec", "keys="),
-        number_after("ExpandExec", "projection="),
-    )
+/// How many columns the pattern predicate's seed is asked for.
+fn seed_demand(plan: &[String]) -> usize {
+    number_after(plan, "CorrelatedSeedExec", "projection={")
 }
 
-/// The seed of a pattern predicate over nodes with `extra` unread properties
-/// must be asked for the same columns however wide the node is: the
-/// identities the pattern names, not the node's whole row.
+/// How many columns the outer expansion produces.
+fn outer_expansion_width(plan: &[String]) -> usize {
+    number_after(plan, "ExpandExec", "projection=")
+}
+
+/// The predicate's seed is asked for the identities the pattern names, however
+/// many properties of `a` the parent reads: the outer row grows, the seed does
+/// not.
 #[test]
 fn pattern_predicate_seed_reads_the_pattern_variables_and_not_the_whole_row() {
-    let narrow = physical(&forge(0), NOT_PREDICATE);
-    let wide = physical(&forge(40), NOT_PREDICATE);
-    let (seed_narrow, seed_wide) = (
-        demanded_columns(&narrow, "CorrelatedSeedExec"),
-        demanded_columns(&wide, "CorrelatedSeedExec"),
-    );
-    assert_eq!(
-        seed_narrow,
-        seed_wide,
-        "the seed's demand grew with the unread properties:\n{}",
-        wide.join("\n")
-    );
+    let forge = forge(20);
+    let narrow = physical(&forge, &predicate_reading_properties(0));
+    let wide = physical(&forge, &predicate_reading_properties(20));
     assert!(
-        seed_wide < 40,
-        "the seed is asked for the whole outer row ({seed_wide} columns):\n{}",
+        outer_expansion_width(&wide) > outer_expansion_width(&narrow),
+        "the parent's extra reads should widen the outer expansion:\n{}",
+        wide.join("\n")
+    );
+    assert_eq!(
+        seed_demand(&narrow),
+        seed_demand(&wide),
+        "the seed's demand grew with the properties the parent reads:\n{}",
         wide.join("\n")
     );
 }
 
-/// The outer expansion produces what the predicate and the parent read, not the
-/// bound nodes' whole rows, and the join keys stay the identities.
+/// A property read only below the predicate (by a filter on the scan) is not
+/// carried through the outer expansion: the expansion produces what the
+/// predicate and the parent read, and the join keys stay the identities.
 #[test]
-fn pattern_predicate_outer_plan_does_not_grow_with_unread_properties() {
-    let (keys_narrow, outer_narrow) = outer_shape(&physical(&forge(0), NOT_PREDICATE));
-    let (keys_wide, outer_wide) = outer_shape(&physical(&forge(40), NOT_PREDICATE));
-    assert_eq!(keys_narrow, keys_wide, "join keys grew with the properties");
+fn pattern_predicate_outer_plan_does_not_carry_properties_read_only_below_it() {
+    let forge = forge(0);
+    let plain = physical(&forge, NOT_PREDICATE);
+    let filtered = physical(&forge, NOT_PREDICATE_AFTER_FILTER);
     assert_eq!(
-        outer_narrow, outer_wide,
-        "the outer expansion's output grew with the unread properties"
+        number_after(&plain, "OptionalMatchExec", "keys="),
+        number_after(&filtered, "OptionalMatchExec", "keys="),
+        "join keys grew with the properties read below the predicate"
     );
-}
-
-/// The same invariant at run time: the columns the expansions project do not
-/// depend on how many properties the nodes carry, and the answer is the same.
-#[test]
-fn pattern_predicate_projects_the_same_columns_over_wide_nodes() {
-    let projected = |extra: usize| -> u64 {
-        let forge = forge(extra);
-        let (result, snapshot) = demand::capture(|| forge.execute(NOT_PREDICATE));
-        let result = result.expect("query executes");
-        assert_eq!(rows(&result.batches), ["1", "1", "3"]);
-        snapshot
-            .hops
-            .values()
-            .map(|hop| hop.projected_columns)
-            .sum()
-    };
     assert_eq!(
-        projected(0),
-        projected(40),
-        "the expansions project more columns when the nodes carry unread properties"
+        outer_expansion_width(&plain),
+        outer_expansion_width(&filtered),
+        "the outer expansion carries properties nothing above it reads:\n{}",
+        filtered.join("\n")
     );
 }

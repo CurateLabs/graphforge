@@ -1377,12 +1377,6 @@ fn rewrite_materialization(
         return Ok(rewritten);
     }
 
-    if let Some(seed) = plan.downcast_ref::<CorrelatedSeedExec>() {
-        // A leaf: record what the sub-plan above it reads so the owning
-        // `OptionalMatchExec` asks its outer input for no more.
-        return Ok(Arc::new(seed.with_demand(required.clone())));
-    }
-
     let children = plan.children();
     if children.len() != 1 {
         let rewritten = children
@@ -1408,6 +1402,36 @@ fn rewrite_materialization(
     plan.with_new_children(vec![child])
 }
 
+/// Demand through a correlated sub-plan and the seed leaf that feeds it.
+///
+/// A correlated `OPTIONAL MATCH` seeds its sub-plan with its own outer rows, and
+/// the sub-plan reads only some of their columns. The seed leaf records what
+/// the sub-plan above it asks for; the join rewrites the sub-plan first to learn
+/// which columns that is, then asks its outer input for them on top of its own
+/// demand. Returns `None` when `plan` is neither.
+fn rewrite_correlated_materialization(
+    plan: &Arc<dyn ExecutionPlan>,
+    required: &BTreeSet<usize>,
+) -> Result<Option<Arc<dyn ExecutionPlan>>> {
+    if let Some(seed) = plan.downcast_ref::<CorrelatedSeedExec>() {
+        return Ok(Some(Arc::new(seed.with_demand(required.clone()))));
+    }
+    let Some(optional) = plan.downcast_ref::<OptionalMatchExec>() else {
+        return Ok(None);
+    };
+    let Some(seed) = optional.correlated_seed_id() else {
+        return Ok(None);
+    };
+    let (mut left_required, right_required) = optional.input_demand(required);
+    let children = plan.children();
+    let right = rewrite_materialization(Arc::clone(children[1]), &right_required)?;
+    left_required.extend(correlated_seed_demand(&right, seed));
+    let left = rewrite_materialization(Arc::clone(children[0]), &left_required)?;
+    Arc::clone(plan)
+        .with_new_children(vec![left, right])
+        .map(Some)
+}
+
 /// Split demand across the two inputs of an `OPTIONAL MATCH` or a hash join
 /// whose output is its left columns followed by its right columns.
 ///
@@ -1420,20 +1444,8 @@ fn rewrite_join_materialization(
     plan: &Arc<dyn ExecutionPlan>,
     required: &BTreeSet<usize>,
 ) -> Result<Option<Arc<dyn ExecutionPlan>>> {
-    if let Some(optional) = plan.downcast_ref::<OptionalMatchExec>()
-        && let Some(seed) = optional.correlated_seed_id()
-    {
-        // The sub-plan is seeded with the outer rows and reads only some of
-        // their columns. Rewrite it first to learn which, then ask the outer
-        // input for those on top of its own demand.
-        let (mut left_required, right_required) = optional.input_demand(required);
-        let children = plan.children();
-        let right = rewrite_materialization(Arc::clone(children[1]), &right_required)?;
-        left_required.extend(correlated_seed_demand(&right, seed));
-        let left = rewrite_materialization(Arc::clone(children[0]), &left_required)?;
-        return Arc::clone(plan)
-            .with_new_children(vec![left, right])
-            .map(Some);
+    if let Some(rewritten) = rewrite_correlated_materialization(plan, required)? {
+        return Ok(Some(rewritten));
     }
     let (left_required, right_required) =
         if let Some(optional) = plan.downcast_ref::<OptionalMatchExec>() {
