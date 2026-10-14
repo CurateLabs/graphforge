@@ -615,13 +615,36 @@ fn admit_inventory_memory(
     provider: Option<&PersistentAdjacencyProvider>,
     resources: &SessionResourceConfig,
 ) -> Result<(), GfError> {
-    if let Some(inventory) = catalog.admitted_inventory() {
-        inventory.set_query_memory_budget(resources.memory_budget_bytes)?;
+    let catalog_inventory = catalog.admitted_inventory();
+    let provider_inventory = provider.and_then(AdjacencyProvider::admitted_inventory);
+    match (catalog_inventory, provider_inventory) {
+        (Some(catalog), Some(provider)) => {
+            catalog.set_query_memory_budget_pair(&provider, resources.memory_budget_bytes)?;
+        }
+        (Some(inventory), None) | (None, Some(inventory)) => {
+            inventory.set_query_memory_budget(resources.memory_budget_bytes)?;
+        }
+        (None, None) => {}
     }
-    if let Some(provider) = provider
-        && let Some(inventory) = provider.admitted_inventory()
-    {
-        inventory.set_query_memory_budget(resources.memory_budget_bytes)?;
+    Ok(())
+}
+
+fn validate_provider_memory_budget(
+    provider: &PersistentAdjacencyProvider,
+    resources: &SessionResourceConfig,
+) -> Result<(), GfError> {
+    let supplied = provider.retained_topology_bytes().budget;
+    let allowed = graphforge_storage::read_cache_budget::ReadCacheBudget::from_query_budget(
+        resources.memory_budget_bytes,
+    )
+    .topology_bytes;
+    if supplied > allowed {
+        return Err(GfError::Api {
+            code: graphforge_core::ApiErrorCode::ResourceLimit,
+            message: format!(
+                "supplied adjacency provider has a {supplied} byte topology ceiling against the session's {allowed} byte read-cache share"
+            ),
+        });
     }
     Ok(())
 }
@@ -753,9 +776,10 @@ impl ExecutionSession {
                 "query spill is enabled without a spill directory".into(),
             ));
         }
+        validate_provider_memory_budget(&provider, resources)?;
         let identity = match ordinal_identities {
             Some(resolver) => {
-                let pin = resolver.pin()?;
+                let pin = resolver.pin(resources.memory_budget_bytes)?;
                 OrdinalIdentityConfig {
                     // Requirement and payload come from one resolver snapshot.
                     // Keep them separate so the expansion boundary remains

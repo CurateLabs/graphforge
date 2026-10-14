@@ -1069,8 +1069,7 @@ fn segmented_inventory_rejects_missing_parts_and_changed_admitted_payload() {
     );
 }
 
-#[test]
-fn retained_fragment_footers_share_one_budget_and_refuse_before_caching_more() {
+fn footer_budget_fixture() -> TempDir {
     let root = TempDir::new().unwrap();
     fs::create_dir_all(root.path().join("properties")).unwrap();
     let schema = Arc::new(Schema::new(vec![
@@ -1096,27 +1095,35 @@ fn retained_fragment_footers_share_one_budget_and_refuse_before_caching_more() {
         writer.write(&batch).unwrap();
         writer.close().unwrap();
     }
-    let capture = || {
-        let inventory = crate::capture_graph_read_inventory(root.path()).unwrap();
-        let entries = inventory
-            .files
-            .into_iter()
-            .map(|entry| {
-                let relative = PathBuf::from(&entry.relative_path);
-                (entry, relative)
-            })
-            .collect();
-        AuthenticatedPropertyInventory::admit_read_entries(
-            root.path(),
-            entries,
-            None,
-            None,
-            false,
-            None,
-            FragmentAdmission::FirstTouch,
-        )
-        .unwrap()
-    };
+    root
+}
+
+fn capture_lazy_footer_inventory(root: &Path) -> AuthenticatedPropertyInventory {
+    let inventory = crate::capture_graph_read_inventory(root).unwrap();
+    let entries = inventory
+        .files
+        .into_iter()
+        .map(|entry| {
+            let relative = PathBuf::from(&entry.relative_path);
+            (entry, relative)
+        })
+        .collect();
+    AuthenticatedPropertyInventory::admit_read_entries(
+        root,
+        entries,
+        None,
+        None,
+        false,
+        None,
+        FragmentAdmission::FirstTouch,
+    )
+    .unwrap()
+}
+
+#[test]
+fn retained_fragment_footers_share_one_budget_and_refuse_before_caching_more() {
+    let root = footer_budget_fixture();
+    let capture = || capture_lazy_footer_inventory(root.path());
     let roomy = capture();
     roomy.set_query_memory_budget(512 << 20).unwrap();
     let structure = roomy.retained_metadata_bytes();
@@ -1167,4 +1174,70 @@ fn retained_fragment_footers_share_one_budget_and_refuse_before_caching_more() {
         tight.set_query_memory_budget(0).is_err(),
         "zero is not unlimited"
     );
+}
+
+#[test]
+fn paired_inventory_refusal_preserves_both_shared_ceilings() {
+    let root = footer_budget_fixture();
+    for reverse in [false, true] {
+        let first = capture_lazy_footer_inventory(root.path());
+        let second = capture_lazy_footer_inventory(root.path());
+        first.set_query_memory_budget(512 << 20).unwrap();
+        second.set_query_memory_budget(512 << 20).unwrap();
+        first
+            .route_schema(PropertyRouteKind::Node, "Route0")
+            .unwrap()
+            .unwrap();
+        for route in ["Route0", "Route1", "Route2"] {
+            second
+                .route_schema(PropertyRouteKind::Node, route)
+                .unwrap()
+                .unwrap();
+        }
+        let before_first = first.retained_metadata_bytes();
+        let before_second = second.retained_metadata_bytes();
+        assert!(before_second > before_first);
+        let proposed = (before_first as u64) * 8;
+        let error = if reverse {
+            second.set_query_memory_budget_pair(&first, proposed)
+        } else {
+            first.set_query_memory_budget_pair(&second, proposed)
+        }
+        .unwrap_err();
+        assert_eq!(error.code(), "GF_RESOURCE_LIMIT");
+        assert!(
+            error.to_string().contains("property inventory metadata"),
+            "{error}"
+        );
+        assert_eq!(first.retained_metadata_bytes(), before_first);
+        assert_eq!(second.retained_metadata_bytes(), before_second);
+        // Retained bytes alone cannot prove a ceiling was unchanged. Both
+        // authorities must admit new footers beyond the refused small limit.
+        first
+            .route_schema(PropertyRouteKind::Node, "Route1")
+            .unwrap()
+            .unwrap();
+        second
+            .route_schema(PropertyRouteKind::Node, "Route3")
+            .unwrap()
+            .unwrap();
+        assert!(first.retained_metadata_bytes() > before_first);
+        assert!(second.retained_metadata_bytes() > before_first);
+        std::thread::scope(|scope| {
+            let forward = scope.spawn(|| first.set_query_memory_budget_pair(&second, 512 << 20));
+            let backward = scope.spawn(|| second.set_query_memory_budget_pair(&first, 512 << 20));
+            forward.join().unwrap().unwrap();
+            backward.join().unwrap().unwrap();
+        });
+        let tight = first.retained_metadata_bytes() as u64 * 8;
+        first.set_query_memory_budget_pair(&first, tight).unwrap();
+        let error = first
+            .route_schema(PropertyRouteKind::Node, "Route2")
+            .unwrap_err();
+        assert_eq!(
+            error.code(),
+            "GF_RESOURCE_LIMIT",
+            "an identical authority is tightened once"
+        );
+    }
 }

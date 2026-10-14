@@ -69,6 +69,13 @@ buffers coexist with the shards they displace until publication; construction
 can therefore add one topology share temporarily. Slot growth can hold the old
 buffer beside its exact-sized replacement.
 
+A session reusing caller-supplied adjacency or ordinal-identity caches checks
+their configured ceilings against its own topology and identity shares, even
+when those caches are empty. An oversized supplied cache fails with
+`GF_RESOURCE_LIMIT`, naming the consumer, before identity pinning or inventory
+admission changes shared state. Compatible supplied authorities are retained;
+attachment never replaces them or raises their ceilings.
+
 An edge-record decode reserves a conservative metadata-derived estimate before
 reading pages: four times compressed pages, uncompressed pages, reconstructed
 values and decoder levels, plus 64 KiB per selected column chunk. The estimate
@@ -89,7 +96,9 @@ applying a separate limit to each one. Facade diagnostics expose admitted
 The first resource-configured attachment establishes an inventory ceiling.
 Subsequent sessions sharing that inventory may tighten the ceiling but cannot
 raise it. An attachment requesting less than already admitted bytes fails;
-it preserves the existing authority. Capture an independent inventory for
+it preserves the existing authority. Admission of distinct catalog and provider
+inventories validates both under their budget locks before tightening either.
+Capture an independent inventory for
 readers that need independent budgets. Direct execution sessions apply the
 same policy to both catalog and provider inventories, including after mutation.
 

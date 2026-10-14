@@ -1162,6 +1162,15 @@ impl V4OrdinalIdentityHandle {
         self.limits.max_requested
     }
 
+    /// Combined configured ceiling for retained ordinal and tombstone caches.
+    /// Session attachment checks this ceiling without modifying the authority.
+    #[must_use]
+    pub const fn cache_budget_bytes(&self) -> usize {
+        self.limits
+            .max_ordinal_cache_bytes
+            .saturating_add(self.limits.max_tombstone_cache_bytes)
+    }
+
     /// Resolve a bounded caller batch while preserving caller order.
     pub fn lookup_node_uuids(
         &mut self,

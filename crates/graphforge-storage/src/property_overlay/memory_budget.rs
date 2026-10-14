@@ -42,24 +42,33 @@ fn refusal(requested: usize, limit: usize) -> GfError {
     }
 }
 
+fn validated_limit(bytes: &Bytes, limit: usize, structure: usize) -> Result<usize, GfError> {
+    let limit = if bytes.configured {
+        bytes.limit.min(limit)
+    } else {
+        limit
+    };
+    let requested = structure.saturating_add(bytes.footers);
+    if requested > limit {
+        return Err(refusal(requested, limit));
+    }
+    Ok(limit)
+}
+
+fn apply_configuration(bytes: &mut Bytes, limit: usize, structure: usize) {
+    bytes.limit = limit;
+    bytes.configured = true;
+    bytes.structure = structure;
+}
+
 impl InventoryMemoryBudget {
     fn configure(&self, limit: usize, structure: usize) -> Result<(), GfError> {
         let mut bytes = self
             .0
             .lock()
             .expect("property inventory memory budget lock");
-        let limit = if bytes.configured {
-            bytes.limit.min(limit)
-        } else {
-            limit
-        };
-        let requested = structure.saturating_add(bytes.footers);
-        if requested > limit {
-            return Err(refusal(requested, limit));
-        }
-        bytes.limit = limit;
-        bytes.configured = true;
-        bytes.structure = structure;
+        let limit = validated_limit(&bytes, limit, structure)?;
+        apply_configuration(&mut bytes, limit, structure);
         Ok(())
     }
 
@@ -167,6 +176,50 @@ impl AuthenticatedPropertyInventory {
             usize::try_from(ReadCacheBudget::from_query_budget(query_budget).inventory_bytes)
                 .unwrap_or(usize::MAX);
         self.memory_budget.configure(limit, self.structural_bytes())
+    }
+
+    /// Admit two shared inventories under one query policy atomically.
+    /// An identical inventory is configured once. Distinct inventory locks are
+    /// acquired in address order; neither ceiling changes unless both fit.
+    ///
+    /// # Errors
+    /// Returns the same named resource refusal as [`Self::set_query_memory_budget`]
+    /// when either retained inventory cannot fit, leaving both budgets unchanged.
+    pub fn set_query_memory_budget_pair(
+        &self,
+        other: &Self,
+        query_budget: u64,
+    ) -> Result<(), GfError> {
+        if std::ptr::eq(self, other) {
+            return self.set_query_memory_budget(query_budget);
+        }
+        let limit =
+            usize::try_from(ReadCacheBudget::from_query_budget(query_budget).inventory_bytes)
+                .unwrap_or(usize::MAX);
+        let (first, second) = if std::ptr::from_ref(&self.memory_budget).addr()
+            < std::ptr::from_ref(&other.memory_budget).addr()
+        {
+            (self, other)
+        } else {
+            (other, self)
+        };
+        let first_structure = first.structural_bytes();
+        let second_structure = second.structural_bytes();
+        let mut first_bytes = first
+            .memory_budget
+            .0
+            .lock()
+            .expect("property inventory memory budget lock");
+        let mut second_bytes = second
+            .memory_budget
+            .0
+            .lock()
+            .expect("property inventory memory budget lock");
+        let first_limit = validated_limit(&first_bytes, limit, first_structure)?;
+        let second_limit = validated_limit(&second_bytes, limit, second_structure)?;
+        apply_configuration(&mut first_bytes, first_limit, first_structure);
+        apply_configuration(&mut second_bytes, second_limit, second_structure);
+        Ok(())
     }
 
     /// Aggregate inventory structure and memoized footer admission bytes.

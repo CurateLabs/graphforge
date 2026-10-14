@@ -1,6 +1,6 @@
 //! Regressions for reads that take expansion fast paths or fail during setup.
 use super::*;
-use arrow::datatypes::{Field, Schema};
+use arrow::datatypes::{DataType, Field, Schema};
 use datafusion::datasource::memory::MemorySourceConfig;
 use datafusion::logical_expr::LogicalPlanBuilder;
 use datafusion::logical_expr::logical_plan::LogicalTableSource;
@@ -90,7 +90,11 @@ fn identity_graph() -> (
         panic!("published ordinal authority must open")
     };
     let resolver = V4OrdinalIdentityResolver::new(Some(*handle));
-    let identities = resolver.pin().unwrap().session.unwrap();
+    let identities = resolver
+        .pin(graphforge_storage::read_cache_budget::DEFAULT_QUERY_MEMORY_BUDGET_BYTES)
+        .unwrap()
+        .session
+        .unwrap();
     let catalog =
         graphforge_storage::GraphCatalog::open(&graph, None, &graphforge_ir::RuntimeCatalog::new())
             .unwrap();
