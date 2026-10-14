@@ -1281,6 +1281,56 @@ fn rewrite_var_len_materialization(
     Ok(var_len.with_edge_list_demanded(edge_list_demanded))
 }
 
+/// The input rows are copied once per element, so the columns nobody reads are
+/// the cost. The list column stays demanded: the explode needs it even when the
+/// parent does not.
+fn rewrite_unwind_materialization(
+    plan: &Arc<dyn ExecutionPlan>,
+    unwind: &UnwindExec,
+    required: &BTreeSet<usize>,
+) -> Result<Arc<dyn ExecutionPlan>> {
+    let child_required = unwind.input_demand(required)?;
+    let child = rewrite_materialization(Arc::clone(plan.children()[0]), &child_required)?;
+    let rebuilt = Arc::clone(plan).with_new_children(vec![child])?;
+    let unwind = rebuilt.downcast_ref::<UnwindExec>().ok_or_else(|| {
+        DataFusionError::Internal("UnwindExec rewrite changed physical type".into())
+    })?;
+    Ok(unwind.with_required_output(required.clone()))
+}
+
+/// A global aggregate reads the columns its expressions, orderings and filters
+/// name; a grouped one keeps every input column.
+fn rewrite_aggregate_materialization(
+    plan: &Arc<dyn ExecutionPlan>,
+    aggregate: &AggregateExec,
+) -> Result<Arc<dyn ExecutionPlan>> {
+    let mut child_required = BTreeSet::new();
+    if aggregate.group_expr().is_empty()
+        && matches!(
+            aggregate.mode(),
+            datafusion::physical_plan::aggregates::AggregateMode::Single
+                | datafusion::physical_plan::aggregates::AggregateMode::SinglePartitioned
+                | datafusion::physical_plan::aggregates::AggregateMode::Partial
+        )
+    {
+        for aggr in aggregate.aggr_expr() {
+            for expr in aggr.expressions() {
+                collect_expr_columns(&expr, &mut child_required);
+            }
+            for order in aggr.order_bys() {
+                collect_expr_columns(&order.expr, &mut child_required);
+            }
+        }
+        for filter in aggregate.filter_expr().iter().flatten() {
+            collect_expr_columns(filter, &mut child_required);
+        }
+    } else {
+        child_required = (0..aggregate.input().schema().fields().len()).collect();
+    }
+    let child = rewrite_materialization(Arc::clone(aggregate.input()), &child_required)?;
+    Arc::clone(plan).with_new_children(vec![child])
+}
+
 /// Propagate exact physical output demand through operators whose column
 /// dependency is explicit. Unknown and multi-input operators are conservative
 /// barriers and require every child column.
@@ -1300,16 +1350,7 @@ fn rewrite_materialization(
     }
 
     if let Some(unwind) = plan.downcast_ref::<UnwindExec>() {
-        // The input rows are copied once per element, so the columns nobody
-        // reads are the cost. The list column stays demanded: the explode needs
-        // it even when the parent does not.
-        let child_required = unwind.input_demand(required)?;
-        let child = rewrite_materialization(Arc::clone(plan.children()[0]), &child_required)?;
-        let rebuilt = plan.with_new_children(vec![child])?;
-        let unwind = rebuilt.downcast_ref::<UnwindExec>().ok_or_else(|| {
-            DataFusionError::Internal("UnwindExec rewrite changed physical type".into())
-        })?;
-        return Ok(unwind.with_required_output(required.clone()));
+        return rewrite_unwind_materialization(&plan, unwind, required);
     }
 
     let mut child_required = required.clone();
@@ -1358,31 +1399,7 @@ fn rewrite_materialization(
     }
 
     if let Some(aggregate) = plan.downcast_ref::<AggregateExec>() {
-        let mut child_required = BTreeSet::new();
-        if aggregate.group_expr().is_empty()
-            && matches!(
-                aggregate.mode(),
-                datafusion::physical_plan::aggregates::AggregateMode::Single
-                    | datafusion::physical_plan::aggregates::AggregateMode::SinglePartitioned
-                    | datafusion::physical_plan::aggregates::AggregateMode::Partial
-            )
-        {
-            for aggr in aggregate.aggr_expr() {
-                for expr in aggr.expressions() {
-                    collect_expr_columns(&expr, &mut child_required);
-                }
-                for order in aggr.order_bys() {
-                    collect_expr_columns(&order.expr, &mut child_required);
-                }
-            }
-            for filter in aggregate.filter_expr().iter().flatten() {
-                collect_expr_columns(filter, &mut child_required);
-            }
-        } else {
-            child_required = (0..aggregate.input().schema().fields().len()).collect();
-        }
-        let child = rewrite_materialization(Arc::clone(aggregate.input()), &child_required)?;
-        return plan.with_new_children(vec![child]);
+        return rewrite_aggregate_materialization(&plan, aggregate);
     }
 
     if let Some(rewritten) = rewrite_join_materialization(&plan, required)? {
