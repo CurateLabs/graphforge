@@ -634,6 +634,134 @@ fn the_ordinal_block_cache_never_exceeds_its_budget_and_evicts_oldest_first() {
     );
 }
 
+/// More blocks than the 16 a fixed 1 MiB cache held, so a sweep of them in
+/// order evicts each block before it is wanted again (#1984).
+const WIDE_FRONTIER_BLOCKS: u64 = 24;
+
+/// One id in every block of a wide range, plus a tombstoned ordinal, one past
+/// the range, and ordinal zero: every kind of answer a lookup gives.
+fn wide_frontier(tombstoned: u64) -> Vec<u64> {
+    let mut requested = (0..WIDE_FRONTIER_BLOCKS)
+        .map(|block| block * RECORDS_PER_ORDINAL_BLOCK + 1)
+        .collect::<Vec<_>>();
+    requested.extend([
+        tombstoned,
+        WIDE_FRONTIER_BLOCKS * RECORDS_PER_ORDINAL_BLOCK + 1,
+        0,
+    ]);
+    requested
+}
+
+#[test]
+fn a_frontier_wider_than_a_fixed_megabyte_is_read_once_per_handle() {
+    let tombstoned = 5 * RECORDS_PER_ORDINAL_BLOCK + 7;
+    let fixture = Fixture::new(
+        &[WIDE_FRONTIER_BLOCKS * RECORDS_PER_ORDINAL_BLOCK],
+        &[tombstoned],
+    );
+    let requested = wide_frontier(tombstoned);
+    let mut handle = fixture.open(V4OrdinalIdentityLimits::default());
+
+    // The tombstone list is read on first use and then retained; set it aside
+    // so the count below is of ordinal blocks alone.
+    let tombstone_probe = handle.lookup_node_uuids(&[tombstoned]).unwrap();
+    assert_eq!(tombstone_probe.values, vec![None]);
+    assert!(
+        tombstone_probe.metrics.bytes_read < ORDINAL_BLOCK_BYTES,
+        "a tombstoned ordinal reads no ordinal block"
+    );
+
+    // One lookup naming every block reads each exactly once.
+    let first = handle.lookup_node_uuids(&requested).unwrap();
+    assert_eq!(
+        first.metrics.bytes_read,
+        WIDE_FRONTIER_BLOCKS * ORDINAL_BLOCK_BYTES
+    );
+    // The same frontier, however many times it is asked, is served from the
+    // blocks the handle already authenticated.
+    let again = handle.lookup_node_uuids(&requested).unwrap();
+    assert_eq!(again.metrics.bytes_read, 0);
+    assert_eq!(again.values, first.values);
+
+    // A hop sweeps the blocks in order, one lookup per batch of its frontier.
+    // A cache smaller than the sweep evicts each block just before it is
+    // wanted again and so re-reads every block on every sweep.
+    let mut sweep_bytes = 0;
+    for _ in 0..3 {
+        for block in 0..WIDE_FRONTIER_BLOCKS {
+            sweep_bytes += handle
+                .lookup_node_uuids(&[block * RECORDS_PER_ORDINAL_BLOCK + 2])
+                .unwrap()
+                .metrics
+                .bytes_read;
+        }
+    }
+    assert_eq!(sweep_bytes, 0);
+}
+
+#[test]
+fn caching_ordinal_blocks_never_changes_an_answer() {
+    let tombstoned = 5 * RECORDS_PER_ORDINAL_BLOCK + 7;
+    let fixture = Fixture::new(
+        &[WIDE_FRONTIER_BLOCKS * RECORDS_PER_ORDINAL_BLOCK],
+        &[tombstoned],
+    );
+    let mut requested = wide_frontier(tombstoned);
+    // Shuffled and repeated, so caller order and duplicates are exercised.
+    requested.extend(requested.clone().into_iter().rev());
+    let mut cached = fixture.open(V4OrdinalIdentityLimits::default());
+    let mut uncached = fixture.open(V4OrdinalIdentityLimits {
+        max_ordinal_cache_bytes: 0,
+        ..V4OrdinalIdentityLimits::default()
+    });
+    let expected = uncached.lookup_node_uuids(&requested).unwrap();
+    // Cold, then warm: both are what the handle that retains nothing answers.
+    for _ in 0..2 {
+        let got = cached.lookup_node_uuids(&requested).unwrap();
+        assert_eq!(got.values, expected.values);
+        assert_eq!(got.metrics.found, expected.metrics.found);
+        assert_eq!(got.metrics.tombstoned, expected.metrics.tombstoned);
+    }
+    let missing = expected
+        .values
+        .iter()
+        .filter(|value| value.is_none())
+        .count();
+    // Tombstoned, past the range and zero, each asked twice.
+    assert_eq!(missing, 6);
+}
+
+#[test]
+fn a_wide_frontier_never_retains_more_than_the_budget() {
+    let fixture = Fixture::new(&[WIDE_FRONTIER_BLOCKS * RECORDS_PER_ORDINAL_BLOCK], &[]);
+    let budget = 20 * ORDINAL_BLOCK_BYTES as usize;
+    let mut handle = fixture.open(V4OrdinalIdentityLimits {
+        max_ordinal_cache_bytes: budget,
+        // One block per read, so every block is retained individually.
+        max_coalesced_read_bytes: ORDINAL_BLOCK_BYTES_USIZE,
+        ..V4OrdinalIdentityLimits::default()
+    });
+    let mut retained_high_water = 0;
+    for _ in 0..2 {
+        for block in 0..WIDE_FRONTIER_BLOCKS {
+            let lookup = handle
+                .lookup_node_uuids(&[block * RECORDS_PER_ORDINAL_BLOCK + 1])
+                .unwrap();
+            assert_eq!(
+                lookup.values,
+                vec![Some(Uuid::from_u128(
+                    u128::from(block * RECORDS_PER_ORDINAL_BLOCK) + 1
+                ))]
+            );
+            assert!(handle.ordinal_cache.charged_bytes <= budget);
+            retained_high_water = retained_high_water.max(lookup.metrics.retained_cache_bytes);
+        }
+    }
+    // The budget is spent, and the lookup reports what it retains.
+    assert!(handle.ordinal_cache.charged_bytes > budget - ORDINAL_BLOCK_BYTES_USIZE);
+    assert!(retained_high_water >= handle.ordinal_cache.charged_bytes as u64);
+}
+
 /// One range of three full blocks holding `uuids`, with a record that says
 /// UUIDs ascend.
 fn three_block_fixture(uuids: Vec<u128>) -> Fixture {
@@ -1399,12 +1527,19 @@ fn authenticated_block_read_has_no_per_record_seeks() {
         result.metrics.retained_cache_bytes,
         TOMBSTONE_CACHE_FIXED_CHARGE as u64 + read_buffer
     );
-    // A repeat lookup is charged for the block it does not read.
+    // A repeat lookup reads nothing. The held block is retained, not
+    // transient: it stays in `retained_cache_bytes` (bounded by the cache
+    // budget) and is no longer charged to the lookup's transient peak, which
+    // would otherwise grow with the budget-sized cache.
     let again = handle
         .lookup_node_uuids(&(1..=16).collect::<Vec<_>>())
         .unwrap();
     assert_eq!(again.metrics.bytes_read, 0);
-    assert!(again.metrics.peak_buffer_bytes >= 16 * REQUEST_ENTRY_CHARGE + read_buffer);
+    assert!(again.metrics.peak_buffer_bytes <= peak_bound - 2 * read_buffer);
+    assert_eq!(
+        again.metrics.retained_cache_bytes,
+        TOMBSTONE_CACHE_FIXED_CHARGE as u64 + read_buffer
+    );
 }
 
 #[test]
