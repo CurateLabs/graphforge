@@ -211,6 +211,11 @@ impl OpenBlob {
         usize::try_from(self.page_rows).expect("page rows fit usize")
     }
 
+    /// Pages in the blob.
+    pub(super) fn page_count(&self) -> usize {
+        self.pages.len()
+    }
+
     /// Rows the page holds.
     fn rows_in(&self, page: usize) -> usize {
         let start = page as u64 * self.page_rows;

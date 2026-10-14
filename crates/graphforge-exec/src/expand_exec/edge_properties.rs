@@ -284,7 +284,7 @@ impl EdgeIdPropSource {
 /// then keys the read by `edge_uuid` through [`load_edge_prop_source`], which
 /// also reads such a route's property fragments.
 pub(super) fn load_edge_prop_source_by_id(
-    inventory: Option<&graphforge_storage::AuthenticatedPropertyInventory>,
+    provider: &dyn crate::adjacency::AdjacencyProvider,
     rel_type_name: &str,
     dir: &Path,
     prop_fields: &[arrow::datatypes::FieldRef],
@@ -294,9 +294,10 @@ pub(super) fn load_edge_prop_source_by_id(
     use arrow::compute::concat_batches;
 
     let exec_err = |m: String| GfError::Execution(m);
-    let Some(inventory) = inventory else {
+    let Some(inventory) = provider.admitted_inventory() else {
         return Ok(None);
     };
+    let inventory = inventory.as_ref();
     if prop_fields.is_empty() {
         return Ok(Some(EdgeIdPropSource {
             batches: Vec::new(),
@@ -311,12 +312,16 @@ pub(super) fn load_edge_prop_source_by_id(
         .collect::<Vec<_>>();
     let mut batches_by_route = Vec::with_capacity(stems.len());
     for stem in &stems {
+        // The edge-id map is held by the provider across statements of a
+        // generation; a provider without one reads the index directly.
+        let map = provider.edge_property_id_map(inventory, stem)?;
         let Some(batches) = crate::edge_property_index::indexed_edge_property_batches_by_id(
             inventory,
             dir,
             stem,
             targets,
             &property_names,
+            map.as_deref(),
             &mut owners,
         )?
         else {

@@ -166,7 +166,7 @@ impl PhysicalEdgeFilter {
     ) -> Result<Vec<ArrayRef>, GfError> {
         let targets: BTreeSet<u64> = candidates.iter().copied().collect();
         let children = if let Some(source) = super::edge_properties::load_edge_prop_source_by_id(
-            cfg.provider.admitted_inventory().as_deref(),
+            &*cfg.provider,
             &cfg.rel_type_name,
             &cfg.dir,
             &self.fields,

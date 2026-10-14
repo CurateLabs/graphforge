@@ -2522,7 +2522,7 @@ fn expand_single_hop_chunk(
     let id_keyed_properties = if relationship_properties_required && ordinal_topology_only {
         let targets: std::collections::BTreeSet<u64> = traversed.iter().copied().collect();
         edge_properties::load_edge_prop_source_by_id(
-            cfg.provider.admitted_inventory().as_deref(),
+            &*cfg.provider,
             &cfg.rel_type_name,
             &cfg.dir,
             &demanded_property_fields,
