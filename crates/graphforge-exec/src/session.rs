@@ -581,6 +581,24 @@ struct OrdinalIdentityConfig {
     required: bool,
 }
 
+/// Apply the tighter successfully attached query ceiling without replacing a
+/// shared catalog or provider authority.
+fn admit_inventory_memory(
+    catalog: &GraphCatalog,
+    provider: Option<&PersistentAdjacencyProvider>,
+    memory_budget_bytes: u64,
+) -> Result<(), GfError> {
+    if let Some(inventory) = catalog.admitted_inventory() {
+        inventory.set_query_memory_budget(memory_budget_bytes)?;
+    }
+    if let Some(provider) = provider
+        && let Some(inventory) = provider.admitted_inventory()
+    {
+        inventory.set_query_memory_budget(memory_budget_bytes)?;
+    }
+    Ok(())
+}
+
 impl ExecutionSession {
     /// Remove mutation permission while retaining this session's read authority.
     #[must_use]
@@ -749,17 +767,11 @@ impl ExecutionSession {
         // A facade-shared provider (#832) is revalidated here — once per
         // session — so its memoized state is as fresh as a per-query
         // provider's, while loaded views amortize across queries.
-        // Catalogs and providers may be shared across sessions. Inventory
-        // admission is monotonic, so a larger later session cannot raise the
-        // allowance on an authority already attached to a smaller session.
-        if let Some(inventory) = catalog.admitted_inventory() {
-            inventory.set_query_memory_budget(resources.memory_budget_bytes)?;
-        }
-        if let Some(provider) = &shared_provider
-            && let Some(inventory) = provider.admitted_inventory()
-        {
-            inventory.set_query_memory_budget(resources.memory_budget_bytes)?;
-        }
+        admit_inventory_memory(
+            &catalog,
+            shared_provider.as_deref(),
+            resources.memory_budget_bytes,
+        )?;
         let owns_provider = shared_provider.is_none();
         let adjacency_provider = shared_provider.map_or_else(
             || {
