@@ -48,7 +48,8 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::hash::BuildHasher;
 
-use crate::{ExprArena, ExprId, GraphOp, GraphPlan, IrExpr, PropertyId, VarId};
+use crate::binder::node_struct_operand;
+use crate::{AggFunc, ExprArena, ExprId, GraphOp, GraphPlan, IrExpr, PropertyId, VarId};
 
 /// What a plan reads from one node variable's stored properties.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -93,6 +94,9 @@ pub struct NodePropertyDemand {
     late: HashMap<VarId, BTreeSet<String>>,
     /// The index of the final `Project` when some column is late.
     deferred_projection: Option<usize>,
+    /// The nodes whose collected value is read only through an `UNWIND`, so
+    /// the collected struct carries just the columns the unwound rows use.
+    narrowed_collects: HashSet<VarId>,
 }
 
 impl Default for NodePropertyDemand {
@@ -110,6 +114,7 @@ impl NodePropertyDemand {
             vars: HashMap::new(),
             late: HashMap::new(),
             deferred_projection: None,
+            narrowed_collects: HashSet::new(),
         }
     }
 
@@ -159,6 +164,15 @@ impl NodePropertyDemand {
     #[must_use]
     pub fn deferred_projection(&self) -> Option<usize> {
         self.deferred_projection
+    }
+
+    /// Whether `var` is collected as a node value (`collect(n)` bound as
+    /// `_node_struct(n)`) that the plan only unwinds, so the collected struct
+    /// holds exactly the columns [`NodePropertyDemand::needs`] names for
+    /// `var` instead of every stored property.
+    #[must_use]
+    pub fn narrows_collected_value(&self, var: VarId) -> bool {
+        !self.all && self.narrowed_collects.contains(&var)
     }
 }
 
@@ -271,6 +285,11 @@ struct Collector<'a, S> {
     links: Vec<(VarId, VarId)>,
     /// How many times each variable is scanned, nested plans included.
     scans: HashMap<VarId, u32>,
+    /// `(node, list)`: `list` is the output of a `collect` of `node` as a
+    /// value. The collect does not yet count as a read of the whole node.
+    collects: Vec<(VarId, VarId)>,
+    /// `(list, alias)`: `UNWIND list AS alias` over a bare variable.
+    unwinds: Vec<(VarId, VarId)>,
 }
 
 impl<'a, S: BuildHasher> Collector<'a, S> {
@@ -281,6 +300,8 @@ impl<'a, S: BuildHasher> Collector<'a, S> {
             demands: HashMap::new(),
             links: Vec::new(),
             scans: HashMap::new(),
+            collects: Vec::new(),
+            unwinds: Vec::new(),
         }
     }
 
@@ -367,7 +388,9 @@ impl<'a, S: BuildHasher> Collector<'a, S> {
                     }
                     for agg in aggs {
                         if let Some(arg) = agg.arg {
-                            if identity_only_aggregate(agg.func) {
+                            if let Some((node, list)) = collected_node_value(exprs, agg) {
+                                self.collects.push((node, list));
+                            } else if identity_only_aggregate(agg.func) {
                                 self.identity_or_value(exprs, arg);
                             } else {
                                 self.value(exprs, arg);
@@ -386,7 +409,10 @@ impl<'a, S: BuildHasher> Collector<'a, S> {
                 GraphOp::LimitExpr { expr } | GraphOp::SkipExpr { expr } => {
                     self.value(exprs, *expr);
                 }
-                GraphOp::Unwind { list_expr, .. } => self.value(exprs, *list_expr),
+                GraphOp::Unwind { list_expr, alias } => match exprs.get(*list_expr) {
+                    IrExpr::VarRef(list) => self.unwinds.push((*list, *alias)),
+                    _ => self.value(exprs, *list_expr),
+                },
                 GraphOp::Optional { child }
                 | GraphOp::Exists { child, .. }
                 | GraphOp::PatternComprehension { child, .. } => self.plan(child),
@@ -498,7 +524,8 @@ impl<'a, S: BuildHasher> Collector<'a, S> {
         }
     }
 
-    /// Merge each alias class's demand into every member.
+    /// Resolve the collected-node reads, then merge each alias class's demand
+    /// into every member.
     fn finish(
         self,
         late: HashMap<VarId, BTreeSet<String>>,
@@ -506,8 +533,10 @@ impl<'a, S: BuildHasher> Collector<'a, S> {
     ) -> NodePropertyDemand {
         let Self {
             all,
-            demands,
+            mut demands,
             links,
+            collects,
+            unwinds,
             ..
         } = self;
         let mut classes = Classes::default();
@@ -517,16 +546,15 @@ impl<'a, S: BuildHasher> Collector<'a, S> {
         for (a, b) in &links {
             classes.union(*a, *b);
         }
-        let mut merged: HashMap<VarId, VarDemand> = HashMap::new();
-        for (var, demand) in demands {
-            let root = classes.find(var);
-            match merged.get_mut(&root) {
-                Some(existing) => existing.merge(demand),
-                None => {
-                    merged.insert(root, demand);
-                }
-            }
-        }
+        let narrowed = narrow_collects(
+            &mut demands,
+            &mut classes,
+            &links,
+            &collects,
+            &unwinds,
+            &late,
+        );
+        let merged = merge_by_class(demands, &mut classes);
         let mut vars = HashMap::new();
         for var in classes.members() {
             if let Some(demand) = merged.get(&classes.find(var)) {
@@ -538,6 +566,117 @@ impl<'a, S: BuildHasher> Collector<'a, S> {
             vars,
             late,
             deferred_projection,
+            narrowed_collects: narrowed,
+        }
+    }
+}
+
+/// The merged demand of each alias class, keyed by the class root.
+fn merge_by_class(
+    demands: HashMap<VarId, VarDemand>,
+    classes: &mut Classes,
+) -> HashMap<VarId, VarDemand> {
+    let mut merged: HashMap<VarId, VarDemand> = HashMap::new();
+    for (var, demand) in demands {
+        let root = classes.find(var);
+        match merged.get_mut(&root) {
+            Some(existing) => existing.merge(demand),
+            None => {
+                merged.insert(root, demand);
+            }
+        }
+    }
+    merged
+}
+
+/// `agg` collects a whole node as a value: `(node, list)` where `list` is the
+/// variable the collect binds.
+fn collected_node_value(exprs: &ExprArena, agg: &crate::AggExpr) -> Option<(VarId, VarId)> {
+    if !matches!(agg.func, AggFunc::Collect | AggFunc::CollectDistinct) {
+        return None;
+    }
+    let node = node_struct_operand(exprs, agg.arg?)?;
+    Some((node, agg.out_var?))
+}
+
+/// Charge each collected node value for what its `UNWIND` rows read.
+///
+/// A node collected as a value (`collect(DISTINCT friend)`) is a struct of
+/// every stored property, so by default it reads the whole node. When the list
+/// is only unwound, and every unwound element reads named columns, the struct
+/// need only carry those columns: the element's fields are exactly the
+/// struct's. Any other use of the list (returned, sized, indexed, passed
+/// through a `WITH` that renames it, never unwound) or any whole-node read of
+/// an element keeps the whole read.
+///
+/// Returns the nodes whose collected value is narrowed.
+fn narrow_collects(
+    demands: &mut HashMap<VarId, VarDemand>,
+    classes: &mut Classes,
+    links: &[(VarId, VarId)],
+    collects: &[(VarId, VarId)],
+    unwinds: &[(VarId, VarId)],
+    late: &HashMap<VarId, BTreeSet<String>>,
+) -> HashSet<VarId> {
+    let collected: HashSet<VarId> = collects.iter().map(|(_, list)| *list).collect();
+    // An unwound list that is not a collected node value is read as before.
+    for (list, _) in unwinds {
+        if !collected.contains(list) {
+            merge_demand(demands, *list, VarDemand::All);
+        }
+    }
+    // The demand of every variable outside the collected values, which is
+    // what the elements' own reads add up to.
+    let provisional = merge_by_class(demands.clone(), classes);
+    let mut narrowed: HashSet<VarId> = HashSet::new();
+    let mut whole: HashSet<VarId> = HashSet::new();
+    for (node, list) in collects {
+        let used_elsewhere =
+            demands.contains_key(list) || links.iter().any(|(a, b)| a == list || b == list);
+        let aliases: Vec<VarId> = unwinds
+            .iter()
+            .filter(|(unwound, _)| unwound == list)
+            .map(|(_, alias)| *alias)
+            .collect();
+        let mut columns: BTreeSet<String> = BTreeSet::new();
+        let mut exact = !used_elsewhere && !aliases.is_empty();
+        for alias in &aliases {
+            let root = classes.find(*alias);
+            // An alias whose own demand is not final (it is itself collected,
+            // or it shares a class with the collected node) is read whole.
+            let unsettled = classes.find(*node) == root
+                || collects
+                    .iter()
+                    .any(|(other, _)| classes.find(*other) == root);
+            match provisional.get(&root) {
+                _ if unsettled => exact = false,
+                Some(VarDemand::All) => exact = false,
+                Some(VarDemand::Names(names)) => columns.extend(names.iter().cloned()),
+                None => {}
+            }
+            if let Some(names) = late.get(alias) {
+                columns.extend(names.iter().cloned());
+            }
+        }
+        if exact {
+            narrowed.insert(*node);
+            merge_demand(demands, *node, VarDemand::Names(columns));
+        } else {
+            whole.insert(*node);
+        }
+    }
+    for node in &whole {
+        merge_demand(demands, *node, VarDemand::All);
+    }
+    narrowed.retain(|node| !whole.contains(node));
+    narrowed
+}
+
+fn merge_demand(demands: &mut HashMap<VarId, VarDemand>, var: VarId, demand: VarDemand) {
+    match demands.get_mut(&var) {
+        Some(existing) => existing.merge(demand),
+        None => {
+            demands.insert(var, demand);
         }
     }
 }

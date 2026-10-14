@@ -105,7 +105,7 @@ pub(super) fn narrow_node_collects(plan: &mut GraphPlan) {
 }
 
 /// `_node_struct(VarRef(v), ...)` -> `v`.
-fn node_struct_operand(arena: &ExprArena, id: ExprId) -> Option<VarId> {
+pub(crate) fn node_struct_operand(arena: &ExprArena, id: ExprId) -> Option<VarId> {
     let IrExpr::FunctionCall { name, args } = arena.get(id) else {
         return None;
     };

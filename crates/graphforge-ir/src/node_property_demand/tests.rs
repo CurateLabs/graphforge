@@ -1217,9 +1217,16 @@ mod interactive_shapes {
              message.creationDate AS commentOrPostCreationDate \
              ORDER BY commentOrPostCreationDate DESC, commentOrPostId ASC LIMIT 20",
         );
-        // The friend the collect holds is read at bind time, as it always was.
+        // The friend the collect holds is read at bind time, but only the
+        // columns the unwound friend's projection returns: the collected value
+        // does not carry the friend's other stored properties.
         let collected = scanned(&plan, 1);
         assert!(!demand.defers(collected));
+        assert!(demand.narrows_collected_value(collected));
+        assert_eq!(
+            early(&demand, collected),
+            vec!["id", "firstName", "lastName"]
+        );
         // The unwound friend, matched again, is read only by the projection.
         let unwound = scanned(&plan, 2);
         assert_eq!(late(&demand, unwound), vec!["id", "firstName", "lastName"]);
@@ -1227,6 +1234,72 @@ mod interactive_shapes {
         let message = scanned(&plan, 3);
         assert_eq!(early(&demand, message), vec!["id", "creationDate"]);
         assert_eq!(late(&demand, message), vec!["content", "imageFile"]);
+    }
+
+    /// The collected node whose value is read whole by anything but the
+    /// unwound friend's own property accesses keeps every column.
+    fn collected_value_is_whole(query: &str) {
+        let Bound { plan, demand } = bind(query);
+        let collected = scanned(&plan, 1);
+        assert!(
+            !demand.narrows_collected_value(collected),
+            "the collected value is read whole: {query}"
+        );
+        assert!(demand.needs(collected, "someColumnNobodyNamed"));
+    }
+
+    #[test]
+    fn a_collected_list_read_elsewhere_keeps_every_column_of_its_nodes() {
+        collected_value_is_whole(
+            "MATCH (root:Person {id: 1})-[:KNOWS*1..2]-(friend:Person) \
+             WHERE NOT friend = root WITH collect(DISTINCT friend) AS friends \
+             UNWIND friends AS other RETURN other.id, size(friends) LIMIT 5",
+        );
+    }
+
+    #[test]
+    fn an_unwound_friend_returned_whole_keeps_every_column_of_the_collected_node() {
+        collected_value_is_whole(
+            "MATCH (root:Person {id: 1})-[:KNOWS*1..2]-(friend:Person) \
+             WHERE NOT friend = root WITH collect(DISTINCT friend) AS friends \
+             UNWIND friends AS other RETURN other, other.id LIMIT 5",
+        );
+    }
+
+    #[test]
+    fn a_collected_list_that_is_not_unwound_keeps_every_column_of_its_nodes() {
+        collected_value_is_whole(
+            "MATCH (root:Person {id: 1})-[:KNOWS*1..2]-(friend:Person) \
+             WHERE NOT friend = root WITH collect(DISTINCT friend) AS friends \
+             RETURN friends",
+        );
+    }
+
+    #[test]
+    fn a_collected_list_unwound_and_collected_again_keeps_every_column() {
+        collected_value_is_whole(
+            "MATCH (root:Person {id: 1})-[:KNOWS*1..2]-(friend:Person) \
+             WHERE NOT friend = root WITH collect(DISTINCT friend) AS friends \
+             UNWIND friends AS other WITH collect(other) AS again RETURN again",
+        );
+    }
+
+    #[test]
+    fn a_collected_node_unwound_for_its_properties_keeps_only_those_columns() {
+        let Bound { plan, demand } = bind(
+            "MATCH (root:Person {id: 1})-[:KNOWS*1..2]-(friend:Person) \
+             WHERE NOT friend = root WITH collect(DISTINCT friend) AS friends \
+             UNWIND friends AS other \
+             RETURN other.id, other.lastName ORDER BY other.firstName LIMIT 5",
+        );
+        let collected = scanned(&plan, 1);
+        assert!(demand.narrows_collected_value(collected));
+        // The sort reads `firstName` and the projection `id` and `lastName`.
+        assert_eq!(
+            early(&demand, collected),
+            vec!["id", "firstName", "lastName"]
+        );
+        assert!(!demand.needs(collected, "content"));
     }
 
     #[test]

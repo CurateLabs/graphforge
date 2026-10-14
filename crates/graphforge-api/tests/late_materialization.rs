@@ -640,8 +640,8 @@ fn return_only_properties_are_read_above_the_limit() {
     }
 
     // The IC9 shape defers the message text. The friends arrive as collected
-    // nodes that hold their properties whole, so there is no friend read to
-    // defer.
+    // nodes, so they are read before the sort; each holds only the columns its
+    // unwound copy reads (see `a_collected_node_carries_only_the_columns_...`).
     let plan = physical_plan(&single.graph, &network_messages(200, "LIMIT 5"));
     let shape = overlays_around_sort(&plan, 5);
     assert_eq!(
@@ -1334,4 +1334,105 @@ fn a_decorrelated_expansion_defers_the_text_of_its_messages() {
             "the message text is read for exactly the {n} kept rows"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// The value a collect holds
+// ---------------------------------------------------------------------------
+
+/// The field names of the node value a plan's `collect` builds, sorted.
+fn collected_fields(plan: &str) -> Vec<String> {
+    let aggregate = plan
+        .lines()
+        .find(|line| line.contains("AggregateExec") && line.contains("cypher_collect"))
+        .unwrap_or_else(|| panic!("no collect aggregate in\n{plan}"));
+    let mut fields: Vec<String> = aggregate
+        .split("Utf8(\"")
+        .skip(1)
+        .filter_map(|rest| rest.split_once("\")").map(|(name, _)| name.to_owned()))
+        .collect();
+    fields.sort();
+    fields.dedup();
+    fields
+}
+
+const FRIENDS_LIST: &str = "MATCH (root:Person {id: 1})-[:KNOWS*1..2]-(friend:Person) WHERE NOT friend = root WITH collect(DISTINCT friend) AS friends";
+
+#[test]
+fn a_collected_node_carries_only_the_columns_its_unwound_copy_reads() {
+    let _serial = serial();
+    let engines = Engines::new();
+    let single = durable_single_partition();
+    let people = friends_of_first(2);
+
+    // IC9: the list is only unwound, and the unwound friend only has its id
+    // and names read, so the collected value holds those and no others.
+    let plan = physical_plan(&single.graph, &network_messages(108, "LIMIT 5"));
+    assert_eq!(
+        collected_fields(&plan),
+        ["firstName", "id", "labels", "lastName", "node_uuid"],
+        "the collected friend holds the columns that are read:\n{plan}"
+    );
+
+    // A column the sort reads is collected too.
+    let sorted = format!(
+        "{FRIENDS_LIST} UNWIND friends AS other RETURN other.lastName AS name ORDER BY other.firstName DESC"
+    );
+    let plan = physical_plan(&single.graph, &sorted);
+    assert_eq!(
+        collected_fields(&plan),
+        ["firstName", "labels", "lastName", "node_uuid"],
+        "the sort key and the returned column:\n{plan}"
+    );
+    let expected: Vec<Vec<String>> = people
+        .iter()
+        .rev()
+        .map(|&person| vec![PERSONS[person].2.to_owned()])
+        .collect();
+    assert_eq!(
+        expected.len(),
+        3,
+        "the fixture has three friends of friends"
+    );
+    assert_eq!(engines.rows(&sorted), expected, "{sorted}");
+
+    // The same list read by anything else holds the node whole.
+    let sized = format!(
+        "{FRIENDS_LIST} UNWIND friends AS other RETURN other.id AS id, size(friends) AS n ORDER BY id"
+    );
+    let plan = physical_plan(&single.graph, &sized);
+    let fields = collected_fields(&plan);
+    for column in [
+        "content",
+        "creationDate",
+        "firstName",
+        "id",
+        "imageFile",
+        "name",
+    ] {
+        assert!(
+            fields.iter().any(|field| field == column),
+            "a list read whole keeps `{column}`:\n{plan}"
+        );
+    }
+    let expected: Vec<Vec<String>> = people
+        .iter()
+        .map(|&person| vec![PERSONS[person].0.to_string(), people.len().to_string()])
+        .collect();
+    assert_eq!(engines.rows(&sized), expected, "{sized}");
+
+    // A list that is not unwound is returned whole.
+    let returned = format!("{FRIENDS_LIST} RETURN size(friends) AS n");
+    let plan = physical_plan(&single.graph, &returned);
+    assert!(
+        collected_fields(&plan)
+            .iter()
+            .any(|field| field == "content"),
+        "a list that is not unwound keeps every column:\n{plan}"
+    );
+    assert_eq!(
+        engines.rows(&returned),
+        vec![vec![people.len().to_string()]],
+        "{returned}"
+    );
 }

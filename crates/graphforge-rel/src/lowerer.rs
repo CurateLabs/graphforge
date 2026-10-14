@@ -460,6 +460,21 @@ impl GraphPlanLowerer {
             self.build_node_shapes(&plan.ops);
         let demand = graphforge_ir::node_property_demand(plan, &self.prop_names());
         let late = LateJoins::of(plan, &demand);
+        // A node the plan collects as a whole value and only reads columns
+        // from after unwinding carries just those columns in the collected
+        // struct; the others were never read for it.
+        for (var, shape) in self
+            .node_shapes
+            .write()
+            .expect("node shapes lock poisoned")
+            .iter_mut()
+        {
+            if demand.narrows_collected_value(VarId(*var)) {
+                shape
+                    .prop_names
+                    .retain(|name| demand.needs(VarId(*var), name));
+            }
+        }
         self.set_node_property_demand(demand);
         let mut var_map = VarMap::new();
         let lowered =
