@@ -344,7 +344,9 @@ fn edge_record_decode_is_admitted_before_reading_parquet_pages() {
     let _serial = serial();
     let built = build(FITTING_EDGES);
     let query = "MATCH (a:Entity)-[e:LINK]->(b:Entity) RETURN e";
+    let _capture = LifecycleIoCapture::install();
     let tight = open(&built.project, TIGHT_BUDGET);
+    io_stats::reset();
     let message = tight
         .execute(query)
         .expect_err("the full edge decode cannot fit the tight pool")
@@ -352,6 +354,11 @@ fn edge_record_decode_is_admitted_before_reading_parquet_pages() {
     assert!(
         message.contains("Resources exhausted") && message.contains("ExpandExec hop read"),
         "{message}"
+    );
+    let io = io_stats::snapshot().expect("requested I/O statistics");
+    assert_eq!(
+        io.edge_scanned_rows, 0,
+        "refusal must precede page decode: {io:?}"
     );
     drop(tight);
     let roomy = open(&built.project, ROOMY_BUDGET);
