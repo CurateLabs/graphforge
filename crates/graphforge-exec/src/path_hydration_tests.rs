@@ -66,6 +66,7 @@ fn test_udf_with_demand(
             demand,
         },
         tables,
+        shared: shared_nodes::SharedNodes::new(&resource.pool),
         resource,
     }
 }

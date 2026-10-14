@@ -13,6 +13,8 @@ use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+mod shared_nodes;
+
 pub(crate) struct HydrationResource {
     pub(crate) graph: Arc<crate::read_resource::GraphReadContext>,
     pub(crate) pool: Arc<dyn MemoryPool>,
@@ -49,6 +51,8 @@ impl HydrationResource {
             "property_rows",
             "property_gathered",
             "gathered_entries",
+            "shared_hits",
+            "shared_bypass",
         ]
         .into_iter()
         .map(|name| {
@@ -143,6 +147,7 @@ impl HydrationResource {
                         .collect::<Result<Vec<_>, _>>()?,
                     descriptor: descriptor.clone(),
                     resource: Arc::clone(self),
+                    shared: shared_nodes::SharedNodes::new(&self.pool),
                 }));
             }
             Ok(expr)
@@ -156,6 +161,9 @@ struct HydratedPathNodes {
     descriptor: PathNodeHydration,
     tables: Vec<graphforge_storage::PropertyTable>,
     resource: Arc<HydrationResource>,
+    /// Nodes hydrated by this operator so far (#1984). Execution state, not
+    /// identity: ignored by `Eq` and `Hash`.
+    shared: shared_nodes::SharedNodes,
 }
 impl PartialEq for HydratedPathNodes {
     fn eq(&self, other: &Self) -> bool {
@@ -196,7 +204,7 @@ impl ScalarUDFImpl for HydratedPathNodes {
         graphforge_rel::expr::evaluate_path_nodes(
             &args,
             self.descriptor.fields.clone(),
-            |flat, batch_size| hydrate_path_node_children(&invocation, flat, batch_size),
+            |flat, batch_size| self.shared.hydrate(&invocation, flat, batch_size),
         )
     }
 }
