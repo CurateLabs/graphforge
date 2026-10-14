@@ -1,25 +1,25 @@
-//! Hash joins that cannot fit the query memory pool become sort-merge joins
-//! (#1985).
+//! A hash join is kept only when a side is estimated to fit the query memory
+//! pool, and otherwise becomes a sort-merge join (#1985).
 //!
 //! DataFusion's hash join holds its whole build side in memory and cannot
 //! spill: past the pool it fails with `Resources exhausted ... HashJoinInput
 //! ... can spill: false`. Its sort-merge join sorts both inputs with spillable
-//! sorts and buffers only one key group, so it completes in any pool at the
-//! price of sorting. The hash join is the faster plan whenever the build side
-//! fits, so it is kept unless the statistics the build side publishes say it
-//! cannot.
+//! sorts and buffers only one key group, so it completes in any pool that
+//! holds its sorts, at the price of sorting. The hash join is the faster plan,
+//! so it is kept only when the statistics its inputs publish say the build side
+//! fits.
 //!
 //! The rule runs directly after DataFusion's `JoinSelection`, which has by
-//! then chosen the build side from the same statistics (the smaller side is
-//! already on the left whenever both sizes are known). A build side that is
-//! still estimated beyond [`BUILD_POOL_SHARE_DENOMINATOR`]th of the pool
-//! is a join no choice of side can fit. The sorts and repartitions the
-//! sort-merge join requires are added by DataFusion's later `EnforceDistribution`
-//! and `EnforceSorting`.
-//!
-//! A build side with unknown statistics is left as a hash join: nothing says
-//! it will not fit, and a join that still exhausts the pool fails with the
-//! typed resource error naming its consumers, as before.
+//! then put the smaller side on the left whenever both sizes are known. Each
+//! input is judged against [`BUILD_POOL_SHARE_DENOMINATOR`]th of the pool
+//! (see [`Placement`]): the build side when it fits, else the probe side
+//! becomes the build side when that fits, else the join is planned as a
+//! sort-merge join. An input that publishes neither a size nor a row count
+//! does not fit: with no estimate nothing bounds what the join builds at run
+//! time, and only a join that can spill is safe. A sort-merge join over a pool
+//! too small for its sorts still fails with the typed resource error naming
+//! the consumers. The sorts and repartitions the sort-merge join requires are
+//! added by DataFusion's later `EnforceDistribution` and `EnforceSorting`.
 
 use std::sync::Arc;
 
@@ -61,6 +61,34 @@ impl HashJoinMemoryRule {
     fn build_limit(&self) -> usize {
         self.memory_budget_bytes / BUILD_POOL_SHARE_DENOMINATOR
     }
+
+    /// How `join` is planned, from the sizes its two inputs are estimated at.
+    fn place(&self, join: &HashJoinExec) -> Placement {
+        let limit = self.build_limit();
+        let fits = |side: &Arc<dyn ExecutionPlan>| {
+            estimated_bytes(side).is_some_and(|bytes| bytes <= limit)
+        };
+        if fits(join.left()) {
+            Placement::Keep
+        } else if fits(join.right()) {
+            Placement::Swap
+        } else {
+            Placement::SortMerge
+        }
+    }
+}
+
+/// How a hash join is planned once its build side is judged against the pool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Placement {
+    /// The build side is estimated to fit: the hash join stands.
+    Keep,
+    /// Only the probe side is estimated to fit: it builds and the other side
+    /// streams.
+    Swap,
+    /// Neither side is estimated to fit, or the estimates are unknown: a join
+    /// that can spill.
+    SortMerge,
 }
 
 /// Bytes a plan's output is estimated to occupy, from the statistics it
@@ -120,13 +148,18 @@ impl PhysicalOptimizerRule for HashJoinMemoryRule {
         plan: Arc<dyn ExecutionPlan>,
         _config: &ConfigOptions,
     ) -> Result<Arc<dyn ExecutionPlan>> {
-        let limit = self.build_limit();
         plan.transform_up(|node| {
             let Some(join) = node.downcast_ref::<HashJoinExec>() else {
                 return Ok(Transformed::no(node));
             };
-            if estimated_bytes(join.left()).is_none_or(|bytes| bytes <= limit) {
-                return Ok(Transformed::no(node));
+            match self.place(join) {
+                Placement::Keep => return Ok(Transformed::no(node)),
+                Placement::Swap => {
+                    return join
+                        .swap_inputs(*join.partition_mode())
+                        .map(Transformed::yes);
+                }
+                Placement::SortMerge => {}
             }
             let sort_options = vec![SortOptions::default(); join.on().len()];
             let sort_merge = SortMergeJoinExec::try_new(
@@ -170,3 +203,6 @@ impl PhysicalOptimizerRule for HashJoinMemoryRule {
         true
     }
 }
+
+#[cfg(test)]
+mod tests;

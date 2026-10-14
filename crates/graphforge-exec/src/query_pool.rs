@@ -88,7 +88,8 @@
 
 use std::collections::HashMap;
 use std::fmt::{self, Display, Formatter};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use datafusion::common::{DataFusionError, Result};
 use datafusion::execution::memory_pool::{
@@ -110,6 +111,10 @@ const SPILLER_FLOOR_BYTES: usize = 10 * 1024 * 1024;
 pub(crate) struct QueryMemoryPool {
     pool_size: usize,
     state: Mutex<State>,
+    /// The most bytes the pool has had reserved since the gauge was last
+    /// reset. Shared so the owner of a pool the runtime has taken over (and
+    /// wrapped) can still read it.
+    peak: Arc<AtomicUsize>,
 }
 
 #[derive(Debug, Default)]
@@ -148,7 +153,21 @@ impl QueryMemoryPool {
         Self {
             pool_size,
             state: Mutex::new(State::default()),
+            peak: Arc::new(AtomicUsize::new(0)),
         }
+    }
+
+    /// The pool's high-water mark of reserved bytes. The pool raises it with
+    /// every reservation it serves, loans and unconditional growth included;
+    /// the owner resets it to start a new measurement.
+    pub(crate) fn peak_gauge(&self) -> Arc<AtomicUsize> {
+        Arc::clone(&self.peak)
+    }
+
+    /// Adds `additional` to the reserved total and raises the high-water mark.
+    fn reserve(&self, state: &mut State, additional: usize) {
+        state.reserved += additional;
+        self.peak.fetch_max(state.reserved, Ordering::Relaxed);
     }
 
     fn locked(&self) -> MutexGuard<'_, State> {
@@ -207,7 +226,7 @@ impl MemoryPool for QueryMemoryPool {
 
     fn grow(&self, reservation: &MemoryReservation, additional: usize) {
         let mut state = self.locked();
-        state.reserved += additional;
+        self.reserve(&mut state, additional);
         if let Some(spiller) = state.spillers.get_mut(&reservation.consumer().id()) {
             spiller.held += additional;
         }
@@ -304,7 +323,7 @@ impl MemoryPool for QueryMemoryPool {
                 spiller.grant = Grant::Lent(additional);
             }
         }
-        state.reserved += additional;
+        self.reserve(&mut state, additional);
         if let Some(spiller) = state.spillers.get_mut(&id) {
             spiller.held += additional;
         }

@@ -442,13 +442,22 @@ impl Default for SessionResourceConfig {
 /// RAM-backed on some hosts.
 fn session_runtime(
     resources: &SessionResourceConfig,
-) -> Result<Arc<datafusion::execution::runtime_env::RuntimeEnv>, GfError> {
+) -> Result<
+    (
+        Arc<datafusion::execution::runtime_env::RuntimeEnv>,
+        Arc<std::sync::atomic::AtomicUsize>,
+    ),
+    GfError,
+> {
     let memory_budget = usize::try_from(resources.memory_budget_bytes).unwrap_or(usize::MAX);
     // DataFusion's greedy pool, reporting its top consumers on exhaustion as
     // `with_memory_limit` does, and a spilling aggregate keeping the memory it
-    // has just released long enough to sort it (#1985).
+    // has just released long enough to sort it (#1985). The pool's high-water
+    // mark is returned beside the runtime that now owns the pool.
+    let query_pool = crate::query_pool::QueryMemoryPool::new(memory_budget);
+    let memory_peak = query_pool.peak_gauge();
     let pool = datafusion::execution::memory_pool::TrackConsumersPool::new(
-        crate::query_pool::QueryMemoryPool::new(memory_budget),
+        query_pool,
         std::num::NonZeroUsize::new(5).expect("five is not zero"),
     );
     let mut runtime_builder = datafusion::execution::runtime_env::RuntimeEnvBuilder::new()
@@ -468,10 +477,11 @@ fn session_runtime(
     }
     // A spilling runtime creates its temporary directory here, so a full or
     // read-only volume is an error for this query, not a panic.
-    runtime_builder
+    let runtime = runtime_builder
         .build()
         .map(Arc::new)
-        .map_err(|error| GfError::Storage(format!("query runtime: {error}")))
+        .map_err(|error| GfError::Storage(format!("query runtime: {error}")))?;
+    Ok((runtime, memory_peak))
 }
 
 struct QueryEvidenceStream {
@@ -565,6 +575,9 @@ pub struct ExecutionSession {
     /// read → write → read must observe post-write adjacency.
     pub(super) adjacency_provider: Arc<PersistentAdjacencyProvider>,
     owned_adjacency: Option<Arc<OwnedSessionAdjacency>>,
+    /// High-water mark of the query memory pool, which an execution resets when
+    /// it starts and reports in its [`ExecutionStats`].
+    memory_peak: Arc<std::sync::atomic::AtomicUsize>,
     /// Differential-test strategy, absent from ordinary builds.
     #[cfg(feature = "differential-testing")]
     relational_fixed_hop_reference: bool,
@@ -803,7 +816,7 @@ impl ExecutionSession {
             .use_row_number_estimates_to_optimize_partitioning = true;
 
         let memory_budget = usize::try_from(resources.memory_budget_bytes).unwrap_or(usize::MAX);
-        let runtime_env = session_runtime(resources)?;
+        let (runtime_env, memory_peak) = session_runtime(resources)?;
         let state = SessionStateBuilder::new()
             .with_default_features()
             .with_config(config)
@@ -854,6 +867,7 @@ impl ExecutionSession {
             semantic_composition_fingerprint,
             adjacency_provider,
             owned_adjacency,
+            memory_peak,
             #[cfg(feature = "differential-testing")]
             relational_fixed_hop_reference: false,
         })
@@ -1247,6 +1261,7 @@ impl ExecutionSession {
                     rows_produced,
                     execution_time_ms: 0,
                     write_initialization: initialization_work,
+                    ..ExecutionStats::default()
                 },
                 side_effects,
                 mutation_receipt,
@@ -1261,6 +1276,7 @@ impl ExecutionSession {
                 rows_produced: 1,
                 execution_time_ms: 0,
                 write_initialization: initialization_work,
+                ..ExecutionStats::default()
             },
             side_effects,
             mutation_receipt,
@@ -1426,9 +1442,12 @@ impl ExecutionSession {
 
         let task_ctx = self.ctx.task_ctx();
         let memory_reserved_before = task_ctx.memory_pool().reserved();
+        self.memory_peak
+            .store(memory_reserved_before, std::sync::atomic::Ordering::Relaxed);
         let collected =
             path_hydration::collect_guarded(Arc::clone(&physical), Arc::clone(&task_ctx)).await;
         path_hydration::cancel_plan(&physical);
+        let memory_peak_bytes = self.memory_peak.load(std::sync::atomic::Ordering::Relaxed);
         let memory_reserved_after = task_ctx.memory_pool().reserved();
         let returned_batch_bytes = collected.as_ref().map_or(0, |batches| {
             batches
@@ -1462,6 +1481,7 @@ impl ExecutionSession {
             stats: ExecutionStats {
                 rows_produced,
                 execution_time_ms: 0,
+                peak_memory_bytes: u64::try_from(memory_peak_bytes).unwrap_or(u64::MAX),
                 ..ExecutionStats::default()
             },
             side_effects: None,
