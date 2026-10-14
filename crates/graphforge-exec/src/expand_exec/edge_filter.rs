@@ -103,7 +103,6 @@ impl PhysicalEdgeFilter {
         wanted: &Wanted<'_>,
         reservation: &mut ChunkedReservation,
     ) -> Result<(HashSet<u64>, usize), GfError> {
-        let exec_err = |m: String| GfError::Execution(format!("VarLenExpand edge filter: {m}"));
         // Charged for the whole call, released before it returns.
         let mut temporary = 0_usize;
 
@@ -138,53 +137,7 @@ impl PhysicalEdgeFilter {
             // The predicate reads no property: nothing to look up.
             Vec::new()
         } else {
-            // The relationships' public identities, which key their properties.
-            let edge_batches = read_traversed_edges(cfg, &candidates)?;
-            charge(
-                reservation,
-                &mut temporary,
-                edge_batches
-                    .iter()
-                    .map(RecordBatch::get_array_memory_size)
-                    .sum(),
-            )?;
-            let records = build_edge_records(cfg, &edge_batches)?;
-            charge(
-                reservation,
-                &mut temporary,
-                edge_record_table_bytes(&records),
-            )?;
-            drop(edge_batches);
-            let mut uuids = Vec::with_capacity(ids.len());
-            for id in &ids {
-                let record = records
-                    .get(id)
-                    .ok_or_else(|| exec_err(format!("no record for edge_id {id}")))?;
-                uuids.push(record.edge_uuid);
-            }
-            drop(records);
-            charge(reservation, &mut temporary, 16 * uuids.capacity())?;
-            let targets: BTreeSet<[u8; 16]> = uuids.iter().copied().collect();
-            // `Absent` and `NotIndexed` fall back to the stored properties
-            // inside this call, exactly as the relationship list does.
-            let source = load_edge_prop_source(
-                cfg.provider.admitted_inventory().as_deref(),
-                &cfg.rel_type_name,
-                &cfg.dir,
-                &self.fields,
-                &targets,
-            )?;
-            charge(reservation, &mut temporary, source.charged_bytes())?;
-            let children = edge_prop_children(&source, &self.fields, &uuids)?;
-            charge(
-                reservation,
-                &mut temporary,
-                children
-                    .iter()
-                    .map(arrow::array::Array::get_array_memory_size)
-                    .sum(),
-            )?;
-            children
+            self.edge_properties(cfg, &candidates, &ids, reservation, &mut temporary)?
         };
         let verdicts = self.passing(children, ids.len())?;
         let crossable: HashSet<u64> = ids
@@ -194,6 +147,88 @@ impl PhysicalEdgeFilter {
             .collect();
         reservation.shrink(temporary);
         Ok((crossable, taken))
+    }
+
+    /// The values of [`fields`](Self::fields) for the relationships `ids`, one
+    /// array per field in `ids` order. Everything read is charged to
+    /// `reservation` and added to `temporary`.
+    ///
+    /// The traversal already holds the edge ids, so the indexed id route that
+    /// one-hop expansion uses answers whenever every property route can answer
+    /// by id; otherwise the relationships' public identities key the read.
+    fn edge_properties(
+        &self,
+        cfg: &ExpandConfig,
+        candidates: &HashSet<u64>,
+        ids: &[u64],
+        reservation: &mut ChunkedReservation,
+        temporary: &mut usize,
+    ) -> Result<Vec<ArrayRef>, GfError> {
+        let targets: BTreeSet<u64> = candidates.iter().copied().collect();
+        let children = if let Some(source) = super::edge_properties::load_edge_prop_source_by_id(
+            cfg.provider.admitted_inventory().as_deref(),
+            &cfg.rel_type_name,
+            &cfg.dir,
+            &self.fields,
+            &targets,
+        )? {
+            charge(reservation, temporary, source.charged_bytes())?;
+            super::edge_properties::edge_prop_children_by_id(&source, &self.fields, ids)?
+        } else {
+            // The route is unavailable by id (the same `None` condition used by
+            // one-hop expansion), so resolve public identities.
+            self.edge_properties_by_uuid(cfg, candidates, ids, reservation, temporary)?
+        };
+        charge(
+            reservation,
+            temporary,
+            children.iter().map(Array::get_array_memory_size).sum(),
+        )?;
+        Ok(children)
+    }
+
+    /// [`edge_properties`](Self::edge_properties) through the relationships'
+    /// public identities, read from the edge files.
+    fn edge_properties_by_uuid(
+        &self,
+        cfg: &ExpandConfig,
+        candidates: &HashSet<u64>,
+        ids: &[u64],
+        reservation: &mut ChunkedReservation,
+        temporary: &mut usize,
+    ) -> Result<Vec<ArrayRef>, GfError> {
+        let exec_err = |m: String| GfError::Execution(format!("VarLenExpand edge filter: {m}"));
+        let edge_batches = read_traversed_edges(cfg, candidates)?;
+        charge(
+            reservation,
+            temporary,
+            edge_batches
+                .iter()
+                .map(RecordBatch::get_array_memory_size)
+                .sum(),
+        )?;
+        let records = build_edge_records(cfg, &edge_batches)?;
+        charge(reservation, temporary, edge_record_table_bytes(&records))?;
+        drop(edge_batches);
+        let mut uuids = Vec::with_capacity(ids.len());
+        for id in ids {
+            let record = records
+                .get(id)
+                .ok_or_else(|| exec_err(format!("no record for edge_id {id}")))?;
+            uuids.push(record.edge_uuid);
+        }
+        drop(records);
+        charge(reservation, temporary, 16 * uuids.capacity())?;
+        let uuid_targets: BTreeSet<[u8; 16]> = uuids.iter().copied().collect();
+        let source = load_edge_prop_source(
+            cfg.provider.admitted_inventory().as_deref(),
+            &cfg.rel_type_name,
+            &cfg.dir,
+            &self.fields,
+            &uuid_targets,
+        )?;
+        charge(reservation, temporary, source.charged_bytes())?;
+        edge_prop_children(&source, &self.fields, &uuids)
     }
 
     /// Evaluate the predicate for `rows` edges whose property values are
