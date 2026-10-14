@@ -686,7 +686,11 @@ impl ExecutionPlan for PropertyOverlayExec {
                     .collect::<Vec<_>>();
                 // The read wants only the keys every nomination admits, so the
                 // smallest set bounds it; no nomination means an unpruned read.
-                if let Some(wanted) = uuid_sets.iter().map(|set| set.len()).min() {
+                // Every partition filters by the same sets, so the scan records
+                // the request once, from the first partition.
+                if partition == 0
+                    && let Some(wanted) = uuid_sets.iter().map(|set| set.len()).min()
+                {
                     crate::io_stats::record_property_rows_requested(wanted as u64);
                 }
                 let selected_properties = projection
