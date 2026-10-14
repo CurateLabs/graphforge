@@ -1282,6 +1282,31 @@ pub struct PersistentAdjacencyProvider {
     retained: Mutex<RetainedViewBytes>,
 }
 
+/// The topology share of the query memory budget and what each of its three
+/// consumers retains (#1987): the decoded CSR shards of every index, the label
+/// index, and the edge-id maps.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RetainedTopologyBytes {
+    /// The topology share: `ReadCacheBudget::topology_bytes`.
+    pub budget: u64,
+    /// Decoded shards held by the shared cache.
+    pub shards: u64,
+    /// The label index built from the node files.
+    pub label_index: u64,
+    /// The edge-id maps of every edge-property route.
+    pub edge_id_maps: u64,
+}
+
+impl RetainedTopologyBytes {
+    /// Everything the three consumers retain.
+    #[must_use]
+    pub fn total(self) -> u64 {
+        self.shards
+            .saturating_add(self.label_index)
+            .saturating_add(self.edge_id_maps)
+    }
+}
+
 /// The bytes the label index and the edge-id maps retain, each charged to the
 /// shard cache as external bytes so the shards give way to them.
 #[derive(Clone, Copy, Default)]
@@ -1348,6 +1373,21 @@ impl PersistentAdjacencyProvider {
         self.shard_cache =
             ShardCache::new(ReadCacheBudget::from_query_budget(query_budget_bytes).topology_bytes);
         self
+    }
+
+    /// What the topology caches retain now, against the share they split.
+    /// Each figure is one of the consumers [`ReadCacheBudget`] charges to the
+    /// topology share, so `total()` never exceeds `budget` by more than one
+    /// decoded shard (the cache admits a shard that alone exceeds its share).
+    #[must_use]
+    pub fn retained_topology_bytes(&self) -> RetainedTopologyBytes {
+        let retained = *self.retained.lock().expect("retained view bytes lock");
+        RetainedTopologyBytes {
+            budget: self.shard_cache.budget_bytes(),
+            shards: self.shard_cache.retained_bytes(),
+            label_index: retained.labels,
+            edge_id_maps: retained.maps,
+        }
     }
 
     /// Retain the graph inventory admitted by this provider's owner.
@@ -1825,7 +1865,9 @@ impl AdjacencyProvider for PersistentAdjacencyProvider {
         let mut retained = self.retained.lock().expect("retained view bytes lock");
         let index = graphforge_storage::NodeLabelIndex::build(
             &files,
-            self.shard_cache.budget_bytes().saturating_sub(retained.maps),
+            self.shard_cache
+                .budget_bytes()
+                .saturating_sub(retained.maps),
         )?
         .map(Arc::new);
         retained.labels = index.as_ref().map_or(0, |built| built.bytes());
@@ -2449,10 +2491,22 @@ mod tests {
             "shards {retained} + label index {} exceed {topology}",
             labels.bytes()
         );
+        let held = provider.retained_topology_bytes();
+        assert_eq!(held.budget, topology);
+        assert_eq!(held.shards, retained);
+        assert_eq!(held.label_index, labels.bytes());
+        assert_eq!(held.edge_id_maps, 0, "no edge-id map was requested");
+        assert!(held.total() <= held.budget, "{held:?}");
 
         // A rebuilt generation releases the label index's share.
         provider.invalidate();
         assert_eq!(provider.shard_cache.external_bytes(), 0);
+        let released = provider.retained_topology_bytes();
+        assert_eq!(
+            (released.label_index, released.edge_id_maps),
+            (0, 0),
+            "{released:?}"
+        );
     }
 
     #[test]

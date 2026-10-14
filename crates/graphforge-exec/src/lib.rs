@@ -157,7 +157,7 @@ mod ordered_one_hop;
 mod ordered_two_hop;
 pub use crate::adjacency::{
     Adjacency, AdjacencyBacking, AdjacencyProvider, AdjacencyStatus, AdmittedAdjacencyProvider,
-    PersistentAdjacencyProvider, ScanBuildAdjacencyProvider,
+    PersistentAdjacencyProvider, RetainedTopologyBytes, ScanBuildAdjacencyProvider,
 };
 #[cfg(feature = "algorithms-extended")]
 pub use algorithm_analyze::{
