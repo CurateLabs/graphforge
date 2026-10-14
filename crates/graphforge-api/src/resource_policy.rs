@@ -830,6 +830,49 @@ mod tests {
         );
     }
 
+    /// The whole derivation from a fake cgroup tree: the `memory.max` the
+    /// process runs under, read through the same parser the host uses, decides
+    /// the query pool (#1985). `import_session::memory_budget` tests the parser
+    /// against more hierarchies; this pins that its answer is what the policy
+    /// divides.
+    #[test]
+    fn a_cgroup_memory_max_sets_the_derived_query_budget() {
+        use crate::import_session::memory_budget::process_memory_limit_bytes;
+
+        let meminfo = "MemTotal: 125829120 kB\n";
+        let self_cgroup = "0::/user.slice/run-1.scope\n";
+        let derive = |memory_max: &str| {
+            let memory_max = memory_max.to_owned();
+            let read = move |path: &str| {
+                (path == "/sys/fs/cgroup/user.slice/run-1.scope/memory.max")
+                    .then(|| memory_max.clone())
+            };
+            ExecutionResourcePolicy::default()
+                .normalize_with_host_memory_limit(|| {
+                    process_memory_limit_bytes(Some(meminfo), Some(self_cgroup), &read)
+                })
+                .expect("derived")
+        };
+
+        let limited = derive("4294967296\n");
+        assert_eq!(limited.memory_budget_bytes, 2 * GIB);
+        assert_eq!(
+            limited.memory_budget_source,
+            MemoryBudgetSource::DerivedFromHostLimit {
+                host_limit_bytes: 4 * GIB
+            }
+        );
+        // `max` is no limit: the 120 GiB machine decides, up to the cap.
+        let unlimited = derive("max\n");
+        assert_eq!(unlimited.memory_budget_bytes, 32 * GIB);
+        assert_eq!(
+            unlimited.memory_budget_source,
+            MemoryBudgetSource::DerivedFromHostLimit {
+                host_limit_bytes: 120 * GIB
+            }
+        );
+    }
+
     #[test]
     fn a_stated_budget_overrides_the_host_and_never_reads_it() {
         let normalized = ExecutionResourcePolicy {
