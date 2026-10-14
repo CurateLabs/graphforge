@@ -2868,7 +2868,8 @@ mod edge_properties;
 mod hop_read;
 mod input_columns;
 use hop_read::{HOP_READ_CONSUMER, HopReadCharge, concat_charged};
-        cfg.metrics.edge_rows(edge_batch.num_rows());
+pub(crate) mod metrics;
+mod ordinal_identity;
 mod reachability;
 #[cfg(test)]
 mod tests;
