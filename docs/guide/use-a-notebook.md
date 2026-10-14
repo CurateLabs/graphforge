@@ -53,9 +53,10 @@ print(graphforge.__version__)
 
 Check that the executable is inside your `.venv` and the package version is
 the one you installed. If you already use another notebook environment, select
-its intended kernel and run `%pip install --pre graphforge` in a cell (without
-`--pre` for the latest release). Restart the kernel after
-changing the native package version, then check it again.
+its intended kernel and run `%pip install --upgrade --pre graphforge` in a cell
+(omit `--pre` for the latest release); `--upgrade` replaces a GraphForge the
+environment already has. Restart the kernel after changing the native package
+version, then check it again.
 
 ## Get your first graph answer
 
