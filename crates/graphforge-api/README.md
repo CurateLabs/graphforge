@@ -15,6 +15,22 @@ start with one of these entry points:
 Use matching versions across the engine and bindings. Before v1.0.0, GraphForge
 does not guarantee backward compatibility or project migration.
 
+**Known issue.** Crates installed from crates.io build against stock DataFusion
+54.1. GraphForge's own builds carry two DataFusion fixes that crates.io builds
+lack. Those builds are the Python wheel and the Node packages, including their
+`gf` CLI. The two fixes are:
+
+- a hang when a query spills under memory pressure
+  ([apache/datafusion#24883](https://github.com/apache/datafusion/issues/24883));
+- a planning error when a join's keys read fields of one struct, such as two
+  node patterns keyed off one unwound map
+  ([#2084](https://github.com/CurateLabs/graphforge/issues/2084)).
+
+The planning fix ships in DataFusion 55. The spill fix
+([apache/datafusion#24891](https://github.com/apache/datafusion/pull/24891)) is
+on DataFusion's main branch but not yet in a release. Crates.io builds get each
+fix when GraphForge moves to a DataFusion release that contains it.
+
 ## Quickstart
 
 Create a Rust binary with `cargo new my-graph` and enter its directory. Add
