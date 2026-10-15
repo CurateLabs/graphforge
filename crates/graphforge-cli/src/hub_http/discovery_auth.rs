@@ -1,4 +1,4 @@
-//! Credentials for the initial refs/manifest requests, never object reads.
+//! Origin-bound explicit credentials for discovery and publish control requests.
 
 use super::*;
 use ureq::http::HeaderValue;
@@ -47,7 +47,7 @@ impl DiscoveryCredentials {
         }))
     }
 
-    pub(super) fn headers_for(
+    pub(crate) fn headers_for(
         &self,
         url: &Url,
     ) -> Result<&[(&'static str, HeaderValue)], graphforge_api::GfError> {

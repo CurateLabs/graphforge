@@ -463,6 +463,21 @@ impl Transport for HubTransport {
     }
 }
 
+/// Preserve sensitivity when converting the provider-neutral wire request.
+fn request_header(
+    name: &str,
+    value: &str,
+) -> Result<ureq::http::HeaderValue, graphforge_api::GfError> {
+    let mut value = ureq::http::HeaderValue::from_str(value)
+        .map_err(|_| validation("hub.invalid_input", "request header is invalid"))?;
+    if name.eq_ignore_ascii_case("authorization")
+        || name.eq_ignore_ascii_case("x-vercel-protection-bypass")
+    {
+        value.set_sensitive(true);
+    }
+    Ok(value)
+}
+
 /// Send one request through `agent`; redirects are returned, never followed.
 pub(crate) fn send_with_agent(
     agent: &ureq::Agent,
@@ -479,7 +494,7 @@ pub(crate) fn send_with_agent(
         .method(method)
         .uri(request.url.as_str());
     for (name, value) in &request.headers {
-        builder = builder.header(name.as_str(), value.as_str());
+        builder = builder.header(name.as_str(), request_header(name, value)?);
     }
     let result = if matches!(request.method, HubMethod::Get | HubMethod::Head) {
         let built = builder
