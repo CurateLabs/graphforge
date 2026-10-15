@@ -71,7 +71,7 @@ pub(crate) struct CloneArgs {
     /// Explicit local OTLP collector base URL. Clone telemetry is otherwise disabled.
     #[arg(long)]
     pub telemetry_endpoint: Option<String>,
-    /// Branch ref naming a research head when the Hub advertises `lineage`.
+    /// Research Branch ref; defaults to the advertised default Branch when lineage has Branches.
     #[arg(long = "ref")]
     pub git_ref: Option<String>,
     /// Immutable research Version UUID to clone instead of the Project package.
@@ -412,7 +412,7 @@ fn prepare_research_clone(
     git_ref: Option<&str>,
     version_uuid: Option<&str>,
     retry: &RetryPolicy,
-) -> Result<(ObjectDescriptor, ResearchCloneContext), graphforge_api::GfError> {
+) -> Result<Option<(ObjectDescriptor, ResearchCloneContext)>, graphforge_api::GfError> {
     let lineage_object = manifest
         .lineage_object()
         .map_err(|error| protocol_error(&error))?;
@@ -423,11 +423,16 @@ fn prepare_research_clone(
     manifest
         .bind_lineage(refs, &lineage)
         .map_err(|error| protocol_error(&error))?;
+    let implicit_default = git_ref.is_none() && version_uuid.is_none();
+    if implicit_default && lineage.branches.is_empty() {
+        return Ok(None);
+    }
+    let git_ref = git_ref.or(implicit_default.then_some(manifest.default_ref.as_str()));
     let selected_uuid = resolve_research_version_uuid(&lineage, git_ref, version_uuid)?;
     let (version, object) = manifest
         .research_version_object(&lineage, &selected_uuid)
         .map_err(|error| protocol_error(&error))?;
-    Ok((
+    Ok(Some((
         object.clone(),
         ResearchCloneContext {
             lineage_bytes,
@@ -445,7 +450,7 @@ fn prepare_research_clone(
                     )
                 })?,
         },
-    ))
+    )))
 }
 
 fn staging_path(destination: &Path) -> Result<PathBuf, graphforge_api::GfError> {
@@ -1870,7 +1875,7 @@ fn clone_into_staging(
     } = *discovered;
     let refs = RefSet::from_json(refs_bytes, limits).map_err(|error| protocol_error(&error))?;
     let research_requested = args.git_ref.is_some() || args.version_uuid.is_some();
-    let (object, research_context) = if research_requested {
+    let (object, research_context) = if research_requested || manifest.lineage.is_some() {
         if manifest.lineage.is_none() {
             return Err(validation(
                 "hub.missing_object",
@@ -1883,7 +1888,7 @@ fn clone_into_staging(
             HandoffKind::Call,
             None,
         );
-        let (object, context) = prepare_research_clone(
+        let prepared = prepare_research_clone(
             transport,
             manifest,
             &refs,
@@ -1896,9 +1901,15 @@ fn clone_into_staging(
             ComponentKind::NetworkTransport,
             ComponentKind::Discovery,
             HandoffKind::Return,
-            Some(context.lineage_bytes.len() as u64),
+            prepared
+                .as_ref()
+                .map(|(_, context)| context.lineage_bytes.len() as u64),
         );
-        (object, Some(context))
+        if let Some((object, context)) = prepared {
+            (object, Some(context))
+        } else {
+            (select_bundle(manifest)?.clone(), None)
+        }
     } else {
         (select_bundle(manifest)?.clone(), None)
     };
