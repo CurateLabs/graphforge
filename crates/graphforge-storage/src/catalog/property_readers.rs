@@ -207,6 +207,14 @@ where
         .map_err(|error| DataFusionError::External(Box::new(error)))?;
     let collect = crate::lifecycle_io::is_active();
     let limits = crate::property_overlay::PropertyOverlayLimits::default();
+    // Query execution reuses the storage reader's bounded row window for
+    // decoded-map handoff as well. This bounds conversion/source overlap;
+    // every allocation still needs its own admission to the shared byte pool.
+    let batch_size = if execution.is_some() {
+        batch_size.max(1).min(limits.max_buffered_rows.max(1))
+    } else {
+        batch_size.max(1)
+    };
     let mut metrics = crate::PropertyOverlayMetrics::default();
     let indexed = match equality.filter(|_| !is_edge) {
         Some(equality) => match execution {
@@ -308,30 +316,32 @@ where
         }
         _ => selected_properties.cloned(),
     };
+    // Keep one accumulator allocation across emissions. Conversion has its own
+    // admission below; draining avoids a fresh growing Vec after every batch.
     let _vectors = execution
         .map(|budget| {
             crate::property_scan_memory::mul(
                 batch_size.max(1),
-                4 * std::mem::size_of::<crate::property_scan_memory::Snapshot>(),
+                std::mem::size_of::<crate::property_scan_memory::Snapshot>(),
             )
             .and_then(|bytes| budget.reserve(bytes))
         })
         .transpose()
         .map_err(|error| DataFusionError::External(Box::new(error)))?;
-    let emit_rows = |rows: Vec<crate::property_scan_memory::Snapshot>| -> Result<
+    let emit_rows = |rows: &mut Vec<crate::property_scan_memory::Snapshot>| -> Result<
         (RecordBatch, Option<Arc<crate::property_scan_memory::Guard>>),
         crate::GfError,
     > {
         let mut guard = execution
             .map(|budget| {
                 let empty = arrow::datatypes::Schema::empty();
-                crate::property_scan_memory::codec(&rows, schema.as_deref().unwrap_or(&empty))
+                crate::property_scan_memory::codec(rows, schema.as_deref().unwrap_or(&empty))
                     .and_then(|bytes| budget.reserve(bytes))
             })
             .transpose()?;
         let mut owners = Vec::with_capacity(rows.len());
         let mut snapshots = Vec::with_capacity(rows.len());
-        for snapshot in rows {
+        for snapshot in rows.drain(..) {
             owners.push(snapshot.memory);
             snapshots.push(snapshot.row);
         }
@@ -384,7 +394,7 @@ where
                     if let Some(budget) = execution {
                         budget.check()?;
                     }
-                    let (batch, memory) = emit_rows(std::mem::take(&mut rows))?;
+                    let (batch, memory) = emit_rows(&mut rows)?;
                     match visit(&batch, memory) {
                         Ok(true) => {}
                         Ok(false) => stopped = true,
@@ -409,7 +419,7 @@ where
                 .map_err(|error| DataFusionError::External(Box::new(error)))?;
         }
         let (batch, memory) =
-            emit_rows(rows).map_err(|error| DataFusionError::External(Box::new(error)))?;
+            emit_rows(&mut rows).map_err(|error| DataFusionError::External(Box::new(error)))?;
         let _ = visit(&batch, memory)?;
     }
     Ok(collect.then_some(metrics))

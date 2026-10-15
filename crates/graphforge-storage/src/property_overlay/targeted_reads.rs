@@ -413,7 +413,7 @@ pub(super) fn read_property_targets(
             // Outer authority builder, validation builder, and active reader
             // may coexist; account metadata independently from page buffers.
             admission
-                .with_codec_bytes
+                .with_codec
                 .saturating_add((builder.metadata().memory_size() as u64).saturating_mul(3))
         } else {
             validate_parquet_resource_admission(

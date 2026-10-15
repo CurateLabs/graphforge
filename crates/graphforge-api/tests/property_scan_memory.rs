@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use arrow::array::{ArrayRef, FixedSizeBinaryBuilder, Int64Array, StringArray};
+use arrow::array::{Array, ArrayRef, FixedSizeBinaryBuilder, Int64Array, StringArray, StructArray};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use graphforge_api::{
@@ -13,6 +13,80 @@ use graphforge_api::{
 
 const ROWS: usize = 1024;
 const WIDTH: usize = 8192;
+
+#[test]
+fn property_scan_mixed_scalars_preserve_types_and_nullable_predicates_after_reopen() {
+    use graphforge_value::Literal;
+
+    let root = tempfile::tempdir().unwrap();
+    let writer = GraphForge::new(Some(root.path().to_str().unwrap())).unwrap();
+    writer
+        .execute(
+            "CREATE (root:ScanRoot), (a:ScanValue {slot:0,value:7}), \
+             (b:ScanValue {slot:1,value:2.5}), (c:ScanValue {slot:2,value:'xx'}), \
+             (d:ScanValue {slot:3,value:true}), (e:ScanValue {slot:4}), \
+             (root)-[:R]->(a), (root)-[:R]->(b), (root)-[:R]->(c), \
+             (root)-[:R]->(d), (root)-[:R]->(e)",
+        )
+        .unwrap();
+    drop(writer);
+
+    let reader = open(root.path(), 256 * 1024 * 1024);
+    let result = reader
+        .execute(
+            "MATCH (:ScanRoot)-[:R]->(n:ScanValue) \
+             RETURN n.value AS value ORDER BY n.slot",
+        )
+        .unwrap();
+    let mut actual = Vec::new();
+    for batch in result.batches {
+        let values = batch
+            .column_by_name("value")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .expect("mixed property types retain their native scalar representation");
+        for row in 0..values.len() {
+            actual.push(graphforge_value::heterogeneous::decode_scalar(values, row).unwrap());
+        }
+    }
+    assert_eq!(
+        actual,
+        vec![
+            Literal::Int(7),
+            Literal::Float(2.5),
+            Literal::Str("xx".into()),
+            Literal::Bool(true),
+            Literal::Null,
+        ]
+    );
+    for (predicate, expected) in [
+        ("n.value IS NOT NULL", 4),
+        ("n.value IS NULL OR n.value > 'x'", 2),
+    ] {
+        let result = reader
+            .execute(&format!(
+                "MATCH (:ScanRoot)-[:R]->(n:ScanValue) \
+                 WHERE {predicate} RETURN count(*) AS matches"
+            ))
+            .unwrap();
+        assert_eq!(
+            result
+                .batches
+                .iter()
+                .map(RecordBatch::num_rows)
+                .sum::<usize>(),
+            1
+        );
+        let count = result.batches[0]
+            .column_by_name("matches")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        assert_eq!(count.value(0), expected, "{predicate}");
+    }
+}
 
 fn open(path: &std::path::Path, bytes: u64) -> GraphForge {
     GraphForge::new_with_options(

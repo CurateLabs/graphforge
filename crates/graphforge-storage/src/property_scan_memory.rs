@@ -76,6 +76,18 @@ pub(crate) struct Guard {
 }
 
 impl Guard {
+    /// Divide already-admitted authority without changing the shared pool sum.
+    pub(crate) fn split_off(&mut self, bytes: usize) -> Result<Self, GfError> {
+        if bytes > self.bytes {
+            return Err(refused("split exceeds admitted allocation"));
+        }
+        self.bytes -= bytes;
+        Ok(Self {
+            budget: Arc::clone(&self.budget),
+            bytes,
+        })
+    }
+
     pub(crate) fn shrink_to(&mut self, bytes: usize) -> Result<(), GfError> {
         if bytes > self.bytes {
             return Err(refused("allocation exceeded its admitted envelope"));
@@ -100,11 +112,11 @@ impl Drop for Guard {
     }
 }
 
-/// Rows drop before their shared decoded-batch admission. A partially consumed
-/// batch keeps its complete map/vector capacity charged until its final owner.
+/// Rows drop before their independently owned map/payload admission. The reader
+/// separately retains its complete vector capacity until its iterator drops.
 pub(crate) struct Snapshot {
     pub(crate) row: crate::PropertySnapshotRow,
-    pub(crate) memory: Option<Arc<Guard>>,
+    pub(crate) memory: Option<Guard>,
 }
 
 impl std::ops::Deref for Snapshot {
@@ -125,7 +137,15 @@ fn array_literals(array: &dyn Array, field: &arrow::datatypes::Field) -> Result<
         array.get_array_memory_size(),
         mul(array.len(), size_of::<IrLiteral>())?,
     )?;
-    bytes = add(bytes, mul(array.len().max(1), ARRAY_NODE)?)?;
+    // Scalar decoding borrows Arrow values and creates only inline literals or
+    // their owned payloads, already charged above. It creates no Arrow header
+    // per row. Containers retain the existing allowance for sliced child arrays
+    // and shape dispatch while recursively decoding their values.
+    let headers = match array.data_type() {
+        DataType::List(_) | DataType::Struct(_) => array.len().max(1),
+        _ => 1,
+    };
+    bytes = add(bytes, mul(headers, ARRAY_NODE)?)?;
     if let Some(metadata) = field.metadata().get("ARROW:extension:metadata") {
         // Spatial metadata is parsed by serde_json for each row. Each encoded
         // byte can introduce at most one value/map slot; singleton BTree nodes
@@ -135,6 +155,7 @@ fn array_literals(array: &dyn Array, field: &arrow::datatypes::Field) -> Result<
     match array.data_type() {
         DataType::Null
         | DataType::Boolean
+        | DataType::Int8 // Existing heterogeneous scalar tag, not a new stored value codec.
         | DataType::Int64
         | DataType::Float64
         | DataType::Time64(_)
@@ -162,8 +183,9 @@ fn array_literals(array: &dyn Array, field: &arrow::datatypes::Field) -> Result<
 
 /// Bound the existing Arrow-to-literal decoder before it constructs row maps.
 /// String/list payloads come from actual retained Arrow buffers, recursively;
-/// keys are cloned per row, and each map entry has its full singleton bound.
-pub(crate) fn decoded_rows(batch: &RecordBatch) -> Result<usize, GfError> {
+/// keys are cloned per row. Up to eleven entries occupy one BTreeMap root;
+/// larger maps retain the conservative singleton allowance per entry.
+pub(crate) fn decoded_rows(batch: &RecordBatch, uuid_field: &str) -> Result<usize, GfError> {
     let mut bytes = mul(
         batch.num_rows(),
         add(
@@ -171,12 +193,67 @@ pub(crate) fn decoded_rows(batch: &RecordBatch) -> Result<usize, GfError> {
             size_of::<u64>() + size_of::<Snapshot>(),
         )?,
     )?;
+    let property_fields = batch
+        .schema()
+        .fields()
+        .iter()
+        .filter(|field| field.name() != uuid_field)
+        .count();
+    // Rust 1.96's BTreeMap inserts into a single eleven-slot leaf before
+    // splitting. Count nullable/all-null columns conservatively and include the
+    // tombstone removed after decoding. Keep the per-entry bound above that root.
+    let roots = if property_fields <= 11 {
+        usize::from(property_fields != 0)
+    } else {
+        property_fields
+    };
+    bytes = add(bytes, mul(batch.num_rows(), mul(roots, MAP_ENTRY)?)?)?;
     for (array, field) in batch.columns().iter().zip(batch.schema().fields()) {
-        bytes = add(
-            bytes,
-            mul(batch.num_rows(), add(MAP_ENTRY, field.name().len())?)?,
-        )?;
+        // The decoder copies this key into PropertySnapshotRow's inline UUID
+        // and skips map insertion. Every other field name is cloned, including
+        // the tombstone inserted before decode_snapshot_batch removes it.
+        if field.name() != uuid_field {
+            bytes = add(bytes, mul(batch.num_rows(), field.name().len())?)?;
+        }
         bytes = add(bytes, array_literals(array.as_ref(), field)?)?;
+    }
+    Ok(bytes)
+}
+
+/// After the source Arrow batch drops, retain only owned decoded rows. Map
+/// capacity still uses the pre-removal schema, including the tombstone: removing
+/// its key need not free the allocated BTreeMap root or split nodes.
+pub(crate) fn retained_decoded_rows(
+    rows: &[crate::PropertySnapshotRow],
+    row_capacity: usize,
+    charge_capacity: usize,
+    property_fields: usize,
+) -> Result<usize, GfError> {
+    let mut bytes = add(
+        mul(row_capacity, size_of::<crate::PropertySnapshotRow>())?,
+        mul(charge_capacity, size_of::<u64>())?,
+    )?;
+    for row in rows {
+        bytes = add(bytes, retained_decoded_row(row, property_fields)?)?;
+    }
+    Ok(bytes)
+}
+
+/// A decoded row owns its map and literal payloads; none borrow the source
+/// Arrow batch or the reader's row vector. Move this charge with the row while
+/// leaving the complete source vector capacities in the reader's reservation.
+pub(crate) fn retained_decoded_row(
+    row: &crate::PropertySnapshotRow,
+    property_fields: usize,
+) -> Result<usize, GfError> {
+    let roots = if property_fields <= 11 {
+        usize::from(property_fields != 0)
+    } else {
+        property_fields
+    };
+    let mut bytes = add(size_of::<Snapshot>(), mul(roots, MAP_ENTRY)?)?;
+    for (key, value) in &row.values {
+        bytes = add(bytes, add(key.capacity(), literal_heap(value)?)?)?;
     }
     Ok(bytes)
 }
@@ -284,7 +361,7 @@ pub(crate) fn codec(rows: &[Snapshot], schema: &Schema) -> Result<usize, GfError
         rows.len(),
         size_of::<crate::PropertySnapshotRow>()
             + (size_of::<[u8; 16]>() + size_of::<std::collections::HashMap<String, IrLiteral>>())
-            + size_of::<Arc<Guard>>(),
+            + size_of::<Option<Guard>>(),
     )?;
     for field in schema.fields() {
         // Arrow's default primitive/byte builders start at1024 slots. The

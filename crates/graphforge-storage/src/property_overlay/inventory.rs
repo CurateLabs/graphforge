@@ -2315,17 +2315,19 @@ fn authenticated_snapshot_bytes(
         if read == 0 {
             break;
         }
-        data.extend_from_slice(&buffer[..read]);
         bytes = bytes
             .checked_add(u64::try_from(read).map_err(|_| corrupt("authentication byte overflow"))?)
             .ok_or_else(|| corrupt("authentication byte overflow"))?;
+        // The admitted source capacity comes from this exact authority. A file
+        // that grows after the metadata check must fail before Vec can grow.
+        if bytes > entry.byte_length {
+            return Err(corrupt("property checksum digest conflicts with inventory"));
+        }
+        data.extend_from_slice(&buffer[..read]);
         read_calls = read_calls
             .checked_add(1)
             .ok_or_else(|| corrupt("authentication read call overflow"))?;
         checksum.update(&buffer[..read]);
-        if bytes > entry.byte_length {
-            return Err(corrupt("property checksum digest conflicts with inventory"));
-        }
         #[cfg(test)]
         if read_calls == 1
             && let Some(barrier) = mutation_barrier.as_ref()
