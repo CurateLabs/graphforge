@@ -184,18 +184,23 @@ pub(super) fn projected_fragment_rows(
     context: &ProjectedReaderContext<'_>,
 ) -> PropertyParquetRows {
     let reader = open_projected_fragment(fragment, context);
-    let (reader, pending_error, page_reservation_bytes, source, handle) = match reader {
-        Ok((reader, page_reservation_bytes, file, handle)) => (
+    let (reader, pending_error, page_reservation_bytes, source, handle, query_memory) = match reader
+    {
+        Ok((reader, page_reservation_bytes, file, handle, query_memory)) => (
             Some(reader),
             None,
             page_reservation_bytes,
             Some(file),
             Some(handle),
+            query_memory,
         ),
-        Err(error) => (None, Some(error), 0, None, None),
+        Err(error) => (None, Some(error), 0, None, None, QueryMemory::default()),
     };
     PropertyParquetRows {
         reader,
+        row_memory: None,
+        row_property_fields: 0,
+        query_memory,
         current: Vec::new().into_iter().zip(Vec::new()),
         uuid_field: context.kind.uuid_field(),
         pending_error,
@@ -217,18 +222,89 @@ pub(super) fn projected_fragment_rows(
     }
 }
 
+type ProjectedFragment = (
+    ParquetRecordBatchReader,
+    u64,
+    Arc<PropertyFile>,
+    FragmentHandleGuard,
+    QueryMemory,
+);
+
+#[derive(Default)]
+struct QueryMemory {
+    guards: Vec<crate::property_scan_memory::Guard>,
+    initial_read: Option<crate::property_scan_memory::Guard>,
+    read_bytes: usize,
+}
+
+impl QueryMemory {
+    fn read_guard(
+        &mut self,
+        execution: Option<&Arc<crate::property_scan_memory::Budget>>,
+    ) -> Result<Option<crate::property_scan_memory::Guard>, GfError> {
+        if let Some(guard) = self.initial_read.take() {
+            return Ok(Some(guard));
+        }
+        if self.read_bytes == 0 {
+            return Ok(None);
+        }
+        execution
+            .ok_or_else(|| crate::property_scan_memory::refused("missing decoder admission"))?
+            .reserve(self.read_bytes)
+            .map(Some)
+    }
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "one reader construction keeps its source, decoder and selection admissions together"
+)]
 fn open_projected_fragment(
     fragment: &AuthenticatedPropertyFragment,
     context: &ProjectedReaderContext<'_>,
-) -> Result<
-    (
-        ParquetRecordBatchReader,
-        u64,
-        Arc<PropertyFile>,
-        FragmentHandleGuard,
-    ),
-    GfError,
-> {
+) -> Result<ProjectedFragment, GfError> {
+    let mut query_memory = QueryMemory::default();
+    let mut decoder_memory = None;
+    let mut read_bytes = 0;
+    if let Some(budget) = &context.budget.execution {
+        budget.check()?;
+        let footer = fragment
+            .footer
+            .get()
+            .and_then(|result| result.as_ref().ok())
+            .ok_or_else(|| {
+                crate::property_scan_memory::refused("cannot bound unadmitted property footer")
+            })?;
+        let object = fragment
+            .object
+            .get()
+            .and_then(|result| result.as_ref().ok())
+            .ok_or_else(|| {
+                crate::property_scan_memory::refused("cannot bound unadmitted property source")
+            })?;
+        let source_bytes = if object.envelope.is_some() {
+            2 * super::bounded_object::MAX_PROPERTY_OBJECT_BYTES
+        } else if matches!(context.scratch, SnapshotScratch::Lazy(_))
+            && fragment.entry.byte_length <= super::inventory::MAX_IN_MEMORY_SNAPSHOT_BYTES
+        {
+            usize::try_from(fragment.entry.byte_length)
+                .map_err(|_| crate::property_scan_memory::refused("source size overflow"))?
+        } else if matches!(context.scratch, SnapshotScratch::Lazy(_)) {
+            usize::try_from(super::readonly_snapshot::reservation_bytes(
+                fragment.entry.byte_length,
+            )?)
+            .map_err(|_| crate::property_scan_memory::refused("source size overflow"))?
+        } else {
+            0
+        };
+        let metadata_bytes = crate::property_scan_memory::mul(footer.metadata.memory_size(), 4)?;
+        query_memory
+            .guards
+            .push(budget.reserve(crate::property_scan_memory::add(
+                source_bytes,
+                crate::property_scan_memory::add(metadata_bytes, 64 * 1024)?,
+            )?)?);
+    }
     let opened = context.inventory.open_fragment(fragment, context.scratch)?;
     if let Some(counter) = context.authentication_bytes {
         counter.fetch_add(opened.authentication_bytes, Ordering::Relaxed);
@@ -264,13 +340,50 @@ fn open_projected_fragment(
             .filter(|index| mask.leaf_included(*index))
             .collect::<BTreeSet<_>>()
     });
-    let page_reservation_bytes = validate_parquet_resource_admission(
-        footer.metadata(),
-        context.limits,
-        opened.file.as_ref(),
-        context.counts,
-        projected_leaves.as_ref(),
-    )?;
+    let page_reservation_bytes =
+        if let Some(budget) = &context.budget.execution {
+            let memory = super::parquet_budget::parquet_resource_admission(
+                footer.metadata(),
+                context.limits,
+                opened.file.as_ref(),
+                context.counts,
+                projected_leaves.as_ref(),
+                admitted_batch_rows(context.limits),
+                true,
+                corrupt,
+            )?;
+            if memory.decoded > context.limits.max_buffered_bytes / 4 {
+                return Err(corrupt(
+                    "property projected pages exceed pre-decode live-byte admission",
+                ));
+            }
+            // The full immutable Memory source was admitted before open_fragment.
+            // Its compressed page Bytes are slices, with no configured decryptor;
+            // other file modes retain separate compressed-page copy allowances.
+            let (total, retained) = if matches!(opened.file.as_ref(), PropertyFile::Memory(_)) {
+                (memory.memory_with_codec, memory.memory_retained)
+            } else {
+                (memory.with_codec, memory.retained)
+            };
+            decoder_memory =
+                Some(budget.reserve(usize::try_from(total).map_err(|_| {
+                    crate::property_scan_memory::refused("decoder size overflow")
+                })?)?);
+            read_bytes =
+                usize::try_from(total.checked_sub(retained).ok_or_else(|| {
+                    crate::property_scan_memory::refused("decoder size underflow")
+                })?)
+                .map_err(|_| crate::property_scan_memory::refused("decoder size overflow"))?;
+            memory.decoded
+        } else {
+            validate_parquet_resource_admission(
+                footer.metadata(),
+                context.limits,
+                opened.file.as_ref(),
+                context.counts,
+                projected_leaves.as_ref(),
+            )?
+        };
     context.budget.charge(page_reservation_bytes)?;
     let page_reservation_bytes = page_reservation_bytes.saturating_add(source_reservation);
     {
@@ -297,6 +410,56 @@ fn open_projected_fragment(
                     *wanted,
                 ) =>
         {
+            if let Some(budget) = &context.budget.execution {
+                let mut index_bytes = 0usize;
+                for group in footer.metadata().row_groups() {
+                    for column in group.columns() {
+                        for length in [column.column_index_length(), column.offset_index_length()]
+                            .into_iter()
+                            .flatten()
+                        {
+                            let length = usize::try_from(length).map_err(|_| {
+                                crate::property_scan_memory::refused("page index size overflow")
+                            })?;
+                            index_bytes = crate::property_scan_memory::add(index_bytes, length)?;
+                        }
+                    }
+                }
+                let rows = usize::try_from(footer.metadata().file_metadata().num_rows()).map_err(
+                    |_| crate::property_scan_memory::refused("row selection count overflow"),
+                )?;
+                // One encoded index byte can introduce at most one page entry.
+                // Candidates and candidate-row selectors coexist with final
+                // per-row decisions; RowSelection::from copies its old Vec.
+                let pages = index_bytes;
+                let selectors = crate::property_scan_memory::add(
+                    rows,
+                    crate::property_scan_memory::add(
+                        crate::property_scan_memory::mul(pages, 4)?,
+                        2,
+                    )?,
+                )?;
+                let selection = crate::property_scan_memory::mul(
+                    selectors,
+                    4 * std::mem::size_of::<parquet::arrow::arrow_reader::RowSelector>(),
+                )?;
+                // Parsed indexes own byte vectors, null/count/histogram vectors
+                // and PageLocation triples beside their encoded read buffers.
+                let index = crate::property_scan_memory::mul(
+                    index_bytes,
+                    4 * std::mem::size_of::<Vec<u8>>() + 8 * std::mem::size_of::<u64>() + 64,
+                )?;
+                let candidates = crate::property_scan_memory::mul(
+                    pages,
+                    4 * std::mem::size_of::<super::uuid_pages::Candidate>(),
+                )?;
+                query_memory
+                    .guards
+                    .push(budget.reserve(crate::property_scan_memory::add(
+                        selection,
+                        crate::property_scan_memory::add(index, candidates)?,
+                    )?)?);
+            }
             Some(wanted_row_selection(
                 &source,
                 &footer,
@@ -312,6 +475,23 @@ fn open_projected_fragment(
         Some(rows) => (Some(rows.selection), rows.paged),
         None => (None, None),
     };
+    // Selected/repeated/unknown shapes retain their original whole envelope.
+    // For qualified flat bytes, R bounds idle decoder state and T is the
+    // unchanged complete admission. R+(T-R)=T covers each read jointly; the
+    // temporary difference need not bound returned payloads independently.
+    if row_selection.is_some() {
+        read_bytes = 0;
+    }
+    let initial_read = decoder_memory
+        .as_mut()
+        .filter(|_| read_bytes != 0)
+        .map(|guard| guard.split_off(read_bytes))
+        .transpose()?;
+    if let Some(memory) = decoder_memory {
+        query_memory.guards.push(memory);
+    }
+    query_memory.initial_read = initial_read;
+    query_memory.read_bytes = read_bytes;
     let builder =
         ParquetRecordBatchReaderBuilder::new_with_metadata(source, paged.unwrap_or(footer));
     let builder = if let Some(mask) = projection_mask {
@@ -331,7 +511,13 @@ fn open_projected_fragment(
         .with_batch_size(admitted_batch_rows(context.limits))
         .build()
         .map_err(parquet_error)?;
-    Ok((reader, page_reservation_bytes, opened.file, opened.handle))
+    Ok((
+        reader,
+        page_reservation_bytes,
+        opened.file,
+        opened.handle,
+        query_memory,
+    ))
 }
 
 pub(super) struct ProjectedMetricSources<'a> {
@@ -425,6 +611,10 @@ pub(super) struct PropertyParquetRows {
     authentication_block_equivalents: Option<Arc<AtomicU64>>,
     authentication_read_calls: Option<Arc<AtomicU64>>,
     _handle: Option<FragmentHandleGuard>,
+    // Drop after the decoder/source/current rows, including partial consumption.
+    row_memory: Option<crate::property_scan_memory::Guard>,
+    row_property_fields: usize,
+    query_memory: QueryMemory,
     #[cfg(test)]
     late_failure_row_countdown: Arc<AtomicU64>,
 }
@@ -461,13 +651,27 @@ pub(super) struct DecodedRetention {
 
 impl Iterator for PropertyParquetRows {
     type Item = Result<PropertySnapshotRow, GfError>;
+    fn next(&mut self) -> Option<Self::Item> {
+        self.next_admitted()
+            .map(|result| result.map(|snapshot| snapshot.row))
+    }
+}
 
+impl PropertyParquetRows {
     #[allow(
         clippy::too_many_lines,
         reason = "fallible decoder state, reservations, and release paths stay auditable together"
     )]
-    fn next(&mut self) -> Option<Self::Item> {
+    pub(super) fn next_admitted(
+        &mut self,
+    ) -> Option<Result<crate::property_scan_memory::Snapshot, GfError>> {
         loop {
+            if let Some(budget) = &self.budget.execution
+                && let Err(error) = budget.check()
+            {
+                self.reader = None;
+                return Some(Err(error));
+            }
             if let Some(error) = self.pending_error.take() {
                 self.reader = None;
                 return Some(Err(error));
@@ -495,9 +699,37 @@ impl Iterator for PropertyParquetRows {
                 let mut decoded = self.decoded.lock().expect("property retention lock");
                 decoded.current_rows = decoded.current_rows.saturating_sub(1);
                 decoded.current_bytes = decoded.current_bytes.saturating_sub(charge);
-                return Some(Ok(row));
+                let memory = match self.row_memory.as_mut() {
+                    Some(memory) => {
+                        match crate::property_scan_memory::retained_decoded_row(
+                            &row,
+                            self.row_property_fields,
+                        )
+                        .and_then(|bytes| memory.split_off(bytes))
+                        {
+                            Ok(memory) => Some(memory),
+                            Err(error) => {
+                                self.reader = None;
+                                return Some(Err(error));
+                            }
+                        }
+                    }
+                    None => None,
+                };
+                return Some(Ok(crate::property_scan_memory::Snapshot { row, memory }));
             }
+            let previous =
+                std::mem::replace(&mut self.current, Vec::new().into_iter().zip(Vec::new()));
+            drop(previous);
+            self.row_memory = None;
             self.reader.as_ref()?;
+            let read_memory = match self.query_memory.read_guard(self.budget.execution.as_ref()) {
+                Ok(memory) => memory,
+                Err(error) => {
+                    self.reader = None;
+                    return Some(Err(error));
+                }
+            };
             if let Err(error) = self.budget.charge(self.batch_reservation_bytes) {
                 self.reader = None;
                 return Some(Err(error));
@@ -529,6 +761,22 @@ impl Iterator for PropertyParquetRows {
                 self.reader = None;
                 return Some(Err(error));
             }
+            let mut row_memory = match &self.budget.execution {
+                Some(budget) => {
+                    match crate::property_scan_memory::decoded_rows(&batch, self.uuid_field)
+                        .and_then(|bytes| budget.reserve(bytes))
+                    {
+                        Ok(guard) => Some(guard),
+                        Err(error) => {
+                            self.budget.release(decode_reservation);
+                            self.budget.release(self.batch_reservation_bytes);
+                            self.reader = None;
+                            return Some(Err(error));
+                        }
+                    }
+                }
+                None => None,
+            };
             match decode_snapshot_batch(&batch, self.uuid_field) {
                 Ok(rows) => {
                     let charges = rows.iter().map(snapshot_charge).collect::<Vec<_>>();
@@ -541,6 +789,44 @@ impl Iterator for PropertyParquetRows {
                     let bytes = charges
                         .iter()
                         .fold(0_u64, |total, charge| total.saturating_add(*charge));
+                    self.row_property_fields = batch
+                        .schema()
+                        .fields()
+                        .iter()
+                        .filter(|field| field.name() != self.uuid_field)
+                        .count();
+                    let retained = if row_memory.is_some() {
+                        crate::property_scan_memory::retained_decoded_rows(
+                            &rows,
+                            rows.capacity(),
+                            charges.capacity(),
+                            self.row_property_fields,
+                        )
+                    } else {
+                        Ok(0)
+                    };
+                    let retained = match retained {
+                        Ok(bytes) => bytes,
+                        Err(error) => {
+                            self.budget.release(decode_reservation);
+                            self.budget.release(self.batch_reservation_bytes);
+                            self.reader = None;
+                            return Some(Err(error));
+                        }
+                    };
+                    // Literal payloads now own their data. Keep the original
+                    // admission through the source batch's last use, then stop
+                    // retaining its dead Arrow buffers and dispatch headers.
+                    drop(batch);
+                    if let Some(memory) = row_memory.as_mut()
+                        && let Err(error) = memory.shrink_to(retained)
+                    {
+                        self.budget.release(decode_reservation);
+                        self.budget.release(self.batch_reservation_bytes);
+                        self.reader = None;
+                        return Some(Err(error));
+                    }
+                    drop(read_memory);
                     self.budget.release(decode_reservation);
                     if let Err(error) = self.budget.charge(bytes) {
                         self.budget.release(self.batch_reservation_bytes);
@@ -556,6 +842,7 @@ impl Iterator for PropertyParquetRows {
                     decoded.batches = decoded.batches.saturating_add(1);
                     drop(decoded);
                     self.current = rows.into_iter().zip(charges);
+                    self.row_memory = row_memory;
                 }
                 Err(error) => {
                     self.budget.release(decode_reservation);

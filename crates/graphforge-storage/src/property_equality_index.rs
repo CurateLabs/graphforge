@@ -524,6 +524,17 @@ fn current_manifest(
     route: &str,
     equality: &PropertyEquality,
 ) -> Result<Option<Manifest>, GfError> {
+    current_manifest_admitted(project_dir, inventory, route, equality, None)
+        .map(|value| value.map(|(manifest, _)| manifest))
+}
+
+fn current_manifest_admitted(
+    project_dir: &Path,
+    inventory: &AuthenticatedPropertyInventory,
+    route: &str,
+    equality: &PropertyEquality,
+    execution: Option<&Arc<crate::property_scan_memory::Budget>>,
+) -> Result<Option<(Manifest, Option<crate::property_scan_memory::Guard>)>, GfError> {
     if !is_indexed_column(&equality.column) {
         return Ok(None);
     }
@@ -534,10 +545,37 @@ fn current_manifest(
         Err(error) => return Err(storage("open manifest", &error)),
     };
     crate::graph_admission::admit_file(&file)?;
+    let length = file
+        .metadata()
+        .map_err(|error| storage("stat manifest", &error))?
+        .len();
+    let memory = execution
+        .map(|budget| {
+            let length = usize::try_from(length).map_err(|_| {
+                crate::property_scan_memory::refused("index manifest size overflow")
+            })?;
+            // Typed Manifest has strings and one Vec<ShardEntry>. At most one
+            // entry can be introduced per encoded byte. Four slots cover old/new
+            // Vec growth, input growth, parser scratch and owned field strings.
+            crate::property_scan_memory::mul(
+                length,
+                4 * (std::mem::size_of::<ShardEntry>() + std::mem::size_of::<String>() + 1),
+            )
+            .and_then(|bytes| {
+                crate::property_scan_memory::add(bytes, std::mem::size_of::<Manifest>())
+            })
+            .and_then(|bytes| budget.reserve(bytes))
+        })
+        .transpose()?;
     let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)
+    (&mut file)
+        .take(length.saturating_add(1))
+        .read_to_end(&mut bytes)
         .map_err(|e| storage("read manifest", &e))?;
     crate::lifecycle_io::record_read(crate::StorageIoPhase::ReadPathScan, bytes.len() as u64, 1);
+    if bytes.len() as u64 != length {
+        return Err(validation("manifest changed length while reading"));
+    }
     let manifest = decode_manifest(&bytes, &path)?;
     if manifest.route != route
         || manifest.column != equality.column
@@ -546,7 +584,7 @@ fn current_manifest(
         return Ok(None);
     }
     let current = inventory.route_source_digest(PropertyRouteKind::Node, route);
-    Ok((current.as_deref() == Some(manifest.source_digest.as_str())).then_some(manifest))
+    Ok((current.as_deref() == Some(manifest.source_digest.as_str())).then_some((manifest, memory)))
 }
 
 /// Whether a current index answers this equality on this route.
@@ -611,15 +649,49 @@ pub(crate) fn lookup(
     route: &str,
     equality: &PropertyEquality,
 ) -> Result<Option<BTreeSet<[u8; 16]>>, GfError> {
-    let Some(manifest) = current_manifest(project_dir, inventory, route, equality)? else {
+    lookup_admitted(project_dir, inventory, route, equality, None)
+        .map(|value| value.map(|(ids, _)| ids))
+}
+
+type AdmittedCandidates = (
+    BTreeSet<[u8; 16]>,
+    Option<crate::property_scan_memory::Guard>,
+);
+
+pub(crate) fn lookup_admitted(
+    project_dir: &Path,
+    inventory: &AuthenticatedPropertyInventory,
+    route: &str,
+    equality: &PropertyEquality,
+    execution: Option<&Arc<crate::property_scan_memory::Budget>>,
+) -> Result<Option<AdmittedCandidates>, GfError> {
+    let Some(admitted_manifest) =
+        current_manifest_admitted(project_dir, inventory, route, equality, execution)?
+    else {
         return Ok(None);
     };
+    // Tuple fields drop in declaration order: parsed metadata before admission.
+    let manifest = &admitted_manifest.0;
+    let rows = shards_holding(manifest, &equality.value).try_fold(0usize, |rows, shard| {
+        let shard_rows = usize::try_from(shard.rows)
+            .map_err(|_| crate::property_scan_memory::refused("index row count overflow"))?;
+        crate::property_scan_memory::add(rows, shard_rows)
+    })?;
+    let candidates = execution
+        .map(|budget| {
+            crate::property_scan_memory::mul(
+                rows,
+                16 * (std::mem::size_of::<[u8; 16]>() + 4 * std::mem::size_of::<usize>()),
+            )
+            .and_then(|bytes| budget.reserve(bytes))
+        })
+        .transpose()?;
     let dir = shard_dir(project_dir, route, &equality.column);
     let mut found = BTreeSet::new();
-    for shard in shards_holding(&manifest, &equality.value) {
-        read_shard(&dir, shard, &equality.value, &mut found)?;
+    for shard in shards_holding(manifest, &equality.value) {
+        read_shard(&dir, shard, &equality.value, &mut found, execution)?;
     }
-    Ok(Some(found))
+    Ok(Some((found, candidates)))
 }
 
 fn read_shard(
@@ -627,12 +699,40 @@ fn read_shard(
     shard: &ShardEntry,
     wanted: &EqualityValue,
     found: &mut BTreeSet<[u8; 16]>,
+    execution: Option<&Arc<crate::property_scan_memory::Budget>>,
 ) -> Result<(), GfError> {
     if shard.file.contains(['/', '\\']) || shard.file.starts_with('.') {
         return Err(validation("manifest names a shard outside its directory"));
     }
     let path = dir.join(&shard.file);
     let mut file = File::open(&path).map_err(|e| storage("open shard", &e))?;
+    let length = file
+        .metadata()
+        .map_err(|error| storage("stat shard", &error))?
+        .len();
+    if length != shard.byte_length {
+        return Err(validation("shard length conflicts with manifest"));
+    }
+    let _memory = execution
+        .map(|budget| {
+            let encoded = usize::try_from(length)
+                .map_err(|_| crate::property_scan_memory::refused("index shard size overflow"))?;
+            let rows = usize::try_from(shard.rows)
+                .map_err(|_| crate::property_scan_memory::refused("index row count overflow"))?;
+            // Current index shards are two flat, uncompressed Arrow IPC columns.
+            // Input Vec growth and simultaneous IPC body/alignment copies need at
+            // most four encoded lengths; array/stream/schema headers are separate.
+            crate::property_scan_memory::mul(encoded, 4)
+                .and_then(|bytes| {
+                    crate::property_scan_memory::add(
+                        bytes,
+                        crate::property_scan_memory::mul(rows, 64)?,
+                    )
+                })
+                .and_then(|bytes| crate::property_scan_memory::add(bytes, 64 * 1024))
+                .and_then(|bytes| budget.reserve(bytes))
+        })
+        .transpose()?;
     let mut bytes = Vec::new();
     // One byte past the declared length detects a longer file without reading it all.
     (&mut file)
@@ -647,6 +747,9 @@ fn read_shard(
             "shard {} failed its checksum",
             path.display()
         )));
+    }
+    if execution.is_some() {
+        preflight_index_ipc(&bytes, shard.rows)?;
     }
     let reader = arrow::ipc::reader::StreamReader::try_new(std::io::Cursor::new(&bytes), None)
         .map_err(|e| validation(e.to_string()))?;
@@ -810,5 +913,128 @@ impl RouteIndexBuilder {
             )?;
         }
         Ok(files)
+    }
+}
+
+/// Admission recognizes the exact bounded IPC shape written by encode_shard.
+/// Refuse other codecs/shapes before the Arrow reader constructs buffers.
+fn preflight_index_ipc(bytes: &[u8], rows: u64) -> Result<(), GfError> {
+    let refuse =
+        || crate::property_scan_memory::refused("cannot bound equality-index IPC representation");
+    if rows > SHARD_ENTRIES as u64 {
+        return Err(refuse());
+    }
+    let mut offset = 0usize;
+    let mut decoded_rows = 0u64;
+    while offset < bytes.len() {
+        let prefix = bytes.get(offset..offset + 4).ok_or_else(refuse)?;
+        let mut length = i32::from_le_bytes(prefix.try_into().map_err(|_| refuse())?);
+        offset += 4;
+        if length == -1 {
+            let prefix = bytes.get(offset..offset + 4).ok_or_else(refuse)?;
+            length = i32::from_le_bytes(prefix.try_into().map_err(|_| refuse())?);
+            offset += 4;
+        }
+        if length == 0 {
+            return if decoded_rows == rows {
+                Ok(())
+            } else {
+                Err(refuse())
+            };
+        }
+        let length = usize::try_from(length).map_err(|_| refuse())?;
+        let end = offset.checked_add(length).ok_or_else(refuse)?;
+        let message = arrow::ipc::root_as_message(bytes.get(offset..end).ok_or_else(refuse)?)
+            .map_err(|_| refuse())?;
+        if let Some(schema) = message.header_as_schema() {
+            if schema
+                .custom_metadata()
+                .is_some_and(|values| !values.is_empty())
+            {
+                return Err(refuse());
+            }
+            let fields = schema.fields().ok_or_else(refuse)?;
+            if fields.len() != 2 {
+                return Err(refuse());
+            }
+            for (index, field) in fields.iter().enumerate() {
+                if field.dictionary().is_some()
+                    || field.children().is_some_and(|values| !values.is_empty())
+                    || field
+                        .custom_metadata()
+                        .is_some_and(|values| !values.is_empty())
+                    || field.name() != Some(if index == 0 { "value" } else { "node_uuid" })
+                {
+                    return Err(refuse());
+                }
+                if index == 0 {
+                    if !matches!(
+                        field.type_type(),
+                        arrow::ipc::Type::Int | arrow::ipc::Type::Utf8 | arrow::ipc::Type::Bool
+                    ) {
+                        return Err(refuse());
+                    }
+                    if let Some(integer) = field.type_as_int()
+                        && (integer.bitWidth() != 64 || !integer.is_signed())
+                    {
+                        return Err(refuse());
+                    }
+                } else if field
+                    .type_as_fixed_size_binary()
+                    .is_none_or(|value| value.byteWidth() != 16)
+                {
+                    return Err(refuse());
+                }
+            }
+        } else if let Some(batch) = message.header_as_record_batch() {
+            decoded_rows = decoded_rows
+                .checked_add(u64::try_from(batch.length()).map_err(|_| refuse())?)
+                .filter(|total| *total <= rows)
+                .ok_or_else(refuse)?;
+            if batch.compression().is_some()
+                || u64::try_from(batch.length()).map_err(|_| refuse())? > rows
+                || batch.nodes().is_none_or(|nodes| nodes.len() != 2)
+                || batch.buffers().is_none_or(|buffers| buffers.len() > 5)
+            {
+                return Err(refuse());
+            }
+        } else {
+            return Err(refuse());
+        }
+        let body = usize::try_from(message.bodyLength()).map_err(|_| refuse())?;
+        offset = end.checked_add(body).ok_or_else(refuse)?;
+        if offset > bytes.len() {
+            return Err(refuse());
+        }
+    }
+    if decoded_rows == rows {
+        Ok(())
+    } else {
+        Err(refuse())
+    }
+}
+
+#[cfg(test)]
+mod admission_tests {
+    use super::*;
+
+    #[test]
+    fn index_ipc_rejects_cumulative_rows_before_candidate_allocation() {
+        let entries = Entries::Int(vec![(7, 1u128.to_be_bytes())]);
+        let (batch, _, _) = entries.shard(0..1).unwrap();
+        let mut bytes = Vec::new();
+        {
+            let mut writer =
+                arrow::ipc::writer::StreamWriter::try_new(&mut bytes, &batch.schema()).unwrap();
+            writer.write(&batch).unwrap();
+            writer.write(&batch).unwrap();
+            writer.finish().unwrap();
+        }
+        assert!(preflight_index_ipc(&bytes, 2).is_ok());
+        let error = preflight_index_ipc(&bytes, 1).unwrap_err().to_string();
+        assert!(
+            error.contains("PropertyScan") && error.contains("IPC"),
+            "{error}"
+        );
     }
 }

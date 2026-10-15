@@ -13,6 +13,167 @@ use std::collections::{BTreeSet, HashMap};
 use tempfile::TempDir;
 
 #[test]
+fn admitted_decoded_rows_release_independent_payloads_and_retain_iterator_backing() {
+    use arrow::array::builder::{ListBuilder, StringBuilder};
+    use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryPool};
+
+    const ROWS: usize = 3;
+    const WIDTH: usize = 8192;
+    let root = TempDir::new().unwrap();
+    let id = PropertyFragmentId {
+        generation: 0,
+        ordinal: 0,
+    };
+    let route_dir = root.path().join("properties/Person");
+    fs::create_dir_all(&route_dir).unwrap();
+    let mut lists = ListBuilder::new(StringBuilder::new());
+    let payloads = (0..ROWS)
+        .map(|row| format!("row-{row}-{}", "s".repeat(WIDTH)))
+        .collect::<Vec<_>>();
+    let nested = (0..ROWS)
+        .map(|row| format!("nested-{row}-{}", "n".repeat(WIDTH)))
+        .collect::<Vec<_>>();
+    for value in &nested {
+        lists.values().append_value(value);
+        lists.values().append_null();
+        lists.append(true);
+    }
+    let lists = lists.finish();
+    let schema = Arc::new(Schema::new_with_metadata(
+        vec![
+            Field::new("node_uuid", DataType::FixedSizeBinary(16), false),
+            Field::new(PROPERTY_TOMBSTONE_FIELD, DataType::Boolean, false),
+            Field::new("name", DataType::Utf8, true),
+            Field::new("names", lists.data_type().clone(), true),
+        ],
+        HashMap::from([
+            (
+                PROPERTY_OVERLAY_FORMAT_KEY.into(),
+                PROPERTY_OVERLAY_FORMAT.into(),
+            ),
+            (PROPERTY_ROUTE_KEY.into(), "Person".into()),
+            (PROPERTY_KIND_KEY.into(), "node".into()),
+            (PROPERTY_GENERATION_KEY.into(), "0".into()),
+            (PROPERTY_ORDINAL_KEY.into(), "0".into()),
+        ]),
+    ));
+    let batch = RecordBatch::try_new(
+        Arc::clone(&schema),
+        vec![
+            Arc::new(
+                FixedSizeBinaryArray::try_from_iter(
+                    (1..=ROWS).map(|row| [u8::try_from(row).unwrap(); 16]),
+                )
+                .unwrap(),
+            ),
+            Arc::new(BooleanArray::from(vec![false; ROWS])),
+            Arc::new(StringArray::from_iter_values(&payloads)),
+            Arc::new(lists),
+        ],
+    )
+    .unwrap();
+    let path = route_dir.join(id.file_name());
+    let mut writer = ArrowWriter::try_new(File::create(&path).unwrap(), schema, None).unwrap();
+    writer.write(&batch).unwrap();
+    writer.close().unwrap();
+    let bytes = fs::read(&path).unwrap();
+    let inventory = AuthenticatedPropertyInventory::from_entries_at_root(
+        root.path(),
+        vec![crate::GraphFileEntry {
+            content_xxh64: crate::corruption_checksum::checksum(&bytes),
+            relative_path: format!("properties/Person/{}", id.file_name()),
+            byte_length: u64::try_from(bytes.len()).unwrap(),
+            content_sha256: digest_hex(&Sha256::digest(&bytes)),
+            role: crate::GraphFileRole::Properties,
+        }],
+    )
+    .unwrap();
+    let limits = PropertyOverlayLimits {
+        max_buffered_rows: ROWS,
+        max_row_bytes: 1024 * 1024,
+        ..PropertyOverlayLimits::default()
+    };
+    let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(128 * 1024 * 1024));
+    let execution = crate::property_scan_memory::Budget::new(&pool);
+    let budget = Arc::new(LiveByteBudget::with_execution(
+        limits.max_buffered_bytes,
+        Some(execution),
+    ));
+    let counts = ReadCounts::new(false);
+    let decoded = Arc::new(Mutex::new(DecodedRetention::default()));
+    let scratch = inventory.lazy_snapshot_scratch().unwrap();
+    let context = ProjectedReaderContext {
+        inventory: &inventory,
+        scratch: SnapshotScratch::Lazy(&scratch),
+        row_groups: RowGroupSelection::All,
+        limits,
+        kind: PropertyRouteKind::Node,
+        route: "Person",
+        selected_properties: None,
+        counts: &counts,
+        budget: &budget,
+        decoded: &decoded,
+        authentication_bytes: &None,
+        authentication_block_equivalents: &None,
+        authentication_read_calls: &None,
+    };
+    let fragment = &inventory.routes[&(PropertyRouteKind::Node, "Person".into())][0];
+    let mut reader = projected_fragment_rows(fragment, &context);
+    let first = reader.next_admitted().unwrap().unwrap();
+    let before_second = pool.reserved();
+    let second = reader.next_admitted().unwrap().unwrap();
+    assert_eq!(
+        pool.reserved(),
+        before_second,
+        "moving an owned row transfers its reservation without releasing it"
+    );
+    assert_eq!(second.uuid, [2; 16]);
+    assert_eq!(second.values["name"], IrLiteral::Str(payloads[1].clone()));
+    assert_eq!(
+        second.values["names"],
+        IrLiteral::List(vec![IrLiteral::Str(nested[1].clone()), IrLiteral::Null])
+    );
+    drop(second);
+    assert!(
+        before_second - pool.reserved() >= payloads[1].len() + nested[1].len(),
+        "one retained row must not pin another row's independent string/list payloads"
+    );
+    let third = reader.next_admitted().unwrap().unwrap();
+    assert_eq!(third.uuid, [3; 16]);
+    assert_eq!(decoded.lock().unwrap().batches, 1);
+    drop(third);
+
+    // Do not ask for another batch: exhausted IntoIters still own their full
+    // allocations. Move those allocations and their authority together, then
+    // close the Parquet decoder to isolate the two remaining owners.
+    let backing = (
+        std::mem::replace(&mut reader.current, Vec::new().into_iter().zip(Vec::new())),
+        reader.row_memory.take(),
+    );
+    drop(reader);
+    let with_backing = pool.reserved();
+    drop(backing);
+    let first_only = pool.reserved();
+    assert!(
+        with_backing - first_only
+            >= ROWS * (std::mem::size_of::<PropertySnapshotRow>() + std::mem::size_of::<u64>()),
+        "the complete row and charge Vec allocations stay admitted until their owners drop"
+    );
+    assert!(first_only >= payloads[0].len() + nested[0].len());
+    assert_eq!(first.values["name"], IrLiteral::Str(payloads[0].clone()));
+    assert_eq!(
+        first.values["names"],
+        IrLiteral::List(vec![IrLiteral::Str(nested[0].clone()), IrLiteral::Null])
+    );
+    drop(first);
+    assert_eq!(
+        pool.reserved(),
+        0,
+        "the last owner releases its reservation"
+    );
+}
+
+#[test]
 fn authenticated_reader_reports_actual_io_and_decodes_snapshot() {
     let dir = TempDir::new().unwrap();
     let scratch = TempDir::new().unwrap();

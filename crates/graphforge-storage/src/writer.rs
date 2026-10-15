@@ -2598,6 +2598,7 @@ mod replay_properties;
 mod replay_topology;
 
 use property_codec::ColType;
+pub(crate) use property_codec::admitted_property_snapshots_to_batch;
 use property_codec::build_property_array;
 use property_codec::build_property_columns;
 use property_codec::build_property_columns_keyed;

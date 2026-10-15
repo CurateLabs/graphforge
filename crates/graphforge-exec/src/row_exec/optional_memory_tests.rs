@@ -1,5 +1,5 @@
 use super::*;
-use arrow::array::{StringArray, UInt64Array};
+use arrow::array::{AsArray, StringArray, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema};
 use datafusion::execution::memory_pool::MemoryPool;
 use datafusion::execution::runtime_env::RuntimeEnvBuilder;
@@ -813,4 +813,783 @@ async fn optional_tiny_windows_charge_full_pair_bitmap_aliases_in_nested_null_ou
     assert_eq!(count, rows);
     assert_eq!(pool.reserved(), 0);
     assert!(pool.peak_gauge().load(Ordering::Relaxed) <= 16 * MIB);
+}
+
+#[tokio::test]
+async fn optional_compound_keys_borrow_outer_values_and_match_the_full_materialized_oracle() {
+    use arrow::array::ListArray;
+    use arrow::datatypes::UInt64Type;
+    use datafusion_datasource::memory::MemorySourceConfig;
+    let wide = ["a".repeat(8192), "b".repeat(8192)];
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("key", DataType::Utf8, true),
+        Field::new(
+            "nested",
+            DataType::List(Arc::new(Field::new_list_field(DataType::UInt64, true))),
+            true,
+        ),
+        Field::new("payload", DataType::UInt64, false),
+    ]));
+    let make = |rows: Vec<(Option<usize>, Option<Vec<Option<u64>>>, u64)>| {
+        RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(StringArray::from(
+                    rows.iter()
+                        .map(|(key, _, _)| key.map(|key| wide[key].as_str()))
+                        .collect::<Vec<_>>(),
+                )),
+                Arc::new(ListArray::from_iter_primitive::<UInt64Type, _, _>(
+                    rows.iter().map(|(_, nested, _)| nested.clone()),
+                )),
+                Arc::new(UInt64Array::from(
+                    rows.iter()
+                        .map(|(_, _, payload)| *payload)
+                        .collect::<Vec<_>>(),
+                )),
+            ],
+        )
+        .unwrap()
+    };
+    let outer = make(vec![
+        (Some(0), Some(vec![Some(1), None]), 10),
+        (None, None, 11),
+        (Some(0), Some(vec![Some(1), None]), 12),
+        (Some(1), Some(vec![Some(2)]), 13),
+        (Some(1), Some(vec![Some(9)]), 14),
+    ]);
+    let inner: Vec<_> = (0..4)
+        .map(|batch| {
+            make(
+                (0..128)
+                    .map(|row| {
+                        let payload = batch * 128 + row;
+                        match row % 4 {
+                            0 => (Some(0), Some(vec![Some(1), None]), payload),
+                            1 => (None, None, payload),
+                            2 => (Some(0), Some(vec![Some(3)]), payload),
+                            _ => (Some(1), Some(vec![Some(2)]), payload),
+                        }
+                    })
+                    .collect(),
+            )
+        })
+        .collect();
+    let output_schema = Arc::new(Schema::new(vec![
+        schema.field(0).clone(),
+        schema.field(1).clone(),
+        schema.field(2).clone(),
+        Field::new("optional_payload", DataType::UInt64, true),
+    ]));
+    let mut results = Vec::new();
+    for mapped in [false, true] {
+        let limit = if mapped { 512 * 1024 } else { 32 * MIB };
+        let (context, pool) = context(limit);
+        let budget = optional_memory::Budget::new(&context.task_ctx());
+        let mut cfg = OptionalConfig {
+            join_keys: vec![(0, 0), (1, 1)],
+            inner_keep_idx: vec![2],
+            null_safe_keys: true,
+            out_schema: output_schema.clone(),
+            outer_schema: schema.clone(),
+            inner_schema: schema.clone(),
+        };
+        let source =
+            MemorySourceConfig::try_new_exec(&[vec![outer.clone()]], schema.clone(), None).unwrap();
+        let outer = budget.collect(source, context.task_ctx()).await.unwrap();
+        let source =
+            MemorySourceConfig::try_new_exec(&[inner.clone()], schema.clone(), None).unwrap();
+        let inner = if mapped {
+            budget
+                .collect_mapped(source, context.task_ctx(), &mut cfg, &outer)
+                .await
+                .unwrap()
+        } else {
+            budget.collect(source, context.task_ctx()).await.unwrap()
+        };
+        let mut joined = optional_memory::join(&cfg, outer, inner, &budget).unwrap();
+        let mut output = Vec::new();
+        while let Some(batch) = joined.next(&budget, 8).unwrap() {
+            let bytes = optional_memory::batch_bytes(&batch).unwrap();
+            output.push(batch);
+            budget.release(bytes);
+        }
+        assert_eq!(output.iter().map(RecordBatch::num_rows).sum::<usize>(), 513);
+        results.push(output);
+        drop(joined);
+        drop(budget);
+        assert_eq!(pool.reserved(), 0);
+        assert!(pool.peak_gauge().load(Ordering::Relaxed) <= limit);
+    }
+    assert_eq!(
+        results[0], results[1],
+        "same cells, nulls, duplicate multiplicity and source order"
+    );
+}
+
+#[tokio::test]
+async fn optional_compound_key_collection_cancellation_releases_representatives_and_seed() {
+    use futures::StreamExt;
+    let (plan, weak) = super::tests::interrupted_optional(false);
+    let mut plan = Arc::try_unwrap(plan).unwrap();
+    // Repeating a key position is a valid compound tuple and reaches the mapped
+    // path while retaining the existing deliberately pending correlated source.
+    plan.join_keys.push((0, 0));
+    let baseline = weak.strong_count();
+    let (context, pool) = context(MIB);
+    let mut stream = plan.execute(0, context.task_ctx()).unwrap();
+    assert!(futures::poll!(stream.next()).is_pending());
+    assert!(pool.reserved() > 0);
+    drop(stream);
+    assert_eq!(pool.reserved(), 0);
+    assert_eq!(weak.strong_count(), baseline);
+    let executed = plan.executed_inner.get().unwrap();
+    let seed = executed.children()[0]
+        .downcast_ref::<CorrelatedSeedExec>()
+        .unwrap();
+    assert!(seed.rows.as_ref().unwrap().get().is_none());
+}
+
+#[tokio::test]
+async fn optional_repeated_payload_dictionary_preserves_changed_cells_nulls_and_row_order() {
+    use arrow::array::ListArray;
+    use arrow::datatypes::UInt64Type;
+    use datafusion_datasource::memory::MemorySourceConfig;
+    let names = ["a".repeat(8192), "b".repeat(8192)];
+    let list_type = DataType::List(Arc::new(Field::new_list_field(DataType::UInt64, true)));
+    let outer_schema = Arc::new(Schema::new(vec![
+        Field::new("node_id", DataType::UInt64, false),
+        Field::new("name", DataType::Utf8, false),
+        Field::new("nested", list_type.clone(), true),
+    ]));
+    let outer = RecordBatch::try_new(
+        outer_schema.clone(),
+        vec![
+            Arc::new(UInt64Array::from(vec![1, 1, 2, 3])),
+            Arc::new(StringArray::from(vec![
+                names[0].as_str(),
+                names[0].as_str(),
+                names[1].as_str(),
+                "unmatched",
+            ])),
+            Arc::new(ListArray::from_iter_primitive::<UInt64Type, _, _>(vec![
+                Some(vec![Some(7)]),
+                Some(vec![Some(7)]),
+                None,
+                Some(vec![Some(9)]),
+            ])),
+        ],
+    )
+    .unwrap();
+    let inner_schema = Arc::new(Schema::new(vec![
+        Field::new("anchor_id", DataType::UInt64, false),
+        Field::new("anchor_name", DataType::Utf8, false),
+        Field::new("node_id", DataType::UInt64, false),
+        Field::new("name", DataType::Utf8, false),
+        Field::new("nested", list_type.clone(), true),
+        Field::new("extra", list_type, true),
+    ]));
+    let inner: Vec<_> = (0..8)
+        .map(|batch| {
+            RecordBatch::try_new(
+                inner_schema.clone(),
+                vec![
+                    Arc::new(UInt64Array::from(vec![1; 128])),
+                    Arc::new(StringArray::from(vec![names[0].as_str(); 128])),
+                    Arc::new(UInt64Array::from_iter_values(
+                        (0..128).map(|row| if row % 2 == 0 { 1 } else { 2 }),
+                    )),
+                    Arc::new(StringArray::from(
+                        (0..128)
+                            .map(|row| {
+                                if batch == 1 && row == 0 {
+                                    "changed name with the same node id"
+                                } else {
+                                    names[row % 2].as_str()
+                                }
+                            })
+                            .collect::<Vec<_>>(),
+                    )),
+                    Arc::new(ListArray::from_iter_primitive::<UInt64Type, _, _>(
+                        (0..128).map(|row| (row % 2 == 0).then(|| vec![Some(7)])),
+                    )),
+                    Arc::new(ListArray::from_iter_primitive::<UInt64Type, _, _>(
+                        (0..128).map(|row| (batch == 1 && row == 1).then(|| vec![Some(99)])),
+                    )),
+                ],
+            )
+            .unwrap()
+        })
+        .collect();
+    let keep = vec![4, 3, 5, 2];
+    let mut fields: Vec<_> = outer_schema.fields().iter().cloned().collect();
+    fields.extend(
+        keep.iter()
+            .map(|&index| Arc::new(inner_schema.field(index).clone().with_nullable(true))),
+    );
+    let output_schema = Arc::new(Schema::new(fields));
+    let mut results = Vec::new();
+    for mapped in [false, true] {
+        let limit = if mapped { 4 * MIB } else { 64 * MIB };
+        let (context, pool) = context(limit);
+        let budget = optional_memory::Budget::new(&context.task_ctx());
+        let mut cfg = OptionalConfig {
+            join_keys: vec![(0, 0), (1, 1)],
+            inner_keep_idx: keep.clone(),
+            null_safe_keys: true,
+            out_schema: output_schema.clone(),
+            outer_schema: outer_schema.clone(),
+            inner_schema: inner_schema.clone(),
+        };
+        let source =
+            MemorySourceConfig::try_new_exec(&[vec![outer.clone()]], outer_schema.clone(), None)
+                .unwrap();
+        let outer = budget.collect(source, context.task_ctx()).await.unwrap();
+        let source =
+            MemorySourceConfig::try_new_exec(&[inner.clone()], inner_schema.clone(), None).unwrap();
+        let inner = if mapped {
+            budget
+                .collect_mapped(source, context.task_ctx(), &mut cfg, &outer)
+                .await
+                .unwrap()
+        } else {
+            budget.collect(source, context.task_ctx()).await.unwrap()
+        };
+        assert_eq!(inner.logical_rows(), 1024);
+        let retained_outer = outer.batches[0].get_array_memory_size();
+        // One authority plus only the mixed batch containing changed cells.
+        if mapped {
+            assert_eq!(inner.batches.len(), 2);
+        }
+        let mut joined = optional_memory::join(&cfg, outer, inner, &budget).unwrap();
+        assert!(pool.reserved() >= retained_outer);
+        let mut output = Vec::new();
+        while let Some(batch) = joined.next(&budget, 8).unwrap() {
+            assert!(pool.reserved() >= retained_outer + batch.get_array_memory_size());
+            budget.release(optional_memory::batch_bytes(&batch).unwrap());
+            output.push(batch);
+        }
+        assert_eq!(
+            output.iter().map(RecordBatch::num_rows).sum::<usize>(),
+            2050
+        );
+        results.push(output);
+        drop(joined);
+        drop(budget);
+        assert_eq!(pool.reserved(), 0);
+        assert!(pool.peak_gauge().load(Ordering::Relaxed) <= limit);
+    }
+    assert_eq!(results[0], results[1]);
+}
+
+#[tokio::test]
+async fn optional_payload_dictionary_cancellation_releases_its_authority() {
+    use futures::StreamExt;
+    let (original, weak) = super::tests::interrupted_optional(false);
+    let logical = |name, schema| {
+        Arc::new(
+            LogicalPlanBuilder::scan(name, Arc::new(LogicalTableSource::new(schema)), None)
+                .unwrap()
+                .build()
+                .unwrap(),
+        )
+    };
+    let node = OptionalMatchNode::new(
+        logical("outer", original.outer.schema()),
+        logical("inner", original.inner.schema()),
+        vec![(0, 0), (0, 0)],
+        vec![0],
+    )
+    .with_correlated_seed(7);
+    let plan = OptionalMatchExec::new(&node, original.outer.clone(), original.inner.clone());
+    let baseline = weak.strong_count();
+    let (context, pool) = context(MIB);
+    let mut stream = plan.execute(0, context.task_ctx()).unwrap();
+    assert!(futures::poll!(stream.next()).is_pending());
+    assert!(pool.reserved() > 0);
+    drop(stream);
+    assert_eq!(pool.reserved(), 0);
+    assert_eq!(weak.strong_count(), baseline);
+    let executed = plan.executed_inner.get().unwrap();
+    let seed = executed.children()[0]
+        .downcast_ref::<CorrelatedSeedExec>()
+        .unwrap();
+    assert!(seed.rows.as_ref().unwrap().get().is_none());
+}
+
+#[tokio::test]
+async fn optional_payload_dictionary_keeps_distinct_float_bits_in_plain_and_nested_cells() {
+    use arrow::array::{ArrayRef, Float64Array, ListArray};
+    use arrow::datatypes::Float64Type;
+    use datafusion_datasource::memory::MemorySourceConfig;
+    let outer_bits = [0_u64, 0x7ff8_0000_0000_0001];
+    let inner_bits = [1_u64 << 63, 0x7ff8_0000_0000_0002];
+    for nested in [false, true] {
+        let floats = |bits: &[u64]| -> ArrayRef {
+            if nested {
+                Arc::new(ListArray::from_iter_primitive::<Float64Type, _, _>(
+                    bits.iter()
+                        .map(|&bits| Some(vec![Some(f64::from_bits(bits))])),
+                ))
+            } else {
+                Arc::new(Float64Array::from_iter_values(
+                    bits.iter().map(|&bits| f64::from_bits(bits)),
+                ))
+            }
+        };
+        let outer_values = floats(&outer_bits);
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("key", DataType::UInt64, false),
+            Field::new("other_key", DataType::UInt64, false),
+            Field::new("value", outer_values.data_type().clone(), false),
+        ]));
+        let make = |values| {
+            RecordBatch::try_new(
+                schema.clone(),
+                vec![
+                    Arc::new(UInt64Array::from(vec![1, 2])),
+                    Arc::new(UInt64Array::from(vec![10, 20])),
+                    values,
+                ],
+            )
+            .unwrap()
+        };
+        let outer = make(outer_values);
+        let inner = make(floats(&inner_bits));
+        let mut fields: Vec<_> = schema.fields().iter().cloned().collect();
+        fields.extend(
+            schema
+                .fields()
+                .iter()
+                .map(|field| Arc::new(field.as_ref().clone().with_nullable(true))),
+        );
+        let mut cfg = OptionalConfig {
+            join_keys: vec![(0, 0), (1, 1)],
+            inner_keep_idx: vec![0, 1, 2],
+            null_safe_keys: true,
+            out_schema: Arc::new(Schema::new(fields)),
+            outer_schema: schema.clone(),
+            inner_schema: schema.clone(),
+        };
+        let (context, pool) = context(MIB);
+        let budget = optional_memory::Budget::new(&context.task_ctx());
+        let source =
+            MemorySourceConfig::try_new_exec(&[vec![outer]], schema.clone(), None).unwrap();
+        let outer = budget.collect(source, context.task_ctx()).await.unwrap();
+        let source = MemorySourceConfig::try_new_exec(&[vec![inner]], schema, None).unwrap();
+        let inner = budget
+            .collect_mapped(source, context.task_ctx(), &mut cfg, &outer)
+            .await
+            .unwrap();
+        assert_eq!(
+            inner.batches.len(),
+            1,
+            "floating-point payloads keep their original cells"
+        );
+        let mut joined = optional_memory::join(&cfg, outer, inner, &budget).unwrap();
+        let output = joined.next(&budget, 8).unwrap().unwrap();
+        assert_eq!(output.num_rows(), 2);
+        for (row, &bits) in inner_bits.iter().enumerate() {
+            let values = if nested {
+                output
+                    .column(5)
+                    .as_any()
+                    .downcast_ref::<ListArray>()
+                    .unwrap()
+                    .value(row)
+            } else {
+                Arc::clone(output.column(5))
+            };
+            let values = values.as_any().downcast_ref::<Float64Array>().unwrap();
+            assert_eq!(values.value(if nested { 0 } else { row }).to_bits(), bits);
+        }
+        drop(joined);
+        drop(budget);
+        assert_eq!(pool.reserved(), 0);
+    }
+}
+
+#[tokio::test]
+async fn optional_payload_dictionary_qualifies_all_types_before_authority_construction() {
+    use datafusion::physical_plan::empty::EmptyExec;
+    let outer_schema = Arc::new(Schema::new(vec![
+        Field::new("key", DataType::UInt64, false),
+        Field::new("other_key", DataType::UInt64, false),
+    ]));
+    let outer = RecordBatch::try_new(
+        outer_schema.clone(),
+        vec![
+            Arc::new(UInt64Array::from(vec![1])),
+            Arc::new(UInt64Array::from(vec![2])),
+        ],
+    )
+    .unwrap();
+    let map_type = DataType::Map(
+        Arc::new(Field::new(
+            "entries",
+            DataType::Struct(
+                vec![
+                    Field::new("key", DataType::UInt64, false),
+                    Field::new("value", DataType::UInt64, true),
+                ]
+                .into(),
+            ),
+            false,
+        )),
+        false,
+    );
+    let inner_schema = Arc::new(Schema::new(vec![
+        outer_schema.field(0).clone(),
+        outer_schema.field(1).clone(),
+        Field::new("unsupported", map_type, true),
+    ]));
+    let mut fields: Vec<_> = outer_schema.fields().iter().cloned().collect();
+    fields.extend(
+        inner_schema
+            .fields()
+            .iter()
+            .map(|field| Arc::new(field.as_ref().clone().with_nullable(true))),
+    );
+    let mut cfg = OptionalConfig {
+        join_keys: vec![(0, 0), (1, 1)],
+        inner_keep_idx: vec![0, 1, 2],
+        null_safe_keys: true,
+        out_schema: Arc::new(Schema::new(fields)),
+        outer_schema,
+        inner_schema: inner_schema.clone(),
+    };
+    let (context, pool) = context(MIB);
+    let budget = optional_memory::Budget::new(&context.task_ctx());
+    let source = datafusion_datasource::memory::MemorySourceConfig::try_new_exec(
+        &[vec![outer]],
+        cfg.outer_schema.clone(),
+        None,
+    )
+    .unwrap();
+    let outer = budget.collect(source, context.task_ctx()).await.unwrap();
+    let reserved = pool.reserved();
+    let peak = pool.peak_gauge().load(Ordering::Relaxed);
+    let source = Arc::new(EmptyExec::new(inner_schema));
+    let error = budget
+        .collect_mapped(source, context.task_ctx(), &mut cfg, &outer)
+        .await
+        .err()
+        .unwrap();
+    assert!(
+        error
+            .to_string()
+            .contains("cannot bound Arrow kernel for Map"),
+        "{error}"
+    );
+    resource_error(error);
+    assert_eq!(
+        pool.reserved(),
+        reserved,
+        "no authority, index or row map was allocated"
+    );
+    assert_eq!(pool.peak_gauge().load(Ordering::Relaxed), peak);
+    drop(budget);
+    assert_eq!(pool.reserved(), 0);
+}
+
+fn dictionary_alias_batches(slice: bool) -> (RecordBatch, RecordBatch) {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("key", DataType::UInt64, false),
+        Field::new("other_key", DataType::UInt64, false),
+        Field::new("payload", DataType::Utf8, false),
+    ]));
+    let outer = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(UInt64Array::from_iter_values((0..256).map(|row| row / 2))),
+            Arc::new(UInt64Array::from(vec![7; 256])),
+            Arc::new(StringArray::from_iter_values(std::iter::repeat_n(
+                "x".repeat(8192),
+                256,
+            ))),
+        ],
+    )
+    .unwrap();
+    let outer = if slice { outer.slice(128, 1) } else { outer };
+    let mut fields: Vec<_> = schema.fields().iter().cloned().collect();
+    let null_type = DataType::List(Arc::new(Field::new_list_field(DataType::UInt64, true)));
+    fields.push(Arc::new(Field::new("extra", null_type.clone(), true)));
+    // The incoming payload is an independent allocation. Only the materializer
+    // proves equality and borrows the already owned outer allocation.
+    let inner = RecordBatch::try_new(
+        Arc::new(Schema::new(fields)),
+        vec![
+            Arc::new(UInt64Array::from_iter_values(
+                outer
+                    .column(0)
+                    .as_primitive::<arrow::datatypes::UInt64Type>()
+                    .values()
+                    .iter()
+                    .copied(),
+            )),
+            Arc::new(UInt64Array::from(vec![7; outer.num_rows()])),
+            Arc::new(StringArray::from_iter_values(
+                outer
+                    .column(2)
+                    .as_string::<i32>()
+                    .iter()
+                    .map(Option::unwrap),
+            )),
+            arrow::array::new_null_array(&null_type, outer.num_rows()),
+        ],
+    )
+    .unwrap();
+    (outer, inner)
+}
+
+fn dictionary_alias_config(outer: &RecordBatch, inner: &RecordBatch) -> OptionalConfig {
+    // Duplicate payload outputs and nontrivial keep order exercise independent
+    // aliases of the same outer column, as well as a newly allocated null list.
+    let keep = vec![2, 0, 3, 2, 1];
+    let mut fields: Vec<_> = outer.schema().fields().iter().cloned().collect();
+    fields.extend(
+        keep.iter()
+            .map(|&index| Arc::new(inner.schema().field(index).clone().with_nullable(true))),
+    );
+    OptionalConfig {
+        join_keys: vec![(0, 0), (1, 1)],
+        inner_keep_idx: keep,
+        null_safe_keys: true,
+        out_schema: Arc::new(Schema::new(fields)),
+        outer_schema: outer.schema(),
+        inner_schema: inner.schema(),
+    }
+}
+
+#[tokio::test]
+async fn optional_dictionary_aliases_fit_once_and_keep_full_outer_backing_through_output() {
+    use datafusion_datasource::memory::MemorySourceConfig;
+    for slice in [false, true] {
+        let (outer, inner) = dictionary_alias_batches(slice);
+        let source_bytes = outer.get_array_memory_size();
+        assert!(
+            source_bytes >= 2 * MIB,
+            "slices retain full source capacity"
+        );
+        let mut results = Vec::new();
+        for mapped in [false, true] {
+            let limit = if mapped { 3 * MIB } else { 32 * MIB };
+            let (context, pool) = context(limit);
+            let budget = optional_memory::Budget::new(&context.task_ctx());
+            let mut cfg = dictionary_alias_config(&outer, &inner);
+            let source = MemorySourceConfig::try_new_exec(
+                &[vec![outer.clone()]],
+                cfg.outer_schema.clone(),
+                None,
+            )
+            .unwrap();
+            let outer = budget.collect(source, context.task_ctx()).await.unwrap();
+            let source = MemorySourceConfig::try_new_exec(
+                &[vec![inner.clone()]],
+                cfg.inner_schema.clone(),
+                None,
+            )
+            .unwrap();
+            let inner = if mapped {
+                let inner = budget
+                    .collect_mapped(source, context.task_ctx(), &mut cfg, &outer)
+                    .await
+                    .unwrap();
+                assert_eq!(inner.batches.len(), 1, "all payload rows reuse authority");
+                for index in [0, 3] {
+                    assert!(Arc::ptr_eq(
+                        inner.batches[0].column(index),
+                        outer.batches[0].column(2)
+                    ));
+                }
+                assert_eq!(
+                    inner.batches[0].column(2).null_count(),
+                    outer.batches[0].num_rows()
+                );
+                inner
+            } else {
+                budget.collect(source, context.task_ctx()).await.unwrap()
+            };
+            let mut joined = optional_memory::join(&cfg, outer, inner, &budget).unwrap();
+            let mut output = Vec::new();
+            while let Some(batch) = joined.next(&budget, 8).unwrap() {
+                assert!(pool.reserved() >= source_bytes + batch.get_array_memory_size());
+                assert_eq!(batch.column(5).null_count(), batch.num_rows());
+                budget.release(optional_memory::batch_bytes(&batch).unwrap());
+                output.push(batch);
+            }
+            assert_eq!(
+                output.iter().map(RecordBatch::num_rows).sum::<usize>(),
+                if slice { 1 } else { 512 }
+            );
+            results.push(output);
+            drop(joined);
+            drop(budget);
+            assert_eq!(pool.reserved(), 0);
+            assert!(pool.peak_gauge().load(Ordering::Relaxed) <= limit);
+        }
+        assert_eq!(results[0], results[1]);
+    }
+}
+
+#[tokio::test]
+async fn optional_dictionary_unused_aliases_never_release_the_outer_owner() {
+    use datafusion_datasource::memory::MemorySourceConfig;
+    let (outer, inner) = dictionary_alias_batches(true);
+    let source_bytes = outer.get_array_memory_size();
+    let (context, pool) = context(3 * MIB);
+    let budget = optional_memory::Budget::new(&context.task_ctx());
+    let mut cfg = dictionary_alias_config(&outer, &inner);
+    let source =
+        MemorySourceConfig::try_new_exec(&[vec![outer]], cfg.outer_schema.clone(), None).unwrap();
+    let outer = budget.collect(source, context.task_ctx()).await.unwrap();
+    let source =
+        MemorySourceConfig::try_new_exec(&[vec![inner]], cfg.inner_schema.clone(), None).unwrap();
+    let inner = budget
+        .collect_mapped(source, context.task_ctx(), &mut cfg, &outer)
+        .await
+        .unwrap();
+    // Prune both wide borrowed aliases and the owned null column after mapping.
+    cfg.inner_keep_idx = vec![1];
+    let mut fields: Vec<_> = cfg.outer_schema.fields().iter().cloned().collect();
+    fields.push(Arc::new(
+        cfg.inner_schema.field(1).clone().with_nullable(true),
+    ));
+    cfg.out_schema = Arc::new(Schema::new(fields));
+    let mut joined = optional_memory::join(&cfg, outer, inner, &budget).unwrap();
+    assert!(pool.reserved() >= source_bytes);
+    let output = joined.next(&budget, 8).unwrap().unwrap();
+    assert_eq!(output.num_rows(), 1);
+    assert!(pool.reserved() >= source_bytes + output.get_array_memory_size());
+    drop(output);
+    drop(joined);
+    drop(budget);
+    assert_eq!(pool.reserved(), 0);
+}
+
+#[tokio::test]
+async fn optional_dictionary_aliases_preserve_refusal_and_ordinary_concat_ownership() {
+    use datafusion_datasource::memory::MemorySourceConfig;
+    let (outer, inner) = dictionary_alias_batches(true);
+    let source_bytes = outer.get_array_memory_size();
+    let (context, pool) = context(3 * MIB);
+    let budget = optional_memory::Budget::new(&context.task_ctx());
+    let mut cfg = dictionary_alias_config(&outer, &inner);
+    let source =
+        MemorySourceConfig::try_new_exec(&[vec![outer]], cfg.outer_schema.clone(), None).unwrap();
+    let outer = budget.collect(source, context.task_ctx()).await.unwrap();
+    let source =
+        MemorySourceConfig::try_new_exec(&[vec![inner]], cfg.inner_schema.clone(), None).unwrap();
+    let inner = budget
+        .collect_mapped(source, context.task_ctx(), &mut cfg, &outer)
+        .await
+        .unwrap();
+    let reserved = pool.reserved();
+    resource_error(budget.admit(2 * MIB).unwrap_err());
+    assert_eq!(
+        pool.reserved(),
+        reserved,
+        "refusal preserves existing ownership"
+    );
+    let error = budget.concat(inner, &cfg.inner_schema).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("borrowed concat requires retained outer")
+    );
+    resource_error(error);
+    assert!(pool.reserved() >= source_bytes);
+    drop(outer);
+    drop(budget);
+    assert_eq!(pool.reserved(), 0);
+}
+
+#[tokio::test]
+async fn optional_dictionary_borrowing_requires_the_compact_outer_owner() {
+    use datafusion_datasource::memory::MemorySourceConfig;
+    let (outer, inner) = dictionary_alias_batches(true);
+    let (context, pool) = context(16 * MIB);
+    let budget = optional_memory::Budget::new(&context.task_ctx());
+    let mut cfg = dictionary_alias_config(&outer, &inner);
+    let source = MemorySourceConfig::try_new_exec(
+        &[vec![outer.clone(), outer]],
+        cfg.outer_schema.clone(),
+        None,
+    )
+    .unwrap();
+    let outer = budget.collect(source, context.task_ctx()).await.unwrap();
+    assert_eq!(outer.batches.len(), 2);
+    let source =
+        MemorySourceConfig::try_new_exec(&[vec![inner]], cfg.inner_schema.clone(), None).unwrap();
+    let before = pool.reserved();
+    let error = budget
+        .collect_mapped(source.clone(), context.task_ctx(), &mut cfg, &outer)
+        .await
+        .err()
+        .unwrap();
+    assert!(error.to_string().contains("one fully owned outer batch"));
+    resource_error(error);
+    assert_eq!(
+        pool.reserved(),
+        before,
+        "no aliases or indexes precede qualification"
+    );
+    let outer = budget.compact(outer, &cfg.outer_schema).unwrap();
+    let inner = budget
+        .collect_mapped(source, context.task_ctx(), &mut cfg, &outer)
+        .await
+        .unwrap();
+    let mut joined = optional_memory::join(&cfg, outer, inner, &budget).unwrap();
+    assert_eq!(joined.next(&budget, 8).unwrap().unwrap().num_rows(), 2);
+    drop(joined);
+    drop(budget);
+    assert_eq!(pool.reserved(), 0);
+}
+
+#[tokio::test]
+async fn optional_dictionary_alias_output_cancellation_releases_sources_and_displayed_seed() {
+    use datafusion_datasource::memory::MemorySourceConfig;
+    use futures::StreamExt;
+    let (outer, _) = dictionary_alias_batches(true);
+    let source_bytes = outer.get_array_memory_size();
+    let weak = Arc::downgrade(outer.column(2));
+    let schema = outer.schema();
+    let logical = |name| {
+        Arc::new(
+            LogicalPlanBuilder::scan(
+                name,
+                Arc::new(LogicalTableSource::new(schema.clone())),
+                None,
+            )
+            .unwrap()
+            .build()
+            .unwrap(),
+        )
+    };
+    let node = OptionalMatchNode::new(
+        logical("outer"),
+        logical("inner"),
+        vec![(0, 0), (1, 1)],
+        vec![2, 0, 1],
+    )
+    .with_correlated_seed(7);
+    let source = MemorySourceConfig::try_new_exec(&[vec![outer]], schema.clone(), None).unwrap();
+    let inner = Arc::new(CorrelatedSeedExec::with_rows(7, schema, None));
+    let plan = OptionalMatchExec::new(&node, source, inner);
+    let baseline = weak.strong_count();
+    let (context, pool) = context(3 * MIB);
+    let mut stream = plan.execute(0, context.task_ctx()).unwrap();
+    let first = stream.next().await.unwrap().unwrap();
+    assert_eq!(first.num_rows(), 1);
+    assert!(pool.reserved() >= source_bytes + first.get_array_memory_size());
+    drop(stream);
+    assert_eq!(pool.reserved(), 0);
+    assert_eq!(weak.strong_count(), baseline);
+    let seed = plan
+        .executed_inner
+        .get()
+        .unwrap()
+        .downcast_ref::<CorrelatedSeedExec>()
+        .unwrap();
+    assert!(seed.rows.as_ref().unwrap().get().is_none());
 }

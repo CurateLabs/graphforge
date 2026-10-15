@@ -23,6 +23,7 @@ impl Output {
         cfg: &OptionalConfig,
         outer: RecordBatch,
         inner: RecordBatch,
+        borrowed: Vec<usize>,
         outer_take: UInt32Array,
         inner_take: UInt32Array,
         budget: &Budget,
@@ -37,11 +38,20 @@ impl Output {
         for (index, source) in inner.iter_mut().enumerate() {
             if !cfg.inner_keep_idx.contains(&index) {
                 let source = source.take().expect("unconsumed inner column");
-                let bytes = source.get_array_memory_size();
+                let bytes = source
+                    .get_array_memory_size()
+                    .checked_sub(borrowed.get(index).copied().unwrap_or(0))
+                    .ok_or_else(|| refused("output borrowed accounting underflow"))?;
                 drop(source);
                 budget.release(bytes);
             }
         }
+        // Selected aliases need no further per-column release: Output retains
+        // the original outer and its complete charge through its own drop.
+        // The surrounding stream drops Output before its shared Budget.
+        let ledger_bytes = mul(borrowed.capacity(), std::mem::size_of::<usize>())?;
+        drop(borrowed);
+        budget.release(ledger_bytes);
         Ok(Self {
             outer,
             inner,

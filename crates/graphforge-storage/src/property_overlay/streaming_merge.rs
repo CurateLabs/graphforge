@@ -53,7 +53,11 @@ struct ReadAccounting {
 }
 
 impl ReadAccounting {
-    fn new(collect: bool, limits: PropertyOverlayLimits) -> Self {
+    fn with_execution(
+        collect: bool,
+        limits: PropertyOverlayLimits,
+        execution: Option<Arc<crate::property_scan_memory::Budget>>,
+    ) -> Self {
         Self {
             counts: ReadCounts::new(collect),
             authentication_bytes: collect.then(|| Arc::new(AtomicU64::new(0))),
@@ -62,8 +66,9 @@ impl ReadAccounting {
             // A merge holds the fragment it is reading and, beside it, the
             // overlay that rewrites some of its UUIDs, where the spooled merge
             // held one decoder at a time: twice the one-decoder budget.
-            budget: Arc::new(LiveByteBudget::new(
+            budget: Arc::new(LiveByteBudget::with_execution(
                 limits.max_buffered_bytes.saturating_mul(2),
+                execution,
             )),
             decoded: Arc::new(Mutex::new(DecodedRetention::default())),
         }
@@ -99,7 +104,7 @@ struct Cursor {
     id: PropertyFragmentId,
     range: Option<([u8; 16], [u8; 16])>,
     prior: Option<[u8; 16]>,
-    head: Option<PropertySnapshotRow>,
+    head: Option<crate::property_scan_memory::Snapshot>,
 }
 
 impl Cursor {
@@ -110,7 +115,7 @@ impl Cursor {
         metrics: &mut PropertyOverlayMetrics,
     ) -> Result<bool, GfError> {
         self.head = None;
-        for row in self.rows.by_ref() {
+        while let Some(row) = self.rows.next_admitted() {
             let row = row?;
             if row.tombstone && !row.values.is_empty() {
                 return Err(corrupt("property tombstone carries live values"));
@@ -140,6 +145,12 @@ impl Cursor {
 
 /// The UUIDs an equality nominates, and the work of finding them.
 pub(crate) type EqualityCandidates = (BTreeSet<[u8; 16]>, PropertyOverlayMetrics);
+// Tuple fields drop in declaration order: UUID nodes before their authority.
+type AdmittedEqualityCandidates = (
+    BTreeSet<[u8; 16]>,
+    PropertyOverlayMetrics,
+    Option<crate::property_scan_memory::Guard>,
+);
 
 type HeapKey = Reverse<([u8; 16], Reverse<PropertyFragmentId>, usize)>;
 
@@ -154,12 +165,38 @@ impl AuthenticatedPropertyInventory {
     where
         F: FnMut(PropertySnapshotRow) -> Result<bool, GfError>,
     {
+        self.visit_route_streaming_admitted(read, None, |snapshot| emit(snapshot.row))
+    }
+
+    pub(crate) fn visit_route_streaming_admitted<F>(
+        &self,
+        read: &RouteRead<'_>,
+        execution: Option<Arc<crate::property_scan_memory::Budget>>,
+        mut emit: F,
+    ) -> Result<PropertyOverlayMetrics, GfError>
+    where
+        F: FnMut(crate::property_scan_memory::Snapshot) -> Result<bool, GfError>,
+    {
         let Some(fragments) = self.routes.get(&(read.kind, read.route.to_owned())) else {
             return Ok(PropertyOverlayMetrics::default());
         };
         // Resolve the route's footer summary before any fragment is trusted, so
         // a route that cannot be summarized refuses here rather than reading.
         self.route_summary(read.kind, read.route)?;
+        let _merge_memory = execution
+            .as_ref()
+            .map(|budget| {
+                let slot = std::mem::size_of::<Option<Cursor>>()
+                    + std::mem::size_of::<HeapKey>()
+                    + std::mem::size_of::<(
+                        [u8; 16],
+                        Option<([u8; 16], [u8; 16])>,
+                        &AuthenticatedPropertyFragment,
+                    )>();
+                crate::property_scan_memory::mul(fragments.len().max(4), 4 * slot)
+                    .and_then(|bytes| budget.reserve(bytes))
+            })
+            .transpose()?;
         let mut plan = Vec::with_capacity(fragments.len());
         for fragment in fragments {
             let footer = self.fragment_footer_of(fragment, read.kind, read.route)?;
@@ -173,7 +210,7 @@ impl AuthenticatedPropertyInventory {
         }
         plan.sort_unstable_by_key(|(min, _, fragment)| (*min, fragment.id));
 
-        let accounting = ReadAccounting::new(read.collect, read.limits);
+        let accounting = ReadAccounting::with_execution(read.collect, read.limits, execution);
         let scratch = self.lazy_snapshot_scratch()?;
         let context = ProjectedReaderContext {
             inventory: self,
@@ -254,7 +291,7 @@ impl AuthenticatedPropertyInventory {
         uuids: Option<&dyn crate::uuid_set::UuidMembership>,
         heap: &mut BinaryHeap<HeapKey>,
         metrics: &mut PropertyOverlayMetrics,
-    ) -> Result<PropertySnapshotRow, GfError> {
+    ) -> Result<crate::property_scan_memory::Snapshot, GfError> {
         let cursor = cursors[index]
             .as_mut()
             .ok_or_else(|| corrupt("property merge cursor is closed"))?;
@@ -291,8 +328,36 @@ impl AuthenticatedPropertyInventory {
         cap: usize,
         collect: bool,
     ) -> Result<Option<EqualityCandidates>, GfError> {
+        self.equality_candidates_admitted(kind, route, equality, limits, cap, collect, None)
+            .map(|result| result.map(|(candidates, metrics, _)| (candidates, metrics)))
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the private admitted adapter preserves the existing equality read contract"
+    )]
+    pub(crate) fn equality_candidates_admitted(
+        &self,
+        kind: PropertyRouteKind,
+        route: &str,
+        equality: &PropertyEquality,
+        limits: PropertyOverlayLimits,
+        cap: usize,
+        collect: bool,
+        execution: Option<Arc<crate::property_scan_memory::Budget>>,
+    ) -> Result<Option<AdmittedEqualityCandidates>, GfError> {
+        // Declare admission before the set, so refusal, corruption, cancellation
+        // and cap abandonment all destroy its nodes before releasing authority.
+        let mut candidate_memory = execution
+            .as_ref()
+            .map(|budget| budget.reserve(0))
+            .transpose()?;
         let Some(fragments) = self.routes.get(&(kind, route.to_owned())) else {
-            return Ok(Some((BTreeSet::new(), PropertyOverlayMetrics::default())));
+            return Ok(Some((
+                BTreeSet::new(),
+                PropertyOverlayMetrics::default(),
+                candidate_memory,
+            )));
         };
         let summary = self.route_summary(kind, route)?;
         let expected = equality.value.data_type();
@@ -304,6 +369,16 @@ impl AuthenticatedPropertyInventory {
         }) {
             return Ok(None);
         }
+        let _plan_memory = execution
+            .as_ref()
+            .map(|budget| {
+                crate::property_scan_memory::mul(
+                    fragments.len().max(4),
+                    4 * std::mem::size_of::<&AuthenticatedPropertyFragment>(),
+                )
+                .and_then(|bytes| budget.reserve(bytes))
+            })
+            .transpose()?;
         let mut wanted = Vec::new();
         for fragment in fragments {
             let footer = self.fragment_footer_of(fragment, kind, route)?;
@@ -316,7 +391,7 @@ impl AuthenticatedPropertyInventory {
                 wanted.push(fragment);
             }
         }
-        let accounting = ReadAccounting::new(collect, limits);
+        let accounting = ReadAccounting::with_execution(collect, limits, execution);
         let scratch = self.lazy_snapshot_scratch()?;
         let selected = BTreeSet::from([equality.column.clone()]);
         let context = ProjectedReaderContext {
@@ -347,16 +422,25 @@ impl AuthenticatedPropertyInventory {
             };
             while cursor.advance(None, &mut metrics)? {
                 let row = cursor.head.take().expect("advanced to a row");
-                if !row.tombstone && equality.holds(&row.values) {
-                    candidates.insert(row.uuid);
-                    if candidates.len() > cap {
+                if !row.tombstone && equality.holds(&row.values) && !candidates.contains(&row.uuid)
+                {
+                    if candidates.len() >= cap {
                         return Ok(None);
                     }
+                    if let Some(memory) = candidate_memory.as_mut() {
+                        // Retain the existing conservative BTreeSet node bound,
+                        // admitting only actual distinct UUIDs before insertion.
+                        memory.grow(
+                            16 * (std::mem::size_of::<[u8; 16]>()
+                                + 4 * std::mem::size_of::<usize>()),
+                        )?;
+                    }
+                    candidates.insert(row.uuid);
                 }
             }
         }
         accounting.finalize(&mut metrics, fragments);
-        Ok(Some((candidates, metrics)))
+        Ok(Some((candidates, metrics, candidate_memory)))
     }
 }
 

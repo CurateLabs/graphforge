@@ -225,7 +225,7 @@ impl ExecutionPlan for OptionalMatchExec {
         let outer = self.outer.clone();
         let inner = self.inner.clone();
         let correlated_seed = self.correlated_seed;
-        let cfg = OptionalConfig {
+        let mut cfg = OptionalConfig {
             join_keys: self.join_keys.clone(),
             inner_keep_idx: self.inner_keep_idx.clone(),
             null_safe_keys: self.correlated_seed.is_some(),
@@ -243,6 +243,12 @@ impl ExecutionPlan for OptionalMatchExec {
         let fut = async move {
             let budget = optional_memory::Budget::new(&context);
             let outer_batches = budget.collect(outer, context.clone()).await?;
+            let mapped = cfg.null_safe_keys && cfg.join_keys.len() > 1;
+            let outer_batches = if mapped {
+                budget.compact(outer_batches, &cfg.outer_schema)?
+            } else {
+                outer_batches
+            };
             metrics.outer_rows.add(row_count(&outer_batches.batches));
             // A correlated sub-plan starts from the rows just collected, not
             // from a second evaluation of the outer plan (#1919).
@@ -258,12 +264,18 @@ impl ExecutionPlan for OptionalMatchExec {
                 }
                 None => (inner, None),
             };
-            let collected = budget.collect(inner, context).await;
+            let collected = if mapped {
+                budget
+                    .collect_mapped(inner, context, &mut cfg, &outer_batches)
+                    .await
+            } else {
+                budget.collect(inner, context).await
+            };
             // The executed copy stays for display; release its rows on success
             // or error here, and on cancellation or panic through the guard.
             drop(seed_release);
             let inner_batches = collected?;
-            metrics.inner_rows.add(row_count(&inner_batches.batches));
+            metrics.inner_rows.add(inner_batches.logical_rows());
             let timer = metrics.baseline.elapsed_compute().timer();
             let joined = optional_memory::join(&cfg, outer_batches, inner_batches, &budget)?;
             drop(timer);
