@@ -23,6 +23,7 @@ use std::sync::Arc;
 mod decode_budget;
 mod edge_ordinal;
 pub use decode_budget::edge_decode_admission_bytes;
+pub use decode_budget::node_decode_admission_bytes;
 
 pub(crate) use self::edge_ordinal::EdgeIdRequest;
 

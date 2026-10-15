@@ -930,6 +930,23 @@ fn unwind_explode(
 
 mod anchored_expansion;
 mod optional_memory;
+
+/// Pinned Arrow copy envelope shared by single-hop materialization.
+pub(crate) fn hop_copy_bytes(
+    array: &dyn arrow::array::Array,
+    rows: usize,
+) -> datafusion::common::Result<usize> {
+    optional_memory::copy_bytes(array, rows)
+}
+
+/// Pinned Arrow allocation bound shared by single-hop materialization.
+pub(crate) fn hop_take_bytes(
+    array: &dyn arrow::array::Array,
+    indices: &arrow::array::UInt32Array,
+) -> datafusion::common::Result<usize> {
+    optional_memory::selected_bytes(array, indices)
+}
+
 pub use anchored_expansion::AnchoredExpansionExec;
 
 #[cfg(test)]

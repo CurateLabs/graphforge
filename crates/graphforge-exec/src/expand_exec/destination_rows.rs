@@ -13,6 +13,7 @@
 //! destination block is built here.
 
 use super::V4OrdinalIdentitySession;
+use super::hop_read::{HopReadCharge, checked_add, checked_mul};
 use crate::adjacency::AdjacencyProvider;
 use arrow::array::ArrayRef;
 use arrow::array::BooleanArray;
@@ -191,6 +192,7 @@ pub(super) fn synthesise_destination_batch(
     edge_end: usize,
     projection: &[usize],
     reached: &HashSet<u64>,
+    charge: &mut HopReadCharge,
 ) -> Result<Option<SynthesisedDestination>, GfError> {
     let Some(demanded) = DemandedColumns::classify(out_schema, edge_end, projection) else {
         return Ok(None);
@@ -200,13 +202,38 @@ pub(super) fn synthesise_destination_batch(
     if identity_lookup && ordinal_identities.is_none() {
         return Ok(None);
     }
+    charge.charge(checked_mul(reached.len(), 8)?)?;
     let mut ordinals = reached.iter().copied().collect::<Vec<_>>();
     ordinals.sort_unstable();
+    charge.charge(checked_mul(
+        4,
+        std::mem::size_of::<(&'static str, ArrayRef)>(),
+    )?)?;
     let mut columns: Vec<(&'static str, ArrayRef)> = Vec::with_capacity(4);
     let requested = if labels {
         let Some(index) = provider.node_labels()? else {
             return Ok(None);
         };
+        let members = if demanded.type_ids {
+            ordinals.iter().try_fold(0, |count, ordinal| {
+                checked_add(
+                    count,
+                    index.get(*ordinal).map_or(0, |set| set.type_ids().len()),
+                )
+            })?
+        } else {
+            0
+        };
+        // gather owns node IDs, primaries, lengths, growing members and offsets.
+        // Four copies include Vec growth and filtering the gathered arrays
+        // when the identity authority subsequently reports missing ordinals.
+        charge.charge(checked_add(
+            checked_mul(
+                checked_add(checked_mul(ordinals.len(), 32)?, checked_mul(members, 4)?)?,
+                4,
+            )?,
+            8 * 2048,
+        )?)?;
         let gathered = index.gather(&ordinals, demanded.type_id, demanded.type_ids)?;
         let present = gathered.node_ids.values().to_vec();
         columns.push(("node_id", Arc::new(gathered.node_ids)));
@@ -218,9 +245,32 @@ pub(super) fn synthesise_destination_batch(
         }
         present
     } else {
+        charge.charge(checked_add(checked_mul(ordinals.len(), 8 * 4)?, 2048)?)?;
         columns.push(("node_id", Arc::new(UInt64Array::from(ordinals.clone()))));
         ordinals
     };
+    if identity_lookup {
+        // Lookup results, owned Vec<bool>, UUID builder/validity, filter mask,
+        // and the old/new lookup-metric vector coexist through assemble_batch.
+        let lookups = ordinal_identities.map_or(0, |identities| {
+            requested
+                .len()
+                .div_ceil(identities.max_requested_ids().max(1))
+        });
+        charge.charge(checked_add(
+            checked_mul(
+                requested.len(),
+                std::mem::size_of::<Option<graphforge_core::uuid::Uuid>>() + 16 * 4 + 4,
+            )?,
+            checked_add(
+                checked_mul(
+                    lookups.max(4),
+                    4 * std::mem::size_of::<V4OrdinalLookupMetrics>(),
+                )?,
+                8 * 2048,
+            )?,
+        )?)?;
+    }
     let resolved = ordinal_identities
         .filter(|_| identity_lookup)
         .map(|identities| {

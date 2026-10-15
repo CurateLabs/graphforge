@@ -66,10 +66,12 @@ futures = "0.3"
 # Arrow / DataFusion (verify release train compatibility at first use)
 arrow = { version = "=58.4.0", features = ["prettyprint"] }
 arrow-data = "=58.4.0"
+arrow-buffer = { version = "=58.4.0", features = ["pool"] }
 datafusion = "54"
 datafusion-datasource = "54"
 parquet = "=58.4.0"
 thrift = "0.17"
+base64 = "=0.22.1"
 tantivy = { version = "=0.26.2", default-features = false, features = ["mmap", "lz4-compression"] }
 
 # Parser / lexer

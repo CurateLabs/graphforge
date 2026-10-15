@@ -38,6 +38,7 @@ fs4 = "1.1"
 futures = { workspace = true }
 parquet = { workspace = true }
 thrift = { workspace = true }
+base64 = { workspace = true }
 bytes = "1"
 sysinfo = { version = "0.39.6", default-features = false, features = ["disk"] }
 serde = { workspace = true }

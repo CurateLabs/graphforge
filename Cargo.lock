@@ -2683,6 +2683,7 @@ version = "0.6.0-rc.5"
 dependencies = [
  "anyhow",
  "arrow",
+ "arrow-buffer",
  "async-trait",
  "codspeed-divan-compat",
  "datafusion",
@@ -2876,6 +2877,7 @@ dependencies = [
  "arrow",
  "async-trait",
  "atomicwrites",
+ "base64 0.22.1",
  "bytes",
  "codspeed-divan-compat",
  "datafusion",

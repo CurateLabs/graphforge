@@ -17,6 +17,9 @@ use parquet::file::statistics::Statistics;
 
 use crate::AuthenticatedPropertyInventory;
 
+mod nodes;
+pub use nodes::node_decode_admission_bytes;
+
 /// Conservative transient admission for an admitted edge-record read.
 ///
 /// Reserve active decoder scratch plus all retained output before reading.
