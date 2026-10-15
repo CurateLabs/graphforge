@@ -27,10 +27,10 @@ Add optional manifest field `lineage { format, lineage_digest, object_digest }` 
 
 The lineage is derived from the research registry: Branch genealogy and heads, Version identities and kinds, Proposal records, and the Fork origin (origin Project, Version, and identity from the Fork record). The publisher supplies only hosting facts: ref names, per-Version packages, which Proposals to publish, and the origin repository. A Version is `complete` only when it is Project research or a Branch state; a frozen Proposal payload or any other derivative of a source Version is a `projection` that cites its source.
 
-Cloning a Version verifies the package, then requires its research registry to carry the selected Version with the lineage identity digest and kind before any destination exists. The import operation, and so the generation identity, is derived from the repository snapshot plus the selected Version UUID and identity, so a Branch-head clone and an immutable-Version clone of one snapshot never share a generation. Plain Project clones keep their historical derivation.
+Cloning a Version verifies the package, then requires its research registry to carry the selected Version with the lineage identity digest and kind before any destination exists. The import operation, and so the generation identity, is derived from the repository snapshot plus the selected Version UUID and identity, so a Branch-head clone and an immutable-Version clone of one snapshot never share a generation. Without an explicit selector, a repository advertising research Branches clones the head named by `manifest.default_ref` through these same strict checks. Valid branchless lineage and repositories without lineage retain the historical Project package path and generation derivation; invalid advertised lineage never downgrades to that path.
 
 ## Consequences
 
-- Hubs can render lineage without graph I/O; clone consumers still ignore `lineage` until they opt in.
+- Hubs can render lineage without graph I/O. Clone consumers validate advertised lineage and select its default Branch head unless a ref or immutable Version is explicit.
 - Partial projections are labeled `projection` and must cite `source_version_uuid`; Proposals reference projection payload Versions only.
 - Publish and resumable upload remain #1749; this ADR does not define write paths.
