@@ -407,15 +407,14 @@ fn assemble_children(
     mut charge: Option<&mut super::HopReadCharge>,
 ) -> Result<Vec<arrow::array::ArrayRef>, GfError> {
     use arrow::array::{ArrayRef, UInt32Array, new_null_array};
-    use arrow::compute::kernels::zip::zip;
-    use arrow::compute::{is_not_null, take};
+    use arrow::compute::take;
 
     let exec_err = |m: String| GfError::Execution(m);
     if prop_fields.is_empty() {
         return Ok(Vec::new());
     }
 
-    if let Some(charge) = charge.as_deref_mut() {
+    let index_bytes = if let Some(charge) = charge.as_deref_mut() {
         // Trusted-length nullable UInt32 collection owns 4*N values and one
         // bitmap per batch; headers/alignment plus the exact ArrayRef vector
         // coexist through all per-field takes.
@@ -427,7 +426,10 @@ fn assemble_children(
             indexes,
             super::hop_read::checked_mul(prop_fields.len(), std::mem::size_of::<ArrayRef>())?,
         )?)?;
-    }
+        indexes
+    } else {
+        0
+    };
 
     // One take-index per flattened hop PER BATCH: Some(row) only for the hops
     // the batch owns, so each batch's `take` yields NULL everywhere else and
@@ -445,10 +447,15 @@ fn assemble_children(
 
     let mut children: Vec<ArrayRef> = Vec::with_capacity(prop_fields.len());
     for field in prop_fields {
-        if let Some(charge) = charge.as_deref_mut() {
-            charge.charge(super::hop_read::unused_bytes(field.data_type(), hops)?)?;
-        }
-        let mut child: ArrayRef = new_null_array(field.data_type(), hops);
+        let mut child: ArrayRef = if let Some(charge) = charge.as_deref_mut() {
+            super::hop_read::construct_array(
+                charge,
+                super::hop_read::unused_bytes(field.data_type(), hops)?,
+                || Ok(new_null_array(field.data_type(), hops)),
+            )?
+        } else {
+            new_null_array(field.data_type(), hops)
+        };
         for (bi, b) in prop_batches_by_rel.iter().enumerate() {
             // Field advertised in the union schema but absent in this file
             // (or absent on disk entirely) -> this relation contributes NULLs.
@@ -464,30 +471,66 @@ fn assemble_children(
                 Some(charge) => super::hop_read::take(charge, col, &take_by_batch[bi])?,
                 None => take(col, &take_by_batch[bi], None).map_err(|e| exec_err(e.to_string()))?,
             };
-            child = if prop_batches_by_rel.len() == 1 {
+            let previous_bytes = if charge.is_some() {
+                super::hop_read::retained_array_bytes(child.as_ref())?
+            } else {
+                0
+            };
+            let next = if prop_batches_by_rel.len() == 1 {
                 // Single relation: `take` alone reproduces the #755 behavior.
                 taken
             } else {
-                if let Some(charge) = charge.as_deref_mut() {
-                    // zip uses MutableArrayData over both complete arrays.
-                    // Existing canonical copy bounds include inherited child
-                    // capacity, old/new growth, NULL payload and headers.
-                    let copies = super::hop_read::checked_add(
-                        super::hop_read::zip_copy_bytes(taken.as_ref())?,
-                        super::hop_read::zip_copy_bytes(child.as_ref())?,
-                    )?;
-                    charge.charge(super::hop_read::checked_add(
-                        copies,
-                        super::hop_read::checked_add(hops.div_ceil(8), 2048)?,
-                    )?)?;
-                }
-                let mask = is_not_null(&taken).map_err(|e| exec_err(e.to_string()))?;
-                zip(&mask, &taken, &child).map_err(|e| exec_err(e.to_string()))?
+                coalesce_child(&child, taken, hops, charge.as_deref_mut())?
             };
+            let previous = std::mem::replace(&mut child, next);
+            drop(previous);
+            if let Some(charge) = charge.as_deref_mut() {
+                charge.release(previous_bytes);
+            }
         }
         children.push(child);
     }
+    // A single-route take may share an index validity buffer. Its full
+    // capacity already has the returned child's independent retained credit.
+    drop(take_by_batch);
+    if let Some(charge) = charge {
+        charge.release(index_bytes);
+    }
     Ok(children)
+}
+
+fn coalesce_child(
+    child: &arrow::array::ArrayRef,
+    taken: arrow::array::ArrayRef,
+    hops: usize,
+    charge: Option<&mut super::HopReadCharge>,
+) -> Result<arrow::array::ArrayRef, GfError> {
+    use arrow::compute::{is_not_null, kernels::zip::zip};
+    let exec_err = |error: arrow::error::ArrowError| GfError::Execution(error.to_string());
+    let Some(charge) = charge else {
+        let mask = is_not_null(&taken).map_err(exec_err)?;
+        return zip(&mask, &taken, child).map_err(exec_err);
+    };
+    // zip uses MutableArrayData over both complete arrays. Keep the existing
+    // child-capacity, growth, NULL-payload and header construction allowances.
+    let copies = super::hop_read::checked_add(
+        super::hop_read::zip_copy_bytes(taken.as_ref())?,
+        super::hop_read::zip_copy_bytes(child.as_ref())?,
+    )?;
+    let envelope = super::hop_read::checked_add(
+        copies,
+        super::hop_read::checked_add(hops.div_ceil(8), 2048)?,
+    )?;
+    let taken_bytes = super::hop_read::retained_array_bytes(taken.as_ref())?;
+    let next = super::hop_read::construct_array(charge, envelope, || {
+        let mask = is_not_null(&taken).map_err(exec_err)?;
+        zip(&mask, &taken, child).map_err(exec_err)
+    })?;
+    // The replacement already owns its complete backing and container
+    // allowance, including any immutable aliases.
+    drop(taken);
+    charge.release(taken_bytes);
+    Ok(next)
 }
 
 #[cfg(test)]
@@ -497,6 +540,89 @@ mod admission_tests {
     use arrow::datatypes::{DataType, Field, Schema};
     use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryPool};
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn hop_property_coalescing_releases_completed_route_workspace() {
+        let values = [
+            format!("route-a:{}", "a".repeat(1024 * 1024)),
+            format!("route-b:{}", "b".repeat(1024 * 1024)),
+            format!("route-c:{}", "c".repeat(1024 * 1024)),
+        ];
+        let fields = vec![Arc::new(Field::new("payload", DataType::Utf8, true))];
+        // The roomy oracle runs first. Twenty-four MiB also holds the three
+        // source payloads plus a live child, take and full zip envelope;
+        // successive zip workspaces must not remain simultaneously charged.
+        for budget in [64 * 1024 * 1024, 24 * 1024 * 1024] {
+            let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(budget));
+            let input_credit = datafusion::execution::memory_pool::MemoryConsumer::new(
+                "coalescing fixture inputs",
+            )
+            .register(&pool);
+            let source = EdgeIdPropSource {
+                batches: values
+                    .iter()
+                    .map(|value| {
+                        RecordBatch::try_new(
+                            Arc::new(Schema::new(fields.clone())),
+                            vec![Arc::new(StringArray::from(vec![Some(value.as_str())]))],
+                        )
+                        .unwrap()
+                    })
+                    .collect(),
+                id_to_loc: [(11, (0, 0)), (21, (1, 0)), (31, (2, 0))].into(),
+            };
+            // These preexisting inputs have their own authority; the hop
+            // charge below funds only the actual assembly boundary.
+            input_credit
+                .try_grow(
+                    source
+                        .batches
+                        .iter()
+                        .map(RecordBatch::get_array_memory_size)
+                        .sum(),
+                )
+                .unwrap();
+            let reservation = Arc::new(Mutex::new(
+                crate::chunked_reservation::ChunkedReservation::register(
+                    super::super::HOP_READ_CONSUMER,
+                    &pool,
+                ),
+            ));
+            let mut charge = super::super::HopReadCharge::new(&reservation);
+            let mut children =
+                edge_prop_children_by_id_admitted(&source, &fields, &[31, 11, 21, 99], &mut charge)
+                    .unwrap();
+            let child = children.pop().unwrap();
+            drop(children);
+            assert_eq!(
+                child.as_string::<i32>().iter().collect::<Vec<_>>(),
+                vec![
+                    Some(values[2].as_str()),
+                    Some(values[0].as_str()),
+                    Some(values[1].as_str()),
+                    None,
+                ]
+            );
+            if budget == 24 * 1024 * 1024 {
+                assert!(
+                    charge.held_bytes_internal() <= child.get_array_memory_size() + 64 * 1024,
+                    "completed constructors must retain the output and small index/header owners"
+                );
+            }
+            let batch =
+                RecordBatch::try_new(Arc::new(Schema::new(fields.clone())), vec![child]).unwrap();
+            let output = super::super::hop_read::lease_output(batch, charge).unwrap();
+            let escaped = output.batch.column(0).slice(0, 1);
+            drop(output);
+            drop(source);
+            drop(input_credit);
+            drop(reservation);
+            assert!(pool.reserved() >= escaped.get_buffer_memory_size());
+            assert_eq!(escaped.as_string::<i32>().value(0), values[2]);
+            drop(escaped);
+            assert_eq!(pool.reserved(), 0);
+        }
+    }
 
     #[test]
     fn hop_property_assembly_pre_admits_wide_selected_values_and_retains_output() {

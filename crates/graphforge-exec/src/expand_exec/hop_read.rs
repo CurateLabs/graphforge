@@ -196,10 +196,7 @@ pub(super) fn construct_array(
 ) -> Result<arrow::array::ArrayRef, GfError> {
     charge.charge(envelope)?;
     let array = construct()?;
-    let retained = checked_add(
-        array.get_array_memory_size(),
-        retained_containers(array.as_ref())?,
-    )?;
+    let retained = retained_array_bytes(array.as_ref())?;
     if retained > envelope {
         return Err(GfError::Execution(
             "Expand array exceeded its admitted construction envelope".into(),
@@ -207,6 +204,10 @@ pub(super) fn construct_array(
     }
     charge.replace(envelope, retained)?;
     Ok(array)
+}
+
+pub(super) fn retained_array_bytes(array: &dyn arrow::array::Array) -> Result<usize, GfError> {
+    checked_add(array.get_array_memory_size(), retained_containers(array)?)
 }
 
 pub(super) fn take(
