@@ -31,7 +31,11 @@ use futures::{StreamExt, TryStreamExt};
 use graphforge_plan::AnchoredExpansionNode;
 use std::fmt;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::OnceCell;
+
+#[cfg(test)]
+mod tests;
 
 /// Executes an [`AnchoredExpansionNode`]: its output is the input columns
 /// followed by the expansion columns at `expansion_keep_idx`, one row per
@@ -54,7 +58,11 @@ struct Shared {
     join_keys: Vec<(usize, usize)>,
     expansion_keep_idx: Vec<usize>,
     seed: u64,
-    prepared: OnceCell<Prepared>,
+    prepared: OnceCell<Result<Prepared, Arc<DataFusionError>>>,
+    /// Set only by the cell's initializer, before it can consume physical input.
+    /// If that future is cancelled, its replacement must finish with an error,
+    /// since the original exchange cannot safely be executed again.
+    preparation_started: AtomicBool,
 }
 
 /// The collected input and the join built over it.
@@ -154,6 +162,7 @@ impl AnchoredExpansionExec {
                 expansion_keep_idx,
                 seed,
                 prepared: OnceCell::new(),
+                preparation_started: AtomicBool::new(false),
             }),
             schema,
             props,
@@ -310,8 +319,19 @@ impl ExecutionPlan for AnchoredExpansionExec {
         let probe = futures::stream::once(async move {
             let prepared = shared
                 .prepared
-                .get_or_try_init(|| shared.prepare(&context))
-                .await?;
+                .get_or_init(|| async {
+                    if shared.preparation_started.swap(true, Ordering::AcqRel) {
+                        return Err(Arc::new(DataFusionError::Execution(
+                            "AnchoredExpansion preparation cancelled before completion".into(),
+                        )));
+                    }
+                    // Errors are terminal outcomes too. Dropping the initializer
+                    // leaves the started guard set even if the cell stays unset.
+                    shared.prepare(&context).await.map_err(Arc::new)
+                })
+                .await
+                .as_ref()
+                .map_err(|error| DataFusionError::Shared(Arc::clone(error)))?;
             let stream: SendableRecordBatchStream = match &prepared.join {
                 Some(join) => join.execute(partition, context)?,
                 None => Box::pin(EmptyRecordBatchStream::new(Arc::clone(&stream_schema))),
