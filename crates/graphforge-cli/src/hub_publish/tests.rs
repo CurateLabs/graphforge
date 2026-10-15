@@ -34,6 +34,7 @@ struct Logged {
     method: String,
     path: String,
     bearer: Option<String>,
+    bypass: Option<String>,
     content_range: Option<String>,
     body_len: usize,
     /// Object a successful `PUT` appended to.
@@ -197,6 +198,7 @@ fn serve(state: &ServerState, stream: TcpStream) {
         method: method.clone(),
         path: path.clone(),
         bearer: header("authorization"),
+        bypass: header("x-vercel-protection-bypass"),
         content_range: header("content-range"),
         body_len: request.body.len(),
         digest: None,
@@ -415,6 +417,7 @@ fn args(repository: &str) -> PublishArgs {
         version_uuid: None,
         fork_of: None,
         operation_uuid: None,
+        protection_bypass_env: None,
     }
 }
 
@@ -442,10 +445,20 @@ fn run_publish_with(
     args: &PublishArgs,
     credential: Credential,
 ) -> Run {
+    run_publish_with_bypass(hub, graph, args, credential, None)
+}
+fn run_publish_with_bypass(
+    hub: &LoopbackHub,
+    graph: &GraphForge,
+    args: &PublishArgs,
+    credential: Credential,
+    bypass: Option<&crate::hub_http::DiscoveryCredentials>,
+) -> Run {
     let mut stderr = Vec::new();
     let mut stdout = Vec::new();
     let result = {
         let mut environment = PublishEnvironment {
+            bypass,
             credential,
             wait: &|_| panic!("no device flow expected"),
             notices: &mut stderr,
@@ -1212,6 +1225,7 @@ fn a_slow_but_progressing_upload_succeeds_in_bounded_chunks() {
     hub.inject(Fault::SlowPut(Duration::from_secs(2)));
     let mut notices = Vec::new();
     let mut environment = PublishEnvironment {
+        bypass: None,
         credential: Credential::Token(token(&hub, "curate/claims")),
         wait: &|_| panic!("no device flow expected"),
         notices: &mut notices,
@@ -1311,6 +1325,7 @@ fn device_flow(
     let mut writer = notices.clone();
     let result = {
         let mut environment = PublishEnvironment {
+            bypass: None,
             credential: Credential::DeviceFlow,
             wait: &wait,
             notices: &mut writer,
@@ -1550,4 +1565,73 @@ fn streaming_publish_can_reuse_saved_credentials_without_a_terminal() {
         select_credential(None, true, true, || Ok(None)).unwrap(),
         Credential::DeviceFlow
     ));
+}
+
+#[test]
+fn preview_publish_keeps_bypass_on_control_requests_and_off_upload_retries() {
+    let history = history();
+    let hub = LoopbackHub::start();
+    let bypass = crate::hub_http::DiscoveryCredentials::load(
+        &Url::parse(HUB).unwrap(),
+        None,
+        Some("PREVIEW_SECRET"),
+        |_| Ok("preview-secret".into()),
+    )
+    .unwrap();
+    hub.inject(Fault::CutPut);
+    let interrupted = run_publish_with_bypass(
+        &hub,
+        &history.graph,
+        &on_ref("curate/claims", "main"),
+        Credential::Token(token(&hub, "curate/claims")),
+        bypass.as_ref(),
+    );
+    assert!(
+        interrupted
+            .result
+            .unwrap_err()
+            .to_string()
+            .contains("hub.network")
+    );
+    let run = run_publish_with_bypass(
+        &hub,
+        &history.graph,
+        &on_ref("curate/claims", "main"),
+        Credential::Token(token(&hub, "curate/claims")),
+        bypass.as_ref(),
+    );
+    run.result.unwrap();
+    let log = hub.log();
+    assert!(log.iter().any(|entry| entry.method == "HEAD"));
+    assert!(log.iter().filter(|entry| entry.method == "PUT").count() >= 2);
+    for entry in log {
+        if entry.method == "HEAD" || entry.method == "PUT" {
+            assert!(
+                entry.bypass.is_none(),
+                "upload purpose must exclude preview credentials"
+            );
+            assert!(
+                entry.bearer.is_none(),
+                "upload purpose must exclude publish bearer"
+            );
+        } else {
+            assert_eq!(
+                entry.bypass.as_deref(),
+                Some("preview-secret"),
+                "{} {}",
+                entry.method,
+                entry.path
+            );
+        }
+    }
+    assert!(
+        !String::from_utf8(run.stdout)
+            .unwrap()
+            .contains("preview-secret")
+    );
+    assert!(
+        !String::from_utf8(run.stderr)
+            .unwrap()
+            .contains("preview-secret")
+    );
 }

@@ -586,15 +586,27 @@ pub(crate) fn repository_token(
     owner: &str,
     name: &str,
     capability: &str,
+    bypass_env: Option<&str>,
 ) -> Result<Option<RepositoryToken>, GfError> {
     let hub = origin(&hub.origin().ascii_serialization())?;
-    let transport = HubTransport::new();
-    let Some(session) = session(&Vault, &transport, &hub, now())? else {
+    let transport = PreviewTransport::new(&hub, bypass_env)?;
+    repository_token_from(&Vault, &transport, &hub, owner, name, capability, now())
+}
+fn repository_token_from(
+    store: &dyn Store,
+    transport: &dyn Transport,
+    hub: &Url,
+    owner: &str,
+    name: &str,
+    capability: &str,
+    now: u64,
+) -> Result<Option<RepositoryToken>, GfError> {
+    let Some(session) = session(store, transport, hub, now)? else {
         return Ok(None);
     };
     exchange_repository_token(
-        &transport,
-        &hub,
+        transport,
+        hub,
         &session.access_token,
         owner,
         name,

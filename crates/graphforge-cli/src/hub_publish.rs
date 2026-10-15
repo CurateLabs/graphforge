@@ -92,6 +92,9 @@ pub(crate) struct PublishArgs {
     /// repository, ref, and Version, so a rerun replays the original receipt.
     #[arg(long)]
     pub operation_uuid: Option<String>,
+    /// Read a Vercel preview bypass secret from this environment variable.
+    #[arg(long)]
+    pub protection_bypass_env: Option<String>,
 }
 
 /// How the CLI obtains its publish token.
@@ -104,6 +107,8 @@ pub(crate) enum Credential {
 
 /// Process-side effects a publish needs besides the Hub transport.
 pub(crate) struct PublishEnvironment<'a> {
+    /// Opt-in credentials for selected-origin control requests only.
+    pub bypass: Option<&'a crate::hub_http::DiscoveryCredentials>,
     /// Credential source.
     pub credential: Credential,
     /// Waits between device-flow polls.
@@ -200,9 +205,20 @@ fn run_command(
     if let Some(origin) = &args.fork_of {
         parse_input(origin)?;
     }
+    let bypass = crate::hub_http::DiscoveryCredentials::load(
+        &base,
+        None,
+        args.protection_bypass_env.as_deref(),
+        |name| std::env::var(name),
+    )?;
     let credential = select_credential(PublishToken::from_env(), streaming, interactive, || {
-        let grant =
-            crate::auth::repository_token(&base, &identity.owner, &identity.repository, "publish")?;
+        let grant = crate::auth::repository_token(
+            &base,
+            &identity.owner,
+            &identity.repository,
+            "publish",
+            args.protection_bypass_env.as_deref(),
+        )?;
         grant
             .map(|grant| {
                 if grant.origin.origin() != base.origin() {
@@ -223,6 +239,7 @@ fn run_command(
     let stderr = std::io::stderr();
     let mut notices = stderr.lock();
     let mut environment = PublishEnvironment {
+        bypass: bypass.as_ref(),
         credential,
         wait: &std::thread::sleep,
         notices: &mut notices,
@@ -365,20 +382,55 @@ type Document = (Vec<u8>, Option<String>);
 
 /// Control-plane and data-plane exchange over one transport.
 struct Hub<'a> {
+    bypass: Option<&'a crate::hub_http::DiscoveryCredentials>,
     transport: &'a dyn Transport,
     base: Url,
 }
 
 impl Hub<'_> {
-    /// Public, redirect-bounded read of a repository document or object.
-    /// `None` on 404. Every hop is validated; no credential is sent.
+    /// Public object reads never receive identity or preview credentials.
     fn read(&self, url: &Url, limit: usize) -> Result<Option<Document>, GfError> {
+        self.read_inner(url, limit, false)
+    }
+    /// Repository metadata receives bypass only on its initial selected-origin hop.
+    fn read_control(&self, url: &Url, limit: usize) -> Result<Option<Document>, GfError> {
+        self.read_inner(url, limit, true)
+    }
+    fn with_bypass(&self, mut request: HubRequest, url: &Url) -> Result<HubRequest, GfError> {
+        if url.origin() == self.base.origin()
+            && let Some(bypass) = self.bypass
+        {
+            for (name, value) in bypass
+                .headers_for(url)?
+                .iter()
+                .filter(|(name, _)| *name == "x-vercel-protection-bypass")
+            {
+                request = request.with_header(
+                    name,
+                    value
+                        .to_str()
+                        .map_err(|_| validation("hub.auth_denied", "invalid preview credential"))?,
+                );
+            }
+        }
+        Ok(request)
+    }
+    fn read_inner(
+        &self,
+        url: &Url,
+        limit: usize,
+        control: bool,
+    ) -> Result<Option<Document>, GfError> {
         let mut url = url.clone();
         for hop in 0..=MAX_REDIRECTS {
             self.transport.validate(&url)?;
-            let response = self
-                .transport
-                .exchange(&HubRequest::new(HubMethod::Get, url.as_str()), limit)?;
+            let request = HubRequest::new(HubMethod::Get, url.as_str());
+            let request = if control && hop == 0 {
+                self.with_bypass(request, &url)?
+            } else {
+                request
+            };
+            let response = self.transport.exchange(&request, limit)?;
             match response.status {
                 301 | 302 | 303 | 307 | 308 if hop < MAX_REDIRECTS => {
                     let location = response
@@ -412,10 +464,12 @@ impl Hub<'_> {
                 "control-plane URL is not on the repository origin",
             ));
         }
-        self.transport.exchange(
-            &request.with_header("authorization", token.authorization()),
-            MAX_CONTROL_RESPONSE_BYTES,
-        )
+        let request = self.with_bypass(
+            request.with_header("authorization", token.authorization()),
+            &url,
+        )?;
+        self.transport
+            .exchange(&request, MAX_CONTROL_RESPONSE_BYTES)
     }
 
     /// Unauthenticated data-plane request to a Hub-issued upload capability URL.
@@ -423,11 +477,19 @@ impl Hub<'_> {
         let url = Url::parse(&request.url)
             .map_err(|_| validation("hub.unsafe_location", "upload URL is invalid"))?;
         validate_upload_url(&url)?;
-        debug_assert!(request.header("authorization").is_none());
+        if request.headers.iter().any(|(name, _)| {
+            name.eq_ignore_ascii_case("authorization")
+                || name.eq_ignore_ascii_case("x-vercel-protection-bypass")
+        }) {
+            return Err(validation(
+                "hub.auth_denied",
+                "upload capabilities cannot carry Hub credentials",
+            ));
+        }
         self.transport.exchange(request, MAX_CONTROL_RESPONSE_BYTES)
     }
 
-    /// Unauthenticated form POST to an OAuth endpoint the capabilities named.
+    /// Device-grant form POST; preview bypass applies only at the selected origin.
     fn oauth(&self, endpoint: &str, form: &[(&str, &str)]) -> Result<HubResponse, GfError> {
         let url = Url::parse(endpoint)
             .map_err(|_| validation("hub.unsafe_location", "OAuth endpoint is invalid"))?;
@@ -435,12 +497,12 @@ impl Hub<'_> {
         let body = url::form_urlencoded::Serializer::new(String::new())
             .extend_pairs(form)
             .finish();
-        self.transport.exchange(
-            &HubRequest::new(HubMethod::Post, endpoint)
-                .with_header("content-type", "application/x-www-form-urlencoded")
-                .with_body(body.into_bytes()),
-            MAX_CONTROL_RESPONSE_BYTES,
-        )
+        let request = HubRequest::new(HubMethod::Post, endpoint)
+            .with_header("content-type", "application/x-www-form-urlencoded")
+            .with_body(body.into_bytes());
+        let request = self.with_bypass(request, &url)?;
+        self.transport
+            .exchange(&request, MAX_CONTROL_RESPONSE_BYTES)
     }
 }
 
@@ -671,7 +733,8 @@ fn read_published(
         max_response_bytes: MAX_METADATA_BYTES,
         ..DiscoveryLimits::default()
     };
-    let Some((refs_bytes, etag)) = hub.read(&endpoint(base, "refs"), MAX_METADATA_BYTES)? else {
+    let Some((refs_bytes, etag)) = hub.read_control(&endpoint(base, "refs"), MAX_METADATA_BYTES)?
+    else {
         return Ok(None);
     };
     let revision = sha256_digest(&refs_bytes);
@@ -683,7 +746,7 @@ fn read_published(
     }
     let refs = RefSet::from_json(&refs_bytes, limits).map_err(|error| discovery(&error))?;
     let (manifest_bytes, _) = hub
-        .read(&endpoint(base, "manifest"), MAX_METADATA_BYTES)?
+        .read_control(&endpoint(base, "manifest"), MAX_METADATA_BYTES)?
         .ok_or_else(|| {
             publish_error(
                 HubPublishErrorCode::InvalidInput,
@@ -1242,13 +1305,14 @@ pub(crate) fn publish(
     });
     let intent_digest = intent_digest(&identity, &selection, fork.as_ref().map(|(id, _)| id));
     let hub = Hub {
+        bypass: environment.bypass,
         transport,
         base: base.clone(),
     };
 
-    // Capabilities first: an unsupported future Hub fails before any credential use.
+    // Capabilities first: an unsupported future Hub fails before publish-token use.
     let (capabilities_bytes, _) = hub
-        .read(&endpoint(&base, "publish"), MAX_CONTROL_RESPONSE_BYTES)?
+        .read_control(&endpoint(&base, "publish"), MAX_CONTROL_RESPONSE_BYTES)?
         .ok_or_else(|| {
             publish_error(
                 HubPublishErrorCode::InvalidInput,
@@ -1446,3 +1510,6 @@ pub(crate) fn publish(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod preview_tests;
