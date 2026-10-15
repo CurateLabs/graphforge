@@ -11,7 +11,7 @@ use std::path::Path;
 use arrow::datatypes::DataType;
 use datafusion::error::DataFusionError;
 use graphforge_core::OntologyMode;
-use parquet::basic::{Compression, Type};
+use parquet::basic::{Compression, Encoding, Type};
 use parquet::file::metadata::{ColumnChunkMetaData, ParquetStatisticsPolicy};
 use parquet::file::statistics::Statistics;
 
@@ -228,6 +228,57 @@ fn retained_column(
     add(values, add(slots.div_ceil(8), mul(batches, 512)?)?)
 }
 
+fn construction_bytes(
+    column: &ColumnChunkMetaData,
+    values: usize,
+    batch_size: usize,
+) -> Result<usize, DataFusionError> {
+    let physical = column.column_type();
+    let descriptor = column.column_descr();
+    let whole = || mul(values, 16);
+    if physical == Type::BYTE_ARRAY
+        || descriptor.max_rep_level() != 0
+        || !matches!(descriptor.max_def_level(), 0 | 1)
+    {
+        return whole();
+    }
+    let mut has_data_encoding = false;
+    for encoding in column.encodings() {
+        has_data_encoding |= match encoding {
+            Encoding::PLAIN | Encoding::PLAIN_DICTIONARY | Encoding::RLE_DICTIONARY => true,
+            Encoding::RLE => physical == Type::BOOLEAN,
+            Encoding::DELTA_BINARY_PACKED if matches!(physical, Type::INT32 | Type::INT64) => true,
+            Encoding::BYTE_STREAM_SPLIT
+                if matches!(
+                    physical,
+                    Type::INT32
+                        | Type::INT64
+                        | Type::FLOAT
+                        | Type::DOUBLE
+                        | Type::FIXED_LEN_BYTE_ARRAY
+                ) =>
+            {
+                true
+            }
+            // Arrow's fixed DELTA_BYTE_ARRAY decoder eagerly allocates both
+            // full-page prefix/suffix Vec<i32>s, independently of batch size.
+            // Empty or unsupported encoding metadata keeps the same envelope.
+            _ => return whole(),
+        };
+    }
+    if !has_data_encoding {
+        return whole();
+    }
+    // parquet 58.4 RecordReader creates no levels for required flat columns;
+    // nullable flat levels and fixed output advance within the reader batch.
+    // Complete pages/dictionaries and retained output are charged separately.
+    if descriptor.max_def_level() == 0 {
+        Ok(0)
+    } else {
+        mul(batch_size, 16)
+    }
+}
+
 fn column_bytes(column: &ColumnChunkMetaData, batch_size: usize) -> Result<usize, DataFusionError> {
     let values = nonnegative(column.num_values())?;
     let compressed = nonnegative(column.compressed_size())?;
@@ -250,13 +301,13 @@ fn column_bytes(column: &ColumnChunkMetaData, batch_size: usize) -> Result<usize
         )?,
         Type::BYTE_ARRAY => add(variable_payload(column)?, mul(values, 32)?)?,
     };
-    // Keep conservative complete chunk/page/dictionary and level allowances.
-    // Only fixed output construction uses the bounded Selectors batch window.
+    // Keep complete chunk/page/dictionary and codec allowances. Construction
+    // uses a batch bound only for positively identified flat decoders.
     add(
         mul(
             add(
                 add(compressed, uncompressed)?,
-                add(value_bytes, mul(values, 16)?)?,
+                add(value_bytes, construction_bytes(column, values, batch_size)?)?,
             )?,
             4,
         )?,
@@ -310,6 +361,168 @@ mod tests {
         assert!(matches!(error, DataFusionError::ResourcesExhausted(_)));
         assert!(error.to_string().contains("edge Parquet decode"));
     }
+
+    fn fixed_column(
+        physical: Type,
+        definition_level: i16,
+        encodings: Vec<Encoding>,
+        values: i64,
+    ) -> ColumnChunkMetaData {
+        let mut field = SchemaType::primitive_type_builder("value", physical);
+        if physical == Type::FIXED_LEN_BYTE_ARRAY {
+            field = field.with_length(16);
+        }
+        let descriptor = Arc::new(ColumnDescriptor::new(
+            Arc::new(field.build().unwrap()),
+            definition_level,
+            0,
+            ColumnPath::from("value"),
+        ));
+        ColumnChunkMetaData::builder(descriptor)
+            .set_num_values(values)
+            .set_total_compressed_size(2048)
+            .set_total_uncompressed_size(4096)
+            .set_encodings(encodings)
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn flat_primitive_construction_uses_the_batch_not_the_row_group() {
+        for physical in [Type::INT64, Type::FIXED_LEN_BYTE_ARRAY] {
+            let encodings = vec![Encoding::PLAIN, Encoding::RLE, Encoding::RLE_DICTIONARY];
+            let required = fixed_column(physical, 0, encodings.clone(), 1_000_000);
+            let nullable = fixed_column(physical, 1, encodings.clone(), 1_000_000);
+            let small = fixed_column(physical, 1, encodings, 1024);
+            let required = column_bytes(&required, 1024).unwrap();
+            let nullable = column_bytes(&nullable, 1024).unwrap();
+            assert!(required < 1024 * 1024, "required: {required}");
+            assert_eq!(nullable, column_bytes(&small, 1024).unwrap());
+            assert_eq!(nullable - required, 4 * 16 * 1024);
+        }
+    }
+
+    #[test]
+    fn whole_page_and_ambiguous_construction_remain_conservative() {
+        let values = 1_000_000;
+        for (physical, level, encodings) in [
+            (
+                Type::FIXED_LEN_BYTE_ARRAY,
+                0,
+                vec![Encoding::DELTA_BYTE_ARRAY],
+            ),
+            (Type::INT64, 0, vec![]),
+            (Type::INT64, 0, vec![Encoding::RLE]),
+            (Type::INT64, 0, vec![Encoding::DELTA_BYTE_ARRAY]),
+            (Type::INT64, 2, vec![Encoding::PLAIN]),
+        ] {
+            let column = fixed_column(physical, level, encodings, values);
+            assert!(column_bytes(&column, 1024).unwrap() >= values as usize * 16 * 4);
+        }
+        let huge = fixed_column(Type::FIXED_LEN_BYTE_ARRAY, 0, vec![], i64::MAX);
+        assert!(matches!(
+            column_bytes(&huge, 1024),
+            Err(DataFusionError::ResourcesExhausted(_))
+        ));
+    }
+
+    fn sparse_compressed_read_fits(nullable: bool) {
+        use arrow::array::{Array, Int64Array, RecordBatch, UInt64Array};
+        use arrow::datatypes::{Field, Schema};
+        use parquet::arrow::ArrowWriter;
+        use parquet::file::properties::{WriterProperties, WriterVersion};
+
+        const ROWS: usize = 240_001;
+        const BUDGET: usize = 16 * 1024 * 1024;
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("edge.parquet");
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("edge_id", DataType::UInt64, false),
+            Field::new("timestamp", DataType::Int64, nullable),
+        ]));
+        let timestamp = |row: usize| (!nullable || row % 3 != 0).then_some(row as i64);
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(UInt64Array::from_iter_values(0..ROWS as u64)),
+                Arc::new(Int64Array::from_iter((0..ROWS).map(timestamp))),
+            ],
+        )
+        .unwrap();
+        let properties = WriterProperties::builder()
+            .set_writer_version(WriterVersion::PARQUET_2_0)
+            .set_dictionary_enabled(false)
+            .set_encoding(Encoding::DELTA_BINARY_PACKED)
+            .set_compression(Compression::ZSTD(Default::default()))
+            .set_max_row_group_row_count(Some(ROWS))
+            .build();
+        let mut writer = ArrowWriter::try_new(
+            std::fs::File::create(&path).unwrap(),
+            schema.clone(),
+            Some(properties),
+        )
+        .unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+        let reader = crate::catalog::admitted_parquet(&path).unwrap();
+        assert_eq!(reader.metadata().num_row_groups(), 1);
+        for column in reader.metadata().row_group(0).columns() {
+            assert!(
+                column
+                    .encodings()
+                    .any(|encoding| encoding == Encoding::DELTA_BINARY_PACKED)
+            );
+            assert!(column.compressed_size() < ROWS as i64);
+        }
+        let ids = HashSet::from([0, 1025, (ROWS - 1) as u64]);
+        let bound = file_bytes(&path, &ids, None, None).unwrap();
+        let total = add(
+            bound.retained,
+            bound.scratch.max(mul(bound.retained, 2).unwrap()),
+        )
+        .unwrap();
+        assert!(
+            total <= BUDGET,
+            "sparse read must fit {BUDGET}: {bound:?}, total {total}"
+        );
+        let request = super::super::EdgeIdRequest::new(&ids);
+        let batches =
+            super::super::read_required_edge_filtered(&path, schema, &request, None, None).unwrap();
+        let mut actual = Vec::new();
+        for batch in batches {
+            let ids = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<UInt64Array>()
+                .unwrap();
+            let timestamps = batch
+                .column(1)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap();
+            for row in 0..batch.num_rows() {
+                actual.push((
+                    ids.value(row),
+                    (!timestamps.is_null(row)).then(|| timestamps.value(row)),
+                ));
+            }
+        }
+        assert_eq!(
+            actual,
+            [0, 1025, ROWS - 1].map(|row| (row as u64, timestamp(row)))
+        );
+    }
+
+    #[test]
+    fn large_required_compressed_row_group_fits_a_sparse_read() {
+        sparse_compressed_read_fits(false);
+    }
+
+    #[test]
+    fn large_nullable_compressed_row_group_fits_a_sparse_read() {
+        sparse_compressed_read_fits(true);
+    }
+
     fn fixed_file(path: &Path, rows: usize, row_group: usize) {
         use arrow::array::{FixedSizeBinaryArray, RecordBatch, UInt64Array};
         use arrow::datatypes::{Field, Schema};
