@@ -8,6 +8,7 @@
 mod arrays;
 mod join;
 mod mapped_keys;
+mod payload_dictionary;
 pub(super) use join::join;
 
 use arrow::array::RecordBatch;
@@ -37,6 +38,15 @@ pub(super) struct Collected {
     pub(super) batches: Vec<RecordBatch>,
     bytes: usize,
     mapped: Option<Vec<Option<u32>>>,
+    payload: Option<Vec<u32>>,
+}
+impl Collected {
+    pub(super) fn logical_rows(&self) -> usize {
+        self.mapped.as_ref().map_or_else(
+            || self.batches.iter().map(RecordBatch::num_rows).sum(),
+            Vec::len,
+        )
+    }
 }
 
 impl Budget {
@@ -85,7 +95,10 @@ impl Budget {
             }
             let projected = projection.is_some();
             let batch = match projection.as_deref_mut() {
-                Some(mapper) => mapper.project(batch, self)?,
+                Some(mapper) => match mapper.project(batch, self)? {
+                    Some(batch) => batch,
+                    None => continue,
+                },
                 None => batch,
             };
             let held = batch_bytes(&batch)?;
@@ -117,7 +130,28 @@ impl Budget {
             batches,
             bytes,
             mapped: None,
+            payload: None,
         })
+    }
+    fn prepend(&self, collected: &mut Collected, batch: RecordBatch) -> Result<()> {
+        if collected.batches.len() == collected.batches.capacity() {
+            let next = add(collected.batches.len(), 1)?;
+            let allocated = mul(next, std::mem::size_of::<RecordBatch>())?;
+            self.admit(allocated)?;
+            let old = mul(
+                collected.batches.capacity(),
+                std::mem::size_of::<RecordBatch>(),
+            )?;
+            collected
+                .batches
+                .try_reserve_exact(1)
+                .map_err(|_| refused("authority batch allocation failed"))?;
+            self.release(old);
+            collected.bytes = add(collected.bytes - old, allocated)?;
+        }
+        collected.bytes = add(collected.bytes, batch_bytes(&batch)?)?;
+        collected.batches.insert(0, batch);
+        Ok(())
     }
     pub(super) fn compact(&self, rows: Collected, schema: &SchemaRef) -> Result<Collected> {
         let batch = self.concat(rows, schema)?;
@@ -128,6 +162,7 @@ impl Budget {
             batches: vec![batch],
             bytes,
             mapped: None,
+            payload: None,
         })
     }
     pub(super) fn seed(&self, batches: &[RecordBatch]) -> Result<()> {
@@ -139,9 +174,10 @@ impl Budget {
             mut batches,
             bytes,
             mapped,
+            payload,
         } = collected;
         debug_assert!(
-            mapped.is_none(),
+            mapped.is_none() && payload.is_none(),
             "mapped ownership must reach join before concat"
         );
         if batches.len() == 1 {
@@ -235,25 +271,47 @@ impl Budget {
         keys: &[(usize, usize)],
         null_safe: bool,
     ) -> Result<usize> {
-        self.index_work(inner, outer, keys, null_safe, false)
+        self.index_work(inner, outer, keys.iter().copied(), null_safe)
     }
     pub(super) fn mapped_index(
         &self,
         outer: &RecordBatch,
         keys: &[(usize, usize)],
     ) -> Result<usize> {
-        self.index_work(outer, outer, keys, true, true)
+        self.index_work(
+            outer,
+            outer,
+            keys.iter().map(|&(index, _)| (index, index)),
+            true,
+        )
+    }
+    pub(super) fn probe_index(
+        &self,
+        inner: &RecordBatch,
+        outer: &RecordBatch,
+        outer_columns: &[usize],
+        inner_columns: &[usize],
+    ) -> Result<usize> {
+        self.index_work(
+            inner,
+            outer,
+            outer_columns
+                .iter()
+                .copied()
+                .zip(inner_columns.iter().copied()),
+            true,
+        )
     }
     fn index_work(
         &self,
         inner: &RecordBatch,
         outer: &RecordBatch,
-        keys: &[(usize, usize)],
+        keys: impl ExactSizeIterator<Item = (usize, usize)>,
         null_safe: bool,
-        mapped: bool,
     ) -> Result<usize> {
         use super::OptionalJoinKey;
-        if keys.is_empty() {
+        let width = keys.len();
+        if width == 0 {
             return Ok(0);
         }
         // The index retains source row ordinals, not cloned ScalarValues.
@@ -262,11 +320,9 @@ impl Budget {
         // conversion; the original Arrow inputs remain fully charged.
         let mut owned = 0;
         let mut scratch = 0;
-        for &(outer_index, inner_index) in keys {
+        for (outer_index, inner_index) in keys {
             let left = outer.column(outer_index).as_ref();
-            let right = inner
-                .column(if mapped { outer_index } else { inner_index })
-                .as_ref();
+            let right = inner.column(inner_index).as_ref();
             if null_safe {
                 owned = add(owned, add(arrays::scalar(left)?, arrays::scalar(right)?)?)?;
                 scratch = add(
@@ -276,7 +332,7 @@ impl Budget {
             }
         }
         let vectors = mul(
-            keys.len(),
+            width,
             2 * (std::mem::size_of::<OptionalJoinKey>() + std::mem::size_of::<usize>()),
         )?;
         let envelope = add(vectors, add(owned, scratch)?)?;

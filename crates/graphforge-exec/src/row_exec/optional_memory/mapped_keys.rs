@@ -17,10 +17,15 @@ pub(super) struct Mapper<'a> {
     schema: SchemaRef,
     index: Index<RandomState>,
     rows: Vec<Option<u32>>,
+    payload: Option<super::payload_dictionary::Dictionary>,
 }
 
 impl Mapper<'_> {
-    pub(super) fn project(&mut self, batch: RecordBatch, budget: &Budget) -> Result<RecordBatch> {
+    pub(super) fn project(
+        &mut self,
+        batch: RecordBatch,
+        budget: &Budget,
+    ) -> Result<Option<RecordBatch>> {
         let work = budget.index(&batch, self.outer, self.keys, true)?;
         let required = add(self.rows.len(), batch.num_rows())?;
         u32::try_from(required.saturating_sub(1)).map_err(|_| refused("row index exceeds u32"))?;
@@ -53,6 +58,13 @@ impl Mapper<'_> {
                     .map_err(|_| refused("row index exceeds u32"))?,
             );
         }
+        if let Some(payload) = &mut self.payload {
+            if !payload.map(&batch, &self.index, source, budget)? {
+                drop(batch);
+                budget.release(work);
+                return Ok(None);
+            }
+        }
         let held = self.keep.iter().try_fold(
             add(
                 std::mem::size_of::<RecordBatch>(),
@@ -73,7 +85,7 @@ impl Mapper<'_> {
         )?;
         drop(batch);
         budget.release(work);
-        Ok(projected)
+        Ok(Some(projected))
     }
 }
 
@@ -85,6 +97,11 @@ impl Budget {
         cfg: &mut super::super::OptionalConfig,
         outer: &RecordBatch,
     ) -> Result<Collected> {
+        // Qualify the complete producer schema before constructing even empty
+        // authority arrays. collect_with still validates each emitted batch.
+        for field in plan.schema().fields() {
+            super::arrays::validate(field.data_type())?;
+        }
         u32::try_from(outer.num_rows().saturating_sub(1))
             .map_err(|_| refused("row index exceeds u32"))?;
         // Column positions and key conversion scratch coexist with the source
@@ -107,6 +124,13 @@ impl Budget {
         self.release(work);
         self.admit(schema_bound(&cfg.inner_schema, 0)?)?;
         let schema = Arc::new(cfg.inner_schema.project(&cfg.inner_keep_idx)?);
+        let payload = super::payload_dictionary::Dictionary::new(
+            outer,
+            schema.clone(),
+            &cfg.inner_keep_idx,
+            &outer_keys,
+            self,
+        )?;
         let mut mapper = Mapper {
             outer,
             outer_keys,
@@ -116,6 +140,7 @@ impl Budget {
             schema: schema.clone(),
             index,
             rows: Vec::new(),
+            payload,
         };
         let mut collected = self.collect_with(plan, context, Some(&mut mapper)).await?;
         let Mapper {
@@ -123,12 +148,18 @@ impl Budget {
             rows,
             outer_keys,
             inner_keys,
+            payload,
             ..
         } = mapper;
         index.release(self);
         drop(outer_keys);
         drop(inner_keys);
         self.release(handles);
+        if let Some(payload) = payload {
+            let (authority, rows) = payload.finish(self);
+            self.prepend(&mut collected, authority)?;
+            collected.payload = Some(rows);
+        }
         collected.mapped = Some(rows);
         cfg.inner_schema = schema;
         for (index, kept) in cfg.inner_keep_idx.iter_mut().enumerate() {

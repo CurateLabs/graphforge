@@ -275,7 +275,7 @@ impl ExecutionPlan for OptionalMatchExec {
             // or error here, and on cancellation or panic through the guard.
             drop(seed_release);
             let inner_batches = collected?;
-            metrics.inner_rows.add(row_count(&inner_batches.batches));
+            metrics.inner_rows.add(inner_batches.logical_rows());
             let timer = metrics.baseline.elapsed_compute().timer();
             let joined = optional_memory::join(&cfg, outer_batches, inner_batches, &budget)?;
             drop(timer);

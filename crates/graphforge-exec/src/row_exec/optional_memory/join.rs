@@ -86,6 +86,7 @@ pub(in crate::row_exec) fn join(
 ) -> Result<output::Output> {
     let outer = budget.concat(outer, &cfg.outer_schema)?;
     let mapped = inner.mapped.take();
+    let payload = inner.payload.take();
     let inner = budget.concat(inner, &cfg.inner_schema)?;
     for batch in [&outer, &inner] {
         if u32::try_from(batch.num_rows().saturating_sub(1)).is_err() {
@@ -150,7 +151,10 @@ pub(in crate::row_exec) fn join(
                 cfg.null_safe_keys,
                 |inner_row| {
                     outer_take.push(row_index(row)?);
-                    inner_take.push(Some(row_index(inner_row)?));
+                    inner_take.push(Some(match &payload {
+                        Some(rows) => rows[inner_row],
+                        None => row_index(inner_row)?,
+                    }));
                     Ok(())
                 },
             )?;
@@ -167,6 +171,11 @@ pub(in crate::row_exec) fn join(
     if let Some(mapped) = mapped {
         let bytes = super::mul(mapped.capacity(), std::mem::size_of::<Option<u32>>())?;
         drop(mapped);
+        budget.release(bytes);
+    }
+    if let Some(payload) = payload {
+        let bytes = super::mul(payload.capacity(), std::mem::size_of::<u32>())?;
+        drop(payload);
         budget.release(bytes);
     }
     let outer_take = UInt32Array::from(outer_take);
