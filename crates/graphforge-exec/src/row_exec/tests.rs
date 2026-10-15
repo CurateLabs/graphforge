@@ -12,7 +12,11 @@ pub(crate) async fn join_rows(
         MemorySourceConfig::try_new_exec(&[inner.to_vec()], cfg.inner_schema.clone(), None)?;
     let outer = budget.collect(outer, context.task_ctx()).await?;
     let inner = budget.collect(inner, context.task_ctx()).await?;
-    let output = optional_memory::join(cfg, outer, inner, &budget)?;
+    let mut prepared = optional_memory::join(cfg, outer, inner, &budget)?;
+    let output = prepared
+        .next(&budget, usize::MAX)?
+        .expect("typed empty output");
+    drop(prepared);
     budget.output(&output)?;
     Ok(output)
 }

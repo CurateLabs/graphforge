@@ -47,6 +47,7 @@ impl Budget {
     pub(super) fn release(&self, bytes: usize) {
         self.0.shrink(bytes);
     }
+    #[cfg(test)]
     pub(super) fn output(&self, batch: &RecordBatch) -> Result<()> {
         // All other owners must already be dropped; this only shrinks an
         // existing envelope and never justifies an allocation after the fact.
@@ -109,28 +110,70 @@ impl Budget {
             self.release(bytes - batch_bytes(&batch)?);
             return Ok(batch);
         }
-        // Canonical concat copies at most the complete input buffers. Four
-        // copies cover buffer growth/old allocations; metadata scales with the
-        // existing array trees and batch handles, covered by the same envelope.
-        let envelope = add(mul(bytes, 4)?, schema_bound(schema, 0)?)?;
-        self.admit(envelope)
+        if batches.is_empty() {
+            let envelope = schema_bound(schema, 0)?;
+            self.admit(envelope)
+                .map_err(|error| error.context("OptionalMatch concat"))?;
+            let batch = RecordBatch::new_empty(schema.clone());
+            let actual = batch_bytes(&batch)?;
+            if actual > envelope {
+                return Err(refused("empty concat exceeded its admitted envelope"));
+            }
+            self.release(add(bytes, envelope - actual)?);
+            return Ok(batch);
+        }
+        let rows = batches
+            .iter()
+            .try_fold(0, |rows, batch| add(rows, batch.num_rows()))?;
+        // concat_batches already copies one column at a time. Move each source
+        // column into that same kernel, then drop it before releasing its full
+        // retained capacity. Completed outputs and all unconsumed columns stay
+        // charged; source handles/recursive slice wrappers coexist in scratch.
+        let scratch = mul(batches.len(), schema_bound(schema, 0)?)?;
+        let output_handles = add(
+            std::mem::size_of::<RecordBatch>(),
+            mul(schema.fields().len(), 128)?,
+        )?;
+        self.admit(add(scratch, output_handles)?)
             .map_err(|error| error.context("OptionalMatch concat"))?;
-        // Concat sums source spans; a take bound would falsely multiply one
-        // large value by the lengths of unrelated, empty-valued batches.
-        for column in 0..schema.fields().len() {
-            let arrays: Vec<_> = batches
-                .iter()
-                .map(|batch| batch.column(column).clone())
+        let mut inputs: Vec<_> = batches
+            .into_iter()
+            .map(|batch| batch.into_parts().1.into_iter())
+            .collect();
+        let mut remaining = bytes;
+        let mut columns = Vec::with_capacity(schema.fields().len());
+        for _ in schema.fields() {
+            let arrays: Vec<_> = inputs
+                .iter_mut()
+                .map(|input| input.next().expect("validated batch column count"))
                 .collect();
-            arrays::concat(&arrays)?;
+            let source = arrays
+                .iter()
+                .try_fold(0, |bytes, array| add(bytes, array.get_array_memory_size()))?;
+            let envelope = arrays::concat(&arrays)?;
+            self.admit(envelope)
+                .map_err(|error| error.context("OptionalMatch concat"))?;
+            let refs: Vec<_> = arrays.iter().map(AsRef::as_ref).collect();
+            let column = arrow::compute::concat(&refs)?;
+            let actual = column.get_array_memory_size();
+            if actual > envelope {
+                return Err(refused("concat exceeded its admitted envelope"));
+            }
+            drop(refs);
+            drop(arrays);
+            self.release(add(source, envelope - actual)?);
+            remaining = remaining
+                .checked_sub(source)
+                .ok_or_else(|| refused("concat source accounting underflow"))?;
+            columns.push(column);
         }
-        let batch = arrow::compute::concat_batches(schema, &batches)?;
-        let actual = batch_bytes(&batch)?;
-        if actual > envelope {
-            return Err(refused("concat exceeded its admitted envelope"));
-        }
-        drop(batches);
-        self.release(add(bytes, envelope - actual)?);
+        drop(inputs);
+        let batch = RecordBatch::try_new_with_options(
+            schema.clone(),
+            columns,
+            &arrow::array::RecordBatchOptions::new().with_row_count(Some(rows)),
+        )?;
+        self.release(add(remaining, scratch)?);
         Ok(batch)
     }
     pub(super) fn indexes(&self, rows: usize) -> Result<()> {
@@ -145,18 +188,6 @@ impl Budget {
             add(rows.div_ceil(8), 2048)?,
         )?)
     }
-    pub(super) fn take(
-        &self,
-        batch: &RecordBatch,
-        indices: &arrow::array::UInt32Array,
-        columns: impl Iterator<Item = usize>,
-    ) -> Result<()> {
-        for index in columns {
-            self.admit(arrays::selected(batch.column(index).as_ref(), indices)?)
-                .map_err(|error| error.context("OptionalMatch output"))?;
-        }
-        self.admit(mul(batch.num_columns(), 128)?)
-    }
     pub(super) fn index(
         &self,
         inner: &RecordBatch,
@@ -168,50 +199,35 @@ impl Budget {
         if keys.is_empty() {
             return Ok(0);
         }
-        let rows = inner.num_rows();
-        let table = table_bytes(
-            rows,
-            std::mem::size_of::<(Vec<OptionalJoinKey>, Vec<usize>)>(),
-        )?;
-        // At most one owned key per inner row plus a temporary insertion/probe
-        // key. Row-list capacity <=4*rows, with its old allocation during growth.
-        let vectors = add(
-            mul(keys.len(), 2 * std::mem::size_of::<usize>())?,
-            add(
-                mul(
-                    mul(add(rows, 2)?, keys.len())?,
-                    std::mem::size_of::<OptionalJoinKey>(),
-                )?,
-                mul(rows, 8 * std::mem::size_of::<usize>())?,
-            )?,
-        )?;
+        // The index retains source row ordinals, not cloned ScalarValues.
+        // Both a probe and one collision candidate can coexist. Their exact
+        // canonical keys and recursive hash scratch are admitted before either
+        // conversion; the original Arrow inputs remain fully charged.
         let mut owned = 0;
         let mut scratch = 0;
         for &(outer_index, inner_index) in keys {
             let left = outer.column(outer_index).as_ref();
             let right = inner.column(inner_index).as_ref();
             if null_safe {
-                owned = add(
-                    owned,
-                    add(
-                        mul(add(rows, 1)?, arrays::scalar(right)?)?,
-                        arrays::scalar(left)?,
-                    )?,
-                )?;
+                owned = add(owned, add(arrays::scalar(left)?, arrays::scalar(right)?)?)?;
                 scratch = add(
                     scratch,
                     add(arrays::hash_scratch(left)?, arrays::hash_scratch(right)?)?,
                 )?;
             }
         }
-        let envelope = add(add(table, vectors)?, add(owned, scratch)?)?;
+        let vectors = mul(
+            keys.len(),
+            2 * (std::mem::size_of::<OptionalJoinKey>() + std::mem::size_of::<usize>()),
+        )?;
+        let envelope = add(vectors, add(owned, scratch)?)?;
         self.admit(envelope)
             .map_err(|error| error.context("OptionalMatch index"))?;
         Ok(envelope)
     }
 }
 
-fn batch_bytes(batch: &RecordBatch) -> Result<usize> {
+pub(super) fn batch_bytes(batch: &RecordBatch) -> Result<usize> {
     add(
         batch.get_array_memory_size(),
         add(
@@ -242,7 +258,7 @@ fn schema_bound(schema: &SchemaRef, rows: usize) -> Result<usize> {
             add(bytes, mul(nodes(field.data_type())?, arrays::NODE_BYTES)?)
         })
 }
-fn table_bytes(entries: usize, width: usize) -> Result<usize> {
+pub(super) fn table_bytes(entries: usize, width: usize) -> Result<usize> {
     if entries == 0 {
         return Ok(0);
     }

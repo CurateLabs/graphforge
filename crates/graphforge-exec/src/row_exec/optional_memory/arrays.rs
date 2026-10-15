@@ -70,10 +70,38 @@ pub(super) fn take(array: &dyn Array, rows: usize) -> Result<usize> {
 /// already-admitted indexes, including source/index nulls, so a single large
 /// source value does not invent an offset overflow for many small output rows.
 pub(super) fn selected(array: &dyn Array, indices: &arrow::array::UInt32Array) -> Result<usize> {
+    // take_nulls clones the index null buffer for a nonnullable source. A
+    // window still retains that complete backing allocation; Struct take can
+    // propagate it to every child. Count recursive nodes conservatively.
+    fn nodes(data_type: &DataType) -> Result<usize> {
+        match data_type {
+            DataType::Struct(fields) => fields
+                .iter()
+                .try_fold(1, |n, field| add(n, nodes(field.data_type())?)),
+            DataType::List(field)
+            | DataType::LargeList(field)
+            | DataType::FixedSizeList(field, _) => add(1, nodes(field.data_type())?),
+            _ => Ok(1),
+        }
+    }
+    let aliases = mul(
+        nodes(array.data_type())?,
+        indices.nulls().map_or(0, |nulls| nulls.buffer().capacity()),
+    )?;
+    add(selected_values(array, indices)?, aliases)
+}
+
+fn selected_values(array: &dyn Array, indices: &arrow::array::UInt32Array) -> Result<usize> {
     let offset = match array.data_type() {
         DataType::Utf8 | DataType::Binary => 4,
         DataType::LargeUtf8 | DataType::LargeBinary => 8,
-        _ => return take(array, indices.len()),
+        DataType::List(_)
+        | DataType::LargeList(_)
+        | DataType::Struct(_)
+        | DataType::FixedSizeList(_, _) => return take(array, indices.len()),
+        // Primitive/boolean/fixed bytes take kernels preallocate exact output
+        // slots; unlike MutableArrayData there is no amortized payload growth.
+        _ => return raw_take(array, indices.len()),
     };
     let payload = indices.iter().flatten().try_fold(0, |bytes, index| {
         let index = index as usize;
@@ -91,15 +119,11 @@ pub(super) fn selected(array: &dyn Array, indices: &arrow::array::UInt32Array) -
         add(bytes, length)
     })?;
     offset_limit(payload, offset)?;
-    mul(
-        add(
-            add(
-                mul(add(indices.len(), 1)?, offset)?,
-                payload.max(indices.len()),
-            )?,
-            add(indices.len().div_ceil(8), NODE_BYTES)?,
-        )?,
-        4,
+    // take_bytes (Arrow 58.4) computes all offsets first, then allocates
+    // Vec::with_capacity(exact_payload). Neither values nor offsets grow.
+    add(
+        add(mul(add(indices.len(), 1)?, offset)?, payload)?,
+        add(indices.len().div_ceil(8), NODE_BYTES)?,
     )
 }
 
@@ -300,7 +324,7 @@ fn offset_limit(values: usize, offset: usize) -> Result<()> {
 
 /// Upper bound for one nested ScalarValue conversion/hash invocation. Nested
 /// hash kernels allocate u64 vectors over child rows, not encoded byte sizes.
-/// Summing every child length covers simultaneously live recursive hash buffers,
+/// Summing one selected row's recursive child spans covers live hash buffers,
 /// including Null/Boolean children whose physical bytes can be much smaller.
 pub(super) fn hash_scratch(array: &dyn Array) -> Result<usize> {
     if matches!(
@@ -312,7 +336,7 @@ pub(super) fn hash_scratch(array: &dyn Array) -> Result<usize> {
     ) {
         // DF 54.1 hash_nested_array owns one u64 vector; recursive struct
         // owns one per parent row, list/fixed-list one per child row. At most
-        // two vectors per node coexist. Sum full child lengths (even slices)
+        // two vectors per node coexist. Sum the largest one-row child spans
         // and two u64s/slot, plus wrapper metadata, before invoking Hash.
         add(
             mul(hash_slots(array)?, 2 * std::mem::size_of::<u64>())?,
@@ -323,18 +347,42 @@ pub(super) fn hash_scratch(array: &dyn Array) -> Result<usize> {
     }
 }
 fn hash_slots(array: &dyn Array) -> Result<usize> {
-    let children = match array.data_type() {
-        DataType::List(_) => hash_slots(array.as_list::<i32>().values().as_ref())?,
-        DataType::LargeList(_) => hash_slots(array.as_list::<i64>().values().as_ref())?,
-        DataType::FixedSizeList(_, _) => hash_slots(array.as_fixed_size_list().values().as_ref())?,
-        DataType::Struct(_) => array
-            .as_struct()
-            .columns()
-            .iter()
-            .try_fold(0, |slots, child| add(slots, hash_slots(child.as_ref())?))?,
-        _ => 0,
-    };
-    add(array.len(), children)
+    fn slots(array: &dyn Array, rows: usize) -> Result<usize> {
+        let children = match array.data_type() {
+            DataType::List(_) => {
+                let list = array.as_list::<i32>();
+                slots(
+                    list.values().as_ref(),
+                    mul(rows, largest_span(list.value_offsets())?)?,
+                )?
+            }
+            DataType::LargeList(_) => {
+                let list = array.as_list::<i64>();
+                slots(
+                    list.values().as_ref(),
+                    mul(rows, largest_span(list.value_offsets())?)?,
+                )?
+            }
+            DataType::FixedSizeList(_, width) => slots(
+                array.as_fixed_size_list().values().as_ref(),
+                mul(
+                    rows,
+                    usize::try_from(*width).map_err(|_| refused("negative list width"))?,
+                )?,
+            )?,
+            DataType::Struct(_) => array
+                .as_struct()
+                .columns()
+                .iter()
+                .try_fold(0, |n, child| add(n, slots(child.as_ref(), rows)?))?,
+            _ => 0,
+        };
+        add(rows, children)
+    }
+    // ScalarValue wraps exactly one source row. List hashing slices the child
+    // span first (DF 54.1 hash_utils::hash_list_array); it never hashes every
+    // unrelated row retained by the source array.
+    slots(array, 1)
 }
 
 /// Primitive ScalarValues are inline. Bytes are cloned; nested scalars create
@@ -373,117 +421,13 @@ pub(super) fn scalar(array: &dyn Array) -> Result<usize> {
         DataType::FixedSizeBinary(width) => {
             usize::try_from(*width).map_err(|_| refused("negative binary width"))
         }
-        DataType::Struct(_)
-        | DataType::List(_)
-        | DataType::LargeList(_)
-        | DataType::FixedSizeList(_, _) => take(array, 1),
+        DataType::List(field) | DataType::LargeList(field) | DataType::FixedSizeList(field, _) => {
+            add(take(array, 1)?, field.name().len())
+        }
+        DataType::Struct(_) => take(array, 1),
         _ => Ok(0),
     }
 }
 
-/// Arrow 58.4 concat_lists slices each child to its actual offset span before
-/// recursively concatenating it. Check those sums, including nested offsets,
-/// before any concat kernel's infallible offset arithmetic. Temporary handles
-/// and sliced wrappers are inside the already-admitted concat copy envelope.
-pub(super) fn concat(arrays: &[arrow::array::ArrayRef]) -> Result<()> {
-    let Some(first) = arrays.first() else {
-        return Ok(());
-    };
-    let data_type = first.data_type();
-    let rows = arrays
-        .iter()
-        .try_fold(0, |rows, array| add(rows, array.len()))?;
-    let span = |array: &arrow::array::ArrayRef| -> Result<usize> {
-        match data_type {
-            DataType::Utf8 => {
-                let o = array.as_string::<i32>().value_offsets();
-                offset_span(o)
-            }
-            DataType::Binary => {
-                let o = array.as_binary::<i32>().value_offsets();
-                offset_span(o)
-            }
-            DataType::LargeUtf8 => {
-                let o = array.as_string::<i64>().value_offsets();
-                offset_span(o)
-            }
-            DataType::LargeBinary => {
-                let o = array.as_binary::<i64>().value_offsets();
-                offset_span(o)
-            }
-            _ => Ok(0),
-        }
-    };
-    match data_type {
-        DataType::Utf8 | DataType::Binary => offset_limit(
-            arrays
-                .iter()
-                .try_fold(0, |sum, array| add(sum, span(array)?))?,
-            4,
-        )?,
-        DataType::LargeUtf8 | DataType::LargeBinary => offset_limit(
-            arrays
-                .iter()
-                .try_fold(0, |sum, array| add(sum, span(array)?))?,
-            8,
-        )?,
-        DataType::List(_) | DataType::LargeList(_) => {
-            let mut total = 0;
-            let mut children = Vec::with_capacity(arrays.len());
-            for array in arrays {
-                let (start, end, child) = if matches!(data_type, DataType::List(_)) {
-                    let list = array.as_list::<i32>();
-                    let o = list.value_offsets();
-                    (offset(o[0])?, offset(o[o.len() - 1])?, list.values())
-                } else {
-                    let list = array.as_list::<i64>();
-                    let o = list.value_offsets();
-                    (offset(o[0])?, offset(o[o.len() - 1])?, list.values())
-                };
-                total = add(total, end - start)?;
-                children.push(child.slice(start, end - start));
-            }
-            offset_limit(
-                total,
-                if matches!(data_type, DataType::List(_)) {
-                    4
-                } else {
-                    8
-                },
-            )?;
-            concat(&children)?;
-        }
-        DataType::Struct(fields) => {
-            for column in 0..fields.len() {
-                let children: Vec<_> = arrays
-                    .iter()
-                    .map(|array| array.as_struct().column(column).clone())
-                    .collect();
-                concat(&children)?;
-            }
-        }
-        DataType::FixedSizeList(_, width) => {
-            mul(
-                rows,
-                usize::try_from(*width).map_err(|_| refused("negative list width"))?,
-            )?;
-            let children: Vec<_> = arrays
-                .iter()
-                .map(|array| array.as_fixed_size_list().values().clone())
-                .collect();
-            concat(&children)?;
-        }
-        DataType::FixedSizeBinary(width) => {
-            mul(
-                rows,
-                usize::try_from(*width).map_err(|_| refused("negative binary width"))?,
-            )?;
-        }
-        data_type => {
-            if let Some(width) = data_type.primitive_width() {
-                mul(rows, width)?;
-            }
-        }
-    }
-    Ok(())
-}
+mod concat;
+pub(super) use concat::bytes as concat;

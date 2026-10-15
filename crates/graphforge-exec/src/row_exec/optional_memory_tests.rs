@@ -226,7 +226,10 @@ async fn optional_skewed_concat_uses_actual_spans_not_take_multiplicity() {
     drop(budget);
     assert_eq!(pool.reserved(), 0);
     let output = collect(complete, context.task_ctx()).await.unwrap();
-    assert_eq!(output[0].num_rows(), 100_001);
+    assert_eq!(
+        output.iter().map(RecordBatch::num_rows).sum::<usize>(),
+        100_001
+    );
     assert_eq!(
         output[0]
             .column(1)
@@ -236,7 +239,20 @@ async fn optional_skewed_concat_uses_actual_spans_not_take_multiplicity() {
             .value(0),
         wide
     );
-    assert_eq!(output[0].column(2).null_count(), 100_001);
+    assert!(
+        output
+            .iter()
+            .all(|batch| batch.column(2).null_count() == batch.num_rows())
+    );
+    assert!(output.iter().skip(1).all(|batch| {
+        batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap()
+            .iter()
+            .all(|value| value == Some(""))
+    }));
     assert_eq!(pool.reserved(), 0);
 }
 
@@ -308,7 +324,7 @@ async fn concurrent_seed_streams_admit_handles_before_cloning_and_release_at_eos
 }
 
 #[tokio::test]
-async fn optional_owned_null_safe_keys_share_the_input_budget() {
+async fn optional_null_safe_key_temporaries_and_index_share_the_input_budget() {
     use datafusion_datasource::memory::MemorySourceConfig;
     let schema = Arc::new(Schema::new(vec![Field::new("key", DataType::Utf8, true)]));
     let values: Vec<_> = (0..256)
@@ -332,7 +348,10 @@ async fn optional_owned_null_safe_keys_share_the_input_budget() {
         outer_schema: schema.clone(),
         inner_schema: schema.clone(),
     };
-    for (limit, fits) in [(2 * MIB, false), (16 * MIB, true)] {
+    // ~1046 KiB of rounded Arrow source capacity fits in 1060 KiB. The
+    // distinct-key table plus two temporary canonical keys cannot also fit.
+    // The former owned-key 2 MiB refusal is now an exact fitting control.
+    for (limit, fits) in [(1060 * 1024, false), (2 * MIB, true), (16 * MIB, true)] {
         let (context, pool) = context(limit);
         let budget = optional_memory::Budget::new(&context.task_ctx());
         let outer =
@@ -341,7 +360,11 @@ async fn optional_owned_null_safe_keys_share_the_input_budget() {
             MemorySourceConfig::try_new_exec(&[vec![inner.clone()]], schema.clone(), None).unwrap();
         let outer = budget.collect(outer, context.task_ctx()).await.unwrap();
         let inner = budget.collect(inner, context.task_ctx()).await.unwrap();
-        let output = optional_memory::join(&cfg, outer, inner, &budget);
+        let output = optional_memory::join(&cfg, outer, inner, &budget).and_then(|mut prepared| {
+            prepared
+                .next(&budget, usize::MAX)
+                .map(|output| output.unwrap())
+        });
         if fits {
             let output = output.unwrap();
             assert_eq!(output.num_rows(), 1);
@@ -486,4 +509,308 @@ async fn optional_nested_empty_children_charge_the_inherited_builder_capacity() 
     assert!(pool.reserved() >= output.get_array_memory_size());
     drop(stream);
     assert_eq!(pool.reserved(), 0);
+}
+
+fn nested_rows(
+    keys: Vec<u64>,
+    offsets: Vec<i32>,
+    ids: Vec<u64>,
+    texts: Vec<Option<&str>>,
+) -> RecordBatch {
+    use arrow::array::{ListArray, StructArray};
+    use arrow::buffer::OffsetBuffer;
+    let fields = arrow::datatypes::Fields::from(vec![
+        Field::new("id", DataType::UInt64, false),
+        Field::new("text", DataType::Utf8, true),
+    ]);
+    let values = StructArray::try_new(
+        fields.clone(),
+        vec![
+            Arc::new(UInt64Array::from(ids)),
+            Arc::new(StringArray::from(texts)),
+        ],
+        None,
+    )
+    .unwrap();
+    let payload = Arc::new(ListArray::new(
+        Arc::new(Field::new("item", DataType::Struct(fields), false)),
+        OffsetBuffer::new(offsets.into()),
+        Arc::new(values),
+        None,
+    ));
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("key", DataType::UInt64, false),
+        Field::new("payload", payload.data_type().clone(), false),
+    ]));
+    RecordBatch::try_new(schema, vec![Arc::new(UInt64Array::from(keys)), payload]).unwrap()
+}
+
+#[tokio::test]
+async fn optional_nested_multi_batch_concat_admits_copies_and_preserves_every_cell() {
+    use arrow::array::{ListArray, StructArray};
+    let plan = optional(
+        vec![
+            nested_rows(vec![1], vec![0, 2], vec![10, 11], vec![Some("a"), None]),
+            nested_rows(vec![2], vec![0, 1], vec![20], vec![Some("b")]),
+        ],
+        vec![
+            nested_rows(vec![1], vec![0, 1], vec![30], vec![Some("c")]),
+            nested_rows(vec![1], vec![0, 2], vec![40, 41], vec![None, Some("d")]),
+        ],
+    );
+    let (tight, pool) = context(16 * 1024);
+    let error = collect(Arc::clone(&plan), tight.task_ctx())
+        .await
+        .err()
+        .expect("recursive concat copies exceed remaining query memory");
+    assert!(
+        error.to_string().contains("OptionalMatch concat"),
+        "{error}"
+    );
+    resource_error(error);
+    assert_eq!(pool.reserved(), 0);
+    let (roomy, pool) = context(MIB);
+    let output = collect(plan, roomy.task_ctx()).await.unwrap();
+    assert_eq!(output.len(), 1);
+    let output = &output[0];
+    assert_eq!(output.num_rows(), 3);
+    assert_eq!(
+        output
+            .column(0)
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .unwrap()
+            .values()
+            .as_ref(),
+        &[1, 1, 2]
+    );
+    let outer = output
+        .column(1)
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .unwrap();
+    let inner = output
+        .column(2)
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .unwrap();
+    for (list, row, ids, texts) in [
+        (outer, 0, vec![10, 11], vec![Some("a"), None]),
+        (outer, 1, vec![10, 11], vec![Some("a"), None]),
+        (outer, 2, vec![20], vec![Some("b")]),
+        (inner, 0, vec![30], vec![Some("c")]),
+        (inner, 1, vec![40, 41], vec![None, Some("d")]),
+    ] {
+        let values = list.value(row);
+        let values = values.as_any().downcast_ref::<StructArray>().unwrap();
+        assert_eq!(
+            values
+                .column(0)
+                .as_any()
+                .downcast_ref::<UInt64Array>()
+                .unwrap()
+                .values()
+                .as_ref(),
+            ids.as_slice()
+        );
+        assert_eq!(
+            values
+                .column(1)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap()
+                .iter()
+                .collect::<Vec<_>>(),
+            texts
+        );
+    }
+    assert_eq!(inner.null_count(), 1);
+    assert!(inner.is_null(2));
+    assert!(pool.peak_gauge().load(Ordering::Relaxed) <= MIB);
+    assert_eq!(pool.reserved(), 0);
+}
+
+#[tokio::test]
+async fn optional_concat_charges_full_sources_but_only_copies_visible_slices() {
+    use arrow::array::NullArray;
+    let rows = 524_288;
+    let source = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("key", DataType::UInt64, false),
+            Field::new("payload", DataType::Null, true),
+        ])),
+        vec![
+            Arc::new(UInt64Array::from_iter_values(
+                0..u64::try_from(rows).unwrap(),
+            )),
+            Arc::new(NullArray::new(rows)),
+        ],
+    )
+    .unwrap();
+    let retained = source.get_array_memory_size();
+    let plan = optional(
+        vec![source.slice(17, 1), source.slice(511, 1)],
+        vec![RecordBatch::new_empty(source.schema())],
+    );
+    let (context, pool) = context(16 * MIB);
+    let output = collect(plan, context.task_ctx()).await.unwrap();
+    assert_eq!(output[0].num_rows(), 2);
+    assert_eq!(
+        output[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .unwrap()
+            .values()
+            .as_ref(),
+        &[17, 511]
+    );
+    assert_eq!(output[0].column(1).logical_null_count(), 2);
+    assert_eq!(output[0].column(2).logical_null_count(), 2);
+    let peak = pool.peak_gauge().load(Ordering::Relaxed);
+    assert!(
+        peak >= 2 * retained,
+        "both full source capacities remain admitted before concat"
+    );
+    assert!(peak <= 16 * MIB);
+    assert_eq!(pool.reserved(), 0);
+}
+
+#[tokio::test]
+async fn optional_windows_keep_sources_and_yielded_output_charged_until_eos_or_drop() {
+    use futures::StreamExt;
+    for cancel in [false, true] {
+        let outer = batch(3, 4096);
+        let inner = batch(3, 32);
+        // MemorySource splits at the context batch size, then concat compacts
+        // its source slices. Regardless of spare capacity, all original visible
+        // source payload and offsets must coexist with the emitted window.
+        let source_bytes = 3 * 4096 + 3 * 32 + 3 * 8 + 2 * 4 * 4;
+        let plan = optional(vec![outer], vec![inner]);
+        let (context, pool) = context(MIB);
+        let context = SessionContext::new_with_config_rt(
+            SessionConfig::new().with_batch_size(2),
+            context.runtime_env(),
+        );
+        let mut stream = plan.execute(0, context.task_ctx()).unwrap();
+        let first = stream.next().await.unwrap().unwrap();
+        assert_eq!(first.num_rows(), 2);
+        assert!(
+            pool.reserved() >= source_bytes + first.get_array_memory_size(),
+            "held {} source {} output {}",
+            pool.reserved(),
+            source_bytes,
+            first.get_array_memory_size()
+        );
+        if !cancel {
+            let mut count = first.num_rows();
+            while let Some(output) = stream.next().await {
+                let output = output.unwrap();
+                assert!(output.num_rows() <= 2);
+                for (index, width) in [(1, 4096), (2, 32)] {
+                    assert!(
+                        output
+                            .column(index)
+                            .as_any()
+                            .downcast_ref::<StringArray>()
+                            .unwrap()
+                            .iter()
+                            .all(|value| value == Some("x".repeat(width).as_str()))
+                    );
+                }
+                count += output.num_rows();
+            }
+            assert_eq!(count, 9);
+            assert_eq!(pool.reserved(), 0, "EOS drops source authority as well");
+        }
+        drop(stream);
+        assert_eq!(pool.reserved(), 0);
+    }
+}
+
+#[tokio::test]
+async fn optional_tiny_windows_charge_full_pair_bitmap_aliases_in_nested_null_output() {
+    use arrow::array::StructArray;
+    use futures::StreamExt;
+    let rows = 100_003;
+    let fields: arrow::datatypes::Fields = vec![
+        Field::new("text", DataType::Utf8, false),
+        Field::new("number", DataType::UInt64, false),
+    ]
+    .into();
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("key", DataType::UInt64, false),
+        Field::new("payload", DataType::Struct(fields), false),
+    ]));
+    // Keep the outer payload primitive: this exercises the nullable nested
+    // inner output without repeatedly scanning 100K unrelated source strings
+    // in the deliberately conservative nested-copy preflight.
+    let outer_schema = Arc::new(Schema::new(vec![
+        Field::new("key", DataType::UInt64, false),
+        Field::new("payload", DataType::UInt64, false),
+    ]));
+    let outer = RecordBatch::try_new(
+        outer_schema.clone(),
+        vec![
+            Arc::new(UInt64Array::from_iter_values(
+                0..u64::try_from(rows).unwrap(),
+            )),
+            Arc::new(UInt64Array::from_iter_values(
+                0..u64::try_from(rows).unwrap(),
+            )),
+        ],
+    )
+    .unwrap();
+    let plan = optional(
+        vec![outer.clone()],
+        vec![RecordBatch::new_empty(schema.clone())],
+    );
+    // The real seed stream emits an unsplit batch. DataSourceExec otherwise
+    // splits this fixture into 50K slices sharing the whole source allocation,
+    // correctly exhausting collection before the output-window boundary.
+    let outer = Arc::new(CorrelatedSeedExec::with_rows(
+        19,
+        outer_schema,
+        Some(SeedRows::new(vec![outer])),
+    ));
+    let inner = plan.children()[1].clone();
+    let plan = plan.with_new_children(vec![outer, inner]).unwrap();
+    let (context, pool) = context(16 * MIB);
+    let context = SessionContext::new_with_config_rt(
+        SessionConfig::new().with_batch_size(2),
+        context.runtime_env(),
+    );
+    let mut stream = plan.execute(0, context.task_ctx()).unwrap();
+    let mut count = 0;
+    while let Some(output) = stream.next().await {
+        let output = output.unwrap();
+        assert!(output.num_rows() <= 2);
+        let keys = output
+            .column(0)
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .unwrap();
+        let numbers = output
+            .column(1)
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .unwrap();
+        let missing = output
+            .column(2)
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .unwrap();
+        assert_eq!(missing.null_count(), output.num_rows());
+        for child in missing.columns() {
+            assert_eq!(child.logical_null_count(), output.num_rows());
+        }
+        for row in 0..output.num_rows() {
+            assert_eq!(keys.value(row), u64::try_from(count + row).unwrap());
+            assert_eq!(numbers.value(row), keys.value(row));
+        }
+        count += output.num_rows();
+    }
+    assert_eq!(count, rows);
+    assert_eq!(pool.reserved(), 0);
+    assert!(pool.peak_gauge().load(Ordering::Relaxed) <= 16 * MIB);
 }

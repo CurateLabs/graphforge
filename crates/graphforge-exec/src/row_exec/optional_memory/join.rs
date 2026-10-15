@@ -1,15 +1,16 @@
 //! The existing materialized left join, with one admitted ownership envelope.
-use std::collections::HashMap;
+use std::collections::hash_map::RandomState;
+
+mod index;
+mod output;
+use index::Index;
 
 use arrow::array::{Array, FixedSizeBinaryArray, UInt32Array, UInt64Array};
-use arrow::compute::take;
 use datafusion::common::{DataFusionError, Result};
 
 use super::super::{OptionalConfig, OptionalJoinKey};
 use super::{Budget, Collected, add, refused};
 use arrow::array::RecordBatch;
-
-type Index = HashMap<Vec<OptionalJoinKey>, Vec<usize>>;
 
 fn key(
     batch: &RecordBatch,
@@ -54,37 +55,12 @@ fn row_index(value: usize) -> Result<u32> {
     u32::try_from(value).map_err(|_| refused("row index exceeds u32"))
 }
 
-fn build_index(inner: &RecordBatch, columns: &[usize], null_safe: bool) -> Result<Index> {
-    if columns.is_empty() {
-        return Ok(HashMap::new());
-    }
-    let mut index: Index = HashMap::with_capacity(inner.num_rows());
-    for row in 0..inner.num_rows() {
-        if let Some(key) = key(inner, columns, row, null_safe)? {
-            index.entry(key).or_default().push(row);
-        }
-    }
-    Ok(index)
-}
-
-fn matches<'a>(
-    index: &'a Index,
-    outer: &RecordBatch,
-    columns: &[usize],
-    row: usize,
-    null_safe: bool,
-) -> Result<&'a [usize]> {
-    Ok(key(outer, columns, row, null_safe)?
-        .and_then(|key| index.get(&key))
-        .map_or(&[], Vec::as_slice))
-}
-
 pub(in crate::row_exec) fn join(
     cfg: &OptionalConfig,
     outer: Collected,
     inner: Collected,
     budget: &Budget,
-) -> Result<RecordBatch> {
+) -> Result<output::Output> {
     let outer = budget.concat(outer, &cfg.outer_schema)?;
     let inner = budget.concat(inner, &cfg.inner_schema)?;
     for batch in [&outer, &inner] {
@@ -92,19 +68,34 @@ pub(in crate::row_exec) fn join(
             return Err(refused("row index exceeds u32"));
         }
     }
-    // Input buffers and concat copies are still charged while indexing. The
-    // pre-sized table cannot rehash; owned key values, probe keys, row-list
-    // growth and recursive scalar hashing all draw on this admitted envelope.
+    // Retain the source authority while digest buckets refer to inner rows.
+    // Only two temporary canonical keys coexist; collisions use exact equality.
     let index_bytes = budget.index(&inner, &outer, &cfg.join_keys, cfg.null_safe_keys)?;
     let outer_keys: Vec<_> = cfg.join_keys.iter().map(|&(outer, _)| outer).collect();
     let inner_keys: Vec<_> = cfg.join_keys.iter().map(|&(_, inner)| inner).collect();
-    let index = build_index(&inner, &inner_keys, cfg.null_safe_keys)?;
+    let index = Index::build(
+        &inner,
+        &inner_keys,
+        cfg.null_safe_keys,
+        budget,
+        RandomState::new(),
+    )?;
     let mut rows = 0;
     for row in 0..outer.num_rows() {
         let count = if cfg.join_keys.is_empty() {
             inner.num_rows()
         } else {
-            matches(&index, &outer, &outer_keys, row, cfg.null_safe_keys)?.len()
+            let mut count = 0;
+            index.visit(
+                (&outer, &outer_keys, row),
+                (&inner, &inner_keys),
+                cfg.null_safe_keys,
+                |_| {
+                    count = add(count, 1)?;
+                    Ok(())
+                },
+            )?;
+            count
         };
         rows = add(rows, count.max(1))?;
     }
@@ -114,23 +105,30 @@ pub(in crate::row_exec) fn join(
     let mut outer_take = Vec::with_capacity(rows);
     let mut inner_take = Vec::with_capacity(rows);
     for row in 0..outer.num_rows() {
-        let matched = matches(&index, &outer, &outer_keys, row, cfg.null_safe_keys)?;
-        if cfg.join_keys.is_empty() && inner.num_rows() != 0 {
+        let before = outer_take.len();
+        if cfg.join_keys.is_empty() {
             for inner_row in 0..inner.num_rows() {
                 outer_take.push(row_index(row)?);
                 inner_take.push(Some(row_index(inner_row)?));
             }
-        } else if matched.is_empty() {
+        } else {
+            index.visit(
+                (&outer, &outer_keys, row),
+                (&inner, &inner_keys),
+                cfg.null_safe_keys,
+                |inner_row| {
+                    outer_take.push(row_index(row)?);
+                    inner_take.push(Some(row_index(inner_row)?));
+                    Ok(())
+                },
+            )?;
+        }
+        if before == outer_take.len() {
             outer_take.push(row_index(row)?);
             inner_take.push(None);
-        } else {
-            for &inner_row in matched {
-                outer_take.push(row_index(row)?);
-                inner_take.push(Some(row_index(inner_row)?));
-            }
         }
     }
-    drop(index);
+    index.release(budget);
     drop(outer_keys);
     drop(inner_keys);
     budget.release(index_bytes);
@@ -144,16 +142,5 @@ pub(in crate::row_exec) fn join(
             )));
         }
     }
-    // Admit every completed column plus the active kernel, before the first
-    // take. The source buffers and both take arrays remain live throughout.
-    budget.take(&outer, &outer_take, 0..outer.num_columns())?;
-    budget.take(&inner, &inner_take, cfg.inner_keep_idx.iter().copied())?;
-    let mut columns = Vec::with_capacity(cfg.out_schema.fields().len());
-    for column in outer.columns() {
-        columns.push(take(column, &outer_take, None)?);
-    }
-    for &column in &cfg.inner_keep_idx {
-        columns.push(take(inner.column(column), &inner_take, None)?);
-    }
-    Ok(RecordBatch::try_new(cfg.out_schema.clone(), columns)?)
+    output::Output::new(cfg, outer, inner, outer_take, inner_take, budget)
 }

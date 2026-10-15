@@ -239,6 +239,7 @@ impl ExecutionPlan for OptionalMatchExec {
         let schema = self.schema.clone();
         let metrics = OptionalMetrics::new(&self.metrics, partition);
         let executed_inner = Arc::clone(&self.executed_inner);
+        let batch_size = context.session_config().batch_size();
         let fut = async move {
             let budget = optional_memory::Budget::new(&context);
             let outer_batches = budget.collect(outer, context.clone()).await?;
@@ -263,23 +264,42 @@ impl ExecutionPlan for OptionalMatchExec {
             drop(seed_release);
             let inner_batches = collected?;
             metrics.inner_rows.add(row_count(&inner_batches.batches));
-            let _timer = metrics.baseline.elapsed_compute().timer();
+            let timer = metrics.baseline.elapsed_compute().timer();
             let joined = optional_memory::join(&cfg, outer_batches, inner_batches, &budget)?;
-            budget.output(&joined)?;
-            Ok::<_, DataFusionError>((joined.record_output(&metrics.baseline), budget))
+            drop(timer);
+            Ok::<_, DataFusionError>((joined, budget, metrics))
         };
         Ok(Box::pin(RecordBatchStreamAdapter::new(
             schema,
-            // A yielded batch remains owned by the consumer until its next poll.
-            // Keep its charge in the stream state through that handoff and drop.
-            futures::stream::try_unfold((Some(fut), None), |(future, held)| async move {
-                drop(held);
-                let Some(future) = future else {
-                    return Ok(None);
-                };
-                let (batch, budget) = future.await?;
-                Ok::<_, DataFusionError>(Some((batch, (None, Some(budget)))))
-            }),
+            // Source authority and the emitted window stay charged through
+            // the handoff. The next poll releases only that window, never the
+            // retained source arrays or complete pair-index capacities.
+            futures::stream::try_unfold(
+                (Some(fut), None, 0),
+                move |(future, state, held)| async move {
+                    // Tuple fields drop source arrays before the reservation on
+                    // error/EOS and while unwinding, just as stored stream state.
+                    let mut state = match state {
+                        Some(state) => state,
+                        None => future.expect("initial optional preparation").await?,
+                    };
+                    state.1.release(held);
+                    let batch = {
+                        let _timer = state.2.baseline.elapsed_compute().timer();
+                        state.0.next(&state.1, batch_size)?
+                    };
+                    match batch {
+                        Some(batch) => {
+                            let held = optional_memory::batch_bytes(&batch)?;
+                            Ok::<_, DataFusionError>(Some((
+                                batch.record_output(&state.2.baseline),
+                                (None, Some(state), held),
+                            )))
+                        }
+                        None => Ok(None),
+                    }
+                },
+            ),
         )))
     }
 }
