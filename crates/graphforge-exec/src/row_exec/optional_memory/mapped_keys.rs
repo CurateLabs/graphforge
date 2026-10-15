@@ -95,13 +95,19 @@ impl Budget {
         plan: Arc<dyn ExecutionPlan>,
         context: Arc<TaskContext>,
         cfg: &mut super::super::OptionalConfig,
-        outer: &RecordBatch,
+        outer: &Collected,
     ) -> Result<Collected> {
         // Qualify the complete producer schema before constructing even empty
         // authority arrays. collect_with still validates each emitted batch.
         for field in plan.schema().fields() {
             super::arrays::validate(field.data_type())?;
         }
+        // Borrow only from the fully admitted compact outer which join moves
+        // unchanged into Output. A multi-batch concat could release its sources.
+        if outer.batches.len() != 1 || !outer.borrowed.is_empty() {
+            return Err(refused("mapped keys require one fully owned outer batch"));
+        }
+        let outer = &outer.batches[0];
         u32::try_from(outer.num_rows().saturating_sub(1))
             .map_err(|_| refused("row index exceeds u32"))?;
         // Column positions and key conversion scratch coexist with the source
@@ -156,8 +162,8 @@ impl Budget {
         drop(inner_keys);
         self.release(handles);
         if let Some(payload) = payload {
-            let (authority, rows) = payload.finish(self);
-            self.prepend(&mut collected, authority)?;
+            let (authority, rows, borrowed) = payload.finish(self);
+            self.prepend(&mut collected, authority, borrowed)?;
             collected.payload = Some(rows);
         }
         collected.mapped = Some(rows);

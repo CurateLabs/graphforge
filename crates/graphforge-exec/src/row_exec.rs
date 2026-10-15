@@ -266,7 +266,7 @@ impl ExecutionPlan for OptionalMatchExec {
             };
             let collected = if mapped {
                 budget
-                    .collect_mapped(inner, context, &mut cfg, &outer_batches.batches[0])
+                    .collect_mapped(inner, context, &mut cfg, &outer_batches)
                     .await
             } else {
                 budget.collect(inner, context).await

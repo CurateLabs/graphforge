@@ -84,10 +84,11 @@ pub(in crate::row_exec) fn join(
     mut inner: Collected,
     budget: &Budget,
 ) -> Result<output::Output> {
+    inner.validate_outer(&outer)?;
     let outer = budget.concat(outer, &cfg.outer_schema)?;
     let mapped = inner.mapped.take();
     let payload = inner.payload.take();
-    let inner = budget.concat(inner, &cfg.inner_schema)?;
+    let (inner, borrowed) = budget.concat_retained(inner, &cfg.inner_schema, Some(&outer))?;
     for batch in [&outer, &inner] {
         row_index(batch.num_rows().saturating_sub(1))?;
     }
@@ -186,5 +187,5 @@ pub(in crate::row_exec) fn join(
             )));
         }
     }
-    output::Output::new(cfg, outer, inner, outer_take, inner_take, budget)
+    output::Output::new(cfg, outer, inner, borrowed, outer_take, inner_take, budget)
 }

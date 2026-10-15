@@ -15,6 +15,9 @@ pub(super) struct Dictionary {
     keys: Vec<(usize, usize)>,
     probe_keys: Vec<usize>,
     handles: usize,
+    // Exact ArrayRef aliases of the retained outer, indexed by authority column.
+    // Zero denotes an owned, newly constructed null array.
+    borrowed: Vec<usize>,
     rows: Vec<u32>,
     stored: usize,
 }
@@ -88,12 +91,15 @@ impl Dictionary {
         budget.admit(add(handles, schema_bound(schema, 0)?)?)?;
         let metadata = add(std::mem::size_of::<RecordBatch>(), mul(keep.len(), 128)?)?;
         budget.admit(metadata)?;
+        budget.admit(mul(keep.len(), std::mem::size_of::<usize>())?)?;
+        let mut borrowed = Vec::with_capacity(keep.len());
         let mut columns = Vec::with_capacity(keep.len());
         for field in schema.fields() {
             if let Some(index) = matching(outer_schema.as_ref(), field).next() {
                 let source = outer.column(index);
-                // Count complete backing aliases conservatively again.
-                budget.admit(source.get_array_memory_size())?;
+                // The owning outer remains fully charged through Output's last
+                // use. Track this exact alias so concat never releases its charge.
+                borrowed.push(source.get_array_memory_size());
                 columns.push(Arc::clone(source));
             } else {
                 let empty = new_empty_array(field.data_type());
@@ -105,6 +111,7 @@ impl Dictionary {
                     return Err(refused("null authority exceeded its admitted envelope"));
                 }
                 budget.release(envelope - actual);
+                borrowed.push(0);
                 columns.push(nulls);
             }
         }
@@ -139,6 +146,7 @@ impl Dictionary {
             keys,
             probe_keys,
             handles,
+            borrowed,
             rows: Vec::new(),
             stored,
         }))
@@ -205,7 +213,7 @@ impl Dictionary {
         Ok(retained)
     }
 
-    pub(super) fn finish(self, budget: &Budget) -> (RecordBatch, Vec<u32>) {
+    pub(super) fn finish(self, budget: &Budget) -> (RecordBatch, Vec<u32>, Vec<usize>) {
         let Self {
             authority,
             columns,
@@ -213,6 +221,7 @@ impl Dictionary {
             keys,
             probe_keys,
             handles,
+            borrowed,
             rows,
             ..
         } = self;
@@ -221,6 +230,6 @@ impl Dictionary {
         drop(keys);
         drop(probe_keys);
         budget.release(handles);
-        (authority, rows)
+        (authority, rows, borrowed)
     }
 }
