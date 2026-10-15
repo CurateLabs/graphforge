@@ -46,7 +46,7 @@ fn matching<'a>(outer: &'a Schema, field: &'a Field) -> impl Iterator<Item = usi
 impl Dictionary {
     pub(super) fn new(
         outer: &RecordBatch,
-        schema: SchemaRef,
+        schema: &SchemaRef,
         keep: &[usize],
         outer_keys: &[usize],
         budget: &Budget,
@@ -85,7 +85,7 @@ impl Dictionary {
             add(mul(keep.len(), 4)?, outer_keys.len())?,
             std::mem::size_of::<usize>(),
         )?;
-        budget.admit(add(handles, schema_bound(&schema, 0)?)?)?;
+        budget.admit(add(handles, schema_bound(schema, 0)?)?)?;
         let metadata = add(std::mem::size_of::<RecordBatch>(), mul(keep.len(), 128)?)?;
         budget.admit(metadata)?;
         let mut columns = Vec::with_capacity(keep.len());
@@ -187,12 +187,11 @@ impl Dictionary {
                 Some(index) if source.key(index, true)? == probe.key(row, true)? => Some(index),
                 _ => None,
             };
-            let index = match matched {
-                Some(index) => index,
-                None => {
-                    retained = true;
-                    add(self.stored, row)?
-                }
+            let index = if let Some(index) = matched {
+                index
+            } else {
+                retained = true;
+                add(self.stored, row)?
             };
             self.rows
                 .push(u32::try_from(index).map_err(|_| refused("payload row index exceeds u32"))?);

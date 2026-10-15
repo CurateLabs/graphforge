@@ -58,12 +58,12 @@ impl Mapper<'_> {
                     .map_err(|_| refused("row index exceeds u32"))?,
             );
         }
-        if let Some(payload) = &mut self.payload {
-            if !payload.map(&batch, &self.index, source, budget)? {
-                drop(batch);
-                budget.release(work);
-                return Ok(None);
-            }
+        if let Some(payload) = &mut self.payload
+            && !payload.map(&batch, &self.index, source, budget)?
+        {
+            drop(batch);
+            budget.release(work);
+            return Ok(None);
         }
         let held = self.keep.iter().try_fold(
             add(
@@ -126,7 +126,7 @@ impl Budget {
         let schema = Arc::new(cfg.inner_schema.project(&cfg.inner_keep_idx)?);
         let payload = super::payload_dictionary::Dictionary::new(
             outer,
-            schema.clone(),
+            &schema,
             &cfg.inner_keep_idx,
             &outer_keys,
             self,

@@ -89,9 +89,7 @@ pub(in crate::row_exec) fn join(
     let payload = inner.payload.take();
     let inner = budget.concat(inner, &cfg.inner_schema)?;
     for batch in [&outer, &inner] {
-        if u32::try_from(batch.num_rows().saturating_sub(1)).is_err() {
-            return Err(refused("row index exceeds u32"));
-        }
+        row_index(batch.num_rows().saturating_sub(1))?;
     }
     // Retain the source authority while digest buckets refer to inner rows.
     // Only two temporary canonical keys coexist; collisions use exact equality.
