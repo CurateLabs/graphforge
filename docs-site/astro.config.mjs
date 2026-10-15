@@ -544,6 +544,10 @@ export default defineConfig({
                   label: '0059 — Edge properties are read through a derived, authenticated shard index',
                   slug: 'adr/0059-edge-properties-are-read-through-a-derived-shard-index',
                 },
+                {
+                  label: '0060 — Carry prepaid memory authority across reader handoffs',
+                  slug: 'adr/0060-query-memory-handoffs',
+                },
                 // END generated ADR records
               ],
             },

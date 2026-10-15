@@ -477,3 +477,15 @@ pub(super) fn handle_bytes(batches: &[RecordBatch]) -> Result<usize> {
         )
     })
 }
+
+/// Share the established kernel envelope without sharing OPTIONAL ownership.
+pub(super) fn selected_bytes(
+    array: &dyn arrow::array::Array,
+    indices: &arrow::array::UInt32Array,
+) -> Result<usize> {
+    arrays::selected(array, indices)
+}
+
+pub(super) fn copy_bytes(array: &dyn arrow::array::Array, rows: usize) -> Result<usize> {
+    arrays::take(array, rows)
+}

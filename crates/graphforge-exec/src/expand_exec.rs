@@ -37,7 +37,6 @@ use datafusion::physical_plan::stream::RecordBatchReceiverStream;
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use edge_filter::PhysicalEdgeFilter;
 pub(crate) use edge_properties::EdgePropSource;
-use edge_properties::build_edge_prop_children;
 use edge_properties::edge_prop_children;
 use edge_properties::load_edge_prop_source;
 use futures::StreamExt;
@@ -1716,10 +1715,10 @@ impl ExpandExec {
             edge_predicate: self.edge_predicate.clone(),
             metrics: self.metrics.partition(partition),
             reservation: std::sync::Mutex::new(crate::fast_path::expand_reservation(context)),
-            read_reservation: std::sync::Mutex::new(ChunkedReservation::register(
+            read_reservation: Arc::new(std::sync::Mutex::new(ChunkedReservation::register(
                 HOP_READ_CONSUMER,
                 context.memory_pool(),
-            )),
+            ))),
         }
     }
 }
@@ -2024,6 +2023,7 @@ impl ExecutionPlan for ExpandExec {
                 None,
                 batch_size,
                 initial_batch_goal,
+                None::<Arc<HopReadCharge>>,
             ),
             |(
                 mut input_stream,
@@ -2032,7 +2032,9 @@ impl ExecutionPlan for ExpandExec {
                 mut pending,
                 batch_size,
                 mut next_batch_goal,
+                previous_output,
             )| async move {
+                drop(previous_output);
                 loop {
                     if remaining == Some(0)
                         || cfg
@@ -2045,7 +2047,7 @@ impl ExecutionPlan for ExpandExec {
                     if let Some((input_batch, position)) = pending.as_mut() {
                         let max_output =
                             remaining.map_or(next_batch_goal, |left| left.min(next_batch_goal));
-                        let output = {
+                        let chunk = {
                             let _compute = cfg.metrics.compute();
                             expand_single_hop_chunk(&cfg, input_batch, position, max_output)
                                 .map_err(to_df_err)?
@@ -2053,7 +2055,14 @@ impl ExecutionPlan for ExpandExec {
                         if position.row >= input_batch.num_rows() {
                             pending = None;
                         }
-                        cfg.account(pending.as_ref().map(|(batch, _)| batch), &output)?;
+                        cfg.account(
+                            pending.as_ref().map(|(batch, _)| batch),
+                            &RecordBatch::new_empty(cfg.out_schema.clone()),
+                        )?;
+                        // Declare the guard first: fallible downstream work
+                        // and empty-output cleanup must drop the batch first.
+                        let output_charge = chunk.charge;
+                        let output = chunk.batch;
                         if let Some(left) = remaining.as_mut() {
                             *left = left.saturating_sub(output.num_rows());
                         }
@@ -2072,6 +2081,7 @@ impl ExecutionPlan for ExpandExec {
                                 pending,
                                 batch_size,
                                 next_batch_goal,
+                                Some(output_charge),
                             ),
                         )));
                     }
@@ -2121,7 +2131,7 @@ struct SingleHopConfig {
     /// Memory-pool reservation for the edge and destination-node reads one
     /// chunk holds while it assembles its output (#1987). Separate from
     /// `reservation`, which is resized absolutely to the held input and output.
-    read_reservation: std::sync::Mutex<ChunkedReservation>,
+    read_reservation: Arc<std::sync::Mutex<ChunkedReservation>>,
 }
 
 /// Resumable position within one input batch. Keeping the raw adjacency offset
@@ -2133,6 +2143,8 @@ struct SingleHopPosition {
     row: usize,
     neighbor_offset: usize,
     seen_edges: std::collections::HashSet<u64>,
+    // clear() retains the table across chunk boundaries; its guard follows it.
+    seen_charge: Option<HopReadCharge>,
 }
 
 fn require_admitted_ordinal_identity(required: bool, admitted: bool) -> Result<(), GfError> {
@@ -2144,23 +2156,24 @@ fn require_admitted_ordinal_identity(required: bool, admitted: bool) -> Result<(
     Ok(())
 }
 
-/// Execute the adjacency-backed single-hop expansion: for every input row's
-/// source node, emit one output row per adjacency entry, assembling input,
-/// edge-topology, edge-property (nullable), and destination-node columns in
-/// the [`graphforge_plan::ExpandNode`] schema order — the same rows the join chain
-/// produces.
 #[allow(clippy::too_many_lines)]
-fn expand_single_hop_chunk(
+fn expand_single_hop_chunk_inner(
     cfg: &SingleHopConfig,
     input: &RecordBatch,
     position: &mut SingleHopPosition,
     max_output: usize,
+    read_charge: &mut HopReadCharge,
 ) -> Result<RecordBatch, GfError> {
     use std::collections::HashMap;
-
-    use arrow::compute::take;
-
     let exec_err = |m: String| GfError::Execution(m);
+    // Empty output arrays and the output ArrayRef vector also own headers.
+    for field in cfg.out_schema.fields() {
+        read_charge.charge(hop_read::unused_bytes(field.data_type(), 0)?)?;
+    }
+    read_charge.charge(hop_read::checked_mul(
+        cfg.out_schema.fields().len(),
+        std::mem::size_of::<ArrayRef>(),
+    )?)?;
 
     if input.num_rows() == 0 || max_output == 0 {
         return Ok(RecordBatch::new_empty(cfg.out_schema.clone()));
@@ -2175,7 +2188,6 @@ fn expand_single_hop_chunk(
     let src_ids = u64_column(input, cfg.src_col_idx)?;
     // Everything this chunk reads from the edge and node files is charged to the
     // pool until the chunk ends (#1987).
-    let mut read_charge = HopReadCharge::new(&cfg.read_reservation);
 
     // The adjacency view: directional for Out/In, merged for Undirected
     // (dedup per input row happens in the emit pass below).
@@ -2203,7 +2215,7 @@ fn expand_single_hop_chunk(
             position.seen_edges.clear();
             continue;
         };
-        adjacency.with_neighbors(src, |neighbors| {
+        adjacency.with_neighbors(src, |neighbors| -> Result<(), GfError> {
             while position.neighbor_offset < neighbors.len() && triples.len() < max_output {
                 let (edge_id, neighbor) = neighbors
                     .get(position.neighbor_offset)
@@ -2211,20 +2223,29 @@ fn expand_single_hop_chunk(
                 position.neighbor_offset += 1;
                 examined += 1;
                 if matches!(cfg.direction, Direction::Undirected)
-                    && !position.seen_edges.insert(edge_id)
+                    && !hop_read::set_insert(
+                        position
+                            .seen_charge
+                            .get_or_insert_with(|| HopReadCharge::new(&cfg.read_reservation)),
+                        &mut position.seen_edges,
+                        edge_id,
+                    )?
                 {
                     continue;
                 }
+                let next = triples.len() + 1;
+                hop_read::vector_capacity(read_charge, &mut triples, next)?;
                 triples.push((row, edge_id, neighbor));
-                traversed.insert(edge_id);
-                reached.insert(neighbor);
+                hop_read::set_insert(read_charge, &mut traversed, edge_id)?;
+                hop_read::set_insert(read_charge, &mut reached, neighbor)?;
             }
             if position.neighbor_offset >= neighbors.len() {
                 position.row += 1;
                 position.neighbor_offset = 0;
                 position.seen_edges.clear();
             }
-        })?;
+            Ok(())
+        })??;
     }
     cfg.metrics.adjacency_entries(examined);
     if triples.is_empty() {
@@ -2282,6 +2303,10 @@ fn expand_single_hop_chunk(
         && destination_identity_only
         && let Some(ordinal_identities) = cfg.ordinal_identities.as_ref()
     {
+        read_charge.charge(hop_read::checked_mul(
+            reached.len(),
+            8 + std::mem::size_of::<Option<graphforge_core::uuid::Uuid>>(),
+        )?)?;
         let mut requested = reached.iter().copied().collect::<Vec<_>>();
         requested.sort_unstable();
         let (resolved, identity_metrics) = if uuid_required {
@@ -2295,7 +2320,11 @@ fn expand_single_hop_chunk(
                 graphforge_storage::V4OrdinalLookupMetrics::default(),
             )
         };
-        let mut uuids = HashMap::with_capacity(requested.len());
+        let mut uuids = hop_read::admitted_table::<(u64, [u8; 16]), _>(
+            read_charge,
+            requested.len(),
+            HashMap::with_capacity,
+        )?;
         for (node_id, uuid) in requested.into_iter().zip(resolved) {
             if uuid_required {
                 let uuid = uuid.ok_or_else(|| {
@@ -2306,6 +2335,7 @@ fn expand_single_hop_chunk(
                 uuids.insert(node_id, *uuid.as_bytes());
             }
         }
+        read_charge.charge(hop_read::checked_mul(triples.len(), 4 + 8 + 8 + 16)?)?;
         let src_take = arrow::array::UInt32Array::from(
             triples
                 .iter()
@@ -2316,8 +2346,7 @@ fn expand_single_hop_chunk(
         );
         let mut columns = Vec::with_capacity(cfg.out_schema.fields().len());
         for column in input.columns() {
-            columns
-                .push(take(column, &src_take, None).map_err(|error| exec_err(error.to_string()))?);
+            columns.push(hop_read::take(read_charge, column, &src_take)?);
         }
         for (offset, field) in cfg
             .out_schema
@@ -2336,7 +2365,7 @@ fn expand_single_hop_chunk(
                         .collect::<Vec<_>>(),
                 )));
             } else {
-                columns.push(unused_expand_column(field, triples.len())?);
+                columns.push(hop_read::unused(read_charge, field, triples.len())?);
             }
         }
         for (offset, field) in cfg.out_schema.fields().iter().skip(edge_end).enumerate() {
@@ -2359,7 +2388,7 @@ fn expand_single_hop_chunk(
                 }
                 Arc::new(builder.finish())
             } else {
-                unused_expand_column(field, triples.len())?
+                hop_read::unused(read_charge, field, triples.len())?
             };
             columns.push(column);
         }
@@ -2394,6 +2423,10 @@ fn expand_single_hop_chunk(
             cfg.capture_epoch,
         )) as Arc<dyn graphforge_storage::io_stats::FilteredReadObserver>
     });
+    read_charge.charge(hop_read::checked_mul(
+        cfg.edge_prop_count,
+        2 * std::mem::size_of::<arrow::datatypes::FieldRef>(),
+    )?)?;
     let prop_fields: Vec<arrow::datatypes::FieldRef> = cfg
         .out_schema
         .fields()
@@ -2422,20 +2455,27 @@ fn expand_single_hop_chunk(
     // are not read at all (#1984). A route whose index cannot answer by id
     // (older, stale, or not joined to its topology) keeps the UUID-keyed read.
     let id_keyed_properties = if relationship_properties_required && ordinal_topology_only {
-        let targets: std::collections::BTreeSet<u64> = traversed.iter().copied().collect();
-        edge_properties::load_edge_prop_source_by_id(
-            &*cfg.provider,
-            &cfg.rel_type_name,
-            &cfg.dir,
-            &demanded_property_fields,
-            &targets,
-        )?
+        hop_read::with_property_targets(read_charge, &traversed, |targets| {
+            edge_properties::load_edge_prop_source_by_id(
+                &*cfg.provider,
+                &cfg.rel_type_name,
+                &cfg.dir,
+                &demanded_property_fields,
+                targets,
+            )
+        })?
     } else {
         None
     };
-    let mut edge_projection = (0..edge_topology_width)
-        .filter(|offset| required.is_none_or(|mask| mask[cfg.input_width + offset]))
-        .collect::<Vec<_>>();
+    read_charge.charge(hop_read::checked_mul(
+        edge_topology_width + 1,
+        std::mem::size_of::<usize>(),
+    )?)?;
+    let mut edge_projection = Vec::with_capacity(edge_topology_width + 1);
+    edge_projection.extend(
+        (0..edge_topology_width)
+            .filter(|offset| required.is_none_or(|mask| mask[cfg.input_width + offset])),
+    );
     // edge_id keys adjacency entries; edge_uuid keys demanded relationship
     // properties. Storage adds edge_id automatically.
     if relationship_properties_required {
@@ -2448,68 +2488,16 @@ fn expand_single_hop_chunk(
         drop(edge_permit);
         None
     } else {
-        let admitted_inventory = cfg.provider.admitted_inventory();
-        // Admit decoder scratch before Parquet reads allocate it. The estimate
-        // includes dictionary expansion and the returned buffers; retain it
-        // through concatenation until the owned result has its own charge.
-        let decode_bytes = if let Some(inventory) = admitted_inventory.as_deref() {
-            let projection = if required.is_some() {
-                edge_projection.clone()
-            } else {
-                (0..edge_topology_width).collect()
-            };
-            graphforge_storage::edge_decode_admission_bytes(
-                inventory,
-                &cfg.rel_type_name,
-                cfg.mode,
-                &traversed,
-                &projection,
-            )
-            .map_err(GfError::from_execution_error)?
-        } else {
-            0
-        };
-        read_charge.charge(decode_bytes)?;
-        let edge_batches =
-            if let Some(inventory) = admitted_inventory.as_deref().filter(|_| required.is_some()) {
-                graphforge_storage::read_edges_filtered_projected_from_inventory(
-                    inventory,
-                    &cfg.rel_type_name,
-                    cfg.mode,
-                    &traversed,
-                    &edge_projection,
-                    edge_observer.as_ref(),
-                )
-            } else if required.is_some() {
-                graphforge_storage::read_edges_filtered_projected_observed(
-                    &cfg.dir,
-                    &cfg.rel_type_name,
-                    cfg.mode,
-                    &traversed,
-                    &edge_projection,
-                    edge_observer.as_ref(),
-                )
-            } else if let Some(inventory) = admitted_inventory.as_deref() {
-                graphforge_storage::read_edges_filtered_observed_from_inventory(
-                    inventory,
-                    &cfg.rel_type_name,
-                    cfg.mode,
-                    &traversed,
-                    edge_observer.as_ref(),
-                )
-            } else {
-                graphforge_storage::read_edges_filtered_observed(
-                    &cfg.dir,
-                    &cfg.rel_type_name,
-                    cfg.mode,
-                    &traversed,
-                    edge_observer.as_ref(),
-                )
-            }
-            .map_err(|e| exec_err(e.to_string()))?;
+        let edge_batch = hop_read::read_edge_batch(
+            cfg,
+            read_charge,
+            &traversed,
+            &edge_projection,
+            required.is_some(),
+            edge_topology_width,
+            edge_observer.as_ref(),
+        )?;
         drop(edge_permit);
-        read_charge.replace(decode_bytes, batches_bytes(&edge_batches))?;
-        let edge_batch = concat_precharged(&mut read_charge, edge_batches)?;
         cfg.metrics.edge_rows(edge_batch.num_rows());
         Some(edge_batch)
     };
@@ -2521,16 +2509,20 @@ fn expand_single_hop_chunk(
                 .index_of("edge_id")
                 .map_err(|error| exec_err(error.to_string()))?;
             let edge_ids_col = u64_column(edge_batch, edge_id_index)?;
-            (0..edge_batch.num_rows())
-                .filter_map(|i| edge_ids_col.value_at(i).map(|id| (id, i)))
-                .collect()
+            let mut rows = hop_read::admitted_table::<(u64, usize), _>(
+                read_charge,
+                edge_batch.num_rows(),
+                HashMap::with_capacity,
+            )?;
+            for i in 0..edge_batch.num_rows() {
+                if let Some(id) = edge_ids_col.value_at(i) {
+                    rows.insert(id, i);
+                }
+            }
+            rows
         }
         None => HashMap::new(),
     };
-    read_charge.charge(hash_table_bytes(
-        edge_row.capacity(),
-        std::mem::size_of::<(u64, usize)>(),
-    ))?;
     let edge_uuids = edge_batch
         .as_ref()
         .filter(|_| relationship_properties_required)
@@ -2552,15 +2544,25 @@ fn expand_single_hop_chunk(
     // here are reused for the output columns.
     let mut prefetched_properties: Option<Vec<ArrayRef>> = None;
     if let Some(predicate) = cfg.edge_predicate.as_ref() {
+        // ID/UUID requests, verdict and its clone/bitmap, plus expression
+        // input ArrayRef vectors coexist before filtering triples.
+        read_charge.charge(hop_read::checked_add(
+            hop_read::checked_mul(triples.len(), 8 + 16 + 4)?,
+            hop_read::checked_mul(
+                predicate.fields().len(),
+                2 * std::mem::size_of::<ArrayRef>(),
+            )?,
+        )?)?;
         let hop_edge_ids = triples
             .iter()
             .map(|(_, edge_id, _)| *edge_id)
             .collect::<Vec<_>>();
         let mut children = if let Some(source) = id_keyed_properties.as_ref() {
-            edge_properties::edge_prop_children_by_id(
+            edge_properties::edge_prop_children_by_id_admitted(
                 source,
                 &demanded_property_fields,
                 &hop_edge_ids,
+                read_charge,
             )?
         } else {
             let edge_uuids = edge_uuids.ok_or_else(|| {
@@ -2582,12 +2584,13 @@ fn expand_single_hop_chunk(
                 edge_uuid.copy_from_slice(edge_uuids.value(edge_idx));
                 uuids.push(edge_uuid);
             }
-            build_edge_prop_children(
+            edge_properties::build_edge_prop_children_admitted(
                 cfg.provider.admitted_inventory().as_deref(),
                 &cfg.rel_type_name,
                 &cfg.dir,
                 &demanded_property_fields,
                 &uuids,
+                read_charge,
             )?
         };
         let mut read = Vec::with_capacity(predicate.fields().len());
@@ -2606,17 +2609,17 @@ fn expand_single_hop_chunk(
         }
         let verdicts = predicate.passing(read, triples.len())?;
         if verdicts.iter().any(|passes| !passes) {
+            hop_read::filter_workspace(read_charge, children.len(), verdicts.len())?;
             let keep = arrow::array::BooleanArray::from(verdicts.clone());
             children = children
                 .iter()
-                .map(|column| {
-                    arrow::compute::filter(column, &keep)
-                        .map_err(|error| exec_err(error.to_string()))
-                })
+                .map(|column| hop_read::filter(read_charge, column, &keep))
                 .collect::<Result<Vec<_>, _>>()?;
             let mut verdicts = verdicts.into_iter();
             triples.retain(|_| verdicts.next().unwrap_or(false));
-            reached = triples.iter().map(|(_, _, neighbor)| *neighbor).collect();
+            // A filtered subset fits the already-admitted original table.
+            reached.clear();
+            reached.extend(triples.iter().map(|(_, _, neighbor)| *neighbor));
         }
         if triples.is_empty() {
             return Ok(RecordBatch::new_empty(cfg.out_schema.clone()));
@@ -2639,9 +2642,14 @@ fn expand_single_hop_chunk(
             cfg.capture_epoch,
         )) as Arc<dyn graphforge_storage::io_stats::FilteredReadObserver>
     });
-    let node_projection = (0..dst_width)
-        .filter(|offset| required.is_none_or(|mask| mask[edge_end + offset]))
-        .collect::<Vec<_>>();
+    read_charge.charge(hop_read::checked_mul(
+        dst_width,
+        std::mem::size_of::<usize>(),
+    )?)?;
+    let mut node_projection = Vec::with_capacity(dst_width);
+    node_projection.extend(
+        (0..dst_width).filter(|offset| required.is_none_or(|mask| mask[edge_end + offset])),
+    );
     let edge_key_index =
         if matches!(cfg.mode, OntologyMode::Exploratory) || cfg.rel_type_name == "*" {
             graphforge_storage::EXPLORATORY_EDGE_SCHEMA.index_of("edge_id")
@@ -2678,6 +2686,7 @@ fn expand_single_hop_chunk(
             edge_end,
             &node_projection,
             &reached,
+            read_charge,
         )?
     } else {
         None
@@ -2696,16 +2705,23 @@ fn expand_single_hop_chunk(
         }
         destination.batch
     } else {
+        let files = topology_for_provider(cfg.provider.as_ref(), &cfg.dir)?;
+        let (decode_bytes, metadata_bytes, retained_schemas) =
+            graphforge_storage::node_decode_admission_bytes(&files, &reached, |bytes| {
+                read_charge.charge(bytes).map_err(to_df_err)
+            })
+            .map_err(GfError::from_execution_error)?;
+        read_charge.charge(decode_bytes)?;
         let node_batches = if required.is_some() {
             graphforge_storage::read_nodes_filtered_projected_observed_from_files(
-                &topology_for_provider(cfg.provider.as_ref(), &cfg.dir)?,
+                &files,
                 &reached,
                 &node_projection,
                 node_observer.as_ref(),
             )
         } else {
             graphforge_storage::read_nodes_filtered_observed_from_files(
-                &topology_for_provider(cfg.provider.as_ref(), &cfg.dir)?,
+                &files,
                 &reached,
                 node_observer.as_ref(),
             )
@@ -2715,7 +2731,11 @@ fn expand_single_hop_chunk(
         if node_batches.is_empty() {
             return Ok(RecordBatch::new_empty(cfg.out_schema.clone()));
         }
-        concat_charged(&mut read_charge, node_batches)?
+        // Both the outer projected builder and any dense retry have dropped.
+        // Returned batches still own their independently admitted schemas.
+        read_charge.replace(metadata_bytes, retained_schemas)?;
+        read_charge.replace(decode_bytes, batches_bytes(&node_batches))?;
+        concat_precharged(read_charge, node_batches)?
     };
     cfg.metrics.destination_rows(node_batch.num_rows());
     let node_id_index = node_batch
@@ -2723,25 +2743,27 @@ fn expand_single_hop_chunk(
         .index_of("node_id")
         .map_err(|error| exec_err(error.to_string()))?;
     let node_ids = u64_column(&node_batch, node_id_index)?;
-    let node_row: HashMap<u64, usize> = node_ids
-        .iter()
-        .enumerate()
-        .filter_map(|(i, id)| id.map(|v| (v, i)))
-        .collect();
-    read_charge.charge(hash_table_bytes(
-        node_row.capacity(),
-        std::mem::size_of::<(u64, usize)>(),
-    ))?;
+    let mut node_row: HashMap<u64, usize> = hop_read::admitted_table::<(u64, usize), _>(
+        read_charge,
+        node_batch.num_rows(),
+        HashMap::with_capacity,
+    )?;
+    for (row, id) in node_ids.iter().enumerate() {
+        if let Some(id) = id {
+            node_row.insert(id, row);
+        }
+    }
 
     // Pass 2: convert triples into take indices against the FILTERED edge
     // batch (edge_row maps edge_id -> position within it).
     let to_u32 = |v: usize| -> Result<u32, GfError> {
         u32::try_from(v).map_err(|_| exec_err(format!("row index {v} exceeds u32")))
     };
-    let mut src_take: Vec<u32> = Vec::new();
-    let mut edge_take: Vec<u32> = Vec::new();
-    let mut dst_take: Vec<u32> = Vec::new();
-    let mut output_edge_uuids: Vec<[u8; 16]> = Vec::new();
+    read_charge.charge(hop_read::checked_mul(triples.len(), 3 * 4 + 16)?)?;
+    let mut src_take: Vec<u32> = Vec::with_capacity(triples.len());
+    let mut edge_take: Vec<u32> = Vec::with_capacity(triples.len());
+    let mut dst_take: Vec<u32> = Vec::with_capacity(triples.len());
+    let mut output_edge_uuids: Vec<[u8; 16]> = Vec::with_capacity(triples.len());
     for &(row, edge_id, neighbor) in &triples {
         let Some(&dst_idx) = node_row.get(&neighbor) else {
             return Err(exec_err(format!(
@@ -2779,7 +2801,7 @@ fn expand_single_hop_chunk(
     // edge properties (nullable) ++ destination node.
     let mut columns = Vec::with_capacity(cfg.out_schema.fields().len());
     for column in input.columns() {
-        columns.push(take(column, &src_take, None).map_err(|error| exec_err(error.to_string()))?);
+        columns.push(hop_read::take(read_charge, column, &src_take)?);
     }
     for (offset, field) in cfg
         .out_schema
@@ -2791,7 +2813,7 @@ fn expand_single_hop_chunk(
     {
         let index = cfg.input_width + offset;
         columns.push(if !required.is_none_or(|mask| mask[index]) {
-            unused_expand_column(field, triples.len())?
+            hop_read::unused(read_charge, field, triples.len())?
         } else if let Some(edge_batch) = edge_batch.as_ref() {
             let column = edge_batch.column_by_name(field.name()).ok_or_else(|| {
                 exec_err(format!(
@@ -2799,10 +2821,11 @@ fn expand_single_hop_chunk(
                     field.name()
                 ))
             })?;
-            take(column, &edge_take, None).map_err(|error| exec_err(error.to_string()))?
+            hop_read::take(read_charge, column, &edge_take)?
         } else {
             // No edge file was read: the only demanded edge column is the
             // ordinal the CSR carries.
+            read_charge.charge(hop_read::checked_mul(triples.len(), 8)?)?;
             Arc::new(UInt64Array::from(
                 triples
                     .iter()
@@ -2814,31 +2837,50 @@ fn expand_single_hop_chunk(
     let demanded_property_columns = if let Some(children) = prefetched_properties {
         children
     } else if let Some(source) = id_keyed_properties.as_ref() {
+        read_charge.charge(hop_read::checked_mul(triples.len(), 8)?)?;
         let hop_edge_ids = triples
             .iter()
             .map(|(_, edge_id, _)| *edge_id)
             .collect::<Vec<_>>();
-        edge_properties::edge_prop_children_by_id(source, &demanded_property_fields, &hop_edge_ids)?
+        edge_properties::edge_prop_children_by_id_admitted(
+            source,
+            &demanded_property_fields,
+            &hop_edge_ids,
+            read_charge,
+        )?
     } else {
-        build_edge_prop_children(
+        edge_properties::build_edge_prop_children_admitted(
             cfg.provider.admitted_inventory().as_deref(),
             &cfg.rel_type_name,
             &cfg.dir,
             &demanded_property_fields,
             &output_edge_uuids,
+            read_charge,
         )?
     };
-    let demanded_properties = demanded_property_fields
+    let key_bytes = demanded_property_fields
         .iter()
-        .map(|field| field.name().clone())
+        .try_fold(0, |bytes, field| {
+            hop_read::checked_add(bytes, field.name().len())
+        })?;
+    read_charge.charge(key_bytes)?;
+    let mut demanded_properties = hop_read::admitted_table::<(String, ArrayRef), _>(
+        read_charge,
+        demanded_property_fields.len(),
+        HashMap::with_capacity,
+    )?;
+    for (field, column) in demanded_property_fields
+        .iter()
         .zip(demanded_property_columns)
-        .collect::<HashMap<_, _>>();
+    {
+        demanded_properties.insert(field.name().clone(), column);
+    }
     for field in &prop_fields {
         columns.push(
             demanded_properties
                 .get(field.name())
                 .cloned()
-                .map_or_else(|| unused_expand_column(field, triples.len()), Ok)?,
+                .map_or_else(|| hop_read::unused(read_charge, field, triples.len()), Ok)?,
         );
     }
     for (offset, field) in cfg.out_schema.fields().iter().skip(edge_end).enumerate() {
@@ -2850,9 +2892,9 @@ fn expand_single_hop_chunk(
                     field.name()
                 ))
             })?;
-            take(column, &dst_take, None).map_err(|error| exec_err(error.to_string()))?
+            hop_read::take(read_charge, column, &dst_take)?
         } else {
-            unused_expand_column(field, triples.len())?
+            hop_read::unused(read_charge, field, triples.len())?
         });
     }
     let output = RecordBatch::try_new(cfg.out_schema.clone(), columns)
@@ -2868,7 +2910,7 @@ mod edge_properties;
 mod hop_read;
 mod input_columns;
 use hop_read::{
-    HOP_READ_CONSUMER, HopReadCharge, batches_bytes, concat_charged, concat_precharged,
+    HOP_READ_CONSUMER, HopReadCharge, batches_bytes, concat_precharged, expand_single_hop_chunk,
 };
 pub(crate) mod metrics;
 mod ordinal_identity;

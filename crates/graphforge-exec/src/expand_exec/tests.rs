@@ -1009,10 +1009,9 @@ impl datafusion::execution::memory_pool::MemoryPool for ConsumerPool {
         shrink: usize,
     ) {
         self.inner.shrink(reservation, shrink);
-        self.record(
-            reservation.consumer().name(),
-            reservation.size().saturating_sub(shrink),
-        );
+        // MemoryReservation::shrink updates its size before this callback;
+        // subtracting again would hide a still-live output reservation.
+        self.record(reservation.consumer().name(), reservation.size());
     }
 
     fn try_grow(
@@ -1057,11 +1056,10 @@ fn counting_batch(rows: usize) -> RecordBatch {
 
 fn hop_read_reservation(
     pool: &Arc<ConsumerPool>,
-) -> std::sync::Mutex<crate::chunked_reservation::ChunkedReservation> {
+) -> Arc<std::sync::Mutex<crate::chunked_reservation::ChunkedReservation>> {
     let pool: Arc<dyn datafusion::execution::memory_pool::MemoryPool> = pool.clone();
-    std::sync::Mutex::new(crate::chunked_reservation::ChunkedReservation::register(
-        HOP_READ_CONSUMER,
-        &pool,
+    Arc::new(std::sync::Mutex::new(
+        crate::chunked_reservation::ChunkedReservation::register(HOP_READ_CONSUMER, &pool),
     ))
 }
 
@@ -1083,7 +1081,7 @@ fn a_hop_read_is_charged_its_decoded_bytes_and_the_copy_it_joins() {
     let decoded = batches_bytes(&batches);
     assert!(decoded >= 3 * 4096 * 8, "{decoded}");
     let mut charge = HopReadCharge::new(&reservation);
-    let joined = concat_charged(&mut charge, batches).unwrap();
+    let joined = hop_read::concat_charged(&mut charge, batches).unwrap();
     assert_eq!(joined.num_rows(), 3 * 4096);
     assert_eq!(
         charge.held_bytes(),
@@ -1104,7 +1102,7 @@ fn a_hop_read_is_charged_its_decoded_bytes_and_the_copy_it_joins() {
     let decoded = batches_bytes(&lone);
     let before = pool.peak(HOP_READ_CONSUMER);
     let mut charge = HopReadCharge::new(&reservation);
-    let shared = concat_charged(&mut charge, lone).unwrap();
+    let shared = hop_read::concat_charged(&mut charge, lone).unwrap();
     assert_eq!(shared.num_rows(), 4096);
     assert_eq!(charge.held_bytes(), decoded);
     assert!(
@@ -1129,7 +1127,7 @@ fn a_hop_read_over_the_budget_fails_before_the_copy() {
     // One copy fits; two do not.
     assert!(decoded > 32 * 1024 && decoded <= 64 * 1024, "{decoded}");
     let mut charge = HopReadCharge::new(&reservation);
-    let error = concat_charged(&mut charge, batches)
+    let error = hop_read::concat_charged(&mut charge, batches)
         .unwrap_err()
         .to_string();
     assert!(
@@ -1210,6 +1208,137 @@ async fn a_single_hop_expansion_charges_its_reads_and_fails_typed_over_budget() 
     assert_eq!(pool.leaked(), 0, "a reservation leaked");
 }
 
+type DestinationFileRow = (u64, u64, i64, Vec<u32>);
+
+fn destination_file_rows(batches: &[RecordBatch]) -> Vec<DestinationFileRow> {
+    use arrow::array::{ListArray, TimestampMicrosecondArray, UInt32Array};
+    let mut actual = Vec::new();
+    for batch in batches {
+        let destination = batch.num_columns() - 6;
+        let source = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .unwrap();
+        let reached = batch
+            .column(destination + 1)
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .unwrap();
+        let labels = batch
+            .column(destination + 3)
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .unwrap();
+        let created = batch
+            .column(destination + 4)
+            .as_any()
+            .downcast_ref::<TimestampMicrosecondArray>()
+            .unwrap();
+        for row in 0..batch.num_rows() {
+            let values = labels.value(row);
+            let values = values.as_any().downcast_ref::<UInt32Array>().unwrap();
+            actual.push((
+                source.value(row),
+                reached.value(row),
+                created.value(row),
+                values.values().to_vec(),
+            ));
+        }
+    }
+    actual.sort();
+    actual
+}
+
+#[test]
+fn destination_decoder_refusal_precedes_the_real_node_read() {
+    use datafusion::execution::runtime_env::RuntimeEnvBuilder;
+    use datafusion::physical_plan::collect;
+    use datafusion::prelude::{SessionConfig, SessionContext};
+
+    const NODES: usize = 16;
+    const TS: i64 = 1_700_000_000_000_000;
+    let dir = tempfile::TempDir::new().unwrap();
+    let ids = labelled_ring(dir.path(), NODES);
+    let (provider, resource, _inventory) = open_ring_provider(dir.path());
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    for (limit, fits) in [(16 * 1024 * 1024, true), (64 * 1024, false)] {
+        let pool = ConsumerPool::new(limit);
+        let (result, captured) = demand::capture(|| {
+            let execution = RuntimeEnvBuilder::new()
+                .with_memory_pool(pool.clone())
+                .build_arc()
+                .unwrap();
+            let context = SessionContext::new_with_config_rt(
+                SessionConfig::new().with_batch_size(64),
+                execution,
+            );
+            let exec = ring_expand_exec(&provider, &resource, &ids);
+            let width = exec.schema().fields().len();
+            let destination = width - graphforge_storage::TOPOLOGY_NODES_SCHEMA.fields().len();
+            let mut required = vec![false; width];
+            required[0] = true;
+            required[destination + 1] = true;
+            required[destination + 3] = true;
+            // Timestamps force the authenticated node-file path, rather than
+            // the label/identity synthesis path. Edges need no materialization.
+            required[destination + 4] = true;
+            runtime.block_on(collect(
+                exec.with_required_output(required),
+                context.task_ctx(),
+            ))
+        });
+        let node_reads: u64 = captured
+            .hops
+            .values()
+            .map(|hop| hop.node_reads_started)
+            .sum();
+        let edge_reads: u64 = captured
+            .hops
+            .values()
+            .map(|hop| hop.edge_reads_started)
+            .sum();
+        assert_eq!(edge_reads, 0, "this control isolates destination decoding");
+        if fits {
+            let batches = result.unwrap();
+            assert!(
+                node_reads > 0,
+                "roomy control must execute real node Parquet reads"
+            );
+            let actual = destination_file_rows(&batches);
+            let mut expected = Vec::new();
+            for (source, &id) in ids.iter().enumerate() {
+                for offset in 1..=2 {
+                    let reached = (source + offset) % NODES;
+                    let labels = match reached % 3 {
+                        0 => vec![0, 1],
+                        1 => vec![1],
+                        _ => vec![0],
+                    };
+                    expected.push((id, ids[reached], TS, labels));
+                }
+            }
+            expected.sort();
+            assert_eq!(actual, expected);
+            drop(batches);
+        } else {
+            assert_eq!(
+                node_reads, 0,
+                "an insufficient decoder budget must refuse before storage starts the node read; actual result: {result:?}"
+            );
+            let error = result.unwrap_err().to_string();
+            assert!(
+                error.contains(HOP_READ_CONSUMER) && error.contains("Resources exhausted"),
+                "{error}"
+            );
+        }
+        assert_eq!(pool.leaked(), 0);
+    }
+}
+
 #[test]
 fn decoder_admission_transfers_to_retained_batches_without_a_duplicate_charge() {
     let pool = ConsumerPool::new(160 * 1024);
@@ -1245,4 +1374,1192 @@ fn a_failed_decoder_transfer_preserves_its_original_reservation() {
     drop(charge);
     drop(reservation);
     assert_eq!(pool.now(HOP_READ_CONSUMER), 0);
+}
+
+#[test]
+fn hop_row_tables_are_admitted_before_their_real_constructor() {
+    use std::cell::Cell;
+    use std::collections::HashMap;
+    let entered = Cell::new(false);
+    let pool = ConsumerPool::new(64 * 1024);
+    let reservation = hop_read_reservation(&pool);
+    let mut charge = HopReadCharge::new(&reservation);
+    let refused = hop_read::admitted_table::<(u64, usize), _>(&mut charge, 8192, |capacity| {
+        entered.set(true);
+        HashMap::<u64, usize>::with_capacity(capacity)
+    });
+    assert!(refused.is_err());
+    assert!(
+        !entered.get(),
+        "the actual table allocator ran before admission"
+    );
+    assert_eq!(charge.held_bytes(), 0);
+    let mut table = hop_read::admitted_table::<(u64, usize), _>(&mut charge, 37, |capacity| {
+        entered.set(true);
+        HashMap::<u64, usize>::with_capacity(capacity)
+    })
+    .unwrap();
+    for id in 0..37 {
+        table.insert(id, id as usize);
+    }
+    assert!(entered.get());
+    assert_eq!(table.len(), 37);
+    assert!(pool.now(HOP_READ_CONSUMER) > 0);
+    drop(table);
+    drop(charge);
+    drop(reservation);
+    assert_eq!(pool.leaked(), 0);
+}
+
+#[test]
+fn undirected_seen_table_owns_its_capacity_across_chunks_and_clear() {
+    let pool = ConsumerPool::new(64 * 1024);
+    let reservation = hop_read_reservation(&pool);
+    let mut position = SingleHopPosition::default();
+    position.seen_charge = Some(HopReadCharge::new(&reservation));
+    for id in 0..300 {
+        assert!(
+            hop_read::set_insert(
+                position.seen_charge.as_mut().unwrap(),
+                &mut position.seen_edges,
+                id,
+            )
+            .unwrap()
+        );
+    }
+    let held = position.seen_charge.as_ref().unwrap().held_bytes();
+    assert!(held > 0);
+    position.seen_edges.clear();
+    assert_eq!(position.seen_charge.as_ref().unwrap().held_bytes(), held);
+    assert!(position.seen_edges.capacity() >= 300);
+    // A completed chunk must not release the resumable position's table.
+    let chunk = HopReadCharge::new(&reservation);
+    drop(chunk);
+    assert_eq!(position.seen_charge.as_ref().unwrap().held_bytes(), held);
+    // Refused growth keeps the old table, contents and authority intact.
+    let error = position.seen_charge.as_mut().unwrap().charge(128 * 1024);
+    assert!(error.is_err());
+    assert_eq!(position.seen_charge.as_ref().unwrap().held_bytes(), held);
+    drop(reservation);
+    assert!(pool.now(HOP_READ_CONSUMER) > 0);
+    drop(position);
+    assert_eq!(pool.leaked(), 0);
+}
+
+#[test]
+fn real_undirected_hop_keeps_position_and_output_admitted_through_late_refusal() {
+    use datafusion::execution::memory_pool::{MemoryConsumer, MemoryPool};
+    use datafusion::execution::runtime_env::RuntimeEnvBuilder;
+    use datafusion::prelude::{SessionConfig, SessionContext};
+    let dir = tempfile::TempDir::new().unwrap();
+    let ids = labelled_ring(dir.path(), 16);
+    let (provider, resource, _inventory) = open_ring_provider(dir.path());
+    let pool = ConsumerPool::new(16 * 1024 * 1024);
+    let execution = RuntimeEnvBuilder::new()
+        .with_memory_pool(pool.clone())
+        .build_arc()
+        .unwrap();
+    let context = SessionContext::new_with_config_rt(SessionConfig::new(), execution);
+    let exec = ring_expand_exec(&provider, &resource, &ids[..1]);
+    let mut cfg = exec.single_hop_config(&context.task_ctx(), 0);
+    cfg.direction = Direction::Undirected;
+    let width = cfg.out_schema.fields().len();
+    let mut required = vec![false; width];
+    for index in [0, width - 5, width - 3, width - 2] {
+        required[index] = true;
+    }
+    cfg.required_output = Some(Arc::from(required));
+    let input = RecordBatch::try_new(
+        Arc::new(arrow::datatypes::Schema::new(vec![Field::new(
+            "node_id",
+            DataType::UInt64,
+            false,
+        )])),
+        vec![Arc::new(UInt64Array::from(vec![ids[0]]))],
+    )
+    .unwrap();
+    let mut position = SingleHopPosition::default();
+    let first = expand_single_hop_chunk(&cfg, &input, &mut position, 1).unwrap();
+    assert_eq!(
+        position.row, 0,
+        "the same source row resumes in the next chunk"
+    );
+    assert_eq!(position.seen_edges.len(), 1);
+    let seen = position.seen_charge.as_ref().unwrap().held_bytes();
+    assert!(seen > 0);
+    let rows = destination_file_rows(std::slice::from_ref(&first.batch));
+    assert_eq!(rows.len(), 1);
+    let destination = ids.iter().position(|id| *id == rows[0].1).unwrap();
+    assert!([1, 2, 14, 15].contains(&destination));
+    let labels = match destination % 3 {
+        0 => vec![0, 1],
+        1 => vec![1],
+        _ => vec![0],
+    };
+    assert_eq!(
+        rows[0],
+        (ids[0], ids[destination], 1_700_000_000_000_000, labels)
+    );
+    let dynamic_pool: Arc<dyn MemoryPool> = pool.clone();
+    let blocker = MemoryConsumer::new("late refusal control").register(&dynamic_pool);
+    blocker
+        .try_grow(16 * 1024 * 1024 - pool.reserved() - 256 * 1024)
+        .unwrap();
+    let error = match expand_single_hop_chunk(&cfg, &input, &mut position, 1) {
+        Ok(_) => panic!("a second decoder envelope cannot fit"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains(HOP_READ_CONSUMER), "{error}");
+    assert_eq!(
+        first.batch.num_rows(),
+        1,
+        "prior output remains usable after refusal"
+    );
+    assert!(position.seen_charge.as_ref().unwrap().held_bytes() >= seen);
+    drop(blocker);
+    drop(cfg);
+    drop(position);
+    assert!(pool.now(HOP_READ_CONSUMER) >= first.charge.held_bytes());
+    drop(first);
+    assert_eq!(
+        pool.leaked(),
+        0,
+        "abandoning the partial traversal releases all owners"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn public_hop_output_slice_keeps_its_full_backing_charge_after_next_poll_and_drop() {
+    use datafusion::execution::runtime_env::RuntimeEnvBuilder;
+    use datafusion::prelude::{SessionConfig, SessionContext};
+    let dir = tempfile::TempDir::new().unwrap();
+    let ids = labelled_ring(dir.path(), 16);
+    let (provider, resource, _inventory) = open_ring_provider(dir.path());
+    let pool = ConsumerPool::new(16 * 1024 * 1024);
+    let execution = RuntimeEnvBuilder::new()
+        .with_memory_pool(pool.clone())
+        .build_arc()
+        .unwrap();
+    let context =
+        SessionContext::new_with_config_rt(SessionConfig::new().with_batch_size(2), execution);
+    let exec = ring_expand_exec(&provider, &resource, &ids);
+    let width = exec.schema().fields().len();
+    let created = width - 2;
+    let mut required = vec![false; width];
+    required[0] = true;
+    required[created] = true;
+    let exec = exec.with_required_output(required);
+    let mut stream = exec.execute(0, context.task_ctx()).unwrap();
+    let first = stream.next().await.unwrap().unwrap();
+    assert_eq!(first.num_rows(), 2);
+    // Keep only one column/row. Its Arrow buffer still owns the complete
+    // two-row backing allocation, independently of the batch and stream.
+    let retained = first.project(&[created]).unwrap().slice(0, 1);
+    drop(first);
+    let next = stream.next().await.unwrap().unwrap();
+    assert_eq!(next.num_rows(), 2);
+    drop(next);
+    drop(stream);
+    drop(exec);
+    drop(context);
+    assert!(
+        // Exact split reservations share a consumer name; its callback's
+        // last reservation size is not their sum. This pool is dedicated.
+        pool.leaked() >= retained.column(0).get_buffer_memory_size(),
+        "the escaped timestamp slice lost its charge before its backing dropped"
+    );
+    let timestamp = retained
+        .column(0)
+        .as_any()
+        .downcast_ref::<arrow::array::TimestampMicrosecondArray>()
+        .unwrap();
+    assert_eq!(timestamp.value(0), 1_700_000_000_000_000);
+    drop(retained);
+    assert_eq!(pool.leaked(), 0);
+}
+
+#[test]
+fn nested_hop_output_keeps_struct_child_vectors_until_the_last_buffer_alias() {
+    use arrow::array::{Array, AsArray, StructArray};
+    let fields = (0..33)
+        .map(|index| {
+            Arc::new(Field::new(
+                format!("value_{index}"),
+                DataType::UInt64,
+                false,
+            ))
+        })
+        .collect::<Vec<_>>();
+    let children = (0..33)
+        .map(|index| {
+            Arc::new(UInt64Array::from(vec![
+                index,
+                index + 100,
+                index + 200,
+                index + 300,
+            ])) as ArrayRef
+        })
+        .collect::<Vec<_>>();
+    let inner = StructArray::new(fields.into(), children, None);
+    let outer = StructArray::new(
+        vec![Arc::new(Field::new(
+            "inner",
+            inner.data_type().clone(),
+            false,
+        ))]
+        .into(),
+        vec![Arc::new(inner)],
+        None,
+    );
+    let pool = ConsumerPool::new(1024 * 1024);
+    let reservation = hop_read_reservation(&pool);
+    let mut charge = HopReadCharge::new(&reservation);
+    let outer: ArrayRef = Arc::new(outer);
+    let selected = hop_read::take(&mut charge, &outer, &UInt32Array::from(vec![3, 1])).unwrap();
+    let batch = RecordBatch::try_new(
+        Arc::new(arrow::datatypes::Schema::new(vec![Field::new(
+            "record",
+            selected.data_type().clone(),
+            false,
+        )])),
+        vec![selected],
+    )
+    .unwrap();
+    let visible = batch.get_array_memory_size();
+    // take's exact-sized unzip reserves a four-slot minimum for the outer
+    // one-child Struct; the inner Struct retains 33 slots. Every
+    // nonnullable primitive leaf also has a BackingLease (exact reservation
+    // plus logical size), independently of the constructor guard. The getter omits
+    // these child-vector heaps; lease-token storage cannot cover both owners.
+    let minimum = visible
+        + 37 * std::mem::size_of::<ArrayRef>()
+        + 33 * (std::mem::size_of::<datafusion::execution::memory_pool::MemoryReservation>()
+            + std::mem::size_of::<usize>())
+        + std::mem::size_of::<HopReadCharge>()
+        + 2 * std::mem::size_of::<usize>();
+    let output = hop_read::lease_output(batch, charge).unwrap();
+    assert!(
+        pool.leaked() >= minimum,
+        "complete construction remains admitted through handoff"
+    );
+    assert!(output.charge.held_bytes() >= 37 * std::mem::size_of::<ArrayRef>());
+    let complete_reserved = pool.leaked();
+    let inner = output.batch.column(0).as_struct().column(0).as_struct();
+    for (index, child) in inner.columns().iter().enumerate() {
+        let child = child.as_primitive::<arrow::datatypes::UInt64Type>();
+        assert_eq!(child.value(0), index as u64 + 300);
+        assert_eq!(child.value(1), index as u64 + 100);
+    }
+    let escaped = inner.column(32).slice(0, 1);
+    assert_eq!(
+        escaped
+            .as_primitive::<arrow::datatypes::UInt64Type>()
+            .value(0),
+        332
+    );
+    drop(output);
+    drop(reservation);
+    let escaped_minimum = escaped.get_buffer_memory_size()
+        + std::mem::size_of::<datafusion::execution::memory_pool::MemoryReservation>()
+        + std::mem::size_of::<usize>();
+    assert!(
+        pool.leaked() >= escaped_minimum,
+        "full backing and its own token remain admitted"
+    );
+    assert!(
+        pool.leaked() < complete_reserved,
+        "dropped sibling buffers and construction slack must release"
+    );
+    assert!(
+        pool.leaked() <= escaped.get_array_memory_size(),
+        "the escaped buffer must not retain a chunk or dead siblings"
+    );
+    assert_eq!(
+        escaped
+            .as_primitive::<arrow::datatypes::UInt64Type>()
+            .value(0),
+        332
+    );
+    drop(escaped);
+    assert_eq!(pool.leaked(), 0);
+}
+
+#[test]
+fn destination_footer_is_admitted_before_the_real_metadata_reader_allocates() {
+    use datafusion::execution::runtime_env::RuntimeEnvBuilder;
+    use datafusion::physical_plan::collect;
+    use datafusion::prelude::{SessionConfig, SessionContext};
+    use parquet::arrow::{ArrowWriter, arrow_reader::ParquetRecordBatchReaderBuilder};
+    use parquet::file::metadata::KeyValue;
+    const LARGE_VALUE: usize = 128 * 1024;
+    let dir = tempfile::TempDir::new().unwrap();
+    let ids = labelled_ring(dir.path(), 16);
+    let files = graphforge_storage::TopologyFiles::discover_legacy(dir.path()).unwrap();
+    for (path, _) in files.node_fragments() {
+        let batches = ParquetRecordBatchReaderBuilder::try_new(std::fs::File::open(path).unwrap())
+            .unwrap()
+            .build()
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        let properties = parquet::file::properties::WriterProperties::builder()
+            .set_key_value_metadata(Some(vec![KeyValue::new(
+                "fixture_note".to_owned(),
+                Some("v".repeat(LARGE_VALUE)),
+            )]))
+            .build();
+        let mut writer = ArrowWriter::try_new(
+            std::fs::File::create(path).unwrap(),
+            batches[0].schema(),
+            Some(properties),
+        )
+        .unwrap();
+        for batch in &batches {
+            writer.write(batch).unwrap();
+        }
+        writer.close().unwrap();
+    }
+    // Capture/authenticate the rewritten genuine files before query execution.
+    let (provider, resource, _inventory) = open_ring_provider(dir.path());
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    for (limit, fits) in [(16 * 1024 * 1024, true), (64 * 1024, false)] {
+        let pool = ConsumerPool::new(limit);
+        let _io = graphforge_storage::lifecycle_io::CaptureScope::install();
+        let before = graphforge_storage::lifecycle_io_snapshot().unwrap();
+        let (result, captured) = demand::capture(|| {
+            let execution = RuntimeEnvBuilder::new()
+                .with_memory_pool(pool.clone())
+                .build_arc()
+                .unwrap();
+            let context = SessionContext::new_with_config_rt(SessionConfig::new(), execution);
+            let exec = ring_expand_exec(&provider, &resource, &ids);
+            let width = exec.schema().fields().len();
+            let mut required = vec![false; width];
+            required[0] = true;
+            required[width - 2] = true;
+            runtime.block_on(collect(
+                exec.with_required_output(required),
+                context.task_ctx(),
+            ))
+        });
+        let io = graphforge_storage::lifecycle_io_snapshot()
+            .unwrap()
+            .since(&before)
+            .unwrap();
+        let read = io.phases[&graphforge_storage::StorageIoPhase::ReadPathScan].read_bytes;
+        if fits {
+            let batches = result.unwrap();
+            assert_eq!(batches.iter().map(RecordBatch::num_rows).sum::<usize>(), 32);
+            assert!(
+                read >= LARGE_VALUE as u64,
+                "the real metadata reader must run"
+            );
+            assert!(captured.hops.values().any(|hop| hop.node_reads_started > 0));
+        } else {
+            assert!(result.is_err());
+            assert_eq!(
+                read, 0,
+                "large footer was read/materialized before query admission"
+            );
+            assert!(
+                captured
+                    .hops
+                    .values()
+                    .all(|hop| hop.node_reads_started == 0)
+            );
+        }
+        assert_eq!(pool.leaked(), 0);
+    }
+}
+
+#[test]
+fn hop_view_take_retains_unused_and_zero_capacity_backings_until_the_last_alias() {
+    use arrow::array::{Array, AsArray, BinaryViewArray, StringViewArray};
+    use arrow::buffer::Buffer;
+    for binary in [false, true] {
+        // Fixed 4 KiB comfortably holds inline descriptors/wrappers, but not
+        // the two overlapping 96-slot Buffer containers. No payload bytes can
+        // explain the refusal in this companion control.
+        let inline = StringViewArray::from_iter_values(["inline"]);
+        let (views, original_buffers, nulls) = inline.into_parts();
+        assert!(original_buffers.is_empty());
+        drop(original_buffers);
+        let plain: ArrayRef = if binary {
+            Arc::new(BinaryViewArray::new(
+                views.clone(),
+                Vec::<Buffer>::new(),
+                nulls.clone(),
+            ))
+        } else {
+            Arc::new(StringViewArray::new(
+                views.clone(),
+                Vec::<Buffer>::new(),
+                nulls.clone(),
+            ))
+        };
+        let metadata_only: ArrayRef = if binary {
+            Arc::new(BinaryViewArray::new(
+                views,
+                (0..96)
+                    .map(|_| Buffer::from(Vec::<u8>::new()))
+                    .collect::<Vec<_>>(),
+                nulls,
+            ))
+        } else {
+            Arc::new(StringViewArray::new(
+                views,
+                (0..96)
+                    .map(|_| Buffer::from(Vec::<u8>::new()))
+                    .collect::<Vec<_>>(),
+                nulls,
+            ))
+        };
+        let indices = UInt32Array::from(vec![0]);
+        let pool = ConsumerPool::new(4 * 1024);
+        let reservation = hop_read_reservation(&pool);
+        let mut charge = HopReadCharge::new(&reservation);
+        let selected = hop_read::take(&mut charge, &plain, &indices).unwrap();
+        if binary {
+            assert_eq!(selected.as_binary_view().value(0), b"inline");
+        } else {
+            assert_eq!(selected.as_string_view().value(0), "inline");
+        }
+        drop(selected);
+        drop(charge);
+        drop(reservation);
+        assert_eq!(pool.leaked(), 0);
+        let reservation = hop_read_reservation(&pool);
+        let mut charge = HopReadCharge::new(&reservation);
+        let error = hop_read::take(&mut charge, &metadata_only, &indices).unwrap_err();
+        assert!(error.to_string().contains(HOP_READ_CONSUMER), "{error}");
+        assert_eq!(charge.held_bytes(), 0);
+        drop(charge);
+        drop(reservation);
+        assert_eq!(pool.leaked(), 0);
+        drop(metadata_only);
+        drop(plain);
+        for source_null in [false, true] {
+            let wide = "a distinguishable external payload ".repeat(40);
+            let values = [
+                Some("inline"),
+                Some(wide.as_str()),
+                if source_null { None } else { Some("third") },
+            ];
+            let base = StringViewArray::from_iter(values);
+            let (views, source_buffers, nulls) = base.into_parts();
+            let mut buffers = source_buffers.to_vec();
+            // The fixture must relinquish this Arc too: its original payload
+            // Bytes acquire the output token when take aliases their buffers.
+            drop(source_buffers);
+            // take clones every buffer, even an unused wide payload and many
+            // distinct empty Bytes whose dangling data pointers may coincide.
+            buffers.push(Buffer::from(vec![7u8; 4096]));
+            buffers.extend((0..64).map(|_| Buffer::from(Vec::<u8>::new())));
+            let shared_empty = Buffer::from(Vec::<u8>::new());
+            buffers.extend(std::iter::repeat_n(shared_empty, 32));
+            let input: ArrayRef = if binary {
+                Arc::new(BinaryViewArray::new(views, buffers, nulls))
+            } else {
+                Arc::new(StringViewArray::new(views, buffers, nulls))
+            };
+            let count = if binary {
+                input.as_binary_view().data_buffers().len()
+            } else {
+                input.as_string_view().data_buffers().len()
+            };
+            let indices = UInt32Array::from(vec![Some(0), None, Some(2), Some(1)]);
+            let tight = ConsumerPool::new(1024);
+            let tight_reservation = hop_read_reservation(&tight);
+            let mut refused = HopReadCharge::new(&tight_reservation);
+            let error = hop_read::take(&mut refused, &input, &indices).unwrap_err();
+            assert!(error.to_string().contains(HOP_READ_CONSUMER), "{error}");
+            assert_eq!(refused.held_bytes(), 0);
+            drop(refused);
+            drop(tight_reservation);
+            assert_eq!(tight.leaked(), 0);
+
+            let pool = ConsumerPool::new(1024 * 1024);
+            let reservation = hop_read_reservation(&pool);
+            let mut charge = HopReadCharge::new(&reservation);
+            let selected = hop_read::take(&mut charge, &input, &indices).unwrap();
+            let cell = |array: &ArrayRef, row| -> Option<Vec<u8>> {
+                if array.is_null(row) {
+                    None
+                } else if binary {
+                    Some(array.as_binary_view().value(row).to_vec())
+                } else {
+                    Some(array.as_string_view().value(row).as_bytes().to_vec())
+                }
+            };
+            assert_eq!(cell(&selected, 0), Some(b"inline".to_vec()));
+            assert_eq!(cell(&selected, 1), None);
+            assert_eq!(
+                cell(&selected, 2),
+                if source_null {
+                    None
+                } else {
+                    Some(b"third".to_vec())
+                }
+            );
+            assert_eq!(cell(&selected, 3), Some(wide.as_bytes().to_vec()));
+            let batch = RecordBatch::try_new(
+                Arc::new(arrow::datatypes::Schema::new(vec![Field::new(
+                    "carried",
+                    selected.data_type().clone(),
+                    true,
+                )])),
+                vec![selected],
+            )
+            .unwrap();
+            let output = hop_read::lease_output(batch, charge).unwrap();
+            let escaped = output.batch.column(0).slice(0, 1);
+            drop(output);
+            drop(reservation);
+            drop(indices);
+            drop(input);
+            let variable_metadata = count * std::mem::size_of::<Buffer>()
+                + 2 * std::mem::size_of::<usize>()
+                + std::mem::size_of::<datafusion::execution::memory_pool::MemoryReservation>()
+                + 2 * std::mem::size_of::<usize>();
+            assert!(
+                pool.leaked() >= escaped.get_buffer_memory_size() + variable_metadata,
+                "full unused payloads and the variable buffer-list owner must survive an inline-only slice"
+            );
+            assert_eq!(cell(&escaped, 0), Some(b"inline".to_vec()));
+            drop(escaped);
+            assert_eq!(
+                pool.leaked(),
+                0,
+                "empty backing tokens must not immortalize the metadata lease"
+            );
+        }
+    }
+}
+
+#[test]
+fn hop_unused_views_preserve_nullability_and_release_empty_payload_metadata() {
+    use arrow::array::{Array, AsArray};
+    for kind in [DataType::Utf8View, DataType::BinaryView] {
+        for nullable in [false, true] {
+            let pool = ConsumerPool::new(64 * 1024);
+            let reservation = hop_read_reservation(&pool);
+            let mut charge = HopReadCharge::new(&reservation);
+            let field = Field::new("unused", kind.clone(), nullable);
+            let array = hop_read::unused(&mut charge, &field, 4).unwrap();
+            assert_eq!(array.data_type(), &kind);
+            assert_eq!(array.null_count(), if nullable { 4 } else { 0 });
+            match kind {
+                DataType::Utf8View => {
+                    assert!(array.as_string_view().data_buffers().is_empty());
+                }
+                DataType::BinaryView => {
+                    assert!(array.as_binary_view().data_buffers().is_empty());
+                }
+                _ => unreachable!(),
+            }
+            let batch = RecordBatch::try_new(
+                Arc::new(arrow::datatypes::Schema::new(vec![field])),
+                vec![array],
+            )
+            .unwrap();
+            let output = hop_read::lease_output(batch, charge).unwrap();
+            let escaped = output.batch.column(0).slice(0, 1);
+            drop(output);
+            drop(reservation);
+            assert!(pool.leaked() >= escaped.get_buffer_memory_size());
+            assert_eq!(escaped.null_count(), usize::from(nullable));
+            drop(escaped);
+            assert_eq!(pool.leaked(), 0);
+        }
+    }
+}
+
+#[test]
+fn unsupported_hop_arrow_shape_reports_a_bound_refusal_before_construction() {
+    use arrow::array::{DictionaryArray, Int32Array};
+    use arrow::datatypes::Int32Type;
+    let dictionary = DictionaryArray::<Int32Type>::try_new(
+        Int32Array::from(vec![0, 1]),
+        Arc::new(StringArray::from(vec!["first", "second"])),
+    )
+    .unwrap();
+    let field = Field::new("carried", dictionary.data_type().clone(), false);
+    let pool = ConsumerPool::new(64 * 1024);
+    let reservation = hop_read_reservation(&pool);
+    let mut charge = HopReadCharge::new(&reservation);
+    let error = hop_read::unused(&mut charge, &field, 2).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("unsupported Arrow allocation bound for Dictionary"),
+        "{error}"
+    );
+    assert!(!error.to_string().contains("overflow"), "{error}");
+    assert_eq!(
+        charge.held_bytes(),
+        0,
+        "unsupported shape refuses before output admission or construction"
+    );
+    assert_eq!(pool.leaked(), 0);
+    let batch = RecordBatch::try_new(
+        Arc::new(arrow::datatypes::Schema::new(vec![field])),
+        vec![Arc::new(dictionary)],
+    )
+    .unwrap();
+    let error = match hop_read::lease_output(batch, charge) {
+        Ok(_) => panic!("dictionary output has no admitted claim traversal"),
+        Err(error) => error,
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("unsupported Arrow allocation bound for Dictionary"),
+        "{error}"
+    );
+    assert!(!error.to_string().contains("overflow"), "{error}");
+    drop(reservation);
+    assert_eq!(pool.leaked(), 0);
+}
+
+#[test]
+fn hop_property_target_nodes_release_before_the_next_workspace_and_on_error() {
+    let pool = ConsumerPool::new(1024 * 1024);
+    let reservation = hop_read_reservation(&pool);
+    let mut charge = HopReadCharge::new(&reservation);
+    charge.charge(4096).unwrap();
+    let targets = (0..1024).collect();
+    let ordered = hop_read::with_property_targets(&mut charge, &targets, |ordered| {
+        assert!(
+            pool.leaked() > 512 * 1024,
+            "nodes must be prepaid during lookup"
+        );
+        assert_eq!(
+            ordered.iter().copied().collect::<Vec<_>>(),
+            (0..1024).collect::<Vec<_>>()
+        );
+        Ok(ordered.len())
+    })
+    .unwrap();
+    assert_eq!(ordered, 1024);
+    assert_eq!(charge.held_bytes(), 4096);
+    // This next phase cannot coexist with the target-tree envelope in 1 MiB.
+    charge.charge(768 * 1024).unwrap();
+    charge.release(768 * 1024);
+    let failed = hop_read::with_property_targets(&mut charge, &targets, |_| {
+        Err::<(), _>(GfError::Execution("late property lookup failure".into()))
+    });
+    assert!(
+        failed
+            .unwrap_err()
+            .to_string()
+            .contains("late property lookup failure")
+    );
+    assert_eq!(charge.held_bytes(), 4096);
+    let too_many = (0..4096).collect();
+    let called = std::cell::Cell::new(false);
+    let refused = hop_read::with_property_targets(&mut charge, &too_many, |_| {
+        called.set(true);
+        Ok(())
+    });
+    assert!(refused.unwrap_err().to_string().contains(HOP_READ_CONSUMER));
+    assert!(
+        !called.get(),
+        "lookup must not run before target-node admission"
+    );
+    assert_eq!(charge.held_bytes(), 4096);
+    drop(charge);
+    drop(reservation);
+    assert_eq!(pool.leaked(), 0);
+}
+
+#[test]
+fn hop_struct_take_uses_real_indices_including_children_of_null_parents() {
+    use arrow::array::{AsArray, StructArray};
+    use arrow::buffer::NullBuffer;
+    let wide = "w".repeat(1024 * 1024);
+    let field = Arc::new(Field::new("payload", DataType::Utf8, false));
+    let source: ArrayRef = Arc::new(StructArray::new(
+        vec![field].into(),
+        vec![Arc::new(StringArray::from(vec![
+            wide.as_str(),
+            "small",
+            "other",
+        ]))],
+        Some(NullBuffer::from(vec![false, true, true])),
+    ));
+    // The selected payload is 1 MiB plus small strings; max*rows exceeds i32.
+    // Arrow still takes the wide child beneath its NULL Struct parent.
+    let indices = UInt32Array::from_iter_values(std::iter::repeat_n(1, 4096).chain([0]));
+    let pool = ConsumerPool::new(4 * 1024 * 1024);
+    let reservation = hop_read_reservation(&pool);
+    let mut charge = HopReadCharge::new(&reservation);
+    let selected = hop_read::take(&mut charge, &source, &indices).unwrap();
+    assert_eq!(selected.len(), 4097);
+    assert_eq!(selected.data_type(), source.data_type());
+    let result = selected.as_struct();
+    let strings = result.column(0).as_string::<i32>();
+    assert!((0..4096).all(|row| result.is_valid(row) && strings.value(row) == "small"));
+    assert!(result.is_null(4096));
+    assert_eq!(strings.value(4096), wide);
+    let batch = RecordBatch::try_new(
+        Arc::new(arrow::datatypes::Schema::new(vec![Field::new(
+            "carried",
+            selected.data_type().clone(),
+            true,
+        )])),
+        vec![selected],
+    )
+    .unwrap();
+    let output = hop_read::lease_output(batch, charge).unwrap();
+    let escaped = output.batch.column(0).as_struct().column(0).slice(4096, 1);
+    drop(output);
+    drop(reservation);
+    drop(source);
+    assert!(pool.leaked() >= 1024 * 1024);
+    assert_eq!(escaped.as_string::<i32>().value(0), wide);
+    drop(escaped);
+    assert_eq!(pool.leaked(), 0);
+
+    let source: ArrayRef = Arc::new(StructArray::new(
+        vec![Arc::new(Field::new("payload", DataType::Utf8, false))].into(),
+        vec![Arc::new(StringArray::from(vec![wide.as_str()]))],
+        None,
+    ));
+    let reservation = hop_read_reservation(&pool);
+    let mut charge = HopReadCharge::new(&reservation);
+    let indices = UInt32Array::from(vec![0; 8]);
+    let error = hop_read::take(&mut charge, &source, &indices).unwrap_err();
+    assert!(error.to_string().contains(HOP_READ_CONSUMER), "{error}");
+    assert_eq!(
+        charge.held_bytes(),
+        0,
+        "refused construction must not change ownership"
+    );
+    drop(charge);
+    drop(reservation);
+    assert_eq!(pool.leaked(), 0);
+}
+
+#[test]
+fn hop_zip_bound_includes_large_nullable_empty_struct_validity() {
+    use arrow::array::StructArray;
+    use arrow::buffer::NullBuffer;
+    let rows = 262_144;
+    let truthy: ArrayRef = Arc::new(StructArray::new_empty_fields(
+        rows,
+        Some(NullBuffer::from_iter((0..rows).map(|row| row % 2 == 0))),
+    ));
+    let falsy: ArrayRef = Arc::new(StructArray::new_empty_fields(
+        rows,
+        Some(NullBuffer::from_iter((0..rows).map(|row| row % 3 == 0))),
+    ));
+    let mask = arrow::array::BooleanArray::from_iter((0..rows).map(|row| Some(row % 5 == 0)));
+    let bound = hop_read::zip_copy_bytes(truthy.as_ref()).unwrap();
+    let pool = ConsumerPool::new(256 * 1024);
+    let reservation = hop_read_reservation(&pool);
+    let mut charge = HopReadCharge::new(&reservation);
+    charge.charge(bound).unwrap();
+    let output = arrow::compute::kernels::zip::zip(&mask, &truthy, &falsy).unwrap();
+    assert_eq!(output.len(), rows);
+    assert_eq!(output.data_type(), truthy.data_type());
+    assert!((0..rows).all(|row| output.is_valid(row)
+        == if row % 5 == 0 {
+            row % 2 == 0
+        } else {
+            row % 3 == 0
+        }));
+    assert!(
+        bound >= output.get_array_memory_size(),
+        "the actual parent bitmap must fit without any children hiding its size"
+    );
+    drop(output);
+    drop(charge);
+    drop(reservation);
+    assert_eq!(pool.leaked(), 0);
+}
+
+#[test]
+fn hop_completed_constructors_release_workspace_but_retain_earlier_columns() {
+    use arrow::array::AsArray;
+    use arrow::datatypes::TimeUnit;
+    let rows = 32_768;
+    let field = Field::new(
+        "timestamp",
+        DataType::Timestamp(TimeUnit::Microsecond, None),
+        false,
+    );
+    let pool = ConsumerPool::new(2 * 1024 * 1024);
+    let reservation = hop_read_reservation(&pool);
+    let mut charge = HopReadCharge::new(&reservation);
+    let first = hop_read::construct_array(
+        &mut charge,
+        hop_read::unused_bytes(field.data_type(), rows).unwrap(),
+        || {
+            assert!(
+                pool.leaked() >= 1024 * 1024,
+                "the complete workspace must be reserved before the real constructor"
+            );
+            unused_expand_column(&field, rows)
+        },
+    )
+    .unwrap();
+    let backing = first.get_buffer_memory_size();
+    assert!(backing >= rows * 8);
+    let second = hop_read::unused(&mut charge, &field, rows).unwrap();
+    assert_eq!(
+        first
+            .as_primitive::<arrow::datatypes::TimestampMicrosecondType>()
+            .value(rows - 1),
+        0
+    );
+    let third = hop_read::unused(&mut charge, &field, rows).unwrap();
+    assert_eq!(
+        second
+            .as_primitive::<arrow::datatypes::TimestampMicrosecondType>()
+            .value(rows - 1),
+        0
+    );
+    assert!(
+        charge.held_bytes() >= 3 * backing,
+        "earlier columns remain fully admitted"
+    );
+    // Three simultaneous future workspaces exceed 2 MiB; three completed
+    // columns and one current constructor fit without changing its envelope.
+    assert!(charge.held_bytes() < 1024 * 1024);
+    let batch = RecordBatch::try_new(
+        Arc::new(arrow::datatypes::Schema::new(vec![
+            field.clone().with_name("first"),
+            field.clone().with_name("second"),
+            field.with_name("third"),
+        ])),
+        vec![first, second, third],
+    )
+    .unwrap();
+    let output = hop_read::lease_output(batch, charge).unwrap();
+    let escaped = output.batch.column(0).slice(rows - 1, 1);
+    drop(output);
+    drop(reservation);
+    assert!(
+        pool.leaked() >= backing,
+        "a one-row slice retains its full backing"
+    );
+    assert!(
+        pool.leaked() < 2 * backing,
+        "dropped sibling columns release independently"
+    );
+    assert_eq!(
+        escaped
+            .as_primitive::<arrow::datatypes::TimestampMicrosecondType>()
+            .value(0),
+        0
+    );
+    drop(escaped);
+    assert_eq!(pool.leaked(), 0);
+}
+
+#[test]
+fn hop_property_filter_bounds_real_spans_and_retains_a_wide_selected_value() {
+    use arrow::array::AsArray;
+    let wide = "a".repeat(1024 * 1024);
+    let source: ArrayRef = Arc::new(StringArray::from_iter(
+        [Some(wide.as_str())]
+            .into_iter()
+            .chain(std::iter::repeat_n(None, 4096)),
+    ));
+    let mask = arrow::compute::is_not_null(&source).unwrap();
+    assert_eq!(mask.true_count(), 1);
+
+    // The fixture is already produced; this isolated constructor control has
+    // no room for its selected payload, irrespective of source ownership.
+    let tight = ConsumerPool::new(64 * 1024);
+    let reservation = hop_read_reservation(&tight);
+    let mut charge = HopReadCharge::new(&reservation);
+    let error = hop_read::filter(&mut charge, &source, &mask).unwrap_err();
+    assert!(error.to_string().contains(HOP_READ_CONSUMER), "{error}");
+    assert_eq!(
+        charge.held_bytes(),
+        0,
+        "admission must refuse before entering the Arrow constructor"
+    );
+    drop(charge);
+    drop(reservation);
+    assert_eq!(tight.leaked(), 0);
+
+    let pool = ConsumerPool::new(8 * 1024 * 1024);
+    let reservation = hop_read_reservation(&pool);
+    // This control includes retained producer input and the real predicate
+    // mask in the same pool, in addition to the unchanged4x copy envelope.
+    let mut input_charge = HopReadCharge::new(&reservation);
+    input_charge
+        .charge(source.get_array_memory_size() + mask.get_array_memory_size())
+        .unwrap();
+    let mut charge = HopReadCharge::new(&reservation);
+    let filtered = hop_read::filter(&mut charge, &source, &mask).unwrap();
+    assert_eq!(filtered.len(), 1);
+    assert_eq!(filtered.data_type(), source.data_type());
+    assert_eq!(filtered.as_string::<i32>().value(0), wide);
+    let batch = RecordBatch::try_new(
+        Arc::new(arrow::datatypes::Schema::new(vec![Field::new(
+            "note",
+            DataType::Utf8,
+            true,
+        )])),
+        vec![filtered],
+    )
+    .unwrap();
+    let output = hop_read::lease_output(batch, charge).unwrap();
+    let escaped = output.batch.column(0).slice(0, 1);
+    drop(output);
+    drop(mask);
+    drop(source);
+    drop(input_charge);
+    drop(reservation);
+    assert!(pool.leaked() >= escaped.get_buffer_memory_size());
+    assert_eq!(escaped.as_string::<i32>().value(0), wide);
+    drop(escaped);
+    assert_eq!(pool.leaked(), 0);
+}
+
+#[test]
+fn hop_property_filter_preserves_populated_null_spans_and_full_alias_backing() {
+    use arrow::array::AsArray;
+    use arrow::buffer::{Buffer, NullBuffer, OffsetBuffer, ScalarBuffer};
+    let wide = "n".repeat(1024 * 1024);
+    for selected_null in [true, false] {
+        // Arrow permits a populated byte span below NULL, and filter_bytes
+        // explicitly copies it. The other case slices down to three visible
+        // bytes, then takes the all-selected alias fast path.
+        let raw = StringArray::new(
+            OffsetBuffer::new(ScalarBuffer::from(vec![
+                0_i32,
+                i32::try_from(wide.len()).unwrap(),
+                i32::try_from(wide.len() + 3).unwrap(),
+            ])),
+            Buffer::from(format!("{wide}yes").into_bytes()),
+            Some(NullBuffer::from(vec![false, true])),
+        );
+        let source: ArrayRef = Arc::new(if selected_null {
+            raw.clone()
+        } else {
+            raw.slice(1, 1)
+        });
+        let mask = arrow::array::BooleanArray::from(if selected_null {
+            vec![true, false]
+        } else {
+            vec![true]
+        });
+        let tight = ConsumerPool::new(64 * 1024);
+        let reservation = hop_read_reservation(&tight);
+        let mut charge = HopReadCharge::new(&reservation);
+        let error = hop_read::filter(&mut charge, &source, &mask).unwrap_err();
+        assert!(error.to_string().contains(HOP_READ_CONSUMER), "{error}");
+        assert_eq!(charge.held_bytes(), 0);
+        drop(charge);
+        drop(reservation);
+        assert_eq!(tight.leaked(), 0);
+
+        let pool = ConsumerPool::new(8 * 1024 * 1024);
+        let reservation = hop_read_reservation(&pool);
+        let mut input_charge = HopReadCharge::new(&reservation);
+        input_charge
+            .charge(source.get_array_memory_size() + mask.get_array_memory_size())
+            .unwrap();
+        let mut charge = HopReadCharge::new(&reservation);
+        let selected = hop_read::filter(&mut charge, &source, &mask).unwrap();
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected.is_null(0), selected_null);
+        let strings = selected.as_string::<i32>();
+        assert_eq!(
+            strings.value(0),
+            if selected_null { wide.as_str() } else { "yes" }
+        );
+        assert!(selected.get_buffer_memory_size() >= wide.len());
+        let batch = RecordBatch::try_new(
+            Arc::new(arrow::datatypes::Schema::new(vec![Field::new(
+                "note",
+                DataType::Utf8,
+                true,
+            )])),
+            vec![selected],
+        )
+        .unwrap();
+        let output = hop_read::lease_output(batch, charge).unwrap();
+        let escaped = output.batch.column(0).slice(0, 1);
+        drop(output);
+        drop(raw);
+        drop(source);
+        drop(mask);
+        drop(input_charge);
+        drop(reservation);
+        assert!(pool.leaked() >= wide.len());
+        assert_eq!(escaped.is_null(0), selected_null);
+        assert_eq!(
+            escaped.as_string::<i32>().value(0),
+            if selected_null { wide.as_str() } else { "yes" }
+        );
+        drop(escaped);
+        assert_eq!(pool.leaked(), 0);
+    }
+}
+
+#[test]
+fn prepaid_edge_alias_handoff_keeps_one_sponsor_and_releases_unrelated_columns() {
+    use datafusion::execution::memory_pool::{MemoryConsumer, MemoryPool, MemoryReservation};
+    use graphforge_storage::read_memory::{PrepaidBatch, ReadAdmission, ReadGrant};
+    struct Admission(std::sync::Mutex<MemoryReservation>);
+    impl ReadAdmission for Admission {
+        fn reserve(&self, bytes: usize) -> datafusion::error::Result<ReadGrant> {
+            let reservation = self.0.lock().unwrap();
+            reservation.try_grow(bytes)?;
+            Ok(ReadGrant::from_reserved(reservation.split(bytes)))
+        }
+        fn check_cancelled(&self) -> datafusion::error::Result<()> {
+            Ok(())
+        }
+    }
+    const LIMIT: usize = 16 * 1024 * 1024;
+    let dir = tempfile::TempDir::new().unwrap();
+    labelled_ring(dir.path(), 8192);
+    let (_, _resource, inventory) = open_ring_provider(dir.path());
+    let pool = ConsumerPool::new(LIMIT);
+    let authority: Arc<dyn MemoryPool> = pool.clone();
+    let admission = Admission(std::sync::Mutex::new(
+        MemoryConsumer::new("prepaid edge source").register(&authority),
+    ));
+    let ids = (1..=8192).collect();
+    let source: PrepaidBatch = graphforge_storage::read_edges_filtered_prepaid_from_inventory(
+        &inventory,
+        "KNOWS",
+        OntologyMode::Strict,
+        &ids,
+        &[3, 6],
+        None,
+        &admission,
+    )
+    .unwrap();
+    let expected_schema = source.batch().schema();
+    let backing = source
+        .batch()
+        .column_by_name("edge_id")
+        .unwrap()
+        .get_buffer_memory_size();
+    let reservation = hop_read_reservation(&pool);
+    let mut charge = HopReadCharge::new(&reservation);
+    let batch = charge.adopt_source(source).unwrap();
+    charge.charge(4096).unwrap();
+    // Leave wrapper room, but no capacity for a second full key payload.
+    let filler = MemoryConsumer::new("other live query state").register(&authority);
+    filler.try_grow(LIMIT - pool.leaked() - 4096).unwrap();
+    let output = batch.project(&[0]).unwrap();
+    assert_eq!(output.schema().field(0), expected_schema.field(0));
+    drop(batch);
+    let output =
+        hop_read::lease_output(output, charge).expect("the source already funds this alias");
+    let escaped = output.batch.column(0).slice(7, 1);
+    assert_eq!(
+        escaped
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .unwrap()
+            .value(0),
+        8
+    );
+    drop(output);
+    drop(reservation);
+    drop(filler);
+    drop(admission);
+    assert!(
+        pool.leaked() >= backing,
+        "escaped full backing remains funded"
+    );
+    assert!(
+        pool.leaked() <= backing + 256,
+        "sibling columns, wrappers and duplicate sponsor must be gone: {}",
+        pool.leaked()
+    );
+    drop(escaped);
+    assert_eq!(pool.leaked(), 0);
+}
+
+#[test]
+fn prepaid_edge_unprojected_read_preserves_nullable_field_compatibility() {
+    use datafusion::execution::runtime_env::RuntimeEnvBuilder;
+    use datafusion::prelude::{SessionConfig, SessionContext};
+    let ring = tempfile::TempDir::new().unwrap();
+    let nodes = labelled_ring(ring.path(), 16);
+    let (provider, resource, canonical) = open_ring_provider(ring.path());
+    let wanted = std::collections::HashSet::from([1, 2]);
+    let batches = graphforge_storage::read_edges_filtered_observed_from_inventory(
+        &canonical,
+        "KNOWS",
+        OntologyMode::Strict,
+        &wanted,
+        None,
+    )
+    .unwrap();
+    let source = arrow::compute::concat_batches(&batches[0].schema(), &batches).unwrap();
+    // A valid flat legacy schema can differ only in nullability while every
+    // stored cell is present. The unprojected reader has always accepted it.
+    let mut fields = source
+        .schema()
+        .fields()
+        .iter()
+        .map(|field| field.as_ref().clone())
+        .collect::<Vec<_>>();
+    fields[6] = fields[6].clone().with_nullable(true);
+    let schema = Arc::new(arrow::datatypes::Schema::new(fields));
+    let legacy = RecordBatch::try_new(schema.clone(), source.columns().to_vec()).unwrap();
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join("topology/edges/KNOWS.parquet");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut writer =
+        parquet::arrow::ArrowWriter::try_new(std::fs::File::create(&path).unwrap(), schema, None)
+            .unwrap();
+    writer.write(&legacy).unwrap();
+    writer.close().unwrap();
+    let inventory =
+        Arc::new(graphforge_storage::AuthenticatedPropertyInventory::capture(dir.path()).unwrap());
+    let ordinary = graphforge_storage::read_edges_filtered_observed_from_inventory(
+        &inventory,
+        "KNOWS",
+        OntologyMode::Strict,
+        &wanted,
+        None,
+    )
+    .unwrap();
+    let expected = arrow::compute::concat_batches(&ordinary[0].schema(), &ordinary).unwrap();
+    assert_eq!(expected, legacy);
+    let pool = ConsumerPool::new(16 * 1024 * 1024);
+    let execution = RuntimeEnvBuilder::new()
+        .with_memory_pool(pool.clone())
+        .build_arc()
+        .unwrap();
+    let context = SessionContext::new_with_config_rt(SessionConfig::new(), execution);
+    let exec = ring_expand_exec(&provider, &resource, &nodes[..1]);
+    let mut cfg = exec.single_hop_config(&context.task_ctx(), 0);
+    cfg.provider = Arc::new(
+        adjacency::PersistentAdjacencyProvider::new(dir.path().to_owned(), OntologyMode::Strict)
+            .with_inventory(inventory),
+    );
+    cfg.dir = dir.path().to_owned();
+    let mut charge = HopReadCharge::new(&cfg.read_reservation);
+    let actual =
+        hop_read::read_edge_batch(&cfg, &mut charge, &wanted, &[], false, 7, None).unwrap();
+    assert_eq!(actual, expected);
+    drop(actual);
+    drop(charge);
+    let mut projected = HopReadCharge::new(&cfg.read_reservation);
+    let error = hop_read::read_edge_batch(&cfg, &mut projected, &wanted, &[3, 6], true, 7, None)
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("requires canonical schema"),
+        "{error}"
+    );
+    drop(projected);
+    drop(cfg);
+    drop(context);
+    assert_eq!(pool.leaked(), 0);
 }
