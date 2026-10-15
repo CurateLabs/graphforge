@@ -1962,6 +1962,7 @@ name = "datafusion-physical-plan"
 version = "54.1.0"
 dependencies = [
  "arrow",
+ "arrow-buffer",
  "arrow-data",
  "arrow-ipc",
  "arrow-ord",
@@ -1986,6 +1987,7 @@ dependencies = [
  "parking_lot",
  "pin-project-lite",
  "tokio",
+ "zstd-sys",
 ]
 
 [[package]]

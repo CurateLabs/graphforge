@@ -15,6 +15,8 @@
 // specific language governing permissions and limitations
 // under the License.
 
+use super::copy_admission::{CopyAdmission, Phase, Resident, SourceOwners};
+use crate::spill::admission::{add, mul};
 use crate::spill::get_record_batch_memory_size;
 use arrow::array::ArrayRef;
 use arrow::compute::interleave;
@@ -67,9 +69,24 @@ pub struct BatchBuilder {
     /// The accumulated stream indexes from which to pull rows
     /// Consists of a tuple of `(batch_idx, row_idx)`
     indices: Vec<(usize, usize)>,
+    copy: Option<Arc<CopyAdmission>>,
+    _copy_resident: Option<Arc<Resident>>,
+    _failed_phase: Option<Phase>,
 }
 
 impl BatchBuilder {
+    pub(super) fn constructor_bound(streams: usize, batch_size: usize) -> Result<usize> {
+        add(
+            add(size_of::<Self>(), 512)?,
+            add(
+                mul(mul(streams, 2)?, size_of::<(usize, RecordBatch)>())?,
+                add(
+                    mul(streams, size_of::<BatchCursor>())?,
+                    mul(batch_size, size_of::<(usize, usize)>())?,
+                )?,
+            )?,
+        )
+    }
     /// Create a new [`BatchBuilder`] with the provided `stream_count` and `batch_size`
     pub fn new(
         schema: SchemaRef,
@@ -86,7 +103,33 @@ impl BatchBuilder {
             reservation,
             batches_mem_used: 0,
             initial_reservation,
+            copy: None,
+            _copy_resident: None,
+            _failed_phase: None,
         }
+    }
+
+    pub(super) fn attach_copy(
+        &mut self,
+        copy: Arc<CopyAdmission>,
+        phase: &Phase,
+    ) -> Result<()> {
+        self._copy_resident = Some(phase.resident(self.metadata()?)?);
+        self.copy = Some(copy);
+        Ok(())
+    }
+
+    fn metadata(&self) -> Result<usize> {
+        add(
+            size_of::<Self>(),
+            add(
+                mul(self.batches.capacity(), size_of::<(usize, RecordBatch)>())?,
+                add(
+                    mul(self.cursors.capacity(), size_of::<BatchCursor>())?,
+                    mul(self.indices.capacity(), size_of::<(usize, usize)>())?,
+                )?,
+            )?,
+        )
     }
 
     /// Append a new batch in `stream_idx`
@@ -98,7 +141,33 @@ impl BatchBuilder {
         // pre-reserved bytes from sort_spill_reservation_bytes).
         try_grow_reservation_to_at_least(&mut self.reservation, self.batches_mem_used)?;
         let batch_idx = self.batches.len();
+        let growing = batch_idx == self.batches.capacity();
+        let mut phase = if growing {
+            self.copy
+                .as_ref()
+                .map(|copy| {
+                    // Old capacity remains resident while the complete new Vec
+                    // allocation can coexist with it during realloc.
+                    let capacity = mul(self.batches.capacity(), 2)?.max(4);
+                    copy.begin_operation(Some(mul(
+                        capacity,
+                        size_of::<(usize, RecordBatch)>(),
+                    )?))
+                })
+                .transpose()?
+        } else {
+            None
+        };
         self.batches.push((stream_idx, batch));
+        if let Some(active) = &phase {
+            let result = self.metadata().and_then(|metadata| {
+                active.resize(self._copy_resident.as_ref().unwrap(), metadata)
+            });
+            if let Err(error) = result {
+                self._failed_phase = phase.take();
+                return Err(error);
+            }
+        }
         self.cursors[stream_idx] = BatchCursor {
             batch_idx,
             row_idx: 0,
@@ -134,7 +203,25 @@ impl BatchBuilder {
         &self,
         indices: &[(usize, usize)],
     ) -> Result<Vec<ArrayRef>> {
-        (0..self.schema.fields.len())
+        let phase = self
+            .copy
+            .as_ref()
+            .map(|copy| {
+                let workspace = if copy.encoded_width().is_some() {
+                    super::copy_bounds::interleave(&self.batches, indices)?
+                } else {
+                    None
+                };
+                copy.begin_operation(workspace)
+            })
+            .transpose()?;
+        let source = phase
+            .as_ref()
+            .map(|phase| {
+                SourceOwners::new(phase, self.batches.iter().map(|(_, batch)| batch))
+            })
+            .transpose()?;
+        let columns = (0..self.schema.fields.len())
             .map(|column_idx| {
                 let arrays: Vec<_> = self
                     .batches
@@ -145,7 +232,11 @@ impl BatchBuilder {
                 // interleave, allowing retry_interleave to shrink the batch.
                 interleave(&arrays, indices).map_err(Into::into)
             })
-            .collect::<Result<Vec<_>>>()
+            .collect::<Result<Vec<_>>>()?;
+        if let (Some(phase), Some(source)) = (&phase, &source) {
+            source.retain_fresh(phase, &self.schema, &columns)?;
+        }
+        Ok(columns)
     }
 
     /// Builds a record batch from the first `rows_to_emit` buffered rows.

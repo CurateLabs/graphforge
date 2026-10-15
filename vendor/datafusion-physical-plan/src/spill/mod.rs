@@ -17,6 +17,8 @@
 
 //! Defines the spilling functions
 
+pub(crate) mod admission;
+mod credit;
 pub(crate) mod in_progress_spill_file;
 pub(crate) mod replayable_spill_input;
 pub(crate) mod spill_manager;
@@ -33,6 +35,7 @@ use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
 
 use arrow::array::{
@@ -55,8 +58,8 @@ use datafusion_common::{DataFusionError, Result, exec_datafusion_err, exec_err};
 use datafusion_common_runtime::SpawnedTask;
 use datafusion_execution::RecordBatchStream;
 use datafusion_execution::disk_manager::RefCountedTempFile;
+use datafusion_execution::memory_pool::MemoryPool;
 use futures::{FutureExt as _, Stream};
-use log::debug;
 
 /// Stream that reads spill files from disk where each batch is read in a spawned blocking task
 /// It will read one batch at a time and will not do any buffering, to buffer data use [`crate::common::spawn_buffered`]
@@ -68,32 +71,27 @@ use log::debug;
 struct SpillReaderStream {
     schema: SchemaRef,
     state: SpillReaderStreamState,
-    /// Maximum memory size observed among spilling sorted record batches.
-    /// This is used for validation purposes during reading each RecordBatch from spill.
-    /// For context on why this value is recorded and validated,
-    /// see `physical_plan/sort/multi_level_merge.rs`.
-    max_record_batch_memory: Option<usize>,
+    pool: Arc<dyn MemoryPool>,
+    cancelled: Arc<AtomicBool>,
+    credit: Option<Arc<admission::Credit>>,
+    producer: Option<Arc<admission::ReaderPermit>>,
 }
 
-// Small margin allowed to accommodate slight memory accounting variation
-const SPILL_BATCH_MEMORY_MARGIN: usize = 4096;
-
-/// When we poll for the next batch, we will get back both the batch and the reader,
-/// so we can call `next` again.
-type NextRecordBatchResult = Result<(StreamReader<BufReader<File>>, Option<RecordBatch>)>;
-
+/// The reader owns its persistent schema/metadata and open file authority.
+/// A started spawn_blocking task owns this entire value until it exits, even
+/// when aborting its handle cannot stop the blocking operation.
+struct AdmittedSpillReader {
+    reader: StreamReader<BufReader<File>>,
+    _persistent: admission::Budget,
+    _file: RefCountedTempFile,
+    dictionary_bound: usize,
+    dictionary_sources: admission::DictionarySources,
+}
+type NextRecordBatchResult = Result<(AdmittedSpillReader, Option<RecordBatch>)>;
 enum SpillReaderStreamState {
-    /// Initial state: the stream was not initialized yet
-    /// and the file was not opened
     Uninitialized(RefCountedTempFile),
-
-    /// A read is in progress in a spawned blocking task for which we hold the handle.
     ReadInProgress(SpawnedTask<NextRecordBatchResult>),
-
-    /// A read has finished and we wait for being polled again in order to start reading the next batch.
-    Waiting(StreamReader<BufReader<File>>),
-
-    /// The stream has finished, successfully or not.
+    Waiting(AdmittedSpillReader),
     Done,
 }
 
@@ -101,12 +99,18 @@ impl SpillReaderStream {
     fn new(
         schema: SchemaRef,
         spill_file: RefCountedTempFile,
-        max_record_batch_memory: Option<usize>,
+        _max_record_batch_memory: Option<usize>,
+        pool: Arc<dyn MemoryPool>,
+        credit: Option<Arc<admission::Credit>>,
+        producer: Option<Arc<admission::ReaderPermit>>,
     ) -> Self {
         Self {
             schema,
             state: SpillReaderStreamState::Uninitialized(spill_file),
-            max_record_batch_memory,
+            pool,
+            credit,
+            producer,
+            cancelled: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -115,119 +119,148 @@ impl SpillReaderStream {
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<RecordBatch>>> {
         match &mut self.state {
-            SpillReaderStreamState::Uninitialized(_) => {
-                // Temporarily replace with `Done` to be able to pass the file to the task.
-                let SpillReaderStreamState::Uninitialized(spill_file) =
-                    std::mem::replace(&mut self.state, SpillReaderStreamState::Done)
-                else {
-                    unreachable!()
-                };
-
-                let expected_schema = Arc::clone(&self.schema);
-                let task = SpawnedTask::spawn_blocking(move || {
-                    let file = BufReader::new(File::open(spill_file.path())?);
-                    // SAFETY: DataFusion's spill writer strictly follows Arrow IPC specifications
-                    // with validated schemas and buffers. Skip redundant validation during read
-                    // to speedup read operation. This is safe for DataFusion as input guaranteed to be correct when written.
-                    let mut reader = unsafe {
-                        StreamReader::try_new(file, None)?.with_skip_validation(true)
-                    };
-
-                    // Validate the schema read from Arrow IPC file is the same as the
-                    // schema of the current `SpillManager`
-                    let actual_schema = reader.schema();
-
-                    if actual_schema != expected_schema {
-                        return exec_err!(
-                            "Spill file schema mismatch: expected {}, got {}. \
-                            The caller must use the same SpillManager that created the spill file to read it.",
-                            expected_schema,
-                            actual_schema
-                        );
-                    }
-
-                    // TODO: Same-schema reads from a different SpillManager still pass today.
-                    // Add a SpillManager UID to IPC metadata and validate it here as well.
-                    let next_batch = reader.next().transpose()?;
-
-                    Ok((reader, next_batch))
-                });
-
-                self.state = SpillReaderStreamState::ReadInProgress(task);
-
-                // Poll again immediately so the inner task is polled and the waker is
-                // registered.
-                self.poll_next_inner(cx)
-            }
-
             SpillReaderStreamState::ReadInProgress(task) => {
                 let result = futures::ready!(task.poll_unpin(cx))
                     .unwrap_or_else(|err| Err(DataFusionError::External(Box::new(err))));
-
                 match result {
-                    Ok((reader, batch)) => {
-                        match batch {
-                            Some(batch) => {
-                                if let Some(max_record_batch_memory) =
-                                    self.max_record_batch_memory
-                                {
-                                    let actual_size =
-                                        get_record_batch_memory_size(&batch);
-                                    if actual_size
-                                        > max_record_batch_memory
-                                            + SPILL_BATCH_MEMORY_MARGIN
-                                    {
-                                        debug!(
-                                            "Record batch memory usage ({actual_size} bytes) exceeds the expected limit ({max_record_batch_memory} bytes) \n\
-                                                by more than the allowed tolerance ({SPILL_BATCH_MEMORY_MARGIN} bytes).\n\
-                                                This likely indicates a bug in memory accounting during spilling.\n\
-                                                Please report this issue in https://github.com/apache/datafusion/issues/17340."
-                                        );
-                                    }
-                                }
-                                self.state = SpillReaderStreamState::Waiting(reader);
-
-                                Poll::Ready(Some(Ok(batch)))
-                            }
-                            None => {
-                                // Stream is done
-                                self.state = SpillReaderStreamState::Done;
-
-                                Poll::Ready(None)
-                            }
-                        }
+                    Ok((reader, Some(batch))) => {
+                        self.state = SpillReaderStreamState::Waiting(reader);
+                        Poll::Ready(Some(Ok(batch)))
                     }
-                    Err(err) => {
+                    Ok((_, None)) => {
                         self.state = SpillReaderStreamState::Done;
-
-                        Poll::Ready(Some(Err(err)))
+                        self.producer.take();
+                        Poll::Ready(None)
+                    }
+                    Err(error) => {
+                        self.state = SpillReaderStreamState::Done;
+                        self.producer.take();
+                        Poll::Ready(Some(Err(error)))
                     }
                 }
             }
-
-            SpillReaderStreamState::Waiting(_) => {
-                // Temporarily replace with `Done` to be able to pass the file to the task.
-                let SpillReaderStreamState::Waiting(mut reader) =
-                    std::mem::replace(&mut self.state, SpillReaderStreamState::Done)
-                else {
-                    unreachable!()
-                };
-
-                let task = SpawnedTask::spawn_blocking(move || {
-                    let next_batch = reader.next().transpose()?;
-
-                    Ok((reader, next_batch))
-                });
-
-                self.state = SpillReaderStreamState::ReadInProgress(task);
-
-                // Poll again immediately so the inner task is polled and the waker is
-                // registered.
+            SpillReaderStreamState::Done => Poll::Ready(None),
+            _ => {
+                let state =
+                    std::mem::replace(&mut self.state, SpillReaderStreamState::Done);
+                let schema = Arc::clone(&self.schema);
+                let pool = Arc::clone(&self.pool);
+                let cancelled = Arc::clone(&self.cancelled);
+                let credit = self.credit.clone();
+                let producer = self.producer.clone();
+                self.state = SpillReaderStreamState::ReadInProgress(
+                    SpawnedTask::spawn_blocking(move || {
+                        // Declared first, dropped after every worker allocation. A
+                        // cancelled async handle cannot retire this active root.
+                        let _producer = producer;
+                        let check_cancelled = || -> Result<()> {
+                            if cancelled.load(Ordering::Acquire) {
+                                return exec_err!("Spill read cancelled");
+                            }
+                            Ok(())
+                        };
+                        check_cancelled()?;
+                        let mut admitted = match state {
+                            SpillReaderStreamState::Waiting(reader) => reader,
+                            SpillReaderStreamState::Uninitialized(file) => {
+                                let schema_bytes = admission::schema_bound(&schema)?;
+                                let persistent = admission::reserve_with_credit(
+                                    &pool,
+                                    schema_bytes,
+                                    "SpillReaderMetadata",
+                                    credit.clone(),
+                                )?;
+                                // BufReader's fixed 8 KiB allocation is admitted before construction.
+                                let initial = admission::reserve_with_credit(
+                                    &pool,
+                                    8192,
+                                    "SpillReaderInitialize",
+                                    credit.clone(),
+                                )?;
+                                let mut input = BufReader::new(File::open(file.path())?);
+                                admission::preflight(
+                                    &mut input,
+                                    &initial,
+                                    &persistent,
+                                    &cancelled,
+                                )?;
+                                check_cancelled()?;
+                                // SAFETY: only this engine's validated IPC writer creates
+                                // these files; framing admission does not change decoding.
+                                let reader = unsafe {
+                                    StreamReader::try_new(input, None)?
+                                        .with_skip_validation(true)
+                                };
+                                if reader.schema() != schema {
+                                    return exec_err!("Spill file schema mismatch");
+                                }
+                                // Keep the reader buffer as well as schema/metadata alive.
+                                persistent.try_grow(8192)?;
+                                AdmittedSpillReader {
+                                    reader,
+                                    _persistent: persistent,
+                                    _file: file,
+                                    dictionary_bound: 0,
+                                    dictionary_sources: Default::default(),
+                                }
+                            }
+                            _ => unreachable!(),
+                        };
+                        check_cancelled()?;
+                        let mut work = admission::reserve_with_credit(
+                            &pool,
+                            admission::add(
+                                admission::schema_bound(&schema)?,
+                                admitted.dictionary_bound,
+                            )?,
+                            "SpillReaderDecode",
+                            credit,
+                        )?;
+                        let frame = admission::preflight(
+                            admitted.reader.get_mut(),
+                            &work,
+                            &admitted._persistent,
+                            &cancelled,
+                        )?;
+                        check_cancelled()?;
+                        let batch = admitted.reader.next().transpose()?;
+                        if let Some(batch) = &batch {
+                            let bytes = admission::retained_bound(batch, work.size())?;
+                            if bytes > work.size() {
+                                return exec_err!(
+                                    "Spill decoder exceeded its admitted source bound: actual={bytes} admitted={} fixed={} dictionary={} frame={frame:?}",
+                                    work.size(),
+                                    admission::schema_bound(&schema)?,
+                                    admitted.dictionary_bound
+                                );
+                            }
+                            // The next batch can reference cached dictionary values
+                            // without another dictionary message. Admit that complete
+                            // prior backing before the next decode/reclaim.
+                            admitted.dictionary_bound =
+                                admission::dictionary_bound(batch)?;
+                            let next_sources = admission::retain_batch(
+                                batch,
+                                &mut work,
+                                &admitted.dictionary_sources,
+                            )?;
+                            // The old roots stay pinned through reconciliation.
+                            admitted.dictionary_sources = next_sources;
+                        }
+                        check_cancelled()?;
+                        Ok((admitted, batch))
+                    }),
+                );
                 self.poll_next_inner(cx)
             }
-
-            SpillReaderStreamState::Done => Poll::Ready(None),
         }
+    }
+}
+impl Drop for SpillReaderStream {
+    fn drop(&mut self) {
+        // Abort stops a queued task; an already active blocking task keeps its
+        // own reservations and cooperatively stops before the next decode.
+        self.cancelled.store(true, Ordering::Release);
     }
 }
 
@@ -500,16 +533,17 @@ fn gc_array_children(array: &ArrayRef) -> Result<(ArrayRef, bool)> {
 /// the views buffer (16 bytes × n_rows) from `get_buffer_memory_size()` so the
 /// threshold tracks non-inline string data rather than row count.
 fn should_gc_view_array<T: ByteViewType>(array: &GenericByteViewArray<T>) -> bool {
+    should_gc_view_memory(
+        !array.data_buffers().is_empty(),
+        array.get_buffer_memory_size(),
+        array.len() * VIEW_SIZE_BYTES,
+    )
+}
+
+// Keep write admission and the actual GC branch on the same predicate.
+fn should_gc_view_memory(has_data_buffers: bool, memory: usize, views: usize) -> bool {
     const MIN_BUFFER_SIZE_FOR_GC: usize = 10 * 1024; // 10KB threshold
-
-    if array.data_buffers().is_empty() {
-        return false;
-    }
-
-    let data_buffer_size = array
-        .get_buffer_memory_size()
-        .saturating_sub(array.len() * VIEW_SIZE_BYTES);
-    data_buffer_size > MIN_BUFFER_SIZE_FOR_GC
+    has_data_buffers && memory.saturating_sub(views) > MIN_BUFFER_SIZE_FOR_GC
 }
 
 #[cfg(test)]
@@ -1460,7 +1494,11 @@ mod tests {
         // 1. Setup bloated data (large buffers)
         let num_rows = 1000;
         let string_array: StringViewArray = (0..num_rows)
-            .map(|i| Some(format!("this_is_a_long_string_to_ensure_it_is_not_inlined_and_causes_waste_{i}")))
+            .map(|i| {
+                Some(format!(
+                    "this_is_a_long_string_to_ensure_it_is_not_inlined_and_causes_waste_{i}"
+                ))
+            })
             .collect();
         let schema = Arc::new(Schema::new(vec![Field::new(
             "s",

@@ -25,8 +25,10 @@ use std::task::{Context, Poll, ready};
 use crate::RecordBatchStream;
 use crate::metrics::BaselineMetrics;
 use crate::sorts::builder::BatchBuilder;
+use crate::sorts::copy_admission::{CopyAdmission, Resident};
 use crate::sorts::cursor::{Cursor, CursorValues};
 use crate::sorts::stream::PartitionedStream;
+use crate::spill::admission::{add, mul};
 
 use arrow::datatypes::SchemaRef;
 use arrow::record_batch::RecordBatch;
@@ -153,9 +155,22 @@ pub(crate) struct SortPreservingMergeStream<C: CursorValues> {
 
     /// This vector contains the indices of the partitions that have not started emitting yet.
     uninitiated_partitions: Vec<usize>,
+    _copy_resident: Option<Arc<Resident>>,
 }
 
 impl<C: CursorValues> SortPreservingMergeStream<C> {
+    pub(super) fn constructor_bound(streams: usize, batch_size: usize) -> Result<usize> {
+        add(
+            add(size_of::<Self>(), 512)?,
+            add(
+                BatchBuilder::constructor_bound(streams, batch_size)?,
+                add(
+                    mul(mul(streams, 2)?, size_of::<Option<Cursor<C>>>())?,
+                    mul(mul(streams, 6)?, size_of::<usize>())?,
+                )?,
+            )?,
+        )
+    }
     pub(crate) fn new(
         streams: CursorStream<C>,
         schema: SchemaRef,
@@ -185,8 +200,55 @@ impl<C: CursorValues> SortPreservingMergeStream<C> {
             fetch,
             produced: 0,
             uninitiated_partitions: (0..stream_count).collect(),
+            _copy_resident: None,
             enable_round_robin_tie_breaker,
         }
+    }
+
+    pub(super) fn new_with_copy(
+        streams: CursorStream<C>,
+        schema: SchemaRef,
+        metrics: BaselineMetrics,
+        batch_size: usize,
+        fetch: Option<usize>,
+        reservation: MemoryReservation,
+        enable_round_robin_tie_breaker: bool,
+        copy: Option<Arc<CopyAdmission>>,
+    ) -> Result<Self> {
+        let phase = copy.as_ref().map(|copy| copy.begin()).transpose()?;
+        let mut stream = Self::new(
+            streams,
+            schema,
+            metrics,
+            batch_size,
+            fetch,
+            reservation,
+            enable_round_robin_tie_breaker,
+        );
+        if let (Some(copy), Some(phase)) = (copy, phase.as_ref()) {
+            stream.in_progress.attach_copy(copy, phase)?;
+            let cursors = add(stream.cursors.capacity(), stream.prev_cursors.capacity())?;
+            let indices = add(
+                add(
+                    stream.num_of_polled_with_same_value.capacity(),
+                    stream.poll_reset_epochs.capacity(),
+                )?,
+                add(
+                    stream.cursors.len(),
+                    stream.uninitiated_partitions.capacity(),
+                )?,
+            )?;
+            // Includes the loser tree's known future allocation before init.
+            let metadata = add(
+                size_of::<Self>(),
+                add(
+                    mul(cursors, size_of::<Option<Cursor<C>>>())?,
+                    mul(indices, size_of::<usize>())?,
+                )?,
+            )?;
+            stream._copy_resident = Some(phase.resident(metadata)?);
+        }
+        Ok(stream)
     }
 
     /// If the stream at the given index is not exhausted, and the last cursor for the

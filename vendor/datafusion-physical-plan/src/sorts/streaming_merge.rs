@@ -19,6 +19,7 @@
 //! This is an order-preserving merge.
 
 use crate::metrics::BaselineMetrics;
+use crate::sorts::copy_admission::CopyAdmission;
 use crate::sorts::multi_level_merge::MultiLevelMergeBuilder;
 use crate::sorts::{
     merge::SortPreservingMergeStream,
@@ -88,6 +89,7 @@ pub struct StreamingMergeBuilder<'a> {
     fetch: Option<usize>,
     reservation: Option<MemoryReservation>,
     enable_round_robin_tie_breaker: bool,
+    copy: Option<Arc<CopyAdmission>>,
 }
 
 impl<'a> StreamingMergeBuilder<'a> {
@@ -141,6 +143,11 @@ impl<'a> StreamingMergeBuilder<'a> {
         self
     }
 
+    pub(super) fn with_copy(mut self, copy: Option<Arc<CopyAdmission>>) -> Self {
+        self.copy = copy;
+        self
+    }
+
     pub fn with_reservation(mut self, reservation: MemoryReservation) -> Self {
         self.reservation = Some(reservation);
         self
@@ -181,6 +188,7 @@ impl<'a> StreamingMergeBuilder<'a> {
             fetch,
             expressions,
             enable_round_robin_tie_breaker,
+            copy,
         } = self;
 
         // Early return if expressions are empty:
@@ -241,13 +249,14 @@ impl<'a> StreamingMergeBuilder<'a> {
             }
         }
 
-        let streams = RowCursorStream::try_new(
+        let streams = RowCursorStream::try_new_with_copy(
             schema.as_ref(),
             expressions,
             streams,
             reservation.new_empty(),
+            copy.clone(),
         )?;
-        Ok(Box::pin(SortPreservingMergeStream::new(
+        let stream = SortPreservingMergeStream::new_with_copy(
             Box::new(streams),
             schema,
             metrics,
@@ -255,6 +264,11 @@ impl<'a> StreamingMergeBuilder<'a> {
             fetch,
             reservation,
             enable_round_robin_tie_breaker,
-        )))
+            copy.clone(),
+        )?;
+        if let Some(copy) = &copy {
+            copy.finish_preparing();
+        }
+        Ok(Box::pin(stream))
     }
 }
