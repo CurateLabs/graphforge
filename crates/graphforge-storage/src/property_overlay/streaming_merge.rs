@@ -145,6 +145,12 @@ impl Cursor {
 
 /// The UUIDs an equality nominates, and the work of finding them.
 pub(crate) type EqualityCandidates = (BTreeSet<[u8; 16]>, PropertyOverlayMetrics);
+// Tuple fields drop in declaration order: UUID nodes before their authority.
+type AdmittedEqualityCandidates = (
+    BTreeSet<[u8; 16]>,
+    PropertyOverlayMetrics,
+    Option<crate::property_scan_memory::Guard>,
+);
 
 type HeapKey = Reverse<([u8; 16], Reverse<PropertyFragmentId>, usize)>;
 
@@ -323,6 +329,7 @@ impl AuthenticatedPropertyInventory {
         collect: bool,
     ) -> Result<Option<EqualityCandidates>, GfError> {
         self.equality_candidates_admitted(kind, route, equality, limits, cap, collect, None)
+            .map(|result| result.map(|(candidates, metrics, _)| (candidates, metrics)))
     }
 
     #[allow(
@@ -338,9 +345,19 @@ impl AuthenticatedPropertyInventory {
         cap: usize,
         collect: bool,
         execution: Option<Arc<crate::property_scan_memory::Budget>>,
-    ) -> Result<Option<EqualityCandidates>, GfError> {
+    ) -> Result<Option<AdmittedEqualityCandidates>, GfError> {
+        // Declare admission before the set, so refusal, corruption, cancellation
+        // and cap abandonment all destroy its nodes before releasing authority.
+        let mut candidate_memory = execution
+            .as_ref()
+            .map(|budget| budget.reserve(0))
+            .transpose()?;
         let Some(fragments) = self.routes.get(&(kind, route.to_owned())) else {
-            return Ok(Some((BTreeSet::new(), PropertyOverlayMetrics::default())));
+            return Ok(Some((
+                BTreeSet::new(),
+                PropertyOverlayMetrics::default(),
+                candidate_memory,
+            )));
         };
         let summary = self.route_summary(kind, route)?;
         let expected = equality.value.data_type();
@@ -405,16 +422,25 @@ impl AuthenticatedPropertyInventory {
             };
             while cursor.advance(None, &mut metrics)? {
                 let row = cursor.head.take().expect("advanced to a row");
-                if !row.tombstone && equality.holds(&row.values) {
-                    candidates.insert(row.uuid);
-                    if candidates.len() > cap {
+                if !row.tombstone && equality.holds(&row.values) && !candidates.contains(&row.uuid)
+                {
+                    if candidates.len() >= cap {
                         return Ok(None);
                     }
+                    if let Some(memory) = candidate_memory.as_mut() {
+                        // Retain the existing conservative BTreeSet node bound,
+                        // admitting only actual distinct UUIDs before insertion.
+                        memory.grow(
+                            16 * (std::mem::size_of::<[u8; 16]>()
+                                + 4 * std::mem::size_of::<usize>()),
+                        )?;
+                    }
+                    candidates.insert(row.uuid);
                 }
             }
         }
         accounting.finalize(&mut metrics, fragments);
-        Ok(Some((candidates, metrics)))
+        Ok(Some((candidates, metrics, candidate_memory)))
     }
 }
 

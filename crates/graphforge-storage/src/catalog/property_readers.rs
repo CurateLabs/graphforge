@@ -241,37 +241,28 @@ where
         _indexed_memory = None;
         None
     };
-    // The fallback's existing cap bounds its retained UUID set, including the
-    // last row which makes pruning give up. Indexed reads use selected shards.
-    let candidate_memory = if indexed.is_none() && equality.is_some() && !is_edge {
-        execution
-            .map(|budget| {
-                let rows = inventory
-                    .route_row_upper_bound(kind, stem)?
-                    .min(MAX_EQUALITY_CANDIDATES + 1);
-                crate::property_scan_memory::mul(
-                    rows,
-                    16 * (std::mem::size_of::<[u8; 16]>() + 4 * std::mem::size_of::<usize>()),
-                )
-                .and_then(|bytes| budget.reserve(bytes))
-            })
-            .transpose()
-            .map_err(|error| DataFusionError::External(Box::new(error)))?
-    } else {
-        None
-    };
+    // Adopt fallback candidate admission before moving its UUID data into the
+    // filter owner. Indexed candidates retain their existing shard authority.
+    let mut _candidate_memory = None;
     let candidates = match (indexed, equality.filter(|_| !is_edge)) {
         (Some(found), _) => Some((found, crate::PropertyOverlayMetrics::default())),
         (None, Some(equality)) => match execution {
-            Some(_) => inventory.equality_candidates_admitted(
-                kind,
-                stem,
-                equality,
-                limits,
-                MAX_EQUALITY_CANDIDATES,
-                collect,
-                execution.cloned(),
-            ),
+            Some(_) => inventory
+                .equality_candidates_admitted(
+                    kind,
+                    stem,
+                    equality,
+                    limits,
+                    MAX_EQUALITY_CANDIDATES,
+                    collect,
+                    execution.cloned(),
+                )
+                .map(|result| {
+                    result.map(|(candidates, metrics, memory)| {
+                        _candidate_memory = memory;
+                        (candidates, metrics)
+                    })
+                }),
             None => inventory.equality_candidates(
                 kind,
                 stem,
@@ -288,9 +279,6 @@ where
         metrics.absorb(&work);
         Some(candidates)
     } else {
-        // An abandoned candidate pass retains no UUID set. Its envelope
-        // must not compete with the subsequent unpruned read.
-        drop(candidate_memory);
         None
     };
     let uuid_filter = (!uuid_sets.is_empty() || candidate_uuids.is_some()).then_some(

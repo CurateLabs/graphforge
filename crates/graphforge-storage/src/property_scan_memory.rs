@@ -76,6 +76,21 @@ pub(crate) struct Guard {
 }
 
 impl Guard {
+    /// Admit additional capacity before its owner allocates it. A refusal
+    /// leaves this guard and the pool's existing reservation unchanged.
+    pub(crate) fn grow(&mut self, additional: usize) -> Result<(), GfError> {
+        self.budget.check()?;
+        let bytes = add(self.bytes, additional)?;
+        self.budget
+            .reservation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .try_grow(additional)
+            .map_err(refused)?;
+        self.bytes = bytes;
+        Ok(())
+    }
+
     fn release(&mut self, bytes: usize) -> Result<(), GfError> {
         let retained = self
             .bytes
@@ -489,6 +504,29 @@ mod tests {
     use super::*;
     use datafusion::execution::memory_pool::GreedyMemoryPool;
     use std::collections::{BTreeMap, HashMap};
+
+    #[test]
+    fn guard_growth_refusal_and_cancellation_preserve_existing_authority() {
+        let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1024));
+        let budget = Budget::new(&pool);
+        let mut memory = budget.reserve(256).unwrap();
+        memory.grow(512).unwrap();
+        assert_eq!(pool.reserved(), 768);
+        assert_eq!(memory.grow(512).unwrap_err().code(), "GF_RESOURCE_LIMIT");
+        assert_eq!(memory.bytes, 768);
+        assert_eq!(pool.reserved(), 768);
+        assert_eq!(
+            memory.grow(usize::MAX).unwrap_err().code(),
+            "GF_RESOURCE_LIMIT"
+        );
+        assert_eq!(pool.reserved(), 768);
+        budget.cancel();
+        assert_eq!(memory.grow(128).unwrap_err().code(), "GF_CANCELLED");
+        assert_eq!(memory.bytes, 768);
+        assert_eq!(pool.reserved(), 768);
+        drop(memory);
+        assert_eq!(pool.reserved(), 0);
+    }
 
     #[derive(Debug)]
     struct AdmissionPool {
