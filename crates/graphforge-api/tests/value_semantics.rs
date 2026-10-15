@@ -257,3 +257,98 @@ fn in_precedence_truth_tables_decode_tagged_nested_lists() {
     );
     assert_eq!(bool_cell(&batch, "result"), Some(true));
 }
+
+#[test]
+fn numeric_list_order_preserves_large_integer_paths_in_both_directions() {
+    let graph = GraphForge::new(None).expect("in-memory instance");
+    for (input, ascending) in [
+        (
+            "[[9007199254740992,2],[9007199254740993,1]]",
+            vec![
+                vec![9_007_199_254_740_992, 2],
+                vec![9_007_199_254_740_993, 1],
+            ],
+        ),
+        (
+            "[[0,9007199254740993],[0,9007199254740992]]",
+            vec![
+                vec![0, 9_007_199_254_740_992],
+                vec![0, 9_007_199_254_740_993],
+            ],
+        ),
+        (
+            "[[-9007199254740993,2],[-9007199254740992,1]]",
+            vec![
+                vec![-9_007_199_254_740_993, 2],
+                vec![-9_007_199_254_740_992, 1],
+            ],
+        ),
+    ] {
+        for direction in ["ASC", "DESC"] {
+            let query = format!("UNWIND {input} AS path RETURN path ORDER BY path {direction}");
+            let result = graph.execute(&query).expect("ordered integer paths");
+            let mut actual = Vec::new();
+            for batch in &result.batches {
+                let paths = batch
+                    .column_by_name("path")
+                    .expect("path")
+                    .as_any()
+                    .downcast_ref::<ListArray>()
+                    .expect("Int64 lists");
+                for row in 0..paths.len() {
+                    assert!(!paths.is_null(row));
+                    let values = paths.value(row);
+                    let values = values
+                        .as_any()
+                        .downcast_ref::<Int64Array>()
+                        .expect("exact Int64 ids");
+                    assert_eq!(values.null_count(), 0);
+                    actual.push(values.values().to_vec());
+                }
+            }
+            let mut expected = ascending.clone();
+            if direction == "DESC" {
+                expected.reverse();
+            }
+            assert_eq!(result.stats.rows_produced, 2, "{query}");
+            assert_eq!(actual, expected, "{query}");
+        }
+    }
+}
+
+#[test]
+fn numeric_list_order_compares_large_integers_with_floats_exactly() {
+    let graph = GraphForge::new(None).expect("in-memory instance");
+    for direction in ["ASC", "DESC"] {
+        let query = format!(
+            "UNWIND [{{path:[9007199254740993,'x'],marker:'integer'}}, \
+                     {{path:[9007199254740992.0,'x'],marker:'float'}}] AS row \
+             RETURN row.marker AS marker, row.path AS path ORDER BY path {direction}"
+        );
+        let result = graph.execute(&query).expect("ordered mixed numeric paths");
+        let actual = result
+            .batches
+            .iter()
+            .flat_map(|batch| {
+                let values = batch
+                    .column_by_name("marker")
+                    .expect("marker")
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .expect("marker strings");
+                assert_eq!(values.null_count(), 0);
+                values
+                    .iter()
+                    .map(|value| value.expect("non-null marker").to_owned())
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let expected = if direction == "ASC" {
+            vec!["float", "integer"]
+        } else {
+            vec!["integer", "float"]
+        };
+        assert_eq!(result.stats.rows_produced, 2);
+        assert_eq!(actual, expected, "{query}");
+    }
+}
