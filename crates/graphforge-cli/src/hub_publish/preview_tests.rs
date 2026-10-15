@@ -372,3 +372,64 @@ fn publish_preview_argument_and_validation_preserve_default_captured_behavior() 
             .contains("hub.auth_denied")
     );
 }
+
+#[test]
+fn private_context_shape_status_bounds_and_redirects_fail_closed_on_the_wire() {
+    let invalid = [
+        "{}",
+        "null",
+        "[]",
+        r#"{"refs_json":null,"manifest_json":null}"#,
+        r#"{"refs_json":null,"manifest_json":null,"lineage_json":null,"extra":null}"#,
+        r#"{"refs_json":null,"refs_json":null,"manifest_json":null,"lineage_json":null}"#,
+        r#"{"refs_json":"{}","manifest_json":null,"lineage_json":null}"#,
+        r#"{"refs_json":null,"manifest_json":"{}","lineage_json":null}"#,
+        r#"{"refs_json":false,"manifest_json":false,"lineage_json":false}"#,
+        r#"{"refs_json":"{}","manifest_json":"{}","lineage_json":"{}"}"#,
+    ];
+    let mut replies: Vec<_> = invalid
+        .iter()
+        .map(|body| HubResponse {
+            status: 200,
+            headers: vec![],
+            body: body.as_bytes().to_vec(),
+        })
+        .collect();
+    for status in [401, 403, 404, 422, 500, 302, 307] {
+        replies.push(response(status, Some("https://external.test/steal")));
+    }
+    replies.push(HubResponse {
+        status: 200,
+        headers: vec![],
+        body: vec![b' '; MAX_CONTROL_RESPONSE_BYTES + 1],
+    });
+    let count = replies.len();
+    replies.push(HubResponse {
+        status: 200,
+        headers: vec![],
+        body: br#"{"refs_json":null,"manifest_json":null,"lineage_json":null}"#.to_vec(),
+    });
+    let (transport, server) = wire(replies);
+    let bypass = bypass();
+    let hub = Hub {
+        transport: &transport,
+        bypass: Some(&bypass),
+        base: Url::parse("https://hub.test/alice/private").unwrap(),
+    };
+    let token = PublishToken::new("ci-private-token".into());
+    let identity = RepositoryIdentity::parse("alice/private").unwrap();
+    for _ in 0..count {
+        assert!(read_private_context(&hub, &identity, &token).is_err());
+    }
+    assert!(
+        read_private_context(&hub, &identity, &token)
+            .unwrap()
+            .is_none()
+    );
+    let requests = server.join().unwrap();
+    assert_eq!(requests.len(), count + 1);
+    for request in requests {
+        assert!(request.starts_with("GET /alice/private/.gf/publish/context "));
+        headers(&request, true, true);
+    }
+}
