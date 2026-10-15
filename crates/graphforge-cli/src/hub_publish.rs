@@ -28,7 +28,7 @@ use graphforge_hub_publish::{
     HUB_PUBLISH_FORMAT, HubErrorBody, HubMethod, HubPublishErrorCode, HubRequest, HubResponse,
     ObjectDeclaration, OpenSessionRequest, OperationStatus, PublishCapabilities, PublishIntent,
     PublishReceipt, PublishToken, SessionResponse, UPLOAD_OFFSET_HEADER, UploadStatus,
-    UploadTarget, canonical_json, content_range, publish_scope, sha256_digest,
+    UploadTarget, canonical_json, content_range, parse_unique_json, publish_scope, sha256_digest,
 };
 use publication::{
     ManifestInputs, PACKAGE_MEDIA_TYPE, SUMMARY_MEDIA_TYPE, VerifiedBundle, build_manifest,
@@ -729,22 +729,10 @@ fn read_published(
     base: &Url,
     identity: &RepositoryIdentity,
 ) -> Result<Option<Published>, GfError> {
-    let limits = DiscoveryLimits {
-        max_response_bytes: MAX_METADATA_BYTES,
-        ..DiscoveryLimits::default()
-    };
     let Some((refs_bytes, etag)) = hub.read_control(&endpoint(base, "refs"), MAX_METADATA_BYTES)?
     else {
         return Ok(None);
     };
-    let revision = sha256_digest(&refs_bytes);
-    if etag.is_some_and(|etag| etag.trim_matches('"') != revision) {
-        return Err(publish_error(
-            HubPublishErrorCode::IntegrityFailure,
-            "refs validator does not match the refs document",
-        ));
-    }
-    let refs = RefSet::from_json(&refs_bytes, limits).map_err(|error| discovery(&error))?;
     let (manifest_bytes, _) = hub
         .read_control(&endpoint(base, "manifest"), MAX_METADATA_BYTES)?
         .ok_or_else(|| {
@@ -753,8 +741,87 @@ fn read_published(
                 "repository refs exist without a manifest",
             )
         })?;
+    bind_published(
+        &refs_bytes,
+        etag.as_deref(),
+        &manifest_bytes,
+        identity,
+        |object, limit| read_object(hub, object, limit),
+    )
+    .map(Some)
+}
+
+/// Read one authorized snapshot; an advertised context endpoint never falls back.
+fn read_private_context(
+    hub: &Hub<'_>,
+    identity: &RepositoryIdentity,
+    token: &PublishToken,
+) -> Result<Option<Published>, GfError> {
+    let url = endpoint(&hub.base, "publish/context");
+    let response = hub.control(HubRequest::new(HubMethod::Get, url.as_str()), token)?;
+    if response.status != 200 {
+        return Err(hub_failure(&response));
+    }
+    if response.body.len() > MAX_CONTROL_RESPONSE_BYTES {
+        return Err(network("publish context exceeds response limit"));
+    }
+    let value = parse_unique_json(&response.body).map_err(|error| protocol(&error))?;
+    let malformed = || {
+        publish_error(
+            HubPublishErrorCode::InvalidInput,
+            "publish context must contain exactly refs_json, manifest_json and lineage_json, all strings or all null",
+        )
+    };
+    let object = value.as_object().ok_or_else(malformed)?;
+    let keys = ["refs_json", "manifest_json", "lineage_json"];
+    if object.len() != keys.len() || keys.iter().any(|key| !object.contains_key(*key)) {
+        return Err(malformed());
+    }
+    if keys.iter().all(|key| object[*key].is_null()) {
+        return Ok(None);
+    }
+    let refs = object["refs_json"].as_str().ok_or_else(malformed)?;
+    let manifest = object["manifest_json"].as_str().ok_or_else(malformed)?;
+    let lineage = object["lineage_json"].as_str().ok_or_else(malformed)?;
+    bind_published(
+        refs.as_bytes(),
+        None,
+        manifest.as_bytes(),
+        identity,
+        |object, limit| {
+            let bytes = lineage.as_bytes();
+            if bytes.len() > limit {
+                return Err(network("lineage exceeds response limit"));
+            }
+            validate_object_bytes(object, bytes)?;
+            Ok(bytes.to_vec())
+        },
+    )
+    .map(Some)
+}
+
+/// Both discovery paths validate the same exact documents and package bindings.
+fn bind_published(
+    refs_bytes: &[u8],
+    etag: Option<&str>,
+    manifest_bytes: &[u8],
+    identity: &RepositoryIdentity,
+    load_lineage: impl FnOnce(&ObjectDescriptor, usize) -> Result<Vec<u8>, GfError>,
+) -> Result<Published, GfError> {
+    let limits = DiscoveryLimits {
+        max_response_bytes: MAX_METADATA_BYTES,
+        ..DiscoveryLimits::default()
+    };
+    let revision = sha256_digest(refs_bytes);
+    if etag.is_some_and(|etag| etag.trim_matches('"') != revision) {
+        return Err(publish_error(
+            HubPublishErrorCode::IntegrityFailure,
+            "refs validator does not match the refs document",
+        ));
+    }
+    let refs = RefSet::from_json(refs_bytes, limits).map_err(|error| discovery(&error))?;
     let manifest =
-        DiscoveryManifest::from_json(&manifest_bytes, limits).map_err(|error| discovery(&error))?;
+        DiscoveryManifest::from_json(manifest_bytes, limits).map_err(|error| discovery(&error))?;
     if refs.repository != *identity || manifest.repository != *identity {
         return Err(publish_error(
             HubPublishErrorCode::IntegrityFailure,
@@ -763,24 +830,38 @@ fn read_published(
     }
     refs.validate_manifest(&manifest)
         .map_err(|error| discovery(&error))?;
+    let validator = manifest
+        .canonical_digest()
+        .map_err(|error| discovery(&error))?;
+    if refs
+        .refs
+        .iter()
+        .find(|reference| reference.name == manifest.resolved_ref)
+        .is_none_or(|reference| reference.validator != validator)
+    {
+        return Err(publish_error(
+            HubPublishErrorCode::IntegrityFailure,
+            "ref validator does not match the canonical manifest",
+        ));
+    }
     let object = manifest.lineage_object().map_err(|_| {
         publish_error(
             HubPublishErrorCode::InvalidInput,
             "the repository has no research lineage to extend",
         )
     })?;
-    let lineage_bytes = read_object(hub, object, limits.max_lineage_bytes)?;
+    let lineage_bytes = load_lineage(object, limits.max_lineage_bytes)?;
     let lineage =
         ResearchLineage::from_json(&lineage_bytes, limits).map_err(|error| discovery(&error))?;
     manifest
         .bind_lineage(&refs, &lineage)
         .map_err(|error| discovery(&error))?;
-    Ok(Some(Published {
+    Ok(Published {
         refs,
         revision,
         manifest,
         lineage,
-    }))
+    })
 }
 
 fn read_object(hub: &Hub<'_>, object: &ObjectDescriptor, limit: usize) -> Result<Vec<u8>, GfError> {
@@ -793,13 +874,18 @@ fn read_object(hub: &Hub<'_>, object: &ObjectDescriptor, limit: usize) -> Result
     let (bytes, _) = hub.read(&url, limit)?.ok_or_else(|| {
         publish_error(HubPublishErrorCode::InvalidInput, "object is not published")
     })?;
-    if digest_bytes(&bytes) != object.digest.0 || bytes.len() as u64 != object.length {
+    validate_object_bytes(object, &bytes)?;
+    Ok(bytes)
+}
+
+fn validate_object_bytes(object: &ObjectDescriptor, bytes: &[u8]) -> Result<(), GfError> {
+    if digest_bytes(bytes) != object.digest.0 || bytes.len() as u64 != object.length {
         return Err(publish_error(
             HubPublishErrorCode::IntegrityFailure,
             "object bytes disagree with their descriptor",
         ));
     }
-    Ok(bytes)
+    Ok(())
 }
 
 /// Fail closed unless the origin repository publishes the cited origin Version
@@ -1362,7 +1448,14 @@ pub(crate) fn publish(
         _ => return Err(hub_failure(&status)),
     }
 
-    let published = read_published(&hub, &base, &identity)?;
+    let published =
+        if capabilities.capabilities.iter().any(|capability| {
+            capability.capability == "publish-read-context" && capability.major == 1
+        }) {
+            read_private_context(&hub, &identity, &token)?
+        } else {
+            read_published(&hub, &base, &identity)?
+        };
     let fork_origin_repository = match (&fork, &published) {
         (Some(_), Some(_)) => {
             return Err(publish_error(

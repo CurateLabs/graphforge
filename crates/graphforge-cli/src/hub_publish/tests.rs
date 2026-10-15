@@ -64,8 +64,16 @@ struct LoopbackHub {
     fault: Arc<Mutex<Option<Fault>>>,
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum ContextMode {
+    Legacy,
+    Private,
+    Public,
+}
+
 /// Server state shared with the accept thread.
 struct ServerState {
+    private_context: ContextMode,
     hub: Arc<ReferenceHub>,
     log: Arc<Mutex<Vec<Logged>>>,
     fault: Arc<Mutex<Option<Fault>>>,
@@ -81,12 +89,27 @@ impl LoopbackHub {
     }
 
     fn with_config(config: ReferenceHubConfig) -> Self {
+        Self::configured(config, ContextMode::Legacy)
+    }
+
+    fn private() -> Self {
+        Self::configured(
+            ReferenceHubConfig {
+                base_url: HUB.into(),
+                ..ReferenceHubConfig::default()
+            },
+            ContextMode::Private,
+        )
+    }
+
+    fn configured(config: ReferenceHubConfig, private_context: ContextMode) -> Self {
         let hub = Arc::new(ReferenceHub::with_config(config).unwrap());
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let log = Arc::new(Mutex::new(Vec::new()));
         let fault = Arc::new(Mutex::new(None));
         let state = ServerState {
+            private_context,
             hub: hub.clone(),
             log: log.clone(),
             fault: fault.clone(),
@@ -249,6 +272,9 @@ fn serve(state: &ServerState, stream: TcpStream) {
             headers: vec![("etag".into(), format!("\"{}\"", sha256_digest(&body)))],
             body,
         },
+        None if state.private_context != ContextMode::Legacy => {
+            private_context_response(hub, &request, state.private_context == ContextMode::Private)
+        }
         None => hub.handle(&request),
     };
     if hub_method == HubMethod::Put && response.status == 200 {
@@ -272,6 +298,67 @@ fn serve(state: &ServerState, stream: TcpStream) {
     head = head + "content-length: " + &body.len().to_string() + "\r\nconnection: close\r\n\r\n";
     stream.write_all(head.as_bytes()).unwrap();
     stream.write_all(body).unwrap();
+}
+
+/// Emulates the Hub context contract over the real HTTP transport while hiding
+/// all anonymous discovery/object reads. ReferenceHub remains admission authority.
+fn private_context_response(
+    hub: &ReferenceHub,
+    request: &HubRequest,
+    hide_discovery: bool,
+) -> HubResponse {
+    let mut response = hub.handle(request);
+    if request.method != HubMethod::Get {
+        return response;
+    }
+    if request.url.ends_with("/.gf/publish") {
+        let mut document: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
+        document["capabilities"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"capability":"publish-read-context", "major":1}));
+        response.body = serde_json::to_vec(&document).unwrap();
+    } else if let Some(base) = request.url.strip_suffix("/.gf/publish/context") {
+        let probe = HubRequest {
+            url: format!("{base}/.gf/publish/operations/{}", Uuid::nil()),
+            ..request.clone()
+        };
+        let authorization = hub.handle(&probe);
+        if authorization.status != 404 {
+            return authorization;
+        }
+        let get = |suffix: &str| {
+            hub.handle(&HubRequest::new(
+                HubMethod::Get,
+                format!("{base}/.gf/{suffix}"),
+            ))
+        };
+        let refs = get("refs");
+        let value = if refs.status == 404 {
+            json!({"refs_json":null,"manifest_json":null,"lineage_json":null})
+        } else {
+            let manifest = get("manifest");
+            let parsed =
+                DiscoveryManifest::from_json(&manifest.body, DiscoveryLimits::default()).unwrap();
+            let lineage = hub.handle(&HubRequest::new(
+                HubMethod::Get,
+                &parsed.lineage_object().unwrap().locations[0],
+            ));
+            json!({"refs_json":String::from_utf8(refs.body).unwrap(),"manifest_json":String::from_utf8(manifest.body).unwrap(),"lineage_json":String::from_utf8(lineage.body).unwrap()})
+        };
+        response = HubResponse {
+            status: 200,
+            headers: vec![],
+            body: serde_json::to_vec(&value).unwrap(),
+        };
+    } else if hide_discovery && !request.url.contains("/.gf/publish/") {
+        response = HubResponse {
+            status: 404,
+            headers: vec![],
+            body: vec![],
+        };
+    }
+    response
 }
 
 /// Routes `https://hub.test` to the loopback server after product validation.
@@ -744,7 +831,13 @@ fn corrupt_object_is_refused_before_ref_moves() {
 fn published_fork_clones_back_with_origin_citation() {
     let cancellation = CancellationToken::new();
     let origin = history();
-    let hub = LoopbackHub::start();
+    let hub = LoopbackHub::configured(
+        ReferenceHubConfig {
+            base_url: HUB.into(),
+            ..ReferenceHubConfig::default()
+        },
+        ContextMode::Public,
+    );
     publish_ok(&hub, &origin.graph, &on_ref("curate/claims", "main"));
 
     // Fork the published origin head into an independent Project.
@@ -822,6 +915,23 @@ fn published_fork_clones_back_with_origin_citation() {
     );
 
     // The served lineage cites the origin Project, Version, and identity.
+    assert!(
+        hub.log()
+            .iter()
+            .filter(|request| request.method == "GET"
+                && request.path.starts_with("/curate/claims/.gf/")
+                && !request.path.contains("/publish"))
+            .all(|request| request.bearer.is_none()),
+        "Fork origin reads must never borrow destination credentials, even on the same Hub"
+    );
+    assert_eq!(
+        hub.log()
+            .iter()
+            .filter(|request| request.path == "/curate/claims/.gf/publish/context")
+            .count(),
+        1,
+        "only the origin own publication may read its authenticated context"
+    );
     let (_, lineage) = served_lineage(&hub, "curate/claims-fork");
     let cited = lineage.fork.as_ref().expect("Fork origin is published");
     let origin_reference = reference(&origin.graph, origin.head);
@@ -1634,4 +1744,231 @@ fn preview_publish_keeps_bypass_on_control_requests_and_off_upload_retries() {
             .unwrap()
             .contains("preview-secret")
     );
+}
+
+#[test]
+fn private_context_first_publish_republish_and_replay_use_only_authorized_hub_metadata() {
+    let mut history = history();
+    let hub = LoopbackHub::private();
+    let credential = || Credential::Token(token(&hub, "curate/claims"));
+    let bypass = crate::hub_http::DiscoveryCredentials::load(
+        &Url::parse(HUB).unwrap(),
+        None,
+        Some("BYPASS"),
+        |_| Ok("context-preview".into()),
+    )
+    .unwrap()
+    .unwrap();
+    let first_args = on_ref("curate/claims", "main");
+    let first = run_publish_with_bypass(
+        &hub,
+        &history.graph,
+        &first_args,
+        credential(),
+        Some(&bypass),
+    );
+    assert!(first.result.is_ok(), "{:?}", first.result.err());
+    edit(&mut history.graph, history.branch, 9);
+    let second_args = on_ref("curate/claims", "main");
+    let second = run_publish_with_bypass(
+        &hub,
+        &history.graph,
+        &second_args,
+        credential(),
+        Some(&bypass),
+    );
+    assert!(second.result.is_ok(), "{:?}", second.result.err());
+    let replay = run_publish_with_bypass(
+        &hub,
+        &history.graph,
+        &second_args,
+        credential(),
+        Some(&bypass),
+    );
+    assert!(replay.result.unwrap().replayed);
+    let log = hub.log();
+    let contexts: Vec<_> = log
+        .iter()
+        .filter(|r| r.path.ends_with("/publish/context"))
+        .collect();
+    assert_eq!(contexts.len(), 2);
+    assert!(
+        contexts
+            .iter()
+            .all(|r| r.bearer.is_some() && r.bypass.as_deref() == Some("context-preview"))
+    );
+    assert!(!log.iter().any(|r| r.method == "GET"
+        && (r.path.ends_with("/.gf/refs")
+            || r.path.ends_with("/.gf/manifest")
+            || r.path.contains("/objects/"))));
+    assert!(
+        log.iter()
+            .filter(|r| r.method == "PUT" || r.method == "HEAD")
+            .all(|r| r.bearer.is_none() && r.bypass.is_none())
+    );
+    let transport = hub.transport();
+    let control = Hub {
+        transport: &transport,
+        bypass: Some(&bypass),
+        base: Url::parse(&repository_url("curate/claims")).unwrap(),
+    };
+    let identity = RepositoryIdentity::parse("curate/claims").unwrap();
+    assert!(read_private_context(&control, &identity, &token(&hub, "curate/another")).is_err());
+    let expired = token(&hub, "curate/claims");
+    hub.hub.advance_clock(901);
+    assert!(read_private_context(&control, &identity, &expired).is_err());
+}
+
+fn changed_lineage_binding(
+    parsed: &DiscoveryManifest,
+    lineage: &[u8],
+    base: &Url,
+) -> (Vec<u8>, Vec<u8>) {
+    // Keep outer descriptors and canonical digests correct so this reaches
+    // the semantic ref/Version binding check instead of an earlier hash failure.
+    let mut document: serde_json::Value = serde_json::from_slice(lineage).unwrap();
+    document["branches"][0]["ref_name"] = json!("unpublished");
+    let changed_binding = serde_json::to_vec(&document).unwrap();
+    let changed_binding_lineage =
+        ResearchLineage::from_json(&changed_binding, DiscoveryLimits::default()).unwrap();
+    let mut changed_binding_manifest = parsed.clone();
+    let lineage_digest = parsed.lineage.as_ref().unwrap().object_digest.clone();
+    let reference = changed_binding_manifest.lineage.as_mut().unwrap();
+    reference.lineage_digest = changed_binding_lineage.canonical_digest().unwrap();
+    reference.object_digest = Sha256Digest(digest_bytes(&changed_binding));
+    let object = changed_binding_manifest
+        .objects
+        .iter_mut()
+        .find(|object| object.digest == lineage_digest)
+        .unwrap();
+    object.digest = reference.object_digest.clone();
+    object.length = changed_binding.len() as u64;
+    object.locations = vec![format!(
+        "{}/.gf/objects/{}",
+        base.as_str().trim_end_matches('/'),
+        object.digest.0
+    )];
+    changed_binding_manifest
+        .objects
+        .sort_by(|a, b| a.digest.cmp(&b.digest));
+    let changed_binding_manifest = serde_json::to_vec(&changed_binding_manifest).unwrap();
+    (changed_binding_manifest, changed_binding)
+}
+
+fn refs_for_manifest(refs: &[u8], bytes: &[u8]) -> Vec<u8> {
+    let manifest = DiscoveryManifest::from_json(bytes, DiscoveryLimits::default()).unwrap();
+    let mut refs = RefSet::from_json(refs, DiscoveryLimits::default()).unwrap();
+    for reference in &mut refs.refs {
+        reference.validator = manifest.canonical_digest().unwrap();
+    }
+    serde_json::to_vec(&refs).unwrap()
+}
+
+fn mutate_context_document(bytes: &[u8], pointer: &str, value: serde_json::Value) -> Vec<u8> {
+    let mut document: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+    *document.pointer_mut(pointer).unwrap() = value;
+    serde_json::to_vec(&document).unwrap()
+}
+
+#[test]
+fn private_context_checks_exact_revision_and_raw_lineage_integrity_and_bindings() {
+    let history = history();
+    let server = LoopbackHub::start();
+    publish_ok(&server, &history.graph, &on_ref("curate/claims", "main"));
+    let base = Url::parse(&repository_url("curate/claims")).unwrap();
+    let refs = server.get(endpoint(&base, "refs").as_str()).body;
+    let manifest = server.get(endpoint(&base, "manifest").as_str()).body;
+    let parsed = DiscoveryManifest::from_json(&manifest, DiscoveryLimits::default()).unwrap();
+    let lineage = server
+        .get(&parsed.lineage_object().unwrap().locations[0])
+        .body;
+    let context = |r: &[u8], m: &[u8], l: &[u8]| {
+        serde_json::to_vec(&json!({"refs_json":std::str::from_utf8(r).unwrap(),"manifest_json":std::str::from_utf8(m).unwrap(),"lineage_json":std::str::from_utf8(l).unwrap()})).unwrap()
+    };
+    let transport = server.transport();
+    let hub = Hub {
+        transport: &transport,
+        bypass: None,
+        base: base.clone(),
+    };
+    let identity = RepositoryIdentity::parse("curate/claims").unwrap();
+    let credential = token(&server, "curate/claims");
+    let path = endpoint(&base, "publish/context").path().to_owned();
+    let mut exact_refs = refs.clone();
+    exact_refs.push(b'\n');
+    server.inject(Fault::Serve(BTreeMap::from([(
+        path.clone(),
+        context(&exact_refs, &manifest, &lineage),
+    )])));
+    let state = read_private_context(&hub, &identity, &credential)
+        .unwrap()
+        .unwrap();
+    assert_eq!(state.revision, sha256_digest(&exact_refs));
+    let wrong_repo = mutate_context_document(&refs, "/repository/owner", json!("other"));
+    let wrong_validator = mutate_context_document(
+        &refs,
+        "/refs/0/validator",
+        json!(format!("sha256:{}", "0".repeat(64))),
+    );
+    let wrong_ref = mutate_context_document(
+        &refs,
+        "/refs/0/target",
+        json!(format!("sha256:{}", "0".repeat(64))),
+    );
+    let wrong_package = mutate_context_document(
+        &manifest,
+        "/package/package_digest",
+        json!(format!("sha256:{}", "0".repeat(64))),
+    );
+    let mut wrong_length = parsed.clone();
+    let lineage_digest = wrong_length.lineage.as_ref().unwrap().object_digest.clone();
+    wrong_length
+        .objects
+        .iter_mut()
+        .find(|object| object.digest == lineage_digest)
+        .unwrap()
+        .length += 1;
+    let wrong_length = serde_json::to_vec(&wrong_length).unwrap();
+    let wrong_canonical = mutate_context_document(
+        &manifest,
+        "/lineage/lineage_digest",
+        json!(format!("sha256:{}", "0".repeat(64))),
+    );
+    let (changed_binding_manifest, changed_binding) =
+        changed_lineage_binding(&parsed, &lineage, &base);
+    let mut changed_lineage = lineage.clone();
+    changed_lineage.push(b' ');
+    let malformed_refs = br#"{"repository":{},"repository":{}}"#.to_vec();
+    for (index, body) in [
+        context(&wrong_repo, &manifest, &lineage),
+        context(&wrong_validator, &manifest, &lineage),
+        context(&wrong_ref, &manifest, &lineage),
+        context(&refs, &wrong_package, &lineage),
+        context(
+            &refs_for_manifest(&refs, &wrong_length),
+            &wrong_length,
+            &lineage,
+        ),
+        context(
+            &refs_for_manifest(&refs, &wrong_canonical),
+            &wrong_canonical,
+            &lineage,
+        ),
+        context(
+            &refs_for_manifest(&refs, &changed_binding_manifest),
+            &changed_binding_manifest,
+            &changed_binding,
+        ),
+        context(&refs, &manifest, &changed_lineage),
+        context(&malformed_refs, &manifest, &lineage),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        server.inject(Fault::Serve(BTreeMap::from([(path.clone(), body)])));
+        assert!(
+            read_private_context(&hub, &identity, &credential).is_err(),
+            "corruption case {index} must fail"
+        );
+    }
 }
