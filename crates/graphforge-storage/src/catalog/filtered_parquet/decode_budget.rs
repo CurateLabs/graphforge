@@ -426,26 +426,48 @@ mod tests {
         ));
     }
 
-    fn sparse_compressed_read_fits(nullable: bool) {
-        use arrow::array::{Array, Int64Array, RecordBatch, UInt64Array};
+    fn sparse_compressed_read_fits(nullable: bool, encoding: Encoding) {
+        use arrow::array::{Array, ArrayRef, BooleanArray, Int64Array, RecordBatch, UInt64Array};
         use arrow::datatypes::{Field, Schema};
         use parquet::arrow::ArrowWriter;
+        use parquet::column::page::Page;
         use parquet::file::properties::{WriterProperties, WriterVersion};
+        use parquet::file::reader::FileReader;
+        use parquet::file::serialized_reader::SerializedFileReader;
 
         const ROWS: usize = 240_001;
         const BUDGET: usize = 16 * 1024 * 1024;
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("edge.parquet");
+        let boolean = encoding == Encoding::RLE;
+        let value_type = if boolean {
+            DataType::Boolean
+        } else {
+            DataType::Int64
+        };
         let schema = Arc::new(Schema::new(vec![
             Field::new("edge_id", DataType::UInt64, false),
-            Field::new("timestamp", DataType::Int64, nullable),
+            Field::new("value", value_type, nullable),
         ]));
-        let timestamp = |row: usize| (!nullable || row % 3 != 0).then_some(row as i64);
+        let expected_value = |row: usize| {
+            (!nullable || row % 3 != 0).then_some(if boolean {
+                i64::from(row % 2 == 0)
+            } else {
+                row as i64
+            })
+        };
+        let values: ArrayRef = if boolean {
+            Arc::new(BooleanArray::from_iter(
+                (0..ROWS).map(|row| expected_value(row).map(|value| value != 0)),
+            ))
+        } else {
+            Arc::new(Int64Array::from_iter((0..ROWS).map(expected_value)))
+        };
         let batch = RecordBatch::try_new(
             schema.clone(),
             vec![
                 Arc::new(UInt64Array::from_iter_values(0..ROWS as u64)),
-                Arc::new(Int64Array::from_iter((0..ROWS).map(timestamp))),
+                values,
             ],
         )
         .unwrap();
@@ -453,6 +475,7 @@ mod tests {
             .set_writer_version(WriterVersion::PARQUET_2_0)
             .set_dictionary_enabled(false)
             .set_encoding(Encoding::DELTA_BINARY_PACKED)
+            .set_column_encoding(ColumnPath::from("value"), encoding)
             .set_compression(Compression::ZSTD(Default::default()))
             .set_max_row_group_row_count(Some(ROWS))
             .build();
@@ -466,15 +489,43 @@ mod tests {
         writer.close().unwrap();
         let reader = crate::catalog::admitted_parquet(&path).unwrap();
         assert_eq!(reader.metadata().num_row_groups(), 1);
-        for column in reader.metadata().row_group(0).columns() {
+        for (column, expected_encoding) in reader
+            .metadata()
+            .row_group(0)
+            .columns()
+            .iter()
+            .zip([Encoding::DELTA_BINARY_PACKED, encoding])
+        {
             assert!(
                 column
                     .encodings()
-                    .any(|encoding| encoding == Encoding::DELTA_BINARY_PACKED)
+                    .any(|encoding| encoding == expected_encoding)
             );
             assert!(column.compressed_size() < ROWS as i64);
         }
-        let ids = HashSet::from([0, 1025, (ROWS - 1) as u64]);
+        // Inspect actual data pages: RLE in the footer can describe nullable
+        // definition levels even when the Boolean values use another encoding.
+        let file = SerializedFileReader::new(std::fs::File::open(&path).unwrap()).unwrap();
+        let group = file.get_row_group(0).unwrap();
+        let mut pages = group.get_column_page_reader(1).unwrap();
+        let mut data_pages = 0;
+        while let Some(page) = pages.get_next_page().unwrap() {
+            match page {
+                Page::DataPage {
+                    encoding: actual, ..
+                }
+                | Page::DataPageV2 {
+                    encoding: actual, ..
+                } => {
+                    assert_eq!(actual, encoding);
+                    data_pages += 1;
+                }
+                Page::DictionaryPage { .. } => panic!("fixture disables dictionary encoding"),
+            }
+        }
+        assert!(data_pages > 0, "fixture must contain encoded values");
+        let selected = [0, 1024, 1025, ROWS - 1];
+        let ids = selected.map(|row| row as u64).into_iter().collect();
         let bound = file_bytes(&path, &ids, None, None).unwrap();
         let total = add(
             bound.retained,
@@ -495,32 +546,59 @@ mod tests {
                 .as_any()
                 .downcast_ref::<UInt64Array>()
                 .unwrap();
-            let timestamps = batch
-                .column(1)
-                .as_any()
-                .downcast_ref::<Int64Array>()
-                .unwrap();
             for row in 0..batch.num_rows() {
-                actual.push((
-                    ids.value(row),
-                    (!timestamps.is_null(row)).then(|| timestamps.value(row)),
-                ));
+                let value = if boolean {
+                    let values = batch
+                        .column(1)
+                        .as_any()
+                        .downcast_ref::<BooleanArray>()
+                        .unwrap();
+                    (!values.is_null(row)).then(|| i64::from(values.value(row)))
+                } else {
+                    let values = batch
+                        .column(1)
+                        .as_any()
+                        .downcast_ref::<Int64Array>()
+                        .unwrap();
+                    (!values.is_null(row)).then(|| values.value(row))
+                };
+                actual.push((ids.value(row), value));
             }
         }
         assert_eq!(
             actual,
-            [0, 1025, ROWS - 1].map(|row| (row as u64, timestamp(row)))
+            selected.map(|row| (row as u64, expected_value(row)))
         );
     }
 
     #[test]
     fn large_required_compressed_row_group_fits_a_sparse_read() {
-        sparse_compressed_read_fits(false);
+        sparse_compressed_read_fits(false, Encoding::DELTA_BINARY_PACKED);
     }
 
     #[test]
     fn large_nullable_compressed_row_group_fits_a_sparse_read() {
-        sparse_compressed_read_fits(true);
+        sparse_compressed_read_fits(true, Encoding::DELTA_BINARY_PACKED);
+    }
+
+    #[test]
+    fn required_byte_stream_split_values_fit_a_sparse_read() {
+        sparse_compressed_read_fits(false, Encoding::BYTE_STREAM_SPLIT);
+    }
+
+    #[test]
+    fn nullable_byte_stream_split_values_fit_a_sparse_read() {
+        sparse_compressed_read_fits(true, Encoding::BYTE_STREAM_SPLIT);
+    }
+
+    #[test]
+    fn required_boolean_rle_values_fit_a_sparse_read() {
+        sparse_compressed_read_fits(false, Encoding::RLE);
+    }
+
+    #[test]
+    fn nullable_boolean_rle_values_fit_a_sparse_read() {
+        sparse_compressed_read_fits(true, Encoding::RLE);
     }
 
     fn fixed_file(path: &Path, rows: usize, row_group: usize) {
