@@ -23,6 +23,11 @@ serde_json = "1"
 arrow = "=58.4.0"
 parquet = { version = "=58.4.0", features = ["arrow"] }
 
+# This standalone workspace must use the same engine patches as the product.
+[patch.crates-io]
+datafusion-physical-plan = { path = "../vendor/datafusion-physical-plan" }
+datafusion-optimizer = { path = "../vendor/datafusion-optimizer" }
+
 # The GDC query driver hashes its own executable into every evidence document.
 # Unoptimized, SHA-256 over a debug binary takes over 30 s per run in the tests.
 [profile.dev.package.sha2]
