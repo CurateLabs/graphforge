@@ -1517,3 +1517,37 @@ fn saved_query_definition_and_parameterized_aggregate_survive_hub_publish_and_cl
         reference(&graph, version).identity_sha256
     );
 }
+
+#[test]
+fn captured_publish_credentials_never_consult_the_vault_or_network() {
+    let error = select_credential(None, false, false, || {
+        panic!("captured publish must not consult saved credentials")
+    })
+    .err()
+    .unwrap();
+    assert_eq!(
+        error.to_string(),
+        "validation error: hub.publish.auth_denied: no publish credential: set GRAPHFORGE_HUB_PUBLISH_TOKEN or run gf publish in a terminal"
+    );
+    let credential = select_credential(
+        Some(PublishToken::new("explicit-token".into())),
+        false,
+        false,
+        || panic!("explicit credentials take precedence"),
+    )
+    .unwrap();
+    assert!(matches!(credential, Credential::Token(token) if token.expose() == "explicit-token"));
+}
+
+#[test]
+fn streaming_publish_can_reuse_saved_credentials_without_a_terminal() {
+    let credential = select_credential(None, true, false, || {
+        Ok(Some(PublishToken::new("saved-token".into())))
+    })
+    .unwrap();
+    assert!(matches!(credential, Credential::Token(token) if token.expose() == "saved-token"));
+    assert!(matches!(
+        select_credential(None, true, true, || Ok(None)).unwrap(),
+        Credential::DeviceFlow
+    ));
+}

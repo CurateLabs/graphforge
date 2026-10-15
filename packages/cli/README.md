@@ -52,10 +52,37 @@ the validated manifest. Existing destinations are never overwritten.
 
 For another Hub, use `--hub https://preview.example` with `owner/repository`,
 or pass an explicit HTTPS repository URL (which cannot be combined with `--hub`).
-Private discovery is opt-in and noninteractive. Select an environment variable
-containing a Hub bearer token with `--token-env HUB_READ_TOKEN`. For a Vercel
-protected preview, independently select the bypass secret with
-`--protection-bypass-env PREVIEW_BYPASS_SECRET`:
+Sign in once for private repositories:
+
+```bash
+gf auth login
+gf auth status
+gf clone my-org/private-repo
+gf auth logout
+```
+
+`gf auth login` opens the WorkOS approval page and prints its verification link
+and code. Use `--no-browser` to approve on another device, or
+`--hub https://preview.example` on each auth command for another Hub. Protected
+previews also accept `--protection-bypass-env PREVIEW_BYPASS_SECRET` on auth
+commands; that secret is read only for same-origin Hub requests and never saved. Access and
+refresh tokens are stored together only in macOS Keychain, Windows Credential
+Manager, or Linux Secret Service. An unavailable or locked vault fails clearly;
+there is no plaintext fallback. Status verifies the session with the Hub. Logout
+revokes its provider session and deletes local credentials, including when
+remote revocation fails. Expired access tokens refresh and rotate the saved pair.
+`--json auth status` reports authentication and principal identity without tokens.
+
+Public clones stay anonymous and never consult the credential vault. A private
+repository may conceal its existence with `404`. After `401` or `404`, clone uses
+the saved session to request a repository-scoped read token from the selected Hub.
+Only that token reaches the data-plane origin the Hub authorizes. Authenticated
+downloads reject redirects and retain range/resume and digest verification.
+The WorkOS session never reaches manifest-provided object locations.
+
+For headless use, select an environment variable containing a Hub bearer token
+with `--token-env HUB_READ_TOKEN`. For a Vercel protected preview, independently
+select the bypass secret with `--protection-bypass-env PREVIEW_BYPASS_SECRET`:
 
 ```bash
 # Supply these variables through your shell or CI secret store.
@@ -64,15 +91,20 @@ gf clone openalex/openalex --hub https://preview.example \
 ```
 
 The token becomes `Authorization: Bearer ...`; the preview secret becomes
-`x-vercel-protection-bypass`. Neither replaces the other. Only the initial
-`/.gf/refs` and `/.gf/manifest` requests to the selected Hub's exact origin
-(scheme, host, effective port) receive these headers. Every redirect and every
-object request, including objects on the Hub origin, omits both. Protected Hubs
-must serve discovery directly; objects must be accessible without these headers.
+`x-vercel-protection-bypass`. Initial discovery receives these headers only at
+the configured Hub's exact origin. Neither header follows redirects. When private
+discovery or objects reject access, clone can exchange the Hub token at the same
+Hub for a separate repository read credential. The original environment value
+never reaches object origins; the preview bypass never reaches objects.
 Missing, empty, non-ASCII, or whitespace-containing secrets fail before discovery
-with `hub.auth_denied`. A `401` or `403` stops without retrying the credentials.
-Clone never prompts, uses publish credentials, or stores secrets in resume state,
-output, or telemetry. Unauthenticated clones read no credential variables.
+with `hub.auth_denied`. Clone does not prompt or store secrets in resume state,
+output, project files, or telemetry. Public clones without these flags read no
+credential variables.
+
+`gf publish` uses `GRAPHFORGE_HUB_PUBLISH_TOKEN` when supplied; otherwise it
+exchanges the saved session for the selected repository's publish capability.
+The existing interactive device-flow fallback remains available on compatible
+publish servers. Upload locations never receive identity or publish credentials.
 
 Downloads use finite response, object (1 TiB), redirect, and connection
 limits, and an idle bound instead of a whole-transfer deadline: a slow transfer
