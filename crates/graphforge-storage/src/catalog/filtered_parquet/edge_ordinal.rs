@@ -95,6 +95,16 @@ pub(super) fn read_dense_edge_file(
     let builder =
         ParquetRecordBatchReaderBuilder::try_new_with_options(admitted_path_file(file)?, options)
             .map_err(parquet_err)?;
+    read_dense_edge_builder(builder, schema, request, observer, projection)
+}
+
+pub(super) fn read_dense_edge_builder<T: parquet::file::reader::ChunkReader + 'static>(
+    builder: parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder<T>,
+    schema: &SchemaRef,
+    request: &EdgeIdRequest<'_>,
+    observer: Option<&Arc<dyn crate::io_stats::FilteredReadObserver>>,
+    projection: Option<&[usize]>,
+) -> Result<Option<Vec<RecordBatch>>, DataFusionError> {
     let metadata = Arc::clone(builder.metadata());
     let Some(key_leaf) = builder
         .parquet_schema()
@@ -207,10 +217,8 @@ fn projected_schema(schema: &SchemaRef, projection: Option<&[usize]>) -> SchemaR
 }
 
 /// Decode the selected rows of the retained row groups, in file order.
-fn read_selection(
-    builder: parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder<
-        crate::lifecycle_io::ReadPathFile,
-    >,
+fn read_selection<T: parquet::file::reader::ChunkReader + 'static>(
+    builder: parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder<T>,
     row_groups: Vec<usize>,
     selection: parquet::arrow::arrow_reader::RowSelection,
     projection: Option<&[usize]>,

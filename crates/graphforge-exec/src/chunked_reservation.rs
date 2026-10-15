@@ -97,6 +97,23 @@ impl ChunkedReservation {
         Ok(())
     }
 
+    /// Transfer an exact prepaid charge to a separately owned reservation.
+    /// The pool remains charged throughout; only ownership changes. Escaped
+    /// immutable buffers use this so they cannot retain construction slack.
+    pub(crate) fn extract(&mut self, bytes: usize) -> Result<MemoryReservation> {
+        if bytes > self.used || bytes > self.inner.size() {
+            return Err(datafusion::error::DataFusionError::Internal(
+                "invalid prepaid reservation transfer".into(),
+            ));
+        }
+        let reservation = self.inner.split(bytes);
+        self.used -= bytes;
+        if let Some(mark) = self.tight_mark.as_mut() {
+            *mark = mark.saturating_sub(bytes);
+        }
+        Ok(reservation)
+    }
+
     /// Release `bytes` previously charged.
     pub(crate) fn shrink(&mut self, bytes: usize) {
         debug_assert!(

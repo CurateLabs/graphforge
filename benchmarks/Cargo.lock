@@ -1944,6 +1944,7 @@ version = "0.6.0-rc.5"
 dependencies = [
  "anyhow",
  "arrow",
+ "arrow-buffer",
  "async-trait",
  "datafusion",
  "datafusion-datasource",
@@ -2108,8 +2109,10 @@ name = "graphforge-storage"
 version = "0.6.0-rc.5"
 dependencies = [
  "arrow",
+ "arrow-buffer",
  "async-trait",
  "atomicwrites",
+ "base64 0.22.1",
  "bytes",
  "datafusion",
  "datafusion-catalog",

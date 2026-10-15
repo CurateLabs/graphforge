@@ -404,3 +404,25 @@ fn dense_selection_decode_does_not_grow_with_the_node_table() {
     }
     assert_eq!(decoded, [2_048; 3]);
 }
+
+#[test]
+fn filter_membership_copies_live_ids_without_retaining_the_source_table_capacity() {
+    let mut source = std::collections::HashSet::with_capacity(262_144);
+    source.extend([1, 9, 17]);
+    let owned = super::compact_filter_membership(&source);
+    assert_eq!(owned.as_ref(), &source);
+    assert!(source.capacity() > 100_000);
+    assert!(
+        owned.capacity() < 32,
+        "the predicate must not clone the sparse source table"
+    );
+    source.clear();
+    let empty = super::compact_filter_membership(&source);
+    assert_eq!(empty.capacity(), 0);
+    assert!(empty.is_empty());
+    assert_eq!(
+        owned.len(),
+        3,
+        "the owned predicate stays independent of source changes"
+    );
+}

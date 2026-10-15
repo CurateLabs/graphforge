@@ -29,7 +29,8 @@ graphforge-core = { version = "0.6.0-rc.5", path = "../graphforge-core" }
 graphforge-filesystem = { version = "0.6.0-rc.5", path = "../graphforge-filesystem" }
 graphforge-ir = { version = "0.6.0-rc.5", path = "../graphforge-ir" }
 graphforge-ontology = { version = "0.6.0-rc.5", path = "../graphforge-ontology" }
-arrow = { workspace = true }
+arrow = { workspace = true, features = ["pool"] }
+arrow-buffer = { workspace = true, features = ["pool"] }
 async-trait = "0.1"
 atomicwrites = "0.4.4"
 datafusion = { workspace = true }
@@ -38,6 +39,7 @@ fs4 = "1.1"
 futures = { workspace = true }
 parquet = { workspace = true }
 thrift = { workspace = true }
+base64 = { workspace = true }
 bytes = "1"
 sysinfo = { version = "0.39.6", default-features = false, features = ["disk"] }
 serde = { workspace = true }
