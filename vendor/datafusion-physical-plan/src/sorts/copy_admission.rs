@@ -33,6 +33,12 @@ use std::sync::{Arc, Mutex};
 fn bound_error() -> DataFusionError {
     DataFusionError::ResourcesExhausted("Merge copy exceeds its admitted envelope".into())
 }
+#[derive(Debug, PartialEq, Eq)]
+enum FieldLifetime {
+    None,
+    Live,
+    Retired,
+}
 #[derive(Debug)]
 struct State {
     authority: MemoryReservation,
@@ -40,31 +46,40 @@ struct State {
     outputs: usize,
     active: bool,
     preparing: bool,
+    field: FieldLifetime,
+}
+/// The allocation proof used by this merge, separate from its original envelope.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum CopyCapability {
+    Legacy,
+    Row { encoded_width: usize },
+    PrimitiveField,
 }
 #[derive(Debug)]
 pub(super) struct CopyAdmission {
     envelope: usize,
-    encoded_width: Option<usize>,
+    capability: CopyCapability,
     state: Mutex<State>,
 }
 impl CopyAdmission {
     pub(super) fn new(authority: MemoryReservation) -> Arc<Self> {
         Arc::new(Self {
             envelope: authority.size(),
-            encoded_width: None,
+            capability: CopyCapability::Legacy,
             state: Mutex::new(State {
                 authority,
                 rows: 0,
                 outputs: 0,
                 active: false,
                 preparing: false,
+                field: FieldLifetime::None,
             }),
         })
     }
     pub(super) fn preparing(
         authority: MemoryReservation,
         metadata: usize,
-        encoded_width: usize,
+        capability: CopyCapability,
     ) -> Result<Arc<Self>> {
         let envelope = authority.size();
         // This occurs before starting any prefetched reader. Constructor
@@ -72,24 +87,109 @@ impl CopyAdmission {
         authority.try_resize(metadata)?;
         Ok(Arc::new(Self {
             envelope,
-            encoded_width: Some(encoded_width),
+            capability,
             state: Mutex::new(State {
                 authority,
                 rows: 0,
                 outputs: 0,
                 active: false,
                 preparing: true,
+                field: FieldLifetime::None,
             }),
         }))
     }
     pub(super) fn encoded_width(&self) -> Option<usize> {
-        self.encoded_width
+        match self.capability {
+            CopyCapability::Row { encoded_width } => Some(encoded_width),
+            _ => None,
+        }
+    }
+    pub(super) fn capability(&self) -> CopyCapability {
+        self.capability
+    }
+    pub(super) fn bounded_operations(&self) -> bool {
+        self.capability != CopyCapability::Legacy
+    }
+    // Dynamic outputs can retain this Arc after every cursor/stream lease has
+    // gone. Keep its control allocation directly, without a Resident self-cycle.
+    fn control(&self, state: &State) -> usize {
+        if self.bounded_operations() || state.field != FieldLifetime::None {
+            size_of::<Self>() + 2 * size_of::<usize>()
+        } else {
+            0
+        }
+    }
+    fn base(&self, state: &State, rows: usize) -> usize {
+        // Metadata is admitted before resident creation. A live Field keeps
+        // the entire original production guard, including unphased key GC.
+        let resident = self.control(state) + rows;
+        if state.field == FieldLifetime::Live {
+            self.envelope.max(resident)
+        } else {
+            resident
+        }
+    }
+    fn checked_base(&self, state: &State, rows: usize) -> Result<usize> {
+        let resident = add(self.control(state), rows)?;
+        Ok(if state.field == FieldLifetime::Live {
+            self.envelope.max(resident)
+        } else {
+            resident
+        })
+    }
+    fn retained(&self, state: &State) -> usize {
+        self.base(state, state.rows) + state.outputs
+    }
+    pub(super) fn preparing_field(&self, metadata: usize) -> Result<()> {
+        let mut state = self.state.lock().unwrap();
+        if self.capability != CopyCapability::Legacy
+            || state.field != FieldLifetime::None
+            || state.active
+        {
+            return Err(bound_error());
+        }
+        let control = add(size_of::<Self>(), 2 * size_of::<usize>())?;
+        let target = self.envelope.max(add(control, metadata)?);
+        if target > state.authority.size() {
+            state.authority.try_grow(target - state.authority.size())?;
+        }
+        state.field = FieldLifetime::Live;
+        state.preparing = true;
+        Ok(())
+    }
+    /// The wrapper must destroy inner cursor/GC/failed-phase data first.
+    pub(super) fn retire_field(&self) {
+        let mut state = self.state.lock().unwrap();
+        if state.field == FieldLifetime::Live {
+            state.field = FieldLifetime::Retired;
+            state.preparing = false;
+            if !state.active {
+                let excess = state.authority.size() - self.retained(&state);
+                state.authority.shrink(excess);
+            }
+        }
+    }
+    pub(super) fn has_output_bounds(&self) -> bool {
+        self.bounded_operations()
+            || self.state.lock().unwrap().field != FieldLifetime::None
+    }
+    pub(super) fn begin_interleave(
+        self: &Arc<Self>,
+        workspace: Option<usize>,
+    ) -> Result<Phase> {
+        if workspace.is_none() && self.state.lock().unwrap().field != FieldLifetime::None
+        {
+            return Err(DataFusionError::ResourcesExhausted(
+                "Legacy Field interleave lacks a checked payload allocation bound".into(),
+            ));
+        }
+        self.begin_operation(workspace)
     }
     pub(super) fn finish_preparing(&self) {
         let mut state = self.state.lock().unwrap();
         if state.preparing {
             state.preparing = false;
-            let target = state.rows + state.outputs;
+            let target = self.retained(&state);
             let excess = state.authority.size() - target;
             state.authority.shrink(excess);
         }
@@ -108,10 +208,15 @@ impl CopyAdmission {
         // Escaped previous outputs cannot pay for another kernel invocation.
         let target = if state.preparing {
             state.authority.size()
-        } else if let (Some(_), Some(workspace)) = (self.encoded_width, workspace) {
-            add(add(state.rows, state.outputs)?, workspace)?
+        } else if state.field != FieldLifetime::None {
+            add(self.retained(&state), workspace.unwrap_or(0))?
+        } else if let Some(workspace) = workspace.filter(|_| self.bounded_operations()) {
+            add(self.retained(&state), workspace)?
         } else {
-            add(self.envelope.max(state.rows), state.outputs)?
+            add(
+                self.envelope.max(add(self.control(&state), state.rows)?),
+                state.outputs,
+            )?
         };
         if target > state.authority.size() {
             state.authority.try_grow(target - state.authority.size())?;
@@ -124,7 +229,14 @@ impl CopyAdmission {
     fn resident(self: &Arc<Self>, bytes: usize, output: bool) -> Result<Arc<Resident>> {
         let mut state = self.state.lock().unwrap();
         let bytes = add(bytes, add(size_of::<Resident>(), 2 * size_of::<usize>())?)?;
-        let total = add(add(state.rows, state.outputs)?, bytes)?;
+        let total = if output {
+            add(self.retained(&state), bytes)?
+        } else {
+            add(
+                self.checked_base(&state, add(state.rows, bytes)?)?,
+                state.outputs,
+            )?
+        };
         if !state.active || total > state.authority.size() {
             return Err(bound_error());
         }
@@ -156,7 +268,7 @@ impl Drop for Resident {
             state.rows -= bytes;
         }
         if !state.active && !state.preparing {
-            let target = state.rows + state.outputs;
+            let target = self.admission.retained(&state);
             let excess = state.authority.size() - target;
             state.authority.shrink(excess);
         }
@@ -180,7 +292,11 @@ impl Phase {
         let bytes = add(bytes, add(size_of::<Resident>(), 2 * size_of::<usize>())?)?;
         let mut state = self.admission.state.lock().unwrap();
         let old = resident.bytes.load(Ordering::Relaxed);
-        let total = add(state.rows - old, add(state.outputs, bytes)?)?;
+        let total = add(
+            self.admission
+                .checked_base(&state, add(state.rows - old, bytes)?)?,
+            state.outputs,
+        )?;
         if !state.active || resident.output || total > state.authority.size() {
             return Err(bound_error());
         }
@@ -201,7 +317,7 @@ impl Drop for Phase {
         let mut state = self.admission.state.lock().unwrap();
         state.active = false;
         if !state.preparing {
-            let target = state.rows + state.outputs;
+            let target = self.admission.retained(&state);
             let excess = state.authority.size() - target;
             state.authority.shrink(excess);
         }

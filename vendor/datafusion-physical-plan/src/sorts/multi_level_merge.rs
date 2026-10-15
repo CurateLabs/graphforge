@@ -31,7 +31,7 @@ use datafusion_common::Result;
 use datafusion_execution::memory_pool::MemoryReservation;
 
 use crate::sorts::builder::try_grow_reservation_to_at_least;
-use crate::sorts::copy_admission::CopyAdmission;
+use crate::sorts::copy_admission::{CopyAdmission, CopyCapability};
 use crate::sorts::sort::get_reserved_bytes_for_record_batch_size;
 use crate::sorts::streaming_merge::{SortedSpillFile, StreamingMergeBuilder};
 use crate::stream::RecordBatchStreamAdapter;
@@ -311,6 +311,22 @@ impl MultiLevelMergeBuilder {
                     && !is_only_merging_memory_streams
                     && !memory_reservation.consumer().can_spill()
                     && crate::spill::admission::ticket_schema(&self.schema);
+                // Qualification precedes all authority moves and prefetch.
+                let capability = if all_ipc_inputs && !is_only_merging_memory_streams {
+                    if let Some(encoded_width) =
+                        super::copy_bounds::qualified_columns(&self.schema, &self.expr)?
+                    {
+                        CopyCapability::Row { encoded_width }
+                    } else if retiring
+                        && super::copy_bounds::primitive_field(&self.schema, &self.expr)
+                    {
+                        CopyCapability::PrimitiveField
+                    } else {
+                        CopyCapability::Legacy
+                    }
+                } else {
+                    CopyCapability::Legacy
+                };
                 let (input_credit, producers) = if retiring {
                     crate::spill::admission::Credit::with_readers(
                         memory_reservation.split(input_bytes),
@@ -330,22 +346,51 @@ impl MultiLevelMergeBuilder {
                 let mut producers = producers.into_iter();
 
                 let copy = if all_ipc_inputs && !is_only_merging_memory_streams {
-                    let fixed =
-                        super::copy_bounds::qualified_columns(&self.schema, &self.expr)?;
                     let authority = memory_reservation.take();
-                    if let Some(width) = fixed {
+                    if capability == CopyCapability::Legacy {
+                        Some(CopyAdmission::new(authority))
+                    } else {
                         let streams = sorted_spill_files.len();
-                        let metadata = crate::spill::admission::add(
-                            super::stream::RowCursorStream::constructor_bound(
-                                streams,
-                                self.expr.len(),
-                            )?,
-                            crate::spill::admission::add(
+                        let (cursor, merge) = match capability {
+                            CopyCapability::Row { .. } => (
+                                super::stream::RowCursorStream::constructor_bound(
+                                    streams,
+                                    self.expr.len(),
+                                )?,
                                 super::merge::SortPreservingMergeStream::<
                                     super::cursor::RowValues,
                                 >::constructor_bound(
                                     streams, self.batch_size
                                 )?,
+                            ),
+                            CopyCapability::PrimitiveField => {
+                                // An empty supplied Vec can retain capacity.
+                                // Fund that backing and possible push growth;
+                                // Field separately allocates N Fuse slots.
+                                let capacity = sorted_streams.capacity().max(
+                                    crate::spill::admission::mul(streams, 2)?.max(4),
+                                );
+                                (
+                                    super::stream::FieldCursorStream::<
+                                        arrow::array::Int64Array,
+                                    >::constructor_bound(
+                                        streams, capacity
+                                    )?,
+                                    super::merge::SortPreservingMergeStream::<
+                                        super::cursor::ArrayValues<
+                                            super::cursor::PrimitiveValues<i64>,
+                                        >,
+                                    >::constructor_bound(
+                                        streams, self.batch_size
+                                    )?,
+                                )
+                            }
+                            CopyCapability::Legacy => unreachable!(),
+                        };
+                        let metadata = crate::spill::admission::add(
+                            cursor,
+                            crate::spill::admission::add(
+                                merge,
                                 crate::spill::admission::add(
                                     crate::spill::admission::schema_bound(&self.schema)?,
                                     crate::spill::admission::mul(
@@ -355,9 +400,7 @@ impl MultiLevelMergeBuilder {
                                 )?,
                             )?,
                         )?;
-                        Some(CopyAdmission::preparing(authority, metadata, width)?)
-                    } else {
-                        Some(CopyAdmission::new(authority))
+                        Some(CopyAdmission::preparing(authority, metadata, capability)?)
                     }
                 } else {
                     None
@@ -517,7 +560,8 @@ impl MultiLevelMergeBuilder {
 }
 
 struct StreamAttachedReservation {
-    stream: SendableRecordBatchStream,
+    stream: Option<SendableRecordBatchStream>,
+    schema: SchemaRef,
     reservation: MemoryReservation,
     copy: Option<Arc<CopyAdmission>>,
 }
@@ -528,11 +572,27 @@ impl StreamAttachedReservation {
         reservation: MemoryReservation,
         copy: Option<Arc<CopyAdmission>>,
     ) -> Self {
+        let schema = stream.schema();
         Self {
-            stream,
+            stream: Some(stream),
+            schema,
             reservation,
             copy,
         }
+    }
+    fn retire(&mut self) {
+        // Cursor values, GC buffers and failed phases must die while the
+        // original production floor is still held. No Arrow drop under its lock.
+        self.stream.take();
+        if let Some(copy) = self.copy.take() {
+            copy.retire_field();
+        }
+        self.reservation.free();
+    }
+}
+impl Drop for StreamAttachedReservation {
+    fn drop(&mut self) {
+        self.retire();
     }
 }
 
@@ -543,7 +603,10 @@ impl Stream for StreamAttachedReservation {
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Option<Self::Item>> {
-        let res = self.stream.poll_next_unpin(cx);
+        let Some(stream) = self.stream.as_mut() else {
+            return Poll::Ready(None);
+        };
+        let res = stream.poll_next_unpin(cx);
 
         match res {
             Poll::Ready(res) => {
@@ -551,14 +614,12 @@ impl Stream for StreamAttachedReservation {
                     Some(Ok(batch)) => Poll::Ready(Some(Ok(batch))),
                     Some(Err(err)) => {
                         // Had an error so drop the data
-                        self.reservation.free();
-                        self.copy = None;
+                        self.retire();
                         Poll::Ready(Some(Err(err)))
                     }
                     None => {
                         // Stream is done so free the memory
-                        self.reservation.free();
-                        self.copy = None;
+                        self.retire();
 
                         Poll::Ready(None)
                     }
@@ -571,6 +632,6 @@ impl Stream for StreamAttachedReservation {
 
 impl RecordBatchStream for StreamAttachedReservation {
     fn schema(&self) -> SchemaRef {
-        self.stream.schema()
+        Arc::clone(&self.schema)
     }
 }

@@ -15,7 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use super::copy_admission::{CopyAdmission, Phase, Resident};
+use super::copy_admission::{CopyAdmission, CopyCapability, Phase, Resident};
 use crate::SendableRecordBatchStream;
 use crate::sorts::cursor::{ArrayValues, CursorArray, RowValues};
 use crate::spill::admission::{add, mul};
@@ -145,6 +145,15 @@ pub struct RowCursorStream {
 }
 
 impl RowCursorStream {
+    fn copy_header(copy: Option<&Arc<CopyAdmission>>) -> usize {
+        if copy
+            .is_some_and(|copy| matches!(copy.capability(), CopyCapability::Row { .. }))
+        {
+            0 // The dynamic control floor owns these bytes through escaped output.
+        } else {
+            size_of::<CopyAdmission>() + 2 * size_of::<usize>()
+        }
+    }
     pub(super) fn constructor_bound(streams: usize, keys: usize) -> Result<usize> {
         // Stateless Codec/SortField/encoder headers fit 1024/key in Arrow58.4.
         // Include simultaneous old/new stream vectors and all 2N empty Rows,
@@ -200,10 +209,7 @@ impl RowCursorStream {
             rows.push([Some(make_empty()?), Some(make_empty()?)]);
         }
         let metadata = add(
-            add(
-                size_of::<Self>(),
-                add(size_of::<CopyAdmission>(), 2 * size_of::<usize>())?,
-            )?,
+            add(size_of::<Self>(), Self::copy_header(copy.as_ref()))?,
             add(
                 converter.size(),
                 add(
@@ -236,10 +242,7 @@ impl RowCursorStream {
 
     fn metadata(&self) -> Result<usize> {
         add(
-            add(
-                size_of::<Self>(),
-                add(size_of::<CopyAdmission>(), 2 * size_of::<usize>())?,
-            )?,
+            add(size_of::<Self>(), Self::copy_header(self.copy.as_ref()))?,
             add(
                 self.converter.size(),
                 add(
@@ -357,6 +360,8 @@ pub struct FieldCursorStream<T: CursorArray> {
     /// Create new reservations for each array
     reservation: MemoryReservation,
     phantom: PhantomData<fn(T) -> T>,
+    // This lease is last: fused input streams and their backing drop first.
+    _copy_resident: Option<Arc<Resident>>,
 }
 
 impl<T: CursorArray> std::fmt::Debug for FieldCursorStream<T> {
@@ -379,7 +384,56 @@ impl<T: CursorArray> FieldCursorStream<T> {
             streams: FusedStreams(streams),
             reservation,
             phantom: Default::default(),
+            _copy_resident: None,
         }
+    }
+
+    pub(super) fn constructor_bound(
+        streams: usize,
+        input_capacity: usize,
+    ) -> Result<usize> {
+        // The incoming Vec and newly allocated Fuse Vec coexist. Do not
+        // assume collect can reuse its differently sized source allocation.
+        add(
+            add(size_of::<Self>(), add(size_of::<CopyAdmission>(), 512)?)?,
+            add(
+                mul(input_capacity, size_of::<SendableRecordBatchStream>())?,
+                mul(streams, size_of::<Fuse<SendableRecordBatchStream>>())?,
+            )?,
+        )
+    }
+
+    pub(super) fn try_new_with_copy(
+        sort: PhysicalSortExpr,
+        streams: Vec<SendableRecordBatchStream>,
+        reservation: MemoryReservation,
+        copy: &Arc<CopyAdmission>,
+    ) -> Result<Self> {
+        let phase = copy.begin()?;
+        let mut fused = Vec::new();
+        fused.try_reserve_exact(streams.len()).map_err(|error| {
+            datafusion_common::DataFusionError::ResourcesExhausted(format!(
+                "Field cursor stream allocation failed: {error}"
+            ))
+        })?;
+        for stream in streams {
+            fused.push(stream.fuse());
+        }
+        let metadata = add(
+            size_of::<Self>(),
+            mul(
+                fused.capacity(),
+                size_of::<Fuse<SendableRecordBatchStream>>(),
+            )?,
+        )?;
+        let resident = phase.resident(metadata)?;
+        Ok(Self {
+            sort,
+            streams: FusedStreams(fused),
+            reservation,
+            phantom: Default::default(),
+            _copy_resident: Some(resident),
+        })
     }
 
     fn convert_batch(&mut self, batch: &RecordBatch) -> Result<ArrayValues<T::Values>> {

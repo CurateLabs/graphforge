@@ -1,0 +1,227 @@
+//! A channel slot must precede producing the IPC batch that occupies it.
+use super::*;
+use arrow::array::Int64Array;
+use datafusion::execution::SendableRecordBatchStream;
+use datafusion::physical_plan::{
+    RecordBatchStream, common::spawn_buffered, stream::RecordBatchStreamAdapter,
+};
+use futures::Stream;
+use std::pin::Pin;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::task::{Context, Poll};
+use tokio::sync::oneshot;
+
+struct Probe {
+    inner: SendableRecordBatchStream,
+    starts: Arc<AtomicUsize>,
+    active: bool,
+    completed: usize,
+    after_two: Option<oneshot::Sender<usize>>,
+    dropped: Option<oneshot::Sender<()>>,
+}
+impl Stream for Probe {
+    type Item = Result<RecordBatch>;
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        if !self.active {
+            self.starts.fetch_add(1, Ordering::SeqCst);
+            self.active = true;
+        }
+        let result = self.inner.as_mut().poll_next(cx);
+        if let Poll::Ready(Some(_)) = &result {
+            self.active = false;
+            self.completed += 1;
+            if self.completed == 2 {
+                let tx = self.after_two.take().unwrap();
+                let starts = Arc::clone(&self.starts);
+                // This task runs on the same sole worker. The immediately-ready
+                // producer cannot be preempted before its next Pending await.
+                // Old code starts item3 then blocks send; corrected code blocks
+                // reserve before polling item3. Capacity2 is below Tokio's
+                // cooperative budget, so no sleep/timing oracle is involved.
+                tokio::spawn(async move {
+                    tx.send(starts.load(Ordering::SeqCst)).ok();
+                });
+            }
+        }
+        result
+    }
+}
+impl RecordBatchStream for Probe {
+    fn schema(&self) -> Arc<Schema> {
+        self.inner.schema()
+    }
+}
+impl Drop for Probe {
+    fn drop(&mut self) {
+        if let Some(tx) = self.dropped.take() {
+            tx.send(()).ok();
+        }
+    }
+}
+fn probe(
+    inner: SendableRecordBatchStream,
+) -> (
+    SendableRecordBatchStream,
+    oneshot::Receiver<usize>,
+    oneshot::Receiver<()>,
+) {
+    let (tx, ready) = oneshot::channel();
+    let (dropped, done) = oneshot::channel();
+    (
+        Box::pin(Probe {
+            inner,
+            starts: Arc::new(AtomicUsize::new(0)),
+            active: false,
+            completed: 0,
+            after_two: Some(tx),
+            dropped: Some(dropped),
+        }),
+        ready,
+        done,
+    )
+}
+fn synthetic() -> SendableRecordBatchStream {
+    let schema = Arc::new(Schema::new(vec![Field::new(
+        "value",
+        DataType::Int64,
+        false,
+    )]));
+    let batch = |value| {
+        RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![Arc::new(Int64Array::from(vec![value]))],
+        )
+        .unwrap()
+    };
+    let items = vec![
+        Ok(batch(0)),
+        Ok(batch(1)),
+        Err(datafusion::common::DataFusionError::Execution(
+            "buffered error item".into(),
+        )),
+        Ok(batch(2)),
+    ];
+    Box::pin(RecordBatchStreamAdapter::new(
+        schema,
+        futures::stream::iter(items),
+    ))
+}
+fn runtime() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .unwrap()
+}
+
+#[test]
+fn spill_admission_buffer_reserves_before_poll_and_preserves_fifo_error_and_eof() -> Result<()> {
+    runtime().block_on(async {
+        let (source, ready, dropped) = probe(synthetic());
+        let mut output = spawn_buffered(source, 2);
+        assert_eq!(
+            ready.await.unwrap(),
+            2,
+            "capacity2 must not produce a third pending-send item"
+        );
+        for expected in [0, 1] {
+            let batch = output.next().await.unwrap()?;
+            assert_eq!(
+                batch
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<Int64Array>()
+                    .unwrap()
+                    .value(0),
+                expected
+            );
+        }
+        let error = output.next().await.unwrap().unwrap_err();
+        assert!(error.to_string().contains("buffered error item"));
+        let batch = output.next().await.unwrap()?;
+        assert_eq!(
+            batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap()
+                .value(0),
+            2
+        );
+        assert!(output.next().await.is_none());
+        dropped.await.unwrap();
+        Ok(())
+    })
+}
+
+#[test]
+fn spill_admission_buffer_drop_cancels_full_queue_without_another_source_poll() -> Result<()> {
+    runtime().block_on(async {
+        let (source, ready, dropped) = probe(synthetic());
+        let output = spawn_buffered(source, 2);
+        assert_eq!(ready.await.unwrap(), 2);
+        drop(output);
+        dropped.await.unwrap();
+        Ok(())
+    })
+}
+
+#[test]
+fn spill_admission_buffer_bounds_real_ipc_prefetch_and_cleans_up_after_escaped_leaf() -> Result<()>
+{
+    runtime().block_on(async {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("key", DataType::Int64, false),
+            Field::new("text", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(Int64Array::from_iter_values(0..512)),
+                Arc::new(StringArray::from_iter_values(
+                    (0..512).map(|i| format!("{i:0128}")),
+                )),
+            ],
+        )?;
+        let writer_pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(16 * 1024 * 1024));
+        let writer = manager(writer_pool, Arc::clone(&schema));
+        let file = writer
+            .spill_record_batch_and_finish(&vec![batch.clone(); 24], "bounded IPC prefetch")?
+            .unwrap();
+        let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(384 * 1024));
+        let reader = manager(Arc::clone(&pool), schema);
+        let raw = reader.read_spill_as_stream_unbuffered(file, None)?;
+        let (source, ready, dropped) = probe(raw);
+        let mut output = spawn_buffered(source, 2);
+        assert_eq!(
+            ready.await.unwrap(),
+            2,
+            "no third decode may begin outside the configured channel slots"
+        );
+        let first = output.next().await.unwrap()?;
+        assert_eq!(first, batch);
+        let alias = first.column(1).slice(17, 1);
+        let body = first
+            .column(1)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap()
+            .values()
+            .capacity();
+        drop(first);
+        let mut rows = 512;
+        while let Some(next) = output.next().await {
+            let next = next?;
+            assert_eq!(next, batch);
+            rows += next.num_rows();
+        }
+        assert_eq!(rows, 24 * 512);
+        dropped.await.unwrap();
+        assert!(pool.reserved() >= body);
+        drop(output);
+        assert!(pool.reserved() >= body);
+        drop(alias);
+        assert_eq!(pool.reserved(), 0);
+        Ok(())
+    })
+}

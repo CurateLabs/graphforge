@@ -86,6 +86,8 @@ struct AdmittedSpillReader {
     _file: RefCountedTempFile,
     dictionary_bound: usize,
     dictionary_sources: admission::DictionarySources,
+    // Dictionary VALUE roots may share schema fields without payload buffers.
+    schema_owner: Arc<admission::SharedSchema>,
 }
 type NextRecordBatchResult = Result<(AdmittedSpillReader, Option<RecordBatch>)>;
 enum SpillReaderStreamState {
@@ -163,8 +165,9 @@ impl SpillReaderStream {
                         let mut admitted = match state {
                             SpillReaderStreamState::Waiting(reader) => reader,
                             SpillReaderStreamState::Uninitialized(file) => {
-                                let schema_bytes = admission::schema_bound(&schema)?;
-                                let persistent = admission::reserve_with_credit(
+                                let schema_bytes =
+                                    admission::SharedSchema::bound(&schema)?;
+                                let mut persistent = admission::reserve_with_credit(
                                     &pool,
                                     schema_bytes,
                                     "SpillReaderMetadata",
@@ -183,6 +186,8 @@ impl SpillReaderStream {
                                     &initial,
                                     &persistent,
                                     &cancelled,
+                                    &schema,
+                                    schema_bytes,
                                 )?;
                                 check_cancelled()?;
                                 // SAFETY: only this engine's validated IPC writer creates
@@ -196,9 +201,17 @@ impl SpillReaderStream {
                                 }
                                 // Keep the reader buffer as well as schema/metadata alive.
                                 persistent.try_grow(8192)?;
+                                // The persistent floor now separately retains BufReader
+                                // and MessageReader metadata. Extract only the schema's
+                                // already-admitted owner/control after parsing succeeds.
+                                let schema_owner = admission::SharedSchema::new(
+                                    reader.schema(),
+                                    persistent.split(schema_bytes),
+                                );
                                 AdmittedSpillReader {
                                     reader,
                                     _persistent: persistent,
+                                    schema_owner,
                                     _file: file,
                                     dictionary_bound: 0,
                                     dictionary_sources: Default::default(),
@@ -221,11 +234,17 @@ impl SpillReaderStream {
                             &work,
                             &admitted._persistent,
                             &cancelled,
+                            &schema,
+                            8192,
                         )?;
                         check_cancelled()?;
                         let batch = admitted.reader.next().transpose()?;
                         if let Some(batch) = &batch {
-                            let bytes = admission::retained_bound(batch, work.size())?;
+                            let bytes = admission::retained_bound(
+                                batch,
+                                work.size(),
+                                &admitted.schema_owner,
+                            )?;
                             if bytes > work.size() {
                                 return exec_err!(
                                     "Spill decoder exceeded its admitted source bound: actual={bytes} admitted={} fixed={} dictionary={} frame={frame:?}",
@@ -243,6 +262,7 @@ impl SpillReaderStream {
                                 batch,
                                 &mut work,
                                 &admitted.dictionary_sources,
+                                &admitted.schema_owner,
                             )?;
                             // The old roots stay pinned through reconciliation.
                             admitted.dictionary_sources = next_sources;

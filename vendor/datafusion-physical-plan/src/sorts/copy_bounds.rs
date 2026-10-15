@@ -95,6 +95,21 @@ pub(super) fn qualified_columns(
     }
     Ok(Some(width))
 }
+/// This Field proof is deliberately narrower than Arrow's dispatch table.
+/// Direct Int64 values shallow-clone their ScalarBuffer. Only the already
+/// proved flat Int64/Utf8 output kernels enter this new seam.
+pub(super) fn primitive_field(schema: &Schema, expressions: &LexOrdering) -> bool {
+    expressions.len() == 1
+        && expressions[0]
+            .expr
+            .downcast_ref::<Column>()
+            .and_then(|column| schema.fields().get(column.index()))
+            .is_some_and(|field| field.data_type() == &DataType::Int64)
+        && schema
+            .fields()
+            .iter()
+            .all(|field| matches!(field.data_type(), DataType::Int64 | DataType::Utf8))
+}
 /// Append reuses two Vecs; reserve/resize needs at most max(2*old, required,
 /// minimum). Keep old backing resident and admit complete new capacities.
 /// Arrow row variable.rs uses mini-blocks through 32 bytes and 32-byte blocks

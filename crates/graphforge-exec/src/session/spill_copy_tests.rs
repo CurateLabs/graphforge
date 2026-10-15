@@ -735,3 +735,267 @@ async fn spill_admission_prepaid_reader_cancel_keeps_the_active_root_until_worke
     assert_eq!(pool.reserved(), 0);
     Ok(())
 }
+
+fn primitive_field_batch(parity: usize, rows: usize) -> RecordBatch {
+    use arrow::array::Int64Array;
+    // Slice a larger allocation; repeated keys and stored NULL byte spans must
+    // survive the real writer, Field cursor and selected interleave unchanged.
+    let key = Int64Array::from(
+        (0..rows + 2)
+            .map(|i| (i > 1).then_some(((2 * i + parity) / 3) as i64))
+            .collect::<Vec<_>>(),
+    );
+    let text = stored_null_strings(parity, rows + 2, 5);
+    RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("key", DataType::Int64, true),
+            Field::new("value", DataType::Utf8, true),
+        ])),
+        vec![Arc::new(key), Arc::new(text)],
+    )
+    .unwrap()
+    .slice(1, rows + 1)
+}
+
+#[tokio::test]
+async fn spill_admission_primitive_field_releases_idle_copy_and_retains_escaped_output()
+-> Result<()> {
+    const LIMIT: usize = 16 * 1024 * 1024;
+    const HEADROOM: usize = 1024 * 1024;
+    const ROWS: usize = 2048;
+    let observed = Arc::new(CopyPhasePool {
+        inner: GreedyMemoryPool::new(LIMIT),
+        reading: std::sync::atomic::AtomicBool::new(false),
+        restored: std::sync::atomic::AtomicBool::new(false),
+        release: (std::sync::Mutex::new(false), std::sync::Condvar::new()),
+        started: tokio::sync::Notify::new(),
+        changed: tokio::sync::Notify::new(),
+    });
+    struct Release(Arc<CopyPhasePool>);
+    impl Drop for Release {
+        fn drop(&mut self) {
+            *self.0.release.0.lock().unwrap() = true;
+            self.0.release.1.notify_all();
+        }
+    }
+    let release = Release(Arc::clone(&observed));
+    let pool: Arc<dyn MemoryPool> = observed.clone();
+    let batches = [
+        primitive_field_batch(0, ROWS),
+        primitive_field_batch(1, ROWS),
+    ];
+    let roomy: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(LIMIT));
+    let (mut oracle_stream, _) = merge(&roomy, &batches, 16)?;
+    let mut oracle_batches = Vec::new();
+    while let Some(batch) = oracle_stream.next().await {
+        oracle_batches.push(batch?);
+    }
+    let oracle = arrow::compute::concat_batches(&batches[0].schema(), &oracle_batches)?;
+    drop(oracle_batches);
+    drop(oracle_stream);
+    assert_eq!(roomy.reserved(), 0);
+
+    let (mut stream, prepaid) = merge(&pool, &batches, 16)?;
+    {
+        let read = stream.next();
+        tokio::pin!(read);
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            tokio::select! {
+                _ = observed.started.notified() => {},
+                result = &mut read => panic!("reader barrier bypassed: {result:?}"),
+            }
+        })
+        .await
+        .expect("a real primitive-field reader reaches its metadata boundary");
+    }
+    assert!(prepaid / 2 > HEADROOM);
+    let pressure = MemoryConsumer::new("independent primitive-copy pressure").register(&pool);
+    pressure.try_grow(LIMIT - pool.reserved() - HEADROOM)?;
+    drop(release);
+    let mut offset = 0;
+    let mut alias = None;
+    while let Some(batch) = stream.next().await {
+        let batch = batch?;
+        assert_eq!(batch, oracle.slice(offset, batch.num_rows()));
+        let text = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(text.values().len(), 128 * batch.num_rows());
+        if alias.is_none() {
+            alias = Some(batch.column(1).slice(batch.num_rows() - 1, 1));
+        }
+        offset += batch.num_rows();
+    }
+    assert_eq!(offset, 2 * (ROWS + 1));
+    drop(stream);
+    drop(pressure);
+    let alias = alias.unwrap();
+    assert!(pool.reserved() >= alias.to_data().buffers()[1].capacity());
+    drop(alias);
+    assert_eq!(pool.reserved(), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn spill_admission_primitive_field_constructor_refuses_before_prefetch() -> Result<()> {
+    const LIMIT: usize = 16 * 1024 * 1024;
+    let observed = Arc::new(CopyPhasePool {
+        inner: GreedyMemoryPool::new(LIMIT),
+        reading: std::sync::atomic::AtomicBool::new(false),
+        restored: std::sync::atomic::AtomicBool::new(false),
+        release: (std::sync::Mutex::new(true), std::sync::Condvar::new()),
+        started: tokio::sync::Notify::new(),
+        changed: tokio::sync::Notify::new(),
+    });
+    let pool: Arc<dyn MemoryPool> = observed.clone();
+    let batches = [primitive_field_batch(0, 2), primitive_field_batch(1, 2)];
+    let (mut stream, _) = merge(&pool, &batches, LIMIT / size_of::<(usize, usize)>())?;
+    let error = stream.next().await.unwrap().expect_err(
+        "the complete constructor index allocation must be admitted before reader prefetch",
+    );
+    assert!(matches!(
+        error.find_root(),
+        datafusion::common::DataFusionError::ResourcesExhausted(_)
+    ));
+    assert!(!observed.reading.load(std::sync::atomic::Ordering::Acquire));
+    drop(stream);
+    assert_eq!(pool.reserved(), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn spill_admission_primitive_field_builder_grows_with_live_sources_and_output_alias()
+-> Result<()> {
+    use arrow::array::Int64Array;
+    const ROWS: usize = 32;
+    let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(2 * 1024 * 1024));
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("key", DataType::Int64, false),
+        Field::new("value", DataType::Utf8, false),
+    ]));
+    let manager = manager(Arc::clone(&pool), Arc::clone(&schema));
+    let mut files = Vec::new();
+    let mut prepaid = 0;
+    for parity in 0..2 {
+        let mut writer = manager.create_in_progress_file("primitive multi-batch source")?;
+        let mut maximum = 0;
+        for index in 0..ROWS {
+            let id = 2 * index + parity;
+            let batch = RecordBatch::try_new(
+                Arc::clone(&schema),
+                vec![
+                    Arc::new(Int64Array::from(vec![id as i64])),
+                    Arc::new(StringArray::from(vec![format!("row-{id:03}")])),
+                ],
+            )?;
+            maximum = maximum.max(writer.append_batch(&batch)?);
+        }
+        files.push(SortedSpillFile {
+            file: writer.finish()?.unwrap(),
+            max_record_batch_memory: maximum,
+        });
+        prepaid += 4 * maximum;
+    }
+    let reservation = MemoryConsumer::new("primitive growth control").register(&pool);
+    reservation.try_grow(prepaid)?;
+    let order = [PhysicalSortExpr::new_default(Arc::new(Column::new(
+        "key", 0,
+    )))]
+    .into();
+    let mut stream = StreamingMergeBuilder::new()
+        .with_sorted_spill_files(files)
+        .with_spill_manager(manager)
+        .with_schema(schema)
+        .with_expressions(&order)
+        .with_metrics(BaselineMetrics::new(&ExecutionPlanMetricsSet::new(), 0))
+        .with_batch_size(128)
+        .with_reservation(reservation)
+        .build()?;
+    // Sixty-four one-row source batches grow the initial four builder slots.
+    let output = stream.next().await.unwrap()?;
+    assert_eq!(output.num_rows(), 2 * ROWS);
+    let text = output
+        .column(1)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    for row in 0..2 * ROWS {
+        assert_eq!(text.value(row), format!("row-{row:03}"));
+    }
+    assert!(stream.next().await.is_none());
+    let alias = output.column(1).slice(2 * ROWS - 1, 1);
+    drop(output);
+    drop(stream);
+    assert!(pool.reserved() >= alias.to_data().buffers()[1].capacity());
+    drop(alias);
+    assert_eq!(pool.reserved(), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn spill_admission_primitive_field_counts_presized_empty_input_vec_before_prefetch()
+-> Result<()> {
+    const LIMIT: usize = 2 * 1024 * 1024;
+    let observed = Arc::new(CopyPhasePool {
+        inner: GreedyMemoryPool::new(LIMIT),
+        reading: std::sync::atomic::AtomicBool::new(false),
+        restored: std::sync::atomic::AtomicBool::new(false),
+        release: (std::sync::Mutex::new(true), std::sync::Condvar::new()),
+        started: tokio::sync::Notify::new(),
+        changed: tokio::sync::Notify::new(),
+    });
+    let pool: Arc<dyn MemoryPool> = observed.clone();
+    let batches = [primitive_field_batch(0, 2), primitive_field_batch(1, 2)];
+    let schema = batches[0].schema();
+    let manager = manager(Arc::clone(&pool), Arc::clone(&schema));
+    let mut files = Vec::new();
+    let mut prepaid = 0;
+    for batch in &batches {
+        let mut writer = manager.create_in_progress_file("pre-sized empty input vector")?;
+        let maximum = writer.append_batch(batch)?;
+        files.push(SortedSpillFile {
+            file: writer.finish()?.unwrap(),
+            max_record_batch_memory: maximum,
+        });
+        prepaid += 4 * maximum;
+    }
+    let reservation = MemoryConsumer::new("pre-sized vector sponsor").register(&pool);
+    reservation.try_grow(prepaid)?;
+    let order = [PhysicalSortExpr::new_default(Arc::new(Column::new(
+        "key", 0,
+    )))]
+    .into();
+    // Caller supplies an empty but allocated Vec. Its capacity is real backing,
+    // despite all logical merge sources coming from the admitted IPC readers.
+    let streams = Vec::with_capacity(LIMIT / size_of::<SendableRecordBatchStream>());
+    let mut stream = StreamingMergeBuilder::new()
+        .with_streams(streams)
+        .with_sorted_spill_files(files)
+        .with_spill_manager(manager)
+        .with_schema(schema)
+        .with_expressions(&order)
+        .with_metrics(BaselineMetrics::new(&ExecutionPlanMetricsSet::new(), 0))
+        .with_batch_size(8)
+        .with_reservation(reservation)
+        .build()?;
+    let error = stream
+        .next()
+        .await
+        .unwrap()
+        .expect_err("the incoming Vec backing and new Fuse Vec cannot coexist in this pool");
+    assert!(matches!(
+        error.find_root(),
+        datafusion::common::DataFusionError::ResourcesExhausted(_)
+    ));
+    assert!(!observed.reading.load(std::sync::atomic::Ordering::Acquire));
+    drop(stream);
+    assert_eq!(pool.reserved(), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn spill_admission_primitive_field_does_not_migrate_view_payloads() -> Result<()> {
+    super::field_tests::observe_legacy_prefetch().await
+}

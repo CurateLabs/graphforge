@@ -29,7 +29,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use arrow::array::{Array, AsArray, BinaryViewArray, RecordBatch, StringViewArray};
 use arrow::array::{downcast_dictionary_array, downcast_run_array};
-use arrow::datatypes::{DataType, Schema};
+use arrow::datatypes::{DataType, Schema, SchemaRef};
 use arrow_data::ArrayData;
 use arrow_ipc::{CompressionType, MessageHeader};
 use datafusion_common::{DataFusionError, Result, config::SpillCompression};
@@ -316,14 +316,106 @@ pub(crate) fn array_metadata(array: &dyn Array) -> Result<usize> {
     Ok(size)
 }
 
+/// The pinned uncompressed writer appends each payload and padding separately
+/// to one initially empty Vec<u8>. Account reallocating old/new owners together
+/// and temporary validity/rebased-offset buffers while those buffers are live.
+#[derive(Default)]
+struct WriteSequence {
+    len: usize,
+    capacity: usize,
+    peak: usize,
+}
+impl WriteSequence {
+    fn append(&mut self, bytes: usize, scratch: usize) -> Result<()> {
+        self.peak = self.peak.max(add(self.capacity, scratch)?);
+        let required = add(self.len, bytes)?;
+        if required > self.capacity {
+            let next = mul(self.capacity, 2)?.max(required).max(8);
+            std::alloc::Layout::array::<u8>(next).map_err(|_| overflow())?;
+            self.peak = self.peak.max(add(add(self.capacity, next)?, scratch)?);
+            self.capacity = next;
+        }
+        self.len = required;
+        Ok(())
+    }
+    fn buffer(&mut self, bytes: usize, scratch: usize) -> Result<()> {
+        self.append(bytes, scratch)?;
+        self.append((8 - bytes % 8) % 8, scratch)
+    }
+}
+fn round_64(bytes: usize) -> Result<usize> {
+    let capacity = mul(add(bytes, 63)? / 64, 64)?;
+    std::alloc::Layout::array::<u8>(capacity).map_err(|_| overflow())?;
+    Ok(capacity)
+}
+fn flat_write_peak(
+    batch: &RecordBatch,
+    declared: &Schema,
+    codec: SpillCompression,
+) -> Result<Option<usize>> {
+    // Alignment is chosen from the declared writer schema, not from the
+    // incoming batch schema (which may differ in field nullability).
+    if codec != SpillCompression::Uncompressed
+        || declared.fields().is_empty()
+        || declared.fields().len() != batch.num_columns()
+        || !declared
+            .fields()
+            .iter()
+            .zip(batch.columns())
+            .all(|(field, array)| {
+                matches!(field.data_type(), DataType::Int64 | DataType::Utf8)
+                    && field.data_type() == array.data_type()
+            })
+    {
+        return Ok(None);
+    }
+    let rows = batch.num_rows();
+    let validity = add(rows / 8, usize::from(rows % 8 != 0))?;
+    let mut sequence = WriteSequence::default();
+    for array in batch.columns() {
+        // V5 writes validity even for all-valid fields. MutableBuffer's
+        // alignment-rounded scratch also covers a shifted source bitmap.
+        sequence.buffer(validity, round_64(validity)?)?;
+        match array.data_type() {
+            DataType::Int64 => sequence.buffer(mul(rows, 8)?, 0)?,
+            DataType::Utf8 => {
+                let strings = array.as_string::<i32>();
+                let offsets = strings.value_offsets();
+                let start = nonnegative(i64::from(offsets[0]))?;
+                let end = nonnegative(i64::from(offsets[rows]))?;
+                let values = end.checked_sub(start).ok_or_else(overflow)?;
+                let offsets_bytes = mul(add(rows, 1)?, 4)?;
+                let scratch = if rows == 0 {
+                    64
+                } else if start != 0 {
+                    round_64(offsets_bytes)?
+                } else {
+                    0
+                };
+                sequence.buffer(offsets_bytes, scratch)?;
+                // get_byte_array_buffers' rebased offsets are dropped at the
+                // end of the offsets iteration, before the values append.
+                sequence.buffer(values, 0)?;
+            }
+            _ => unreachable!(),
+        }
+    }
+    sequence.append((8 - sequence.len % 8) % 8, 0)?;
+    Ok(Some(sequence.peak))
+}
+
 pub(super) fn write_bound(
     batch: &RecordBatch,
     schema: usize,
-    _codec: SpillCompression,
+    codec: SpillCompression,
+    declared: &Schema,
 ) -> Result<usize> {
     let mut layout = LayoutBound::default();
     for column in batch.columns() {
         layout.visit(&column.to_data(), true)?;
+    }
+    if let Some(peak) = flat_write_peak(batch, declared, codec)? {
+        return add(add(peak, layout.headers)?, schema);
     }
     let raw = add(layout.raw, layout.gc)?;
     let padding = mul(add(layout.buffers, 1)?, 128)?;
@@ -378,16 +470,46 @@ pub(super) struct DictionarySources {
     values: Vec<ArrayData>,
     _metadata: Option<Budget>,
 }
+/// A private reader parses one schema and clones that exact Arc into each
+/// unprojected batch. Keep its authority through the reader and last body token.
+/// This owner never contains buffers, arrays, or producer permits.
+#[derive(Debug)]
+pub(super) struct SharedSchema {
+    schema: SchemaRef,
+    _authority: Budget,
+}
+impl SharedSchema {
+    pub(super) fn bound(schema: &Schema) -> Result<usize> {
+        add(
+            schema_bound(schema)?,
+            add(size_of::<Self>(), 2 * size_of::<usize>())?,
+        )
+    }
+    pub(super) fn new(schema: SchemaRef, authority: Budget) -> Arc<Self> {
+        Arc::new(Self {
+            schema,
+            _authority: authority,
+        })
+    }
+    fn matches(&self, batch: &RecordBatch) -> bool {
+        Arc::ptr_eq(&self.schema, batch.schema_ref())
+    }
+}
+#[derive(Debug)]
+struct BatchMetadata {
+    _authority: Budget,
+    _schema: Option<Arc<SharedSchema>>,
+}
 #[derive(Debug)]
 struct OwnerClaims {
     payload: Arc<Budget>,
-    metadata: Arc<Budget>,
+    metadata: Arc<BatchMetadata>,
 }
 #[derive(Debug)]
 struct OwnerReservation {
     size: usize,
     _payload: Arc<Budget>,
-    _metadata: Arc<Budget>,
+    _metadata: Arc<BatchMetadata>,
 }
 impl arrow_buffer::MemoryReservation for OwnerReservation {
     fn size(&self) -> usize {
@@ -457,7 +579,7 @@ fn claim_owners(
     data: &ArrayData,
     owners: &mut HashMap<NonNull<u8>, usize>,
     work: &mut Budget,
-    metadata: &Arc<Budget>,
+    metadata: &Arc<BatchMetadata>,
 ) {
     let mut claim = |buffer: &arrow_buffer::Buffer| {
         if let Some(bytes) = owners.remove(&buffer.data_ptr()) {
@@ -487,6 +609,7 @@ pub(super) fn retain_batch(
     batch: &RecordBatch,
     work: &mut Budget,
     previous: &DictionarySources,
+    schema: &Arc<SharedSchema>,
 ) -> Result<DictionarySources> {
     let mut layout = LayoutBound::default();
     let mut roots = 0;
@@ -499,7 +622,16 @@ pub(super) fn retain_batch(
     for data in &previous.values {
         prior.visit(data, false)?;
     }
-    let metadata = add(layout.headers, schema_bound(&batch.schema())?)?;
+    let shared = schema.matches(batch);
+    let metadata = add(
+        layout.headers,
+        add(size_of::<BatchMetadata>(), 2 * size_of::<usize>())?,
+    )?;
+    let metadata = if shared {
+        metadata
+    } else {
+        add(metadata, schema_bound(&batch.schema())?)?
+    };
     let snapshot = if roots == 0 {
         0
     } else {
@@ -564,7 +696,10 @@ pub(super) fn retain_batch(
             pin_values(&column.to_data(), &mut next.values);
         }
     }
-    let metadata = Arc::new(work.split(metadata));
+    let metadata = Arc::new(BatchMetadata {
+        _authority: work.split(metadata),
+        _schema: shared.then(|| Arc::clone(schema)),
+    });
     for column in batch.columns() {
         claim_owners(&column.to_data(), &mut owners, work, &metadata);
     }
@@ -617,14 +752,117 @@ pub(super) struct FrameStats {
     buffers: usize,
 }
 
+/// Arrow58.4 MessageReader::maybe_next allocates exactly bodyLength bytes
+/// with MutableBuffer::from_len_zeroed (Arrow ALIGNMENT), and uncompressed
+/// read_buffer returns slices. For this checked flat layout, align_buffers
+/// cannot allocate another body: Int64 requires 8, Utf8 offsets 4, bytes 1.
+/// This is an allocation proof for the same private frame subsequently decoded,
+/// not validation of arbitrary IPC values. Other layouts keep the old bound.
+fn flat_body_matches(
+    schema: &Schema,
+    message: &arrow_ipc::Message<'_>,
+    body: usize,
+) -> Result<bool> {
+    if message.version() != arrow_ipc::MetadataVersion::V5
+        || message.header_type() != MessageHeader::RecordBatch
+        || schema.fields().is_empty()
+        || !schema
+            .fields()
+            .iter()
+            .all(|field| matches!(field.data_type(), DataType::Int64 | DataType::Utf8))
+    {
+        return Ok(false);
+    }
+    let Some(batch) = message.header_as_record_batch() else {
+        return Ok(false);
+    };
+    if batch.compression().is_some() || batch.variadicBufferCounts().is_some() {
+        return Ok(false);
+    }
+    let (Some(nodes), Some(buffers)) = (batch.nodes(), batch.buffers()) else {
+        return Ok(false);
+    };
+    let expected = schema.fields().iter().try_fold(0, |total, field| {
+        add(
+            total,
+            if field.data_type() == &DataType::Int64 {
+                2
+            } else {
+                3
+            },
+        )
+    })?;
+    if nodes.len() != schema.fields().len() || buffers.len() != expected {
+        return Ok(false);
+    }
+    // from_len_zeroed unwraps this exact Layout before allocating.
+    std::alloc::Layout::from_size_align(body, arrow_buffer::alloc::ALIGNMENT)
+        .map_err(|_| overflow())?;
+    let Ok(rows) = usize::try_from(batch.length()) else {
+        return Ok(false);
+    };
+    let descriptor = |index: usize, minimum: usize| -> bool {
+        let buffer = buffers.get(index);
+        let (Ok(offset), Ok(len)) = (
+            usize::try_from(buffer.offset()),
+            usize::try_from(buffer.length()),
+        ) else {
+            return false;
+        };
+        offset % 8 == 0
+            && len >= minimum
+            && offset.checked_add(len).is_some_and(|end| end <= body)
+    };
+    let mut index = 0;
+    for (field, node) in schema.fields().iter().zip(nodes) {
+        let Ok(nulls) = usize::try_from(node.null_count()) else {
+            return Ok(false);
+        };
+        if node.length() != batch.length() || nulls > rows {
+            return Ok(false);
+        }
+        let bitmap = if nulls == 0 { 0 } else { add(rows, 7)? / 8 };
+        if !descriptor(index, bitmap) {
+            return Ok(false);
+        }
+        index += 1;
+        match field.data_type() {
+            DataType::Int64 => {
+                if !descriptor(index, mul(rows, 8)?) {
+                    return Ok(false);
+                }
+                index += 1;
+            }
+            DataType::Utf8 => {
+                if !descriptor(index, mul(add(rows, 1)?, 4)?) || !descriptor(index + 1, 0)
+                {
+                    return Ok(false);
+                }
+                index += 2;
+            }
+            _ => unreachable!(),
+        }
+    }
+    Ok(true)
+}
+
 pub(super) fn preflight(
     input: &mut BufReader<File>,
     workspace: &Budget,
     persistent: &Budget,
     cancelled: &AtomicBool,
+    schema: &Schema,
+    persistent_floor: usize,
 ) -> Result<FrameStats> {
     let position = input.stream_position()?;
-    let result = scan(input, workspace, persistent, cancelled);
+    let result = scan(
+        input,
+        workspace,
+        persistent,
+        cancelled,
+        schema,
+        persistent_floor,
+    );
     input.seek(SeekFrom::Start(position))?;
     result
 }
@@ -633,8 +871,11 @@ fn scan(
     work: &Budget,
     persistent: &Budget,
     cancelled: &AtomicBool,
+    schema: &Schema,
+    persistent_floor: usize,
 ) -> Result<FrameStats> {
     let mut stats = FrameStats::default();
+    let mut ordinary = true;
     loop {
         if cancelled.load(Ordering::Acquire) {
             return Err(DataFusionError::Execution("Spill framing cancelled".into()));
@@ -656,7 +897,9 @@ fn scan(
         // StreamReader metadata Vec may double its old high-water capacity.
         // This separate reservation follows the reader, including worker drop.
         let metadata = mul(len, 2)?;
-        persistent.try_resize(persistent.size().max(metadata))?;
+        // Schema/BufReader authority cannot also pay this separately retained
+        // MessageReader metadata Vec. Preserve its maximum through reader drop.
+        persistent.try_resize(persistent.size().max(add(persistent_floor, metadata)?))?;
         work.try_grow(metadata)?;
         let mut bytes = vec![0; len];
         input.read_exact(&mut bytes)?;
@@ -664,6 +907,7 @@ fn scan(
             DataFusionError::Execution(format!("Invalid spill IPC metadata: {error}"))
         })?;
         let body = nonnegative(message.bodyLength())?;
+        ordinary &= message.header_type() != MessageHeader::DictionaryBatch;
         stats.wire_bytes = add(stats.wire_bytes, body)?;
         stats.metadata_bytes = add(stats.metadata_bytes, len)?;
         let body_start = input.stream_position()?;
@@ -723,7 +967,11 @@ fn scan(
         // Wire body, decompressed buffers (Vec growth at most 2x on valid
         // frames), plus an aligned copy of all buffers when Arrow requires it.
         stats.decoded_bytes = add(stats.decoded_bytes, decoded)?;
-        let payload = mul(add(body, mul(decoded, 2)?)?, 2)?;
+        let payload = if ordinary && flat_body_matches(schema, &message, body)? {
+            body
+        } else {
+            mul(add(body, mul(decoded, 2)?)?, 2)?
+        };
         work.try_grow(add(add(payload, headers)?, codec)?)?;
         input.seek(SeekFrom::Start(
             body_start.checked_add(body as u64).ok_or_else(overflow)?,
@@ -734,12 +982,24 @@ fn scan(
     }
 }
 
-pub(super) fn retained_bound(batch: &RecordBatch, admitted: usize) -> Result<usize> {
+pub(super) fn retained_bound(
+    batch: &RecordBatch,
+    admitted: usize,
+    schema: &Arc<SharedSchema>,
+) -> Result<usize> {
     let mut layout = LayoutBound::default();
     for column in batch.columns() {
         layout.visit(&column.to_data(), false)?;
     }
-    let metadata = add(layout.headers, schema_bound(&batch.schema())?)?;
+    let metadata = add(
+        layout.headers,
+        add(size_of::<BatchMetadata>(), 2 * size_of::<usize>())?,
+    )?;
+    let metadata = if schema.matches(batch) {
+        metadata
+    } else {
+        add(metadata, schema_bound(&batch.schema())?)?
+    };
     // HashMap's 7/8 load factor, power-of-two buckets, minimum four
     // buckets, and sixteen trailing control bytes. Admission covers the table
     // before allocation, including arbitrarily many view buffers. This is a

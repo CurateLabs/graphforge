@@ -94,8 +94,12 @@ impl InProgressSpillFile {
             admission::source_metadata(batch)?,
             "SpillWriterMetadata",
         )?;
-        let bytes =
-            admission::write_bound(batch, schema_bytes, self.spill_writer.compression)?;
+        let bytes = admission::write_bound(
+            batch,
+            schema_bytes,
+            self.spill_writer.compression,
+            self.spill_writer.schema(),
+        )?;
         let _workspace =
             admission::reserve(pool, bytes.saturating_sub(credit), "SpillWriterEncode")?;
         let codec = admission::codec_bound(self.spill_writer.compression, true)?;

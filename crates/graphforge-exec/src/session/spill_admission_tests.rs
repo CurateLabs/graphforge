@@ -965,3 +965,12 @@ mod source_tests;
 
 #[path = "spill_credit_tests.rs"]
 mod credit_tests;
+
+#[path = "spill_field_tests.rs"]
+mod field_tests;
+
+#[path = "spill_frame_tests.rs"]
+mod frame_tests;
+
+#[path = "spill_buffer_tests.rs"]
+mod buffer_tests;

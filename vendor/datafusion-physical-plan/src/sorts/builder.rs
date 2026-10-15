@@ -207,12 +207,12 @@ impl BatchBuilder {
             .copy
             .as_ref()
             .map(|copy| {
-                let workspace = if copy.encoded_width().is_some() {
+                let workspace = if copy.has_output_bounds() {
                     super::copy_bounds::interleave(&self.batches, indices)?
                 } else {
                     None
                 };
-                copy.begin_operation(workspace)
+                copy.begin_interleave(workspace)
             })
             .transpose()?;
         let source = phase

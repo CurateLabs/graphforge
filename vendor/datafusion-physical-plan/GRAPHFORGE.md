@@ -40,6 +40,14 @@ single-block GC branch, encoded payload bounds use its new referenced bytes
 and view descriptors; original source capacities remain separately admitted,
 and GC construction keeps its full allowance. Repeated and NULL stored views
 are included. Skipped GC and the multi-block branch keep the original bound.
+For matched flat Int64/Utf8 arrays and the actual declared flat writer schema,
+the uncompressed, alignment-eight writer instead follows a checked append
+sequence. Each payload and padding append accounts old/new Vec capacity overlap,
+including its minimum capacity, plus validity and rebased-offset scratch during
+actual use. NULL stored spans are included; source full capacities, all existing
+headers and schema metadata remain independent. Other codecs, types, declared
+schemas and empty schemas keep the original encoding envelope. The Arrow writer
+and its growth policy are unchanged.
 Dictionary tracker entries retain original buffer authority
 through the writer's last use. Finishing destroys the writer, including its
 private dictionary tracker and compression context, before freeing its guard.
@@ -47,7 +55,21 @@ private dictionary tracker and compression context, before freeing its guard.
 Before each read, a framing preflight saves and restores the seek position,
 admits metadata before constructing its temporary Vec, and checks IPC body and
 compressed-buffer length prefixes before Arrow allocates decode buffers.
-Reader metadata has a separate persistent reservation. Pre-existing multi-run
+The shared buffered-stream helper reserves an existing channel slot before
+polling its input. Queued and currently produced items together fit the
+configured capacity, without an extra pending-send decoded batch. Capacity,
+merge degree, batch sizes and pool rules are unchanged. FIFO, error items,
+non-multithread pass-through and task-owned cancellation retain their existing
+semantics; EOF returns its unused permit.
+Reader metadata has a separate persistent reservation. Each reader parses one
+heap schema; an identity-checked shared owner carries its schema reservation
+through that reader and the final body token. Equal schemas from independent
+readers remain distinct. Per-batch array/control metadata and per-decode scratch
+stay independently funded; a nonidentical batch schema keeps its original full
+schema bound. BufReader and MessageReader metadata high-water authority remain
+separate after extracting the shared schema owner. This does not extend the
+existing external SchemaRef/bufferless-header guarantee.
+Pre-existing multi-run
 admission is divided explicitly: input credit moves to the readers, while
 sorted-copy credit remains independent of input credit. Numeric input-credit
 tickets prevent prefetch, active workers and escaped outputs from reusing the
@@ -79,6 +101,52 @@ leases before unused allowance is released. Row conversion accounts both Vec
 reallocations, the old retained Rows, encoded bytes, offsets and encoder metadata. Builder growth admits a complete new Vec while its old capacity
 remains resident.
 
+A separate primitive Field capability qualifies only a nonspilling sponsor,
+all admitted IPC inputs, one direct Int64 Column key, and flat Int64/Utf8 output
+fields. Its constructor allowance is admitted before prefetch: the incoming
+stream Vec's complete capacity coexists with a separately reserved Fuse Vec,
+and the actual Field/generic-merge/BatchBuilder types and capacities are funded.
+The Field lease retains its actual vector capacity. Column evaluation clones
+an ArrayRef, and the primitive cursor clones its ScalarBuffer; ArrayValues
+stores only the null threshold and does not allocate key payload or a bitmap.
+The generic merge then uses the existing funded builder-growth and interleave
+phases, including fresh output leases through escaped aliases. This explicit
+capability does not use a zero row-width sentinel. Other Field keys or payload
+families retain the original envelope. Dynamic Row and primitive Field modes
+keep an explicit numeric floor for CopyAdmission's Arc/control allocation
+through the last escaped output; the Row resident metadata transfers that
+exact charge to the floor rather than charging it twice. The floor owns no
+Resident and cannot form an owner cycle. In particular Utf8View key conversion
+can allocate through gc() and is not covered by the primitive proof.
+
+Other all-IPC Field dispatch keeps the complete original copy envelope as a
+live production floor through key evaluation and StringView gc. On the same
+original reservation, fresh interleave workspace and previous escaped outputs
+are additional to that floor. Existing checked interleave bounds apply; an
+unproved payload kernel refuses before allocation rather than treating the
+old envelope as a universal output bound. Constructor/growth metadata is
+preadmitted and kept at its actual capacity. EOF, error and drop destroy inner
+cursor/builder/GC/failed-phase data before retiring the production floor;
+escaped outputs retain their exact owners, metadata and Copy control afterward.
+No new consumer, empty reservation or split is introduced for this handoff.
+Real workspace release can still invoke the existing aggregate loan/floor
+policy; there is no claim of identical pool callback sequences. The wrapper's
+cached SchemaRef clones the same schema already retained by the outer
+RecordBatchStreamAdapter, adding neither a heap schema nor a last-use extension;
+the existing constant/external schema-header boundary remains.
+
+For uncompressed V5 RecordBatch frames whose actual reader schema is flat
+Int64/Utf8, framing admits one complete body only after checking node/field and
+buffer counts, row/null lengths, signed descriptor ranges, required lengths,
+8-byte offsets, no dictionaries/variadic buffers/compression, and a valid body
+allocation Layout. Pinned MessageReader uses from_len_zeroed with exact body
+capacity and Arrow alignment; these layouts need no alignment copy. The whole
+body, including padding, stays charged through the final alias. Compressed,
+unknown or unmatched layouts keep the original body/decompression allowance;
+schema, metadata, ledger, header, codec and BufReader terms are unchanged.
+This proves allocation reachability for the private immutable engine frame,
+not general validation of arbitrary IPC values.
+
 Interleave qualifies primitives, Boolean, Null, FixedSizeBinary, ordinary
 32/64-bit offset byte arrays, Struct, List and LargeList recursively. A borrowed
 selection traversal counts the exact stored offset spans, including cells
@@ -88,11 +156,11 @@ input full backing remains independently charged. Flat Utf8View/BinaryView
 payloads additionally bound the complete source handle mapping table (including
 unused and empty buffers), raw NULL views, descriptor/null buffers, Buffer Vec
 growth and Arc conversion; source payloads keep their existing IPC tickets.
-Nested views retain the original envelope. Earlier copied output
-leases cannot pay for another allocation. Other operations restore the
-existing full copy envelope; no unsupported-type refusal or alternate engine
-is introduced. This finite proof does not replace upstream estimates for
-unqualified kernels.
+Unqualified Row kernels and mixed inputs retain the original envelope. Earlier
+copied output leases cannot pay for another allocation. Unqualified Row operations
+restore that full envelope; the separate FixedField path requires a checked
+interleave bound as described above. No alternate engine is introduced. This
+finite proof does not replace upstream estimates for unqualified Row kernels.
 
 While waiting for input, exact resident Rows, converter and vector authority
 remains. Reusable slots and current/previous cursors share each Rows lease;
@@ -106,8 +174,9 @@ interleave never reclaims those Bytes. Each distinct fresh output owner gets
 its own fixed buffer-lifetime lease, so an escaped copied leaf retains its
 whole allocation without pinning copied siblings. Previous output leases
 cannot pay for a later copy phase. Empty dangling buffers receive no physical
-owner claim. Mixed in-memory/IPC inputs and specialized field cursors keep the
-existing fixed copy reservation.
+owner claim. Mixed in-memory/IPC inputs keep the existing fixed copy reservation.
+Other all-IPC Field cursors keep their fixed production floor and separately
+fund escaped output handoff as described above.
 
 Arrow 58.4's `pool` feature attaches fixed, already-admitted guards to original
 shared `Bytes` through `RecordBatch::claim`. This is a lifetime hook, not the
