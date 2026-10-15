@@ -390,7 +390,7 @@ pub(super) fn validate_parquet_resource_admission(
 }
 
 pub(super) struct ParquetDecoderMemory {
-    decoded_bytes: u64,
+    pub(super) decoded_bytes: u64,
     pub(super) with_codec_bytes: u64,
 }
 

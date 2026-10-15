@@ -361,11 +361,9 @@ impl UuidBuildKeyNomination {
         self.completed.get()
     }
 
-    pub(crate) async fn wait(
+    pub(crate) async fn wait<T>(
         &self,
-        consumer_closed: &tokio::sync::mpsc::Sender<
-            Result<arrow::record_batch::RecordBatch, DataFusionError>,
-        >,
+        consumer_closed: &tokio::sync::mpsc::Sender<T>,
     ) -> Result<bool, DataFusionError> {
         let mut status = self.status.subscribe();
         loop {
@@ -828,7 +826,7 @@ mod compact_set_budget_tests {
         assert!(nomination.ids().is_none());
         assert_eq!(pool.reserved(), 0);
 
-        let (sender, _receiver) = tokio::sync::mpsc::channel(1);
+        let (sender, _receiver) = tokio::sync::mpsc::channel::<()>(1);
         assert!(nomination.wait(&sender).await.unwrap());
     }
 

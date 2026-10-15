@@ -64,6 +64,26 @@ fn write_property_route_with_metadata(
     value: &str,
     extra_metadata: &[(&str, &str)],
 ) -> Arc<AuthenticatedPropertyInventory> {
+    write_property_route_column(
+        root,
+        kind,
+        rows,
+        rows_per_fragment,
+        value,
+        extra_metadata,
+        "value",
+    )
+}
+
+fn write_property_route_column(
+    root: &std::path::Path,
+    kind: crate::PropertyRouteKind,
+    rows: usize,
+    rows_per_fragment: usize,
+    value: &str,
+    extra_metadata: &[(&str, &str)],
+    value_column: &str,
+) -> Arc<AuthenticatedPropertyInventory> {
     let (directory, kind_name, uuid_field) = match kind {
         crate::PropertyRouteKind::Node => ("properties", "node", "node_uuid"),
         crate::PropertyRouteKind::Edge => ("edge_properties", "edge", "edge_uuid"),
@@ -94,7 +114,7 @@ fn write_property_route_with_metadata(
             vec![
                 Field::new(uuid_field, DataType::FixedSizeBinary(16), false),
                 Field::new(PROPERTY_TOMBSTONE_FIELD, DataType::Boolean, false),
-                Field::new("value", DataType::Utf8, false),
+                Field::new(value_column, DataType::Utf8, false),
             ],
             metadata,
         ));
@@ -152,6 +172,60 @@ fn property_session(
     let table = PropertyTable::open_authenticated(root, "Person", inventory).unwrap();
     context.register_table("props", Arc::new(table)).unwrap();
     context
+}
+
+#[tokio::test]
+async fn property_scan_intermediate_payload_obeys_execution_pool_with_exact_fitting_count() {
+    use arrow::array::Int64Array;
+    use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryPool};
+    use datafusion::execution::runtime_env::RuntimeEnvBuilder;
+
+    // The result is one scalar; the wide values are intermediate scan state.
+    // A pool that easily holds the aggregate cannot admit those buffers.
+    let root = tempfile::tempdir().unwrap();
+    let inventory = write_property_route(root.path(), 128, 64, &"x".repeat(16 * 1024));
+    for (budget, fits) in [(256 * 1024 * 1024, true), (2 * 1024 * 1024, false)] {
+        let pool = Arc::new(GreedyMemoryPool::new(budget));
+        let runtime = RuntimeEnvBuilder::new()
+            .with_memory_pool(pool.clone())
+            .build_arc()
+            .unwrap();
+        let context = SessionContext::new_with_config_rt(
+            SessionConfig::new().with_target_partitions(1),
+            runtime,
+        );
+        let table =
+            PropertyTable::open_authenticated(root.path(), "Person", inventory.clone()).unwrap();
+        context.register_table("props", Arc::new(table)).unwrap();
+        let result = context
+            .sql("SELECT count(*) AS matched FROM props WHERE length(value) = 16384")
+            .await
+            .unwrap()
+            .collect()
+            .await;
+        if fits {
+            let batches = result.expect("fitting property scan must preserve every match");
+            assert_eq!(batches.len(), 1);
+            let count = batches[0]
+                .column(0)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap();
+            assert_eq!(count.value(0), 128);
+        } else {
+            let error = result.expect_err("intermediate property memory must use the query pool");
+            let text = error.to_string();
+            assert!(
+                text.contains("Resources exhausted") && text.contains("PropertyScan"),
+                "{text}"
+            );
+        }
+        assert_eq!(
+            pool.reserved(),
+            0,
+            "completion or refusal releases scan state"
+        );
+    }
 }
 
 #[tokio::test]
@@ -458,4 +532,140 @@ async fn limited_inner_and_right_semi_scans_preserve_their_prefix_under_uuid_hin
         )
         .unwrap();
     assert_eq!(collect_rows(unlimited).await, 1);
+}
+
+#[tokio::test]
+async fn property_scan_output_and_cancel_hold_then_release_query_reservations() {
+    use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryPool};
+    use datafusion::execution::runtime_env::RuntimeEnvBuilder;
+    let root = tempfile::tempdir().unwrap();
+    let inventory = write_property_route(root.path(), 128, 64, &"x".repeat(1024));
+    let pool = Arc::new(GreedyMemoryPool::new(128 * 1024 * 1024));
+    let runtime = RuntimeEnvBuilder::new()
+        .with_memory_pool(pool.clone())
+        .build_arc()
+        .unwrap();
+    let context = SessionContext::new_with_config_rt(
+        SessionConfig::new()
+            .with_target_partitions(1)
+            .with_batch_size(8),
+        runtime,
+    );
+    let table = PropertyTable::open_authenticated(root.path(), "Person", inventory).unwrap();
+    let scan = table.scan(&context.state(), None, &[], None).await.unwrap();
+    for cancel in [false, true] {
+        let mut stream = scan.execute(0, context.task_ctx()).unwrap();
+        let first = stream.next().await.unwrap().unwrap();
+        assert_eq!(first.num_rows(), 8);
+        assert!(
+            pool.reserved() >= first.get_array_memory_size(),
+            "yielded output must remain charged"
+        );
+        let mut rows = first.num_rows();
+        drop(first);
+        if !cancel {
+            while let Some(batch) = stream.next().await {
+                rows += batch.unwrap().num_rows();
+            }
+            assert_eq!(rows, 128);
+        }
+        drop(stream);
+        // The blocking reader owns its guards until it observes channel close.
+        // Wait for that asynchronous cleanup, not a retried query.
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while pool.reserved() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("cancelled reader must release every reservation");
+    }
+}
+
+#[test]
+fn equality_index_candidates_and_corruption_share_execution_admission() {
+    use crate::property_overlay::{EqualityValue, PropertyEquality, PropertyRouteKind};
+    use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryPool};
+    let root = tempfile::tempdir().unwrap();
+    let inventory = write_property_route_column(
+        root.path(),
+        PropertyRouteKind::Node,
+        512,
+        128,
+        "anchor",
+        &[],
+        "id",
+    );
+    let built = crate::property_equality_index::write_property_equality_indexes(
+        root.path(),
+        &inventory,
+        &mut || Ok(()),
+    )
+    .unwrap();
+    assert_eq!(built.indexes, 1);
+    let equality = PropertyEquality {
+        column: "id".into(),
+        value: EqualityValue::Str("anchor".into()),
+    };
+    for (limit, fits) in [(128 * 1024 * 1024, true), (1024, false)] {
+        let pool = Arc::new(GreedyMemoryPool::new(limit));
+        let authority: Arc<dyn MemoryPool> = pool.clone();
+        let budget = crate::property_scan_memory::Budget::new(&authority);
+        let result = crate::property_equality_index::lookup_admitted(
+            root.path(),
+            &inventory,
+            "Person",
+            &equality,
+            Some(&budget),
+        );
+        if fits {
+            let admitted = result.unwrap().unwrap();
+            assert_eq!(admitted.0.len(), 512);
+            assert_eq!(admitted.0.first(), Some(&0u128.to_be_bytes()));
+            assert_eq!(admitted.0.last(), Some(&511u128.to_be_bytes()));
+            assert!(
+                pool.reserved() >= 512 * 16,
+                "candidate ownership keeps its admission"
+            );
+            drop(admitted);
+        } else {
+            let error = result.unwrap_err().to_string();
+            assert!(
+                error.contains("PropertyScan") && error.contains("Resources exhausted"),
+                "{error}"
+            );
+        }
+        assert_eq!(pool.reserved(), 0);
+    }
+    // Corrupt a selected shard after authenticating the route. The checksum
+    // error must remain visible and all admitted scratch must be released.
+    let index = root.path().join("indexes/property");
+    let shard_dir = fs::read_dir(index)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| path.is_dir())
+        .unwrap();
+    let shard = fs::read_dir(shard_dir)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let mut bytes = fs::read(&shard).unwrap();
+    bytes[0] ^= 1;
+    fs::write(shard, bytes).unwrap();
+    let pool = Arc::new(GreedyMemoryPool::new(128 * 1024 * 1024));
+    let authority: Arc<dyn MemoryPool> = pool.clone();
+    let budget = crate::property_scan_memory::Budget::new(&authority);
+    let error = crate::property_equality_index::lookup_admitted(
+        root.path(),
+        &inventory,
+        "Person",
+        &equality,
+        Some(&budget),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("checksum"), "{error}");
+    assert_eq!(pool.reserved(), 0);
 }

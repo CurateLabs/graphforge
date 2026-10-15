@@ -77,7 +77,7 @@ fn selected_rows(metadata: &ParquetMetaData, groups: &[usize]) -> Option<usize> 
 }
 
 /// A data page that may hold a wanted UUID.
-struct Candidate {
+pub(super) struct Candidate {
     /// First row, relative to the concatenation of the selected row groups.
     start: usize,
     rows: usize,

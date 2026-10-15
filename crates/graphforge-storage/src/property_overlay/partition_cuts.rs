@@ -51,6 +51,41 @@ impl AuthenticatedPropertyInventory {
     /// split the route's key space into row-balanced intervals. Fewer cuts mean
     /// the route's rows do not separate further (a single key, no statistics, or
     /// an empty route); the missing trailing partitions are then empty.
+    pub(crate) fn route_partition_admission_bytes(
+        &self,
+        kind: PropertyRouteKind,
+        route: &str,
+        partitions: usize,
+    ) -> Result<usize, GfError> {
+        if partitions < 2 {
+            return Ok(0);
+        }
+        let Some(fragments) = self.routes.get(&(kind, route.to_owned())) else {
+            return Ok(0);
+        };
+        // Cold authenticated footers are acquired under the existing inventory
+        // cache authority. Query-owned cuts are admitted only after acquisition;
+        // this guard makes no new claim about the metadata parser itself.
+        self.route_summary(kind, route)?;
+        let mut groups = 0usize;
+        for fragment in fragments {
+            let footer = fragment
+                .footer
+                .get()
+                .and_then(|result| result.as_ref().ok())
+                .ok_or_else(|| {
+                    crate::property_scan_memory::refused("cannot bound unadmitted partition footer")
+                })?;
+            groups = crate::property_scan_memory::add(groups, footer.metadata.num_row_groups())?;
+        }
+        // Vec growth retains old/new KeySegment allocations. balanced_cuts
+        // then holds both its u128 Vec and the collected UUID Vec.
+        crate::property_scan_memory::add(
+            crate::property_scan_memory::mul(groups.max(4), 4 * std::mem::size_of::<KeySegment>())?,
+            crate::property_scan_memory::mul(partitions - 1, 2 * std::mem::size_of::<[u8; 16]>())?,
+        )
+    }
+
     pub(crate) fn route_partition_cuts(
         &self,
         kind: PropertyRouteKind,
