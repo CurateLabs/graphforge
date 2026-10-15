@@ -814,3 +814,138 @@ async fn optional_tiny_windows_charge_full_pair_bitmap_aliases_in_nested_null_ou
     assert_eq!(pool.reserved(), 0);
     assert!(pool.peak_gauge().load(Ordering::Relaxed) <= 16 * MIB);
 }
+
+#[tokio::test]
+async fn optional_compound_keys_borrow_outer_values_and_match_the_full_materialized_oracle() {
+    use arrow::array::ListArray;
+    use arrow::datatypes::UInt64Type;
+    use datafusion_datasource::memory::MemorySourceConfig;
+    let wide = ["a".repeat(8192), "b".repeat(8192)];
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("key", DataType::Utf8, true),
+        Field::new(
+            "nested",
+            DataType::List(Arc::new(Field::new_list_field(DataType::UInt64, true))),
+            true,
+        ),
+        Field::new("payload", DataType::UInt64, false),
+    ]));
+    let make = |rows: Vec<(Option<usize>, Option<Vec<Option<u64>>>, u64)>| {
+        RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(StringArray::from(
+                    rows.iter()
+                        .map(|(key, _, _)| key.map(|key| wide[key].as_str()))
+                        .collect::<Vec<_>>(),
+                )),
+                Arc::new(ListArray::from_iter_primitive::<UInt64Type, _, _>(
+                    rows.iter().map(|(_, nested, _)| nested.clone()),
+                )),
+                Arc::new(UInt64Array::from(
+                    rows.iter()
+                        .map(|(_, _, payload)| *payload)
+                        .collect::<Vec<_>>(),
+                )),
+            ],
+        )
+        .unwrap()
+    };
+    let outer = make(vec![
+        (Some(0), Some(vec![Some(1), None]), 10),
+        (None, None, 11),
+        (Some(0), Some(vec![Some(1), None]), 12),
+        (Some(1), Some(vec![Some(2)]), 13),
+        (Some(1), Some(vec![Some(9)]), 14),
+    ]);
+    let inner: Vec<_> = (0..4)
+        .map(|batch| {
+            make(
+                (0..128)
+                    .map(|row| {
+                        let payload = batch * 128 + row;
+                        match row % 4 {
+                            0 => (Some(0), Some(vec![Some(1), None]), payload),
+                            1 => (None, None, payload),
+                            2 => (Some(0), Some(vec![Some(3)]), payload),
+                            _ => (Some(1), Some(vec![Some(2)]), payload),
+                        }
+                    })
+                    .collect(),
+            )
+        })
+        .collect();
+    let output_schema = Arc::new(Schema::new(vec![
+        schema.field(0).clone(),
+        schema.field(1).clone(),
+        schema.field(2).clone(),
+        Field::new("optional_payload", DataType::UInt64, true),
+    ]));
+    let mut results = Vec::new();
+    for mapped in [false, true] {
+        let limit = if mapped { 512 * 1024 } else { 32 * MIB };
+        let (context, pool) = context(limit);
+        let budget = optional_memory::Budget::new(&context.task_ctx());
+        let mut cfg = OptionalConfig {
+            join_keys: vec![(0, 0), (1, 1)],
+            inner_keep_idx: vec![2],
+            null_safe_keys: true,
+            out_schema: output_schema.clone(),
+            outer_schema: schema.clone(),
+            inner_schema: schema.clone(),
+        };
+        let source =
+            MemorySourceConfig::try_new_exec(&[vec![outer.clone()]], schema.clone(), None).unwrap();
+        let outer = budget.collect(source, context.task_ctx()).await.unwrap();
+        let source =
+            MemorySourceConfig::try_new_exec(&[inner.clone()], schema.clone(), None).unwrap();
+        let inner = if mapped {
+            budget
+                .collect_mapped(source, context.task_ctx(), &mut cfg, &outer.batches[0])
+                .await
+                .unwrap()
+        } else {
+            budget.collect(source, context.task_ctx()).await.unwrap()
+        };
+        let mut joined = optional_memory::join(&cfg, outer, inner, &budget).unwrap();
+        let mut output = Vec::new();
+        while let Some(batch) = joined.next(&budget, 8).unwrap() {
+            let bytes = optional_memory::batch_bytes(&batch).unwrap();
+            output.push(batch);
+            budget.release(bytes);
+        }
+        assert_eq!(output.iter().map(RecordBatch::num_rows).sum::<usize>(), 513);
+        results.push(output);
+        drop(joined);
+        drop(budget);
+        assert_eq!(pool.reserved(), 0);
+        assert!(pool.peak_gauge().load(Ordering::Relaxed) <= limit);
+    }
+    assert_eq!(
+        results[0], results[1],
+        "same cells, nulls, duplicate multiplicity and source order"
+    );
+}
+
+#[tokio::test]
+async fn optional_compound_key_collection_cancellation_releases_representatives_and_seed() {
+    use futures::StreamExt;
+    let (plan, weak) = super::tests::interrupted_optional(false);
+    let mut plan = Arc::try_unwrap(plan).unwrap();
+    // Repeating a key position is a valid compound tuple and reaches the mapped
+    // path while retaining the existing deliberately pending correlated source.
+    plan.join_keys.push((0, 0));
+    let baseline = weak.strong_count();
+    let (context, pool) = context(MIB);
+    let mut stream = plan.execute(0, context.task_ctx()).unwrap();
+    assert!(futures::poll!(stream.next()).is_pending());
+    assert!(pool.reserved() > 0);
+    drop(stream);
+    assert_eq!(pool.reserved(), 0);
+    assert_eq!(weak.strong_count(), baseline);
+    let executed = plan.executed_inner.get().unwrap();
+    let seed = executed.children()[0]
+        .downcast_ref::<CorrelatedSeedExec>()
+        .unwrap();
+    assert!(seed.rows.as_ref().unwrap().get().is_none());
+}

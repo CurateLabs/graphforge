@@ -7,6 +7,7 @@
 
 mod arrays;
 mod join;
+mod mapped_keys;
 pub(super) use join::join;
 
 use arrow::array::RecordBatch;
@@ -35,6 +36,7 @@ pub(super) struct Budget(MemoryReservation);
 pub(super) struct Collected {
     pub(super) batches: Vec<RecordBatch>,
     bytes: usize,
+    mapped: Option<Vec<Option<u32>>>,
 }
 
 impl Budget {
@@ -63,6 +65,14 @@ impl Budget {
         plan: Arc<dyn ExecutionPlan>,
         context: Arc<TaskContext>,
     ) -> Result<Collected> {
+        self.collect_with(plan, context, None).await
+    }
+    async fn collect_with(
+        &self,
+        plan: Arc<dyn ExecutionPlan>,
+        context: Arc<TaskContext>,
+        mut mapped: Option<&mut mapped_keys::Mapper<'_>>,
+    ) -> Result<Collected> {
         for field in plan.schema().fields() {
             arrays::validate(field.data_type())?;
         }
@@ -73,9 +83,16 @@ impl Budget {
             for field in batch.schema().fields() {
                 arrays::validate(field.data_type())?;
             }
+            let projected = mapped.is_some();
+            let batch = match mapped.as_deref_mut() {
+                Some(mapper) => mapper.project(batch, self)?,
+                None => batch,
+            };
             let held = batch_bytes(&batch)?;
-            self.admit(held)
-                .map_err(|error| error.context("OptionalMatch collection"))?;
+            if !projected {
+                self.admit(held)
+                    .map_err(|error| error.context("OptionalMatch collection"))?;
+            }
             bytes = add(bytes, held)?;
             if batches.len() == batches.capacity() {
                 let capacity = batches
@@ -96,14 +113,37 @@ impl Budget {
             }
             batches.push(batch);
         }
-        Ok(Collected { batches, bytes })
+        Ok(Collected {
+            batches,
+            bytes,
+            mapped: None,
+        })
+    }
+    pub(super) fn compact(&self, rows: Collected, schema: &SchemaRef) -> Result<Collected> {
+        let batch = self.concat(rows, schema)?;
+        let handles = std::mem::size_of::<RecordBatch>();
+        self.admit(handles)?;
+        let bytes = add(batch_bytes(&batch)?, handles)?;
+        Ok(Collected {
+            batches: vec![batch],
+            bytes,
+            mapped: None,
+        })
     }
     pub(super) fn seed(&self, batches: &[RecordBatch]) -> Result<()> {
         // Binding copies the batch/column handles, not the Arrow buffers.
         self.admit(handle_bytes(batches)?)
     }
     pub(super) fn concat(&self, collected: Collected, schema: &SchemaRef) -> Result<RecordBatch> {
-        let Collected { mut batches, bytes } = collected;
+        let Collected {
+            mut batches,
+            bytes,
+            mapped,
+        } = collected;
+        debug_assert!(
+            mapped.is_none(),
+            "mapped ownership must reach join before concat"
+        );
         if batches.len() == 1 {
             let batch = batches.pop().expect("one collected batch");
             drop(batches);
@@ -195,6 +235,23 @@ impl Budget {
         keys: &[(usize, usize)],
         null_safe: bool,
     ) -> Result<usize> {
+        self.index_work(inner, outer, keys, null_safe, false)
+    }
+    pub(super) fn mapped_index(
+        &self,
+        outer: &RecordBatch,
+        keys: &[(usize, usize)],
+    ) -> Result<usize> {
+        self.index_work(outer, outer, keys, true, true)
+    }
+    fn index_work(
+        &self,
+        inner: &RecordBatch,
+        outer: &RecordBatch,
+        keys: &[(usize, usize)],
+        null_safe: bool,
+        mapped: bool,
+    ) -> Result<usize> {
         use super::OptionalJoinKey;
         if keys.is_empty() {
             return Ok(0);
@@ -207,7 +264,9 @@ impl Budget {
         let mut scratch = 0;
         for &(outer_index, inner_index) in keys {
             let left = outer.column(outer_index).as_ref();
-            let right = inner.column(inner_index).as_ref();
+            let right = inner
+                .column(if mapped { outer_index } else { inner_index })
+                .as_ref();
             if null_safe {
                 owned = add(owned, add(arrays::scalar(left)?, arrays::scalar(right)?)?)?;
                 scratch = add(

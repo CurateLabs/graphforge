@@ -2,41 +2,61 @@
 use std::collections::HashMap;
 use std::hash::BuildHasher;
 
-use arrow::array::RecordBatch;
 use datafusion::common::Result;
 
 use super::super::{Budget, add, mul, refused, table_bytes};
-use super::key;
+use super::KeySource;
 
-pub(super) struct Index<S> {
+pub(in crate::row_exec::optional_memory) struct Index<S> {
     buckets: HashMap<u64, Vec<usize>>,
     hasher: S,
     bytes: usize,
 }
 
 impl<S: BuildHasher> Index<S> {
-    pub(super) fn build(
-        inner: &RecordBatch,
-        columns: &[usize],
+    pub(in crate::row_exec::optional_memory) fn build(
+        source: KeySource<'_>,
         null_safe: bool,
         budget: &Budget,
         hasher: S,
+    ) -> Result<Self> {
+        Self::build_rows(source, null_safe, budget, hasher, false)
+    }
+
+    pub(in crate::row_exec::optional_memory) fn representatives(
+        source: KeySource<'_>,
+        null_safe: bool,
+        budget: &Budget,
+        hasher: S,
+    ) -> Result<Self> {
+        Self::build_rows(source, null_safe, budget, hasher, true)
+    }
+
+    fn build_rows(
+        source: KeySource<'_>,
+        null_safe: bool,
+        budget: &Budget,
+        hasher: S,
+        distinct: bool,
     ) -> Result<Self> {
         let mut result = Self {
             buckets: HashMap::new(),
             hasher,
             bytes: 0,
         };
-        if columns.is_empty() {
+        if source.columns.is_empty() {
             return Ok(result);
         }
         let mut table = 0;
-        for row in 0..inner.num_rows() {
-            let Some(key) = key(inner, columns, row, null_safe)? else {
+        for row in 0..source.len() {
+            let Some(key) = source.key(row, null_safe)? else {
                 continue;
             };
             let digest = result.hasher.hash_one(&key);
             drop(key);
+            if distinct && result.first(source, row, source, null_safe)?.is_some() {
+                continue;
+            }
             if !result.buckets.contains_key(&digest)
                 && result.buckets.len() == result.buckets.capacity()
             {
@@ -79,14 +99,15 @@ impl<S: BuildHasher> Index<S> {
         Ok(result)
     }
 
-    pub(super) fn visit(
+    pub(in crate::row_exec::optional_memory) fn visit(
         &self,
-        outer: (&RecordBatch, &[usize], usize),
-        inner: (&RecordBatch, &[usize]),
+        outer: KeySource<'_>,
+        row: usize,
+        inner: KeySource<'_>,
         null_safe: bool,
         mut matched: impl FnMut(usize) -> Result<()>,
     ) -> Result<()> {
-        let Some(probe) = key(outer.0, outer.1, outer.2, null_safe)? else {
+        let Some(probe) = outer.key(row, null_safe)? else {
             return Ok(());
         };
         let digest = self.hasher.hash_one(&probe);
@@ -95,7 +116,7 @@ impl<S: BuildHasher> Index<S> {
                 // A digest is never equality: compare the same typed/null-safe
                 // OptionalJoinKeys as the original owned-key HashMap. Buckets
                 // append in input order, including duplicates and collisions.
-                if key(inner.0, inner.1, row, null_safe)?.as_ref() == Some(&probe) {
+                if inner.key(row, null_safe)?.as_ref() == Some(&probe) {
                     matched(row)?;
                 }
             }
@@ -103,7 +124,27 @@ impl<S: BuildHasher> Index<S> {
         Ok(())
     }
 
-    pub(super) fn release(self, budget: &Budget) {
+    pub(in crate::row_exec::optional_memory) fn first(
+        &self,
+        probe: KeySource<'_>,
+        row: usize,
+        source: KeySource<'_>,
+        null_safe: bool,
+    ) -> Result<Option<usize>> {
+        let Some(key) = probe.key(row, null_safe)? else {
+            return Ok(None);
+        };
+        if let Some(rows) = self.buckets.get(&self.hasher.hash_one(&key)) {
+            for &row in rows {
+                if source.key(row, null_safe)?.as_ref() == Some(&key) {
+                    return Ok(Some(row));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    pub(in crate::row_exec::optional_memory) fn release(self, budget: &Budget) {
         let bytes = self.bytes;
         drop(self);
         budget.release(bytes);
@@ -113,7 +154,7 @@ impl<S: BuildHasher> Index<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow::array::{ListArray, UInt64Array};
+    use arrow::array::{ListArray, RecordBatch, UInt64Array};
     use arrow::datatypes::{DataType, Field, Schema, UInt32Type};
     use datafusion::execution::memory_pool::MemoryPool;
     use datafusion::execution::runtime_env::RuntimeEnvBuilder;
@@ -181,8 +222,11 @@ mod tests {
             .index(&inner, &outer, &[(0, 0), (1, 1)], true)
             .unwrap();
         let index = Index::build(
-            &inner,
-            &[0, 1],
+            KeySource {
+                batch: &inner,
+                columns: &[0, 1],
+                mapped: None,
+            },
             true,
             &budget,
             BuildHasherDefault::<Collision>::default(),
@@ -196,7 +240,73 @@ mod tests {
         for (row, expected) in [vec![0, 2], vec![], vec![3]].iter().enumerate() {
             let mut actual = Vec::new();
             index
-                .visit((&outer, &[0, 1], row), (&inner, &[0, 1]), true, |row| {
+                .visit(
+                    KeySource {
+                        batch: &outer,
+                        columns: &[0, 1],
+                        mapped: None,
+                    },
+                    row,
+                    KeySource {
+                        batch: &inner,
+                        columns: &[0, 1],
+                        mapped: None,
+                    },
+                    true,
+                    |row| {
+                        actual.push(row);
+                        Ok(())
+                    },
+                )
+                .unwrap();
+            assert_eq!(&actual, expected);
+        }
+        index.release(&budget);
+        let source = KeySource {
+            batch: &inner,
+            columns: &[0, 1],
+            mapped: None,
+        };
+        let representatives = Index::representatives(
+            source,
+            true,
+            &budget,
+            BuildHasherDefault::<Collision>::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            representatives.buckets.values().next().unwrap(),
+            &[0, 1, 3],
+            "duplicate full keys retain one representative even when every digest collides"
+        );
+        let probe = KeySource {
+            batch: &outer,
+            columns: &[0, 1],
+            mapped: None,
+        };
+        for (row, expected) in [Some(0), None, Some(3)].into_iter().enumerate() {
+            assert_eq!(
+                representatives.first(probe, row, source, true).unwrap(),
+                expected
+            );
+        }
+        representatives.release(&budget);
+        let rows = [Some(0), Some(0), None, Some(3)];
+        let mapped = KeySource {
+            mapped: Some(&rows),
+            ..source
+        };
+        let index = Index::build(
+            mapped,
+            true,
+            &budget,
+            BuildHasherDefault::<Collision>::default(),
+        )
+        .unwrap();
+        for (row, expected) in [vec![0, 1], vec![], vec![3]].iter().enumerate() {
+            let mut actual = Vec::new();
+            index
+                .visit(probe, row, mapped, true, |row| {
                     actual.push(row);
                     Ok(())
                 })
