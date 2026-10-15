@@ -127,10 +127,37 @@ impl std::ops::Deref for Snapshot {
 }
 
 // Rust's BTreeMap nodes hold eleven key/value slots and up to twelve edges.
-// Sixteen slots per entry cover a singleton node and its edges/header. The
-// HashMap conversion's minimum buckets and old/new growth also fit this bound.
+// Sixteen slots per entry cover a singleton node and its edges/header.
 const MAP_ENTRY: usize = 16 * (size_of::<(String, IrLiteral)>() + 4 * size_of::<usize>());
 const ARRAY_NODE: usize = 4 * size_of::<arrow::array::ArrayData>() + 8 * 64;
+
+/// Destination table allocation, excluding moved key/literal heaps and the
+/// inline HashMap header. Rust 1.96's std HashMap::from_iter starts empty and
+/// hashbrown 0.16.1 Extend reserves the full lower size_hint; BTreeMap IntoIter
+/// is exact-sized, so property conversion needs one table and no growth copy.
+/// hashbrown's raw::capacity_to_buckets / TableLayout::calculate_layout_for use
+/// four minimum buckets, a 7/8 load, aligned buckets and trailing control bytes.
+fn hash_map_bytes(entries: usize) -> Result<usize, GfError> {
+    if entries == 0 {
+        return Ok(0);
+    }
+    let buckets = (add(mul(entries, 8)?, 6)? / 7)
+        .max(4)
+        .checked_next_power_of_two()
+        .ok_or_else(|| refused("property map bucket count overflow"))?;
+    // The pinned hashbrown's SIMD groups are at most sixteen bytes; its generic
+    // groups are smaller. Round to the larger control or entry alignment.
+    let alignment = 16_usize.max(std::mem::align_of::<(String, IrLiteral)>());
+    let controls = add(
+        mul(buckets, size_of::<(String, IrLiteral)>())?,
+        alignment - 1,
+    )? & !(alignment - 1);
+    let bytes = add(controls, add(buckets, 16)?)?;
+    if bytes > isize::MAX as usize - (alignment - 1) {
+        return Err(refused("property map allocation exceeds addressable size"));
+    }
+    Ok(bytes)
+}
 
 fn array_literals(array: &dyn Array, field: &arrow::datatypes::Field) -> Result<usize, GfError> {
     let mut bytes = add(
@@ -328,9 +355,12 @@ fn literal_codec(value: &IrLiteral) -> Result<usize, GfError> {
             bytes = add(
                 bytes,
                 add(
-                    MAP_ENTRY
-                        + (size_of::<[u8; 16]>()
-                            + size_of::<std::collections::HashMap<String, IrLiteral>>()),
+                    add(
+                        hash_map_bytes(1)?,
+                        size_of::<[u8; 16]>()
+                            + size_of::<std::collections::HashMap<String, IrLiteral>>()
+                            + "item".len(),
+                    )?,
                     literal_codec(value)?,
                 )?,
             )?;
@@ -377,10 +407,75 @@ pub(crate) fn codec(rows: &[Snapshot], schema: &Schema) -> Result<usize, GfError
         bytes = add(bytes, mul(field.size(), 4)?)?;
     }
     for snapshot in rows {
+        bytes = add(bytes, hash_map_bytes(snapshot.values.len())?)?;
         for (key, value) in &snapshot.values {
-            bytes = add(bytes, add(MAP_ENTRY, mul(key.capacity(), 8)?)?)?;
+            bytes = add(bytes, mul(key.capacity(), 8)?)?;
             bytes = add(bytes, literal_codec(value)?)?;
         }
     }
     Ok(bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::{BTreeMap, HashMap};
+
+    #[test]
+    fn property_codec_table_admission_covers_std_map_capacity_boundaries() {
+        // Capacities come from the actual std maps below. Bucket counts are
+        // the pinned hashbrown layout at each small-table/load transition.
+        for (entries, capacity, buckets) in [
+            (0, 0, 0),
+            (1, 3, 4),
+            (3, 3, 4),
+            (4, 7, 8),
+            (7, 7, 8),
+            (8, 14, 16),
+            (14, 14, 16),
+            (15, 28, 32),
+            (28, 28, 32),
+            (29, 56, 64),
+            (56, 56, 64),
+            (57, 112, 128),
+        ] {
+            let source = (0..entries)
+                .map(|index| {
+                    (
+                        format!("property_{index}"),
+                        IrLiteral::Int(i64::try_from(index).unwrap()),
+                    )
+                })
+                .collect::<BTreeMap<_, _>>();
+            let values = source.into_iter();
+            assert_eq!(values.size_hint(), (entries, Some(entries)));
+            let converted: HashMap<_, _> = values.collect();
+            assert_eq!(converted.len(), entries);
+            assert_eq!(converted.capacity(), capacity);
+            assert_eq!(
+                converted.capacity(),
+                HashMap::<String, IrLiteral>::with_capacity(entries).capacity(),
+                "collect must reserve once from the exact iterator length"
+            );
+            let table = hash_map_bytes(entries).unwrap();
+            if entries == 0 {
+                assert_eq!(table, 0);
+            } else {
+                assert!(
+                    table >= buckets * (size_of::<(String, IrLiteral)>() + 1) + 16,
+                    "admit every bucket, its control byte and the trailing SIMD group"
+                );
+            }
+            for index in 0..entries {
+                assert_eq!(
+                    converted[&format!("property_{index}")],
+                    IrLiteral::Int(i64::try_from(index).unwrap())
+                );
+            }
+        }
+        assert_eq!(
+            hash_map_bytes(usize::MAX).unwrap_err().code(),
+            "GF_RESOURCE_LIMIT"
+        );
+    }
 }
