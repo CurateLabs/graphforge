@@ -144,18 +144,238 @@ fn view_take_bytes(
     )
 }
 
+/// Struct take invokes take recursively with the SAME row indexes, including
+/// children beneath a null parent. Bound those actual selections rather than
+/// multiplying an unrelated child's largest string by the output row count.
+fn selected_take_bytes(
+    array: &dyn arrow::array::Array,
+    indices: &arrow::array::UInt32Array,
+) -> Result<usize, GfError> {
+    use arrow::array::{Array, AsArray};
+    if let Some(buffers) = view_buffers(array) {
+        return view_take_bytes(array, buffers, indices);
+    }
+    if matches!(array.data_type(), arrow::datatypes::DataType::Struct(_)) {
+        let children = array
+            .as_struct()
+            .columns()
+            .iter()
+            .try_fold(0, |bytes, child| {
+                checked_add(bytes, selected_take_bytes(child.as_ref(), indices)?)
+            })?;
+        // take_struct's child ArrayRef vectors, validity and aligned headers.
+        return checked_add(
+            children,
+            checked_add(
+                checked_mul(
+                    array.as_struct().num_columns().max(4),
+                    4 * std::mem::size_of::<(arrow::datatypes::FieldRef, arrow::array::ArrayRef)>(),
+                )?,
+                checked_add(
+                    2048,
+                    checked_add(
+                        indices.len().div_ceil(8),
+                        indices.nulls().map_or(0, |nulls| nulls.buffer().capacity()),
+                    )?,
+                )?,
+            )?,
+        );
+    }
+    crate::row_exec::hop_take_bytes(array, indices).map_err(GfError::from_execution_error)
+}
+
+/// Keep construction authority until the kernel has returned and dropped its
+/// mutable builders. Only then transfer to the actual retained array, including
+/// owned child/view containers omitted by Arrow's memory getter. This never
+/// grows an envelope after allocation; errors leave its original authority live
+/// while the local array drops before the caller's guard.
+pub(super) fn construct_array(
+    charge: &mut HopReadCharge,
+    envelope: usize,
+    construct: impl FnOnce() -> Result<arrow::array::ArrayRef, GfError>,
+) -> Result<arrow::array::ArrayRef, GfError> {
+    charge.charge(envelope)?;
+    let array = construct()?;
+    let retained = checked_add(
+        array.get_array_memory_size(),
+        retained_containers(array.as_ref())?,
+    )?;
+    if retained > envelope {
+        return Err(GfError::Execution(
+            "Expand array exceeded its admitted construction envelope".into(),
+        ));
+    }
+    charge.replace(envelope, retained)?;
+    Ok(array)
+}
+
 pub(super) fn take(
     charge: &mut HopReadCharge,
     array: &arrow::array::ArrayRef,
     indices: &arrow::array::UInt32Array,
 ) -> Result<arrow::array::ArrayRef, GfError> {
-    let bytes = match view_buffers(array.as_ref()) {
-        Some(buffers) => view_take_bytes(array.as_ref(), buffers, indices)?,
-        None => crate::row_exec::hop_take_bytes(array.as_ref(), indices)
-            .map_err(GfError::from_execution_error)?,
+    construct_array(
+        charge,
+        selected_take_bytes(array.as_ref(), indices)?,
+        || arrow::compute::take(array, indices, None).map_err(GfError::from_execution_error),
+    )
+}
+
+/// zip's MutableArrayData copies disjoint slices of these already-assembled
+/// full-length columns. Byte offsets include payload stored beneath NULLs;
+/// unrelated largest values must not be multiplied by the row count again.
+pub(super) fn zip_copy_bytes(array: &dyn arrow::array::Array) -> Result<usize, GfError> {
+    use arrow::array::AsArray;
+    use arrow::datatypes::DataType;
+    let (payload, width) = match array.data_type() {
+        DataType::Utf8 => {
+            let offsets = array.as_string::<i32>().value_offsets();
+            (
+                usize::try_from(offsets[offsets.len() - 1] - offsets[0])
+                    .map_err(|_| size_refused())?,
+                4,
+            )
+        }
+        DataType::Binary => {
+            let offsets = array.as_binary::<i32>().value_offsets();
+            (
+                usize::try_from(offsets[offsets.len() - 1] - offsets[0])
+                    .map_err(|_| size_refused())?,
+                4,
+            )
+        }
+        DataType::LargeUtf8 => {
+            let offsets = array.as_string::<i64>().value_offsets();
+            (
+                usize::try_from(offsets[offsets.len() - 1] - offsets[0])
+                    .map_err(|_| size_refused())?,
+                8,
+            )
+        }
+        DataType::LargeBinary => {
+            let offsets = array.as_binary::<i64>().value_offsets();
+            (
+                usize::try_from(offsets[offsets.len() - 1] - offsets[0])
+                    .map_err(|_| size_refused())?,
+                8,
+            )
+        }
+        DataType::Struct(_) => {
+            let children = array
+                .as_struct()
+                .columns()
+                .iter()
+                .try_fold(0, |bytes, child| {
+                    checked_add(bytes, zip_copy_bytes(child.as_ref())?)
+                })?;
+            return checked_add(
+                children,
+                checked_add(
+                    // MutableArrayData allocates parent validity even for an
+                    // empty Struct whenever either input contains NULLs.
+                    checked_add(
+                        2048,
+                        checked_mul(checked_add(array.len().div_ceil(8), 64)?, 4)?,
+                    )?,
+                    checked_mul(
+                        array.as_struct().num_columns().max(4),
+                        4 * std::mem::size_of::<(arrow::datatypes::FieldRef, arrow::array::ArrayRef)>(
+                        ),
+                    )?,
+                )?,
+            );
+        }
+        _ => {
+            let bound = crate::row_exec::hop_copy_bytes(array, array.len())
+                .map_err(GfError::from_execution_error)?;
+            // Mutable nested copying may include populated NULL spans. Retain
+            // the complete source buffer allowance alongside its initial-slot
+            // bound, without dropping the established growth/header envelope.
+            return checked_add(bound, checked_mul(array.get_buffer_memory_size(), 4)?);
+        }
     };
+    checked_add(
+        checked_mul(
+            checked_add(
+                payload.max(array.len()),
+                checked_add(
+                    checked_mul(checked_add(array.len(), 1)?, width)?,
+                    array.len().div_ceil(8),
+                )?,
+            )?,
+            4,
+        )?,
+        2048,
+    )
+}
+
+/// Filter copies a subset of each complete source span, never an arbitrary
+/// multiplicity of its largest value. Full retained capacity is also admitted:
+/// the all-selected fast path returns an alias, including unused backing.
+pub(super) fn filter_workspace(
+    charge: &mut HopReadCharge,
+    columns: usize,
+    rows: usize,
+) -> Result<(), GfError> {
+    // Result<Vec<ArrayRef>> grows geometrically from four slots. Admit its
+    // old/new overlap and the cloned bool Vec plus aligned mask construction
+    // before the caller constructs either one.
+    let arrays = checked_mul(
+        columns.max(4),
+        3 * std::mem::size_of::<arrow::array::ArrayRef>(),
+    )?;
+    let mask = checked_add(
+        rows,
+        checked_add(checked_mul(checked_add(rows.div_ceil(8), 64)?, 4)?, 2048)?,
+    )?;
+    charge.charge(checked_add(arrays, mask)?)
+}
+
+/// Filter one column under the caller's already-admitted predicate mask.
+pub(super) fn filter(
+    charge: &mut HopReadCharge,
+    array: &arrow::array::ArrayRef,
+    mask: &arrow::array::BooleanArray,
+) -> Result<arrow::array::ArrayRef, GfError> {
+    use arrow::compute::kernels::filter::FilterBuilder;
+    let retained = checked_add(
+        array.get_array_memory_size(),
+        retained_containers(array.as_ref())?,
+    )?;
+    let copies = zip_copy_bytes(array.as_ref())?.max(retained);
+    // Struct filtering can optimize the predicate into Vec<usize> indexes or
+    // Vec<(usize, usize)> ranges. Four full pair slots per input row cover
+    // either growing Vec and its old/new overlap. Scalar filters iterate the
+    // mask directly. A nullable mask additionally materializes one bitmap.
+    let optimized = if FilterBuilder::is_optimize_beneficial(array.data_type()) {
+        checked_mul(mask.len(), 4 * std::mem::size_of::<(usize, usize)>())?
+    } else {
+        0
+    };
+    let scratch = checked_add(optimized, checked_add(mask.len().div_ceil(8), 64)?)?;
+    construct_array(charge, checked_add(copies, scratch)?, || {
+        arrow::compute::filter(array, mask).map_err(GfError::from_execution_error)
+    })
+}
+
+/// The target tree exists only while resolving the id-keyed property source.
+/// Its nodes have dropped before any subsequent read/output workspace is used.
+pub(super) fn with_property_targets<R>(
+    charge: &mut HopReadCharge,
+    traversed: &std::collections::HashSet<u64>,
+    read: impl FnOnce(&std::collections::BTreeSet<u64>) -> Result<R, GfError>,
+) -> Result<R, GfError> {
+    // Unchanged conservative leaf/internal-node envelope.
+    let bytes = checked_mul(
+        traversed.len(),
+        16 * (std::mem::size_of::<u64>() + 4 * std::mem::size_of::<usize>()),
+    )?;
     charge.charge(bytes)?;
-    arrow::compute::take(array, indices, None).map_err(GfError::from_execution_error)
+    let targets = traversed.iter().copied().collect();
+    let result = read(&targets);
+    drop(targets);
+    charge.release(bytes);
+    result
 }
 
 /// Buffers and growing builders used by unused_expand_column. Four copies
@@ -205,32 +425,33 @@ pub(super) fn unused(
     field: &arrow::datatypes::Field,
     rows: usize,
 ) -> Result<arrow::array::ArrayRef, GfError> {
-    charge.charge(unused_bytes(field.data_type(), rows)?)?;
-    // Empty inline descriptors have no payload buffer. Nullable views use
-    // Arrow's ordinary new_null_array path; nonnullable placeholders preserve
-    // their declared type and nullability without a string builder.
-    if !field.is_nullable() {
-        let descriptors = || arrow::buffer::ScalarBuffer::from(vec![0u128; rows]);
-        let buffers = || Vec::<arrow::buffer::Buffer>::new();
-        match field.data_type() {
-            arrow::datatypes::DataType::Utf8View => {
-                return Ok(std::sync::Arc::new(arrow::array::StringViewArray::new(
-                    descriptors(),
-                    buffers(),
-                    None,
-                )));
+    construct_array(charge, unused_bytes(field.data_type(), rows)?, || {
+        // Empty inline descriptors have no payload buffer. Nullable views use
+        // Arrow's ordinary new_null_array path; nonnullable placeholders preserve
+        // their declared type and nullability without a string builder.
+        if !field.is_nullable() {
+            let descriptors = || arrow::buffer::ScalarBuffer::from(vec![0u128; rows]);
+            let buffers = || Vec::<arrow::buffer::Buffer>::new();
+            match field.data_type() {
+                arrow::datatypes::DataType::Utf8View => {
+                    return Ok(std::sync::Arc::new(arrow::array::StringViewArray::new(
+                        descriptors(),
+                        buffers(),
+                        None,
+                    )));
+                }
+                arrow::datatypes::DataType::BinaryView => {
+                    return Ok(std::sync::Arc::new(arrow::array::BinaryViewArray::new(
+                        descriptors(),
+                        buffers(),
+                        None,
+                    )));
+                }
+                _ => {}
             }
-            arrow::datatypes::DataType::BinaryView => {
-                return Ok(std::sync::Arc::new(arrow::array::BinaryViewArray::new(
-                    descriptors(),
-                    buffers(),
-                    None,
-                )));
-            }
-            _ => {}
         }
-    }
-    super::unused_expand_column(field, rows)
+        super::unused_expand_column(field, rows)
+    })
 }
 
 /// Data precedes its guard so errors and cancellation release backing buffers

@@ -37,7 +37,6 @@ use datafusion::physical_plan::stream::RecordBatchReceiverStream;
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use edge_filter::PhysicalEdgeFilter;
 pub(crate) use edge_properties::EdgePropSource;
-use edge_properties::build_edge_prop_children;
 use edge_properties::edge_prop_children;
 use edge_properties::load_edge_prop_source;
 use futures::StreamExt;
@@ -2456,20 +2455,15 @@ fn expand_single_hop_chunk_inner(
     // are not read at all (#1984). A route whose index cannot answer by id
     // (older, stale, or not joined to its topology) keeps the UUID-keyed read.
     let id_keyed_properties = if relationship_properties_required && ordinal_topology_only {
-        // Rust's BTree leaf has eleven entries; this per-entry allowance
-        // covers a partly populated leaf and internal parent/edge headers.
-        read_charge.charge(hop_read::checked_mul(
-            traversed.len(),
-            16 * (std::mem::size_of::<u64>() + 4 * std::mem::size_of::<usize>()),
-        )?)?;
-        let targets: std::collections::BTreeSet<u64> = traversed.iter().copied().collect();
-        edge_properties::load_edge_prop_source_by_id(
-            &*cfg.provider,
-            &cfg.rel_type_name,
-            &cfg.dir,
-            &demanded_property_fields,
-            &targets,
-        )?
+        hop_read::with_property_targets(read_charge, &traversed, |targets| {
+            edge_properties::load_edge_prop_source_by_id(
+                &*cfg.provider,
+                &cfg.rel_type_name,
+                &cfg.dir,
+                &demanded_property_fields,
+                targets,
+            )
+        })?
     } else {
         None
     };
@@ -2620,10 +2614,11 @@ fn expand_single_hop_chunk_inner(
             .map(|(_, edge_id, _)| *edge_id)
             .collect::<Vec<_>>();
         let mut children = if let Some(source) = id_keyed_properties.as_ref() {
-            edge_properties::edge_prop_children_by_id(
+            edge_properties::edge_prop_children_by_id_admitted(
                 source,
                 &demanded_property_fields,
                 &hop_edge_ids,
+                read_charge,
             )?
         } else {
             let edge_uuids = edge_uuids.ok_or_else(|| {
@@ -2645,12 +2640,13 @@ fn expand_single_hop_chunk_inner(
                 edge_uuid.copy_from_slice(edge_uuids.value(edge_idx));
                 uuids.push(edge_uuid);
             }
-            build_edge_prop_children(
+            edge_properties::build_edge_prop_children_admitted(
                 cfg.provider.admitted_inventory().as_deref(),
                 &cfg.rel_type_name,
                 &cfg.dir,
                 &demanded_property_fields,
                 &uuids,
+                read_charge,
             )?
         };
         let mut read = Vec::with_capacity(predicate.fields().len());
@@ -2669,19 +2665,11 @@ fn expand_single_hop_chunk_inner(
         }
         let verdicts = predicate.passing(read, triples.len())?;
         if verdicts.iter().any(|passes| !passes) {
-            for column in &children {
-                read_charge.charge(
-                    crate::row_exec::hop_copy_bytes(column.as_ref(), triples.len())
-                        .map_err(GfError::from_execution_error)?,
-                )?;
-            }
+            hop_read::filter_workspace(read_charge, children.len(), verdicts.len())?;
             let keep = arrow::array::BooleanArray::from(verdicts.clone());
             children = children
                 .iter()
-                .map(|column| {
-                    arrow::compute::filter(column, &keep)
-                        .map_err(|error| exec_err(error.to_string()))
-                })
+                .map(|column| hop_read::filter(read_charge, column, &keep))
                 .collect::<Result<Vec<_>, _>>()?;
             let mut verdicts = verdicts.into_iter();
             triples.retain(|_| verdicts.next().unwrap_or(false));
@@ -2910,14 +2898,20 @@ fn expand_single_hop_chunk_inner(
             .iter()
             .map(|(_, edge_id, _)| *edge_id)
             .collect::<Vec<_>>();
-        edge_properties::edge_prop_children_by_id(source, &demanded_property_fields, &hop_edge_ids)?
+        edge_properties::edge_prop_children_by_id_admitted(
+            source,
+            &demanded_property_fields,
+            &hop_edge_ids,
+            read_charge,
+        )?
     } else {
-        build_edge_prop_children(
+        edge_properties::build_edge_prop_children_admitted(
             cfg.provider.admitted_inventory().as_deref(),
             &cfg.rel_type_name,
             &cfg.dir,
             &demanded_property_fields,
             &output_edge_uuids,
+            read_charge,
         )?
     };
     let key_bytes = demanded_property_fields
