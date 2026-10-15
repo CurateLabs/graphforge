@@ -8,6 +8,9 @@ struct MemoryStore {
     writes: Cell<usize>,
 }
 impl Store for MemoryStore {
+    fn lock(&self, _: &str) -> Result<Box<dyn StoreLock + '_>, GfError> {
+        Ok(Box::new(()))
+    }
     fn read(&self, _: &str) -> Result<Option<String>, GfError> {
         Ok(self.value.borrow().clone())
     }
@@ -513,6 +516,9 @@ fn transient_refresh_error_preserves_credentials() {
 }
 struct FailedStore;
 impl Store for FailedStore {
+    fn lock(&self, _: &str) -> Result<Box<dyn StoreLock + '_>, GfError> {
+        Err(vault_error())
+    }
     fn read(&self, _: &str) -> Result<Option<String>, GfError> {
         Err(vault_error())
     }

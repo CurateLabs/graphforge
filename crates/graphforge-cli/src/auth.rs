@@ -62,7 +62,11 @@ struct DeviceAuthorization {
 fn poll_interval() -> u64 {
     5
 }
+trait StoreLock {}
+impl StoreLock for () {}
+
 trait Store {
+    fn lock(&self, origin: &str) -> Result<Box<dyn StoreLock + '_>, GfError>;
     fn read(&self, origin: &str) -> Result<Option<String>, GfError>;
     fn write(&self, origin: &str, value: &str) -> Result<(), GfError>;
     fn delete(&self, origin: &str) -> Result<(), GfError>;
@@ -72,6 +76,15 @@ fn vault_error() -> GfError {
     denied("OS credential vault unavailable; unlock or configure your system credential service")
 }
 impl Store for Vault {
+    fn lock(&self, origin: &str) -> Result<Box<dyn StoreLock + '_>, GfError> {
+        #[cfg(windows)]
+        let parent = std::env::var_os("LOCALAPPDATA");
+        #[cfg(not(windows))]
+        let parent = std::env::var_os("HOME");
+        let parent = parent.ok_or_else(lock_error)?;
+        Ok(Box::new(lock_in(std::path::Path::new(&parent), origin)?))
+    }
+
     fn read(&self, origin: &str) -> Result<Option<String>, GfError> {
         match keyring::Entry::new("graphforge-cli", origin)
             .map_err(|_| vault_error())?
@@ -97,6 +110,81 @@ impl Store for Vault {
             Err(_) => Err(vault_error()),
         }
     }
+}
+/// These stable empty files coordinate processes; credentials never touch disk.
+struct CredentialLock {
+    _file: std::fs::File,
+    _directory: graphforge_filesystem::StableDirectory,
+}
+impl StoreLock for CredentialLock {}
+fn lock_error() -> GfError {
+    denied("cannot secure the per-Hub credential lock directory")
+}
+fn lock_name(origin: &str) -> String {
+    format!(
+        "{}.lock",
+        graphforge_hub_publish::sha256_digest(origin.as_bytes()).replace(':', "-")
+    )
+}
+fn lock_file_in(
+    parent: &std::path::Path,
+    origin: &str,
+) -> Result<(graphforge_filesystem::StableDirectory, std::fs::File), GfError> {
+    let parent_handle =
+        graphforge_filesystem::StableDirectory::open(parent).map_err(|_| lock_error())?;
+    let path = parent.join(".graphforge-cli-auth-locks");
+    match graphforge_filesystem::create_private_directory(&path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(_) => return Err(lock_error()),
+    }
+    let directory =
+        graphforge_filesystem::StableDirectory::open(&path).map_err(|_| lock_error())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        let parent_owner = parent_handle
+            .as_file()
+            .metadata()
+            .map_err(|_| lock_error())?
+            .uid();
+        let metadata = directory.as_file().metadata().map_err(|_| lock_error())?;
+        if metadata.uid() != parent_owner || metadata.mode() & 0o777 != 0o700 {
+            return Err(lock_error());
+        }
+    }
+    parent_handle.revalidate_named().map_err(|_| lock_error())?;
+    let name = lock_name(origin);
+    let file = directory
+        .open_or_create_child_file(std::ffi::OsStr::new(&name))
+        .map_err(|_| lock_error())?;
+    if graphforge_filesystem::file_link_count(&file).map_err(|_| lock_error())? != 1 {
+        return Err(lock_error());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        let metadata = file.metadata().map_err(|_| lock_error())?;
+        let owner = directory
+            .as_file()
+            .metadata()
+            .map_err(|_| lock_error())?
+            .uid();
+        if metadata.uid() != owner || metadata.mode() & 0o777 != 0o600 {
+            return Err(lock_error());
+        }
+    }
+    Ok((directory, file))
+}
+fn lock_in(parent: &std::path::Path, origin: &str) -> Result<CredentialLock, GfError> {
+    let (directory, file) = lock_file_in(parent, origin)?;
+    fs4::FileExt::lock(&file).map_err(|_| lock_error())?;
+    directory.revalidate_named().map_err(|_| lock_error())?;
+    // Never unlink this file: replacing its inode would split the lock domain.
+    Ok(CredentialLock {
+        _file: file,
+        _directory: directory,
+    })
 }
 fn denied(message: &str) -> GfError {
     validation("hub.auth_denied", message)
@@ -156,6 +244,15 @@ fn validate_secret(value: &str) -> Result<(), GfError> {
     Ok(())
 }
 fn save(store: &dyn Store, hub: &Url, response: HubResponse, now: u64) -> Result<Session, GfError> {
+    let _guard = store.lock(&hub.origin().ascii_serialization())?;
+    save_unlocked(store, hub, response, now)
+}
+fn save_unlocked(
+    store: &dyn Store,
+    hub: &Url,
+    response: HubResponse,
+    now: u64,
+) -> Result<Session, GfError> {
     let HubResponse { status, body, .. } = response;
     if status != 200 {
         return Err(denied("sign-in was refused; run gf auth login"));
@@ -180,6 +277,15 @@ fn save(store: &dyn Store, hub: &Url, response: HubResponse, now: u64) -> Result
     Ok(session)
 }
 fn session(
+    store: &dyn Store,
+    transport: &dyn Transport,
+    hub: &Url,
+    now: u64,
+) -> Result<Option<Session>, GfError> {
+    let _guard = store.lock(&hub.origin().ascii_serialization())?;
+    session_unlocked(store, transport, hub, now)
+}
+fn session_unlocked(
     store: &dyn Store,
     transport: &dyn Transport,
     hub: &Url,
@@ -221,7 +327,7 @@ fn session(
     {
         store.delete(&hub.origin().ascii_serialization())?;
     }
-    save(store, hub, response, now).map(Some)
+    save_unlocked(store, hub, response, now).map(Some)
 }
 fn verification_url(value: &str) -> Result<Url, GfError> {
     if value.len() > 4096 || value.chars().any(char::is_control) {
@@ -331,7 +437,8 @@ fn logout(
     hub: &Url,
     now: u64,
 ) -> Result<(), GfError> {
-    let saved = session(store, transport, hub, now);
+    let _guard = store.lock(&hub.origin().ascii_serialization())?;
+    let saved = session_unlocked(store, transport, hub, now);
     let revoked = match saved {
         Ok(Some(session)) => request(
             transport,
@@ -792,3 +899,6 @@ pub(crate) fn run(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod lock_tests;

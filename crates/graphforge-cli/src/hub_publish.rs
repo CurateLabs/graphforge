@@ -112,6 +112,35 @@ pub(crate) struct PublishEnvironment<'a> {
     pub notices: &'a mut dyn Write,
 }
 
+/// Captured bindings accept explicit credentials without consulting the user's
+/// vault. The native process may reuse a saved session even without a terminal.
+fn select_credential(
+    explicit: Option<PublishToken>,
+    streaming: bool,
+    interactive: bool,
+    saved: impl FnOnce() -> Result<Option<PublishToken>, GfError>,
+) -> Result<Credential, GfError> {
+    if let Some(token) = explicit {
+        return Ok(Credential::Token(token));
+    }
+    if !streaming {
+        return Err(publish_error(
+            HubPublishErrorCode::AuthDenied,
+            "no publish credential: set GRAPHFORGE_HUB_PUBLISH_TOKEN or run gf publish in a terminal",
+        ));
+    }
+    if let Some(token) = saved()? {
+        return Ok(Credential::Token(token));
+    }
+    if interactive {
+        return Ok(Credential::DeviceFlow);
+    }
+    Err(publish_error(
+        HubPublishErrorCode::AuthDenied,
+        "no saved session: run gf auth login or set GRAPHFORGE_HUB_PUBLISH_TOKEN",
+    ))
+}
+
 /// Published result written to stdout.
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) struct PublishOutcome {
@@ -163,40 +192,29 @@ fn run_command(
     output: &mut dyn Write,
 ) -> Result<(), GfError> {
     use std::io::IsTerminal as _;
-    let interactive = DEVICE_FLOW_ALLOWED.load(Ordering::Relaxed)
-        && std::io::stdin().is_terminal()
-        && std::io::stderr().is_terminal();
+    let streaming = DEVICE_FLOW_ALLOWED.load(Ordering::Relaxed);
+    let interactive =
+        streaming && std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
     // Locations and arguments are validated before any credential or network use.
     let (identity, base) = parse_input(&args.repository)?;
     if let Some(origin) = &args.fork_of {
         parse_input(origin)?;
     }
-    let credential = match PublishToken::from_env() {
-        Some(token) => Credential::Token(token),
-        None => {
-            if let Some(grant) = crate::auth::repository_token(
-                &base,
-                &identity.owner,
-                &identity.repository,
-                "publish",
-            )? {
+    let credential = select_credential(PublishToken::from_env(), streaming, interactive, || {
+        let grant =
+            crate::auth::repository_token(&base, &identity.owner, &identity.repository, "publish")?;
+        grant
+            .map(|grant| {
                 if grant.origin.origin() != base.origin() {
                     return Err(validation(
                         "hub.auth_denied",
                         "publish capability must match the Hub origin",
                     ));
                 }
-                Credential::Token(PublishToken::new(grant.token))
-            } else if interactive {
-                Credential::DeviceFlow
-            } else {
-                return Err(publish_error(
-                    HubPublishErrorCode::AuthDenied,
-                    "no saved session: run gf auth login or set GRAPHFORGE_HUB_PUBLISH_TOKEN",
-                ));
-            }
-        }
-    };
+                Ok(PublishToken::new(grant.token))
+            })
+            .transpose()
+    })?;
     let path = crate::resolve_project_path(project, project_dir)?;
     let path = path
         .to_str()
