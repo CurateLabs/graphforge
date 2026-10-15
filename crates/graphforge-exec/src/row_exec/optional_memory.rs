@@ -71,7 +71,7 @@ impl Budget {
         &self,
         plan: Arc<dyn ExecutionPlan>,
         context: Arc<TaskContext>,
-        mut mapped: Option<&mut mapped_keys::Mapper<'_>>,
+        mut projection: Option<&mut mapped_keys::Mapper<'_>>,
     ) -> Result<Collected> {
         for field in plan.schema().fields() {
             arrays::validate(field.data_type())?;
@@ -83,8 +83,8 @@ impl Budget {
             for field in batch.schema().fields() {
                 arrays::validate(field.data_type())?;
             }
-            let projected = mapped.is_some();
-            let batch = match mapped.as_deref_mut() {
+            let projected = projection.is_some();
+            let batch = match projection.as_deref_mut() {
                 Some(mapper) => mapper.project(batch, self)?,
                 None => batch,
             };

@@ -3,7 +3,10 @@
 use std::collections::hash_map::RandomState;
 
 use super::join::{KeySource, index::Index};
-use super::*;
+use super::{
+    Arc, Budget, Collected, ExecutionPlan, RecordBatch, Result, SchemaRef, TaskContext, add, mul,
+    refused, schema_bound,
+};
 
 pub(super) struct Mapper<'a> {
     outer: &'a RecordBatch,
