@@ -129,7 +129,20 @@ impl std::ops::Deref for Snapshot {
 // Rust's BTreeMap nodes hold eleven key/value slots and up to twelve edges.
 // Sixteen slots per entry cover a singleton node and its edges/header.
 const MAP_ENTRY: usize = 16 * (size_of::<(String, IrLiteral)>() + 4 * size_of::<usize>());
+// Rust 1.96 alloc::collections::btree::node has eleven key/value slots per
+// node. A fresh map with at most eleven inserts cannot split. The pair layout
+// bounds the separate key/value arrays; 64 bytes cover the parent/length/index
+// header and alignment, and twelve pointers also cover an internal-node tail.
+const MAP_ROOT: usize = 11 * size_of::<(String, IrLiteral)>() + 64 + 12 * size_of::<usize>();
 const ARRAY_NODE: usize = 4 * size_of::<arrow::array::ArrayData>() + 8 * 64;
+
+fn decoded_map_bytes(property_fields: usize) -> Result<usize, GfError> {
+    match property_fields {
+        0 => Ok(0),
+        1..=11 => Ok(MAP_ROOT),
+        _ => mul(property_fields, MAP_ENTRY),
+    }
+}
 
 /// Destination table allocation, excluding moved key/literal heaps and the
 /// inline HashMap header. Rust 1.96's std HashMap::from_iter starts empty and
@@ -229,12 +242,10 @@ pub(crate) fn decoded_rows(batch: &RecordBatch, uuid_field: &str) -> Result<usiz
     // Rust 1.96's BTreeMap inserts into a single eleven-slot leaf before
     // splitting. Count nullable/all-null columns conservatively and include the
     // tombstone removed after decoding. Keep the per-entry bound above that root.
-    let roots = if property_fields <= 11 {
-        usize::from(property_fields != 0)
-    } else {
-        property_fields
-    };
-    bytes = add(bytes, mul(batch.num_rows(), mul(roots, MAP_ENTRY)?)?)?;
+    bytes = add(
+        bytes,
+        mul(batch.num_rows(), decoded_map_bytes(property_fields)?)?,
+    )?;
     for (array, field) in batch.columns().iter().zip(batch.schema().fields()) {
         // The decoder copies this key into PropertySnapshotRow's inline UUID
         // and skips map insertion. Every other field name is cloned, including
@@ -273,12 +284,7 @@ pub(crate) fn retained_decoded_row(
     row: &crate::PropertySnapshotRow,
     property_fields: usize,
 ) -> Result<usize, GfError> {
-    let roots = if property_fields <= 11 {
-        usize::from(property_fields != 0)
-    } else {
-        property_fields
-    };
-    let mut bytes = add(size_of::<Snapshot>(), mul(roots, MAP_ENTRY)?)?;
+    let mut bytes = add(size_of::<Snapshot>(), decoded_map_bytes(property_fields)?)?;
     for (key, value) in &row.values {
         bytes = add(bytes, add(key.capacity(), literal_heap(value)?)?)?;
     }
