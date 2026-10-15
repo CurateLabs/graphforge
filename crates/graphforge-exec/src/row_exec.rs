@@ -240,14 +240,16 @@ impl ExecutionPlan for OptionalMatchExec {
         let metrics = OptionalMetrics::new(&self.metrics, partition);
         let executed_inner = Arc::clone(&self.executed_inner);
         let fut = async move {
-            let outer_batches = collect(outer, context.clone()).await?;
-            metrics.outer_rows.add(row_count(&outer_batches));
+            let budget = optional_memory::Budget::new(&context);
+            let outer_batches = budget.collect(outer, context.clone()).await?;
+            metrics.outer_rows.add(row_count(&outer_batches.batches));
             // A correlated sub-plan starts from the rows just collected, not
             // from a second evaluation of the outer plan (#1919).
             let (inner, seed_release) = match correlated_seed {
                 Some(seed) => {
                     let _timer = metrics.baseline.elapsed_compute().timer();
-                    let (bound, rows) = bind_seed_rows(inner, seed, &outer_batches)?;
+                    budget.seed(&outer_batches.batches)?;
+                    let (bound, rows) = bind_seed_rows(inner, seed, &outer_batches.batches)?;
                     let release = SeedReleaseGuard(rows);
                     // Keep the copy that runs: its operators own the metrics.
                     let _ = executed_inner.set(Arc::clone(&bound));
@@ -255,19 +257,29 @@ impl ExecutionPlan for OptionalMatchExec {
                 }
                 None => (inner, None),
             };
-            let collected = collect(inner, context).await;
+            let collected = budget.collect(inner, context).await;
             // The executed copy stays for display; release its rows on success
             // or error here, and on cancellation or panic through the guard.
             drop(seed_release);
             let inner_batches = collected?;
-            metrics.inner_rows.add(row_count(&inner_batches));
+            metrics.inner_rows.add(row_count(&inner_batches.batches));
             let _timer = metrics.baseline.elapsed_compute().timer();
-            let joined = optional_join(&cfg, &outer_batches, &inner_batches).map_err(to_df_err)?;
-            Ok(joined.record_output(&metrics.baseline))
+            let joined = optional_memory::join(&cfg, outer_batches, inner_batches, &budget)?;
+            budget.output(&joined)?;
+            Ok::<_, DataFusionError>((joined.record_output(&metrics.baseline), budget))
         };
         Ok(Box::pin(RecordBatchStreamAdapter::new(
             schema,
-            futures::stream::once(fut),
+            // A yielded batch remains owned by the consumer until its next poll.
+            // Keep its charge in the stream state through that handoff and drop.
+            futures::stream::try_unfold((Some(fut), None), |(future, held)| async move {
+                drop(held);
+                let Some(future) = future else {
+                    return Ok(None);
+                };
+                let (batch, budget) = future.await?;
+                Ok::<_, DataFusionError>(Some((batch, (None, Some(budget)))))
+            }),
         )))
     }
 }
@@ -284,6 +296,7 @@ impl SeedRows {
     }
 
     /// A copy of the rows, or `None` once they were released.
+    #[cfg(test)]
     fn get(&self) -> Option<Vec<RecordBatch>> {
         self.0
             .lock()
@@ -462,7 +475,7 @@ impl ExecutionPlan for CorrelatedSeedExec {
     fn execute(
         &self,
         partition: usize,
-        _context: Arc<TaskContext>,
+        context: Arc<TaskContext>,
     ) -> Result<SendableRecordBatchStream, DataFusionError> {
         if partition != 0 {
             return Err(DataFusionError::Internal(format!(
@@ -475,17 +488,36 @@ impl ExecutionPlan for CorrelatedSeedExec {
                 self.seed
             ))
         })?;
-        let rows = bound.get().ok_or_else(|| {
+        // Each leaf execution owns a fresh batch/column handle collection.
+        // Admit under the seed lock before cloning, from the same query pool.
+        let rows = bound
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let rows = rows.as_ref().ok_or_else(|| {
             DataFusionError::Internal(format!(
                 "correlated seed {} executed after its outer rows were released",
                 self.seed
             ))
         })?;
-        Ok(Box::pin(MemoryStream::try_new(
-            rows,
+        let reservation =
+            datafusion::execution::memory_pool::MemoryConsumer::new("OptionalMatch seed handles")
+                .register(context.memory_pool());
+        // MemoryStream retains the collection and clones a batch on poll. Two
+        // complete handle sets cover that handoff without charging payload twice.
+        reservation.try_grow(optional_memory::mul(
+            optional_memory::handle_bytes(rows)?,
+            2,
+        )?)?;
+        let stream = MemoryStream::try_new(rows.clone(), self.schema.clone(), None)?
+            .with_reservation(reservation);
+        Ok(Box::pin(RecordBatchStreamAdapter::new(
             self.schema.clone(),
-            None,
-        )?))
+            futures::stream::try_unfold(stream, |mut stream| async move {
+                use futures::TryStreamExt;
+                Ok::<_, DataFusionError>(stream.try_next().await?.map(|batch| (batch, stream)))
+            }),
+        )))
     }
 }
 
@@ -511,7 +543,7 @@ fn row_count(batches: &[RecordBatch]) -> usize {
     batches.iter().map(RecordBatch::num_rows).sum()
 }
 
-/// Owned config for [`optional_join`] (so it can run in a `'static` future).
+/// Owned config for [`optional_memory::join`] (so it can run in a `'static` future).
 pub(super) struct OptionalConfig {
     pub(super) join_keys: Vec<(usize, usize)>,
     /// Inner column indices to append (in order); every shared-variable column
@@ -535,149 +567,6 @@ enum OptionalJoinKey {
     Uuid([u8; 16]),
     /// Any value, null included, for null-safe keys.
     Value(datafusion::scalar::ScalarValue),
-}
-
-/// Every key column of `row` as a value, null included (null-safe keys).
-fn null_safe_key(
-    batch: &RecordBatch,
-    columns: &[usize],
-    row: usize,
-) -> Result<Vec<OptionalJoinKey>, GfError> {
-    columns
-        .iter()
-        .map(|&index| {
-            datafusion::scalar::ScalarValue::try_from_array(batch.column(index), row)
-                .map(OptionalJoinKey::Value)
-                .map_err(|e| GfError::Execution(e.to_string()))
-        })
-        .collect()
-}
-
-/// Run the LEFT OUTER join with null-shaping and build the output batch.
-///
-/// Output columns = all outer columns, then the inner columns named by
-/// [`inner_keep_idx`](OptionalConfig::inner_keep_idx) (every shared-variable
-/// column excluded — those come from the outer side), in that order. Unmatched
-/// outer rows get a null index into the inner side, which `take` materialises as
-/// null in every inner output column (the node's schema marks them nullable).
-pub(super) fn optional_join(
-    cfg: &OptionalConfig,
-    outer_batches: &[RecordBatch],
-    inner_batches: &[RecordBatch],
-) -> Result<RecordBatch, GfError> {
-    use std::collections::HashMap;
-
-    use arrow::array::{Array, FixedSizeBinaryArray, UInt32Array, UInt64Array};
-    use arrow::compute::{concat_batches, take};
-
-    let exec_err = |m: String| GfError::Execution(m);
-
-    // Use the child schemas (not the joined output schema). `concat_batches`
-    // returns a correctly-typed empty batch for an empty slice, so a child that
-    // yields zero batches is handled: an empty inner null-shapes every outer
-    // row rather than erroring.
-    let outer =
-        concat_batches(&cfg.outer_schema, outer_batches).map_err(|e| exec_err(e.to_string()))?;
-    let inner =
-        concat_batches(&cfg.inner_schema, inner_batches).map_err(|e| exec_err(e.to_string()))?;
-
-    let outer_key_idx: Vec<usize> = cfg.join_keys.iter().map(|&(o, _)| o).collect();
-    let inner_key_idx: Vec<usize> = cfg.join_keys.iter().map(|&(_, i)| i).collect();
-
-    // Index the inner side by its key tuple (skip rows with any null key — a
-    // null join key never matches in openCypher).
-    let key_tuple = |batch: &RecordBatch,
-                     columns: &[usize],
-                     row: usize|
-     -> Result<Option<Vec<OptionalJoinKey>>, GfError> {
-        if cfg.null_safe_keys {
-            return null_safe_key(batch, columns, row).map(Some);
-        }
-        columns
-            .iter()
-            .map(|&index| {
-                let column = batch.column(index);
-                if matches!(column.data_type(), arrow::datatypes::DataType::Null)
-                    || column.is_null(row)
-                {
-                    return Ok(None);
-                }
-                if let Some(values) = column.as_any().downcast_ref::<UInt64Array>() {
-                    Ok(Some(OptionalJoinKey::U64(values.value(row))))
-                } else if let Some(values) = column.as_any().downcast_ref::<FixedSizeBinaryArray>()
-                {
-                    Ok(Some(OptionalJoinKey::Uuid(
-                        values.value(row).try_into().map_err(|_| {
-                            exec_err(format!(
-                                "optional join key at index {index} is not a 16-byte UUID"
-                            ))
-                        })?,
-                    )))
-                } else {
-                    Err(exec_err(format!(
-                        "optional join key at index {index} has unsupported type {:?}",
-                        column.data_type()
-                    )))
-                }
-            })
-            .collect::<Result<Option<Vec<_>>, _>>()
-    };
-    let mut index: HashMap<Vec<OptionalJoinKey>, Vec<usize>> = HashMap::new();
-    for r in 0..inner.num_rows() {
-        if let Some(k) = key_tuple(&inner, &inner_key_idx, r)? {
-            index.entry(k).or_default().push(r);
-        }
-    }
-
-    // Build take-index vectors. outer_take always points at a real outer row;
-    // inner_take is a null slot for unmatched rows (→ null in every inner col).
-    let mut outer_take: Vec<u32> = Vec::new();
-    let mut inner_take: Vec<Option<u32>> = Vec::new();
-    let to_u32 = |v: usize| -> Result<u32, GfError> {
-        u32::try_from(v).map_err(|_| exec_err(format!("row index {v} exceeds u32")))
-    };
-    for o in 0..outer.num_rows() {
-        let matches = if cfg.join_keys.is_empty() {
-            // Unconditional join: every inner row matches every outer row.
-            (0..inner.num_rows()).collect::<Vec<_>>()
-        } else {
-            key_tuple(&outer, &outer_key_idx, o)?
-                .and_then(|k| index.get(&k).cloned())
-                .unwrap_or_default()
-        };
-        if matches.is_empty() {
-            outer_take.push(to_u32(o)?);
-            inner_take.push(None);
-        } else {
-            for m in matches {
-                outer_take.push(to_u32(o)?);
-                inner_take.push(Some(to_u32(m)?));
-            }
-        }
-    }
-
-    let outer_take = UInt32Array::from(outer_take);
-    let inner_take = UInt32Array::from(inner_take); // None entries → null indices
-
-    let mut columns: Vec<arrow::array::ArrayRef> =
-        Vec::with_capacity(cfg.out_schema.fields().len());
-    for col in outer.columns() {
-        columns.push(take(col, &outer_take, None).map_err(|e| exec_err(e.to_string()))?);
-    }
-    // Append only the kept inner columns (shared-variable columns excluded — they
-    // are carried by the outer side), in the node's declared order.
-    let inner_cols = inner.columns();
-    for &i in &cfg.inner_keep_idx {
-        let col = inner_cols.get(i).ok_or_else(|| {
-            exec_err(format!(
-                "OptionalMatch inner_keep_idx {i} out of range ({} inner columns)",
-                inner_cols.len()
-            ))
-        })?;
-        columns.push(take(col, &inner_take, None).map_err(|e| exec_err(e.to_string()))?);
-    }
-
-    RecordBatch::try_new(cfg.out_schema.clone(), columns).map_err(|e| exec_err(e.to_string()))
 }
 
 // ---------------------------------------------------------------------------
@@ -1008,7 +897,11 @@ fn unwind_explode(
 }
 
 mod anchored_expansion;
+mod optional_memory;
 pub use anchored_expansion::AnchoredExpansionExec;
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;
+
+#[cfg(test)]
+mod optional_memory_tests;

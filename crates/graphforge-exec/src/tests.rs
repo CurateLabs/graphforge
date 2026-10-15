@@ -6,7 +6,7 @@ use crate::expand_exec::ExpandConfig;
 use crate::expand_exec::build_edge_list_column;
 use crate::expand_exec::metrics::ExpandMetrics;
 use crate::row_exec::OptionalConfig;
-use crate::row_exec::optional_join;
+use crate::row_exec::tests::join_rows as optional_join;
 use crate::session::ExecutionSession;
 use crate::session::GraphForgeExtensionPlanner;
 use crate::write_exec::GraphDeleteExec;
@@ -160,8 +160,8 @@ fn write_summary_reads_named_counters_and_ignores_missing_or_empty_rows() {
     );
 }
 
-#[test]
-fn wave11_low_level_expand_and_optional_schema_guards_fail_closed() {
+#[tokio::test]
+async fn wave11_low_level_expand_and_optional_schema_guards_fail_closed() {
     use arrow::array::{FixedSizeBinaryArray, Int64Array, StringArray};
     use arrow::datatypes::Field;
 
@@ -211,6 +211,7 @@ fn wave11_low_level_expand_and_optional_schema_guards_fail_closed() {
     };
     assert!(
         optional_join(&optional, &[short_batch.clone()], &[short_batch])
+            .await
             .unwrap_err()
             .to_string()
             .contains("not a 16-byte UUID")
