@@ -27,7 +27,8 @@ required-capability set) stay authoritative in Rust.
 ```bash
 gf --project <dir> publish <owner/repository | https://hub/owner/repository> \
     (--ref <branch-label> | --version-uuid <uuid>) \
-    [--fork-of <owner/repository | URL>] [--operation-uuid <uuid>] [--json]
+    [--fork-of <owner/repository | URL>] [--operation-uuid <uuid>] \
+    [--protection-bypass-env <name>] [--json]
 ```
 
 `--ref` publishes the head of the local research Branch with that label under
@@ -38,10 +39,16 @@ publishes the cited Version with the same identity. The repository argument
 follows `gf clone`: `owner/repository` resolves against `https://graphforge.sh`,
 or pass the HTTPS repository URL.
 
-Credentials come from `GRAPHFORGE_HUB_PUBLISH_TOKEN` or, in a terminal, the
-device flow (instructions on standard error). The token is never written to the
-Project, configuration, or output. The device flow waits at most fifteen
-minutes. Rerunning a publication of an unchanged Project replays its original
+Credentials come from `GRAPHFORGE_HUB_PUBLISH_TOKEN`, a saved `gf auth login`
+session for the selected Hub, or, in a terminal, the publish device flow
+(instructions on standard error). Saved sessions use the operating system
+credential vault and exchange for a repository-scoped publish token. Captured
+binding invocations require an explicit environment token and never consult the
+vault or prompt. The publish token is never written to the Project,
+configuration, or output. The device flow waits at most fifteen minutes.
+`--protection-bypass-env` reads a preview bypass secret from the named environment
+variable for selected-Hub control and OAuth requests. Neither that secret nor
+the publish bearer is sent to object reads or upload HEAD/PUT requests. Rerunning a publication of an unchanged Project replays its original
 receipt without uploading; after new data is committed the same command
 publishes a new snapshot. An interrupted upload resumes from the Hub's offset,
 and a rerun after `hub.publish.ref_conflict` lands on the newer revision without
@@ -61,6 +68,37 @@ re-sending bytes the Hub already holds. `--json` prints the receipt.
 
 [ADR 0053](../../../adr/0053-hub-publish-wire-contract.md#client-snapshot)
 records how the client builds the snapshot.
+
+## Authenticated publication context
+
+A Hub can offer optional `{"capability":"publish-read-context","major":1}` in
+its existing `capabilities` array. After obtaining the repository publish token,
+the client reads fixed `GET {repo}/.gf/publish/context` on the selected Hub through
+the authenticated control transport. CI tokens, device tokens and tokens
+exchanged from saved sessions use this same endpoint. The Hub rechecks current
+authorization and returns a private, `no-store` snapshot with exactly three keys:
+
+```json
+{"refs_json":"<exact stored refs UTF-8 JSON>","manifest_json":"<exact stored manifest UTF-8 JSON>","lineage_json":"<exact stored lineage UTF-8 JSON>"}
+```
+
+All three values are strings from one snapshot, or all three are `null` with
+HTTP 200 for authorized absence. Missing, extra or duplicate keys, mixed null
+and string values, and other value types are invalid. HTTP 401/403 deny access;
+422 indicates mixed or corrupt stored state. The response is bounded to 4 MiB.
+An advertised endpoint failure fails the publication; it never becomes anonymous
+404 or permission to create a new repository. Without optional major 1 support,
+the existing public discovery path remains available.
+
+The client derives the expected revision from the SHA-256 of the exact refs
+bytes and validates repository identity, refs/manifest consistency, lineage
+object byte length and SHA-256, canonical lineage digest, and package and
+ref/Version bindings. It uses the returned lineage bytes directly, without
+reading a Worker object URL. Control requests follow no redirects. Publish
+credentials and preview bypass stay on the selected Hub control origin and are
+never attached to Worker reads or upload requests. Fork origin checks retain
+public source reads and never borrow the destination publish bearer, including
+when source and destination share a Hub origin.
 
 ## Conformance corpus
 
