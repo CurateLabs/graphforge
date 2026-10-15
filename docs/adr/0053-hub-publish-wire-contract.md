@@ -180,8 +180,12 @@ whole next snapshot locally:
   change here. `export_portable_v2` with `Complete` refuses a Project with
   research Branches, because its research registry carries operational heads
   and is not a single interchange archive (`portable_registry`). Research
-  travels only through the research interchange packages, and `gf clone --ref`
-  / `--version-uuid` fetch those Version packages, never the Project package.
+  travels only through the research interchange packages. Plain `gf clone`
+  selects the advertised default research Branch; `--ref` or `--version-uuid`
+  overrides that selection. These clones fetch the selected Version package,
+  never the Project package. Valid branchless lineage and repositories without
+  lineage retain the historical Project package path; invalid advertised
+  lineage fails closed.
   The Project package keeps the workspace research metadata and configuration
   that the Project summary is derived from (ADR 0051), so a published research
   repository's summary carries its title, licence and ontology mode. Its

@@ -69,6 +69,14 @@ re-sending bytes the Hub already holds. `--json` prints the receipt.
 [ADR 0053](../../../adr/0053-hub-publish-wire-contract.md#client-snapshot)
 records how the client builds the snapshot.
 
+A plain `gf clone` of a research publication selects the advertised default
+research Branch head, including non-`main` defaults. `--ref` and `--version-uuid`
+override that choice. The clone validates lineage and imports the selected
+Version package; the publication's Project package contains metadata rather
+than the research graph. Invalid advertised lineage fails closed. Repositories
+without lineage, or with valid lineage containing no Branches, retain Project
+package cloning.
+
 ## Authenticated publication context
 
 A Hub can offer optional `{"capability":"publish-read-context","major":1}` in

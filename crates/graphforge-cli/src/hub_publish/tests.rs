@@ -767,7 +767,7 @@ fn interrupted_upload_resumes_from_hub_offset() {
     // The committed result clones back through the real clone path.
     let root = tempfile::tempdir().unwrap();
     let destination = root.path().join("clone");
-    let cloned = clone_into(&hub, "curate/claims", &destination, Some("main"), None);
+    let cloned = clone_into(&hub, "curate/claims", &destination, None, None);
     assert_eq!(cloned["research_version_uuid"], history.head.to_string());
     let reopened = GraphForge::new(destination.to_str()).unwrap();
     assert_eq!(

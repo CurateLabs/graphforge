@@ -989,3 +989,249 @@ fn collect_files(directory: &Path, files: &mut BTreeSet<PathBuf>) {
         }
     }
 }
+
+/// Change the advertised default without changing native research identities.
+fn default_ref(hub: &mut Hub, name: &str) {
+    let limits = DiscoveryLimits::default();
+    let mut manifest =
+        DiscoveryManifest::from_json(&hub.documents[&endpoint_url("manifest")], limits).unwrap();
+    manifest.default_ref = name.into();
+    manifest.resolved_ref = name.into();
+    let bytes = manifest.to_canonical_json().unwrap();
+    let mut refs = RefSet::from_json(&hub.documents[&endpoint_url("refs")], limits).unwrap();
+    refs.default_ref = name.into();
+    if !refs.refs.iter().any(|reference| reference.name == name) {
+        let mut reference = refs.refs[0].clone();
+        reference.name = name.into();
+        refs.refs.push(reference);
+        refs.refs.sort_by(|a, b| a.name.cmp(&b.name));
+    }
+    for reference in &mut refs.refs {
+        reference.validator = sha256(&bytes);
+    }
+    hub.documents.insert(endpoint_url("manifest"), bytes);
+    hub.documents
+        .insert(endpoint_url("refs"), refs.to_canonical_json().unwrap());
+}
+
+#[test]
+fn plain_clone_uses_advertised_default_research_branch_and_explicit_selectors_override_it() {
+    let published = publish_history();
+    let lineage = published
+        .fork
+        .build_research_lineage_for_discovery(
+            &lineage_request(&published),
+            &CancellationToken::new(),
+        )
+        .unwrap();
+    let mut hub = serve(&published, &lineage);
+    default_ref(&mut hub, "feature/score");
+    let root = tempfile::tempdir().unwrap();
+    let mut default_generation = None;
+    for (label, git_ref, version, expected) in [
+        ("default", None, None, published.feature_head),
+        (
+            "explicit-default",
+            Some("feature/score"),
+            None,
+            published.feature_head,
+        ),
+        ("explicit", Some("main"), None, published.main_head),
+        (
+            "version",
+            None,
+            Some(published.main_base),
+            published.main_base,
+        ),
+    ] {
+        let destination = root.path().join(label);
+        let result = clone_into(&hub, &destination, git_ref, version).unwrap();
+        assert_eq!(result["research_version_uuid"], expected.to_string());
+        if label == "default" {
+            default_generation = Some(result["generation_uuid"].clone());
+        }
+        if label == "explicit-default" {
+            assert_eq!(Some(result["generation_uuid"].clone()), default_generation);
+        }
+        let reopened = GraphForge::new(destination.to_str()).unwrap();
+        assert_eq!(
+            reference(&reopened, expected).identity_sha256,
+            reference(&published.fork, expected).identity_sha256
+        );
+        assert_eq!(
+            score(&reopened),
+            if expected == published.main_base {
+                0
+            } else if expected == published.main_head {
+                1
+            } else {
+                2
+            }
+        );
+    }
+    assert!(
+        !hub.requested()
+            .contains(&object_url(&published.project_package.0.object_digest))
+    );
+    // Advertised lineage must never downgrade to a Project clone on failure.
+    for (label, lineage) in [
+        ("missing-default", lineage.clone()),
+        ("missing-package", {
+            let mut changed = lineage.clone();
+            changed
+                .versions
+                .iter_mut()
+                .find(|version| version.version_uuid == published.feature_head.to_string())
+                .unwrap()
+                .package = None;
+            changed
+        }),
+    ] {
+        let mut bad = serve(&published, &lineage);
+        default_ref(
+            &mut bad,
+            if label == "missing-default" {
+                "unpublished"
+            } else {
+                "feature/score"
+            },
+        );
+        let destination = root.path().join(label);
+        assert!(clone_into(&bad, &destination, None, None).is_err());
+        assert!(!destination.exists());
+        assert!(
+            !bad.requested()
+                .contains(&object_url(&published.project_package.0.object_digest))
+        );
+    }
+}
+
+fn branchless_hub(
+    package_digest: Sha256Digest,
+    bytes: Vec<u8>,
+) -> (Hub, Sha256Digest, Sha256Digest) {
+    let project_object = sha256(&bytes);
+    let lineage = ResearchLineage {
+        format: RESEARCH_LINEAGE_FORMAT.into(),
+        version: ProtocolVersion::CURRENT,
+        repository: RepositoryIdentity::parse(REPOSITORY).unwrap(),
+        immutable_version: package_digest.clone(),
+        project_uuid: Uuid::now_v7().to_string(),
+        requirements: vec![ProtocolRequirement {
+            capability: "research-lineage".into(),
+            major: 1,
+        }],
+        capabilities: vec![],
+        fork: None,
+        branches: vec![],
+        versions: vec![],
+        proposals: vec![],
+        extensions: BTreeMap::new(),
+    };
+    let lineage_bytes = lineage.to_canonical_json().unwrap();
+    let lineage_digest = sha256(&lineage_bytes);
+    let manifest = DiscoveryManifest {
+        format: DISCOVERY_FORMAT.into(),
+        version: ProtocolVersion::CURRENT,
+        repository: lineage.repository.clone(),
+        default_ref: "main".into(),
+        resolved_ref: "main".into(),
+        immutable_version: package_digest.clone(),
+        package: PortablePackageReference {
+            format: PORTABLE_V2_FORMAT.into(),
+            package_digest,
+            object_digest: project_object.clone(),
+        },
+        summary: None,
+        ontology: None,
+        lineage: Some(ResearchLineageReference {
+            format: RESEARCH_LINEAGE_FORMAT.into(),
+            lineage_digest: lineage.canonical_digest().unwrap(),
+            object_digest: lineage_digest.clone(),
+        }),
+        requirements: vec![ProtocolRequirement {
+            capability: "portable-v2".into(),
+            major: 1,
+        }],
+        capabilities: vec![],
+        extensions: BTreeMap::new(),
+        objects: {
+            let mut objects = vec![
+                ObjectDescriptor {
+                    digest: project_object.clone(),
+                    length: bytes.len() as u64,
+                    media_type: PORTABLE_V2_MEDIA_TYPE.into(),
+                    locations: vec![object_url(&project_object)],
+                },
+                ObjectDescriptor {
+                    digest: lineage_digest.clone(),
+                    length: lineage_bytes.len() as u64,
+                    media_type: RESEARCH_LINEAGE_MEDIA_TYPE.into(),
+                    locations: vec![object_url(&lineage_digest)],
+                },
+            ];
+            objects.sort_by(|a, b| a.digest.cmp(&b.digest));
+            objects
+        },
+    };
+    let manifest_bytes = manifest.to_canonical_json().unwrap();
+    let refs = RefSet {
+        format: DISCOVERY_FORMAT.into(),
+        version: ProtocolVersion::CURRENT,
+        repository: lineage.repository.clone(),
+        default_ref: "main".into(),
+        refs: vec![RepositoryRef {
+            name: "main".into(),
+            target: manifest.immutable_version.clone(),
+            validator: sha256(&manifest_bytes),
+        }],
+        extensions: BTreeMap::new(),
+    };
+    let hub = Hub {
+        documents: BTreeMap::from([
+            (endpoint_url("manifest"), manifest_bytes),
+            (endpoint_url("refs"), refs.to_canonical_json().unwrap()),
+            (object_url(&project_object), bytes),
+            (object_url(&lineage_digest), lineage_bytes),
+        ]),
+        requested: Mutex::new(vec![]),
+    };
+    (hub, project_object, lineage_digest)
+}
+
+#[test]
+fn branchless_lineage_preserves_complete_project_clone_and_corruption_never_downgrades() {
+    let root = tempfile::tempdir().unwrap();
+    let graph = GraphForge::new(root.path().join("source").to_str()).unwrap();
+    graph.execute("CREATE (:Item {score:42})").unwrap();
+    let output = root.path().join("complete.gfbundle");
+    let exported = graph
+        .export_portable_v2(
+            &PortableV2ExportRequest {
+                selection: PortableSelection::Current,
+                output_path: output.clone(),
+                representation: PortableV2Output::Bundle,
+                profile: PortableV2SelectionProfile::Complete,
+                subset: None,
+                limits: PortableV2Limits::default(),
+            },
+            None,
+            |_| {},
+        )
+        .unwrap();
+    let bytes = std::fs::read(output).unwrap();
+    let package_digest = Sha256Digest(exported.package_digest);
+    let (mut hub, project_object, lineage_digest) = branchless_hub(package_digest, bytes);
+    let destination = root.path().join("clone");
+    let result = clone_into(&hub, &destination, None, None).unwrap();
+    assert!(result.get("research_version_uuid").is_none());
+    assert_eq!(score(&GraphForge::new(destination.to_str()).unwrap()), 42);
+    assert!(hub.requested().contains(&object_url(&project_object)));
+    hub.documents
+        .insert(object_url(&lineage_digest), b"{}".to_vec());
+    hub.requested.lock().unwrap().clear();
+    let refused = root.path().join("corrupt");
+    assert!(clone_into(&hub, &refused, None, None).is_err());
+    assert!(!refused.exists());
+    assert!(!hub.requested().contains(&object_url(&project_object)));
+}
