@@ -226,17 +226,31 @@ fn hash_map_bytes(entries: usize) -> Result<usize, GfError> {
 }
 
 fn array_literals(array: &dyn Array, field: &arrow::datatypes::Field) -> Result<usize, GfError> {
+    array_literals_inner(array, field, false)
+}
+
+fn array_literals_inner(
+    array: &dyn Array,
+    field: &arrow::datatypes::Field,
+    nested: bool,
+) -> Result<usize, GfError> {
     let mut bytes = add(
         array.get_array_memory_size(),
         mul(array.len(), size_of::<IrLiteral>())?,
     )?;
     // Scalar decoding borrows Arrow values and creates only inline literals or
-    // their owned payloads, already charged above. It creates no Arrow header
-    // per row. Containers retain the existing allowance for sliced child arrays
-    // and shape dispatch while recursively decoding their values.
+    // their owned payloads, already charged above. Ordinary top-level scalars
+    // create no Arrow headers. Preserve every existing container/descendant
+    // and spatial allowance for child slices, shape dispatch and metadata.
     let headers = match array.data_type() {
         DataType::List(_) | DataType::Struct(_) => array.len().max(1),
-        _ => 1,
+        _ if nested
+            || field.metadata().contains_key("ARROW:extension:name")
+            || field.metadata().contains_key("ARROW:extension:metadata") =>
+        {
+            1
+        }
+        _ => 0,
     };
     bytes = add(bytes, mul(headers, ARRAY_NODE)?)?;
     if let Some(metadata) = field.metadata().get("ARROW:extension:metadata") {
@@ -258,11 +272,11 @@ fn array_literals(array: &dyn Array, field: &arrow::datatypes::Field) -> Result<
         | DataType::Int32 => {}
         DataType::List(inner) => {
             let values = array.as_list::<i32>().values();
-            bytes = add(bytes, array_literals(values.as_ref(), inner)?)?;
+            bytes = add(bytes, array_literals_inner(values.as_ref(), inner, true)?)?;
         }
         DataType::Struct(fields) => {
             for (child, field) in array.as_struct().columns().iter().zip(fields) {
-                bytes = add(bytes, array_literals(child.as_ref(), field)?)?;
+                bytes = add(bytes, array_literals_inner(child.as_ref(), field, true)?)?;
             }
         }
         other => {
@@ -476,6 +490,333 @@ mod tests {
     use datafusion::execution::memory_pool::GreedyMemoryPool;
     use std::collections::{BTreeMap, HashMap};
 
+    #[derive(Debug)]
+    struct AdmissionPool {
+        inner: GreedyMemoryPool,
+        requests: Mutex<Vec<(usize, usize, bool)>>,
+    }
+
+    impl std::fmt::Display for AdmissionPool {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            self.inner.fmt(f)
+        }
+    }
+
+    impl MemoryPool for AdmissionPool {
+        fn grow(&self, reservation: &MemoryReservation, additional: usize) {
+            self.inner.grow(reservation, additional);
+        }
+
+        fn shrink(&self, reservation: &MemoryReservation, bytes: usize) {
+            self.inner.shrink(reservation, bytes);
+        }
+
+        fn try_grow(
+            &self,
+            reservation: &MemoryReservation,
+            additional: usize,
+        ) -> datafusion::error::Result<()> {
+            let before = self.inner.reserved();
+            let result = self.inner.try_grow(reservation, additional);
+            self.requests
+                .lock()
+                .unwrap()
+                .push((additional, before, result.is_ok()));
+            result
+        }
+
+        fn reserved(&self) -> usize {
+            self.inner.reserved()
+        }
+        fn name(&self) -> &str {
+            "AdmissionPool"
+        }
+        fn memory_limit(&self) -> datafusion::execution::memory_pool::MemoryLimit {
+            self.inner.memory_limit()
+        }
+    }
+
+    fn scalar_rows(count: usize) -> Vec<crate::PropertySnapshotRow> {
+        (0..count)
+            .map(|index| crate::PropertySnapshotRow {
+                uuid: (index as u128).to_le_bytes(),
+                tombstone: false,
+                values: BTreeMap::from([(
+                    "name".into(),
+                    IrLiteral::Str(format!("entity-{index}")),
+                )]),
+            })
+            .collect()
+    }
+
+    fn own_rows(
+        rows: Vec<crate::PropertySnapshotRow>,
+        budget: &Arc<Budget>,
+    ) -> (Guard, Vec<Snapshot>) {
+        let accumulator = budget.reserve(rows.len() * size_of::<Snapshot>()).unwrap();
+        let mut snapshots = Vec::with_capacity(rows.len());
+        for row in rows {
+            let memory = Some(
+                budget
+                    .reserve(retained_decoded_row(&row, 2).unwrap())
+                    .unwrap(),
+            );
+            snapshots.push(Snapshot { row, memory });
+            snapshots.last_mut().unwrap().release_carrier().unwrap();
+        }
+        (accumulator, snapshots)
+    }
+
+    #[test]
+    fn flat_snapshot_decoder_fits_owned_payload_admission_without_new_arrow_headers() {
+        use arrow::array::{
+            ArrayRef, BooleanArray, FixedSizeBinaryArray, Float64Array, Int64Array, StringArray,
+            Time64NanosecondArray, TimestampMicrosecondArray,
+        };
+        use arrow::datatypes::{Field, TimeUnit};
+
+        let text = "owned utf8 ".repeat(512);
+        let fields = vec![
+            Field::new("node_uuid", DataType::FixedSizeBinary(16), false),
+            Field::new(crate::PROPERTY_TOMBSTONE_FIELD, DataType::Boolean, false),
+            Field::new("name", DataType::Utf8, false),
+            Field::new("count", DataType::Int64, true),
+            Field::new("ratio", DataType::Float64, false),
+            Field::new("enabled", DataType::Boolean, false),
+            Field::new("time", DataType::Time64(TimeUnit::Nanosecond), false),
+            Field::new(
+                "at",
+                DataType::Timestamp(TimeUnit::Microsecond, None),
+                false,
+            ),
+        ];
+        let columns: Vec<ArrayRef> = vec![
+            Arc::new(
+                FixedSizeBinaryArray::try_from_iter([vec![1; 16], vec![2; 16]].into_iter())
+                    .unwrap(),
+            ),
+            Arc::new(BooleanArray::from(vec![false, false])),
+            Arc::new(StringArray::from(vec![text.as_str(), "second"])),
+            Arc::new(Int64Array::from(vec![Some(7), None])),
+            Arc::new(Float64Array::from(vec![1.25, 2.5])),
+            Arc::new(BooleanArray::from(vec![true, false])),
+            Arc::new(Time64NanosecondArray::from(vec![10, 20])),
+            Arc::new(TimestampMicrosecondArray::from(vec![30, 40])),
+        ];
+        let batch = RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).unwrap();
+        let bytes = decoded_rows(&batch, "node_uuid").unwrap();
+        // The 5.6 KiB UTF8 source retains doubled backing capacity after its
+        // second append. Actual buffers, decoded maps and payloads fit 24 KiB;
+        // eight additional nonexistent scalar headers would exhaust this pool.
+        let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(24 * 1024));
+        let budget = Budget::new(&pool);
+        let mut memory = budget.reserve(bytes).unwrap();
+        let rows = crate::property_overlay::decode_snapshot_batch(&batch, "node_uuid").unwrap();
+        for (index, row) in rows.iter().enumerate() {
+            assert_eq!(row.uuid, [index as u8 + 1; 16]);
+            assert!(!row.tombstone);
+            let mut expected = BTreeMap::from([
+                (
+                    "name".into(),
+                    IrLiteral::Str(if index == 0 {
+                        text.clone()
+                    } else {
+                        "second".into()
+                    }),
+                ),
+                (
+                    "ratio".into(),
+                    IrLiteral::Float(if index == 0 { 1.25 } else { 2.5 }),
+                ),
+                ("enabled".into(), IrLiteral::Bool(index == 0)),
+                (
+                    "time".into(),
+                    IrLiteral::Time(if index == 0 { 10 } else { 20 }),
+                ),
+                (
+                    "at".into(),
+                    IrLiteral::DateTime(if index == 0 { 30 } else { 40 }),
+                ),
+            ]);
+            if index == 0 {
+                expected.insert("count".into(), IrLiteral::Int(7));
+            }
+            assert_eq!(row.values, expected);
+        }
+        drop(batch);
+        memory
+            .shrink_to(retained_decoded_rows(&rows, rows.capacity(), 0, 7).unwrap())
+            .unwrap();
+        assert!(
+            pool.reserved() >= text.len(),
+            "decoded UTF8 owns its payload after Arrow drops"
+        );
+        drop(rows);
+        drop(memory);
+        assert_eq!(pool.reserved(), 0);
+    }
+
+    #[test]
+    fn nested_list_decoder_still_accounts_for_real_child_array_slices() {
+        use arrow::array::{ArrayRef, ListArray};
+        use arrow::datatypes::{Field, Int64Type};
+
+        let list = ListArray::from_iter_primitive::<Int64Type, _, _>([
+            Some(vec![Some(3), Some(5)]),
+            Some(vec![Some(7)]),
+        ]);
+        // This is the exact ListArray::value operation used by decode_value:
+        // a distinct child array header sharing the source backing allocation.
+        let slice = list.value(0);
+        assert!(!Arc::ptr_eq(&slice, list.values()));
+        assert_eq!(slice.len(), 2);
+        assert_eq!(
+            slice.as_primitive::<Int64Type>().values().as_ptr(),
+            list.values().as_primitive::<Int64Type>().values().as_ptr()
+        );
+        let field = Field::new("items", list.data_type().clone(), false);
+        let array: ArrayRef = Arc::new(list);
+        let bytes = array_literals(array.as_ref(), &field).unwrap();
+        assert!(
+            bytes >= array.get_array_memory_size() + 2 * ARRAY_NODE,
+            "container header authority remains in addition to source buffers"
+        );
+        assert_eq!(
+            crate::decode_property_value(&array, &field, 0).unwrap(),
+            IrLiteral::List(vec![IrLiteral::Int(3), IrLiteral::Int(5)])
+        );
+        assert_eq!(
+            crate::decode_property_value(&array, &field, 1).unwrap(),
+            IrLiteral::List(vec![IrLiteral::Int(7)])
+        );
+    }
+
+    #[test]
+    fn property_arrow_workspace_is_admitted_after_source_maps_are_consumed() {
+        let original = scalar_rows(256);
+        let expected = crate::writer::property_snapshots_to_batch("route", false, original.clone())
+            .unwrap()
+            .unwrap();
+        let estimates = original
+            .into_iter()
+            .map(|row| Snapshot { row, memory: None })
+            .collect::<Vec<_>>();
+        let arrow_bytes = codec(&estimates, expected.schema().as_ref()).unwrap();
+        let source_bytes: usize = estimates
+            .iter()
+            .map(|snapshot| retained_decoded_row(&snapshot.row, 2).unwrap())
+            .sum();
+        let tables = estimates.len() * hash_map_bytes(1).unwrap();
+        let vectors = estimates.len()
+            * (size_of::<MapMemory>() + size_of::<([u8; 16], HashMap<String, IrLiteral>)>());
+        let limit = (source_bytes + vectors + hash_map_bytes(1).unwrap()).max(
+            source_bytes - estimates.len() * decoded_map_bytes(1).unwrap()
+                + tables
+                + vectors
+                + arrow_bytes,
+        );
+        let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(limit));
+        let budget = Budget::new(&pool);
+        let (accumulator, mut rows) = own_rows(
+            estimates.into_iter().map(|snapshot| snapshot.row).collect(),
+            &budget,
+        );
+        assert_eq!(
+            budget.reserve(arrow_bytes).unwrap_err().code(),
+            "GF_RESOURCE_LIMIT",
+            "future Arrow workspace cannot coexist with all source nodes"
+        );
+        let arrow;
+        let batch;
+        (batch, arrow) = crate::writer::admitted_property_snapshots_to_batch(
+            "route",
+            false,
+            rows.drain(..),
+            &budget,
+            arrow_bytes,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(batch, expected);
+        assert_eq!(
+            pool.reserved(),
+            rows.capacity() * size_of::<Snapshot>() + arrow_bytes
+        );
+        drop(batch);
+        assert!(
+            pool.reserved() >= arrow_bytes,
+            "returned Arrow authority remains live"
+        );
+        drop(arrow);
+        drop(rows);
+        drop(accumulator);
+        assert_eq!(pool.reserved(), 0);
+    }
+
+    #[test]
+    fn property_arrow_refusal_after_map_transfer_releases_every_owner() {
+        let original = scalar_rows(2);
+        let expected = crate::writer::property_snapshots_to_batch("route", false, original.clone())
+            .unwrap()
+            .unwrap();
+        let source_bytes: usize = original
+            .iter()
+            .map(|row| retained_decoded_row(row, 2).unwrap())
+            .sum();
+        let table_bytes = hash_map_bytes(1).unwrap();
+        let observed = Arc::new(AdmissionPool {
+            inner: GreedyMemoryPool::new(source_bytes + 4096),
+            requests: Mutex::default(),
+        });
+        let pool: Arc<dyn MemoryPool> = observed.clone();
+        let budget = Budget::new(&pool);
+        let (accumulator, mut rows) = own_rows(original, &budget);
+        let arrow_bytes = codec(&rows, expected.schema().as_ref()).unwrap();
+        observed.requests.lock().unwrap().clear();
+        let error = crate::writer::admitted_property_snapshots_to_batch(
+            "route",
+            false,
+            rows.drain(..),
+            &budget,
+            arrow_bytes,
+        )
+        .unwrap_err();
+        assert_eq!(error.code(), "GF_RESOURCE_LIMIT");
+        let requests = observed.requests.lock().unwrap();
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|(bytes, _, ok)| *bytes == table_bytes && *ok)
+                .count(),
+            2,
+            "both real destination tables must precede Arrow admission"
+        );
+        let &(bytes, before, ok) = requests.last().unwrap();
+        assert_eq!(bytes, arrow_bytes);
+        assert!(!ok);
+        assert!(
+            before < source_bytes,
+            "source nodes were freed before the Arrow request"
+        );
+        drop(requests);
+        assert_eq!(pool.reserved(), rows.capacity() * size_of::<Snapshot>());
+        drop(rows);
+        drop(accumulator);
+        assert_eq!(pool.reserved(), 0);
+        assert!(
+            crate::writer::admitted_property_snapshots_to_batch(
+                "route",
+                false,
+                Vec::new().drain(..),
+                &budget,
+                arrow_bytes,
+            )
+            .unwrap()
+            .is_none()
+        );
+        assert_eq!(pool.reserved(), 0);
+    }
+
     fn payload_row(index: u8) -> crate::PropertySnapshotRow {
         crate::PropertySnapshotRow {
             uuid: [index; 16],
@@ -682,32 +1023,33 @@ mod tests {
                     rows.push(Snapshot { row, memory });
                     rows.last_mut().unwrap().release_carrier().unwrap();
                 }
-                // Real callers retain the Arrow envelope throughout conversion.
                 let blocker = refuse.then(|| {
                     budget
                         .reserve(source_bytes + carriers - pool.reserved())
                         .unwrap()
                 });
-                let arrow = (!refuse).then(|| {
-                    budget
-                        .reserve(codec(&rows, expected.schema().as_ref()).unwrap())
-                        .unwrap()
-                });
+                let codec_bytes = codec(&rows, expected.schema().as_ref()).unwrap();
                 let converted = crate::writer::admitted_property_snapshots_to_batch(
                     "route",
                     is_edge,
                     rows.drain(..),
                     &budget,
+                    codec_bytes,
                 );
                 if refuse {
                     assert_eq!(converted.unwrap_err().code(), "GF_RESOURCE_LIMIT");
                 } else {
-                    assert_eq!(converted.unwrap().unwrap(), expected);
+                    let arrow;
+                    let batch;
+                    (batch, arrow) = converted.unwrap().unwrap();
+                    assert_eq!(batch, expected);
+                    assert!(pool.reserved() >= batch.get_array_memory_size());
+                    drop(batch);
+                    drop(arrow);
                 }
                 assert!(rows.is_empty());
                 drop(rows);
                 drop(blocker);
-                drop(arrow);
                 assert_eq!(pool.reserved(), carriers);
                 drop(accumulator);
                 assert_eq!(pool.reserved(), 0);

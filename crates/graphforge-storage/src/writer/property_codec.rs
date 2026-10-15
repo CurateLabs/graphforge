@@ -438,7 +438,8 @@ pub(crate) fn admitted_property_snapshots_to_batch(
     is_edge: bool,
     rows: std::vec::Drain<'_, crate::property_scan_memory::Snapshot>,
     budget: &Arc<crate::property_scan_memory::Budget>,
-) -> Result<Option<RecordBatch>, GfError> {
+    codec_bytes: usize,
+) -> Result<Option<(RecordBatch, crate::property_scan_memory::Guard)>, GfError> {
     use crate::property_scan_memory::{MapMemory, add, mul};
 
     if rows.as_slice().is_empty() {
@@ -466,11 +467,13 @@ pub(crate) fn admitted_property_snapshots_to_batch(
     } else {
         (NODE_PROPERTY_UUID_FIELD, "graphforge.entity_type")
     };
+    // Source maps have now been consumed. Admit Arrow workspace at its first
+    // allocation, rather than while those already-freed BTree nodes were live.
+    let arrow = budget.reserve(codec_bytes)?;
     let (schema, columns) =
         build_property_columns_keyed(uuid_key, metadata_key, route, &converted)?;
-    RecordBatch::try_new(Arc::new(schema), columns)
-        .map(Some)
-        .map_err(pq_err)
+    let batch = RecordBatch::try_new(Arc::new(schema), columns).map_err(pq_err)?;
+    Ok(Some((batch, arrow)))
 }
 
 pub(super) fn reject_map_property_value(name: &str, lit: &IrLiteral) -> Result<(), GfError> {

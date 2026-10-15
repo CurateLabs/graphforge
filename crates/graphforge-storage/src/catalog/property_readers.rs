@@ -332,20 +332,28 @@ where
         (RecordBatch, Option<Arc<crate::property_scan_memory::Guard>>),
         crate::GfError,
     > {
-        let mut guard = execution
-            .map(|budget| {
+        let codec_bytes = execution
+            .map(|_| {
                 let empty = arrow::datatypes::Schema::empty();
                 crate::property_scan_memory::codec(rows, schema.as_deref().unwrap_or(&empty))
-                    .and_then(|bytes| budget.reserve(bytes))
             })
-            .transpose()?;
+            .transpose()?
+            .unwrap_or(0);
+        // Data declared below must drop before its Arrow allocation authority
+        // on normalization/projection errors as well as ordinary completion.
+        let mut guard = None;
         let batch = if let Some(budget) = execution {
             crate::writer::admitted_property_snapshots_to_batch(
                 stem,
                 is_edge,
                 rows.drain(..),
                 budget,
+                codec_bytes,
             )?
+            .map(|(batch, memory)| {
+                guard = Some(memory);
+                batch
+            })
         } else {
             crate::writer::property_snapshots_to_batch(
                 stem,
