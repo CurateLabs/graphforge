@@ -339,14 +339,21 @@ where
                     .and_then(|bytes| budget.reserve(bytes))
             })
             .transpose()?;
-        let mut owners = Vec::with_capacity(rows.len());
-        let mut snapshots = Vec::with_capacity(rows.len());
-        for snapshot in rows.drain(..) {
-            owners.push(snapshot.memory);
-            snapshots.push(snapshot.row);
+        let batch = if let Some(budget) = execution {
+            crate::writer::admitted_property_snapshots_to_batch(
+                stem,
+                is_edge,
+                rows.drain(..),
+                budget,
+            )?
+        } else {
+            crate::writer::property_snapshots_to_batch(
+                stem,
+                is_edge,
+                rows.drain(..).map(|snapshot| snapshot.row).collect(),
+            )?
         }
-        let batch = crate::writer::property_snapshots_to_batch(stem, is_edge, snapshots)?
-            .ok_or_else(|| crate::GfError::Storage("property batch disappeared".into()))?;
+        .ok_or_else(|| crate::GfError::Storage("property batch disappeared".into()))?;
         let batch = normalize_property_batch(batch, schema.as_ref())?;
         let batch = project_property_batch(batch, kind.uuid_field(), selected_properties)?;
         if let Some(guard) = guard.as_mut() {
@@ -360,7 +367,6 @@ where
             guard.shrink_to(bytes)?;
         }
         let memory = guard.map(Arc::new);
-        drop(owners);
         Ok((batch, memory))
     };
     let mut rows = Vec::with_capacity(batch_size.max(1));
@@ -390,6 +396,9 @@ where
                     return Ok(true);
                 }
                 rows.push(row);
+                // The accumulator's complete capacity is prepaid above. Its
+                // inline Snapshot now has an owner independent of the reader.
+                rows.last_mut().expect("just pushed").release_carrier()?;
                 if rows.len() >= batch_size.max(1) {
                     if let Some(budget) = execution {
                         budget.check()?;

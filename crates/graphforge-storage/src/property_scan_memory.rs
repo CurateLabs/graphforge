@@ -76,6 +76,14 @@ pub(crate) struct Guard {
 }
 
 impl Guard {
+    fn release(&mut self, bytes: usize) -> Result<(), GfError> {
+        let retained = self
+            .bytes
+            .checked_sub(bytes)
+            .ok_or_else(|| refused("release exceeds admitted allocation"))?;
+        self.shrink_to(retained)
+    }
+
     /// Divide already-admitted authority without changing the shared pool sum.
     pub(crate) fn split_off(&mut self, bytes: usize) -> Result<Self, GfError> {
         if bytes > self.bytes {
@@ -117,6 +125,52 @@ impl Drop for Guard {
 pub(crate) struct Snapshot {
     pub(crate) row: crate::PropertySnapshotRow,
     pub(crate) memory: Option<Guard>,
+}
+
+/// The destination map must drop before either of these allocation owners.
+pub(crate) struct MapMemory {
+    _source: Option<Guard>,
+    _table: Guard,
+}
+
+impl Snapshot {
+    /// Called only after insertion into a separately prepaid Snapshot vector.
+    pub(crate) fn release_carrier(&mut self) -> Result<(), GfError> {
+        if let Some(memory) = self.memory.as_mut() {
+            memory.release(size_of::<Self>())?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn into_admitted_map(
+        mut self,
+        budget: &Arc<Budget>,
+    ) -> Result<
+        (
+            [u8; 16],
+            std::collections::HashMap<String, IrLiteral>,
+            MapMemory,
+        ),
+        GfError,
+    > {
+        // Keep self intact through admission: on refusal its values drop before
+        // their guard. collect consumes an exact-sized BTreeMap iterator and
+        // frees its nodes, while moving the existing keys and literal heaps.
+        let table = budget.reserve(hash_map_bytes(self.row.values.len())?)?;
+        let nodes = decoded_map_bytes(self.row.values.len())?;
+        let values = std::mem::take(&mut self.row.values).into_iter().collect();
+        if let Some(memory) = self.memory.as_mut() {
+            memory.release(nodes)?;
+        }
+        Ok((
+            self.row.uuid,
+            values,
+            MapMemory {
+                _source: self.memory.take(),
+                _table: table,
+            },
+        ))
+    }
 }
 
 impl std::ops::Deref for Snapshot {
@@ -389,16 +443,12 @@ fn type_nodes(data_type: &DataType) -> Result<usize, GfError> {
     Ok(nodes)
 }
 
-/// Admission before BTreeMap-to-HashMap and Arrow conversion. Source snapshots
-/// remain separately charged. Recursion includes list synthetic rows and their
-/// cloned payloads; completed columns and the active builder overlap.
+/// Arrow conversion admission. Source heaps remain separately charged; the
+/// converter admits its row vectors and each destination table at allocation.
+/// Recursion includes list synthetic rows and their cloned payloads; completed
+/// columns and the active builder overlap.
 pub(crate) fn codec(rows: &[Snapshot], schema: &Schema) -> Result<usize, GfError> {
-    let mut bytes = mul(
-        rows.len(),
-        size_of::<crate::PropertySnapshotRow>()
-            + (size_of::<[u8; 16]>() + size_of::<std::collections::HashMap<String, IrLiteral>>())
-            + size_of::<Option<Guard>>(),
-    )?;
+    let mut bytes = 0;
     for field in schema.fields() {
         // Arrow's default primitive/byte builders start at1024 slots. The
         // largest native scalar slot is smaller than IrLiteral; account one
@@ -413,7 +463,6 @@ pub(crate) fn codec(rows: &[Snapshot], schema: &Schema) -> Result<usize, GfError
         bytes = add(bytes, mul(field.size(), 4)?)?;
     }
     for snapshot in rows {
-        bytes = add(bytes, hash_map_bytes(snapshot.values.len())?)?;
         for (key, value) in &snapshot.values {
             bytes = add(bytes, mul(key.capacity(), 8)?)?;
             bytes = add(bytes, literal_codec(value)?)?;
@@ -425,7 +474,247 @@ pub(crate) fn codec(rows: &[Snapshot], schema: &Schema) -> Result<usize, GfError
 #[cfg(test)]
 mod tests {
     use super::*;
+    use datafusion::execution::memory_pool::GreedyMemoryPool;
     use std::collections::{BTreeMap, HashMap};
+
+    fn payload_row(index: u8) -> crate::PropertySnapshotRow {
+        crate::PropertySnapshotRow {
+            uuid: [index; 16],
+            tombstone: false,
+            values: BTreeMap::from([(
+                "payload".into(),
+                IrLiteral::List(vec![
+                    IrLiteral::Str(char::from(b'a' + index).to_string().repeat(8192)),
+                    IrLiteral::Int(i64::from(index)),
+                ]),
+            )]),
+        }
+    }
+
+    #[test]
+    fn decoded_property_transfer_preserves_tombstone_split_node_admission() {
+        use arrow::array::{ArrayRef, BooleanArray, FixedSizeBinaryArray, StringArray};
+        use arrow::datatypes::Field;
+
+        let uuid_field = "node_uuid";
+        for live_properties in [10, 11, 12] {
+            let mut fields = vec![Field::new(uuid_field, DataType::FixedSizeBinary(16), false)];
+            let mut columns: Vec<ArrayRef> = vec![Arc::new(
+                FixedSizeBinaryArray::try_from_iter([vec![7_u8; 16]].into_iter()).unwrap(),
+            )];
+            let expected = (0..live_properties)
+                .map(|index| {
+                    (
+                        format!("property_{index:02}"),
+                        format!("value_{index}_").repeat(512),
+                    )
+                })
+                .collect::<BTreeMap<_, _>>();
+            for (name, text) in &expected {
+                fields.push(Field::new(name, DataType::Utf8, false));
+                columns.push(Arc::new(StringArray::from(vec![text.as_str()])));
+            }
+            fields.push(Field::new(
+                crate::PROPERTY_TOMBSTONE_FIELD,
+                DataType::Boolean,
+                false,
+            ));
+            columns.push(Arc::new(BooleanArray::from(vec![false])));
+            let batch = RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).unwrap();
+            let property_fields = batch.num_columns() - 1;
+            assert_eq!(property_fields, live_properties + 1);
+            let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(16 * 1024 * 1024));
+            let budget = Budget::new(&pool);
+            let mut decoder = budget
+                .reserve(decoded_rows(&batch, uuid_field).unwrap())
+                .unwrap();
+            let mut decoded =
+                crate::property_overlay::decode_snapshot_batch(&batch, uuid_field).unwrap();
+            drop(batch);
+            decoder
+                .shrink_to(
+                    retained_decoded_rows(&decoded, decoded.capacity(), 0, property_fields)
+                        .unwrap(),
+                )
+                .unwrap();
+            let accumulator = budget.reserve(size_of::<Snapshot>()).unwrap();
+            let mut rows = Vec::with_capacity(1);
+            let row = decoded.pop().unwrap();
+            assert!(!row.tombstone);
+            assert_eq!(row.values.len(), live_properties);
+            let memory = Some(
+                decoder
+                    .split_off(retained_decoded_row(&row, property_fields).unwrap())
+                    .unwrap(),
+            );
+            rows.push(Snapshot { row, memory });
+            rows.last_mut().unwrap().release_carrier().unwrap();
+            drop(decoded);
+            drop(decoder);
+            let (uuid, values, memory) = rows.pop().unwrap().into_admitted_map(&budget).unwrap();
+            assert_eq!(uuid, [7; 16]);
+            assert_eq!(values.len(), expected.len());
+            let mut moved_heaps = 0;
+            for (name, text) in &expected {
+                let (key, value) = values.get_key_value(name).unwrap();
+                assert_eq!(value, &IrLiteral::Str(text.clone()));
+                moved_heaps += key.capacity() + literal_heap(value).unwrap();
+            }
+            let source = memory._source.as_ref().unwrap().bytes;
+            assert!(
+                source >= moved_heaps,
+                "all moved keys and values remain admitted"
+            );
+            if live_properties == 11 {
+                assert!(
+                    source > moved_heaps,
+                    "the pre-removal twelve-field map retains conservative split-node residue"
+                );
+            }
+            assert!(memory._table.bytes > 0);
+            assert_eq!(
+                pool.reserved(),
+                size_of::<Snapshot>() + source + memory._table.bytes
+            );
+            drop(values);
+            drop(memory);
+            assert_eq!(pool.reserved(), size_of::<Snapshot>());
+            drop(rows);
+            drop(accumulator);
+            assert_eq!(pool.reserved(), 0);
+        }
+    }
+
+    #[test]
+    fn property_map_transfer_releases_nodes_but_retains_moved_payloads() {
+        let first = payload_row(1);
+        let second = payload_row(2);
+        let source_bytes =
+            retained_decoded_row(&first, 2).unwrap() + retained_decoded_row(&second, 2).unwrap();
+        let carriers = 2 * size_of::<Snapshot>();
+        let table_bytes = hash_map_bytes(first.values.len()).unwrap();
+        let pool: Arc<dyn MemoryPool> =
+            Arc::new(GreedyMemoryPool::new(source_bytes + carriers + table_bytes));
+        let budget = Budget::new(&pool);
+        let accumulator = budget.reserve(carriers).unwrap();
+        let mut rows = Vec::with_capacity(2);
+        for row in [first, second] {
+            let memory = Some(
+                budget
+                    .reserve(retained_decoded_row(&row, 2).unwrap())
+                    .unwrap(),
+            );
+            rows.push(Snapshot { row, memory });
+            rows.last_mut().unwrap().release_carrier().unwrap();
+        }
+        let before = pool.reserved();
+        assert_eq!(
+            budget.reserve(2 * table_bytes).unwrap_err().code(),
+            "GF_RESOURCE_LIMIT",
+            "both tables cannot be admitted while all source nodes remain"
+        );
+        let IrLiteral::List(items) = &rows[0].values["payload"] else {
+            panic!("expected nested payload")
+        };
+        let IrLiteral::Str(text) = &items[0] else {
+            panic!("expected string")
+        };
+        let payload_pointer = text.as_ptr();
+        let (uuid, values, memory) = rows.remove(0).into_admitted_map(&budget).unwrap();
+        assert_eq!(uuid, [1; 16]);
+        assert!(
+            pool.reserved() < before,
+            "consumed BTree nodes must release"
+        );
+        let IrLiteral::List(items) = &values["payload"] else {
+            panic!("expected nested payload")
+        };
+        let IrLiteral::Str(text) = &items[0] else {
+            panic!("expected string")
+        };
+        assert_eq!(text.as_ptr(), payload_pointer, "payload heap must move");
+        assert_eq!(text, &"b".repeat(8192));
+        // Only one extra table fits beside all source allocations. The second
+        // allocation succeeds by releasing the first map's consumed nodes.
+        let (_, other_values, other_memory) = rows.remove(0).into_admitted_map(&budget).unwrap();
+        drop(other_values);
+        drop(other_memory);
+        drop(rows);
+        drop(accumulator);
+        assert!(
+            pool.reserved() >= text.capacity(),
+            "moved heap remains owned"
+        );
+        let retained = pool.reserved();
+        drop(values);
+        assert_eq!(pool.reserved(), retained, "guard outlives destination map");
+        drop(memory);
+        assert_eq!(pool.reserved(), 0);
+    }
+
+    #[test]
+    fn admitted_property_conversion_preserves_node_and_edge_batches_and_cleans_refusals() {
+        for is_edge in [false, true] {
+            let original = vec![payload_row(1), payload_row(2)];
+            let expected =
+                crate::writer::property_snapshots_to_batch("route", is_edge, original.clone())
+                    .unwrap()
+                    .unwrap();
+            for refuse in [false, true] {
+                let source_bytes: usize = original
+                    .iter()
+                    .map(|row| retained_decoded_row(row, 2).unwrap())
+                    .sum();
+                let carriers = original.len() * size_of::<Snapshot>();
+                let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(if refuse {
+                    source_bytes + carriers
+                } else {
+                    16 * 1024 * 1024
+                }));
+                let budget = Budget::new(&pool);
+                let accumulator = budget.reserve(carriers).unwrap();
+                let mut rows = Vec::with_capacity(original.len());
+                for row in original.clone() {
+                    let memory = Some(
+                        budget
+                            .reserve(retained_decoded_row(&row, 2).unwrap())
+                            .unwrap(),
+                    );
+                    rows.push(Snapshot { row, memory });
+                    rows.last_mut().unwrap().release_carrier().unwrap();
+                }
+                // Real callers retain the Arrow envelope throughout conversion.
+                let blocker = refuse.then(|| {
+                    budget
+                        .reserve(source_bytes + carriers - pool.reserved())
+                        .unwrap()
+                });
+                let arrow = (!refuse).then(|| {
+                    budget
+                        .reserve(codec(&rows, expected.schema().as_ref()).unwrap())
+                        .unwrap()
+                });
+                let converted = crate::writer::admitted_property_snapshots_to_batch(
+                    "route",
+                    is_edge,
+                    rows.drain(..),
+                    &budget,
+                );
+                if refuse {
+                    assert_eq!(converted.unwrap_err().code(), "GF_RESOURCE_LIMIT");
+                } else {
+                    assert_eq!(converted.unwrap().unwrap(), expected);
+                }
+                assert!(rows.is_empty());
+                drop(rows);
+                drop(blocker);
+                drop(arrow);
+                assert_eq!(pool.reserved(), carriers);
+                drop(accumulator);
+                assert_eq!(pool.reserved(), 0);
+            }
+        }
+    }
 
     #[test]
     fn property_codec_table_admission_covers_std_map_capacity_boundaries() {

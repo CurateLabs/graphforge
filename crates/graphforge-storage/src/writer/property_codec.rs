@@ -431,6 +431,48 @@ pub(crate) fn property_snapshots_to_batch(
     }
 }
 
+/// Convert admitted snapshots without retaining freed source map nodes or
+/// reserving destination tables before their allocation actually overlaps.
+pub(crate) fn admitted_property_snapshots_to_batch(
+    route: &str,
+    is_edge: bool,
+    rows: std::vec::Drain<'_, crate::property_scan_memory::Snapshot>,
+    budget: &Arc<crate::property_scan_memory::Budget>,
+) -> Result<Option<RecordBatch>, GfError> {
+    use crate::property_scan_memory::{MapMemory, add, mul};
+
+    if rows.as_slice().is_empty() {
+        return Ok(None);
+    }
+    let capacity = rows.len();
+    let _vectors = budget.reserve(mul(
+        capacity,
+        add(
+            std::mem::size_of::<MapMemory>(),
+            std::mem::size_of::<PropRow>(),
+        )?,
+    )?)?;
+    // Reverse local drop order keeps all map heaps/tables charged until their
+    // PropRows drop, on both success and any intermediate admission failure.
+    let mut owners = Vec::with_capacity(capacity);
+    let mut converted = Vec::with_capacity(capacity);
+    for snapshot in rows {
+        let (node_uuid, props, memory) = snapshot.into_admitted_map(budget)?;
+        owners.push(memory);
+        converted.push(PropRow { node_uuid, props });
+    }
+    let (uuid_key, metadata_key) = if is_edge {
+        (EDGE_PROPERTY_UUID_FIELD, "graphforge.rel_type")
+    } else {
+        (NODE_PROPERTY_UUID_FIELD, "graphforge.entity_type")
+    };
+    let (schema, columns) =
+        build_property_columns_keyed(uuid_key, metadata_key, route, &converted)?;
+    RecordBatch::try_new(Arc::new(schema), columns)
+        .map(Some)
+        .map_err(pq_err)
+}
+
 pub(super) fn reject_map_property_value(name: &str, lit: &IrLiteral) -> Result<(), GfError> {
     if contains_uuid_literal(lit) {
         return Err(GfError::Validation(format!(
