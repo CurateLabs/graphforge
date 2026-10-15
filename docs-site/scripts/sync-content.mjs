@@ -181,6 +181,7 @@ const PAGES = [
   'adr/0056-stage-internal-parallelism.md',
   'adr/0058-initial-builds-run-on-a-bulk-builder.md',
   'adr/0059-edge-properties-are-read-through-a-derived-shard-index.md',
+  'adr/0060-query-memory-handoffs.md',
   // END generated ADR records
   "releases/roadmap.md",
   "legal/licensing.md",

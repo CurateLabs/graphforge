@@ -270,7 +270,44 @@ impl<'a> Scan<'a> {
     }
 }
 
-pub(super) fn footer(bytes: &[u8]) -> Result<Facts, DataFusionError> {
+fn schema_elements(scan: &mut Scan<'_>, flat_fields: Option<usize>) -> Result<(), DataFusionError> {
+    let list = scan
+        .protocol
+        .read_list_begin()
+        .map_err(crate::catalog::parquet_err)?;
+    if list.element_type != TType::Struct
+        || !flat_fields.map_or(matches!(list.size, 6 | 9), |fields| {
+            usize::try_from(list.size).ok() == fields.checked_add(1)
+        })
+    {
+        return Err(refused());
+    }
+    let count = scan.count(list.size, TType::Struct)?;
+    let mut children = [0; 9];
+    for slot in &mut children[..count] {
+        *slot = scan.structure(1, true)?.unwrap_or(0);
+    }
+    // from_thrift reserves num_children before validating remaining
+    // elements. These are the actual legacy/canonical node shapes.
+    let mut flat = [0; 9];
+    let expected: &[i32] = if let Some(fields) = flat_fields {
+        flat[0] = i32::try_from(fields).map_err(|_| refused())?;
+        &flat[..count]
+    } else if count == 6 {
+        &[5, 0, 0, 0, 0, 0]
+    } else {
+        &[6, 0, 0, 0, 1, 1, 0, 0, 0]
+    };
+    if &children[..count] != expected {
+        return Err(refused());
+    }
+    scan.protocol
+        .read_list_end()
+        .map_err(crate::catalog::parquet_err)?;
+    Ok(())
+}
+
+pub(super) fn footer(bytes: &[u8], flat_fields: Option<usize>) -> Result<Facts, DataFusionError> {
     let mut scan = Scan::new(bytes);
     scan.objects = 1;
     let mut arrow_schema = None;
@@ -285,31 +322,7 @@ pub(super) fn footer(bytes: &[u8]) -> Result<Facts, DataFusionError> {
             break;
         }
         if field.id == Some(2) && field.field_type == TType::List {
-            let list = scan
-                .protocol
-                .read_list_begin()
-                .map_err(crate::catalog::parquet_err)?;
-            if list.element_type != TType::Struct || !matches!(list.size, 6 | 9) {
-                return Err(refused());
-            }
-            let count = scan.count(list.size, TType::Struct)?;
-            let mut children = [0; 9];
-            for slot in &mut children[..count] {
-                *slot = scan.structure(1, true)?.unwrap_or(0);
-            }
-            // from_thrift reserves num_children before validating remaining
-            // elements. These are the actual legacy/canonical node shapes.
-            let expected: &[i32] = if count == 6 {
-                &[5, 0, 0, 0, 0, 0]
-            } else {
-                &[6, 0, 0, 0, 1, 1, 0, 0, 0]
-            };
-            if &children[..count] != expected {
-                return Err(refused());
-            }
-            scan.protocol
-                .read_list_end()
-                .map_err(crate::catalog::parquet_err)?;
+            schema_elements(&mut scan, flat_fields)?;
             saw_schema = true;
         } else if field.id == Some(5) && field.field_type == TType::List {
             let (element, count) = scan.collection()?;

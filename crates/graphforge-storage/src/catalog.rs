@@ -79,6 +79,7 @@ pub use filtered_parquet::read_edges_filtered;
 pub use filtered_parquet::read_edges_filtered_from_inventory;
 pub use filtered_parquet::read_edges_filtered_observed;
 pub use filtered_parquet::read_edges_filtered_observed_from_inventory;
+pub use filtered_parquet::read_edges_filtered_prepaid_from_inventory;
 pub use filtered_parquet::read_edges_filtered_projected_from_inventory;
 pub use filtered_parquet::read_edges_filtered_projected_observed;
 pub(crate) use filtered_parquet::read_node_fragment_filtered;

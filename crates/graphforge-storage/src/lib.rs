@@ -494,6 +494,8 @@ pub mod property_overlay;
 mod property_scan;
 mod property_scan_filter;
 mod property_scan_memory;
+#[doc(hidden)]
+pub mod read_memory;
 pub use property_overlay::{
     AuthenticatedPropertyInventory, EdgeOwnerProbeWork, PROPERTY_OVERLAY_FORMAT,
     PROPERTY_OVERLAY_FORMAT_KEY, PROPERTY_TOMBSTONE_FIELD, PropertyFragmentId,
@@ -518,15 +520,16 @@ pub use catalog::{
     read_edge_properties_from_inventory, read_edge_properties_projected,
     read_edge_properties_projected_from_inventory, read_edges, read_edges_filtered,
     read_edges_filtered_from_inventory, read_edges_filtered_observed,
-    read_edges_filtered_observed_from_inventory, read_edges_filtered_projected_from_inventory,
-    read_edges_filtered_projected_observed, read_edges_from_inventory, read_nodes,
-    read_nodes_filtered, read_nodes_filtered_from_files, read_nodes_filtered_observed,
-    read_nodes_filtered_observed_from_files, read_nodes_filtered_projected_observed,
-    read_nodes_filtered_projected_observed_from_files, read_nodes_from_files, read_properties,
-    read_properties_batched, read_properties_from_inventory, topology_node_files,
-    visit_node_fragments_admitted, visit_node_fragments_admitted_from_files,
-    visit_node_property_overlay_admitted, visit_nodes_batched, visit_nodes_batched_from_files,
-    visit_properties_batched, visit_property_fragments_admitted,
+    read_edges_filtered_observed_from_inventory, read_edges_filtered_prepaid_from_inventory,
+    read_edges_filtered_projected_from_inventory, read_edges_filtered_projected_observed,
+    read_edges_from_inventory, read_nodes, read_nodes_filtered, read_nodes_filtered_from_files,
+    read_nodes_filtered_observed, read_nodes_filtered_observed_from_files,
+    read_nodes_filtered_projected_observed, read_nodes_filtered_projected_observed_from_files,
+    read_nodes_from_files, read_properties, read_properties_batched,
+    read_properties_from_inventory, topology_node_files, visit_node_fragments_admitted,
+    visit_node_fragments_admitted_from_files, visit_node_property_overlay_admitted,
+    visit_nodes_batched, visit_nodes_batched_from_files, visit_properties_batched,
+    visit_property_fragments_admitted,
 };
 pub use catalog::{
     EXPORT_STREAM_BATCH_ROWS, count_node_rows, visit_edge_identities, visit_edge_property_batches,

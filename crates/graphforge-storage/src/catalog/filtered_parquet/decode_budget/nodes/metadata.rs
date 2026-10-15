@@ -13,9 +13,9 @@ mod compact;
 use compact::{Scan, footer};
 
 #[derive(Default)]
-pub(super) struct Admission {
-    pub(super) held: usize,
-    pub(super) retained: usize,
+pub(in crate::catalog::filtered_parquet) struct Admission {
+    pub(in crate::catalog::filtered_parquet) held: usize,
+    pub(in crate::catalog::filtered_parquet) retained: usize,
     active: usize,
 }
 impl Admission {
@@ -55,22 +55,36 @@ impl Admission {
         file.read_exact(&mut trailer)
             .map_err(DataFusionError::IoError)?;
         let encoded = u32::from_le_bytes(trailer[..4].try_into().unwrap()) as usize;
+        let source = crate::catalog::admitted_path_file(file)?;
+        self.source(&source, length, encoded, None, admit)
+    }
+
+    pub(in crate::catalog::filtered_parquet) fn source(
+        &mut self,
+        source: &impl ChunkReader,
+        length: u64,
+        encoded: usize,
+        schema: Option<&arrow::datatypes::Schema>,
+        admit: &mut impl FnMut(usize) -> Result<(), DataFusionError>,
+    ) -> Result<(usize, u64), DataFusionError> {
         // Footer Bytes and Base64's 3*ceil(n/4) decoded buffer coexist. The
         // bounded compact/FlatBuffer verifier workspace has its own floor.
         let first = add(add(encoded, mul(encoded.div_ceil(4), 3)?)?, 64 * 1024)?;
         self.reserve(add(self.retained, self.active.max(first))?, admit)?;
-        let source = crate::catalog::admitted_path_file(file)?;
         let bytes = source
             .get_bytes(length - 8 - encoded as u64, encoded)
             .map_err(crate::catalog::parquet_err)?;
-        let facts = footer(&bytes).map_err(|error| match error {
-            DataFusionError::ResourcesExhausted(_) => error,
-            other => {
-                DataFusionError::Context("node metadata footer inspection".into(), Box::new(other))
-            }
-        })?;
+        let facts = footer(&bytes, schema.map(|schema| schema.fields().len())).map_err(
+            |error| match error {
+                DataFusionError::ResourcesExhausted(_) => error,
+                other => DataFusionError::Context(
+                    "node metadata footer inspection".into(),
+                    Box::new(other),
+                ),
+            },
+        )?;
         let (ipc_objects, ipc_strings) = match facts.arrow_schema {
-            Some((start, end)) => inspect_arrow_schema(&bytes[start..end])?,
+            Some((start, end)) => inspect_arrow_schema(&bytes[start..end], schema)?,
             None => (9, 0),
         };
         let schema = add(
@@ -95,6 +109,19 @@ impl Admission {
     pub(super) fn indexes(
         &mut self,
         path: &Path,
+        metadata: &parquet::file::metadata::ParquetMetaData,
+        file_active: usize,
+        footer_start: u64,
+        admit: &mut impl FnMut(usize) -> Result<(), DataFusionError>,
+    ) -> Result<(), DataFusionError> {
+        let file = std::fs::File::open(path).map_err(DataFusionError::IoError)?;
+        let source = crate::catalog::admitted_path_file(file)?;
+        self.source_indexes(&source, metadata, file_active, footer_start, admit)
+    }
+
+    pub(in crate::catalog::filtered_parquet) fn source_indexes(
+        &mut self,
+        source: &impl ChunkReader,
         metadata: &parquet::file::metadata::ParquetMetaData,
         file_active: usize,
         footer_start: u64,
@@ -136,8 +163,7 @@ impl Admission {
         if high == 0 {
             return Ok(());
         }
-        let file = std::fs::File::open(path).map_err(DataFusionError::IoError)?;
-        if high > file.metadata().map_err(DataFusionError::IoError)?.len() {
+        if high > source.len() {
             return Err(refused());
         }
         let transport_span = usize::try_from(high - low).map_err(|_| refused())?;
@@ -147,7 +173,6 @@ impl Admission {
             add(self.retained, self.active.max(add(file_active, transport)?))?,
             admit,
         )?;
-        let source = crate::catalog::admitted_path_file(file)?;
         let bytes = source
             .get_bytes(low, transport_span)
             .map_err(crate::catalog::parquet_err)?;
@@ -246,7 +271,10 @@ fn slot_bytes(kind: TType) -> Result<usize, DataFusionError> {
     })
 }
 
-fn inspect_arrow_schema(encoded: &[u8]) -> Result<(usize, usize), DataFusionError> {
+fn inspect_arrow_schema(
+    encoded: &[u8],
+    expected_schema: Option<&arrow::datatypes::Schema>,
+) -> Result<(usize, usize), DataFusionError> {
     let decoded = base64::engine::general_purpose::STANDARD
         .decode(encoded)
         .map_err(crate::catalog::parquet_err)?;
@@ -258,7 +286,9 @@ fn inspect_arrow_schema(encoded: &[u8]) -> Result<(usize, usize), DataFusionErro
     let message = arrow::ipc::root_as_message(slice).map_err(crate::catalog::parquet_err)?;
     let schema = message.header_as_schema().ok_or_else(refused)?;
     let fields = schema.fields().ok_or_else(refused)?;
-    if !matches!(fields.len(), 5 | 6) {
+    if !expected_schema.map_or(matches!(fields.len(), 5 | 6), |schema| {
+        fields.len() == schema.fields().len()
+    }) {
         return Err(refused());
     }
     let mut objects = 0;
@@ -280,7 +310,10 @@ fn inspect_arrow_schema(encoded: &[u8]) -> Result<(usize, usize), DataFusionErro
         };
         inspect_field(
             field,
-            crate::TOPOLOGY_NODES_SCHEMA.field(expected),
+            expected_schema.map_or_else(
+                || crate::TOPOLOGY_NODES_SCHEMA.field(expected),
+                |schema| schema.field(index),
+            ),
             &mut objects,
             &mut strings,
         )?;
@@ -311,6 +344,7 @@ fn inspect_field(
     }
     let children = field.children();
     match (field.type_type(), expected.data_type()) {
+        (Type::Utf8, DataType::Utf8) if field.type_as_utf_8().is_some() => {}
         (Type::FixedSizeBinary, DataType::FixedSizeBinary(16))
             if field
                 .type_as_fixed_size_binary()

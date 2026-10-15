@@ -17,7 +17,7 @@ use parquet::file::statistics::Statistics;
 
 use crate::AuthenticatedPropertyInventory;
 
-mod nodes;
+pub(super) mod nodes;
 pub use nodes::node_decode_admission_bytes;
 
 /// Conservative transient admission for an admitted edge-record read.
@@ -66,9 +66,9 @@ pub fn edge_decode_admission_bytes(
 }
 
 #[derive(Debug)]
-struct DecodeBytes {
-    retained: usize,
-    scratch: usize,
+pub(super) struct DecodeBytes {
+    pub(super) retained: usize,
+    pub(super) scratch: usize,
 }
 
 fn add(a: usize, b: usize) -> Result<usize, DataFusionError> {
@@ -101,37 +101,47 @@ fn file_bytes(
     // The common reader preflights the encoded footer's 16 MiB ceiling before
     // decoding metadata, then validates row-group and column byte ceilings.
     let reader = crate::catalog::admitted_parquet_with_options(path, options)?;
-    let key = reader
-        .schema()
-        .index_of("edge_id")
-        .map_err(|_| exhausted())?;
+    metadata_bytes(
+        reader.metadata(),
+        reader.schema(),
+        ids,
+        projection,
+        union_name,
+    )
+}
+
+pub(super) fn metadata_bytes(
+    metadata: &parquet::file::metadata::ParquetMetaData,
+    schema: &arrow::datatypes::SchemaRef,
+    ids: &HashSet<u64>,
+    projection: Option<&[usize]>,
+    union_name: Option<&str>,
+) -> Result<DecodeBytes, DataFusionError> {
+    let key = schema.index_of("edge_id").map_err(|_| exhausted())?;
     let mut columns = projection.map_or_else(
-        || (0..reader.schema().fields().len()).collect::<Vec<_>>(),
+        || (0..schema.fields().len()).collect::<Vec<_>>(),
         <[usize]>::to_vec,
     );
     columns.push(key);
     columns.sort_unstable();
     columns.dedup();
-    if columns
-        .iter()
-        .any(|&index| index >= reader.schema().fields().len())
-    {
+    if columns.iter().any(|&index| index >= schema.fields().len()) {
         return Err(DataFusionError::Execution(
             "edge decode projection index is out of range".into(),
         ));
     }
     // Canonical edge topology consists of one flat primitive leaf per field.
     // Refuse a noncanonical nested field rather than underestimate its buffers.
-    if reader.parquet_schema().num_columns() != reader.schema().fields().len() {
+    if metadata.file_metadata().schema_descr().num_columns() != schema.fields().len() {
         return Err(exhausted());
     }
-    let file_rows = nonnegative(reader.metadata().file_metadata().num_rows())?;
+    let file_rows = nonnegative(metadata.file_metadata().num_rows())?;
     let batch_size = file_rows.clamp(1, 1024);
     let full_read = ids.len().saturating_mul(2) > file_rows;
     let mut rows = 0usize;
     let mut scratch = vec![0; columns.len()];
     let mut payloads = vec![0; columns.len()];
-    for group in reader.metadata().row_groups() {
+    for group in metadata.row_groups() {
         if !full_read && !group_may_be_read(group.column(key).statistics(), ids) {
             continue;
         }
@@ -152,7 +162,7 @@ fn file_bytes(
         retained = add(
             retained,
             retained_column(
-                reader.schema().field(column).data_type(),
+                schema.field(column).data_type(),
                 slots,
                 batches,
                 payloads[slot],
@@ -160,7 +170,7 @@ fn file_bytes(
         )?;
     }
     if let Some(name) = union_name
-        && reader.schema().index_of("rel_type_name").is_err()
+        && schema.index_of("rel_type_name").is_err()
     {
         retained = add(
             retained,

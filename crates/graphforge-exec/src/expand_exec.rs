@@ -2488,72 +2488,16 @@ fn expand_single_hop_chunk_inner(
         drop(edge_permit);
         None
     } else {
-        let admitted_inventory = cfg.provider.admitted_inventory();
-        // Admit decoder scratch before Parquet reads allocate it. The estimate
-        // includes dictionary expansion and the returned buffers; retain it
-        // through concatenation until the owned result has its own charge.
-        let decode_bytes = if let Some(inventory) = admitted_inventory.as_deref() {
-            read_charge.charge(hop_read::checked_mul(
-                edge_topology_width + 1,
-                std::mem::size_of::<usize>(),
-            )?)?;
-            let projection = if required.is_some() {
-                edge_projection.clone()
-            } else {
-                (0..edge_topology_width).collect()
-            };
-            graphforge_storage::edge_decode_admission_bytes(
-                inventory,
-                &cfg.rel_type_name,
-                cfg.mode,
-                &traversed,
-                &projection,
-            )
-            .map_err(GfError::from_execution_error)?
-        } else {
-            0
-        };
-        read_charge.charge(decode_bytes)?;
-        let edge_batches =
-            if let Some(inventory) = admitted_inventory.as_deref().filter(|_| required.is_some()) {
-                graphforge_storage::read_edges_filtered_projected_from_inventory(
-                    inventory,
-                    &cfg.rel_type_name,
-                    cfg.mode,
-                    &traversed,
-                    &edge_projection,
-                    edge_observer.as_ref(),
-                )
-            } else if required.is_some() {
-                graphforge_storage::read_edges_filtered_projected_observed(
-                    &cfg.dir,
-                    &cfg.rel_type_name,
-                    cfg.mode,
-                    &traversed,
-                    &edge_projection,
-                    edge_observer.as_ref(),
-                )
-            } else if let Some(inventory) = admitted_inventory.as_deref() {
-                graphforge_storage::read_edges_filtered_observed_from_inventory(
-                    inventory,
-                    &cfg.rel_type_name,
-                    cfg.mode,
-                    &traversed,
-                    edge_observer.as_ref(),
-                )
-            } else {
-                graphforge_storage::read_edges_filtered_observed(
-                    &cfg.dir,
-                    &cfg.rel_type_name,
-                    cfg.mode,
-                    &traversed,
-                    edge_observer.as_ref(),
-                )
-            }
-            .map_err(|e| exec_err(e.to_string()))?;
+        let edge_batch = hop_read::read_edge_batch(
+            cfg,
+            read_charge,
+            &traversed,
+            &edge_projection,
+            required.is_some(),
+            edge_topology_width,
+            edge_observer.as_ref(),
+        )?;
         drop(edge_permit);
-        read_charge.replace(decode_bytes, batches_bytes(&edge_batches))?;
-        let edge_batch = concat_precharged(read_charge, edge_batches)?;
         cfg.metrics.edge_rows(edge_batch.num_rows());
         Some(edge_batch)
     };

@@ -22,8 +22,10 @@ use std::sync::Arc;
 
 mod decode_budget;
 mod edge_ordinal;
+mod prepared_edge;
 pub use decode_budget::edge_decode_admission_bytes;
 pub use decode_budget::node_decode_admission_bytes;
+pub use prepared_edge::read_edges_filtered_prepaid_from_inventory;
 
 pub(crate) use self::edge_ordinal::EdgeIdRequest;
 
@@ -687,7 +689,10 @@ fn canonical_projection_with_key(
     projection: &[usize],
     key_column: &str,
 ) -> Result<Vec<usize>, DataFusionError> {
-    let mut indices = projection.to_vec();
+    let capacity = crate::read_memory::add(projection.len(), 1)?;
+    crate::read_memory::mul(capacity, std::mem::size_of::<usize>())?;
+    let mut indices = Vec::with_capacity(capacity);
+    indices.extend_from_slice(projection);
     indices.push(
         schema
             .index_of(key_column)
@@ -764,13 +769,58 @@ fn read_parquet_filtered_u64_attempt(
     projection: Option<&[usize]>,
     required: bool,
 ) -> Result<Vec<RecordBatch>, DataFusionError> {
-    use parquet::arrow::ProjectionMask;
-    use parquet::arrow::arrow_reader::{
-        ArrowPredicateFn, ArrowReaderOptions, ParquetRecordBatchReaderBuilder, RowFilter,
-    };
+    use parquet::arrow::arrow_reader::{ArrowReaderOptions, ParquetRecordBatchReaderBuilder};
     use parquet::file::metadata::PageIndexPolicy;
-    use parquet::file::statistics::Statistics;
 
+    let file = File::open(path).map_err(|e| io_err(&e))?;
+    // Optional, NOT required: with_page_index(true) errors on files lacking a
+    // page index; Optional enables page-level skipping when one is present.
+    let options = ArrowReaderOptions::new().with_page_index_policy(PageIndexPolicy::Optional);
+    let builder = ParquetRecordBatchReaderBuilder::try_new_with_options(
+        crate::catalog::admitted_path_file(file)?,
+        options,
+    )
+    .map_err(parquet_err)?;
+    read_parquet_filtered_u64_from_builder(
+        builder,
+        path,
+        fallback_schema.clone(),
+        key_column,
+        ids,
+        kind,
+        observer,
+        allow_dense_node_selection,
+        projection,
+        required,
+        || {
+            if let (true, Some(indices)) = (required, projection) {
+                super::read_parquet_required_projected(path, indices)
+            } else if required {
+                read_parquet_required(path)
+            } else {
+                read_parquet_or_empty(path, fallback_schema)
+            }
+        },
+    )
+}
+
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
+fn read_parquet_filtered_u64_from_builder<T: parquet::file::reader::ChunkReader + 'static>(
+    builder: parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder<T>,
+    path: &Path,
+    fallback_schema: SchemaRef,
+    key_column: &str,
+    ids: &std::collections::HashSet<u64>,
+    kind: FilteredReadKind,
+    observer: Option<&std::sync::Arc<dyn crate::io_stats::FilteredReadObserver>>,
+    allow_dense_node_selection: bool,
+    projection: Option<&[usize]>,
+    required: bool,
+    read_plain: impl FnOnce() -> Result<Vec<RecordBatch>, DataFusionError>,
+) -> Result<Vec<RecordBatch>, DataFusionError> {
+    use parquet::arrow::ProjectionMask;
+    use parquet::arrow::arrow_reader::{ArrowPredicateFn, RowFilter};
+    use parquet::file::statistics::Statistics;
     let projected_schema = projection.map_or_else(
         || fallback_schema.clone(),
         |indices| {
@@ -783,15 +833,6 @@ fn read_parquet_filtered_u64_attempt(
         },
     );
     let mut observation = FilteredReadObservation::new(observer, kind);
-    let file = File::open(path).map_err(|e| io_err(&e))?;
-    // Optional, NOT required: with_page_index(true) errors on files lacking a
-    // page index; Optional enables page-level skipping when one is present.
-    let options = ArrowReaderOptions::new().with_page_index_policy(PageIndexPolicy::Optional);
-    let builder = ParquetRecordBatchReaderBuilder::try_new_with_options(
-        crate::catalog::admitted_path_file(file)?,
-        options,
-    )
-    .map_err(parquet_err)?;
     let builder = if matches!(kind, FilteredReadKind::Edge) {
         builder
             .with_row_selection_policy(parquet::arrow::arrow_reader::RowSelectionPolicy::Selectors)
@@ -806,13 +847,7 @@ fn read_parquet_filtered_u64_attempt(
     let builder_row_groups = u64::try_from(builder.metadata().num_row_groups()).unwrap_or(u64::MAX);
     if total >= 0 && ids.len() as u64 * 2 > u64::try_from(total).unwrap_or(u64::MAX) {
         drop(builder);
-        let batches = if let (true, Some(indices)) = (required, projection) {
-            super::read_parquet_required_projected(path, indices)?
-        } else if required {
-            read_parquet_required(path)?
-        } else {
-            read_parquet_or_empty(path, fallback_schema.clone())?
-        };
+        let batches = read_plain()?;
         // The fallback scanned the whole file before trimming, so record it as
         // a full read (its row count is the full file, not the trimmed result):
         // a fallback must not masquerade as a cheap filtered read.
@@ -959,7 +994,7 @@ fn read_parquet_filtered_u64_attempt(
 
     // 2) Row filter on the key column within surviving groups.
     let mask = ProjectionMask::leaves(builder.parquet_schema(), [key_leaf]);
-    let owned: std::sync::Arc<std::collections::HashSet<u64>> = std::sync::Arc::new(ids.clone());
+    let owned = compact_filter_membership(ids);
     let scan_observer = observer.cloned();
     let predicate = ArrowPredicateFn::new(mask, move |batch: RecordBatch| {
         use arrow::array::Array as _;
@@ -1037,6 +1072,16 @@ fn read_parquet_filtered_u64_attempt(
         return Ok(vec![RecordBatch::new_empty(projected_schema)]);
     }
     Ok(batches)
+}
+
+/// The predicate owns only its live ids. Cloning an input table would also
+/// clone retained capacity after filtering/clear, which is not bounded by len.
+fn compact_filter_membership(
+    ids: &std::collections::HashSet<u64>,
+) -> Arc<std::collections::HashSet<u64>> {
+    let mut owned = std::collections::HashSet::with_capacity(ids.len());
+    owned.extend(ids.iter().copied());
+    Arc::new(owned)
 }
 
 /// Attribute a full read of `rows` to the table named by `kind`.

@@ -463,11 +463,138 @@ pub(super) struct HopChunk {
     pub(super) charge: std::sync::Arc<HopReadCharge>,
 }
 
+struct HopReadAdmission<'a>(&'a SingleHopConfig);
+impl graphforge_storage::read_memory::ReadAdmission for HopReadAdmission<'_> {
+    fn reserve(
+        &self,
+        bytes: usize,
+    ) -> datafusion::error::Result<graphforge_storage::read_memory::ReadGrant> {
+        self.check_cancelled()?;
+        let mut reservation = self.0.read_reservation.lock().map_err(|_| {
+            DataFusionError::Internal("ExpandExec hop read reservation poisoned".into())
+        })?;
+        reservation.try_grow(bytes)?;
+        Ok(graphforge_storage::read_memory::ReadGrant::from_reserved(
+            reservation.extract(bytes)?,
+        ))
+    }
+    fn check_cancelled(&self) -> datafusion::error::Result<()> {
+        if self
+            .0
+            .demand
+            .as_ref()
+            .is_some_and(|demand| demand.is_cancelled())
+        {
+            return Err(DataFusionError::Execution(
+                "ExpandExec hop read cancelled".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn read_edge_batch(
+    cfg: &SingleHopConfig,
+    charge: &mut HopReadCharge,
+    traversed: &std::collections::HashSet<u64>,
+    projection: &[usize],
+    projected: bool,
+    width: usize,
+    observer: Option<&std::sync::Arc<dyn graphforge_storage::io_stats::FilteredReadObserver>>,
+) -> Result<RecordBatch, GfError> {
+    let inventory = cfg.provider.admitted_inventory();
+    if let Some(inventory) = inventory.as_deref().filter(|_| {
+        projected
+            && (cfg.rel_type_name != "*"
+                || matches!(cfg.mode, graphforge_core::OntologyMode::Exploratory))
+    }) {
+        charge.charge(checked_mul(width + 1, std::mem::size_of::<usize>())?)?;
+        let projection = if projected {
+            projection.to_vec()
+        } else {
+            (0..width).collect()
+        };
+        let batch = graphforge_storage::read_edges_filtered_prepaid_from_inventory(
+            inventory,
+            &cfg.rel_type_name,
+            cfg.mode,
+            traversed,
+            &projection,
+            observer,
+            &HopReadAdmission(cfg),
+        )
+        .map_err(GfError::from_execution_error)?;
+        return charge.adopt_source(batch);
+    }
+    // Unmigrated wildcard union and legacy discovery retain their existing
+    // authority and behavior; they cannot manufacture a prepaid capability.
+    let decode = if let Some(inventory) = inventory.as_deref() {
+        charge.charge(checked_mul(width + 1, std::mem::size_of::<usize>())?)?;
+        let indices = if projected {
+            projection.to_vec()
+        } else {
+            (0..width).collect()
+        };
+        graphforge_storage::edge_decode_admission_bytes(
+            inventory,
+            &cfg.rel_type_name,
+            cfg.mode,
+            traversed,
+            &indices,
+        )
+        .map_err(GfError::from_execution_error)?
+    } else {
+        0
+    };
+    charge.charge(decode)?;
+    let batches = if let Some(inventory) = inventory.as_deref().filter(|_| projected) {
+        graphforge_storage::read_edges_filtered_projected_from_inventory(
+            inventory,
+            &cfg.rel_type_name,
+            cfg.mode,
+            traversed,
+            projection,
+            observer,
+        )
+    } else if projected {
+        graphforge_storage::read_edges_filtered_projected_observed(
+            &cfg.dir,
+            &cfg.rel_type_name,
+            cfg.mode,
+            traversed,
+            projection,
+            observer,
+        )
+    } else if let Some(inventory) = inventory.as_deref() {
+        graphforge_storage::read_edges_filtered_observed_from_inventory(
+            inventory,
+            &cfg.rel_type_name,
+            cfg.mode,
+            traversed,
+            observer,
+        )
+    } else {
+        graphforge_storage::read_edges_filtered_observed(
+            &cfg.dir,
+            &cfg.rel_type_name,
+            cfg.mode,
+            traversed,
+            observer,
+        )
+    }
+    .map_err(GfError::from_execution_error)?;
+    charge.replace(decode, batches_bytes(&batches))?;
+    concat_precharged(charge, batches)
+}
+
 /// What a single-hop chunk has charged to [`SingleHopConfig::read_reservation`],
 /// released when the chunk ends, by whatever path it ends.
 pub(super) struct HopReadCharge {
     reservation: std::sync::Arc<std::sync::Mutex<ChunkedReservation>>,
     held: usize,
+    prepaid_sources: Vec<graphforge_storage::read_memory::PrepaidBatch>,
+    schema_owners: Vec<graphforge_storage::read_memory::ReadSchemaOwner>,
 }
 
 impl HopReadCharge {
@@ -475,7 +602,42 @@ impl HopReadCharge {
         Self {
             reservation: std::sync::Arc::clone(reservation),
             held: 0,
+            prepaid_sources: Vec::new(),
+            schema_owners: Vec::new(),
         }
+    }
+
+    pub(super) fn adopt_source(
+        &mut self,
+        source: graphforge_storage::read_memory::PrepaidBatch,
+    ) -> Result<RecordBatch, GfError> {
+        // Pin original arrays through output identity checks; no address can
+        // be reused while a known backing is classified. This is chunk-local
+        // provenance, never a process-wide allocation registry.
+        let needed = self.prepaid_sources.len() + 1;
+        if needed > self.prepaid_sources.capacity() {
+            self.charge(checked_mul(
+                needed,
+                std::mem::size_of::<graphforge_storage::read_memory::PrepaidBatch>(),
+            )?)?;
+            self.prepaid_sources
+                .reserve_exact(needed - self.prepaid_sources.len());
+        }
+        if needed > self.schema_owners.capacity() {
+            self.charge(checked_mul(
+                needed,
+                std::mem::size_of::<graphforge_storage::read_memory::ReadSchemaOwner>(),
+            )?)?;
+            self.schema_owners
+                .reserve_exact(needed - self.schema_owners.len());
+        }
+        self.charge(checked_mul(
+            source.batch().num_columns(),
+            std::mem::size_of::<arrow::array::ArrayRef>(),
+        )?)?;
+        let batch = source.batch().clone();
+        self.prepaid_sources.push(source);
+        Ok(batch)
     }
 
     /// Charge `bytes` that are now live. Fails, naming [`HOP_READ_CONSUMER`],
@@ -555,6 +717,8 @@ impl HopReadCharge {
 
 impl Drop for HopReadCharge {
     fn drop(&mut self) {
+        drop(std::mem::take(&mut self.prepaid_sources));
+        drop(std::mem::take(&mut self.schema_owners));
         self.release(self.held);
     }
 }
@@ -826,9 +990,23 @@ fn view_owner_bytes() -> usize {
     std::mem::size_of::<datafusion::execution::memory_pool::MemoryReservation>()
         + 2 * std::mem::size_of::<usize>()
 }
+fn claim_new_buffer(
+    buffer: &arrow::buffer::Buffer,
+    prepaid: &PrepaidOutput,
+    sources: &[graphforge_storage::read_memory::PrepaidBatch],
+) {
+    if !sources.iter().any(|source| source.funds_buffer(buffer)) {
+        buffer.claim(prepaid);
+    }
+}
+
 /// Concrete borrowed traversal preserves each view's variable buffer-list
 /// owner independently of other columns, without ArrayData reconstruction.
-fn claim_output(array: &dyn arrow::array::Array, prepaid: &PrepaidOutput) {
+fn claim_output(
+    array: &dyn arrow::array::Array,
+    prepaid: &PrepaidOutput,
+    sources: &[graphforge_storage::read_memory::PrepaidBatch],
+) {
     use arrow::array::AsArray;
     use arrow::datatypes::DataType;
     if view_buffers(array).is_some() {
@@ -837,41 +1015,136 @@ fn claim_output(array: &dyn arrow::array::Array, prepaid: &PrepaidOutput) {
         let bytes =
             retained_containers(array).expect("prechecked view metadata") + view_owner_bytes();
         let metadata = std::sync::Arc::new(prepaid.0.split(bytes));
-        array.claim(&ViewPool { prepaid, metadata });
+        let pool = ViewPool { prepaid, metadata };
+        graphforge_storage::read_memory::visit_buffers(array, &mut |buffer| {
+            if !sources.iter().any(|source| source.funds_buffer(buffer)) {
+                buffer.claim(&pool);
+            }
+            Ok(())
+        })
+        .expect("prechecked view buffers");
         return;
     }
     match array.data_type() {
         DataType::List(_) => {
-            array.as_list::<i32>().offsets().inner().claim(prepaid);
-            claim_output(array.as_list::<i32>().values().as_ref(), prepaid);
+            claim_new_buffer(
+                array.as_list::<i32>().offsets().inner().inner(),
+                prepaid,
+                sources,
+            );
+            claim_output(array.as_list::<i32>().values().as_ref(), prepaid, sources);
         }
         DataType::LargeList(_) => {
-            array.as_list::<i64>().offsets().inner().claim(prepaid);
-            claim_output(array.as_list::<i64>().values().as_ref(), prepaid);
+            claim_new_buffer(
+                array.as_list::<i64>().offsets().inner().inner(),
+                prepaid,
+                sources,
+            );
+            claim_output(array.as_list::<i64>().values().as_ref(), prepaid, sources);
         }
         DataType::FixedSizeList(_, _) => {
-            claim_output(array.as_fixed_size_list().values().as_ref(), prepaid);
+            claim_output(
+                array.as_fixed_size_list().values().as_ref(),
+                prepaid,
+                sources,
+            );
         }
         DataType::Struct(_) => {
             for child in array.as_struct().columns() {
-                claim_output(child.as_ref(), prepaid);
+                claim_output(child.as_ref(), prepaid, sources);
             }
         }
         _ => {
-            array.claim(prepaid);
+            graphforge_storage::read_memory::visit_buffers(array, &mut |buffer| {
+                if !sources.iter().any(|source| source.funds_buffer(buffer)) {
+                    buffer.claim(prepaid);
+                }
+                Ok(())
+            })
+            .expect("prechecked output buffers");
             return;
         }
     }
     if let Some(nulls) = array.nulls() {
-        nulls.claim(prepaid);
+        claim_new_buffer(nulls.buffer(), prepaid, sources);
     }
+}
+
+fn source_claims(
+    array: &dyn arrow::array::Array,
+    sources: &[graphforge_storage::read_memory::PrepaidBatch],
+) -> Result<(usize, usize, usize), GfError> {
+    // Preserve the operator's existing named shape refusal before consulting
+    // storage provenance, from both construction validation and publication.
+    claim_slots(array)?;
+    let mut bytes = 0usize;
+    let mut slots = 0usize;
+    graphforge_storage::read_memory::visit_buffers(array, &mut |buffer| {
+        if sources.iter().any(|source| source.funds_buffer(buffer)) {
+            bytes = bytes.checked_add(buffer.capacity()).ok_or_else(|| {
+                DataFusionError::ResourcesExhausted("hop shared backing size overflow".into())
+            })?;
+            slots = slots.checked_add(1).ok_or_else(|| {
+                DataFusionError::ResourcesExhausted("hop shared claim count overflow".into())
+            })?;
+        }
+        Ok(())
+    })
+    .map_err(GfError::from_execution_error)?;
+    Ok((bytes, slots, shared_view_slots(array, sources)?))
+}
+
+fn shared_view_slots(
+    array: &dyn arrow::array::Array,
+    sources: &[graphforge_storage::read_memory::PrepaidBatch],
+) -> Result<usize, GfError> {
+    use arrow::array::AsArray;
+    use arrow::datatypes::DataType;
+    if view_buffers(array).is_some() {
+        return source_claims_flat_view(array, sources);
+    }
+    match array.data_type() {
+        DataType::List(_) => shared_view_slots(array.as_list::<i32>().values().as_ref(), sources),
+        DataType::LargeList(_) => {
+            shared_view_slots(array.as_list::<i64>().values().as_ref(), sources)
+        }
+        DataType::FixedSizeList(_, _) => {
+            shared_view_slots(array.as_fixed_size_list().values().as_ref(), sources)
+        }
+        DataType::Struct(_) => array.as_struct().columns().iter().try_fold(0, |n, child| {
+            checked_add(n, shared_view_slots(child.as_ref(), sources)?)
+        }),
+        _ => Ok(0),
+    }
+}
+fn source_claims_flat_view(
+    array: &dyn arrow::array::Array,
+    sources: &[graphforge_storage::read_memory::PrepaidBatch],
+) -> Result<usize, GfError> {
+    let mut slots = 0;
+    graphforge_storage::read_memory::visit_buffers(array, &mut |buffer| {
+        slots += usize::from(sources.iter().any(|source| source.funds_buffer(buffer)));
+        Ok(())
+    })
+    .map_err(GfError::from_execution_error)?;
+    Ok(slots)
 }
 
 pub(super) fn lease_output(batch: RecordBatch, charge: HopReadCharge) -> Result<HopChunk, GfError> {
     // Declare the guard before its data so every fallible admission path drops
     // the batch first, independently of function-parameter drop ordering.
     let mut charge = charge;
+    let sources = std::mem::take(&mut charge.prepaid_sources);
     let batch = batch;
+    let mut shared_bytes = 0;
+    let mut shared_slots = 0;
+    let mut shared_view_slots = 0;
+    for array in batch.columns() {
+        let (bytes, slots, views) = source_claims(array.as_ref(), &sources)?;
+        shared_bytes = checked_add(shared_bytes, bytes)?;
+        shared_slots = checked_add(shared_slots, slots)?;
+        shared_view_slots = checked_add(shared_view_slots, views)?;
+    }
     let slots = batch
         .columns()
         .iter()
@@ -888,8 +1161,14 @@ pub(super) fn lease_output(batch: RecordBatch, charge: HopReadCharge) -> Result<
             })
         })?;
     let tokens = checked_add(
-        checked_mul(slots - views.slots, std::mem::size_of::<BackingLease>())?,
-        checked_mul(views.slots, std::mem::size_of::<ViewBackingLease>())?,
+        checked_mul(
+            slots - views.slots - (shared_slots - shared_view_slots),
+            std::mem::size_of::<BackingLease>(),
+        )?,
+        checked_mul(
+            views.slots - shared_view_slots,
+            std::mem::size_of::<ViewBackingLease>(),
+        )?,
     )?;
     let view_owners = checked_mul(views.owners, view_owner_bytes())?;
     let metadata = checked_add(
@@ -912,14 +1191,14 @@ pub(super) fn lease_output(batch: RecordBatch, charge: HopReadCharge) -> Result<
         checked_add(bytes, retained_containers(array.as_ref())?)
     })?;
     let retained = checked_add(
-        checked_add(batch.get_array_memory_size(), containers)?,
+        checked_add(batch.get_array_memory_size() - shared_bytes, containers)?,
         metadata,
     )?;
     let buffers = batch.columns().iter().try_fold(0, |bytes, array| {
         checked_add(bytes, array.get_buffer_memory_size())
     })?;
     let immutable = checked_add(
-        buffers,
+        buffers - shared_bytes,
         checked_add(tokens, checked_add(views.containers, view_owners)?)?,
     )?;
     // Source maps and read/concat scratch have dropped. Constructor headers
@@ -927,12 +1206,30 @@ pub(super) fn lease_output(batch: RecordBatch, charge: HopReadCharge) -> Result<
     // Arrow output accounting thereafter owns generic wrappers/schema: Bytes
     // cannot observe their drops. Only real backing capacity plus its own Box
     // escapes here, never a whole chunk or projected-away sibling authority.
-    charge.replace(charge.held, retained)?;
+    let source_vector = checked_mul(
+        sources.capacity(),
+        std::mem::size_of::<graphforge_storage::read_memory::PrepaidBatch>(),
+    )?;
+    let schema_vector = checked_mul(
+        charge.schema_owners.capacity(),
+        std::mem::size_of::<graphforge_storage::read_memory::ReadSchemaOwner>(),
+    )?;
+    charge.replace(
+        charge.held,
+        checked_add(retained, checked_add(source_vector, schema_vector)?)?,
+    )?;
     let prepaid = PrepaidOutput(charge.extract(immutable)?);
-    let charge = std::sync::Arc::new(charge);
     for array in batch.columns() {
-        claim_output(array.as_ref(), &prepaid);
+        claim_output(array.as_ref(), &prepaid, &sources);
     }
+    for source in sources {
+        // Array DataTypes can also clone source-owned timezone Arcs when the
+        // output schema's FieldRefs differ. Transfer the small existing schema
+        // credit through handoff; drop source arrays and unrelated payloads.
+        charge.schema_owners.push(source.into_schema_owner());
+    }
+    charge.release(source_vector);
+    let charge = std::sync::Arc::new(charge);
     drop(prepaid); // unused duplicate-occurrence credit is not live storage
     Ok(HopChunk { batch, charge })
 }
@@ -952,7 +1249,16 @@ pub(super) fn expand_single_hop_chunk(
     let mut charge = HopReadCharge::new(&cfg.read_reservation);
     let batch =
         super::expand_single_hop_chunk_inner(cfg, input, position, max_output, &mut charge)?;
-    let actual = batch.get_array_memory_size();
+    let shared = batch.columns().iter().try_fold(0, |bytes, array| {
+        checked_add(
+            bytes,
+            source_claims(array.as_ref(), &charge.prepaid_sources)?.0,
+        )
+    })?;
+    let actual = batch
+        .get_array_memory_size()
+        .checked_sub(shared)
+        .ok_or_else(size_refused)?;
     if actual > charge.held_bytes_internal() {
         return Err(GfError::Execution(
             "Expand output exceeded its admitted construction envelope".into(),

@@ -7,7 +7,7 @@ use parquet::arrow::arrow_reader::ArrowReaderOptions;
 use parquet::basic::Type;
 use parquet::file::metadata::ParquetStatisticsPolicy;
 
-mod metadata;
+pub(in crate::catalog::filtered_parquet) mod metadata;
 
 fn refused() -> DataFusionError {
     DataFusionError::ResourcesExhausted(

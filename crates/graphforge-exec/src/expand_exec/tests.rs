@@ -2404,3 +2404,162 @@ fn hop_property_filter_preserves_populated_null_spans_and_full_alias_backing() {
         assert_eq!(pool.leaked(), 0);
     }
 }
+
+#[test]
+fn prepaid_edge_alias_handoff_keeps_one_sponsor_and_releases_unrelated_columns() {
+    use datafusion::execution::memory_pool::{MemoryConsumer, MemoryPool, MemoryReservation};
+    use graphforge_storage::read_memory::{PrepaidBatch, ReadAdmission, ReadGrant};
+    struct Admission(std::sync::Mutex<MemoryReservation>);
+    impl ReadAdmission for Admission {
+        fn reserve(&self, bytes: usize) -> datafusion::error::Result<ReadGrant> {
+            let reservation = self.0.lock().unwrap();
+            reservation.try_grow(bytes)?;
+            Ok(ReadGrant::from_reserved(reservation.split(bytes)))
+        }
+        fn check_cancelled(&self) -> datafusion::error::Result<()> {
+            Ok(())
+        }
+    }
+    const LIMIT: usize = 16 * 1024 * 1024;
+    let dir = tempfile::TempDir::new().unwrap();
+    labelled_ring(dir.path(), 8192);
+    let (_, _resource, inventory) = open_ring_provider(dir.path());
+    let pool = ConsumerPool::new(LIMIT);
+    let authority: Arc<dyn MemoryPool> = pool.clone();
+    let admission = Admission(std::sync::Mutex::new(
+        MemoryConsumer::new("prepaid edge source").register(&authority),
+    ));
+    let ids = (1..=8192).collect();
+    let source: PrepaidBatch = graphforge_storage::read_edges_filtered_prepaid_from_inventory(
+        &inventory,
+        "KNOWS",
+        OntologyMode::Strict,
+        &ids,
+        &[3, 6],
+        None,
+        &admission,
+    )
+    .unwrap();
+    let expected_schema = source.batch().schema();
+    let backing = source
+        .batch()
+        .column_by_name("edge_id")
+        .unwrap()
+        .get_buffer_memory_size();
+    let reservation = hop_read_reservation(&pool);
+    let mut charge = HopReadCharge::new(&reservation);
+    let batch = charge.adopt_source(source).unwrap();
+    charge.charge(4096).unwrap();
+    // Leave wrapper room, but no capacity for a second full key payload.
+    let filler = MemoryConsumer::new("other live query state").register(&authority);
+    filler.try_grow(LIMIT - pool.leaked() - 4096).unwrap();
+    let output = batch.project(&[0]).unwrap();
+    assert_eq!(output.schema().field(0), expected_schema.field(0));
+    drop(batch);
+    let output =
+        hop_read::lease_output(output, charge).expect("the source already funds this alias");
+    let escaped = output.batch.column(0).slice(7, 1);
+    assert_eq!(
+        escaped
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .unwrap()
+            .value(0),
+        8
+    );
+    drop(output);
+    drop(reservation);
+    drop(filler);
+    drop(admission);
+    assert!(
+        pool.leaked() >= backing,
+        "escaped full backing remains funded"
+    );
+    assert!(
+        pool.leaked() <= backing + 256,
+        "sibling columns, wrappers and duplicate sponsor must be gone: {}",
+        pool.leaked()
+    );
+    drop(escaped);
+    assert_eq!(pool.leaked(), 0);
+}
+
+#[test]
+fn prepaid_edge_unprojected_read_preserves_nullable_field_compatibility() {
+    use datafusion::execution::runtime_env::RuntimeEnvBuilder;
+    use datafusion::prelude::{SessionConfig, SessionContext};
+    let ring = tempfile::TempDir::new().unwrap();
+    let nodes = labelled_ring(ring.path(), 16);
+    let (provider, resource, canonical) = open_ring_provider(ring.path());
+    let wanted = std::collections::HashSet::from([1, 2]);
+    let batches = graphforge_storage::read_edges_filtered_observed_from_inventory(
+        &canonical,
+        "KNOWS",
+        OntologyMode::Strict,
+        &wanted,
+        None,
+    )
+    .unwrap();
+    let source = arrow::compute::concat_batches(&batches[0].schema(), &batches).unwrap();
+    // A valid flat legacy schema can differ only in nullability while every
+    // stored cell is present. The unprojected reader has always accepted it.
+    let mut fields = source
+        .schema()
+        .fields()
+        .iter()
+        .map(|field| field.as_ref().clone())
+        .collect::<Vec<_>>();
+    fields[6] = fields[6].clone().with_nullable(true);
+    let schema = Arc::new(arrow::datatypes::Schema::new(fields));
+    let legacy = RecordBatch::try_new(schema.clone(), source.columns().to_vec()).unwrap();
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join("topology/edges/KNOWS.parquet");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut writer =
+        parquet::arrow::ArrowWriter::try_new(std::fs::File::create(&path).unwrap(), schema, None)
+            .unwrap();
+    writer.write(&legacy).unwrap();
+    writer.close().unwrap();
+    let inventory =
+        Arc::new(graphforge_storage::AuthenticatedPropertyInventory::capture(dir.path()).unwrap());
+    let ordinary = graphforge_storage::read_edges_filtered_observed_from_inventory(
+        &inventory,
+        "KNOWS",
+        OntologyMode::Strict,
+        &wanted,
+        None,
+    )
+    .unwrap();
+    let expected = arrow::compute::concat_batches(&ordinary[0].schema(), &ordinary).unwrap();
+    assert_eq!(expected, legacy);
+    let pool = ConsumerPool::new(16 * 1024 * 1024);
+    let execution = RuntimeEnvBuilder::new()
+        .with_memory_pool(pool.clone())
+        .build_arc()
+        .unwrap();
+    let context = SessionContext::new_with_config_rt(SessionConfig::new(), execution);
+    let exec = ring_expand_exec(&provider, &resource, &nodes[..1]);
+    let mut cfg = exec.single_hop_config(&context.task_ctx(), 0);
+    cfg.provider = Arc::new(
+        adjacency::PersistentAdjacencyProvider::new(dir.path().to_owned(), OntologyMode::Strict)
+            .with_inventory(inventory),
+    );
+    cfg.dir = dir.path().to_owned();
+    let mut charge = HopReadCharge::new(&cfg.read_reservation);
+    let actual =
+        hop_read::read_edge_batch(&cfg, &mut charge, &wanted, &[], false, 7, None).unwrap();
+    assert_eq!(actual, expected);
+    drop(actual);
+    drop(charge);
+    let mut projected = HopReadCharge::new(&cfg.read_reservation);
+    let error = hop_read::read_edge_batch(&cfg, &mut projected, &wanted, &[3, 6], true, 7, None)
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("requires canonical schema"),
+        "{error}"
+    );
+    drop(projected);
+    drop(cfg);
+    drop(context);
+    assert_eq!(pool.leaked(), 0);
+}
