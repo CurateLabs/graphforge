@@ -897,3 +897,51 @@ fn private_clone_authenticates_metadata_and_objects_then_imports_and_reopens_fix
     assert!(!text.contains("workos-secret"));
     assert!(!text.contains("repository-secret"));
 }
+
+#[test]
+fn saved_publish_refresh_and_repository_exchange_keep_preview_bypass_on_hub() {
+    let hub = origin(DEFAULT_HUB).unwrap();
+    let store = MemoryStore::default();
+    save(
+        &store,
+        &hub,
+        Mock::new(vec![(200, tokens("old-access", "old-refresh"))])
+            .replies
+            .borrow_mut()
+            .pop_front()
+            .unwrap(),
+        0,
+    )
+    .unwrap();
+    let transport = PreviewTransport {
+        inner: Mock::new(vec![
+            (200, tokens("new-access", "new-refresh")),
+            (
+                200,
+                serde_json::json!({"access_token":"publish-scope","token_type":"Bearer","expires_in":300,"origin":DEFAULT_HUB,"repository_id":"repo-id"}),
+            ),
+        ]),
+        origin: hub.origin(),
+        bypass: Some("preview-secret".into()),
+    };
+    let grant = repository_token_from(&store, &transport, &hub, "owner", "repo", "publish", 500)
+        .unwrap()
+        .unwrap();
+    assert_eq!(grant.token, "publish-scope");
+    let requests = transport.inner.requests.borrow();
+    assert_eq!(requests.len(), 2);
+    for request in requests.iter() {
+        assert_eq!(Url::parse(&request.url).unwrap().origin(), hub.origin());
+        assert_eq!(
+            request.header("x-vercel-protection-bypass"),
+            Some("preview-secret")
+        );
+    }
+    assert!(requests[0].url.ends_with("/api/cli/token"));
+    assert!(requests[0].header("authorization").is_none());
+    assert!(requests[1].url.ends_with("/api/cli/repository-token"));
+    assert_eq!(
+        requests[1].header("authorization"),
+        Some("Bearer new-access")
+    );
+}

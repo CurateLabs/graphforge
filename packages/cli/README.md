@@ -104,7 +104,13 @@ credential variables.
 `gf publish` uses `GRAPHFORGE_HUB_PUBLISH_TOKEN` when supplied; otherwise it
 exchanges the saved session for the selected repository's publish capability.
 The existing interactive device-flow fallback remains available on compatible
-publish servers. Upload locations never receive identity or publish credentials.
+publish servers. For a protected preview, pass
+`gf publish https://preview.example/OWNER/REPOSITORY --ref main --protection-bypass-env PREVIEW_BYPASS_SECRET`.
+The bypass is validated with the same rules as clone credentials and sent only
+to initial control requests at that Hub origin, including saved-session refresh
+and repository-token exchange. Redirects, off-origin OAuth endpoints, object
+reads, and capability-upload `HEAD`/`PUT` requests receive no bypass. Uploads
+never receive identity or publish credentials, even when hosted at the Hub origin.
 
 Downloads use finite response, object (1 TiB), redirect, and connection
 limits, and an idle bound instead of a whole-transfer deadline: a slow transfer
