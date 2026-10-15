@@ -1,7 +1,7 @@
 ---
 title: "ADR 0060: Carry prepaid memory authority across reader handoffs"
 adr: "0060"
-status: "Proposed"
+status: "Accepted"
 date: "2026-10-15"
 superseded_by: null
 revisit_when: "Either migrated caller requires duplicate payload charges, premature release, a spill-policy exception, or a vendor-only API in a published GraphForge crate"
@@ -9,11 +9,11 @@ revisit_when: "Either migrated caller requires duplicate payload charges, premat
 
 # ADR 0060: Carry prepaid memory authority across reader handoffs
 
-**Status:** Proposed
+**Status:** Accepted
 
-**Implementation:** The first slice covers authenticated edge reads into single-hop
-execution and IPC spill reads into merge execution. Completion and independent
-lifetime verification remain required before accepting this decision.
+**Implementation:** Authenticated edge reads into single-hop execution and private
+IPC spill reads into merge execution apply this contract at their existing
+dependency boundaries.
 
 ## Context
 
@@ -40,7 +40,7 @@ Generic RecordBatch streams carry no ownership capability alongside their batche
 - Replace the execution engine or allocator. This expands scope and does not by
   itself provide fallible admission for the current kernels.
 
-## Proposed decision
+## Decision
 
 Use the second option. A protected allocation first acquires a checked reservation
 from the existing pool. Transfer prepaid authority without releasing and reacquiring
@@ -65,6 +65,13 @@ worker finish, the bank releases unused credit and rejects new borrowing; return
 tickets then release their authority. Buffer tickets never retain producer permits.
 Reader-root registration completes before prefetch. Partial construction, error,
 cancellation and retained exhausted streams follow the same retirement rule.
+
+A buffered producer reserves an existing channel slot before polling its input.
+That slot covers a queued or in-flight item, so a full queue cannot retain an
+additional decoded batch awaiting send. Channel capacity, batch size, merge fan-in
+and query-pool policy are unchanged. Dropping the receiver cancels the producer
+through its existing task owner; started blocking work retains its own lease
+until it exits.
 
 Only a known nonspilling sponsor may enter the new IPC transfer path. Check this
 before moving reservation authority. Spillable and unqualified sources retain their

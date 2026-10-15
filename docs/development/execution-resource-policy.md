@@ -106,13 +106,20 @@ and column admission caps; noncanonical nested/dictionary Arrow topology is
 refused rather than treated as scalar output.
 
 The [reader handoff decision](../adr/0060-query-memory-handoffs.md) records this
-contract and the second, private IPC integration under qualification. Buffer
+shared contract for the storage and private IPC integrations. Buffer
 tokens follow physical backing through clones and slices; they do not observe
 arbitrary public Arrow wrapper drops. This is a controlled producer/consumer
 handoff, not a sponsorship lookup for arbitrary batches. The storage adapter uses
 stock DataFusion reservations and declares its own Arrow pool feature, so its
 package build does not depend on repository-only vendor APIs. Existing query
 pool headroom, floors and loans remain unchanged.
+
+Private IPC replay transfers prepaid credit only from a known nonspilling sponsor.
+Its producer and started workers retain separate lifetime permits; escaped buffers
+retain payload tickets without retaining those permits. Fresh merge outputs stay
+funded while their sources remain alive. Buffered readers reserve a configured
+channel slot before polling, including an in-flight decode in that capacity;
+queue capacity and merge/batch settings are unchanged.
 
 Property inventory admission counts route/path/map capacities and one
 `ParquetMetaData::memory_size()` plus two Arrow schema allowances per cached
