@@ -133,6 +133,12 @@ pub(crate) struct MapMemory {
     _table: Guard,
 }
 
+type AdmittedMap = (
+    [u8; 16],
+    std::collections::HashMap<String, IrLiteral>,
+    MapMemory,
+);
+
 impl Snapshot {
     /// Called only after insertion into a separately prepaid Snapshot vector.
     pub(crate) fn release_carrier(&mut self) -> Result<(), GfError> {
@@ -145,14 +151,7 @@ impl Snapshot {
     pub(crate) fn into_admitted_map(
         mut self,
         budget: &Arc<Budget>,
-    ) -> Result<
-        (
-            [u8; 16],
-            std::collections::HashMap<String, IrLiteral>,
-            MapMemory,
-        ),
-        GfError,
-    > {
+    ) -> Result<AdmittedMap, GfError> {
         // Keep self intact through admission: on refusal its values drop before
         // their guard. collect consumes an exact-sized BTreeMap iterator and
         // frees its nodes, while moving the existing keys and literal heaps.
