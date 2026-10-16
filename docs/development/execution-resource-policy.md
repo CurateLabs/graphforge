@@ -106,13 +106,33 @@ and column admission caps; noncanonical nested/dictionary Arrow topology is
 refused rather than treated as scalar output.
 
 The [reader handoff decision](../adr/0060-query-memory-handoffs.md) records this
-contract and the second, private IPC integration under qualification. Buffer
+shared contract for the storage and private IPC integrations. Buffer
 tokens follow physical backing through clones and slices; they do not observe
 arbitrary public Arrow wrapper drops. This is a controlled producer/consumer
 handoff, not a sponsorship lookup for arbitrary batches. The storage adapter uses
 stock DataFusion reservations and declares its own Arrow pool feature, so its
 package build does not depend on repository-only vendor APIs. Existing query
 pool headroom, floors and loans remain unchanged.
+
+Private IPC replay transfers prepaid credit only from a known nonspilling sponsor.
+Its producer and started workers retain separate lifetime permits; escaped buffers
+retain payload tickets without retaining those permits. Fresh merge outputs stay
+funded while their sources remain alive. Buffered readers reserve a configured
+channel slot before polling, including an in-flight decode in that capacity;
+queue capacity and merge/batch settings are unchanged.
+
+The qualified private Repartition FIFO transfers one completed writer workspace
+to its reader bank before publishing a spilled batch. Later writes and reads
+reuse available credit and admit fresh deficits before allocation. Its consumer
+permit spans file rotations and started workers, and retires unused credit at
+EOF, error or cancellation. Parsed schema, decoded-array and merge-copy phases
+release preparation workspace only after construction ends; source buffers and
+earlier outputs remain funded through each transition. Qualified uncompressed
+frames share one full body after recursive alignment and descriptor checks;
+other frames retain their conservative bounds. Controlled Row copies refuse
+unproved payload bounds before the kernel, while offset overflow preserves the
+existing smaller-prefix retry. Aggregates drop consumed input handles before
+state admission; genuine state aliases retain their buffer charges.
 
 Property inventory admission counts route/path/map capacities and one
 `ParquetMetaData::memory_size()` plus two Arrow schema allowances per cached

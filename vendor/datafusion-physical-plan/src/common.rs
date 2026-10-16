@@ -196,15 +196,20 @@ pub fn spawn_buffered(
             let sender = builder.tx();
 
             builder.spawn(async move {
-                while let Some(item) = input.next().await {
-                    if sender.send(item).await.is_err() {
-                        // Receiver dropped when query is shutdown early (e.g., limit) or error,
-                        // no need to return propagate the send error.
+                loop {
+                    // Production occupies a configured slot too. Polling first
+                    // would retain one extra item while a full queue blocks send.
+                    let Ok(permit) = sender.reserve().await else {
+                        // Receiver shutdown also cancels further input polling.
                         return Ok(());
-                    }
+                    };
+                    let Some(item) = input.next().await else {
+                        // EOF returns the unused slot through Permit::drop.
+                        return Ok(());
+                    };
+                    // Preserve FIFO and continue after an error item, as before.
+                    permit.send(item);
                 }
-
-                Ok(())
             });
 
             builder.build()

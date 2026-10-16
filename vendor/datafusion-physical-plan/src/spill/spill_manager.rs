@@ -38,7 +38,7 @@ use std::sync::Arc;
 /// For example, all records within the same spill file are ordered according to a specific order.
 #[derive(Debug, Clone)]
 pub struct SpillManager {
-    env: Arc<RuntimeEnv>,
+    pub(super) env: Arc<RuntimeEnv>,
     pub(crate) metrics: SpillMetrics,
     schema: SchemaRef,
     /// Number of batches to buffer in memory during disk reads
@@ -185,8 +185,30 @@ impl SpillManager {
             Arc::clone(&self.schema),
             spill_file_path,
             max_record_batch_memory,
+            Arc::clone(&self.env.memory_pool),
+            None,
+            None,
         )));
 
+        Ok(spawn_buffered(stream, self.batch_read_buffer_capacity))
+    }
+
+    /// Read with input credit explicitly transferred from multi-run admission.
+    pub(crate) fn read_spill_with_credit(
+        &self,
+        file: RefCountedTempFile,
+        max: usize,
+        credit: Arc<super::admission::Credit>,
+        producer: Option<Arc<super::admission::ReaderPermit>>,
+    ) -> Result<SendableRecordBatchStream> {
+        let stream = Box::pin(cooperative(SpillReaderStream::new(
+            Arc::clone(&self.schema),
+            file,
+            Some(max),
+            Arc::clone(&self.env.memory_pool),
+            Some(credit),
+            producer,
+        )));
         Ok(spawn_buffered(stream, self.batch_read_buffer_capacity))
     }
 
@@ -200,6 +222,27 @@ impl SpillManager {
             Arc::clone(&self.schema),
             spill_file_path,
             max_record_batch_memory,
+            Arc::clone(&self.env.memory_pool),
+            None,
+            None,
+        ))))
+    }
+
+    /// One logical FIFO consumer owns the root across file rotations; each
+    /// started blocking worker clones that same permit through actual exit.
+    pub(super) fn read_fifo_with_credit(
+        &self,
+        file: RefCountedTempFile,
+        credit: Arc<super::admission::Credit>,
+        producer: Arc<super::admission::ReaderPermit>,
+    ) -> Result<SendableRecordBatchStream> {
+        Ok(Box::pin(cooperative(SpillReaderStream::new(
+            Arc::clone(&self.schema),
+            file,
+            None,
+            Arc::clone(&self.env.memory_pool),
+            Some(credit),
+            Some(producer),
         ))))
     }
 }

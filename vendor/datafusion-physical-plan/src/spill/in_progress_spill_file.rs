@@ -25,7 +25,7 @@ use datafusion_common::exec_datafusion_err;
 use datafusion_execution::disk_manager::RefCountedTempFile;
 
 use super::{
-    IPCStreamWriter, gc_view_arrays,
+    IPCStreamWriter, admission, gc_view_arrays,
     spill_manager::{GetSlicedSize, SpillManager},
 };
 
@@ -36,8 +36,16 @@ pub struct InProgressSpillFile {
     pub(crate) spill_writer: Arc<SpillManager>,
     /// Lazily initialized writer
     writer: Option<IPCStreamWriter>,
+    codec_authority: datafusion_execution::memory_pool::MemoryReservation,
     /// Lazily initialized in-progress file, it will be moved out when the `finish` method is invoked
     in_progress_file: Option<RefCountedTempFile>,
+}
+
+/// Successful synchronous encoding leaves this authority available only after
+/// its GC batch and Arrow's local encoded buffers have been destroyed. The FIFO
+/// caller holds it through flush and withholds publication until handoff.
+pub(super) struct AppendReceipt {
+    pub(super) workspace: admission::Budget,
 }
 
 impl InProgressSpillFile {
@@ -45,7 +53,11 @@ impl InProgressSpillFile {
         spill_writer: Arc<SpillManager>,
         in_progress_file: RefCountedTempFile,
     ) -> Self {
+        let codec_authority =
+            datafusion_execution::memory_pool::MemoryConsumer::new("SpillWriterCodec")
+                .register(&spill_writer.env.memory_pool);
         Self {
+            codec_authority,
             spill_writer,
             in_progress_file: Some(in_progress_file),
             writer: None,
@@ -65,13 +77,67 @@ impl InProgressSpillFile {
     /// - Returns an error if appending would exceed the disk usage limit configured
     ///   by `max_temp_directory_size` in `DiskManager`
     pub fn append_batch(&mut self, batch: &RecordBatch) -> Result<usize> {
+        self.append_batch_with_credit(batch, 0)
+    }
+
+    /// `credit` is already-admitted workspace held by the synchronous caller
+    /// through this entire operation, after reserving all still-live sources.
+    pub(crate) fn append_batch_with_credit(
+        &mut self,
+        batch: &RecordBatch,
+        credit: usize,
+    ) -> Result<usize> {
+        self.append_with_workspace(batch, credit, None)
+            .map(|(size, _receipt)| size)
+    }
+
+    pub(super) fn append_for_fifo(
+        &mut self,
+        batch: &RecordBatch,
+        bank: Option<Arc<admission::Credit>>,
+    ) -> Result<AppendReceipt> {
+        self.append_with_workspace(batch, 0, bank)
+            .map(|(_size, receipt)| receipt)
+    }
+
+    fn append_with_workspace(
+        &mut self,
+        batch: &RecordBatch,
+        credit: usize,
+        bank: Option<Arc<admission::Credit>>,
+    ) -> Result<(usize, AppendReceipt)> {
         if self.in_progress_file.is_none() {
             return Err(exec_datafusion_err!(
                 "Append operation failed: No active in-progress file. The file may have already been finalized."
             ));
         }
 
+        let pool = &self.spill_writer.env.memory_pool;
+        let schema_bytes = admission::schema_bound(self.spill_writer.schema())?;
+        // Admit metadata before to_data() in the checked data-layout walk.
+        let metadata = admission::reserve_with_credit(
+            pool,
+            admission::source_metadata(batch)?,
+            "SpillWriterMetadata",
+            bank.clone(),
+        )?;
+        let bytes = admission::write_bound(
+            batch,
+            schema_bytes,
+            self.spill_writer.compression,
+            self.spill_writer.schema(),
+        )?;
+        let workspace = admission::reserve_with_credit(
+            pool,
+            bytes.saturating_sub(credit),
+            "SpillWriterEncode",
+            bank,
+        )?;
+        let codec = admission::codec_bound(self.spill_writer.compression, true)?;
+        self.codec_authority.try_resize(codec)?;
         let gc_batch = gc_view_arrays(batch)?;
+        admission::retain_dictionaries(&gc_batch, pool)?;
+        drop(metadata);
 
         if self.writer.is_none() {
             // Use the SpillManager's declared schema rather than the batch's schema.
@@ -114,7 +180,9 @@ impl InProgressSpillFile {
                 unreachable!() // Already checked inside current function
             }
         }
-        gc_batch.get_sliced_size()
+        let size = gc_batch.get_sliced_size()?;
+        drop(gc_batch);
+        Ok((size, AppendReceipt { workspace }))
     }
 
     pub fn flush(&mut self) -> Result<()> {
@@ -133,6 +201,11 @@ impl InProgressSpillFile {
     /// Finalizes the file, returning the completed file reference.
     /// If there are no batches spilled before, it returns `None`.
     pub fn finish(&mut self) -> Result<Option<RefCountedTempFile>> {
+        if self.in_progress_file.is_none() {
+            return Err(exec_datafusion_err!(
+                "Finish operation failed: the in-progress file has already been finalized."
+            ));
+        }
         if let Some(writer) = &mut self.writer {
             writer.finish()?;
         } else {
@@ -151,6 +224,10 @@ impl InProgressSpillFile {
                 .add((post_size - pre_size) as usize);
         }
 
+        // finish() alone leaves Arrow's dictionary tracker and codec context
+        // allocated. Destroy the writer before releasing their authority.
+        drop(self.writer.take());
+        self.codec_authority.free();
         Ok(self.in_progress_file.take())
     }
 }

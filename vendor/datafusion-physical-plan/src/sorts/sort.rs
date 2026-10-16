@@ -422,7 +422,20 @@ impl ExternalSorter {
         debug!("Spilling sort data of ExternalSorter to disk whilst inserting");
 
         let batches_to_spill = std::mem::take(globally_sorted_batches);
-        self.reservation.free();
+        // Keep all source backing admitted until every write/drop completes.
+        // The existing reservation also includes sorted-copy workspace. Only
+        // its checked excess above every live source may pay IPC workspace.
+        let source_bytes =
+            batches_to_spill.iter().try_fold(0_usize, |total, batch| {
+                crate::spill::admission::add(total, get_record_batch_memory_size(batch))
+            })?;
+        let credit = self
+            .reservation
+            .size()
+            .checked_sub(source_bytes)
+            .ok_or_else(|| {
+                internal_datafusion_err!("Sort spill sources exceed their admission")
+            })?;
 
         let (in_progress_file, max_record_batch_size) =
             self.in_progress_spill_file.as_mut().ok_or_else(|| {
@@ -430,11 +443,13 @@ impl ExternalSorter {
             })?;
 
         for batch in batches_to_spill {
-            let gc_sliced_size = in_progress_file.append_batch(&batch)?;
+            let gc_sliced_size =
+                in_progress_file.append_batch_with_credit(&batch, credit)?;
 
             *max_record_batch_size = (*max_record_batch_size).max(gc_sliced_size);
         }
 
+        self.reservation.free();
         assert_or_internal_err!(
             globally_sorted_batches.is_empty(),
             "This function consumes globally_sorted_batches, so it should be empty after taking."
@@ -490,17 +505,14 @@ impl ExternalSorter {
 
         while let Some(batch) = sorted_stream.next().await {
             let batch = batch?;
-            let sorted_size = get_reserved_bytes_for_record_batch(&batch)?;
-            if self.reservation.try_grow(sorted_size).is_err() {
-                // Although the reservation is not enough, the batch is
-                // already in memory, so it's okay to combine it with previously
-                // sorted batches, and spill together.
-                globally_sorted_batches.push(batch);
-                self.consume_and_spill_append(&mut globally_sorted_batches)
-                    .await?; // reservation is freed in spill()
-            } else {
-                globally_sorted_batches.push(batch);
-            }
+            // Sorting has finished: retain actual source backing, while the
+            // writer separately admits GC, encoding and codec workspace. If
+            // source admission fails, return before any writer allocation;
+            // the unadmitted batch cannot stay live across an older-row flush.
+            self.reservation
+                .try_grow(get_record_batch_memory_size(&batch))
+                .map_err(Self::err_with_oom_context)?;
+            globally_sorted_batches.push(batch);
         }
 
         // Drop early to free up memory reserved by the sorted stream, otherwise the

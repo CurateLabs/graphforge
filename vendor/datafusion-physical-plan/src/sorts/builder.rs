@@ -15,6 +15,10 @@
 // specific language governing permissions and limitations
 // under the License.
 
+use super::copy_admission::{
+    CopyAdmission, CopyCapability, Phase, Resident, SourceOwners,
+};
+use crate::spill::admission::{add, mul};
 use crate::spill::get_record_batch_memory_size;
 use arrow::array::ArrayRef;
 use arrow::compute::interleave;
@@ -34,6 +38,17 @@ struct BatchCursor {
     row_idx: usize,
 }
 
+#[derive(Debug)]
+pub(super) struct BufferedBatch {
+    stream_idx: usize,
+    pub(super) batch: RecordBatch,
+    // Cache the existing admission measurement. Dropping a consumed input must
+    // not allocate ArrayData trees or a HashSet just to measure it again.
+    memory_size: usize,
+    // Reused while compacting Copy inputs; covered by BufferedBatch capacity.
+    copy_remap: usize,
+}
+
 /// Provides an API to incrementally build a [`RecordBatch`] from partitioned [`RecordBatch`]
 #[derive(Debug)]
 pub struct BatchBuilder {
@@ -41,7 +56,7 @@ pub struct BatchBuilder {
     schema: SchemaRef,
 
     /// Maintain a list of [`RecordBatch`] and their corresponding stream
-    batches: Vec<(usize, RecordBatch)>,
+    batches: Vec<BufferedBatch>,
 
     /// Accounts for memory used by buffered batches.
     ///
@@ -67,9 +82,24 @@ pub struct BatchBuilder {
     /// The accumulated stream indexes from which to pull rows
     /// Consists of a tuple of `(batch_idx, row_idx)`
     indices: Vec<(usize, usize)>,
+    copy: Option<Arc<CopyAdmission>>,
+    copy_resident: Option<Arc<Resident>>,
+    failed_phase: Option<Phase>,
 }
 
 impl BatchBuilder {
+    pub(super) fn constructor_bound(streams: usize, batch_size: usize) -> Result<usize> {
+        add(
+            add(size_of::<Self>(), 512)?,
+            add(
+                mul(mul(streams, 2)?, size_of::<BufferedBatch>())?,
+                add(
+                    mul(streams, size_of::<BatchCursor>())?,
+                    mul(batch_size, size_of::<(usize, usize)>())?,
+                )?,
+            )?,
+        )
+    }
     /// Create a new [`BatchBuilder`] with the provided `stream_count` and `batch_size`
     pub fn new(
         schema: SchemaRef,
@@ -86,7 +116,33 @@ impl BatchBuilder {
             reservation,
             batches_mem_used: 0,
             initial_reservation,
+            copy: None,
+            copy_resident: None,
+            failed_phase: None,
         }
+    }
+
+    pub(super) fn attach_copy(
+        &mut self,
+        copy: Arc<CopyAdmission>,
+        phase: &Phase,
+    ) -> Result<()> {
+        self.copy_resident = Some(phase.resident(self.metadata()?)?);
+        self.copy = Some(copy);
+        Ok(())
+    }
+
+    fn metadata(&self) -> Result<usize> {
+        add(
+            size_of::<Self>(),
+            add(
+                mul(self.batches.capacity(), size_of::<BufferedBatch>())?,
+                add(
+                    mul(self.cursors.capacity(), size_of::<BatchCursor>())?,
+                    mul(self.indices.capacity(), size_of::<(usize, usize)>())?,
+                )?,
+            )?,
+        )
     }
 
     /// Append a new batch in `stream_idx`
@@ -98,7 +154,35 @@ impl BatchBuilder {
         // pre-reserved bytes from sort_spill_reservation_bytes).
         try_grow_reservation_to_at_least(&mut self.reservation, self.batches_mem_used)?;
         let batch_idx = self.batches.len();
-        self.batches.push((stream_idx, batch));
+        let growing = batch_idx == self.batches.capacity();
+        let mut phase = if growing {
+            self.copy
+                .as_ref()
+                .map(|copy| {
+                    // Old capacity remains resident while the complete new Vec
+                    // allocation can coexist with it during realloc.
+                    let capacity = mul(self.batches.capacity(), 2)?.max(4);
+                    copy.begin_operation(Some(mul(capacity, size_of::<BufferedBatch>())?))
+                })
+                .transpose()?
+        } else {
+            None
+        };
+        self.batches.push(BufferedBatch {
+            stream_idx,
+            batch,
+            memory_size: size,
+            copy_remap: usize::MAX,
+        });
+        if let Some(active) = &phase {
+            let result = self.metadata().and_then(|metadata| {
+                active.resize(self.copy_resident.as_ref().unwrap(), metadata)
+            });
+            if let Err(error) = result {
+                self.failed_phase = phase.take();
+                return Err(error);
+            }
+        }
         self.cursors[stream_idx] = BatchCursor {
             batch_idx,
             row_idx: 0,
@@ -129,23 +213,124 @@ impl BatchBuilder {
         &self.schema
     }
 
+    pub(super) fn uses_row_copy(&self) -> bool {
+        self.copy
+            .as_ref()
+            .is_some_and(|copy| matches!(copy.capability(), CopyCapability::Row { .. }))
+    }
+
+    /// Release only sealed Copy inputs with no future rows or pending indices.
+    /// Mark pending inputs, calculate their destinations, then remap indices
+    /// before compacting. Each pass is linear in batches or pending indices;
+    /// the per-batch scratch slot is already covered by admitted Vec capacity.
+    /// No ledger or Arrow metadata is constructed during cleanup.
+    pub(super) fn release_consumed_inputs(&mut self) {
+        if self.copy.is_none() {
+            return;
+        }
+        for input in &mut self.batches {
+            input.copy_remap = usize::MAX;
+        }
+        for &(batch, _) in &self.indices {
+            self.batches[batch].copy_remap = 0;
+        }
+        let mut new_idx = 0;
+        for (old_idx, input) in self.batches.iter_mut().enumerate() {
+            let cursor = &mut self.cursors[input.stream_idx];
+            let current = cursor.batch_idx == old_idx;
+            let future = current && cursor.row_idx < input.batch.num_rows();
+            let pending = input.copy_remap != usize::MAX;
+            let retain = future || pending;
+            if retain {
+                input.copy_remap = new_idx;
+                if current {
+                    cursor.batch_idx = new_idx;
+                }
+                new_idx += 1;
+            } else {
+                self.batches_mem_used -= input.memory_size;
+                if current {
+                    // No future row can use this cursor. push_batch replaces
+                    // it before push_row can select this stream again.
+                    cursor.batch_idx = usize::MAX;
+                }
+            }
+        }
+        // Old slots still exist here, including those whose data will drop.
+        // Every pending index marked its source, so its destination is live.
+        for (batch, _) in &mut self.indices {
+            *batch = self.batches[*batch].copy_remap;
+        }
+        self.batches.retain(|input| input.copy_remap != usize::MAX);
+    }
+
     /// Try to interleave all columns using the given index slice.
     fn try_interleave_columns(
         &self,
         indices: &[(usize, usize)],
     ) -> Result<Vec<ArrayRef>> {
-        (0..self.schema.fields.len())
+        let plan = if self
+            .copy
+            .as_ref()
+            .is_some_and(|copy| copy.has_output_bounds())
+        {
+            super::copy_bounds::serial_interleave(&self.batches, indices)?
+                .map(|payload| SourceOwners::plan(&self.batches, &self.schema, &payload))
+                .transpose()?
+                .flatten()
+        } else {
+            None
+        };
+        let phase = self
+            .copy
+            .as_ref()
+            .map(|copy| {
+                let workspace = if let Some(plan) = &plan {
+                    Some(plan.prepare()?)
+                } else if copy.has_output_bounds() {
+                    super::copy_bounds::interleave(&self.batches, indices)?
+                } else {
+                    None
+                };
+                copy.begin_interleave(workspace)
+            })
+            .transpose()?;
+        let source = phase
+            .as_ref()
+            .map(|phase| {
+                if let Some(plan) = &plan {
+                    SourceOwners::new_planned(&self.batches, plan)
+                } else {
+                    SourceOwners::new(
+                        phase,
+                        self.batches.iter().map(|input| &input.batch),
+                    )
+                }
+            })
+            .transpose()?;
+        if let (Some(phase), Some(plan)) = (&phase, &plan) {
+            phase.transition(plan.kernel()?)?;
+        }
+        let columns = (0..self.schema.fields.len())
             .map(|column_idx| {
                 let arrays: Vec<_> = self
                     .batches
                     .iter()
-                    .map(|(_, batch)| batch.column(column_idx).as_ref())
+                    .map(|input| input.batch.column(column_idx).as_ref())
                     .collect();
                 // Arrow 58.1.0+ returns OffsetOverflowError directly from
                 // interleave, allowing retry_interleave to shrink the batch.
                 interleave(&arrays, indices).map_err(Into::into)
             })
-            .collect::<Result<Vec<_>>>()
+            .collect::<Result<Vec<_>>>()?;
+        if let (Some(phase), Some(source)) = (&phase, &source) {
+            if let Some(plan) = &plan {
+                source.retain_planned(phase, &columns, plan)?;
+            } else {
+                source.retain_fresh(phase, &self.schema, &columns)?;
+            }
+        }
+        Ok(columns)
     }
 
     /// Builds a record batch from the first `rows_to_emit` buffered rows.
@@ -157,13 +342,13 @@ impl BatchBuilder {
         // Remove consumed indices, keeping any remaining for the next call.
         self.indices.drain(..rows_to_emit);
 
-        // Only clean up fully-consumed batches when all indices are drained,
-        // because remaining indices may still reference earlier batches.
-        // In the overflow/partial-emit case this may retain some extra memory
-        // across a few drain polls, but avoids costly index scanning on the
-        // hot path. The retention is bounded and short-lived since leftover
-        // rows are drained over subsequent polls.
-        if self.indices.is_empty() {
+        if self.copy.is_some() {
+            // Output claims are installed before indices are drained. Actual
+            // source aliases keep their own tokens after this reference drops.
+            self.release_consumed_inputs();
+        } else if self.indices.is_empty() {
+            // Legacy inputs retain their original whole-batch accounting and
+            // prune only once no pending index can reference an earlier batch.
             // New cursors are only created once the previous cursor for the stream
             // is finished. This means all remaining rows from all but the last batch
             // for each stream have been yielded to the newly created record batch
@@ -171,8 +356,8 @@ impl BatchBuilder {
             // We can therefore drop all but the last batch for each stream
             let mut batch_idx = 0;
             let mut retained = 0;
-            self.batches.retain(|(stream_idx, batch)| {
-                let stream_cursor = &mut self.cursors[*stream_idx];
+            self.batches.retain(|input| {
+                let stream_cursor = &mut self.cursors[input.stream_idx];
                 let retain = stream_cursor.batch_idx == batch_idx;
                 batch_idx += 1;
 
@@ -180,7 +365,7 @@ impl BatchBuilder {
                     stream_cursor.batch_idx = retained;
                     retained += 1;
                 } else {
-                    self.batches_mem_used -= get_record_batch_memory_size(batch);
+                    self.batches_mem_used -= input.memory_size;
                 }
                 retain
             });
