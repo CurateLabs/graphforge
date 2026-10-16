@@ -333,7 +333,7 @@ pub fn descriptor_schema() -> serde_json::Value {
                 "type":"object","additionalProperties":false,
                 "required":["version_uuid","digest","media_type","length","width","height"],
                 "properties":{
-                    "version_uuid":{"type":"string","pattern":"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"},
+                    "version_uuid":{"type":"string","pattern":"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$","not":{"const":"00000000-0000-0000-0000-000000000000"}},
                     "digest":{"type":"string","pattern":"^sha256:[0-9a-f]{64}$"},
                     "media_type":{"enum":["image/png","image/svg+xml"]},
                     "length":{"type":"integer","minimum":1,"maximum":MAX_PREVIEW_BYTES},

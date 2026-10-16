@@ -84,6 +84,9 @@ fn descriptors_bind_bytes_dimensions_version_and_text_limits() {
         assert!(validate_preview(&bad, &bytes).is_err());
     }
     let mut bad = item.clone();
+    bad.version_uuid = "00000000-0000-0000-0000-000000000000".into();
+    assert_eq!(validate_descriptors(&[bad]), Err(PreviewError::Version));
+    let mut bad = item.clone();
     bad.alt = Some("é".repeat(1025));
     assert_eq!(validate_descriptors(&[bad]), Err(PreviewError::Limit));
     assert!(validate_descriptors(&[item.clone(), item.clone()]).is_err());
