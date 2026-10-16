@@ -86,6 +86,7 @@ struct State {
     operations: BTreeMap<Uuid, String>,
     uploads: BTreeMap<String, (String, usize)>,
     repositories: BTreeMap<RepositoryIdentity, Repository>,
+    moved: BTreeMap<RepositoryIdentity, RepositoryIdentity>,
     quotas: BTreeMap<String, u64>,
 }
 
@@ -193,6 +194,63 @@ fn oauth_error(error: &str) -> HubResponse {
 
 fn quoted(validator: &str) -> String {
     format!("\"{validator}\"")
+}
+
+fn rehome_inputs(
+    repository: &Repository,
+    limits: DiscoveryLimits,
+) -> Result<(RefSet, Vec<graphforge_discovery::RepositorySnapshot>), HubPublishError> {
+    let refs = RefSet::from_json(&repository.refs_document, limits)
+        .map_err(|_| invalid("stored refs are invalid"))?;
+    let validators = refs
+        .refs
+        .iter()
+        .map(|item| item.validator.0.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut snapshots = Vec::new();
+    let mut bytes = repository.refs_document.len();
+    for validator in validators {
+        let raw = repository
+            .manifests
+            .get(&validator)
+            .ok_or_else(|| invalid("referenced manifest is absent"))?;
+        let manifest = DiscoveryManifest::from_json(raw, limits)
+            .map_err(|_| invalid("stored manifest is invalid"))?;
+        let summary = manifest
+            .summary
+            .as_ref()
+            .map(|reference| {
+                repository
+                    .objects
+                    .get(&reference.object_digest.0)
+                    .ok_or_else(|| invalid("stored summary is absent"))
+            })
+            .transpose()?;
+        let lineage = manifest
+            .lineage
+            .as_ref()
+            .map(|reference| {
+                repository
+                    .objects
+                    .get(&reference.object_digest.0)
+                    .ok_or_else(|| invalid("stored lineage is absent"))
+            })
+            .transpose()?;
+        bytes = bytes
+            .checked_add(raw.len())
+            .and_then(|n| n.checked_add(summary.map_or(0, Vec::len)))
+            .and_then(|n| n.checked_add(lineage.map_or(0, Vec::len)))
+            .ok_or_else(|| invalid("rehome byte budget exceeded"))?;
+        if bytes > limits.max_response_bytes {
+            return Err(invalid("rehome byte budget exceeded"));
+        }
+        snapshots.push(graphforge_discovery::RepositorySnapshot {
+            manifest,
+            summary: summary.cloned(),
+            lineage: lineage.cloned(),
+        });
+    }
+    Ok((refs, snapshots))
 }
 
 impl ReferenceHub {
@@ -305,6 +363,30 @@ impl ReferenceHub {
                 };
                 if identity.validate().is_err() {
                     return Err(not_found("repository identity is invalid"));
+                }
+                if let Some(current) = state.moved.get(&identity) {
+                    // Immutable object URLs survive a move. Only repository
+                    // control endpoints redirect; no write is ever replayed.
+                    match rest {
+                        ["objects", "sha256", hex] => {
+                            return read_object(state, current, &format!("sha256:{hex}"), request);
+                        }
+                        ["objects", digest] => return read_object(state, current, digest, request),
+                        ["refs" | "manifest"] | ["publish", ..] => {
+                            let moved = graphforge_discovery::RepositoryMoved {
+                                format: "graphforge-repository-moved/1".into(),
+                                moved_from: identity,
+                                moved_to: current.clone(),
+                            };
+                            let mut response = json_response(308, &moved);
+                            response.headers.push((
+                                "location".into(),
+                                format!("{}/.gf/{}", self.repository_url(current), rest.join("/")),
+                            ));
+                            return Ok(response);
+                        }
+                        _ => return Err(not_found("resource does not exist")),
+                    }
                 }
                 match (method, rest) {
                     (HubMethod::Get, ["publish"]) => {
@@ -1042,6 +1124,90 @@ impl ReferenceHub {
             }
         }
         changed
+    }
+
+    /// Atomically rename one current repository using Core's pure re-homing
+    /// contract. Old names remain permanent, flattened move tombstones; native
+    /// object locations continue serving their original bytes. No upload,
+    /// credential, operation commitment or historical receipt is rewritten.
+    pub fn move_repository(
+        &self,
+        old: &RepositoryIdentity,
+        new: &RepositoryIdentity,
+    ) -> Result<(), HubPublishError> {
+        old.validate()
+            .map_err(|_| invalid("old repository identity is invalid"))?;
+        new.validate()
+            .map_err(|_| invalid("new repository identity is invalid"))?;
+        let mut state = self.state.lock().expect("hub state");
+        if old == new
+            || state.moved.contains_key(old)
+            || state.moved.contains_key(new)
+            || state.repositories.contains_key(new)
+        {
+            return Err(invalid(
+                "repository move conflicts with an existing identity",
+            ));
+        }
+        let repository = state
+            .repositories
+            .get(old)
+            .ok_or_else(|| invalid("repository to move is absent"))?;
+        let limits = DiscoveryLimits::default();
+        let (refs, snapshots) = rehome_inputs(repository, limits)?;
+        let template = graphforge_discovery::ObjectLocationTemplate::parse(
+            &self.capabilities(new).object_location_template,
+        )
+        .map_err(|_| invalid("new object location template is invalid"))?;
+        let result =
+            graphforge_discovery::rehome_repository(&refs, &snapshots, new, &template, limits)
+                .map_err(|_| invalid("stored repository re-homing bindings failed"))?;
+        let refs_document = result
+            .refs
+            .to_canonical_json()
+            .map_err(|_| invalid("re-homed refs are invalid"))?;
+        let mut documents = Vec::new();
+        for snapshot in result.snapshots {
+            let validator = snapshot
+                .manifest
+                .canonical_digest()
+                .map_err(|_| invalid("re-homed manifest is invalid"))?
+                .0;
+            let manifest = snapshot
+                .manifest
+                .to_canonical_json()
+                .map_err(|_| invalid("re-homed manifest is invalid"))?;
+            documents.push((validator, manifest, snapshot.summary, snapshot.lineage));
+        }
+        // Everything above is read-only and fallible. Apply only the complete
+        // validated replacement set while holding the same repository lock.
+        let mut repository = state
+            .repositories
+            .remove(old)
+            .expect("validated repository");
+        repository.refs = result
+            .refs
+            .refs
+            .into_iter()
+            .map(|item| (item.name.clone(), item))
+            .collect();
+        repository.revision = result.revision.0;
+        repository.refs_document = refs_document;
+        repository.history.push(repository.revision.clone());
+        for (validator, manifest, summary, lineage) in documents {
+            repository.manifests.insert(validator, manifest);
+            for bytes in [summary, lineage].into_iter().flatten() {
+                repository.objects.insert(sha256_digest(&bytes), bytes);
+            }
+        }
+        state.repositories.insert(new.clone(), repository);
+        for current in state.moved.values_mut() {
+            if current == old {
+                *current = new.clone();
+            }
+        }
+        state.moved.insert(old.clone(), new.clone());
+        Ok(())
     }
 
     /// Revisions `repository` has moved through, oldest first.

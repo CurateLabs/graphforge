@@ -118,6 +118,7 @@ pub(crate) struct PublishEnvironment<'a> {
     pub wait: &'a dyn Fn(Duration),
     /// Human instructions (device flow); never receives secrets.
     pub notices: &'a mut dyn Write,
+    resolution: Option<PublicationResolution>,
 }
 
 /// Captured bindings accept explicit credentials without consulting the user's
@@ -156,6 +157,7 @@ pub(crate) struct PublishOutcome {
     pub receipt: PublishReceipt,
     /// Whether this run replayed a committed operation without any upload.
     pub replayed: bool,
+    pub moved: Option<graphforge_discovery::RepositoryMoved>,
 }
 
 /// Dispatch the Hub commands, `gf clone` and `gf publish`.
@@ -214,7 +216,17 @@ fn run_command(
         args.protection_bypass_env.as_deref(),
         |name| std::env::var(name),
     )?;
-    let credential = select_credential(PublishToken::from_env(), streaming, interactive, || {
+    let explicit = PublishToken::from_env();
+    if explicit.is_none() && !streaming {
+        return Err(publish_error(
+            HubPublishErrorCode::AuthDenied,
+            "no publish credential: set GRAPHFORGE_HUB_PUBLISH_TOKEN or run gf publish in a terminal",
+        ));
+    }
+    let transport = crate::hub_http::HubTransport::new();
+    let resolution = resolve_publication(&transport, &identity, &base, bypass.as_ref())?;
+    let (identity, base) = (resolution.identity.clone(), resolution.base.clone());
+    let credential = select_credential(explicit, streaming, interactive, || {
         let grant = crate::auth::repository_token(
             &base,
             &identity.owner,
@@ -246,13 +258,9 @@ fn run_command(
         credential,
         wait: &std::thread::sleep,
         notices: &mut notices,
+        resolution: Some(resolution),
     };
-    let outcome = publish(
-        &crate::hub_http::HubTransport::new(),
-        &graph,
-        args,
-        &mut environment,
-    )?;
+    let outcome = publish(&transport, &graph, args, &mut environment)?;
     write_outcome(&outcome, json, output)
 }
 
@@ -263,10 +271,25 @@ pub(crate) fn write_outcome(
 ) -> Result<(), GfError> {
     let io = |error: std::io::Error| GfError::Storage(error.to_string());
     if json {
-        serde_json::to_writer(&mut *output, &outcome.receipt)
+        let mut result = serde_json::to_value(&outcome.receipt)
+            .map_err(|error| GfError::Execution(error.to_string()))?;
+        if let Some(moved) = &outcome.moved {
+            result["moved_from"] = json!(moved.moved_from.canonical_name());
+            result["moved_to"] = json!(moved.moved_to.canonical_name());
+        }
+        serde_json::to_writer(&mut *output, &result)
             .map_err(|error| GfError::Execution(error.to_string()))?;
         writeln!(output).map_err(io)
     } else {
+        if let Some(moved) = &outcome.moved {
+            writeln!(
+                output,
+                "Repository moved from {} to {}",
+                moved.moved_from.canonical_name(),
+                moved.moved_to.canonical_name()
+            )
+            .map_err(io)?;
+        }
         writeln!(
             output,
             "Published {} ({}) at revision {}",
@@ -276,6 +299,69 @@ pub(crate) fn write_outcome(
         )
         .map_err(io)
     }
+}
+
+struct PublicationResolution {
+    requested: RepositoryIdentity,
+    requested_base: Url,
+    identity: RepositoryIdentity,
+    base: Url,
+    moved: Option<graphforge_discovery::RepositoryMoved>,
+    capabilities: PublishCapabilities,
+}
+fn resolve_publication(
+    transport: &dyn Transport,
+    identity: &RepositoryIdentity,
+    base: &Url,
+    bypass: Option<&crate::hub_http::DiscoveryCredentials>,
+) -> Result<PublicationResolution, GfError> {
+    let tracker = crate::hub_http::RepositoryMoveTransport::new(transport, identity, base);
+    let hub = Hub {
+        transport: &tracker,
+        base: base.clone(),
+        bypass,
+    };
+    let (bytes, _) = hub
+        .read_control(&endpoint(base, "publish"), MAX_CONTROL_RESPONSE_BYTES)?
+        .ok_or_else(|| {
+            publish_error(
+                HubPublishErrorCode::InvalidInput,
+                "the Hub does not accept publications for this repository",
+            )
+        })?;
+    if tracker.has_move() {
+        // Agreement is proved from the old identity's markers, without trying
+        // unauthenticated target private discovery before its new scoped grant.
+        for suffix in ["refs", "manifest"] {
+            let url = endpoint(base, suffix);
+            let request = hub.with_bypass(HubRequest::new(HubMethod::Get, url.as_str()), &url)?;
+            let response = tracker.exchange(&request, 4096)?;
+            if response.status != 308 {
+                return Err(validation(
+                    "hub.integrity_failure",
+                    "repository control documents disagree on the move",
+                ));
+            }
+        }
+    }
+    let (current, current_base, moved) = tracker.resolved(true)?;
+    let capabilities = PublishCapabilities::from_json(&bytes).map_err(|error| protocol(&error))?;
+    if capabilities.repository != current
+        || capabilities.authorization.scope != publish_scope(&current)
+    {
+        return Err(publish_error(
+            HubPublishErrorCode::InvalidInput,
+            "capabilities describe another repository",
+        ));
+    }
+    Ok(PublicationResolution {
+        requested: identity.clone(),
+        requested_base: base.clone(),
+        identity: current,
+        base: current_base,
+        moved,
+        capabilities,
+    })
 }
 
 // ------------------------------------------------------------------- errors
@@ -741,11 +827,18 @@ fn read_published(
     base: &Url,
     identity: &RepositoryIdentity,
 ) -> Result<Option<Published>, GfError> {
-    let Some((refs_bytes, etag)) = hub.read_control(&endpoint(base, "refs"), MAX_METADATA_BYTES)?
+    let tracker = crate::hub_http::RepositoryMoveTransport::new(hub.transport, identity, base);
+    let read_hub = Hub {
+        transport: &tracker,
+        base: hub.base.clone(),
+        bypass: hub.bypass,
+    };
+    let Some((refs_bytes, etag)) =
+        read_hub.read_control(&endpoint(base, "refs"), MAX_METADATA_BYTES)?
     else {
         return Ok(None);
     };
-    let (manifest_bytes, _) = hub
+    let (manifest_bytes, _) = read_hub
         .read_control(&endpoint(base, "manifest"), MAX_METADATA_BYTES)?
         .ok_or_else(|| {
             publish_error(
@@ -753,11 +846,12 @@ fn read_published(
                 "repository refs exist without a manifest",
             )
         })?;
+    let (identity, _, _) = tracker.resolved(false)?;
     bind_published(
         &refs_bytes,
         etag.as_deref(),
         &manifest_bytes,
-        identity,
+        &identity,
         |object, limit| read_object(hub, object, limit),
     )
     .map(Some)
@@ -1421,6 +1515,26 @@ pub(crate) fn publish(
             )
         })?;
     let selection = select(graph, args)?;
+    let resolution = match environment.resolution.take() {
+        Some(resolution) => {
+            if resolution.requested != identity || resolution.requested_base != base {
+                return Err(validation(
+                    "hub.integrity_failure",
+                    "resolved publication does not match the request",
+                ));
+            }
+            resolution
+        }
+        None => resolve_publication(transport, &identity, &base, environment.bypass)?,
+    };
+    let PublicationResolution {
+        identity,
+        base,
+        moved,
+        capabilities,
+        ..
+    } = resolution;
+
     let operation_uuid = operation_uuid.unwrap_or_else(|| {
         graphforge_api::hub_publish_operation(
             &identity.canonical_name(),
@@ -1436,25 +1550,6 @@ pub(crate) fn publish(
         base: base.clone(),
     };
 
-    // Capabilities first: an unsupported future Hub fails before publish-token use.
-    let (capabilities_bytes, _) = hub
-        .read_control(&endpoint(&base, "publish"), MAX_CONTROL_RESPONSE_BYTES)?
-        .ok_or_else(|| {
-            publish_error(
-                HubPublishErrorCode::InvalidInput,
-                "the Hub does not accept publications for this repository",
-            )
-        })?;
-    let capabilities =
-        PublishCapabilities::from_json(&capabilities_bytes).map_err(|error| protocol(&error))?;
-    if capabilities.repository != identity
-        || capabilities.authorization.scope != publish_scope(&identity)
-    {
-        return Err(publish_error(
-            HubPublishErrorCode::InvalidInput,
-            "capabilities describe another repository",
-        ));
-    }
     let token = obtain_token(&hub, &capabilities, environment)?;
 
     // A retry is classified before any package is derived.
@@ -1481,6 +1576,7 @@ pub(crate) fn publish(
                 return Ok(PublishOutcome {
                     receipt,
                     replayed: true,
+                    moved,
                 });
             }
         }
@@ -1581,6 +1677,7 @@ pub(crate) fn publish(
             return Ok(PublishOutcome {
                 receipt,
                 replayed: true,
+                moved,
             });
         }
         SessionResponse::Open {
@@ -1644,6 +1741,7 @@ pub(crate) fn publish(
     Ok(PublishOutcome {
         receipt,
         replayed: false,
+        moved,
     })
 }
 

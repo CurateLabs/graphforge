@@ -61,6 +61,10 @@ struct ModuleFetchResult {
     package_digest: String,
     module_sha256: String,
     output: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    moved_from: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    moved_to: Option<String>,
 }
 
 pub(crate) fn run_module_fetch(
@@ -92,6 +96,9 @@ fn write_module_fetch_result(
             .map_err(|e| graphforge_api::GfError::Execution(e.to_string()))?;
         writeln!(output).map_err(storage)?;
     } else {
+        if let (Some(from), Some(to)) = (&result.moved_from, &result.moved_to) {
+            writeln!(output, "Repository moved from {from} to {to}").map_err(storage)?;
+        }
         writeln!(
             output,
             "Fetched ontology module {} {} from {} to {}",
@@ -167,8 +174,11 @@ fn run_module_fetch_job(
     let (identity, base) = parse_input_at(&args.repository, args.hub.as_deref())?;
     let module = module_identity(args)?;
     ensure_output_available(&args.output)?;
+    let move_transport = crate::hub_http::RepositoryMoveTransport::new(transport, &identity, &base);
+    let transport = &move_transport as &dyn Transport;
     let refs_bytes = fetch_document(transport, &endpoint(&base, "refs"), retry)?;
     let manifest_bytes = fetch_document(transport, &endpoint(&base, "manifest"), retry)?;
+    let (identity, _, moved) = move_transport.resolved(false)?;
     let limits = DiscoveryLimits {
         max_response_bytes: MAX_METADATA_BYTES,
         max_module_package_bytes: MAX_MODULE_PACKAGE_BYTES,
@@ -199,7 +209,11 @@ fn run_module_fetch_job(
         retry,
     );
     release_staging(staging);
-    result
+    result.map(|mut result| {
+        result.moved_from = moved.as_ref().map(|m| m.moved_from.canonical_name());
+        result.moved_to = moved.as_ref().map(|m| m.moved_to.canonical_name());
+        result
+    })
 }
 
 // `release_staging` removes everything this fetch staged, on success and on
@@ -250,6 +264,8 @@ fn fetch_and_publish_module(
         package_digest: resolved.package_digest,
         module_sha256: resolved.module_sha256,
         output: args.output.display().to_string(),
+        moved_from: None,
+        moved_to: None,
     })
 }
 

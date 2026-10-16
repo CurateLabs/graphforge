@@ -1,0 +1,66 @@
+{
+  "cases": [
+    {
+      "document": {
+        "format": "graphforge-repository-moved/1",
+        "moved_from": {
+          "owner": "curate",
+          "repository": "claims"
+        },
+        "moved_to": {
+          "owner": "research",
+          "repository": "renamed"
+        }
+      },
+      "name": "canonical-move",
+      "valid": true
+    },
+    {
+      "document": {
+        "format": "graphforge-repository-moved/1",
+        "moved_from": {
+          "owner": "curate",
+          "repository": "claims"
+        },
+        "moved_to": {
+          "owner": "curate",
+          "repository": "claims"
+        }
+      },
+      "name": "same-identity",
+      "valid": false
+    },
+    {
+      "document": {
+        "format": "graphforge-repository-moved/2",
+        "moved_from": {
+          "owner": "curate",
+          "repository": "claims"
+        },
+        "moved_to": {
+          "owner": "research",
+          "repository": "renamed"
+        }
+      },
+      "name": "future-format",
+      "valid": false
+    },
+    {
+      "document": {
+        "format": "graphforge-repository-moved/1",
+        "location": "https://other.example/",
+        "moved_from": {
+          "owner": "curate",
+          "repository": "claims"
+        },
+        "moved_to": {
+          "owner": "research",
+          "repository": "renamed"
+        }
+      },
+      "name": "unknown-field",
+      "valid": false
+    }
+  ],
+  "format": "graphforge-repository-moved-conformance/1"
+}

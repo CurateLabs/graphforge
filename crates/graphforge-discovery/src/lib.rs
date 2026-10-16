@@ -15,7 +15,12 @@
 //! are three distinct fields; none substitutes for another.
 
 mod lineage;
+mod rehome;
+mod repository;
 mod summary;
+
+pub use rehome::{RehomedRepository, RepositorySnapshot, rehome_repository};
+pub use repository::{ObjectLocationTemplate, RepositoryMoved};
 
 pub use lineage::{
     LineageBranch, LineageForkOrigin, LineageProposal, LineageVersion, RESEARCH_LINEAGE_CAPABILITY,
@@ -872,12 +877,39 @@ impl DiscoveryManifest {
     }
 
     /// Verify that a lineage document matches this manifest and refs snapshot.
-    #[allow(clippy::too_many_lines)]
     pub fn bind_lineage(
         &self,
         refs: &RefSet,
         lineage: &ResearchLineage,
     ) -> Result<(), DiscoveryError> {
+        self.bind_lineage_document(lineage)?;
+        // One lineage document describes every Branch head of exactly one
+        // repository snapshot. A Branch ref that targets another snapshot names a
+        // head this document does not describe, so it fails closed rather than
+        // resolving to this snapshot's (possibly older) head.
+        for branch in &lineage.branches {
+            let Some(item) = refs.refs.iter().find(|item| item.name == branch.ref_name) else {
+                return Err(DiscoveryError::new(
+                    DiscoveryErrorCode::MissingRef,
+                    Some("lineage.branches.ref_name"),
+                    "branch ref is absent from refs snapshot",
+                ));
+            };
+            if item.target != self.immutable_version {
+                return Err(DiscoveryError::new(
+                    DiscoveryErrorCode::IntegrityFailure,
+                    Some("lineage.branches.ref_name"),
+                    "branch ref targets a different repository snapshot than the lineage",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    // Historical snapshots bind their own document/package inventory, while
+    // current refs bind a snapshot by its canonical validator. Do not pretend
+    // current refs are the historical snapshot's original ref set.
+    fn bind_lineage_document(&self, lineage: &ResearchLineage) -> Result<(), DiscoveryError> {
         let reference = self.lineage.as_ref().ok_or_else(|| {
             DiscoveryError::new(
                 DiscoveryErrorCode::MissingObject,
@@ -902,26 +934,6 @@ impl DiscoveryManifest {
             return Err(mismatch("lineage.lineage_digest"));
         }
         let limits = DiscoveryLimits::default();
-        // One lineage document describes every Branch head of exactly one
-        // repository snapshot. A Branch ref that targets another snapshot names a
-        // head this document does not describe, so it fails closed rather than
-        // resolving to this snapshot's (possibly older) head.
-        for branch in &lineage.branches {
-            let Some(item) = refs.refs.iter().find(|item| item.name == branch.ref_name) else {
-                return Err(DiscoveryError::new(
-                    DiscoveryErrorCode::MissingRef,
-                    Some("lineage.branches.ref_name"),
-                    "branch ref is absent from refs snapshot",
-                ));
-            };
-            if item.target != self.immutable_version {
-                return Err(DiscoveryError::new(
-                    DiscoveryErrorCode::IntegrityFailure,
-                    Some("lineage.branches.ref_name"),
-                    "branch ref targets a different repository snapshot than the lineage",
-                ));
-            }
-        }
         for version in &lineage.versions {
             if let Some(package) = &version.package {
                 self.validate_lineage_package(package, "versions.package", limits)?;

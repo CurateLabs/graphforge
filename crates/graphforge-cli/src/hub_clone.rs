@@ -319,6 +319,10 @@ struct CloneResult {
     research_version_uuid: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     research_version_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    moved_from: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    moved_to: Option<String>,
 }
 
 struct ResearchCloneContext {
@@ -1702,6 +1706,8 @@ fn run_clone_job(
     if let Some(finished) = finished {
         return Ok(finished);
     }
+    let move_transport = crate::hub_http::RepositoryMoveTransport::new(transport, &identity, &base);
+    let transport = &move_transport as &dyn Transport;
     let credentials = DiscoveryCredentials::load(
         &base,
         args.token_env.as_deref(),
@@ -1768,6 +1774,7 @@ fn run_clone_job(
         stage.attempt = manifest_attempts.max(1);
     }
     let manifest_bytes = manifest_result?;
+    let (identity, _, moved) = move_transport.resolved(false)?;
     let limits = DiscoveryLimits {
         max_response_bytes: MAX_METADATA_BYTES,
         ..DiscoveryLimits::default()
@@ -1800,6 +1807,7 @@ fn run_clone_job(
     )?;
     let discovered = Discovered {
         identity: &identity,
+        moved: moved.as_ref(),
         destination: &destination,
         refs_bytes: &refs_bytes,
         manifest_bytes: &manifest_bytes,
@@ -1848,6 +1856,7 @@ fn run_clone_job(
 /// Validated discovery state shared by the staged clone phases.
 struct Discovered<'a> {
     identity: &'a RepositoryIdentity,
+    moved: Option<&'a graphforge_discovery::RepositoryMoved>,
     destination: &'a Path,
     refs_bytes: &'a [u8],
     manifest_bytes: &'a [u8],
@@ -1867,6 +1876,7 @@ fn clone_into_staging(
 ) -> Result<CloneResult, graphforge_api::GfError> {
     let Discovered {
         identity,
+        moved,
         destination,
         refs_bytes,
         manifest_bytes,
@@ -2151,6 +2161,8 @@ fn clone_into_staging(
         resumed_bytes: download.resumed_bytes,
         research_version_uuid,
         research_version_kind,
+        moved_from: moved.map(|m| m.moved_from.canonical_name()),
+        moved_to: moved.map(|m| m.moved_to.canonical_name()),
     };
     let record = InstallRecord {
         generation_uuid: result.generation_uuid.clone(),
@@ -2176,6 +2188,9 @@ fn write_clone_result(
             .map_err(|e| graphforge_api::GfError::Execution(e.to_string()))?;
         writeln!(output).map_err(storage)?;
     } else {
+        if let (Some(from), Some(to)) = (&result.moved_from, &result.moved_to) {
+            writeln!(output, "Repository moved from {from} to {to}").map_err(storage)?;
+        }
         writeln!(
             output,
             "Cloned {} to {}",

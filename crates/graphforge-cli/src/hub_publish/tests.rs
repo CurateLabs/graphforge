@@ -549,6 +549,7 @@ fn run_publish_with_bypass(
             credential,
             wait: &|_| panic!("no device flow expected"),
             notices: &mut stderr,
+            resolution: None,
         };
         publish(&hub.transport(), graph, args, &mut environment)
     };
@@ -991,6 +992,28 @@ fn published_fork_clones_back_with_origin_citation() {
             source.origin_project_uuid
         );
     }
+    // A citation remains the original published identity, while resolution may
+    // follow its verified one-hop move only for that exact Version identity.
+    let citation = lineage.fork.as_ref().unwrap().clone();
+    hub.hub
+        .move_repository(
+            &citation.origin_repository,
+            &RepositoryIdentity::parse("research/moved-origin").unwrap(),
+        )
+        .unwrap();
+    let transport = hub.transport();
+    let source_base = Url::parse(&repository_url("curate/claims")).unwrap();
+    let reader = Hub {
+        transport: &transport,
+        base: source_base.clone(),
+        bypass: None,
+    };
+    verify_fork_origin(&reader, &source_base, &citation).unwrap();
+    let mut wrong = citation.clone();
+    wrong.origin_version_identity = Sha256Digest(sha256_digest(b"another identity"));
+    assert!(verify_fork_origin(&reader, &source_base, &wrong).is_err());
+    let (_, retained) = served_lineage(&hub, "curate/claims-fork");
+    assert_eq!(retained.fork.as_ref(), Some(&citation));
 }
 
 /// Consistent refs, manifest, and lineage for `repository` whose lineage lists
@@ -1339,6 +1362,7 @@ fn a_slow_but_progressing_upload_succeeds_in_bounded_chunks() {
         credential: Credential::Token(token(&hub, "curate/claims")),
         wait: &|_| panic!("no device flow expected"),
         notices: &mut notices,
+        resolution: None,
     };
     let outcome = publish(
         &transport,
@@ -1439,6 +1463,7 @@ fn device_flow(
             credential: Credential::DeviceFlow,
             wait: &wait,
             notices: &mut writer,
+            resolution: None,
         };
         publish(
             &hub.transport(),
@@ -2158,5 +2183,128 @@ fn per_object_chunk_selection_overrides_the_hub_preference_with_the_same_budget(
     assert_eq!(
         error_code(&upload_chunk_size(&capabilities, &target).unwrap_err()),
         "hub.publish.invalid_input"
+    );
+}
+
+#[test]
+fn moved_repository_clones_both_names_and_publishes_only_with_current_scope() {
+    let mut history = history();
+    let hub = LoopbackHub::start();
+    publish_ok(&hub, &history.graph, &on_ref("curate/claims", "main"));
+    let old = RepositoryIdentity::parse("curate/claims").unwrap();
+    let new = RepositoryIdentity::parse("research/renamed").unwrap();
+    let (_, before) = served_lineage(&hub, "curate/claims");
+    hub.hub.move_repository(&old, &new).unwrap();
+    let (_, after) = served_lineage(&hub, "research/renamed");
+    assert_eq!(after.versions, before.versions);
+    let root = tempfile::tempdir().unwrap();
+    for (name, repository) in [
+        ("old", "curate/claims"),
+        ("short", "curate/claims"),
+        ("new", "research/renamed"),
+    ] {
+        let destination = root.path().join(name);
+        let cloned = if name == "short" {
+            let mut output = Vec::new();
+            run_clone_with(
+                &hub.transport(),
+                CloneArgs {
+                    hub: Some(HUB.into()),
+                    token_env: None,
+                    protection_bypass_env: None,
+                    repository: repository.into(),
+                    destination: Some(destination.clone()),
+                    telemetry_endpoint: None,
+                    git_ref: None,
+                    version_uuid: None,
+                },
+                true,
+                &mut output,
+            )
+            .unwrap();
+            serde_json::from_slice(&output).unwrap()
+        } else {
+            clone_into(&hub, repository, &destination, None, None)
+        };
+        assert_eq!(cloned["repository"], "research/renamed");
+        if name != "new" {
+            assert_eq!(cloned["moved_from"], "curate/claims");
+            assert_eq!(cloned["moved_to"], "research/renamed");
+        }
+        let reopened = GraphForge::new(destination.to_str()).unwrap();
+        assert_eq!(
+            reference(&reopened, history.head).identity_sha256,
+            reference(&history.graph, history.head).identity_sha256
+        );
+        let query = reopened
+            .execute("MATCH (n:Item) RETURN count(n) AS total, sum(n.score) AS score")
+            .unwrap();
+        for (column, expected) in [(0, 1), (1, 1)] {
+            assert_eq!(
+                query.batches[0]
+                    .column(column)
+                    .as_any()
+                    .downcast_ref::<arrow::array::Int64Array>()
+                    .unwrap()
+                    .value(0),
+                expected
+            );
+        }
+    }
+    let mut human_clone = Vec::new();
+    run_clone_with(
+        &hub.transport(),
+        CloneArgs {
+            hub: Some(HUB.into()),
+            token_env: None,
+            protection_bypass_env: None,
+            repository: "curate/claims".into(),
+            destination: Some(root.path().join("human")),
+            telemetry_endpoint: None,
+            git_ref: None,
+            version_uuid: None,
+        },
+        false,
+        &mut human_clone,
+    )
+    .unwrap();
+    assert!(
+        String::from_utf8(human_clone)
+            .unwrap()
+            .contains("Repository moved from curate/claims to research/renamed")
+    );
+    edit(&mut history.graph, history.branch, 3);
+    let before_log = hub.log().len();
+    let stale = run_publish_with(
+        &hub,
+        &history.graph,
+        &on_ref("curate/claims", "main"),
+        Credential::Token(token(&hub, "curate/claims")),
+    );
+    assert!(stale.result.is_err());
+    assert!(puts(&hub.log()[before_log..]).is_empty());
+    let current = run_publish_with(
+        &hub,
+        &history.graph,
+        &on_ref("curate/claims", "main"),
+        Credential::Token(token(&hub, "research/renamed")),
+    );
+    let outcome = current.result.unwrap();
+    assert_eq!(outcome.receipt.repository, new);
+    assert_eq!(outcome.moved.as_ref().unwrap().moved_from, old);
+    let mut human = Vec::new();
+    write_outcome(&outcome, false, &mut human).unwrap();
+    assert!(
+        String::from_utf8(human)
+            .unwrap()
+            .contains("Repository moved from curate/claims to research/renamed")
+    );
+    let json: serde_json::Value = serde_json::from_slice(&current.stdout).unwrap();
+    assert_eq!(json["moved_to"], "research/renamed");
+    assert!(
+        hub.log()[before_log..]
+            .iter()
+            .filter(|entry| entry.method == "POST")
+            .all(|entry| entry.path.starts_with("/research/renamed/"))
     );
 }

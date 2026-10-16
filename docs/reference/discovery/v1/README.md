@@ -129,3 +129,49 @@ manifest's own canonical digest does.
 
 See [portable-v2-integration.md](portable-v2-integration.md) for the normative
 validation order and the boundary between discovery and package verification.
+
+## Repository moves and re-homing
+
+A moved repository returns HTTP **308** for its old `.gf/refs`, `.gf/manifest`,
+and `.gf/publish` endpoints (including publish subpaths). `Location` names the
+same endpoint under the new canonical owner/repository on the **same HTTPS
+origin**. The bounded JSON body uses `moved.schema.json`:
+
+```json
+{"format":"graphforge-repository-moved/1","moved_from":{"owner":"curate","repository":"claims"},"moved_to":{"owner":"research","repository":"renamed"}}
+```
+
+Clients accept one identity move only, require refs and manifest to agree, and
+validate the returned documents against the new identity. Publish resolves this
+identity before acquiring its repository-scoped credential. Writes are never
+forwarded through redirects. Cross-origin, downgraded, chained, ambiguous, or
+inconsistent identity moves fail closed. CLI JSON adds `moved_from` and
+`moved_to` only after a verified move; human output reports the same transition.
+Ordinary object-location redirects retain their existing credential isolation.
+
+`rehome_repository` is the Rust derivation authority for a Hub transaction. It
+accepts the current ref set and exactly the bounded closure of stored manifests
+referenced by that set, with their exact advertised summary and lineage bytes.
+It verifies every original manifest validator, immutable ref target, control
+object digest/length, summary binding, and intrinsic lineage/package binding
+before deriving replacements. The current default snapshot also retains the
+normal strict ref/lineage check. Historical snapshots are not checked against
+invented historical ref sets.
+
+The result replaces repository identity in manifests, summaries and lineage,
+then derives control-object digests, manifest validators and the refs revision.
+A validated explicit `ObjectLocationTemplate` supplies newly derived control
+locations (`{digest}` or `{hex}`); old paths are never inferred by string
+replacement. Native Project/module bytes, package identities and their object
+locations remain unchanged. Fork origin citations remain immutable published
+facts. The Hub must retain old object routes and commit the complete replacement
+set atomically with an unreusable old-name tombstone. Repeated administrative
+moves flatten old tombstones directly to the current name, rather than exposing
+redirect chains. Re-homing does not migrate an in-flight publish operation.
+
+The move schema and `moved-conformance.json` are generated and replayed with:
+
+```bash
+GRAPHFORGE_UPDATE_DISCOVERY_ARTIFACTS=1 \
+  cargo test -p graphforge-discovery --test repository_contract
+```

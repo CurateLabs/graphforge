@@ -17,7 +17,9 @@ use ureq::unversioned::transport::{
 use url::Url;
 
 mod discovery_auth;
+mod repository_moves;
 pub(crate) use discovery_auth::{DiscoveryCredentials, fetch_discovery_with_attempts};
+pub(crate) use repository_moves::RepositoryMoveTransport;
 
 pub(crate) const DEFAULT_HUB: &str = "https://graphforge.sh";
 pub(crate) const MAX_METADATA_BYTES: usize = 16 * 1024 * 1024;

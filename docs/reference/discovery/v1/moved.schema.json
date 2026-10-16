@@ -1,0 +1,46 @@
+{
+  "$defs": {
+    "identity": {
+      "additionalProperties": false,
+      "properties": {
+        "owner": {
+          "$ref": "#/$defs/slug"
+        },
+        "repository": {
+          "$ref": "#/$defs/slug"
+        }
+      },
+      "required": [
+        "owner",
+        "repository"
+      ],
+      "type": "object"
+    },
+    "slug": {
+      "maxLength": 100,
+      "minLength": 1,
+      "pattern": "^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$",
+      "type": "string"
+    }
+  },
+  "$id": "https://graphforge.sh/schemas/discovery/v1/moved.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "format": {
+      "const": "graphforge-repository-moved/1"
+    },
+    "moved_from": {
+      "$ref": "#/$defs/identity"
+    },
+    "moved_to": {
+      "$ref": "#/$defs/identity"
+    }
+  },
+  "required": [
+    "format",
+    "moved_from",
+    "moved_to"
+  ],
+  "type": "object"
+}
