@@ -147,8 +147,10 @@ images for the exact immutable research Version selected by `--ref` or
 notebooks, and visualization intent files are never inferred. No images are
 selected by default. An operation's intent and canonical manifest bind the
 selected descriptors, so changing images under the same operation identity
-conflicts rather than silently replacing them. Use a new operation UUID for a
-new presentation selection of an already published Version.
+conflicts rather than silently replacing them. Default operation identities
+include validated ordered preview descriptors when present, so a new selection
+of an already published Version creates a new operation and exact retries
+replay it. No-preview default identities retain their legacy definition.
 
 The optional typed `x-graphforge-previews` discovery extension has format
 `graphforge-previews/1`; `previews.schema.json` describes its metadata. Each

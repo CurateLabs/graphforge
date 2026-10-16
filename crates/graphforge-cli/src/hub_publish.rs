@@ -1446,12 +1446,19 @@ pub(crate) fn publish(
         .iter()
         .map(|p| p.descriptor.clone())
         .collect::<Vec<_>>();
+    let operation_content = if previews.is_empty() {
+        selection.project_content.clone()
+    } else {
+        sha256_digest(&canonical_json(
+            &json!({"project_content":selection.project_content,"previews":preview_metadata}),
+        ))
+    };
     let operation_uuid = operation_uuid.unwrap_or_else(|| {
         graphforge_api::hub_publish_operation(
             &identity.canonical_name(),
             selection.git_ref.as_deref(),
             &selection.version_uuid.to_string(),
-            &selection.project_content,
+            &operation_content,
         )
     });
     let base_intent = intent_digest(&identity, &selection, fork.as_ref().map(|(id, _)| id));

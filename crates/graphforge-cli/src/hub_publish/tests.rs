@@ -2001,10 +2001,17 @@ fn selected_png_svg_previews_are_version_bound_but_not_native_package_data() {
     std::fs::write(&paths[1], svg).unwrap();
     // Adjacent unsafe/private workbench files are never inferred as selections.
     std::fs::write(root.path().join("unselected.svg"), b"<script/>").unwrap();
-    let selected = LoopbackHub::start();
+    let selected = &plain;
     let mut args = on_ref("curate/claims", "main");
     args.previews = paths.to_vec();
-    publish_ok(&selected, &history.graph, &args).result.unwrap();
+    let first = publish_ok(selected, &history.graph, &args).result.unwrap();
+    assert!(!first.replayed);
+    assert!(
+        publish_ok(selected, &history.graph, &args)
+            .result
+            .unwrap()
+            .replayed
+    );
     let (manifest, _) = served_lineage(&selected, "curate/claims");
     assert_eq!(plain_manifest.package, manifest.package);
     let plain_package = plain.hub.handle(&HubRequest::new(
@@ -2035,6 +2042,35 @@ fn selected_png_svg_previews_are_version_bound_but_not_native_package_data() {
         assert_eq!(response.body, expected);
         graphforge_hub_publish::preview::validate_preview(item, &response.body).unwrap();
     }
+    // New validated image selections get new default identities. An explicit
+    // reused operation remains a conflict, preserving caller-stable CAS intent.
+    std::fs::write(&paths[1],br#"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16"><rect width="2" height="2"/></svg>"#).unwrap();
+    let explicit = PublishArgs {
+        operation_uuid: Some(first.receipt.operation_uuid.to_string()),
+        previews: args.previews.clone(),
+        ..on_ref("curate/claims", "main")
+    };
+    let refused = run_publish_with(
+        selected,
+        &history.graph,
+        &explicit,
+        Credential::Token(token(selected, "curate/claims")),
+    );
+    assert_eq!(
+        refused.result.unwrap_err().code(),
+        "GF_IDEMPOTENCY_CONFLICT"
+    );
+    let changed = publish_ok(selected, &history.graph, &args).result.unwrap();
+    assert!(!changed.replayed);
+    assert_ne!(changed.receipt.operation_uuid, first.receipt.operation_uuid);
+    assert!(
+        publish_ok(selected, &history.graph, &args)
+            .result
+            .unwrap()
+            .replayed
+    );
+    let (final_manifest, _) = served_lineage(selected, "curate/claims");
+    let previews = final_manifest.preview_descriptors().unwrap();
     let before = selected.log().len();
     clone_into(
         &selected,
@@ -2101,127 +2137,134 @@ fn reference_hub_revalidates_unsafe_images_even_when_client_admission_is_bypasse
         .unwrap();
     let (original, _) = served_lineage(&hub, "curate/claims");
     let bytes=br#"<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"><script>alert(1)</script></svg>"#.to_vec();
-    let digest = sha256_digest(&bytes);
-    let mut manifest = original.clone();
-    manifest.objects.push(object_descriptor(
-        digest.clone(),
-        bytes.len() as u64,
-        "image/svg+xml",
-        format!("{HUB}/curate/claims/.gf/objects/{digest}"),
-    ));
-    manifest.objects.sort_by(|a, b| a.digest.cmp(&b.digest));
-    manifest.extensions.insert(
-        PREVIEW_EXTENSION.into(),
-        serde_json::to_value(PreviewSet {
-            format: "graphforge-previews/1".into(),
-            previews: vec![PreviewDescriptor {
-                version_uuid: history.head.to_string(),
-                digest: digest.clone(),
-                media_type: "image/svg+xml".into(),
-                length: bytes.len() as u64,
-                width: 1,
-                height: 1,
-                caption: None,
-                alt: None,
-            }],
-        })
-        .unwrap(),
-    );
-    manifest.validate(DiscoveryLimits::default()).unwrap(); // Metadata alone is valid.
-    let objects: Vec<_> = manifest
-        .objects
-        .iter()
-        .map(|o| ObjectDeclaration {
-            digest: o.digest.0.clone(),
-            length: o.length,
-            media_type: o.media_type.clone(),
-        })
-        .collect();
-    let expected_revision = Some(sha256_digest(&refs_document(&hub, "curate/claims").body));
-    let intent = PublishIntent {
-        repository: manifest.repository.clone(),
-        intent_digest: sha256_digest(b"untrusted preview caller"),
-        objects: objects.clone(),
-        manifest_validator: manifest.canonical_digest().unwrap().0,
-        refs: vec!["main".into()],
-        expected_revision: expected_revision.clone(),
-    };
-    let token = token(&hub, "curate/claims");
-    let response = hub.hub.handle(
-        &HubRequest::new(
-            HubMethod::Post,
-            format!("{HUB}/curate/claims/.gf/publish/sessions"),
-        )
-        .with_header("authorization", token.authorization())
-        .with_json(&OpenSessionRequest {
-            format: HUB_PUBLISH_FORMAT.into(),
-            operation_uuid: Uuid::now_v7(),
-            request_commitment: intent.request_commitment(),
-            intent_digest: intent.intent_digest.clone(),
-            repository: manifest.repository.clone(),
-            objects,
-            requirements: vec![Capability::new("version-previews", 1)],
-        }),
-    );
-    assert_eq!(response.status, 201);
-    let SessionResponse::Open {
-        session_id,
-        uploads,
-    } = serde_json::from_slice(&response.body).unwrap()
-    else {
-        panic!("new session")
-    };
-    for upload in uploads {
-        if upload.received == upload.length {
-            continue;
-        }
-        let body = if upload.digest == digest {
-            bytes.clone()
-        } else {
-            let location = manifest
-                .objects
-                .iter()
-                .find(|o| o.digest.0 == upload.digest)
-                .unwrap()
-                .locations[0]
-                .clone();
-            hub.hub
-                .handle(&HubRequest::new(HubMethod::Get, location))
-                .body
-        };
-        let response = hub.hub.handle(
-            &HubRequest::new(HubMethod::Put, upload.upload_url)
-                .with_header(
-                    "content-range",
-                    content_range(0, body.len() as u64, body.len() as u64),
-                )
-                .with_body(body),
+    let valid =
+        br#"<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"><path d="M0 0"/></svg>"#
+            .to_vec();
+    for (bytes, version, detail) in [
+        (bytes, history.head.to_string(), "Core image admission"),
+        (
+            valid,
+            Uuid::now_v7().to_string(),
+            "absent from native lineage",
+        ),
+    ] {
+        let digest = sha256_digest(&bytes);
+        let mut manifest = original.clone();
+        manifest.objects.push(object_descriptor(
+            digest.clone(),
+            bytes.len() as u64,
+            "image/svg+xml",
+            format!("{HUB}/curate/claims/.gf/objects/{digest}"),
+        ));
+        manifest.objects.sort_by(|a, b| a.digest.cmp(&b.digest));
+        manifest.extensions.insert(
+            PREVIEW_EXTENSION.into(),
+            serde_json::to_value(PreviewSet {
+                format: "graphforge-previews/1".into(),
+                previews: vec![PreviewDescriptor {
+                    version_uuid: version,
+                    digest: digest.clone(),
+                    media_type: "image/svg+xml".into(),
+                    length: bytes.len() as u64,
+                    width: 1,
+                    height: 1,
+                    caption: None,
+                    alt: None,
+                }],
+            })
+            .unwrap(),
         );
-        assert_eq!(response.status, 200);
-    }
-    let before = refs_document(&hub, "curate/claims").body;
-    let response = hub.hub.handle(
-        &HubRequest::new(
-            HubMethod::Post,
-            format!("{HUB}/curate/claims/.gf/publish/sessions/{session_id}/commit"),
-        )
-        .with_header("authorization", token.authorization())
-        .with_json(&CommitRequest {
-            manifest: serde_json::to_value(manifest).unwrap(),
+        manifest.validate(DiscoveryLimits::default()).unwrap(); // Metadata alone is valid.
+        let objects: Vec<_> = manifest
+            .objects
+            .iter()
+            .map(|o| ObjectDeclaration {
+                digest: o.digest.0.clone(),
+                length: o.length,
+                media_type: o.media_type.clone(),
+            })
+            .collect();
+        let expected_revision = Some(sha256_digest(&refs_document(&hub, "curate/claims").body));
+        let intent = PublishIntent {
+            repository: manifest.repository.clone(),
+            intent_digest: sha256_digest(b"untrusted preview caller"),
+            objects: objects.clone(),
+            manifest_validator: manifest.canonical_digest().unwrap().0,
             refs: vec!["main".into()],
-            expected_revision,
-        }),
-    );
-    assert_eq!(response.status, 400);
-    let body: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
-    assert_eq!(body["code"], "invalid_input");
-    assert!(
-        body["message"]
-            .as_str()
-            .unwrap()
-            .contains("Core image admission")
-    );
-    assert_eq!(refs_document(&hub, "curate/claims").body, before);
+            expected_revision: expected_revision.clone(),
+        };
+        let token = token(&hub, "curate/claims");
+        let response = hub.hub.handle(
+            &HubRequest::new(
+                HubMethod::Post,
+                format!("{HUB}/curate/claims/.gf/publish/sessions"),
+            )
+            .with_header("authorization", token.authorization())
+            .with_json(&OpenSessionRequest {
+                format: HUB_PUBLISH_FORMAT.into(),
+                operation_uuid: Uuid::now_v7(),
+                request_commitment: intent.request_commitment(),
+                intent_digest: intent.intent_digest.clone(),
+                repository: manifest.repository.clone(),
+                objects,
+                requirements: vec![Capability::new("version-previews", 1)],
+            }),
+        );
+        assert_eq!(response.status, 201);
+        let SessionResponse::Open {
+            session_id,
+            uploads,
+        } = serde_json::from_slice(&response.body).unwrap()
+        else {
+            panic!("new session")
+        };
+        for upload in uploads {
+            if upload.received == upload.length {
+                continue;
+            }
+            let body = if upload.digest == digest {
+                bytes.clone()
+            } else {
+                let location = manifest
+                    .objects
+                    .iter()
+                    .find(|o| o.digest.0 == upload.digest)
+                    .unwrap()
+                    .locations[0]
+                    .clone();
+                hub.hub
+                    .handle(&HubRequest::new(HubMethod::Get, location))
+                    .body
+            };
+            let response = hub.hub.handle(
+                &HubRequest::new(HubMethod::Put, upload.upload_url)
+                    .with_header(
+                        "content-range",
+                        content_range(0, body.len() as u64, body.len() as u64),
+                    )
+                    .with_body(body),
+            );
+            assert_eq!(response.status, 200);
+        }
+        let before = refs_document(&hub, "curate/claims").body;
+        let response = hub.hub.handle(
+            &HubRequest::new(
+                HubMethod::Post,
+                format!("{HUB}/curate/claims/.gf/publish/sessions/{session_id}/commit"),
+            )
+            .with_header("authorization", token.authorization())
+            .with_json(&CommitRequest {
+                manifest: serde_json::to_value(manifest).unwrap(),
+                refs: vec!["main".into()],
+                expected_revision,
+            }),
+        );
+        assert_eq!(response.status, 400);
+        let body: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
+        assert_eq!(body["code"], "invalid_input");
+        assert!(body["message"].as_str().unwrap().contains(detail));
+        assert_eq!(refs_document(&hub, "curate/claims").body, before);
+    }
 }
 
 #[test]
