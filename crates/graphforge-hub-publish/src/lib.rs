@@ -20,11 +20,11 @@ pub use exchange::{HubExchange, HubMethod, HubRequest, HubResponse};
 pub use reference::{ReferenceHub, ReferenceHubConfig};
 pub use wire::{
     Capability, CommitRequest, DEVICE_CODE_GRANT_TYPE, DIGEST_PLACEHOLDER,
-    DeviceAuthorizationResponse, DevicePoll, HUB_PUBLISH_FORMAT, OAuthErrorBody, ObjectDeclaration,
-    OpenSessionRequest, OperationStatus, PUBLISH_TOKEN_ENV, PublishAuthorization,
-    PublishCapabilities, PublishIntent, PublishLimits, PublishReceipt, PublishSessionId,
-    PublishToken, SUPPORTED_CAPABILITIES, SessionResponse, TokenResponse, UPLOAD_LENGTH_HEADER,
-    UPLOAD_OFFSET_HEADER, UploadStatus, UploadTarget, check_format, check_requirements,
-    content_range, parse_content_range, publish_scope, validate_https_url, validate_inventory,
-    validate_ref_list,
+    DeviceAuthorizationResponse, DevicePoll, HEX_PLACEHOLDER, HUB_PUBLISH_FORMAT, OAuthErrorBody,
+    ObjectDeclaration, OpenSessionRequest, OperationStatus, PUBLISH_NEGOTIATION_CAPABILITY,
+    PUBLISH_TOKEN_ENV, PublishAuthorization, PublishCapabilities, PublishIntent, PublishLimits,
+    PublishReceipt, PublishSessionId, PublishToken, SUPPORTED_CAPABILITIES, SessionResponse,
+    TokenResponse, UPLOAD_LENGTH_HEADER, UPLOAD_OFFSET_HEADER, UploadStatus, UploadTarget,
+    check_format, check_requirements, content_range, parse_content_range, publish_scope,
+    validate_https_url, validate_inventory, validate_ref_list,
 };

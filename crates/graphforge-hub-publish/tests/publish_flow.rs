@@ -11,7 +11,7 @@ use graphforge_hub_publish::{
     PublishCapabilities, PublishIntent, PublishReceipt, PublishToken, ReferenceHub,
     ReferenceHubConfig, SessionResponse, UploadTarget, content_range, sha256_digest,
 };
-use serde_json::json;
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 fn demo() -> RepositoryIdentity {
@@ -121,7 +121,15 @@ impl<'a> Client<'a> {
             intent_digest: plan.intent_digest.clone(),
             repository: self.repository.clone(),
             objects: vec![plan.declaration()],
-            requirements: Vec::new(),
+            requirements: self
+                .capabilities
+                .requirements
+                .iter()
+                .filter(|capability| {
+                    capability.capability == graphforge_hub_publish::PUBLISH_NEGOTIATION_CAPABILITY
+                })
+                .cloned()
+                .collect(),
         })
     }
 
@@ -621,4 +629,152 @@ fn device_flow_issues_a_scoped_short_lived_token() {
     hub.advance_clock(900);
     let response = client.open(&Plan::new("package v2", 'c', None));
     assert_eq!(error_code(&response), HubPublishErrorCode::AuthDenied);
+}
+
+#[test]
+fn negotiated_capabilities_validate_client_chunk_and_hex_without_ambiguous_templates() {
+    let mut config = ReferenceHubConfig {
+        authorization_client_id: Some("client_workos_example".into()),
+        object_location_hex: true,
+        ..ReferenceHubConfig::default()
+    };
+    config.limits.preferred_chunk_bytes = Some(8 * 1024 * 1024);
+    let hub = ReferenceHub::with_config(config).unwrap();
+    let caps = hub.capabilities(&demo());
+    caps.validate().unwrap();
+    let digest = sha256_digest(b"object");
+    assert!(
+        caps.object_location(&digest)
+            .ends_with(&format!("/objects/sha256/{}", &digest[7..]))
+    );
+    for bad in ["", "with space", "line\nfeed", &"x".repeat(129)] {
+        let mut value = caps.clone();
+        value.authorization.client_id = Some(bad.into());
+        assert!(value.validate().is_err());
+    }
+    for n in [0, 8 * 1024 * 1024 + 1] {
+        let mut value = caps.clone();
+        value.limits.preferred_chunk_bytes = Some(n);
+        assert!(value.validate().is_err());
+    }
+    for template in [
+        "https://hub.example/{digest}/{hex}",
+        "https://hub.example/{hex}/{hex}",
+        "https://hub.example/{hex}/{unknown}",
+        "https://user@hub.example/{hex}",
+    ] {
+        let mut value = caps.clone();
+        value.object_location_template = template.into();
+        assert!(value.validate().is_err());
+    }
+    let mut value = serde_json::to_value(&caps).unwrap();
+    value["requirements"] = json!([]);
+    assert_eq!(
+        PublishCapabilities::from_json(&serde_json::to_vec(&value).unwrap())
+            .unwrap_err()
+            .code,
+        HubPublishErrorCode::InvalidInput
+    );
+    value["requirements"] = json!([{"capability":"publish-negotiation","major":2}]);
+    value["authorization"]["unknown_field"] = json!(true);
+    assert_eq!(
+        PublishCapabilities::from_json(&serde_json::to_vec(&value).unwrap())
+            .unwrap_err()
+            .code,
+        HubPublishErrorCode::UnsupportedFuture
+    );
+}
+
+#[test]
+fn optional_negotiation_members_are_nonnullable_and_legacy_omission_stays_valid() {
+    let legacy = serde_json::to_value(ReferenceHub::new().capabilities(&demo())).unwrap();
+    PublishCapabilities::from_json(&serde_json::to_vec(&legacy).unwrap()).unwrap();
+    for pointer in ["/authorization", "/limits"] {
+        let key = if pointer == "/authorization" {
+            "client_id"
+        } else {
+            "preferred_chunk_bytes"
+        };
+        for required in [false, true] {
+            let mut value = legacy.clone();
+            value.pointer_mut(pointer).unwrap()[key] = Value::Null;
+            if required {
+                value["requirements"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(json!({"capability":"publish-negotiation","major":1}));
+            }
+            assert_eq!(
+                PublishCapabilities::from_json(&serde_json::to_vec(&value).unwrap())
+                    .unwrap_err()
+                    .code,
+                HubPublishErrorCode::InvalidInput
+            );
+        }
+    }
+}
+
+#[test]
+fn sessions_select_per_object_chunks_and_preserve_them_on_resume() {
+    let mut config = ReferenceHubConfig::default();
+    config.limits.preferred_chunk_bytes = Some(8);
+    let hub = ReferenceHub::with_config(config).unwrap();
+    let client = Client::new(&hub, demo());
+    for text in ["abc", "abcdefghijkl"] {
+        let plan = Plan::new(text, 'a', None);
+        let (session, upload) = client.opened(&plan);
+        let selected = (text.len() as u64).min(8);
+        assert_eq!(upload.chunk_bytes, Some(selected));
+        assert_eq!(
+            client.capabilities.upload_chunk_bytes(&upload).unwrap(),
+            Some(selected)
+        );
+        assert_eq!(client.put(&upload, 0, &plan.bytes[..2]).status, 200);
+        let response = client.open(&plan);
+        assert_eq!(response.status, 200);
+        let SessionResponse::Open {
+            session_id,
+            uploads,
+        } = serde_json::from_slice(&response.body).unwrap()
+        else {
+            panic!("expected a resumed session")
+        };
+        let resumed = &uploads[0];
+        assert_eq!(session_id.as_str(), session);
+        assert_eq!(resumed.received, 2);
+        assert_eq!(resumed.chunk_bytes, Some(selected));
+    }
+
+    // A client that has not opted in still receives the legacy response shape.
+    let plan = Plan::new("legacy session", 'b', None);
+    let response = client.open_with(&OpenSessionRequest {
+        format: HUB_PUBLISH_FORMAT.into(),
+        operation_uuid: plan.operation,
+        request_commitment: client.intent(&plan).request_commitment(),
+        intent_digest: plan.intent_digest.clone(),
+        repository: demo(),
+        objects: vec![plan.declaration()],
+        requirements: vec![],
+    });
+    assert_eq!(response.status, 201);
+    let legacy: Value = serde_json::from_slice(&response.body).unwrap();
+    assert!(legacy["uploads"][0].get("chunk_bytes").is_none());
+    let mut invalid = legacy.clone();
+    invalid["uploads"][0]["chunk_bytes"] = Value::Null;
+    assert!(serde_json::from_value::<SessionResponse>(invalid).is_err());
+
+    let (_, mut upload) = client.opened(&Plan::new("validate chunks", 'c', None));
+    for bytes in [0, client.capabilities.limits.max_chunk_bytes + 1] {
+        upload.chunk_bytes = Some(bytes);
+        assert!(client.capabilities.upload_chunk_bytes(&upload).is_err());
+    }
+    upload.chunk_bytes = Some(4);
+    let legacy_caps = ReferenceHub::new().capabilities(&demo());
+    assert!(legacy_caps.upload_chunk_bytes(&upload).is_err());
+    upload.chunk_bytes = None;
+    assert_eq!(
+        client.capabilities.upload_chunk_bytes(&upload).unwrap(),
+        Some(8)
+    );
+    assert_eq!(legacy_caps.upload_chunk_bytes(&upload).unwrap(), None);
 }
