@@ -428,14 +428,15 @@ pub(super) struct CopyPlan {
     walk: usize,
     metadata: usize,
     kernel: usize,
+    reconciliation: usize,
     payload: usize,
 }
 impl CopyPlan {
-    pub(super) fn prepare(&self) -> Result<usize> {
-        add(self.ledger, self.walk)
-    }
-    pub(super) fn kernel(&self) -> Result<usize> {
-        add(self.ledger, self.kernel)
+    pub(super) fn workspace(&self) -> Result<usize> {
+        // The output must acquire its lifetime claims before this invocation
+        // can release its authority. One progress grant must fund that entire
+        // handoff, including metadata constructed after the Arrow kernel.
+        Ok(add(self.ledger, self.walk.max(self.kernel))?.max(self.reconciliation))
     }
 }
 impl SourceOwners {
@@ -503,12 +504,30 @@ impl SourceOwners {
             schema_bound(schema)?,
             schema_bound(first.batch.schema_ref())?,
         )?;
+        let resident_arc = resident_metadata::arc_bytes(Layout::new::<Resident>())
+            .ok_or_else(bound_error)?;
+        // Interleave preserves the concrete datatype tree, so its array
+        // headers fit the first IPC source's constructor bound. A null buffer
+        // can come from any source: the SUM of source buffers bounds all
+        // output buffers, fresh owner slots, and their claims. Keep the source
+        // ledger and output backing live through the reconciliation walk.
+        let reconciliation = add(
+            mul(ledger, 2)?,
+            add(
+                add(
+                    payload.resident,
+                    add(add(metadata, headers.headers)?, resident_arc)?,
+                )?,
+                add(mul(buffers, add(256, resident_arc)?)?, walk)?,
+            )?,
+        )?;
         Ok(Some(CopyPlan {
             slots,
             ledger,
             walk,
             metadata,
             kernel: add(payload.peak, kernel_metadata)?,
+            reconciliation,
             payload: payload.resident,
         }))
     }
@@ -627,9 +646,12 @@ impl SourceOwners {
                 add(mul(buffers, add(256, resident_arc)?)?, plan.walk)?,
             )?,
         )?;
-        // Kernels have returned and their local scratch has dropped. Full live
-        // output remains protected while the NEXT metadata allocation is
-        // admitted. Refusal occurs before fresh Vec/Resident/claim construction.
+        if operation > plan.reconciliation {
+            return Err(bound_error());
+        }
+        // Both phases were admitted before executing the kernel. Its scratch
+        // is now dead, so release only the excess while every source/output
+        // owner remains live; this transition cannot need a second grant.
         phase.transition(operation).map_err(|error| {
             DataFusionError::Context(
                 "Merge output reconciliation".into(),

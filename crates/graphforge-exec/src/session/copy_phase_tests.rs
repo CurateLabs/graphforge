@@ -1,5 +1,6 @@
 //! Real IPC merge controls for serial construction and metadata handoffs.
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use arrow::array::{
     Array, ArrayRef, FixedSizeBinaryArray, Int64Array, ListArray, RecordBatch, StructArray,
@@ -8,7 +9,9 @@ use arrow::array::{
 use arrow::buffer::{NullBuffer, OffsetBuffer, ScalarBuffer};
 use arrow::datatypes::{DataType, Field, Schema};
 use datafusion::common::{DataFusionError, Result};
-use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryConsumer, MemoryPool};
+use datafusion::execution::memory_pool::{
+    GreedyMemoryPool, MemoryConsumer, MemoryPool, MemoryReservation,
+};
 use datafusion::execution::runtime_env::RuntimeEnvBuilder;
 use datafusion::physical_expr::{PhysicalSortExpr, expressions::Column};
 use datafusion::physical_plan::SendableRecordBatchStream;
@@ -265,9 +268,49 @@ async fn copy_phase_serial_nested_columns_fit_fixed_headroom_with_escaped_output
     Ok(())
 }
 
+#[derive(Debug)]
+struct CopyWorkspacePool {
+    inner: GreedyMemoryPool,
+    attempts: AtomicUsize,
+    admitted: AtomicUsize,
+}
+impl std::fmt::Display for CopyWorkspacePool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "copy workspace observation")
+    }
+}
+impl MemoryPool for CopyWorkspacePool {
+    fn name(&self) -> &str {
+        "copy workspace observation"
+    }
+    fn grow(&self, reservation: &MemoryReservation, bytes: usize) {
+        if bytes != 0 && reservation.consumer().name() == "serial copy phase control" {
+            self.attempts.fetch_add(1, Ordering::Relaxed);
+            self.admitted.fetch_add(1, Ordering::Relaxed);
+        }
+        self.inner.grow(reservation, bytes);
+    }
+    fn shrink(&self, reservation: &MemoryReservation, bytes: usize) {
+        self.inner.shrink(reservation, bytes);
+    }
+    fn try_grow(&self, reservation: &MemoryReservation, bytes: usize) -> Result<()> {
+        let copy = bytes != 0 && reservation.consumer().name() == "serial copy phase control";
+        if copy {
+            self.attempts.fetch_add(1, Ordering::Relaxed);
+        }
+        let result = self.inner.try_grow(reservation, bytes);
+        if copy && result.is_ok() {
+            self.admitted.fetch_add(1, Ordering::Relaxed);
+        }
+        result
+    }
+    fn reserved(&self) -> usize {
+        self.inner.reserved()
+    }
+}
+
 #[tokio::test]
-async fn copy_phase_reconciliation_refusal_keeps_prior_output_and_releases_partial_copy()
--> Result<()> {
+async fn copy_phase_workspace_refusal_precedes_copy_and_keeps_prior_output() -> Result<()> {
     const LIMIT: usize = 8 * 1024 * 1024;
     const HEADROOM: usize = 64 * 1024;
     let schema = Arc::new(Schema::new(vec![
@@ -287,7 +330,12 @@ async fn copy_phase_reconciliation_refusal_keeps_prior_output_and_releases_parti
         .unwrap()
     });
     let expected = oracle(&batches)?;
-    let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(LIMIT));
+    let observed = Arc::new(CopyWorkspacePool {
+        inner: GreedyMemoryPool::new(LIMIT),
+        attempts: AtomicUsize::new(0),
+        admitted: AtomicUsize::new(0),
+    });
+    let pool: Arc<dyn MemoryPool> = observed.clone();
     let mut stream = merge(&pool, &batches, 16)?;
     let first = stream.next().await.unwrap()?;
     assert_eq!(first, expected.slice(0, 16));
@@ -296,28 +344,33 @@ async fn copy_phase_reconciliation_refusal_keeps_prior_output_and_releases_parti
     drop(first);
     let pressure = MemoryConsumer::new("independent work before output handoff").register(&pool);
     pressure.try_grow(LIMIT - pool.reserved() - HEADROOM)?;
-    let error = stream.next().await.unwrap().expect_err(
-        "the tiny kernel cannot authorize allocation of the larger output metadata handoff",
-    );
+    observed.attempts.store(0, Ordering::Relaxed);
+    observed.admitted.store(0, Ordering::Relaxed);
+    // The first output has already loaded both IPC sources and their row
+    // cursors. The next copy must admit its complete workspace, including the
+    // wide schema's output claims, before creating its ledger or Arrow output.
+    let error =
+        stream.next().await.unwrap().expect_err(
+            "the complete copy workspace must be admitted before allocating its output",
+        );
     assert!(matches!(
         error.find_root(),
         DataFusionError::ResourcesExhausted(_)
     ));
-    if tight_metadata_platform() {
-        assert!(
-            error.to_string().contains("Merge output reconciliation"),
-            "{error}"
-        );
-    } else {
-        assert!(
-            error.to_string().contains("serial copy phase control"),
-            "{error}"
-        );
-        assert!(
-            !error.to_string().contains("Merge output reconciliation"),
-            "{error}"
-        );
-    }
+    assert!(
+        error.to_string().contains("serial copy phase control"),
+        "{error}"
+    );
+    assert!(
+        !error.to_string().contains("Merge output reconciliation"),
+        "refusal must precede the kernel and its output ownership handoff: {error}"
+    );
+    assert_eq!(observed.attempts.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        observed.admitted.load(Ordering::Relaxed),
+        0,
+        "the complete workspace must be refused before any copy phase is funded"
+    );
     drop(stream);
     drop(pressure);
     assert!(pool.reserved() >= full_capacity);
