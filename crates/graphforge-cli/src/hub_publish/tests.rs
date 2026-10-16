@@ -2186,17 +2186,7 @@ fn per_object_chunk_selection_overrides_the_hub_preference_with_the_same_budget(
     );
 }
 
-#[test]
-fn moved_repository_clones_both_names_and_publishes_only_with_current_scope() {
-    let mut history = history();
-    let hub = LoopbackHub::start();
-    publish_ok(&hub, &history.graph, &on_ref("curate/claims", "main"));
-    let old = RepositoryIdentity::parse("curate/claims").unwrap();
-    let new = RepositoryIdentity::parse("research/renamed").unwrap();
-    let (_, before) = served_lineage(&hub, "curate/claims");
-    hub.hub.move_repository(&old, &new).unwrap();
-    let (_, after) = served_lineage(&hub, "research/renamed");
-    assert_eq!(after.versions, before.versions);
+fn assert_rehomed_clones(hub: &LoopbackHub, history: &History) {
     let root = tempfile::tempdir().unwrap();
     for (name, repository) in [
         ("old", "curate/claims"),
@@ -2273,6 +2263,20 @@ fn moved_repository_clones_both_names_and_publishes_only_with_current_scope() {
             .unwrap()
             .contains("Repository moved from curate/claims to research/renamed")
     );
+}
+
+#[test]
+fn moved_repository_clones_both_names_and_publishes_only_with_current_scope() {
+    let mut history = history();
+    let hub = LoopbackHub::start();
+    publish_ok(&hub, &history.graph, &on_ref("curate/claims", "main"));
+    let old = RepositoryIdentity::parse("curate/claims").unwrap();
+    let new = RepositoryIdentity::parse("research/renamed").unwrap();
+    let (_, before) = served_lineage(&hub, "curate/claims");
+    hub.hub.move_repository(&old, &new).unwrap();
+    let (_, after) = served_lineage(&hub, "research/renamed");
+    assert_eq!(after.versions, before.versions);
+    assert_rehomed_clones(&hub, &history);
     edit(&mut history.graph, history.branch, 3);
     let before_log = hub.log().len();
     let stale = run_publish_with(

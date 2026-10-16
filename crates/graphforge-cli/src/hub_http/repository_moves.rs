@@ -33,10 +33,10 @@ impl<'a> RepositoryMoveTransport<'a> {
         }
         for identity in identities {
             let prefix = format!("/{}/.gf/", identity.canonical_name());
-            if let Some(suffix) = url.path().strip_prefix(&prefix) {
-                if matches!(suffix, "refs" | "manifest" | "publish") {
-                    return Some(suffix.into());
-                }
+            if let Some(suffix) = url.path().strip_prefix(&prefix)
+                && matches!(suffix, "refs" | "manifest" | "publish")
+            {
+                return Some(suffix.into());
             }
         }
         None

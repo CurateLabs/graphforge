@@ -419,6 +419,94 @@ mod tests {
     }
 
     #[test]
+    fn module_fetch_follows_one_verified_move_without_changing_package_bytes() {
+        let mut manifest =
+            DiscoveryManifest::from_json(FIXTURE_MANIFEST, DiscoveryLimits::default()).unwrap();
+        let old = manifest.repository.clone();
+        let new = graphforge_discovery::RepositoryIdentity::parse("research/renamed").unwrap();
+        manifest.repository = new.clone();
+        let manifest_bytes = manifest.to_canonical_json().unwrap();
+        let mut refs = RefSet::from_json(FIXTURE_REFS, DiscoveryLimits::default()).unwrap();
+        refs.repository = new.clone();
+        for reference in &mut refs.refs {
+            reference.validator = manifest.canonical_digest().unwrap();
+        }
+        let refs_bytes = refs.to_canonical_json().unwrap();
+        let body = serde_json::to_vec(&graphforge_discovery::RepositoryMoved {
+            format: "graphforge-repository-moved/1".into(),
+            moved_from: old,
+            moved_to: new,
+        })
+        .unwrap();
+        let redirect = |suffix| {
+            let mut r = response(308, None, &body);
+            r.location = Some(format!(
+                "https://graphforge.sh/research/renamed/.gf/{suffix}"
+            ));
+            r
+        };
+        let package = fixture_module_package();
+        let transport = RecordingTransport {
+            inner: Scripted::new(vec![
+                redirect("refs"),
+                response(200, None, &refs_bytes),
+                redirect("manifest"),
+                response(200, None, &manifest_bytes),
+                response(200, None, &package),
+            ]),
+            requested: Mutex::new(Vec::new()),
+        };
+        let root = tempfile::tempdir().unwrap();
+        let args = fixture_module_args(&root.path().join("module.json"));
+        let receipt = fetch_module(&transport, &args).unwrap();
+        assert_eq!(receipt["repository"], "research/renamed");
+        assert_eq!(receipt["moved_from"], "openalex/openalex");
+        assert_eq!(receipt["moved_to"], "research/renamed");
+        assert!(args.output.is_file());
+        assert_eq!(transport.inner.remaining(), 0);
+        let requests = transport.requested.lock().unwrap();
+        assert_eq!(requests.len(), 5);
+        assert_eq!(
+            requests[4],
+            manifest
+                .ontology_module_selection(&ExactIdentity {
+                    id: args.ontology_id.clone(),
+                    version: args.version.clone(),
+                    content_digest: Sha256Digest(args.digest.clone())
+                })
+                .unwrap()
+                .2
+                .locations[0]
+        );
+    }
+
+    #[test]
+    fn module_fetch_rejects_foreign_move_before_target_request_or_output() {
+        let body = serde_json::to_vec(&graphforge_discovery::RepositoryMoved {
+            format: "graphforge-repository-moved/1".into(),
+            moved_from: graphforge_discovery::RepositoryIdentity::parse("openalex/openalex")
+                .unwrap(),
+            moved_to: graphforge_discovery::RepositoryIdentity::parse("research/renamed").unwrap(),
+        })
+        .unwrap();
+        let mut redirect = response(308, None, &body);
+        redirect.location = Some("https://foreign.example/research/renamed/.gf/refs".into());
+        let transport = RecordingTransport {
+            inner: Scripted::new(vec![redirect]),
+            requested: Mutex::new(Vec::new()),
+        };
+        let root = tempfile::tempdir().unwrap();
+        let args = fixture_module_args(&root.path().join("module.json"));
+        let requests =
+            assert_module_fetch_fails("hub.integrity_failure", &transport, &args, root.path(), &[]);
+        assert_eq!(
+            requests,
+            ["https://graphforge.sh/openalex/openalex/.gf/refs"]
+        );
+        assert_eq!(transport.inner.remaining(), 0);
+    }
+
+    #[test]
     fn module_fetch_requests_only_the_module_package_and_writes_the_verified_document() {
         let manifest =
             DiscoveryManifest::from_json(FIXTURE_MANIFEST, DiscoveryLimits::default()).unwrap();
