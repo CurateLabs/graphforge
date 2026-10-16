@@ -595,7 +595,31 @@ impl ReferenceHub {
                     ));
                 }
                 if session.request == open {
-                    return Ok(json_response(200, &self.open_response(session_id, session)));
+                    let session_id = session_id.clone();
+                    let session = state
+                        .sessions
+                        .get_mut(&session_id)
+                        .expect("operation session");
+                    let mut reset = false;
+                    for upload in &mut session.uploads {
+                        if !upload
+                            .bytes
+                            .intact
+                            .load(std::sync::atomic::Ordering::Relaxed)
+                        {
+                            upload.bytes = Blob::default();
+                            upload.complete = false;
+                            reset = true;
+                        }
+                    }
+                    if reset {
+                        session.pending = None;
+                        session.verified = false;
+                    }
+                    return Ok(json_response(
+                        200,
+                        &self.open_response(&session_id, session),
+                    ));
                 }
                 Some(session_id.clone())
             }
@@ -728,6 +752,10 @@ impl ReferenceHub {
             remaining -= count;
             if pending.offset == object.length {
                 if hash_digest(pending.hash.clone()) != object.digest {
+                    upload
+                        .bytes
+                        .intact
+                        .store(false, std::sync::atomic::Ordering::Relaxed);
                     return Err(integrity("an inventory object failed digest verification"));
                 }
                 pending.object += 1;
@@ -982,6 +1010,10 @@ impl ReferenceHub {
                     hash.update(bytes);
                 }
                 if hash_digest(hash) != object.digest {
+                    upload
+                        .bytes
+                        .intact
+                        .store(false, std::sync::atomic::Ordering::Relaxed);
                     return Err(integrity("an inventory object failed digest verification"));
                 }
             }
@@ -1374,7 +1406,11 @@ fn initial_uploads(
                         && bytes.intact.load(std::sync::atomic::Ordering::Relaxed)
                 })
                 .map(|bytes| (bytes.clone(), true))
-                .or_else(|| carried.remove(&object.digest))
+                .or_else(|| {
+                    carried.remove(&object.digest).filter(|(bytes, _)| {
+                        bytes.intact.load(std::sync::atomic::Ordering::Relaxed)
+                    })
+                })
                 .unwrap_or_default()
         })
         .collect()

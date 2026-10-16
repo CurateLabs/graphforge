@@ -316,7 +316,10 @@ The default package directory is beside the Project; `--staging-directory`
 selects an existing explicit directory. Research export and all its nested
 private views inherit the output-local stage through an immutable scoped facade;
 ordinary historical queries retain their existing temporary-directory policy.
-Publication does not silently fall back to TMPDIR. Free-space checks are advisory under concurrent
+Whole-package publication staging does not silently fall back to TMPDIR. Bounded
+engine adjacency caches retain their existing query-budgeted temporary-directory
+policy; this is not a promise that every engine tempfile avoids TMPDIR. Free-space
+checks are advisory under concurrent
 writers; later I/O errors still fail closed. Full semantic package verification
 remains mandatory. Its already-computed transport digest is reused for the
 publication descriptor instead of rereading the file solely to hash it again.

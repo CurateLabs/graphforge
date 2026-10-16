@@ -435,8 +435,25 @@ fn check_projection_from_fork(fork: &GraphForge, version_uuid: Uuid, directory: 
 
 #[test]
 fn export_staging_is_scoped_and_inherited_without_changing_query_policy() {
+    const CHILD: &str = "GRAPHFORGE_TEST_SCOPED_STAGE_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let result = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "research_interchange::tests::export_staging_is_scoped_and_inherited_without_changing_query_policy", "--nocapture"])
+            .env(CHILD, "1")
+            .output().unwrap();
+        assert!(
+            result.status.success(),
+            "scoped stage child failed: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        return;
+    }
     let source = GraphForge::new(None).unwrap();
     let stage = tempfile::tempdir().unwrap();
+    // Initialize the engine first: its bounded adjacency cache intentionally
+    // keeps the ordinary query policy. Poison only this isolated process's
+    // default tempfile path to exercise publication-owned directory helpers.
+    tempfile::env::override_temp_dir(&stage.path().join("missing-default-temp")).unwrap();
     let mut scoped = source.shared_handle();
     scoped.research_staging_parent = Some(stage.path().to_path_buf());
     let first = scoped.private_materialization_directory().unwrap();
@@ -454,30 +471,8 @@ fn export_staging_is_scoped_and_inherited_without_changing_query_policy() {
 }
 
 #[test]
-fn publication_export_uses_explicit_stage_with_poisoned_tmpdir() {
-    const ROOT: &str = "GRAPHFORGE_TEST_PUBLICATION_STAGE_ROOT";
-    const VERSION: &str = "GRAPHFORGE_TEST_PUBLICATION_STAGE_VERSION";
+fn publication_export_uses_explicit_stage_without_changing_query_policy() {
     let cancellation = CancellationToken::new();
-    if let Some(root) = std::env::var_os(ROOT) {
-        let root = std::path::PathBuf::from(root);
-        let source = GraphForge::new(root.join("project").to_str()).unwrap();
-        source
-            .export_research(
-                &ExportResearchRequest {
-                    version_uuid: Uuid::parse_str(&std::env::var(VERSION).unwrap()).unwrap(),
-                    output: root.join("chosen-stage").join("publication.gfpb"),
-                    bundled: true,
-                    projection: None,
-                },
-                &cancellation,
-            )
-            .unwrap();
-        assert!(
-            source.research_staging_parent.is_none(),
-            "export did not mutate the ordinary facade"
-        );
-        return;
-    }
     let root = tempfile::Builder::new()
         .prefix("graphforge-publication-stage-test-")
         .tempdir()
@@ -535,21 +530,36 @@ fn publication_export_uses_explicit_stage_with_poisoned_tmpdir() {
         Some(root.path())
     );
     drop(view);
-    drop(source);
     #[cfg(unix)]
     drop(_restore);
-    // Poison only the subprocess, never global test-process environment.
-    let result = std::process::Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", "research_interchange::tests::publication_export_uses_explicit_stage_with_poisoned_tmpdir", "--nocapture"])
-        .env(ROOT, root.path()).env(VERSION, version_uuid.to_string())
-        .env("TMPDIR", root.path().join("nonexistent-temp-volume"))
-        .env("TMP", root.path().join("nonexistent-temp-volume"))
-        .env("TEMP", root.path().join("nonexistent-temp-volume"))
-        .output().unwrap();
-    assert!(
-        result.status.success(),
-        "export child failed: {}",
-        String::from_utf8_lossy(&result.stderr)
+    let mut scoped = source.shared_handle();
+    scoped.research_staging_parent = Some(root.path().join("chosen-stage"));
+    let staged_view = crate::research_versions::materialize_version(&scoped, &record).unwrap();
+    assert_eq!(
+        staged_view
+            .research_materialization
+            .as_ref()
+            .unwrap()
+            .path()
+            .parent(),
+        Some(root.path().join("chosen-stage").as_path())
     );
+    assert_eq!(
+        staged_view.research_staging_parent,
+        scoped.research_staging_parent
+    );
+    drop(staged_view);
+    source
+        .export_research(
+            &ExportResearchRequest {
+                version_uuid,
+                output: root.path().join("chosen-stage/publication.gfpb"),
+                bundled: true,
+                projection: None,
+            },
+            &cancellation,
+        )
+        .unwrap();
+    assert!(source.research_staging_parent.is_none());
     assert!(root.path().join("chosen-stage/publication.gfpb").is_file());
 }

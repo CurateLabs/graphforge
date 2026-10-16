@@ -818,6 +818,43 @@ fn async_commit_rechecks_retained_bytes_and_never_advances_unverified_refs() {
         HubPublishErrorCode::IntegrityFailure
     );
     assert!(client.refs().is_none());
+    let retry = client.open(&plan);
+    assert_eq!(retry.status, 200);
+    let SessionResponse::Open {
+        session_id,
+        mut uploads,
+    } = serde_json::from_slice(&retry.body).unwrap()
+    else {
+        panic!("expected reopened session")
+    };
+    let retry_session = session_id.as_str().to_owned();
+    let retry_upload = uploads.remove(0);
+    assert_eq!(
+        retry_upload.received, 0,
+        "same request discards known-corrupt bytes"
+    );
+    for (index, part) in plan.bytes.chunks(4).enumerate() {
+        assert_eq!(client.put(&retry_upload, index * 4, part).status, 200);
+    }
+    // A different request commitment for the same intent supersedes this attempt;
+    // known-corrupt carried bytes must not survive that path either.
+    assert_eq!(hub.corrupt_object(&retry_upload.digest), 1);
+    let mut next = Plan::new("abcdefgh", 'e', None);
+    next.operation = plan.operation;
+    let (next_session, next_upload) = client.opened(&next);
+    assert_ne!(next_session, retry_session);
+    assert_eq!(next_upload.received, 0);
+    for (index, part) in next.bytes.chunks(4).enumerate() {
+        assert_eq!(client.put(&next_upload, index * 4, part).status, 200);
+    }
+    assert_eq!(client.commit(&next, &next_session).status, 202);
+    assert!(
+        OperationStatus::from_json(&client.operation(next.operation).body)
+            .unwrap()
+            .receipt
+            .is_some()
+    );
+    assert_eq!(hub.revisions(&demo()).len(), 1);
 }
 
 #[test]
@@ -863,6 +900,12 @@ fn async_verification_requires_fresh_authorization_and_enforces_part_ceiling() {
     );
     assert!(client.refs().is_none());
     let client = Client::new(&hub, demo());
+    let completed = OperationStatus::from_json(&client.operation(plan.operation).body).unwrap();
+    assert!(
+        completed.receipt.is_some(),
+        "fresh bearer completes the same pending operation"
+    );
+    assert!(client.refs().is_some());
     let mut too_many = Plan::new("a", 'e', None);
     too_many.bytes = vec![0; 40_001];
     assert_eq!(client.open(&too_many).status, 413);
