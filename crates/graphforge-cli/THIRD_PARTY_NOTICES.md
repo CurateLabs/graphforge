@@ -17,8 +17,8 @@ python3 scripts/generate_third_party_notices.py
 
 ## License overview
 
-- Apache License 2.0 (385)
-- MIT License (90)
+- Apache License 2.0 (388)
+- MIT License (91)
 - Unicode License v3 (19)
 - BSD 3-Clause "New" or "Revised" License (13)
 - ISC License (4)
@@ -6180,6 +6180,7 @@ Used by:
 - petgraph 0.8.3
 - piper 0.2.5
 - pkg-config 0.3.33
+- png 0.18.1
 - polling 3.11.0
 - rayon 1.12.0
 - rayon-core 1.13.0
@@ -6187,6 +6188,7 @@ Used by:
 - regex-automata 0.4.14
 - regex-syntax 0.8.10
 - ring 0.17.14
+- roxmltree 0.21.1
 - rustc_version 0.4.1
 - rustix 0.38.44
 - rustix 1.1.5
@@ -8302,6 +8304,7 @@ Used by:
 - datasketches 0.2.0
 - dispatch2 0.3.1
 - erased-serde 0.4.10
+- fdeflate 0.3.7
 - flatbuffers 25.12.19
 - half 2.7.1
 - htmlescape 0.3.1
@@ -10774,6 +10777,39 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
 FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
 IN THE SOFTWARE.
+```
+
+--------------------------------------------------------------------------------
+
+## MIT License
+
+Used by:
+- quick-xml 0.42.0
+
+```
+The MIT License (MIT)
+
+Copyright (c) 2016 Johann Tuffe
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
 ```
 
 --------------------------------------------------------------------------------

@@ -39,7 +39,8 @@ pub const HEX_PLACEHOLDER: &str = "{hex}";
 pub const PUBLISH_NEGOTIATION_CAPABILITY: &str = "publish-negotiation";
 
 /// Capability names this release understands, with the major it supports.
-pub const SUPPORTED_CAPABILITIES: [(&str, u16); 4] = [
+pub const SUPPORTED_CAPABILITIES: [(&str, u16); 5] = [
+    ("version-previews", 1),
     ("device-authorization", 1),
     ("publish-session", 1),
     ("resumable-upload", 1),
