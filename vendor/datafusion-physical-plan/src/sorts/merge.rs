@@ -155,7 +155,7 @@ pub(crate) struct SortPreservingMergeStream<C: CursorValues> {
 
     /// This vector contains the indices of the partitions that have not started emitting yet.
     uninitiated_partitions: Vec<usize>,
-    _copy_resident: Option<Arc<Resident>>,
+    copy_resident: Option<Arc<Resident>>,
 }
 
 impl<C: CursorValues> SortPreservingMergeStream<C> {
@@ -200,7 +200,7 @@ impl<C: CursorValues> SortPreservingMergeStream<C> {
             fetch,
             produced: 0,
             uninitiated_partitions: (0..stream_count).collect(),
-            _copy_resident: None,
+            copy_resident: None,
             enable_round_robin_tie_breaker,
         }
     }
@@ -246,7 +246,7 @@ impl<C: CursorValues> SortPreservingMergeStream<C> {
                     mul(indices, size_of::<usize>())?,
                 )?,
             )?;
-            stream._copy_resident = Some(phase.resident(metadata)?);
+            stream.copy_resident = Some(phase.resident(metadata)?);
         }
         Ok(stream)
     }

@@ -45,6 +45,8 @@ pub(super) struct BufferedBatch {
     // Cache the existing admission measurement. Dropping a consumed input must
     // not allocate ArrayData trees or a HashSet just to measure it again.
     memory_size: usize,
+    // Reused while compacting Copy inputs; covered by BufferedBatch capacity.
+    copy_remap: usize,
 }
 
 /// Provides an API to incrementally build a [`RecordBatch`] from partitioned [`RecordBatch`]
@@ -81,8 +83,8 @@ pub struct BatchBuilder {
     /// Consists of a tuple of `(batch_idx, row_idx)`
     indices: Vec<(usize, usize)>,
     copy: Option<Arc<CopyAdmission>>,
-    _copy_resident: Option<Arc<Resident>>,
-    _failed_phase: Option<Phase>,
+    copy_resident: Option<Arc<Resident>>,
+    failed_phase: Option<Phase>,
 }
 
 impl BatchBuilder {
@@ -115,8 +117,8 @@ impl BatchBuilder {
             batches_mem_used: 0,
             initial_reservation,
             copy: None,
-            _copy_resident: None,
-            _failed_phase: None,
+            copy_resident: None,
+            failed_phase: None,
         }
     }
 
@@ -125,7 +127,7 @@ impl BatchBuilder {
         copy: Arc<CopyAdmission>,
         phase: &Phase,
     ) -> Result<()> {
-        self._copy_resident = Some(phase.resident(self.metadata()?)?);
+        self.copy_resident = Some(phase.resident(self.metadata()?)?);
         self.copy = Some(copy);
         Ok(())
     }
@@ -170,13 +172,14 @@ impl BatchBuilder {
             stream_idx,
             batch,
             memory_size: size,
+            copy_remap: usize::MAX,
         });
         if let Some(active) = &phase {
             let result = self.metadata().and_then(|metadata| {
-                active.resize(self._copy_resident.as_ref().unwrap(), metadata)
+                active.resize(self.copy_resident.as_ref().unwrap(), metadata)
             });
             if let Err(error) = result {
-                self._failed_phase = phase.take();
+                self.failed_phase = phase.take();
                 return Err(error);
             }
         }
@@ -217,29 +220,31 @@ impl BatchBuilder {
     }
 
     /// Release only sealed Copy inputs with no future rows or pending indices.
-    /// Kept indices move down in ascending old-index order, so an already
-    /// remapped index cannot be mistaken for a later old index. No new ledger
-    /// or Arrow metadata is constructed, and retained Vec capacity stays paid.
+    /// Mark pending inputs, calculate their destinations, then remap indices
+    /// before compacting. Each pass is linear in batches or pending indices;
+    /// the per-batch scratch slot is already covered by admitted Vec capacity.
+    /// No ledger or Arrow metadata is constructed during cleanup.
     pub(super) fn release_consumed_inputs(&mut self) {
         if self.copy.is_none() {
             return;
         }
-        let mut old_idx = 0;
+        for input in &mut self.batches {
+            input.copy_remap = usize::MAX;
+        }
+        for &(batch, _) in &self.indices {
+            self.batches[batch].copy_remap = 0;
+        }
         let mut new_idx = 0;
-        self.batches.retain(|input| {
+        for (old_idx, input) in self.batches.iter_mut().enumerate() {
             let cursor = &mut self.cursors[input.stream_idx];
             let current = cursor.batch_idx == old_idx;
             let future = current && cursor.row_idx < input.batch.num_rows();
-            let pending = self.indices.iter().any(|(batch, _)| *batch == old_idx);
+            let pending = input.copy_remap != usize::MAX;
             let retain = future || pending;
             if retain {
+                input.copy_remap = new_idx;
                 if current {
                     cursor.batch_idx = new_idx;
-                }
-                for (batch, _) in &mut self.indices {
-                    if *batch == old_idx {
-                        *batch = new_idx;
-                    }
                 }
                 new_idx += 1;
             } else {
@@ -250,9 +255,13 @@ impl BatchBuilder {
                     cursor.batch_idx = usize::MAX;
                 }
             }
-            old_idx += 1;
-            retain
-        });
+        }
+        // Old slots still exist here, including those whose data will drop.
+        // Every pending index marked its source, so its destination is live.
+        for (batch, _) in &mut self.indices {
+            *batch = self.batches[*batch].copy_remap;
+        }
+        self.batches.retain(|input| input.copy_remap != usize::MAX);
     }
 
     /// Try to interleave all columns using the given index slice.

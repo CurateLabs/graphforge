@@ -139,9 +139,9 @@ pub struct RowCursorStream {
     /// Allocated rows for each partition, we keep two to allow for buffering one
     /// in the consumer of the stream
     rows: ReusableRows,
-    _copy_resident: Option<Arc<Resident>>,
+    copy_resident: Option<Arc<Resident>>,
     // A failed mutation can retain converter/reuse backing until stream drop.
-    _failed_phase: Option<Phase>,
+    failed_phase: Option<Phase>,
 }
 
 impl RowCursorStream {
@@ -230,8 +230,8 @@ impl RowCursorStream {
         let resident = phase.as_ref().map(|p| p.resident(metadata)).transpose()?;
         Ok(Self {
             copy,
-            _copy_resident: resident,
-            _failed_phase: None,
+            copy_resident: resident,
+            failed_phase: None,
             converter,
             reservation,
             column_expressions: expressions.iter().map(|x| Arc::clone(&x.expr)).collect(),
@@ -306,7 +306,7 @@ impl RowCursorStream {
             self.reservation.try_resize(self.converter.size())?;
             if let Some(phase) = &phase {
                 let metadata = self.metadata()?;
-                phase.resize(self._copy_resident.as_ref().unwrap(), metadata)?;
+                phase.resize(self.copy_resident.as_ref().unwrap(), metadata)?;
             }
 
             let rows = Arc::new(rows);
@@ -321,10 +321,10 @@ impl RowCursorStream {
             let rows_reservation = self.reservation.new_empty();
             rows_reservation.try_grow(rows.size())?;
             Ok(RowValues::new(rows, rows_reservation)
-                .with_copy_resident(resident, self._copy_resident.clone()))
+                .with_copy_resident(resident, self.copy_resident.clone()))
         })();
         if result.is_err() {
-            self._failed_phase = phase.take();
+            self.failed_phase = phase.take();
         }
         result
     }

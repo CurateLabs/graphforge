@@ -489,7 +489,7 @@ impl arrow_buffer::MemoryPool for Claims {
 #[derive(Default)]
 pub(super) struct DictionarySources {
     values: Vec<ArrayData>,
-    _metadata: Option<Budget>,
+    metadata: Option<Budget>,
 }
 /// A private reader parses one schema and clones that exact Arc into each
 /// unprojected batch. Keep its authority through the reader and last body token.
@@ -497,7 +497,7 @@ pub(super) struct DictionarySources {
 #[derive(Debug)]
 pub(super) struct SharedSchema {
     schema: SchemaRef,
-    _authority: Budget,
+    authority: Budget,
 }
 impl SharedSchema {
     pub(super) fn bound(schema: &Schema) -> Result<usize> {
@@ -513,14 +513,11 @@ impl SharedSchema {
         let resident = super::schema_admission::fresh_resident_schema_bound(&schema);
         // Allocate this owner while complete construction authority is live.
         // Its schema drops before authority, including on the final body token.
-        let owner = Arc::new(Self {
-            schema,
-            _authority: authority,
-        });
+        let owner = Arc::new(Self { schema, authority });
         if let Some(bytes) = resident {
             // Unknown/overflowing representations keep the old grant. A bound
             // above the construction grant cannot trigger post-parse admission.
-            owner._authority.shrink_to(bytes);
+            owner.authority.shrink_to(bytes);
         }
         owner
     }
@@ -760,7 +757,7 @@ pub(super) fn retain_batch(
     }
     let mut next = DictionarySources::default();
     if roots != 0 {
-        next._metadata = Some(work.split(snapshot));
+        next.metadata = Some(work.split(snapshot));
         next.values.try_reserve_exact(roots).map_err(|error| {
             DataFusionError::ResourcesExhausted(format!(
                 "Spill dictionary roots allocation failed: {error}"

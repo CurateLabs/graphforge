@@ -158,8 +158,8 @@ pub struct RowValues {
     /// cursor. Freed on drop
     _reservation: MemoryReservation,
     // Last field: row backing drops before its paired authority.
-    _copy_resident: Option<Arc<super::copy_admission::Resident>>,
-    _copy_metadata: Option<Arc<super::copy_admission::Resident>>,
+    copy_resident: Option<Arc<super::copy_admission::Resident>>,
+    copy_metadata: Option<Arc<super::copy_admission::Resident>>,
 }
 
 impl RowValues {
@@ -176,8 +176,8 @@ impl RowValues {
         );
         assert!(rows.num_rows() > 0);
         Self {
-            _copy_resident: None,
-            _copy_metadata: None,
+            copy_resident: None,
+            copy_metadata: None,
             rows,
             _reservation: reservation,
         }
@@ -190,8 +190,8 @@ impl RowValues {
         resident: Option<Arc<super::copy_admission::Resident>>,
         metadata: Option<Arc<super::copy_admission::Resident>>,
     ) -> Self {
-        self._copy_resident = resident;
-        self._copy_metadata = metadata;
+        self.copy_resident = resident;
+        self.copy_metadata = metadata;
         self
     }
 }

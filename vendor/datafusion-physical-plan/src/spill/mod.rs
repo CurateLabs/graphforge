@@ -84,7 +84,7 @@ struct SpillReaderStream {
 /// when aborting its handle cannot stop the blocking operation.
 struct AdmittedSpillReader {
     reader: StreamReader<BufReader<File>>,
-    _persistent: admission::Budget,
+    persistent: admission::Budget,
     _file: RefCountedTempFile,
     dictionary_bound: usize,
     dictionary_sources: admission::DictionarySources,
@@ -212,7 +212,7 @@ impl SpillReaderStream {
                                 );
                                 AdmittedSpillReader {
                                     reader,
-                                    _persistent: persistent,
+                                    persistent: persistent,
                                     schema_owner,
                                     _file: file,
                                     dictionary_bound: 0,
@@ -234,7 +234,7 @@ impl SpillReaderStream {
                         let frame = admission::preflight(
                             admitted.reader.get_mut(),
                             &work,
-                            &admitted._persistent,
+                            &admitted.persistent,
                             &cancelled,
                             &schema,
                             8192,
