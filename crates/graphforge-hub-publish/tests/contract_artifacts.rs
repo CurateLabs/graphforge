@@ -835,6 +835,55 @@ fn corpus() -> Corpus {
         ),
         status(200).json(serde_json::to_value(expected).unwrap()),
     ));
+    negotiated.steps.extend([
+        send(
+            request(
+                HubMethod::Post,
+                format!("{HUB}/.gf/oauth/device_authorization"),
+            )
+            .form(&[
+                ("client_id", "client_workos_example"),
+                ("scope", "publish:openalex/demo"),
+            ]),
+            status(200)
+                .capture("device", "/device_code")
+                .capture("user", "/user_code"),
+        ),
+        act(Action::ApproveDevice {
+            user_code: "${user}".into(),
+        }),
+        act(Action::AdvanceClock { seconds: 5 }),
+        send(
+            request(HubMethod::Post, format!("{HUB}/.gf/oauth/token")).form(&[
+                ("client_id", "client_workos_example"),
+                ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
+                ("device_code", "${device}"),
+            ]),
+            status(200).capture("token", "/access_token"),
+        ),
+    ]);
+    let publication = v1(1);
+    let mut opened = open_new(&publication, "token", "negotiated");
+    let Step::Request {
+        request: session_request,
+        expect,
+    } = &mut opened
+    else {
+        unreachable!()
+    };
+    session_request.json.as_mut().unwrap()["requirements"] = json!([{
+        "capability": "publish-negotiation", "major": 1
+    }]);
+    for upload in expect.json.as_mut().unwrap()["uploads"]
+        .as_array_mut()
+        .unwrap()
+    {
+        upload["chunk_bytes"] = json!(upload["length"].as_u64().unwrap().min(8_388_608));
+    }
+    negotiated.steps.push(opened);
+    negotiated
+        .steps
+        .extend(upload_all(&publication, "negotiated"));
     cases.push(negotiated);
 
     // Create, then read back the way `gf clone` does.
@@ -1565,7 +1614,8 @@ fn session_response_schema() -> Value {
                     "uploads": {"type": "array", "minItems": 1, "items": {"type": "object", "additionalProperties": false,
                         "required": ["digest", "length", "upload_url", "received"], "properties": {
                             "digest": {"$ref": "#/$defs/digest"}, "length": {"type": "integer", "minimum": 1},
-                            "upload_url": {"$ref": "#/$defs/https_url"}, "received": {"type": "integer", "minimum": 0}}}}}},
+                            "upload_url": {"$ref": "#/$defs/https_url"}, "received": {"type": "integer", "minimum": 0},
+                            "chunk_bytes": {"type": "integer", "minimum": 1}}}}}},
                 {"type": "object", "additionalProperties": false, "required": ["state", "receipt"], "properties": {
                     "state": {"const": "complete"}, "receipt": {"$ref": "#/$defs/receipt"}}}
             ],

@@ -2129,3 +2129,34 @@ fn negotiated_chunk_budget_refuses_hostile_preferences_without_clamping() {
         Duration::from_secs(2400)
     );
 }
+
+#[test]
+fn per_object_chunk_selection_overrides_the_hub_preference_with_the_same_budget() {
+    let mut config = ReferenceHubConfig::default();
+    config.limits.preferred_chunk_bytes = Some(8 * 1024 * 1024);
+    config.limits.max_chunk_bytes = u64::MAX;
+    let capabilities = ReferenceHub::with_config(config)
+        .unwrap()
+        .capabilities(&RepositoryIdentity::parse("curate/claims").unwrap());
+    let mut target = UploadTarget {
+        digest: sha256_digest(b"object"),
+        length: 128 * 1024 * 1024,
+        upload_url: format!("{HUB}/.gf/uploads/test"),
+        received: 0,
+        chunk_bytes: Some(4 * 1024 * 1024),
+    };
+    assert_eq!(
+        upload_chunk_size(&capabilities, &target).unwrap(),
+        4 * 1024 * 1024
+    );
+    target.chunk_bytes = None;
+    assert_eq!(
+        upload_chunk_size(&capabilities, &target).unwrap(),
+        8 * 1024 * 1024
+    );
+    target.chunk_bytes = Some(64 * 1024 * 1024 + 1);
+    assert_eq!(
+        error_code(&upload_chunk_size(&capabilities, &target).unwrap_err()),
+        "hub.publish.invalid_input"
+    );
+}

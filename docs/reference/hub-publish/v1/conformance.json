@@ -108,6 +108,132 @@
               ]
             }
           }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "url": "https://hub.example/.gf/oauth/device_authorization",
+            "headers": {
+              "content-type": "application/x-www-form-urlencoded"
+            },
+            "form": {
+              "client_id": "client_workos_example",
+              "scope": "publish:openalex/demo"
+            }
+          },
+          "expect": {
+            "status": 200,
+            "capture": {
+              "device": "/device_code",
+              "user": "/user_code"
+            }
+          }
+        },
+        {
+          "action": {
+            "action": "approve_device",
+            "user_code": "${user}"
+          }
+        },
+        {
+          "action": {
+            "action": "advance_clock",
+            "seconds": 5
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "url": "https://hub.example/.gf/oauth/token",
+            "headers": {
+              "content-type": "application/x-www-form-urlencoded"
+            },
+            "form": {
+              "client_id": "client_workos_example",
+              "device_code": "${device}",
+              "grant_type": "urn:ietf:params:oauth:grant-type:device_code"
+            }
+          },
+          "expect": {
+            "status": 200,
+            "capture": {
+              "token": "/access_token"
+            }
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "url": "https://hub.example/openalex/demo/.gf/publish/sessions",
+            "headers": {
+              "authorization": "Bearer ${token}",
+              "content-type": "application/json"
+            },
+            "json": {
+              "format": "graphforge-hub-publish/1",
+              "intent_digest": "sha256:a8c322a442f50d5420afb497bbeefc6992d504cd4820582283b7ed96087b9481",
+              "objects": [
+                {
+                  "digest": "sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60",
+                  "length": 47,
+                  "media_type": "application/vnd.graphforge.project"
+                }
+              ],
+              "operation_uuid": "00000000-0000-7000-8000-000000000001",
+              "repository": {
+                "owner": "openalex",
+                "repository": "demo"
+              },
+              "request_commitment": "sha256:23e848008534dcc20d5c13d1298d52b0f3a2535f4b4206d9d6cacd79614322ef",
+              "requirements": [
+                {
+                  "capability": "publish-negotiation",
+                  "major": 1
+                }
+              ]
+            }
+          },
+          "expect": {
+            "status": 201,
+            "json": {
+              "session_id": "${negotiated_session}",
+              "state": "open",
+              "uploads": [
+                {
+                  "chunk_bytes": 47,
+                  "digest": "sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60",
+                  "length": 47,
+                  "received": 0,
+                  "upload_url": "${negotiated_upload_0}"
+                }
+              ]
+            },
+            "capture": {
+              "negotiated_session": "/session_id",
+              "negotiated_upload_0": "/uploads/0/upload_url"
+            }
+          }
+        },
+        {
+          "request": {
+            "method": "PUT",
+            "url": "${negotiated_upload_0}",
+            "headers": {
+              "content-range": "bytes 0-46/47"
+            },
+            "body_text": "graphforge project package fixture: version one"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "upload-offset": "47"
+            },
+            "json": {
+              "digest": "sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60",
+              "length": 47,
+              "received": 47
+            }
+          }
         }
       ]
     },

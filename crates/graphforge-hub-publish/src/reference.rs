@@ -560,6 +560,17 @@ impl ReferenceHub {
                     length: object.length,
                     upload_url: format!("{}/.gf/uploads/{}", self.config.base_url, upload.id),
                     received: upload.bytes.len() as u64,
+                    chunk_bytes: session
+                        .request
+                        .requirements
+                        .iter()
+                        .any(|capability| {
+                            capability.capability == PUBLISH_NEGOTIATION_CAPABILITY
+                                && capability.major == 1
+                        })
+                        .then_some(self.config.limits.preferred_chunk_bytes)
+                        .flatten()
+                        .map(|bytes| bytes.min(object.length)),
                 })
                 .collect(),
         }

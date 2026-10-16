@@ -26,9 +26,10 @@ use graphforge_discovery::{
 use graphforge_hub_publish::{
     CommitRequest, DEVICE_CODE_GRANT_TYPE, DeviceAuthorizationResponse, DevicePoll,
     HUB_PUBLISH_FORMAT, HubErrorBody, HubMethod, HubPublishErrorCode, HubRequest, HubResponse,
-    ObjectDeclaration, OpenSessionRequest, OperationStatus, PublishCapabilities, PublishIntent,
-    PublishReceipt, PublishToken, SessionResponse, UPLOAD_OFFSET_HEADER, UploadStatus,
-    UploadTarget, canonical_json, content_range, parse_unique_json, publish_scope, sha256_digest,
+    ObjectDeclaration, OpenSessionRequest, OperationStatus, PUBLISH_NEGOTIATION_CAPABILITY,
+    PublishCapabilities, PublishIntent, PublishReceipt, PublishToken, SessionResponse,
+    UPLOAD_OFFSET_HEADER, UploadStatus, UploadTarget, canonical_json, content_range,
+    parse_unique_json, publish_scope, sha256_digest,
 };
 use publication::{
     ManifestInputs, PACKAGE_MEDIA_TYPE, SUMMARY_MEDIA_TYPE, VerifiedBundle, build_manifest,
@@ -1281,7 +1282,6 @@ fn upload_offset(response: &HubResponse, length: u64) -> Result<u64, GfError> {
         })
 }
 
-/// Upload whatever the Hub has not retained, resuming at its reported offset.
 fn negotiated_chunk_size(limits: &graphforge_hub_publish::PublishLimits) -> Result<u64, GfError> {
     let size = limits
         .preferred_chunk_bytes
@@ -1295,6 +1295,18 @@ fn negotiated_chunk_size(limits: &graphforge_hub_publish::PublishLimits) -> Resu
     Ok(size)
 }
 
+fn upload_chunk_size(
+    capabilities: &PublishCapabilities,
+    target: &UploadTarget,
+) -> Result<u64, GfError> {
+    let mut limits = capabilities.limits;
+    limits.preferred_chunk_bytes = capabilities
+        .upload_chunk_bytes(target)
+        .map_err(|error| protocol(&error))?;
+    negotiated_chunk_size(&limits)
+}
+
+/// Upload whatever the Hub has not retained, resuming at its reported offset.
 fn upload(
     hub: &Hub<'_>,
     target: &UploadTarget,
@@ -1550,9 +1562,14 @@ pub(crate) fn publish(
         intent_digest,
         repository: identity.clone(),
         objects: snapshot.objects.clone(),
-        requirements: Vec::new(),
+        requirements: capabilities
+            .requirements
+            .iter()
+            .filter(|capability| capability.capability == PUBLISH_NEGOTIATION_CAPABILITY)
+            .cloned()
+            .collect(),
     };
-    let max_chunk = negotiated_chunk_size(&capabilities.limits)?;
+    negotiated_chunk_size(&capabilities.limits)?;
     let sessions = endpoint(&base, "publish/sessions");
     let opened = session_response(&hub.control(
         HubRequest::new(HubMethod::Post, sessions.as_str()).with_json(&open),
@@ -1584,7 +1601,11 @@ pub(crate) fn publish(
             "upload locations do not match the declared inventory",
         ));
     }
-    for target in &uploads {
+    let chunk_sizes = uploads
+        .iter()
+        .map(|target| upload_chunk_size(&capabilities, target))
+        .collect::<Result<Vec<_>, _>>()?;
+    for (target, max_chunk) in uploads.iter().zip(chunk_sizes) {
         let source = snapshot.sources.get(&target.digest).ok_or_else(|| {
             publish_error(
                 HubPublishErrorCode::InvalidInput,

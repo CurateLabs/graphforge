@@ -335,6 +335,24 @@ impl PublishCapabilities {
                 digest.strip_prefix("sha256:").unwrap_or(digest),
             )
     }
+
+    /// Resolve and validate a session's per-object chunk preference.
+    pub fn upload_chunk_bytes(
+        &self,
+        upload: &UploadTarget,
+    ) -> Result<Option<u64>, HubPublishError> {
+        if let Some(bytes) = upload.chunk_bytes {
+            if !self.requirements.iter().any(|capability| {
+                capability.capability == PUBLISH_NEGOTIATION_CAPABILITY && capability.major == 1
+            }) {
+                return Err(invalid("per-object chunks require publish-negotiation@1"));
+            }
+            if bytes == 0 || bytes > self.limits.max_chunk_bytes {
+                return Err(invalid("per-object chunk size exceeds upload bounds"));
+            }
+        }
+        Ok(upload.chunk_bytes.or(self.limits.preferred_chunk_bytes))
+    }
 }
 
 /// One object in a publish session inventory.
@@ -470,6 +488,13 @@ pub struct UploadTarget {
     pub upload_url: String,
     /// Bytes already received and retained.
     pub received: u64,
+    /// Per-object chunk preference, overriding the capabilities preference.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_present"
+    )]
+    pub chunk_bytes: Option<u64>,
 }
 
 /// Session open and commit response.
