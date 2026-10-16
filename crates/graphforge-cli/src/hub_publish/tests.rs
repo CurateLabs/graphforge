@@ -1977,23 +1977,58 @@ fn private_context_checks_exact_revision_and_raw_lineage_integrity_and_bindings(
 fn negotiated_workos_client_eight_mib_chunks_and_hex_locations_publish_real_project() {
     let root = tempfile::tempdir().unwrap();
     let mut graph = GraphForge::new(root.path().join("project").to_str()).unwrap();
-    // Deterministic, poorly compressible data makes a real portable object exceed
-    // one preferred chunk. The query precedes research capture, so lineage stays small.
-    let alphabet = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-";
+    // A native owned Artifact carries real incompressible content while the
+    // historical graph validator retains its normal small semantic footprint.
+    // This avoids changing native graph capture/query admission for this test.
+    use graphforge_api::{
+        ArtifactKind, ArtifactPayloadRequest, CapabilityId, EnableCapabilityRequest,
+        RegisterArtifactRequest, RegisterSourceRequest, SourceKind,
+    };
+    let context = || WriteContext {
+        operation_uuid: OperationId(Uuid::now_v7()),
+        actor_uuid: None,
+    };
+    for capability_id in [CapabilityId::Provenance, CapabilityId::Knowledge] {
+        graph
+            .enable_capability(EnableCapabilityRequest {
+                context: context(),
+                capability_id,
+                capability_version: 1,
+            })
+            .unwrap();
+    }
+    let source_uuid = Uuid::now_v7();
+    graph
+        .register_source(RegisterSourceRequest {
+            context: context(),
+            source_uuid,
+            label: "Negotiated upload evidence".into(),
+            source_kind: SourceKind::Manuscript,
+            identity_uri: None,
+        })
+        .unwrap();
     let mut state = 0x1234_5678_u32;
-    let payload: String = (0..12 * 1024 * 1024)
+    let bytes: Vec<u8> = (0..12 * 1024 * 1024)
         .map(|_| {
             state ^= state << 13;
             state ^= state >> 17;
             state ^= state << 5;
-            char::from(alphabet[(state & 63) as usize])
+            state as u8
         })
         .collect();
     graph
-        .execute(&format!("CREATE (:Item {{score:0,payload:'{payload}'}})"))
+        .register_artifact(RegisterArtifactRequest {
+            context: context(),
+            source_uuid,
+            artifact_uuid: Uuid::now_v7(),
+            artifact_kind: ArtifactKind::RawScan,
+            media_type: "application/octet-stream".into(),
+            payload: ArtifactPayloadRequest::LocalBytes(bytes),
+            derivation_inputs: vec![],
+            run_uuid: None,
+        })
         .unwrap();
-    let (branch, _) = create_branch(&mut graph, "main", current());
-    edit(&mut graph, branch, 1);
+    create_branch(&mut graph, "main", current());
     let mut config = ReferenceHubConfig {
         base_url: HUB.into(),
         authorization_client_id: Some("client_workos_example".into()),
@@ -2007,16 +2042,37 @@ fn negotiated_workos_client_eight_mib_chunks_and_hex_locations_publish_real_proj
         assert!(hub.approve_device(code));
         hub.advance_clock(5);
     });
+    let error = interrupted.unwrap_err();
     assert!(
-        interrupted.is_err(),
-        "the first connection deliberately drops after retaining half a chunk"
+        error.to_string().contains("hub.network"),
+        "expected the injected connection cut, got {error}"
     );
+    let first_run = hub.log();
+    let cut = puts(&first_run)[0].clone();
+    let (_, _, total) =
+        graphforge_hub_publish::parse_content_range(cut.content_range.as_deref().unwrap()).unwrap();
+    let retained = cut.body_len as u64;
+    assert!(retained > 0 && retained < total && retained < 8 * 1024 * 1024);
     let (result, _, _) = device_flow(&hub, &graph, |_, hub, code| {
         assert!(hub.approve_device(code));
         hub.advance_clock(5);
     });
     result.unwrap();
     let log = hub.log();
+    let resumed = puts(&log[first_run.len()..])
+        .into_iter()
+        .find(|x| x.path == cut.path)
+        .unwrap();
+    let (start, end, advertised_total) =
+        graphforge_hub_publish::parse_content_range(resumed.content_range.as_deref().unwrap())
+            .unwrap();
+    assert_eq!(
+        start, retained,
+        "resume starts at exact native retained offset"
+    );
+    assert_eq!(advertised_total, total);
+    assert_eq!(resumed.body_len as u64, end - start + 1);
+
     assert!(
         log.iter()
             .any(|x| x.method == "PUT" && x.body_len == 8 * 1024 * 1024),
@@ -2033,7 +2089,19 @@ fn negotiated_workos_client_eight_mib_chunks_and_hex_locations_publish_real_proj
     ));
     let manifest =
         DiscoveryManifest::from_json(&response.body, DiscoveryLimits::default()).unwrap();
+    assert!(
+        manifest
+            .objects
+            .iter()
+            .any(|object| object.length > 8 * 1024 * 1024)
+    );
     for object in manifest.objects {
+        let stored = hub
+            .hub
+            .handle(&HubRequest::new(HubMethod::Get, &object.locations[0]));
+        assert_eq!(stored.status, 200);
+        assert_eq!(stored.body.len() as u64, object.length);
+        assert_eq!(sha256_digest(&stored.body), object.digest.0);
         assert_eq!(
             object.locations,
             vec![format!(

@@ -159,6 +159,16 @@ pub fn validate_https_url(value: &str) -> Result<Url, HubPublishError> {
     Ok(url)
 }
 
+// Missing optional members preserve legacy documents; a present member must
+// have its declared type. In particular, JSON null is not an omitted value.
+fn deserialize_present<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
+}
+
 /// Upload bounds a Hub advertises. Every bound is enforced from declared
 /// lengths before any byte is buffered.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -173,7 +183,11 @@ pub struct PublishLimits {
     /// Largest body of one upload `PUT`.
     pub max_chunk_bytes: u64,
     /// Preferred positive chunk size, at most `max_chunk_bytes`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_present"
+    )]
     pub preferred_chunk_bytes: Option<u64>,
     /// Largest control-plane JSON request body.
     pub max_document_bytes: u64,
@@ -204,7 +218,11 @@ impl PublishLimits {
 #[serde(deny_unknown_fields)]
 pub struct PublishAuthorization {
     /// OAuth client identifier; absent means `graphforge-cli`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_present"
+    )]
     pub client_id: Option<String>,
     /// RFC 8628 device authorization endpoint.
     pub device_authorization_endpoint: String,
@@ -269,7 +287,10 @@ impl PublishCapabilities {
         }
         if let Some(client_id) = &self.authorization.client_id {
             check_name(client_id, "authorization client identifier is invalid")?;
-            if client_id.chars().any(char::is_whitespace) {
+            if client_id
+                .chars()
+                .any(|c| c.is_whitespace() || c.is_control())
+            {
                 return Err(invalid("authorization client identifier is invalid"));
             }
         }

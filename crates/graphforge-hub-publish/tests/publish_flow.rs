@@ -11,7 +11,7 @@ use graphforge_hub_publish::{
     PublishCapabilities, PublishIntent, PublishReceipt, PublishToken, ReferenceHub,
     ReferenceHubConfig, SessionResponse, UploadTarget, content_range, sha256_digest,
 };
-use serde_json::json;
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 fn demo() -> RepositoryIdentity {
@@ -675,4 +675,33 @@ fn negotiated_capabilities_validate_client_chunk_and_hex_without_ambiguous_templ
             .code,
         HubPublishErrorCode::UnsupportedFuture
     );
+}
+
+#[test]
+fn optional_negotiation_members_are_nonnullable_and_legacy_omission_stays_valid() {
+    let legacy = serde_json::to_value(ReferenceHub::new().capabilities(&demo())).unwrap();
+    PublishCapabilities::from_json(&serde_json::to_vec(&legacy).unwrap()).unwrap();
+    for pointer in ["/authorization", "/limits"] {
+        let key = if pointer == "/authorization" {
+            "client_id"
+        } else {
+            "preferred_chunk_bytes"
+        };
+        for required in [false, true] {
+            let mut value = legacy.clone();
+            value.pointer_mut(pointer).unwrap()[key] = Value::Null;
+            if required {
+                value["requirements"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(json!({"capability":"publish-negotiation","major":1}));
+            }
+            assert_eq!(
+                PublishCapabilities::from_json(&serde_json::to_vec(&value).unwrap())
+                    .unwrap_err()
+                    .code,
+                HubPublishErrorCode::InvalidInput
+            );
+        }
+    }
 }
