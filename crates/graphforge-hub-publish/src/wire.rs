@@ -35,7 +35,8 @@ pub const UPLOAD_LENGTH_HEADER: &str = "upload-length";
 pub const DIGEST_PLACEHOLDER: &str = "{digest}";
 
 /// Capability names this release understands, with the major it supports.
-pub const SUPPORTED_CAPABILITIES: [(&str, u16); 3] = [
+pub const SUPPORTED_CAPABILITIES: [(&str, u16); 4] = [
+    ("version-previews", 1),
     ("device-authorization", 1),
     ("publish-session", 1),
     ("resumable-upload", 1),

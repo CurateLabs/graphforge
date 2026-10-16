@@ -28,3 +28,6 @@ pub use wire::{
     content_range, parse_content_range, publish_scope, validate_https_url, validate_inventory,
     validate_ref_list,
 };
+
+/// Reusable Rust image admission API shared by publisher and Hub.
+pub use graphforge_discovery::preview;

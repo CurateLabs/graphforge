@@ -23,6 +23,10 @@
                 {
                   "capability": "device-authorization",
                   "major": 1
+                },
+                {
+                  "capability": "version-previews",
+                  "major": 1
                 }
               ],
               "format": "graphforge-hub-publish/1",

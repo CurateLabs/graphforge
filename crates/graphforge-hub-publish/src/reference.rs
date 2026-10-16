@@ -226,7 +226,10 @@ impl ReferenceHub {
                 Capability::new("publish-session", 1),
                 Capability::new("resumable-upload", 1),
             ],
-            capabilities: vec![Capability::new("device-authorization", 1)],
+            capabilities: vec![
+                Capability::new("device-authorization", 1),
+                Capability::new("version-previews", 1),
+            ],
             authorization: PublishAuthorization {
                 device_authorization_endpoint: format!(
                     "{}/.gf/oauth/device_authorization",
@@ -682,6 +685,71 @@ impl ReferenceHub {
             }
             if sha256_digest(&upload.bytes) != object.digest {
                 return Err(integrity("an inventory object failed digest verification"));
+            }
+        }
+
+        // Optional presentation bytes have a separate, closed Core admission
+        // boundary. Digest validation alone cannot make arbitrary files images.
+        let previews = manifest
+            .preview_descriptors()
+            .map_err(|_| invalid("preview descriptors are invalid"))?;
+        for object in &session.request.objects {
+            if matches!(object.media_type.as_str(), "image/png" | "image/svg+xml")
+                && !previews.iter().any(|p| p.digest == object.digest)
+            {
+                return Err(invalid("image objects require Version preview descriptors").into());
+            }
+        }
+        if !previews.is_empty() {
+            if !session
+                .request
+                .requirements
+                .iter()
+                .any(|r| r.capability == "version-previews" && r.major == 1)
+            {
+                return Err(invalid("previews require version-previews capability").into());
+            }
+            let lineage_object = manifest
+                .lineage_object()
+                .map_err(|_| invalid("previews require native Version lineage"))?;
+            let lineage_upload = session
+                .request
+                .objects
+                .iter()
+                .zip(&session.uploads)
+                .find(|(object, _)| object.digest == lineage_object.digest.0)
+                .ok_or_else(|| invalid("preview lineage is absent"))?;
+            let lineage = graphforge_discovery::ResearchLineage::from_json(
+                &lineage_upload.1.bytes,
+                discovery_limits,
+            )
+            .map_err(|_| invalid("preview lineage is invalid"))?;
+            let reference = manifest
+                .lineage
+                .as_ref()
+                .ok_or_else(|| invalid("preview lineage reference is absent"))?;
+            if lineage.repository != manifest.repository
+                || lineage.immutable_version != manifest.immutable_version
+                || lineage
+                    .canonical_digest()
+                    .map_err(|_| invalid("preview lineage digest is invalid"))?
+                    != reference.lineage_digest
+            {
+                return Err(invalid("preview lineage does not bind this manifest").into());
+            }
+            for preview in &previews {
+                if lineage.version(&preview.version_uuid).is_none() {
+                    return Err(invalid("preview Version is absent from native lineage").into());
+                }
+                let upload = session
+                    .request
+                    .objects
+                    .iter()
+                    .zip(&session.uploads)
+                    .find(|(object, _)| object.digest == preview.digest)
+                    .ok_or_else(|| invalid("preview bytes are absent"))?;
+                crate::preview::validate_preview(preview, &upload.1.bytes)
+                    .map_err(|_| invalid("preview bytes fail Core image admission"))?;
             }
         }
 

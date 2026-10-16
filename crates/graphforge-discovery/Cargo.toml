@@ -15,5 +15,9 @@ serde_json = { workspace = true }
 sha2 = { workspace = true }
 url = { workspace = true }
 
+png = "=0.18.1"
+roxmltree = "=0.21.1"
+quick-xml = "=0.42.0"
+
 [lints]
 workspace = true

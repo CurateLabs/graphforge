@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "format": {
+      "const": "graphforge-previews/1"
+    },
+    "previews": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "alt": {
+            "maxLength": 2048,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "caption": {
+            "maxLength": 1024,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "digest": {
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "height": {
+            "maximum": 8192,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "length": {
+            "maximum": 8388608,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "media_type": {
+            "enum": [
+              "image/png",
+              "image/svg+xml"
+            ]
+          },
+          "version_uuid": {
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+            "type": "string"
+          },
+          "width": {
+            "maximum": 8192,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "version_uuid",
+          "digest",
+          "media_type",
+          "length",
+          "width",
+          "height"
+        ],
+        "type": "object"
+      },
+      "maxItems": 8,
+      "type": "array"
+    }
+  },
+  "required": [
+    "format",
+    "previews"
+  ],
+  "title": "GraphForge Version previews v1",
+  "type": "object"
+}
