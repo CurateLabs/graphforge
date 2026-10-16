@@ -1972,3 +1972,92 @@ fn private_context_checks_exact_revision_and_raw_lineage_integrity_and_bindings(
         );
     }
 }
+
+#[test]
+fn negotiated_workos_client_eight_mib_chunks_and_hex_locations_publish_real_project() {
+    let root = tempfile::tempdir().unwrap();
+    let mut graph = GraphForge::new(root.path().join("project").to_str()).unwrap();
+    // Deterministic, poorly compressible data makes a real portable object exceed
+    // one preferred chunk. The query precedes research capture, so lineage stays small.
+    let alphabet = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-";
+    let mut state = 0x1234_5678_u32;
+    let payload: String = (0..12 * 1024 * 1024)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            char::from(alphabet[(state & 63) as usize])
+        })
+        .collect();
+    graph
+        .execute(&format!("CREATE (:Item {{score:0,payload:'{payload}'}})"))
+        .unwrap();
+    let (branch, _) = create_branch(&mut graph, "main", current());
+    edit(&mut graph, branch, 1);
+    let mut config = ReferenceHubConfig {
+        base_url: HUB.into(),
+        authorization_client_id: Some("client_workos_example".into()),
+        object_location_hex: true,
+        ..ReferenceHubConfig::default()
+    };
+    config.limits.preferred_chunk_bytes = Some(8 * 1024 * 1024);
+    let hub = LoopbackHub::with_config(config);
+    hub.inject(Fault::CutPut);
+    let (interrupted, _, _) = device_flow(&hub, &graph, |_, hub, code| {
+        assert!(hub.approve_device(code));
+        hub.advance_clock(5);
+    });
+    assert!(
+        interrupted.is_err(),
+        "the first connection deliberately drops after retaining half a chunk"
+    );
+    let (result, _, _) = device_flow(&hub, &graph, |_, hub, code| {
+        assert!(hub.approve_device(code));
+        hub.advance_clock(5);
+    });
+    result.unwrap();
+    let log = hub.log();
+    assert!(
+        log.iter()
+            .any(|x| x.method == "PUT" && x.body_len == 8 * 1024 * 1024),
+        "a real 8 MiB upload must reach the Hub"
+    );
+    assert!(
+        log.iter()
+            .filter(|x| x.method == "PUT")
+            .all(|x| x.body_len <= 8 * 1024 * 1024 && x.bearer.is_none() && x.bypass.is_none())
+    );
+    let response = hub.hub.handle(&HubRequest::new(
+        HubMethod::Get,
+        format!("{HUB}/curate/claims/.gf/manifest"),
+    ));
+    let manifest =
+        DiscoveryManifest::from_json(&response.body, DiscoveryLimits::default()).unwrap();
+    for object in manifest.objects {
+        assert_eq!(
+            object.locations,
+            vec![format!(
+                "{HUB}/curate/claims/.gf/objects/sha256/{}",
+                &object.digest.0[7..]
+            )]
+        );
+    }
+}
+
+#[test]
+fn negotiated_chunk_budget_refuses_hostile_preferences_without_clamping() {
+    let mut limits = ReferenceHubConfig::default().limits;
+    assert_eq!(negotiated_chunk_size(&limits).unwrap(), 1024 * 1024);
+    limits.preferred_chunk_bytes = Some(8 * 1024 * 1024);
+    assert_eq!(negotiated_chunk_size(&limits).unwrap(), 8 * 1024 * 1024);
+    limits.preferred_chunk_bytes = Some(u64::MAX);
+    assert_eq!(
+        error_code(&negotiated_chunk_size(&limits).unwrap_err()),
+        "hub.publish.invalid_input"
+    );
+    assert!(crate::hub_http::chunk_send_timeout(Duration::from_secs(u64::MAX), u64::MAX).is_err());
+    assert_eq!(
+        crate::hub_http::chunk_send_timeout(Duration::from_secs(300), 8 * 1024 * 1024).unwrap(),
+        Duration::from_secs(2400)
+    );
+}

@@ -622,3 +622,57 @@ fn device_flow_issues_a_scoped_short_lived_token() {
     let response = client.open(&Plan::new("package v2", 'c', None));
     assert_eq!(error_code(&response), HubPublishErrorCode::AuthDenied);
 }
+
+#[test]
+fn negotiated_capabilities_validate_client_chunk_and_hex_without_ambiguous_templates() {
+    let mut config = ReferenceHubConfig {
+        authorization_client_id: Some("client_workos_example".into()),
+        object_location_hex: true,
+        ..ReferenceHubConfig::default()
+    };
+    config.limits.preferred_chunk_bytes = Some(8 * 1024 * 1024);
+    let hub = ReferenceHub::with_config(config).unwrap();
+    let caps = hub.capabilities(&demo());
+    caps.validate().unwrap();
+    let digest = sha256_digest(b"object");
+    assert!(
+        caps.object_location(&digest)
+            .ends_with(&format!("/objects/sha256/{}", &digest[7..]))
+    );
+    for bad in ["", "with space", "line\nfeed", &"x".repeat(129)] {
+        let mut value = caps.clone();
+        value.authorization.client_id = Some(bad.into());
+        assert!(value.validate().is_err());
+    }
+    for n in [0, 8 * 1024 * 1024 + 1] {
+        let mut value = caps.clone();
+        value.limits.preferred_chunk_bytes = Some(n);
+        assert!(value.validate().is_err());
+    }
+    for template in [
+        "https://hub.example/{digest}/{hex}",
+        "https://hub.example/{hex}/{hex}",
+        "https://hub.example/{hex}/{unknown}",
+        "https://user@hub.example/{hex}",
+    ] {
+        let mut value = caps.clone();
+        value.object_location_template = template.into();
+        assert!(value.validate().is_err());
+    }
+    let mut value = serde_json::to_value(&caps).unwrap();
+    value["requirements"] = json!([]);
+    assert_eq!(
+        PublishCapabilities::from_json(&serde_json::to_vec(&value).unwrap())
+            .unwrap_err()
+            .code,
+        HubPublishErrorCode::InvalidInput
+    );
+    value["requirements"] = json!([{"capability":"publish-negotiation","major":2}]);
+    value["authorization"]["unknown_field"] = json!(true);
+    assert_eq!(
+        PublishCapabilities::from_json(&serde_json::to_vec(&value).unwrap())
+            .unwrap_err()
+            .code,
+        HubPublishErrorCode::UnsupportedFuture
+    );
+}

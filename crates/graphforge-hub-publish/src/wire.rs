@@ -33,12 +33,17 @@ pub const UPLOAD_LENGTH_HEADER: &str = "upload-length";
 
 /// Placeholder in [`PublishCapabilities::object_location_template`].
 pub const DIGEST_PLACEHOLDER: &str = "{digest}";
+/// SHA-256 hex placeholder without algorithm prefix.
+pub const HEX_PLACEHOLDER: &str = "{hex}";
+/// Negotiated client, chunk and template extension.
+pub const PUBLISH_NEGOTIATION_CAPABILITY: &str = "publish-negotiation";
 
 /// Capability names this release understands, with the major it supports.
-pub const SUPPORTED_CAPABILITIES: [(&str, u16); 3] = [
+pub const SUPPORTED_CAPABILITIES: [(&str, u16); 4] = [
     ("device-authorization", 1),
     ("publish-session", 1),
     ("resumable-upload", 1),
+    (PUBLISH_NEGOTIATION_CAPABILITY, 1),
 ];
 
 const MAX_REQUIREMENTS: usize = 64;
@@ -167,6 +172,9 @@ pub struct PublishLimits {
     pub max_session_bytes: u64,
     /// Largest body of one upload `PUT`.
     pub max_chunk_bytes: u64,
+    /// Preferred positive chunk size, at most `max_chunk_bytes`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preferred_chunk_bytes: Option<u64>,
     /// Largest control-plane JSON request body.
     pub max_document_bytes: u64,
 }
@@ -181,6 +189,12 @@ impl PublishLimits {
         {
             return Err(invalid("publish limits must be positive"));
         }
+        if self
+            .preferred_chunk_bytes
+            .is_some_and(|n| n == 0 || n > self.max_chunk_bytes)
+        {
+            return Err(invalid("preferred chunk size exceeds upload bounds"));
+        }
         Ok(())
     }
 }
@@ -189,6 +203,9 @@ impl PublishLimits {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PublishAuthorization {
+    /// OAuth client identifier; absent means `graphforge-cli`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
     /// RFC 8628 device authorization endpoint.
     pub device_authorization_endpoint: String,
     /// RFC 6749 token endpoint polled with the device-code grant.
@@ -211,7 +228,7 @@ pub struct PublishCapabilities {
     pub capabilities: Vec<Capability>,
     /// Credential acquisition endpoints.
     pub authorization: PublishAuthorization,
-    /// HTTPS location of an admitted object, with one `{digest}` placeholder.
+    /// HTTPS location of an admitted object, with one `{digest}` or `{hex}` placeholder.
     /// Manifests published here must list exactly this location per object.
     pub object_location_template: String,
     /// Upload bounds.
@@ -250,13 +267,38 @@ impl PublishCapabilities {
         if self.authorization.scope != publish_scope(&self.repository) {
             return Err(invalid("authorization scope does not name the repository"));
         }
-        if self
+        if let Some(client_id) = &self.authorization.client_id {
+            check_name(client_id, "authorization client identifier is invalid")?;
+            if client_id.chars().any(char::is_whitespace) {
+                return Err(invalid("authorization client identifier is invalid"));
+            }
+        }
+        let digest_count = self
             .object_location_template
             .matches(DIGEST_PLACEHOLDER)
-            .count()
-            != 1
+            .count();
+        let hex_count = self
+            .object_location_template
+            .matches(HEX_PLACEHOLDER)
+            .count();
+        let rest = self
+            .object_location_template
+            .replace(DIGEST_PLACEHOLDER, "")
+            .replace(HEX_PLACEHOLDER, "");
+        if digest_count + hex_count != 1 || rest.contains(['{', '}']) {
+            return Err(invalid(
+                "object location template needs exactly one {digest} or {hex}",
+            ));
+        }
+        if (self.authorization.client_id.is_some()
+            || self.limits.preferred_chunk_bytes.is_some()
+            || hex_count == 1)
+            && !self
+                .requirements
+                .iter()
+                .any(|c| c.capability == PUBLISH_NEGOTIATION_CAPABILITY && c.major == 1)
         {
-            return Err(invalid("object location template needs one {digest}"));
+            return Err(invalid("negotiated fields require publish-negotiation@1"));
         }
         validate_https_url(&self.object_location(&sha256_digest(b"")))?;
         self.limits.validate()
@@ -267,6 +309,10 @@ impl PublishCapabilities {
     pub fn object_location(&self, digest: &str) -> String {
         self.object_location_template
             .replace(DIGEST_PLACEHOLDER, digest)
+            .replace(
+                HEX_PLACEHOLDER,
+                digest.strip_prefix("sha256:").unwrap_or(digest),
+            )
     }
 }
 

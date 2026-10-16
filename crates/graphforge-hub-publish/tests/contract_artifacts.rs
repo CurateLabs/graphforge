@@ -78,6 +78,8 @@ struct Corpus {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Case {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    negotiated: bool,
     name: String,
     description: String,
     steps: Vec<Step>,
@@ -643,6 +645,7 @@ fn refs_absent(repository: &RepositoryIdentity) -> Step {
 
 fn case(name: &str, description: &str, steps: Vec<Step>) -> Case {
     Case {
+        negotiated: false,
         name: name.into(),
         description: description.into(),
         steps,
@@ -809,6 +812,30 @@ fn corpus() -> Corpus {
             })),
         )],
     ));
+
+    let mut negotiated = case(
+        "negotiated-capabilities",
+        "A Hub advertises its OAuth client, preferred chunk and unprefixed hex locations under a required extension.",
+        vec![],
+    );
+    negotiated.negotiated = true;
+    let mut config = graphforge_hub_publish::ReferenceHubConfig {
+        authorization_client_id: Some("client_workos_example".into()),
+        object_location_hex: true,
+        ..graphforge_hub_publish::ReferenceHubConfig::default()
+    };
+    config.limits.preferred_chunk_bytes = Some(8_388_608);
+    let expected = ReferenceHub::with_config(config)
+        .unwrap()
+        .capabilities(&repository);
+    negotiated.steps.push(send(
+        request(
+            HubMethod::Get,
+            format!("{}/.gf/publish", repo_url(&repository)),
+        ),
+        status(200).json(serde_json::to_value(expected).unwrap()),
+    ));
+    cases.push(negotiated);
 
     // Create, then read back the way `gf clone` does.
     {
@@ -1489,8 +1516,9 @@ fn capabilities_schema() -> Value {
                     "properties": {
                         "device_authorization_endpoint": {"$ref": "#/$defs/https_url"},
                         "token_endpoint": {"$ref": "#/$defs/https_url"},
+                        "client_id": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[^\\s\\x00-\\x1f\\x7f]+$"},
                         "scope": {"type": "string", "pattern": "^publish:[a-z0-9._-]+/[a-z0-9._-]+$"}}},
-                "object_location_template": {"type": "string", "pattern": "^https://[^{}]*\\{digest\\}[^{}]*$"},
+                "object_location_template": {"type": "string", "pattern": "^https://[^{}]*\\{(?:digest|hex)\\}[^{}]*$"},
                 "limits": {"type": "object", "additionalProperties": false,
                     "required": ["max_object_bytes", "max_objects", "max_session_bytes", "max_chunk_bytes", "max_document_bytes"],
                     "properties": {
@@ -1498,6 +1526,7 @@ fn capabilities_schema() -> Value {
                         "max_objects": {"type": "integer", "minimum": 1},
                         "max_session_bytes": {"type": "integer", "minimum": 1},
                         "max_chunk_bytes": {"type": "integer", "minimum": 1},
+                        "preferred_chunk_bytes": {"type": "integer", "minimum": 1},
                         "max_document_bytes": {"type": "integer", "minimum": 1}}}
             },
             "$defs": defs(),
@@ -1920,7 +1949,17 @@ fn every_conformance_case_replays_through_the_reference_hub() {
     assert_eq!(corpus.hub, HUB);
     assert!(corpus.cases.len() >= 15, "corpus lost cases");
     for case in &corpus.cases {
-        let hub = ReferenceHub::new();
+        let hub = if case.negotiated {
+            let mut config = graphforge_hub_publish::ReferenceHubConfig {
+                authorization_client_id: Some("client_workos_example".into()),
+                object_location_hex: true,
+                ..graphforge_hub_publish::ReferenceHubConfig::default()
+            };
+            config.limits.preferred_chunk_bytes = Some(8_388_608);
+            ReferenceHub::with_config(config).unwrap()
+        } else {
+            ReferenceHub::new()
+        };
         let mut variables = BTreeMap::new();
         for (index, step) in case.steps.iter().enumerate() {
             let label = format!("{} step {index}", case.name);

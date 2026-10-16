@@ -478,6 +478,17 @@ fn request_header(
     Ok(value)
 }
 
+/// Preserve the existing per-MiB minimum upload throughput without overflowing.
+pub(crate) fn chunk_send_timeout(
+    base: Duration,
+    bytes: u64,
+) -> Result<Duration, graphforge_api::GfError> {
+    let units = bytes.div_ceil(1024 * 1024).max(1);
+    let units = u32::try_from(units).map_err(|_| network("chunk timeout overflow"))?;
+    base.checked_mul(units)
+        .ok_or_else(|| network("chunk timeout overflow"))
+}
+
 /// Send one request through `agent`; redirects are returned, never followed.
 pub(crate) fn send_with_agent(
     agent: &ureq::Agent,
@@ -505,6 +516,20 @@ pub(crate) fn send_with_agent(
         let built = builder
             .body(request.body.as_slice())
             .map_err(|_| validation("hub.invalid_input", "request is invalid"))?;
+        let built = if request.method == HubMethod::Put {
+            let timeout = agent
+                .config()
+                .timeouts()
+                .send_body
+                .map(|base| chunk_send_timeout(base, request.body.len() as u64))
+                .transpose()?;
+            agent
+                .configure_request(built)
+                .timeout_send_body(timeout)
+                .build()
+        } else {
+            built
+        };
         agent.run(built)
     };
     let response = result.map_err(|_| network("request failed"))?;

@@ -58,10 +58,12 @@ pub(crate) fn allow_device_flow() {
 
 /// OAuth client identifier the CLI presents to device authorization.
 const CLIENT_ID: &str = "graphforge-cli";
-/// Largest upload chunk the client sends, whatever the Hub allows.
+/// Legacy upload size when a Hub does not advertise a preference.
 /// Smaller chunks bound the progress a dropped connection loses and, with
 /// [`crate::hub_http::WRITE_TIMEOUTS`], the slowest uplink that completes one.
 const MAX_CLIENT_CHUNK_BYTES: u64 = 1024 * 1024;
+/// Explicit uploader resource budget for its one owned chunk buffer.
+const MAX_NEGOTIATED_CHUNK_BYTES: u64 = 64 * 1024 * 1024;
 /// Longest the client waits for a device authorization, whatever the Hub allows.
 const MAX_DEVICE_WAIT_SECONDS: u64 = 15 * 60;
 /// Longest pause between device-flow polls, whatever the Hub asks for.
@@ -519,7 +521,13 @@ fn obtain_token(
     let authorization = &capabilities.authorization;
     let response = hub.oauth(
         &authorization.device_authorization_endpoint,
-        &[("client_id", CLIENT_ID), ("scope", &authorization.scope)],
+        &[
+            (
+                "client_id",
+                authorization.client_id.as_deref().unwrap_or(CLIENT_ID),
+            ),
+            ("scope", &authorization.scope),
+        ],
     )?;
     if response.status != 200 {
         return Err(publish_error(
@@ -577,7 +585,10 @@ fn obtain_token(
             &[
                 ("grant_type", DEVICE_CODE_GRANT_TYPE),
                 ("device_code", &device.device_code),
-                ("client_id", CLIENT_ID),
+                (
+                    "client_id",
+                    authorization.client_id.as_deref().unwrap_or(CLIENT_ID),
+                ),
             ],
         )?;
         match DevicePoll::from_response(response.status, &response.body)
@@ -1241,8 +1252,12 @@ fn read_chunk(source: &Source, offset: u64, length: u64) -> Result<Vec<u8>, GfEr
         Source::File(path) => {
             let mut file = File::open(path).map_err(io)?;
             file.seek(SeekFrom::Start(offset)).map_err(io)?;
-            let mut buffer =
-                vec![0; usize::try_from(length).map_err(|_| network("chunk overflow"))?];
+            let size = usize::try_from(length).map_err(|_| network("chunk overflow"))?;
+            let mut buffer = Vec::new();
+            buffer
+                .try_reserve_exact(size)
+                .map_err(|_| network("chunk allocation exceeds available memory"))?;
+            buffer.resize(size, 0);
             file.read_exact(&mut buffer).map_err(io)?;
             Ok(buffer)
         }
@@ -1267,6 +1282,19 @@ fn upload_offset(response: &HubResponse, length: u64) -> Result<u64, GfError> {
 }
 
 /// Upload whatever the Hub has not retained, resuming at its reported offset.
+fn negotiated_chunk_size(limits: &graphforge_hub_publish::PublishLimits) -> Result<u64, GfError> {
+    let size = limits
+        .preferred_chunk_bytes
+        .unwrap_or(limits.max_chunk_bytes.min(MAX_CLIENT_CHUNK_BYTES));
+    if size > MAX_NEGOTIATED_CHUNK_BYTES {
+        return Err(publish_error(
+            HubPublishErrorCode::InvalidInput,
+            "preferred upload chunk exceeds the client's 64 MiB buffer budget",
+        ));
+    }
+    Ok(size)
+}
+
 fn upload(
     hub: &Hub<'_>,
     target: &UploadTarget,
@@ -1524,6 +1552,7 @@ pub(crate) fn publish(
         objects: snapshot.objects.clone(),
         requirements: Vec::new(),
     };
+    let max_chunk = negotiated_chunk_size(&capabilities.limits)?;
     let sessions = endpoint(&base, "publish/sessions");
     let opened = session_response(&hub.control(
         HubRequest::new(HubMethod::Post, sessions.as_str()).with_json(&open),
@@ -1555,10 +1584,6 @@ pub(crate) fn publish(
             "upload locations do not match the declared inventory",
         ));
     }
-    let max_chunk = capabilities
-        .limits
-        .max_chunk_bytes
-        .min(MAX_CLIENT_CHUNK_BYTES);
     for target in &uploads {
         let source = snapshot.sources.get(&target.digest).ok_or_else(|| {
             publish_error(

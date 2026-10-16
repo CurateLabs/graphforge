@@ -10,10 +10,11 @@ use crate::error::{HubPublishError, HubPublishErrorCode, invalid};
 use crate::exchange::{HubExchange, HubMethod, HubRequest, HubResponse};
 use crate::wire::{
     Capability, CommitRequest, DEVICE_CODE_GRANT_TYPE, DIGEST_PLACEHOLDER,
-    DeviceAuthorizationResponse, HUB_PUBLISH_FORMAT, OAuthErrorBody, OpenSessionRequest,
-    OperationStatus, PublishAuthorization, PublishCapabilities, PublishIntent, PublishLimits,
-    PublishReceipt, PublishSessionId, SessionResponse, TokenResponse, UPLOAD_LENGTH_HEADER,
-    UPLOAD_OFFSET_HEADER, UploadStatus, UploadTarget, parse_content_range, publish_scope,
+    DeviceAuthorizationResponse, HEX_PLACEHOLDER, HUB_PUBLISH_FORMAT, OAuthErrorBody,
+    OpenSessionRequest, OperationStatus, PUBLISH_NEGOTIATION_CAPABILITY, PublishAuthorization,
+    PublishCapabilities, PublishIntent, PublishLimits, PublishReceipt, PublishSessionId,
+    SessionResponse, TokenResponse, UPLOAD_LENGTH_HEADER, UPLOAD_OFFSET_HEADER, UploadStatus,
+    UploadTarget, parse_content_range, publish_scope,
 };
 use graphforge_discovery::{
     DISCOVERY_FORMAT, DiscoveryErrorCode, DiscoveryLimits, DiscoveryManifest, ProtocolVersion,
@@ -28,6 +29,10 @@ use uuid::Uuid;
 /// Reference Hub configuration.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReferenceHubConfig {
+    /// Advertised and enforced OAuth client identifier.
+    pub authorization_client_id: Option<String>,
+    /// Advertise algorithm-separated object paths with `{hex}`.
+    pub object_location_hex: bool,
     /// HTTPS origin the Hub serves, without a path (e.g. `https://hub.example`).
     pub base_url: String,
     /// Advertised and enforced upload bounds.
@@ -45,12 +50,15 @@ pub struct ReferenceHubConfig {
 impl Default for ReferenceHubConfig {
     fn default() -> Self {
         Self {
+            authorization_client_id: None,
+            object_location_hex: false,
             base_url: "https://hub.example".to_owned(),
             limits: PublishLimits {
                 max_object_bytes: 64 * 1024 * 1024,
                 max_objects: 1024,
                 max_session_bytes: 256 * 1024 * 1024,
                 max_chunk_bytes: 8 * 1024 * 1024,
+                preferred_chunk_bytes: None,
                 max_document_bytes: 4 * 1024 * 1024,
             },
             token_ttl_seconds: 900,
@@ -200,11 +208,14 @@ impl ReferenceHub {
         if base.path() != "/" || config.base_url.ends_with('/') {
             return Err(invalid("reference hub base URL must be an origin"));
         }
-        Ok(Self {
+        let hub = Self {
             config,
             base,
             state: Mutex::new(State::default()),
-        })
+        };
+        hub.capabilities(&RepositoryIdentity::parse("validation/probe").expect("static identity"))
+            .validate()?;
+        Ok(hub)
     }
 
     /// Repository URL, e.g. `https://hub.example/openalex/demo`.
@@ -219,15 +230,23 @@ impl ReferenceHub {
     /// Capabilities document this Hub serves for `repository`.
     #[must_use]
     pub fn capabilities(&self, repository: &RepositoryIdentity) -> PublishCapabilities {
+        let mut requirements = vec![
+            Capability::new("publish-session", 1),
+            Capability::new("resumable-upload", 1),
+        ];
+        if self.config.authorization_client_id.is_some()
+            || self.config.object_location_hex
+            || self.config.limits.preferred_chunk_bytes.is_some()
+        {
+            requirements.push(Capability::new(PUBLISH_NEGOTIATION_CAPABILITY, 1));
+        }
         PublishCapabilities {
             format: HUB_PUBLISH_FORMAT.to_owned(),
             repository: repository.clone(),
-            requirements: vec![
-                Capability::new("publish-session", 1),
-                Capability::new("resumable-upload", 1),
-            ],
+            requirements,
             capabilities: vec![Capability::new("device-authorization", 1)],
             authorization: PublishAuthorization {
+                client_id: self.config.authorization_client_id.clone(),
                 device_authorization_endpoint: format!(
                     "{}/.gf/oauth/device_authorization",
                     self.config.base_url
@@ -235,10 +254,17 @@ impl ReferenceHub {
                 token_endpoint: format!("{}/.gf/oauth/token", self.config.base_url),
                 scope: publish_scope(repository),
             },
-            object_location_template: format!(
-                "{}/.gf/objects/{DIGEST_PLACEHOLDER}",
-                self.repository_url(repository)
-            ),
+            object_location_template: if self.config.object_location_hex {
+                format!(
+                    "{}/.gf/objects/sha256/{HEX_PLACEHOLDER}",
+                    self.repository_url(repository)
+                )
+            } else {
+                format!(
+                    "{}/.gf/objects/{DIGEST_PLACEHOLDER}",
+                    self.repository_url(repository)
+                )
+            },
             limits: self.config.limits,
         }
     }
@@ -295,6 +321,9 @@ impl ReferenceHub {
                     }
                     (HubMethod::Get, ["refs"]) => read_refs(state, &identity),
                     (HubMethod::Get, ["manifest"]) => read_manifest(state, &identity),
+                    (HubMethod::Get, ["objects", "sha256", hex]) => {
+                        read_object(state, &identity, &format!("sha256:{hex}"), request)
+                    }
                     (HubMethod::Get, ["objects", digest]) => {
                         read_object(state, &identity, digest, request)
                     }
@@ -816,7 +845,14 @@ impl ReferenceHub {
 
     fn device_authorization(&self, state: &mut State, request: &HubRequest) -> HubResponse {
         let form = parse_form(&request.body);
-        if form.get("client_id").is_none_or(String::is_empty) {
+        if form.get("client_id").map(String::as_str)
+            != Some(
+                self.config
+                    .authorization_client_id
+                    .as_deref()
+                    .unwrap_or("graphforge-cli"),
+            )
+        {
             return oauth_error("invalid_request");
         }
         let Some(scope) = form
@@ -856,6 +892,16 @@ impl ReferenceHub {
 
     fn token(&self, state: &mut State, request: &HubRequest) -> HubResponse {
         let form = parse_form(&request.body);
+        if form.get("client_id").map(String::as_str)
+            != Some(
+                self.config
+                    .authorization_client_id
+                    .as_deref()
+                    .unwrap_or("graphforge-cli"),
+            )
+        {
+            return oauth_error("invalid_client");
+        }
         if form.get("grant_type").map(String::as_str) != Some(DEVICE_CODE_GRANT_TYPE) {
             return oauth_error("unsupported_grant_type");
         }

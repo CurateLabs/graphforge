@@ -54,6 +54,64 @@
       ]
     },
     {
+      "negotiated": true,
+      "name": "negotiated-capabilities",
+      "description": "A Hub advertises its OAuth client, preferred chunk and unprefixed hex locations under a required extension.",
+      "steps": [
+        {
+          "request": {
+            "method": "GET",
+            "url": "https://hub.example/openalex/demo/.gf/publish"
+          },
+          "expect": {
+            "status": 200,
+            "json": {
+              "authorization": {
+                "client_id": "client_workos_example",
+                "device_authorization_endpoint": "https://hub.example/.gf/oauth/device_authorization",
+                "scope": "publish:openalex/demo",
+                "token_endpoint": "https://hub.example/.gf/oauth/token"
+              },
+              "capabilities": [
+                {
+                  "capability": "device-authorization",
+                  "major": 1
+                }
+              ],
+              "format": "graphforge-hub-publish/1",
+              "limits": {
+                "max_chunk_bytes": 8388608,
+                "max_document_bytes": 4194304,
+                "max_object_bytes": 67108864,
+                "max_objects": 1024,
+                "max_session_bytes": 268435456,
+                "preferred_chunk_bytes": 8388608
+              },
+              "object_location_template": "https://hub.example/openalex/demo/.gf/objects/sha256/{hex}",
+              "repository": {
+                "owner": "openalex",
+                "repository": "demo"
+              },
+              "requirements": [
+                {
+                  "capability": "publish-session",
+                  "major": 1
+                },
+                {
+                  "capability": "resumable-upload",
+                  "major": 1
+                },
+                {
+                  "capability": "publish-negotiation",
+                  "major": 1
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
       "name": "create-and-read-back",
       "description": "Create-if-absent publication; refs, manifest, and object reads (with resumable Range and If-Range) serve exactly the published bytes.",
       "steps": [
