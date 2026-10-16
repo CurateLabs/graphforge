@@ -147,6 +147,10 @@
           "items": {
             "additionalProperties": false,
             "properties": {
+              "chunk_bytes": {
+                "minimum": 1,
+                "type": "integer"
+              },
               "digest": {
                 "$ref": "#/$defs/digest"
               },

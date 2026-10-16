@@ -1972,3 +1972,191 @@ fn private_context_checks_exact_revision_and_raw_lineage_integrity_and_bindings(
         );
     }
 }
+
+#[test]
+fn negotiated_workos_client_eight_mib_chunks_and_hex_locations_publish_real_project() {
+    let root = tempfile::tempdir().unwrap();
+    let mut graph = GraphForge::new(root.path().join("project").to_str()).unwrap();
+    // A native owned Artifact carries real incompressible content while the
+    // historical graph validator retains its normal small semantic footprint.
+    // This avoids changing native graph capture/query admission for this test.
+    use graphforge_api::{
+        ArtifactKind, ArtifactPayloadRequest, CapabilityId, EnableCapabilityRequest,
+        RegisterArtifactRequest, RegisterSourceRequest, SourceKind,
+    };
+    let context = || WriteContext {
+        operation_uuid: OperationId(Uuid::now_v7()),
+        actor_uuid: None,
+    };
+    for capability_id in [CapabilityId::Provenance, CapabilityId::Knowledge] {
+        graph
+            .enable_capability(EnableCapabilityRequest {
+                context: context(),
+                capability_id,
+                capability_version: 1,
+            })
+            .unwrap();
+    }
+    let source_uuid = Uuid::now_v7();
+    graph
+        .register_source(RegisterSourceRequest {
+            context: context(),
+            source_uuid,
+            label: "Negotiated upload evidence".into(),
+            source_kind: SourceKind::Manuscript,
+            identity_uri: None,
+        })
+        .unwrap();
+    let mut state = 0x1234_5678_u32;
+    let bytes: Vec<u8> = (0..12 * 1024 * 1024)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            state as u8
+        })
+        .collect();
+    graph
+        .register_artifact(RegisterArtifactRequest {
+            context: context(),
+            source_uuid,
+            artifact_uuid: Uuid::now_v7(),
+            artifact_kind: ArtifactKind::RawScan,
+            media_type: "application/octet-stream".into(),
+            payload: ArtifactPayloadRequest::LocalBytes(bytes),
+            derivation_inputs: vec![],
+            run_uuid: None,
+        })
+        .unwrap();
+    create_branch(&mut graph, "main", current());
+    let mut config = ReferenceHubConfig {
+        base_url: HUB.into(),
+        authorization_client_id: Some("client_workos_example".into()),
+        object_location_hex: true,
+        ..ReferenceHubConfig::default()
+    };
+    config.limits.preferred_chunk_bytes = Some(8 * 1024 * 1024);
+    let hub = LoopbackHub::with_config(config);
+    hub.inject(Fault::CutPut);
+    let (interrupted, _, _) = device_flow(&hub, &graph, |_, hub, code| {
+        assert!(hub.approve_device(code));
+        hub.advance_clock(5);
+    });
+    let error = interrupted.unwrap_err();
+    assert!(
+        error.to_string().contains("hub.network"),
+        "expected the injected connection cut, got {error}"
+    );
+    let first_run = hub.log();
+    let cut = puts(&first_run)[0].clone();
+    let (_, _, total) =
+        graphforge_hub_publish::parse_content_range(cut.content_range.as_deref().unwrap()).unwrap();
+    let retained = cut.body_len as u64;
+    assert!(retained > 0 && retained < total && retained < 8 * 1024 * 1024);
+    let (result, _, _) = device_flow(&hub, &graph, |_, hub, code| {
+        assert!(hub.approve_device(code));
+        hub.advance_clock(5);
+    });
+    result.unwrap();
+    let log = hub.log();
+    let resumed = puts(&log[first_run.len()..])
+        .into_iter()
+        .find(|x| x.path == cut.path)
+        .unwrap();
+    let (start, end, advertised_total) =
+        graphforge_hub_publish::parse_content_range(resumed.content_range.as_deref().unwrap())
+            .unwrap();
+    assert_eq!(
+        start, retained,
+        "resume starts at exact native retained offset"
+    );
+    assert_eq!(advertised_total, total);
+    assert_eq!(resumed.body_len as u64, end - start + 1);
+
+    assert!(
+        log.iter()
+            .any(|x| x.method == "PUT" && x.body_len == 8 * 1024 * 1024),
+        "a real 8 MiB upload must reach the Hub"
+    );
+    assert!(
+        log.iter()
+            .filter(|x| x.method == "PUT")
+            .all(|x| x.body_len <= 8 * 1024 * 1024 && x.bearer.is_none() && x.bypass.is_none())
+    );
+    let response = hub.hub.handle(&HubRequest::new(
+        HubMethod::Get,
+        format!("{HUB}/curate/claims/.gf/manifest"),
+    ));
+    let manifest =
+        DiscoveryManifest::from_json(&response.body, DiscoveryLimits::default()).unwrap();
+    assert!(
+        manifest
+            .objects
+            .iter()
+            .any(|object| object.length > 8 * 1024 * 1024)
+    );
+    for object in manifest.objects {
+        let stored = hub
+            .hub
+            .handle(&HubRequest::new(HubMethod::Get, &object.locations[0]));
+        assert_eq!(stored.status, 200);
+        assert_eq!(stored.body.len() as u64, object.length);
+        assert_eq!(sha256_digest(&stored.body), object.digest.0);
+        assert_eq!(
+            object.locations,
+            vec![format!(
+                "{HUB}/curate/claims/.gf/objects/sha256/{}",
+                &object.digest.0[7..]
+            )]
+        );
+    }
+}
+
+#[test]
+fn negotiated_chunk_budget_refuses_hostile_preferences_without_clamping() {
+    let mut limits = ReferenceHubConfig::default().limits;
+    assert_eq!(negotiated_chunk_size(&limits).unwrap(), 1024 * 1024);
+    limits.preferred_chunk_bytes = Some(8 * 1024 * 1024);
+    assert_eq!(negotiated_chunk_size(&limits).unwrap(), 8 * 1024 * 1024);
+    limits.preferred_chunk_bytes = Some(u64::MAX);
+    assert_eq!(
+        error_code(&negotiated_chunk_size(&limits).unwrap_err()),
+        "hub.publish.invalid_input"
+    );
+    assert!(crate::hub_http::chunk_send_timeout(Duration::from_secs(u64::MAX), u64::MAX).is_err());
+    assert_eq!(
+        crate::hub_http::chunk_send_timeout(Duration::from_secs(300), 8 * 1024 * 1024).unwrap(),
+        Duration::from_secs(2400)
+    );
+}
+
+#[test]
+fn per_object_chunk_selection_overrides_the_hub_preference_with_the_same_budget() {
+    let mut config = ReferenceHubConfig::default();
+    config.limits.preferred_chunk_bytes = Some(8 * 1024 * 1024);
+    config.limits.max_chunk_bytes = u64::MAX;
+    let capabilities = ReferenceHub::with_config(config)
+        .unwrap()
+        .capabilities(&RepositoryIdentity::parse("curate/claims").unwrap());
+    let mut target = UploadTarget {
+        digest: sha256_digest(b"object"),
+        length: 128 * 1024 * 1024,
+        upload_url: format!("{HUB}/.gf/uploads/test"),
+        received: 0,
+        chunk_bytes: Some(4 * 1024 * 1024),
+    };
+    assert_eq!(
+        upload_chunk_size(&capabilities, &target).unwrap(),
+        4 * 1024 * 1024
+    );
+    target.chunk_bytes = None;
+    assert_eq!(
+        upload_chunk_size(&capabilities, &target).unwrap(),
+        8 * 1024 * 1024
+    );
+    target.chunk_bytes = Some(64 * 1024 * 1024 + 1);
+    assert_eq!(
+        error_code(&upload_chunk_size(&capabilities, &target).unwrap_err()),
+        "hub.publish.invalid_input"
+    );
+}
