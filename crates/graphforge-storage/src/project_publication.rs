@@ -751,6 +751,7 @@ pub fn stage_project_generation_optimistic_with_graph_tree_mode<'r>(
 /// the writer while admission is still held, verifies CURRENT still names the
 /// exact prepared generation, and only then releases the lifecycle lock while
 /// retaining root identity under the writer.
+#[cfg(test)]
 pub(crate) fn stage_project_generation_from_admitted_parent(
     admission: crate::filesystem_admission::ProjectLifecycleAdmission,
     parent: ResolvedProjectGeneration,

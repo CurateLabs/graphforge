@@ -22,7 +22,7 @@ use graphforge_ontology::{
 use sha2::Digest;
 use uuid::Uuid;
 
-use crate::project_portable::{prepare_import_target, semantically_pristine_generation};
+use crate::project_import_target::{prepare_import_target, semantically_pristine_generation};
 use crate::project_portable_v2::{
     CapturedCompositionControl, PortableV2Error, PortableV2ErrorCode, PortableV2Limits,
     PortableV2PackageClass, PortableV2Report, RUNTIME_MAP_PATH, decode_runtime_map,

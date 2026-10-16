@@ -14,10 +14,9 @@ use clap::{Args, Parser, Subcommand, ValueEnum, error::ErrorKind};
 use graphforge_api::{
     CheckpointDiffDetail, CheckpointDiffScope, CheckpointRequest, CheckpointSelector,
     DeleteCheckpointRequest, DiffCheckpointsRequest, ExecutionResult, GraphForge,
-    ListCheckpointsRequest, OperationId, PageRequest, PageToken, PortableExportRequest,
-    PortableExportResult, PortableImportRequest, PortableImportResult, PortableSelection,
-    PreviewRevertCheckpointRequest, RepositoryContext, RepositorySyncRequest, RepositorySyncStatus,
-    RevertCheckpointPreview, RevertCheckpointRequest, ShowCheckpointRequest,
+    ListCheckpointsRequest, OperationId, PageRequest, PageToken, PreviewRevertCheckpointRequest,
+    RepositoryContext, RepositorySyncRequest, RepositorySyncStatus, RevertCheckpointPreview,
+    RevertCheckpointRequest, ShowCheckpointRequest,
 };
 use uuid::Uuid;
 
@@ -287,11 +286,11 @@ enum Command {
     },
     /// Restore the complete workspace from a checkpoint.
     Revert(RevertArgs),
-    /// Export one immutable generation as a portable envelope.
-    Export(ExportArgs),
-    /// Import a portable envelope into a new or empty project.
-    Import(ImportArgs),
-    /// Portable-v2 preview, export, verify, import, and OCI promotion.
+    /// Export one immutable generation as a streaming portable package.
+    Export(portable_cli::PortableV2ExportArgs),
+    /// Import a streaming portable package into a new or empty project.
+    Import(portable_cli::PortableV2ImportArgs),
+    /// Portable-v2 selection preview, verification, staging, and OCI promotion.
     Portable {
         #[command(subcommand)]
         command: portable_cli::PortableCommand,
@@ -608,33 +607,6 @@ struct RevertArgs {
     preview: bool,
 }
 
-#[derive(Args)]
-struct ExportArgs {
-    /// Export the generation committed as CURRENT when the command starts.
-    #[arg(
-        long,
-        required_unless_present = "checkpoint",
-        conflicts_with = "checkpoint"
-    )]
-    current: bool,
-    /// Export the generation pinned by this active checkpoint.
-    #[arg(long, required_unless_present = "current", conflicts_with = "current")]
-    checkpoint: Option<String>,
-    /// Portable envelope destination.
-    #[arg(long)]
-    output: PathBuf,
-}
-
-#[derive(Args)]
-struct ImportArgs {
-    /// Portable envelope source.
-    #[arg(long)]
-    input: PathBuf,
-    /// Required canonical UUID used for idempotent replay.
-    #[arg(long)]
-    idempotency_key: String,
-}
-
 pub(crate) fn canonical_uuid(value: &str) -> Result<Uuid, graphforge_api::GfError> {
     let parsed = Uuid::parse_str(value)
         .map_err(|_| graphforge_api::GfError::Validation("expected canonical UUID".into()))?;
@@ -799,106 +771,6 @@ fn write_execution_result(
     } else {
         write_result(result, output)
     }
-}
-
-fn write_export_result(
-    result: &PortableExportResult,
-    json: bool,
-    output: &mut dyn Write,
-) -> Result<(), graphforge_api::GfError> {
-    if json {
-        writeln!(
-            output,
-            "{}",
-            serde_json::to_string(&serde_json::json!({
-                "contract": result.contract,
-                "source": result.source,
-                "checkpoint": result.checkpoint,
-                "generation_uuid": result.generation_uuid,
-                "envelope_sha256": result.envelope_sha256,
-                "byte_length": result.byte_length,
-                "participant_count": result.participant_count,
-            }))
-            .map_err(|error| graphforge_api::GfError::Execution(error.to_string()))?
-        )
-        .map_err(|error| graphforge_api::GfError::Execution(error.to_string()))?;
-    } else {
-        writeln!(
-            output,
-            "exported {} generation {} to {} (sha256 {}, {} bytes, {} participants)",
-            result.source,
-            result.generation_uuid,
-            result.output.display(),
-            result.envelope_sha256,
-            result.byte_length,
-            result.participant_count
-        )
-        .map_err(|error| graphforge_api::GfError::Execution(error.to_string()))?;
-    }
-    Ok(())
-}
-
-fn write_import_result(
-    result: &PortableImportResult,
-    json: bool,
-    output: &mut dyn Write,
-) -> Result<(), graphforge_api::GfError> {
-    if json {
-        writeln!(
-            output,
-            "{}",
-            serde_json::to_string(result)
-                .map_err(|error| graphforge_api::GfError::Execution(error.to_string()))?
-        )
-        .map_err(|error| graphforge_api::GfError::Execution(error.to_string()))?;
-    } else {
-        let outcome = if result.idempotent_replay {
-            "replayed"
-        } else {
-            "imported"
-        };
-        writeln!(
-            output,
-            "{outcome} source generation {} as {} (sha256 {})",
-            result.source_generation_uuid, result.generation_uuid, result.envelope_sha256
-        )
-        .map_err(|error| graphforge_api::GfError::Execution(error.to_string()))?;
-    }
-    Ok(())
-}
-
-fn run_import(
-    args: ImportArgs,
-    path: &Path,
-    json: bool,
-    output: &mut dyn Write,
-) -> Result<(), graphforge_api::GfError> {
-    let result = GraphForge::import_portable(
-        path,
-        &PortableImportRequest {
-            input: args.input,
-            operation_id: OperationId(canonical_uuid(&args.idempotency_key)?),
-        },
-    )?;
-    write_import_result(&result, json, output)
-}
-
-fn run_export(
-    graph: &GraphForge,
-    args: ExportArgs,
-    json: bool,
-    output: &mut dyn Write,
-) -> Result<(), graphforge_api::GfError> {
-    let selection = match args.checkpoint {
-        Some(name) => PortableSelection::Checkpoint(name),
-        None if args.current => PortableSelection::Current,
-        None => unreachable!("clap requires exactly one export selector"),
-    };
-    let result = graph.export_portable(PortableExportRequest {
-        selection,
-        output: args.output,
-    })?;
-    write_export_result(&result, json, output)
 }
 
 #[derive(serde::Serialize)]
@@ -1300,13 +1172,6 @@ fn run_with_allocation(
                 )
                 .map(|()| 0);
             }
-            portable_cli::PortableCommand::Import(_) => {
-                let path = resolve_project_path(cli.project, cli.project_dir)?;
-                return portable_cli::run_portable_without_graph(
-                    &path, command, cli.json, output, allocation,
-                )
-                .map(|()| 0);
-            }
             command => {
                 let path = resolve_project_path(cli.project, cli.project_dir)?;
                 let path_text = path.to_str().ok_or_else(|| {
@@ -1323,7 +1188,7 @@ fn run_with_allocation(
     let path = resolve_project_path(cli.project, cli.project_dir)?;
     let command = match command {
         Command::Import(args) => {
-            return run_import(args, &path, cli.json, output)
+            return portable_cli::run_import(&path, args, cli.json, output, allocation)
                 .map(|()| 0)
                 .map_err(Into::into);
         }
@@ -1338,7 +1203,7 @@ fn run_with_allocation(
     let mut graph = open_cli_graph(Path::new(path_text), allocation)?;
     let command = match command {
         Command::Export(args) => {
-            return run_export(&graph, args, cli.json, output)
+            return portable_cli::run_export(&graph, args, cli.json, output)
                 .map(|()| 0)
                 .map_err(Into::into);
         }
@@ -1855,30 +1720,6 @@ mod tests {
 
         let source = Uuid::from_u128(1);
         let generation = Uuid::from_u128(2);
-        for replay in [false, true] {
-            let result = PortableImportResult {
-                contract: "graphforge-portable-import/1",
-                source_generation_uuid: source,
-                generation_uuid: generation,
-                envelope_sha256: "00".repeat(32),
-                idempotent_replay: replay,
-            };
-            let mut plain = Vec::new();
-            write_import_result(&result, false, &mut plain).unwrap();
-            let text = String::from_utf8(plain).unwrap();
-            assert!(text.starts_with(if replay { "replayed" } else { "imported" }));
-            let mut json = Vec::new();
-            write_import_result(&result, true, &mut json).unwrap();
-            assert_eq!(
-                serde_json::from_slice::<serde_json::Value>(&json).unwrap()["idempotent_replay"],
-                replay
-            );
-            assert!(matches!(
-                write_import_result(&result, replay, &mut FailWrite),
-                Err(graphforge_api::GfError::Execution(_))
-            ));
-        }
-
         let preview = RevertCheckpointPreview {
             checkpoint_uuid: Uuid::from_u128(3),
             source_generation_uuid: source,
@@ -2197,8 +2038,7 @@ mod tests {
     fn export_requires_exactly_one_generation_selector() {
         let base = ["gf", "--project", "/tmp/project", "export"];
         assert!(
-            Cli::try_parse_from(base.into_iter().chain(["--output", "/tmp/out.gfportable"]))
-                .is_err()
+            Cli::try_parse_from(base.into_iter().chain(["--output", "/tmp/out.gfpb"])).is_err()
         );
         assert!(
             Cli::try_parse_from(base.into_iter().chain([
@@ -2206,16 +2046,15 @@ mod tests {
                 "--checkpoint",
                 "before-change",
                 "--output",
-                "/tmp/out.gfportable",
+                "/tmp/out.gfpb",
             ]))
             .is_err()
         );
         assert!(
-            Cli::try_parse_from(base.into_iter().chain([
-                "--current",
-                "--output",
-                "/tmp/out.gfportable",
-            ]))
+            Cli::try_parse_from(
+                base.into_iter()
+                    .chain(["--current", "--output", "/tmp/out.gfpb",])
+            )
             .is_ok()
         );
         assert!(
@@ -2223,7 +2062,7 @@ mod tests {
                 "--checkpoint",
                 "before-change",
                 "--output",
-                "/tmp/out.gfportable",
+                "/tmp/out.gfpb",
             ]))
             .is_ok()
         );
@@ -2652,7 +2491,7 @@ mod tests {
             String::from_utf8_lossy(&revert.stderr)
         );
 
-        let envelope = project.path().join("baseline.gfportable");
+        let envelope = project.path().join("baseline.gfpb");
         let envelope_text = envelope.to_string_lossy().into_owned();
         let export = invoke(&[
             "export",

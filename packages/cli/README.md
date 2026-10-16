@@ -8,9 +8,9 @@ npx @curatelabs/graphforge-cli sync --check
 npx @curatelabs/graphforge-cli sync \
   --idempotency-key 41414141-4141-4141-4141-414141414141
 npx @curatelabs/graphforge-cli export --current \
-  --output .graphforge/exports/project.gfportable
+  --output .graphforge/exports/project.gfpb
 npx @curatelabs/graphforge-cli import \
-  --input .graphforge/imports/project.gfportable \
+  --input .graphforge/imports/project.gfpb \
   --idempotency-key 47474747-4747-4747-4747-474747474747
 npx @curatelabs/graphforge-cli checkpoint create before-refactor \
   --idempotency-key 43434343-4343-4343-4343-434343434343

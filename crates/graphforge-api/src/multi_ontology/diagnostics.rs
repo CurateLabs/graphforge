@@ -121,6 +121,11 @@ pub(super) fn portable_error(error: graphforge_storage::PortableV2Error) -> GfEr
             "lifecycle.cancelled",
             "retry with an active cancellation token",
         ),
+        PortableV2ErrorCode::UnsupportedProjectFormat => (
+            "GF_UNSUPPORTED_PROJECT_FORMAT",
+            "interchange.unsupported_format",
+            "export a streaming portable package with a supported producer",
+        ),
         PortableV2ErrorCode::UnsupportedFuture => (
             "GF_UNSUPPORTED_FUTURE",
             "interchange.unsupported_future",

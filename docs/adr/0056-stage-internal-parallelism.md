@@ -111,7 +111,7 @@ current lanes already work:
   119 s of the 392 s at S22. This follows the epic's rule of removing work
   before structural change. Its parallelism outcome stays unmet and is not
   waived.
-- The 2026-10-04 allocator/clone profile was taken on `gf portable import`, not
+- The 2026-10-04 allocator/clone profile was taken on `gf import`, not
   on the `import-session` construction path. It does not identify
   construction work to remove. A construction-path profile has to come first.
 - Removing serial work raises routing's share of complete ingest. The

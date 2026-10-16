@@ -299,7 +299,7 @@ try {
     [".graphforge/state/private.parquet", "graph data\n"],
     [".graphforge/imports/source.arrow", "source data\n"],
     [".graphforge/imports/materialized-seed.db", "seed rows\n"],
-    [".graphforge/exports/snapshot.gfportable", "snapshot bytes\n"],
+    [".graphforge/exports/snapshot.gfpb", "snapshot bytes\n"],
   ]) {
     const target = join(repository, path);
     mkdirSync(dirname(target), { recursive: true });
@@ -336,7 +336,7 @@ try {
     ".db",
     ".sqlite",
     ".duckdb",
-    ".gfportable",
+    ".gfpb",
   ]) {
     assert.equal(
       staged.some((path) => path.includes(forbidden)),
@@ -470,43 +470,37 @@ try {
   );
   cover("checkpoint_and_top_level_revert");
 
-  const envelope = join(
+  const bundle = join(repository, ".graphforge", "exports", "current.gfpb");
+  const secondBundle = join(
     repository,
     ".graphforge",
     "exports",
-    "current.gfportable",
+    "current-copy.gfpb",
   );
-  const secondEnvelope = join(
-    repository,
-    ".graphforge",
-    "exports",
-    "current-copy.gfportable",
-  );
-  const exported = success("export", "--current", "--output", envelope);
-  assert.equal(exported.contract, "graphforge-portable-export/1");
+  const exported = success("export", "--current", "--output", bundle);
+  assert.equal(exported.contract, "graphforge-portable-export/2");
   assert.equal(exported.source, "current");
   assert.equal(exported.checkpoint, null);
   const secondExport = success(
     "export",
     "--current",
     "--output",
-    secondEnvelope,
+    secondBundle,
   );
-  assert.equal(secondExport.envelope_sha256, exported.envelope_sha256);
-  assert.deepEqual(readFileSync(secondEnvelope), readFileSync(envelope));
+  assert.equal(secondExport.package_digest, exported.package_digest);
+  assert.deepEqual(readFileSync(secondBundle), readFileSync(bundle));
 
   successAt(destination, "init", "--no-skills");
   const imported = successAt(
     destination,
     "import",
     "--input",
-    envelope,
+    bundle,
     "--idempotency-key",
     importOperation,
   );
-  assert.equal(imported.contract, "graphforge-portable-import/1");
-  assert.equal(imported.source_generation_uuid, exported.generation_uuid);
-  assert.equal(imported.envelope_sha256, exported.envelope_sha256);
+  assert.equal(imported.contract, "graphforge-portable-import/2");
+  assert.equal(imported.package_digest, exported.package_digest);
   assert.equal(imported.idempotent_replay, false);
   assert.equal(
     successAt(destination, "checkpoint", "list").contract,
@@ -590,7 +584,7 @@ try {
     ".graphforge/migrations/001.yaml",
     ".graphforge/seeds/recipe.yaml",
     ".graphforge/imports/source.arrow",
-    ".graphforge/exports/current.gfportable",
+    ".graphforge/exports/current.gfpb",
     ".agents/skills/graphforge-bootstrap/SKILL.md",
   ]) {
     assert.equal(
