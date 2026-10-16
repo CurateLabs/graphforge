@@ -24,7 +24,7 @@ fn open_with(
     prepared: &PreparedBranchContent,
     read_only: bool,
 ) -> Result<GraphForge, GfError> {
-    let directory = Arc::new(tempfile::tempdir().map_err(|e| GfError::Storage(e.to_string()))?);
+    let directory = Arc::new(owner.private_materialization_directory()?);
     let generation = materialize_prepared_branch(
         owner.resolved_generation.container_root(),
         prepared,
@@ -44,6 +44,9 @@ fn open_with(
             generation.generation_uuid(),
         ),
     )?;
+    graph
+        .research_staging_parent
+        .clone_from(&owner.research_staging_parent);
     graph.lifecycle_mode =
         graphforge_storage::filesystem_admission::ProjectLifecycleMode::Ephemeral;
     graph.research_materialization = Some(directory);

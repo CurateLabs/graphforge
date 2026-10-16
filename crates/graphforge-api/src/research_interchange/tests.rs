@@ -432,3 +432,124 @@ fn check_projection_from_fork(fork: &GraphForge, version_uuid: Uuid, directory: 
     .unwrap();
     assert!(report.research_interchange);
 }
+
+#[test]
+fn export_staging_is_scoped_and_inherited_without_changing_query_policy() {
+    let source = GraphForge::new(None).unwrap();
+    let stage = tempfile::tempdir().unwrap();
+    let mut scoped = source.shared_handle();
+    scoped.research_staging_parent = Some(stage.path().to_path_buf());
+    let first = scoped.private_materialization_directory().unwrap();
+    assert_eq!(first.path().parent(), Some(stage.path()));
+    let nested = scoped.shared_handle();
+    let second = nested.private_materialization_directory().unwrap();
+    assert_eq!(second.path().parent(), Some(stage.path()));
+    assert!(source.research_staging_parent.is_none());
+    assert_eq!(scoped.resource_policy, source.resource_policy);
+    assert_eq!(nested.resource_policy, source.resource_policy);
+    assert!(std::sync::Arc::ptr_eq(
+        &scoped.graph_visibility,
+        &source.graph_visibility
+    ));
+}
+
+#[test]
+fn publication_export_uses_explicit_stage_with_poisoned_tmpdir() {
+    const ROOT: &str = "GRAPHFORGE_TEST_PUBLICATION_STAGE_ROOT";
+    const VERSION: &str = "GRAPHFORGE_TEST_PUBLICATION_STAGE_VERSION";
+    let cancellation = CancellationToken::new();
+    if let Some(root) = std::env::var_os(ROOT) {
+        let root = std::path::PathBuf::from(root);
+        let source = GraphForge::new(root.join("project").to_str()).unwrap();
+        source
+            .export_research(
+                &ExportResearchRequest {
+                    version_uuid: Uuid::parse_str(&std::env::var(VERSION).unwrap()).unwrap(),
+                    output: root.join("chosen-stage").join("publication.gfpb"),
+                    bundled: true,
+                    projection: None,
+                },
+                &cancellation,
+            )
+            .unwrap();
+        assert!(
+            source.research_staging_parent.is_none(),
+            "export did not mutate the ordinary facade"
+        );
+        return;
+    }
+    let root = tempfile::Builder::new()
+        .prefix("graphforge-publication-stage-test-")
+        .tempdir()
+        .unwrap();
+    std::fs::create_dir(root.path().join("chosen-stage")).unwrap();
+    let mut source = GraphForge::new(root.path().join("project").to_str()).unwrap();
+    source.execute("CREATE (:Item {x:7})").unwrap();
+    let version_uuid = Uuid::now_v7();
+    source
+        .create_research_branch(
+            &CreateResearchBranchRequest {
+                author: None,
+                committer: None,
+                operation_uuid: Uuid::now_v7(),
+                expected_generation_uuid: source.generation_for_read().unwrap().generation_uuid(),
+                branch_uuid: Uuid::now_v7(),
+                version_uuid,
+                source: BranchSource::Current {
+                    origin_version_uuid: Uuid::now_v7(),
+                    context_uuid: Uuid::now_v7(),
+                },
+                creator_uuid: Uuid::now_v7(),
+                created_at: 1,
+                label: "stage regression".into(),
+            },
+            &cancellation,
+        )
+        .unwrap();
+    // Normal historical readers still use their original temporary policy,
+    // even when the Project's parent cannot accept new staging directories.
+    #[cfg(unix)]
+    let _restore = {
+        struct Restore(std::path::PathBuf, std::fs::Permissions);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                std::fs::set_permissions(&self.0, self.1.clone()).unwrap();
+            }
+        }
+        let permissions = std::fs::metadata(root.path()).unwrap().permissions();
+        let mut read_only = permissions.clone();
+        read_only.set_readonly(true);
+        std::fs::set_permissions(root.path(), read_only).unwrap();
+        Restore(root.path().to_path_buf(), permissions)
+    };
+    let record = source.research_version(version_uuid).unwrap();
+    let view = crate::research_versions::materialize_version(&source, &record).unwrap();
+    assert!(view.research_staging_parent.is_none());
+    assert_eq!(view.resource_policy, source.resource_policy);
+    assert_ne!(
+        view.research_materialization
+            .as_ref()
+            .unwrap()
+            .path()
+            .parent(),
+        Some(root.path())
+    );
+    drop(view);
+    drop(source);
+    #[cfg(unix)]
+    drop(_restore);
+    // Poison only the subprocess, never global test-process environment.
+    let result = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "research_interchange::tests::publication_export_uses_explicit_stage_with_poisoned_tmpdir", "--nocapture"])
+        .env(ROOT, root.path()).env(VERSION, version_uuid.to_string())
+        .env("TMPDIR", root.path().join("nonexistent-temp-volume"))
+        .env("TMP", root.path().join("nonexistent-temp-volume"))
+        .env("TEMP", root.path().join("nonexistent-temp-volume"))
+        .output().unwrap();
+    assert!(
+        result.status.success(),
+        "export child failed: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(root.path().join("chosen-stage/publication.gfpb").is_file());
+}

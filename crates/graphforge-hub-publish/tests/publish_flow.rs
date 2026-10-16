@@ -126,7 +126,11 @@ impl<'a> Client<'a> {
                 .requirements
                 .iter()
                 .filter(|capability| {
-                    capability.capability == graphforge_hub_publish::PUBLISH_NEGOTIATION_CAPABILITY
+                    matches!(
+                        capability.capability.as_str(),
+                        graphforge_hub_publish::PUBLISH_NEGOTIATION_CAPABILITY
+                            | "large-object-publish"
+                    )
                 })
                 .cloned()
                 .collect(),
@@ -189,7 +193,9 @@ impl<'a> Client<'a> {
                 session_id,
                 mut uploads,
             } => (session_id.as_str().to_owned(), uploads.remove(0)),
-            SessionResponse::Complete { .. } => panic!("expected an open session"),
+            SessionResponse::Complete { .. } | SessionResponse::Pending { .. } => {
+                panic!("expected an open session")
+            }
         }
     }
 
@@ -230,7 +236,9 @@ fn receipt(response: &HubResponse) -> PublishReceipt {
     );
     match serde_json::from_slice(&response.body).unwrap() {
         SessionResponse::Complete { receipt } => receipt,
-        SessionResponse::Open { .. } => panic!("expected a receipt"),
+        SessionResponse::Open { .. } | SessionResponse::Pending { .. } => {
+            panic!("expected a receipt")
+        }
     }
 }
 
@@ -777,4 +785,212 @@ fn sessions_select_per_object_chunks_and_preserve_them_on_resume() {
         Some(8)
     );
     assert_eq!(legacy_caps.upload_chunk_bytes(&upload).unwrap(), None);
+}
+
+fn async_hub(chunk: u64, object_limit: u64) -> ReferenceHub {
+    let mut config = ReferenceHubConfig {
+        large_objects: true,
+        ..ReferenceHubConfig::default()
+    };
+    config.limits.max_chunk_bytes = chunk;
+    config.limits.preferred_chunk_bytes = Some(chunk);
+    config.limits.max_object_bytes = object_limit;
+    config.limits.max_session_bytes = object_limit;
+    ReferenceHub::with_config(config).unwrap()
+}
+
+#[test]
+fn async_commit_rechecks_retained_bytes_and_never_advances_unverified_refs() {
+    let hub = async_hub(4, 1024);
+    let client = Client::new(&hub, demo());
+    let plan = Plan::new("abcdefgh", 'd', None);
+    let (session, upload) = client.opened(&plan);
+    assert_eq!(client.put(&upload, 0, b"abc").status, 400);
+    assert_eq!(client.put(&upload, 0, b"abcd").status, 200);
+    let resumed: SessionResponse = serde_json::from_slice(&client.open(&plan).body).unwrap();
+    assert!(matches!(resumed, SessionResponse::Open { uploads, .. } if uploads[0].received == 4));
+    assert_eq!(client.put(&upload, 4, b"efgh").status, 200);
+    assert_eq!(hub.corrupt_object(&upload.digest), 1);
+    assert_eq!(client.commit(&plan, &session).status, 202);
+    assert!(client.refs().is_none());
+    assert_eq!(
+        error_code(&client.operation(plan.operation)),
+        HubPublishErrorCode::IntegrityFailure
+    );
+    assert!(client.refs().is_none());
+}
+
+#[test]
+fn async_commit_replay_and_final_compare_and_swap_remain_authoritative() {
+    let hub = async_hub(4, 1024);
+    let client = Client::new(&hub, demo());
+    let first = Plan::new("abcdefgh", 'c', None);
+    let second = Plan::new("ijklmnop", 'd', None);
+    let (a, au) = client.opened(&first);
+    let (b, bu) = client.opened(&second);
+    for (upload, bytes) in [(&au, &first.bytes), (&bu, &second.bytes)] {
+        for (index, part) in bytes.chunks(4).enumerate() {
+            assert_eq!(client.put(upload, index * 4, part).status, 200);
+        }
+    }
+    assert_eq!(client.commit(&first, &a).status, 202);
+    assert_eq!(client.commit(&second, &b).status, 202);
+    assert!(client.refs().is_none());
+    let status = OperationStatus::from_json(&client.operation(first.operation).body).unwrap();
+    let original = status.receipt.unwrap();
+    assert_eq!(receipt(&client.commit(&first, &a)), original);
+    assert_eq!(
+        error_code(&client.operation(second.operation)),
+        HubPublishErrorCode::RefConflict
+    );
+    assert_eq!(hub.revisions(&demo()).len(), 1);
+}
+
+#[test]
+fn async_verification_requires_fresh_authorization_and_enforces_part_ceiling() {
+    let hub = async_hub(4, 40_000);
+    let client = Client::new(&hub, demo());
+    let plan = Plan::new("abcdefgh", 'c', None);
+    let (session, target) = client.opened(&plan);
+    for (index, part) in plan.bytes.chunks(4).enumerate() {
+        assert_eq!(client.put(&target, index * 4, part).status, 200);
+    }
+    assert_eq!(client.commit(&plan, &session).status, 202);
+    hub.advance_clock(901);
+    assert_eq!(
+        error_code(&client.operation(plan.operation)),
+        HubPublishErrorCode::AuthDenied
+    );
+    assert!(client.refs().is_none());
+    let client = Client::new(&hub, demo());
+    let mut too_many = Plan::new("a", 'e', None);
+    too_many.bytes = vec![0; 40_001];
+    assert_eq!(client.open(&too_many).status, 413);
+}
+
+/// Actual bytes traverse the ordinary upload, sparse-file storage, and async
+/// SHA-256 re-verification paths. This is intentionally opt-in, not a 200-GiB
+/// allocation or a replacement hasher/counter-only simulation.
+#[test]
+#[ignore = "operator-scale real 200 GiB traversal; run optimized explicitly"]
+#[allow(clippy::too_many_lines)]
+fn actual_200_gib_object_publishes_in_uniform_64_mib_parts() {
+    use sha2::{Digest as _, Sha256};
+    use std::fmt::Write as _;
+    use std::time::{Duration, Instant};
+    const PART: u64 = 64 * 1024 * 1024;
+    const TOTAL: u64 = 200 * 1024 * 1024 * 1024;
+    let body = vec![0; usize::try_from(PART).unwrap()];
+    let started = Instant::now();
+    let mut hash = Sha256::new();
+    for _ in 0..TOTAL / PART {
+        hash.update(&body);
+    }
+    let mut digest = String::from("sha256:");
+    for byte in hash.finalize() {
+        write!(&mut digest, "{byte:02x}").unwrap();
+    }
+    let hub = async_hub(PART, TOTAL);
+    let client = Client::new(&hub, demo());
+    let plan = Plan::new("generated zero extent", 'a', None);
+    let object = ObjectDeclaration {
+        digest: digest.clone(),
+        length: TOTAL,
+        media_type: PORTABLE_V2_MEDIA_TYPE.into(),
+    };
+    let mut manifest = client.manifest(&plan);
+    manifest["package"]["object_digest"] = json!(digest);
+    manifest["objects"][0]["digest"] = json!(digest);
+    manifest["objects"][0]["length"] = json!(TOTAL);
+    manifest["objects"][0]["locations"] = json!([client.capabilities.object_location(&digest)]);
+    let validated = DiscoveryManifest::from_json(
+        &serde_json::to_vec(&manifest).unwrap(),
+        DiscoveryLimits {
+            max_cumulative_object_bytes: TOTAL,
+            ..DiscoveryLimits::default()
+        },
+    )
+    .unwrap();
+    let intent = PublishIntent {
+        repository: demo(),
+        intent_digest: plan.intent_digest.clone(),
+        objects: vec![object.clone()],
+        manifest_validator: validated.canonical_digest().unwrap().0,
+        refs: vec!["main".into()],
+        expected_revision: None,
+    };
+    let opened = client.open_with(&OpenSessionRequest {
+        format: HUB_PUBLISH_FORMAT.into(),
+        operation_uuid: plan.operation,
+        request_commitment: intent.request_commitment(),
+        intent_digest: plan.intent_digest.clone(),
+        repository: demo(),
+        objects: vec![object],
+        requirements: client.capabilities.requirements.clone(),
+    });
+    assert_eq!(opened.status, 201);
+    let SessionResponse::Open {
+        session_id,
+        uploads,
+    } = serde_json::from_slice(&opened.body).unwrap()
+    else {
+        panic!("open")
+    };
+    let target = &uploads[0];
+    let mut max_request = Duration::ZERO;
+    for offset in (0..TOTAL).step_by(usize::try_from(PART).unwrap()) {
+        let request = HubRequest::new(HubMethod::Put, &target.upload_url)
+            .with_header("content-range", content_range(offset, PART, TOTAL))
+            .with_body(body.clone());
+        let now = Instant::now();
+        assert_eq!(hub.handle(&request).status, 200);
+        max_request = max_request.max(now.elapsed());
+    }
+    let commit = HubRequest::new(
+        HubMethod::Post,
+        format!(
+            "{}/.gf/publish/sessions/{session_id}/commit",
+            hub.repository_url(&demo())
+        ),
+    )
+    .with_header("authorization", client.token.authorization())
+    .with_json(&CommitRequest {
+        manifest,
+        refs: vec!["main".into()],
+        expected_revision: None,
+    });
+    let now = Instant::now();
+    assert_eq!(hub.handle(&commit).status, 202);
+    max_request = max_request.max(now.elapsed());
+    assert!(client.refs().is_none());
+    let mut polls = 0;
+    loop {
+        let now = Instant::now();
+        let response = client.operation(plan.operation);
+        max_request = max_request.max(now.elapsed());
+        assert_eq!(response.status, 200);
+        polls += 1;
+        if OperationStatus::from_json(&response.body)
+            .unwrap()
+            .receipt
+            .is_some()
+        {
+            break;
+        }
+        assert!(polls <= TOTAL / PART);
+    }
+    assert_eq!(polls, TOTAL / PART);
+    assert_eq!(hub.revisions(&demo()).len(), 1);
+    assert!(client.refs().is_some());
+    // Existing five-minute request budget, not a Cloudflare CPU claim.
+    assert!(
+        max_request < Duration::from_mins(5),
+        "max request {max_request:?}"
+    );
+    eprintln!(
+        "actual_bytes={TOTAL} upload_parts={} verification_polls={polls} max_request_ms={} elapsed_s={}",
+        TOTAL / PART,
+        max_request.as_millis(),
+        started.elapsed().as_secs()
+    );
 }

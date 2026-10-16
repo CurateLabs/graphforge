@@ -699,6 +699,8 @@ pub struct GraphForge {
     tempdir: Option<Arc<tempfile::TempDir>>,
     // Keeps private historical CAS alive when a prepared view becomes live state.
     research_materialization: Option<Arc<tempfile::TempDir>>,
+    /// Scoped export staging, never process-global and absent for ordinary queries.
+    research_staging_parent: Option<PathBuf>,
     /// Compiled ontology, present in advisory/strict mode.
     ontology: Option<OntologyHandle>,
     /// Source document backing the live, session-scoped compiled ontology.
@@ -969,6 +971,7 @@ impl GraphForge {
             project_open_recovery,
             tempdir: Some(Arc::new(tmp)),
             research_materialization: None,
+            research_staging_parent: None,
             ontology,
             ontology_document,
             runtime_catalog: Arc::new(Mutex::new(RuntimeCatalog::new())),
@@ -1275,6 +1278,7 @@ impl GraphForge {
             project_open_recovery,
             tempdir: None,
             research_materialization: None,
+            research_staging_parent: None,
             ontology,
             ontology_document,
             runtime_catalog: Arc::new(Mutex::new(runtime_catalog)),
@@ -1429,6 +1433,79 @@ impl GraphForge {
                 )?);
         }
         Ok(())
+    }
+
+    /// Share the same native authority, execution and resource budgets for a
+    /// background worker or a scoped export; no generation is reopened.
+    pub(crate) fn shared_handle(&self) -> Self {
+        Self {
+            allocation_operation: self.allocation_operation.clone(),
+            #[cfg(test)]
+            last_mutation_outcome: std::sync::Mutex::new(None),
+            identity: self.identity.clone(),
+            path: self.path.clone(),
+            lifecycle_mode: self.lifecycle_mode,
+            resolved_generation: self.resolved_generation.clone(),
+            property_authority: Arc::clone(&self.property_authority),
+            ordinal_identities: Arc::clone(&self.ordinal_identities),
+            read_only: self.read_only,
+            current_generation_uuid: Arc::clone(&self.current_generation_uuid),
+            identity_probe: crate::identity_probe_cache::IdentityProbeCache::default(),
+            #[cfg(feature = "knowledge")]
+            epistemic_ledger_cache: std::sync::Mutex::new(None),
+            clock: std::sync::Mutex::new(Arc::clone(
+                &self.clock.lock().expect("clock lock poisoned"),
+            )),
+            workspace_guard: Arc::clone(&self.workspace_guard),
+            graph_open_evidence: self.graph_open_evidence.clone(),
+            // The worker handle shares this facade's open; it pays no open of
+            // its own, so it reports the same attribution rather than zero.
+            open_io_attribution: self.open_io_attribution.clone(),
+            project_open_recovery: self.project_open_recovery.clone(),
+            tempdir: self.tempdir.clone(),
+            research_materialization: self.research_materialization.clone(),
+            research_staging_parent: self.research_staging_parent.clone(),
+            ontology: self.ontology.clone(),
+            ontology_document: self.ontology_document.clone(),
+            runtime_catalog: Arc::clone(&self.runtime_catalog),
+            semantic_storage_bindings: Arc::clone(&self.semantic_storage_bindings),
+            default_composition_context: Arc::clone(&self.default_composition_context),
+            procedures: Arc::clone(&self.procedures),
+            ontology_mode: self.ontology_mode,
+            adjacency_provider: Arc::clone(&self.adjacency_provider),
+            adjacency_visibility: Arc::clone(&self.adjacency_visibility),
+            #[cfg(feature = "search")]
+            embedding_refresh_scheduler: Arc::clone(&self.embedding_refresh_scheduler),
+            #[cfg(feature = "search")]
+            embedding_refresh_epoch: self.embedding_refresh_epoch,
+            #[cfg(feature = "search")]
+            embedding_refresh_visibility: Arc::clone(&self.embedding_refresh_visibility),
+            graph_visibility: Arc::clone(&self.graph_visibility),
+            write_options: self.write_options.clone(),
+            resource_policy: self.resource_policy.clone(),
+            compute_pool: Arc::clone(&self.compute_pool),
+            heavy_query_admission: Arc::clone(&self.heavy_query_admission),
+            construction_cpu_admission: Arc::clone(&self.construction_cpu_admission),
+            query_spill: Arc::clone(&self.query_spill),
+            #[cfg(feature = "search")]
+            provider_refresh_driver_active: Arc::clone(&self.provider_refresh_driver_active),
+            #[cfg(feature = "search")]
+            provider_refresh_runtimes: Arc::clone(&self.provider_refresh_runtimes),
+            #[cfg(feature = "search")]
+            provider_find_runtimes: Arc::clone(&self.provider_find_runtimes),
+            runtime: Arc::clone(&self.runtime),
+        }
+    }
+
+    /// Export-only staging inherits through nested private research views.
+    fn private_materialization_directory(&self) -> Result<tempfile::TempDir, GfError> {
+        let directory = match &self.research_staging_parent {
+            Some(parent) => tempfile::Builder::new()
+                .prefix(".graphforge-research-")
+                .tempdir_in(parent),
+            None => tempfile::tempdir(),
+        };
+        directory.map_err(|error| GfError::Storage(error.to_string()))
     }
 
     /// Return the storage path, if any (`None` for an in-memory instance).

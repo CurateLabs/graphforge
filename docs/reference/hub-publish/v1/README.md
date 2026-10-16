@@ -154,7 +154,7 @@ Legacy documents omit these fields and retain their existing behavior.
   `max_chunk_bytes`. The CLI uses that size, including after a non-aligned resume
   offset, and sends a shorter final chunk. Without a preference it uses the
   smaller of 1 MiB and the Hub maximum. The CLI owns one upload buffer with an
-  explicit 64 MiB resource budget; larger preferences fail before opening a
+  explicit 95 MiB resource budget; larger preferences fail before opening a
   session rather than being silently clamped. Request-body deadlines scale from
   the existing per-MiB budget; connection and response bounds do not change.
 - A client accepting this extension echoes `publish-negotiation@1` in the
@@ -179,3 +179,39 @@ Legacy documents omit these fields and retain their existing behavior.
 The checked-in conformance corpus includes a negotiated reference Hub with a
 provider-style client identifier, 8 MiB preferred chunks and `{hex}` locations,
 and exercises provider OAuth, per-object session sizes and object uploads.
+
+## Large objects and bounded commit verification
+
+`large-object-publish@1` selects ADR 0053's asynchronous policy. It is a required
+capability, so older readers reject the document before using new semantics.
+The Hub also requires `publish-negotiation@1`; `preferred_chunk_bytes` is the
+uniform size of every nonfinal PUT, at most 95 MiB. Per-object sizes are the
+smaller of that size and object length. Offsets must be aligned, and at most
+10,000 parts fit an object; `max_object_bytes` declares the practical ceiling
+(625 GiB at 64 MiB parts, or a smaller configured bound).
+
+Commit returns HTTP 202 `{ "state": "pending", "operation_uuid": "…" }`.
+Poll the existing operation endpoint with fresh valid authorization until its
+bound receipt is present. Refs remain unchanged during verification. The
+ReferenceHub rehashes at most 64 MiB per poll, then checks the expected revision
+and applies the publication atomically. Its sparse file-backed storage permits
+actual generated large fixtures without a proportional RAM/disk allocation.
+The ordinary conformance corpus includes asynchronous commit; an explicit
+operator-scale test (explicitly opt-in under AGENTS.md’s existing operator
+qualification policy, not default PR CI) traverses actual 200 GiB source bytes, 3,200 real 64 MiB
+PUTs, and full stored-byte verification through the same implementation:
+
+```sh
+cargo test -p graphforge-hub-publish --release \
+  actual_200_gib_object_publishes_in_uniform_64_mib_parts -- --ignored --nocapture
+```
+
+This is a protocol object fixture, not a 200 GiB native Project or a deployed
+Worker performance result. It records the actual maximum request time against
+the existing 300-second request budget. The buffered reference GET adapter
+refuses responses larger than 95 MiB rather than allocating object-sized RAM.
+
+The wire types, parsers and validators remain portable Rust. Native-only
+`ReferenceHub` and its temporary-file dependency are excluded on `wasm32`; a
+WASM validator consumes the same wire/corpus verdicts, not a filesystem-backed
+reference HTTP server.

@@ -46,6 +46,8 @@ enum Fault {
     /// Retain only the first half of the next `PUT` body, then drop the
     /// connection without a response.
     CutPut,
+    /// Retain one whole uniform part and drop only its successful reply.
+    DropPutReply(usize),
     /// Flip one byte of the next `PUT` body in transit.
     TamperPut,
     /// Corrupt the retained copy of the most recently uploaded object just
@@ -265,6 +267,11 @@ fn serve(state: &ServerState, stream: TcpStream) {
     if delay.is_some() {
         injected.take();
     }
+    let drop_reply = hub_method == HubMethod::Put
+        && matches!(*injected, Some(Fault::DropPutReply(size)) if request.body.len() == size);
+    if drop_reply {
+        injected.take();
+    }
     drop(injected);
     let response = match replayed_body {
         Some(body) => HubResponse {
@@ -281,6 +288,10 @@ fn serve(state: &ServerState, stream: TcpStream) {
         let status: UploadStatus = serde_json::from_slice(&response.body).unwrap();
         log.lock().unwrap().last_mut().unwrap().digest = Some(status.digest.clone());
         *state.last_upload.lock().unwrap() = Some(status.digest);
+    }
+    if drop_reply && response.status == 200 {
+        stream.shutdown(std::net::Shutdown::Both).ok();
+        return;
     }
     if let Some(delay) = delay {
         std::thread::sleep(delay);
@@ -505,6 +516,7 @@ fn args(repository: &str) -> PublishArgs {
         fork_of: None,
         operation_uuid: None,
         protection_bypass_env: None,
+        staging_directory: None,
     }
 }
 
@@ -1975,6 +1987,16 @@ fn private_context_checks_exact_revision_and_raw_lineage_integrity_and_bindings(
 
 #[test]
 fn negotiated_workos_client_eight_mib_chunks_and_hex_locations_publish_real_project() {
+    negotiated_native_project(8 * 1024 * 1024, 12 * 1024 * 1024, false);
+}
+
+#[test]
+fn native_publish_uniform_64_mib_parts_resume_and_async_commit_real_project() {
+    negotiated_native_project(64 * 1024 * 1024, 72 * 1024 * 1024, true);
+}
+
+#[allow(clippy::too_many_lines)]
+fn negotiated_native_project(chunk_bytes: u64, artifact_bytes: usize, uniform: bool) {
     let root = tempfile::tempdir().unwrap();
     let mut graph = GraphForge::new(root.path().join("project").to_str()).unwrap();
     // A native owned Artifact carries real incompressible content while the
@@ -2008,7 +2030,7 @@ fn negotiated_workos_client_eight_mib_chunks_and_hex_locations_publish_real_proj
         })
         .unwrap();
     let mut state = 0x1234_5678_u32;
-    let bytes: Vec<u8> = (0..12 * 1024 * 1024)
+    let bytes: Vec<u8> = (0..artifact_bytes)
         .map(|_| {
             state ^= state << 13;
             state ^= state >> 17;
@@ -2035,12 +2057,24 @@ fn negotiated_workos_client_eight_mib_chunks_and_hex_locations_publish_real_proj
         object_location_hex: true,
         ..ReferenceHubConfig::default()
     };
-    config.limits.preferred_chunk_bytes = Some(8 * 1024 * 1024);
+    config.limits.preferred_chunk_bytes = Some(chunk_bytes);
+    config.limits.max_chunk_bytes = chunk_bytes;
+    if uniform {
+        config.large_objects = true;
+        config.limits.max_object_bytes = 256 * 1024 * 1024;
+        config.limits.max_session_bytes = 512 * 1024 * 1024;
+    }
     let hub = LoopbackHub::with_config(config);
-    hub.inject(Fault::CutPut);
-    let (interrupted, _, _) = device_flow(&hub, &graph, |_, hub, code| {
-        assert!(hub.approve_device(code));
-        hub.advance_clock(5);
+    hub.inject(if uniform {
+        Fault::DropPutReply(chunk_bytes as usize)
+    } else {
+        Fault::CutPut
+    });
+    let (interrupted, _, _) = device_flow(&hub, &graph, |index, hub, code| {
+        if index == 0 {
+            assert!(hub.approve_device(code));
+            hub.advance_clock(5);
+        }
     });
     let error = interrupted.unwrap_err();
     assert!(
@@ -2048,14 +2082,29 @@ fn negotiated_workos_client_eight_mib_chunks_and_hex_locations_publish_real_proj
         "expected the injected connection cut, got {error}"
     );
     let first_run = hub.log();
-    let cut = puts(&first_run)[0].clone();
+    let cut = if uniform {
+        puts(&first_run)
+            .into_iter()
+            .find(|request| request.body_len as u64 == chunk_bytes)
+            .unwrap()
+            .clone()
+    } else {
+        puts(&first_run)[0].clone()
+    };
     let (_, _, total) =
         graphforge_hub_publish::parse_content_range(cut.content_range.as_deref().unwrap()).unwrap();
     let retained = cut.body_len as u64;
-    assert!(retained > 0 && retained < total && retained < 8 * 1024 * 1024);
-    let (result, _, _) = device_flow(&hub, &graph, |_, hub, code| {
-        assert!(hub.approve_device(code));
-        hub.advance_clock(5);
+    assert!(retained > 0 && retained < total);
+    if uniform {
+        assert_eq!(retained, chunk_bytes);
+    } else {
+        assert!(retained < chunk_bytes);
+    }
+    let (result, _, _) = device_flow(&hub, &graph, |index, hub, code| {
+        if index == 0 {
+            assert!(hub.approve_device(code));
+            hub.advance_clock(5);
+        }
     });
     result.unwrap();
     let log = hub.log();
@@ -2075,13 +2124,13 @@ fn negotiated_workos_client_eight_mib_chunks_and_hex_locations_publish_real_proj
 
     assert!(
         log.iter()
-            .any(|x| x.method == "PUT" && x.body_len == 8 * 1024 * 1024),
-        "a real 8 MiB upload must reach the Hub"
+            .any(|x| x.method == "PUT" && x.body_len as u64 == chunk_bytes),
+        "a real negotiated full-size upload must reach the Hub"
     );
     assert!(
         log.iter()
             .filter(|x| x.method == "PUT")
-            .all(|x| x.body_len <= 8 * 1024 * 1024 && x.bearer.is_none() && x.bypass.is_none())
+            .all(|x| x.body_len as u64 <= chunk_bytes && x.bearer.is_none() && x.bypass.is_none())
     );
     let response = hub.hub.handle(&HubRequest::new(
         HubMethod::Get,
@@ -2093,7 +2142,7 @@ fn negotiated_workos_client_eight_mib_chunks_and_hex_locations_publish_real_proj
         manifest
             .objects
             .iter()
-            .any(|object| object.length > 8 * 1024 * 1024)
+            .any(|object| object.length > chunk_bytes)
     );
     for object in manifest.objects {
         let stored = hub
@@ -2154,9 +2203,67 @@ fn per_object_chunk_selection_overrides_the_hub_preference_with_the_same_budget(
         upload_chunk_size(&capabilities, &target).unwrap(),
         8 * 1024 * 1024
     );
-    target.chunk_bytes = Some(64 * 1024 * 1024 + 1);
+    target.chunk_bytes = Some(95 * 1024 * 1024 + 1);
     assert_eq!(
         error_code(&upload_chunk_size(&capabilities, &target).unwrap_err()),
         "hub.publish.invalid_input"
+    );
+}
+
+#[test]
+fn publication_staging_is_project_adjacent_or_explicit_and_preflighted() {
+    let history = history();
+    let default = prepare_staging(&history.graph, None).unwrap();
+    assert_eq!(default.path().parent(), Some(history.root.path()));
+    let explicit = history.root.path().join("stage");
+    std::fs::create_dir(&explicit).unwrap();
+    let staged = prepare_staging(&history.graph, Some(&explicit)).unwrap();
+    assert_eq!(staged.path().parent(), Some(explicit.as_path()));
+    let before = std::fs::read_dir(&explicit).unwrap().count();
+    assert!(prepare_staging_with_space(&history.graph, Some(&explicit), |_| Ok(0)).is_err());
+    assert_eq!(
+        std::fs::read_dir(&explicit).unwrap().count(),
+        before,
+        "low space fails before creating a materialization"
+    );
+    let missing = history.root.path().join("missing");
+    assert!(prepare_staging(&history.graph, Some(&missing)).is_err());
+    assert!(!missing.exists());
+}
+
+#[test]
+fn native_publish_polls_async_verification_and_replays_the_original_receipt() {
+    let history = history();
+    let mut config = ReferenceHubConfig {
+        base_url: HUB.into(),
+        large_objects: true,
+        ..ReferenceHubConfig::default()
+    };
+    config.limits.preferred_chunk_bytes = Some(64 * 1024 * 1024);
+    config.limits.max_chunk_bytes = 64 * 1024 * 1024;
+    let hub = LoopbackHub::with_config(config);
+    let selected = on_ref("curate/async-publication", "main");
+    let first = publish_ok(&hub, &history.graph, &selected).result.unwrap();
+    let second = publish_ok(&hub, &history.graph, &selected).result.unwrap();
+    assert_eq!(first.receipt, second.receipt);
+    assert!(second.replayed);
+    let logs = hub.log.lock().unwrap();
+    assert!(
+        logs.iter()
+            .filter(|request| request.path.contains("/publish/operations/"))
+            .count()
+            >= 3
+    );
+    assert_eq!(
+        logs.iter()
+            .filter(|request| request.method == "POST" && request.path.ends_with("/commit"))
+            .count(),
+        1
+    );
+    assert_eq!(
+        hub.hub
+            .revisions(&RepositoryIdentity::parse("curate/async-publication").unwrap())
+            .len(),
+        1
     );
 }

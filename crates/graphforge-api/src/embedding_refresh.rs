@@ -169,7 +169,7 @@ impl GraphForge {
         {
             return;
         }
-        let worker = self.refresh_worker_handle();
+        let worker = self.shared_handle();
         if thread::Builder::new()
             .name("graphforge-embedding-refresh".to_owned())
             .spawn(move || {
@@ -245,59 +245,6 @@ impl GraphForge {
             if let Ok(mut scheduler) = self.embedding_refresh_scheduler.lock() {
                 let _ = scheduler.complete_through(lease, completion, covered_source, || Ok(()));
             }
-        }
-    }
-
-    fn refresh_worker_handle(&self) -> Self {
-        Self {
-            allocation_operation: self.allocation_operation.clone(),
-            #[cfg(test)]
-            last_mutation_outcome: std::sync::Mutex::new(None),
-            identity: self.identity.clone(),
-            path: self.path.clone(),
-            lifecycle_mode: self.lifecycle_mode,
-            resolved_generation: self.resolved_generation.clone(),
-            property_authority: Arc::clone(&self.property_authority),
-            ordinal_identities: Arc::clone(&self.ordinal_identities),
-            read_only: self.read_only,
-            current_generation_uuid: Arc::clone(&self.current_generation_uuid),
-            identity_probe: crate::identity_probe_cache::IdentityProbeCache::default(),
-            #[cfg(feature = "knowledge")]
-            epistemic_ledger_cache: std::sync::Mutex::new(None),
-            clock: std::sync::Mutex::new(Arc::clone(
-                &self.clock.lock().expect("clock lock poisoned"),
-            )),
-            workspace_guard: Arc::clone(&self.workspace_guard),
-            graph_open_evidence: self.graph_open_evidence.clone(),
-            // The worker handle shares this facade's open; it pays no open of
-            // its own, so it reports the same attribution rather than zero.
-            open_io_attribution: self.open_io_attribution.clone(),
-            project_open_recovery: self.project_open_recovery.clone(),
-            tempdir: self.tempdir.clone(),
-            research_materialization: self.research_materialization.clone(),
-            ontology: self.ontology.clone(),
-            ontology_document: self.ontology_document.clone(),
-            runtime_catalog: Arc::clone(&self.runtime_catalog),
-            semantic_storage_bindings: Arc::clone(&self.semantic_storage_bindings),
-            default_composition_context: Arc::clone(&self.default_composition_context),
-            procedures: Arc::clone(&self.procedures),
-            ontology_mode: self.ontology_mode,
-            adjacency_provider: Arc::clone(&self.adjacency_provider),
-            adjacency_visibility: Arc::clone(&self.adjacency_visibility),
-            embedding_refresh_scheduler: Arc::clone(&self.embedding_refresh_scheduler),
-            embedding_refresh_epoch: self.embedding_refresh_epoch,
-            embedding_refresh_visibility: Arc::clone(&self.embedding_refresh_visibility),
-            graph_visibility: Arc::clone(&self.graph_visibility),
-            write_options: self.write_options.clone(),
-            resource_policy: self.resource_policy.clone(),
-            compute_pool: Arc::clone(&self.compute_pool),
-            heavy_query_admission: Arc::clone(&self.heavy_query_admission),
-            construction_cpu_admission: Arc::clone(&self.construction_cpu_admission),
-            query_spill: Arc::clone(&self.query_spill),
-            provider_refresh_driver_active: Arc::clone(&self.provider_refresh_driver_active),
-            provider_refresh_runtimes: Arc::clone(&self.provider_refresh_runtimes),
-            provider_find_runtimes: Arc::clone(&self.provider_find_runtimes),
-            runtime: Arc::clone(&self.runtime),
         }
     }
 

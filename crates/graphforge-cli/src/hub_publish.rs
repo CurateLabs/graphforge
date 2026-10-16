@@ -64,7 +64,7 @@ const CLIENT_ID: &str = "graphforge-cli";
 /// [`crate::hub_http::WRITE_TIMEOUTS`], the slowest uplink that completes one.
 const MAX_CLIENT_CHUNK_BYTES: u64 = 1024 * 1024;
 /// Explicit uploader resource budget for its one owned chunk buffer.
-const MAX_NEGOTIATED_CHUNK_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_NEGOTIATED_CHUNK_BYTES: u64 = 95 * 1024 * 1024;
 /// Longest the client waits for a device authorization, whatever the Hub allows.
 const MAX_DEVICE_WAIT_SECONDS: u64 = 15 * 60;
 /// Longest pause between device-flow polls, whatever the Hub asks for.
@@ -95,6 +95,10 @@ pub(crate) struct PublishArgs {
     /// repository, ref, and Version, so a rerun replays the original receipt.
     #[arg(long)]
     pub operation_uuid: Option<String>,
+    /// Existing local directory for publication staging; defaults beside the Project.
+    /// Its filesystem and available space are checked before package construction.
+    #[arg(long)]
+    pub staging_directory: Option<PathBuf>,
     /// Read a Vercel preview bypass secret from this environment variable.
     #[arg(long)]
     pub protection_bypass_env: Option<String>,
@@ -1289,7 +1293,7 @@ fn negotiated_chunk_size(limits: &graphforge_hub_publish::PublishLimits) -> Resu
     if size > MAX_NEGOTIATED_CHUNK_BYTES {
         return Err(publish_error(
             HubPublishErrorCode::InvalidInput,
-            "preferred upload chunk exceeds the client's 64 MiB buffer budget",
+            "preferred upload chunk exceeds the client's 95 MiB buffer budget",
         ));
     }
     Ok(size)
@@ -1312,6 +1316,7 @@ fn upload(
     target: &UploadTarget,
     source: &Source,
     max_chunk: u64,
+    uniform: bool,
 ) -> Result<(), GfError> {
     if target.received >= target.length {
         return Ok(());
@@ -1323,6 +1328,12 @@ fn upload(
     let mut offset = upload_offset(&head, target.length)?;
     let mut resynchronized = false;
     while offset < target.length {
+        if uniform && offset % max_chunk != 0 {
+            return Err(publish_error(
+                HubPublishErrorCode::InvalidInput,
+                "retained offset is not aligned to a uniform upload part",
+            ));
+        }
         let chunk = max_chunk.min(target.length - offset);
         let bytes = read_chunk(source, offset, chunk)?;
         let response = hub.data(
@@ -1360,6 +1371,126 @@ fn upload(
         }
     }
     Ok(())
+}
+
+/// The entire upload inventory is checked before the first data-plane PUT.
+fn check_uniform_inventory(
+    capabilities: &PublishCapabilities,
+    uploads: &[UploadTarget],
+    chunks: &[u64],
+) -> Result<(), GfError> {
+    if capabilities
+        .requirements
+        .iter()
+        .any(|c| c.capability == "large-object-publish" && c.major == 1)
+    {
+        for (target, size) in uploads.iter().zip(chunks) {
+            if target.length.div_ceil(*size) > 10_000
+                || (target.received != target.length && target.received % size != 0)
+            {
+                return Err(publish_error(
+                    HubPublishErrorCode::InvalidInput,
+                    "object exceeds uniform multipart bounds or has an unaligned retained offset",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn prepare_staging(
+    graph: &GraphForge,
+    explicit: Option<&Path>,
+) -> Result<tempfile::TempDir, GfError> {
+    prepare_staging_with_space(graph, explicit, |path| fs4::available_space(path))
+}
+
+fn prepare_staging_with_space(
+    graph: &GraphForge,
+    explicit: Option<&Path>,
+    available: fn(&Path) -> std::io::Result<u64>,
+) -> Result<tempfile::TempDir, GfError> {
+    let parent = explicit
+        .or_else(|| graph.path().and_then(Path::parent))
+        .ok_or_else(|| {
+            GfError::Validation(
+                "publication requires an explicit staging directory for an in-memory Project"
+                    .into(),
+            )
+        })?;
+    if !parent.is_dir() {
+        return Err(GfError::Validation(
+            "publication staging directory must already exist".into(),
+        ));
+    }
+    let plan = graph
+        .preview_portable_v2_selection(&PortableV2SelectionPreviewRequest {
+            selection: PortableSelection::Current,
+            request: PortableV2SelectionRequest {
+                profile: PortableV2SelectionProfile::Complete,
+                strict: true,
+            },
+            limits: PortableV2Limits::default(),
+        })
+        .map_err(|error| derivation(&error.to_string()))?;
+    // Project package, derived module/research staging, and finite document/tag
+    // overhead. Space is advisory under concurrent writers; every write still fails closed.
+    let needed = plan
+        .estimated_payload_bytes
+        .checked_mul(3)
+        .and_then(|n| n.checked_add(512 * 1024 * 1024))
+        .ok_or_else(|| GfError::Storage("publication staging size overflow".into()))?;
+    if available(parent).map_err(|error| GfError::Storage(error.to_string()))? < needed {
+        return Err(GfError::Storage(
+            "insufficient free space for publication staging".into(),
+        ));
+    }
+    let scratch = tempfile::Builder::new()
+        .prefix(".graphforge-publish-")
+        .tempdir_in(parent)
+        .map_err(|error| GfError::Storage(error.to_string()))?;
+    graphforge_api::filesystem_durability_preflight(scratch.path().join("admission"))?;
+    Ok(scratch)
+}
+
+fn poll_commit(
+    hub: &Hub<'_>,
+    base: &Url,
+    token: &PublishToken,
+    identity: &RepositoryIdentity,
+    operation_uuid: Uuid,
+    intent_digest: &str,
+    wait: &dyn Fn(Duration),
+) -> Result<PublishReceipt, GfError> {
+    let url = endpoint(base, &format!("publish/operations/{operation_uuid}"));
+    let deadline = std::time::Instant::now() + Duration::from_secs(24 * 60 * 60);
+    // One poll per bounded verification step. No commit resubmission or changed
+    // operation identity on unknown outcomes; a later invocation can resume it.
+    while std::time::Instant::now() < deadline {
+        let response = hub.control(HubRequest::new(HubMethod::Get, url.as_str()), token)?;
+        if response.status != 200 {
+            return Err(hub_failure(&response));
+        }
+        let status =
+            OperationStatus::from_json(&response.body).map_err(|error| protocol(&error))?;
+        if status.repository != *identity
+            || status.operation_uuid != operation_uuid
+            || status.intent_digest != intent_digest
+        {
+            return Err(publish_error(
+                HubPublishErrorCode::IntegrityFailure,
+                "operation status does not bind this publication",
+            ));
+        }
+        if let Some(receipt) = status.receipt {
+            return Ok(receipt);
+        }
+        wait(Duration::from_millis(100));
+    }
+    Err(publish_error(
+        HubPublishErrorCode::InvalidInput,
+        "asynchronous commit remains pending; rerun the same operation to resume",
+    ))
 }
 
 // ------------------------------------------------------------------ publish
@@ -1511,7 +1642,7 @@ pub(crate) fn publish(
             .map(|fork| fork.origin_repository.clone()),
         (None, None) => None,
     };
-    let scratch = tempfile::tempdir().map_err(|error| GfError::Storage(error.to_string()))?;
+    let scratch = prepare_staging(graph, args.staging_directory.as_deref())?;
     let (snapshot, lineage) = build_snapshot(
         graph,
         &identity,
@@ -1565,7 +1696,12 @@ pub(crate) fn publish(
         requirements: capabilities
             .requirements
             .iter()
-            .filter(|capability| capability.capability == PUBLISH_NEGOTIATION_CAPABILITY)
+            .filter(|capability| {
+                matches!(
+                    capability.capability.as_str(),
+                    PUBLISH_NEGOTIATION_CAPABILITY | "large-object-publish"
+                )
+            })
             .cloned()
             .collect(),
     };
@@ -1587,6 +1723,12 @@ pub(crate) fn publish(
             session_id,
             uploads,
         } => (session_id, uploads),
+        SessionResponse::Pending { .. } => {
+            return Err(publish_error(
+                HubPublishErrorCode::InvalidInput,
+                "session open returned an unexpected pending state",
+            ));
+        }
     };
     if uploads.len() != snapshot.objects.len()
         || uploads
@@ -1605,6 +1747,7 @@ pub(crate) fn publish(
         .iter()
         .map(|target| upload_chunk_size(&capabilities, target))
         .collect::<Result<Vec<_>, _>>()?;
+    check_uniform_inventory(&capabilities, &uploads, &chunk_sizes)?;
     for (target, max_chunk) in uploads.iter().zip(chunk_sizes) {
         let source = snapshot.sources.get(&target.digest).ok_or_else(|| {
             publish_error(
@@ -1612,7 +1755,16 @@ pub(crate) fn publish(
                 "the Hub issued an upload for an undeclared object",
             )
         })?;
-        upload(&hub, target, source, max_chunk)?;
+        upload(
+            &hub,
+            target,
+            source,
+            max_chunk,
+            capabilities
+                .requirements
+                .iter()
+                .any(|c| c.capability == "large-object-publish" && c.major == 1),
+        )?;
     }
 
     let commit_url = endpoint(&base, &format!("publish/sessions/{session_id}/commit"));
@@ -1626,11 +1778,32 @@ pub(crate) fn publish(
         }),
         &token,
     )?)?;
-    let SessionResponse::Complete { receipt } = committed else {
-        return Err(publish_error(
-            HubPublishErrorCode::InvalidInput,
-            "commit did not complete the publication",
-        ));
+    let receipt = match committed {
+        SessionResponse::Complete { receipt } => receipt,
+        SessionResponse::Pending {
+            operation_uuid: pending,
+        } if pending == operation_uuid
+            && capabilities
+                .requirements
+                .iter()
+                .any(|c| c.capability == "large-object-publish" && c.major == 1) =>
+        {
+            poll_commit(
+                &hub,
+                &base,
+                &token,
+                &identity,
+                operation_uuid,
+                &open.intent_digest,
+                environment.wait,
+            )?
+        }
+        _ => {
+            return Err(publish_error(
+                HubPublishErrorCode::InvalidInput,
+                "commit did not complete or accept this publication",
+            ));
+        }
     };
     check_receipt(&receipt, &identity, operation_uuid)?;
     if receipt.request_commitment != request_commitment

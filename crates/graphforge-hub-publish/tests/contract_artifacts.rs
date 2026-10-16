@@ -80,6 +80,8 @@ struct Corpus {
 struct Case {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     negotiated: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    large_objects: bool,
     name: String,
     description: String,
     steps: Vec<Step>,
@@ -646,6 +648,7 @@ fn refs_absent(repository: &RepositoryIdentity) -> Step {
 fn case(name: &str, description: &str, steps: Vec<Step>) -> Case {
     Case {
         negotiated: false,
+        large_objects: false,
         name: name.into(),
         description: description.into(),
         steps,
@@ -885,6 +888,42 @@ fn corpus() -> Corpus {
         .steps
         .extend(upload_all(&publication, "negotiated"));
     cases.push(negotiated);
+    let publication = v1(0x1776);
+    let mut model = RepoModel::default();
+    model.advance(&publication);
+    let revision = model.revision(&publication.repository);
+    let mut asynchronous = case(
+        "large-object-async-commit",
+        "Uniform parts negotiate bounded asynchronous re-verification before the atomic ref advance.",
+        vec![token(&publication.repository, "token")],
+    );
+    asynchronous.large_objects = true;
+    let mut opened = open_new(&publication, "token", "async");
+    if let Step::Request { request, expect } = &mut opened {
+        request.json.as_mut().unwrap()["requirements"] = json!([{"capability":"publish-negotiation","major":1},{"capability":"large-object-publish","major":1}]);
+        for upload in expect.json.as_mut().unwrap()["uploads"]
+            .as_array_mut()
+            .unwrap()
+        {
+            upload["chunk_bytes"] = upload["length"].clone();
+        }
+    }
+    asynchronous.steps.push(opened);
+    asynchronous.steps.extend(upload_all(&publication, "async"));
+    asynchronous.steps.push(commit(
+        &publication,
+        "token",
+        "async",
+        status(202).json(json!({"state":"pending","operation_uuid":publication.operation})),
+    ));
+    asynchronous
+        .steps
+        .push(refs_absent(&publication.repository));
+    asynchronous.steps.push(send(request(HubMethod::Get, format!("{}/.gf/publish/operations/{}", repo_url(&publication.repository),publication.operation)).bearer("token"), status(200).json(json!({"format":"graphforge-hub-publish/1","operation_uuid":publication.operation,"repository":publication.repository,"intent_digest":publication.intent_digest(),"receipt":publication.receipt(&revision)}))));
+    asynchronous
+        .steps
+        .push(get_refs(&publication.repository, &model));
+    cases.push(asynchronous);
 
     // Create, then read back the way `gf clone` does.
     {
@@ -1616,6 +1655,7 @@ fn session_response_schema() -> Value {
                             "digest": {"$ref": "#/$defs/digest"}, "length": {"type": "integer", "minimum": 1},
                             "upload_url": {"$ref": "#/$defs/https_url"}, "received": {"type": "integer", "minimum": 0},
                             "chunk_bytes": {"type": "integer", "minimum": 1}}}}}},
+                {"type": "object", "additionalProperties": false, "required": ["state", "operation_uuid"], "properties": {"state": {"const": "pending"}, "operation_uuid": {"type": "string", "format": "uuid"}}},
                 {"type": "object", "additionalProperties": false, "required": ["state", "receipt"], "properties": {
                     "state": {"const": "complete"}, "receipt": {"$ref": "#/$defs/receipt"}}}
             ],
@@ -1999,7 +2039,14 @@ fn every_conformance_case_replays_through_the_reference_hub() {
     assert_eq!(corpus.hub, HUB);
     assert!(corpus.cases.len() >= 15, "corpus lost cases");
     for case in &corpus.cases {
-        let hub = if case.negotiated {
+        let hub = if case.large_objects {
+            let mut config = graphforge_hub_publish::ReferenceHubConfig {
+                large_objects: true,
+                ..graphforge_hub_publish::ReferenceHubConfig::default()
+            };
+            config.limits.preferred_chunk_bytes = Some(config.limits.max_chunk_bytes);
+            ReferenceHub::with_config(config).unwrap()
+        } else if case.negotiated {
             let mut config = graphforge_hub_publish::ReferenceHubConfig {
                 authorization_client_id: Some("client_workos_example".into()),
                 object_location_hex: true,

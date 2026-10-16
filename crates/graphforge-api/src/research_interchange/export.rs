@@ -38,6 +38,19 @@ pub(super) fn export(
     fork: Option<&super::ForkResearchRequest>,
     cancellation: &CancellationToken,
 ) -> Result<crate::PortableV2ExportFacadeResult, PortableV2Error> {
+    // An immutable scoped facade shares authority and budgets, but not staging
+    // configuration, with its caller. Nested proof and Slice views inherit this
+    // output-local parent; ordinary historical queries keep their old policy.
+    let mut scoped = owner.shared_handle();
+    scoped.research_staging_parent = Some(
+        request
+            .output
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .to_path_buf(),
+    );
+    let owner = &scoped;
     cancellation.checkpoint().map_err(resolve_error)?;
     let current = owner.generation_for_read().map_err(resolve_error)?;
     let mut registry = graphforge_storage::research_versions::read_research_registry(&current)
@@ -122,7 +135,14 @@ fn publish_package(
     root: &std::path::Path,
     manifest: &graphforge_storage::research_versions::ResearchInterchangeManifest,
 ) -> Result<crate::PortableV2ExportFacadeResult, PortableV2Error> {
-    let private = tempfile::tempdir()
+    let parent = request
+        .output
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let private = tempfile::Builder::new()
+        .prefix(".graphforge-export-")
+        .tempdir_in(parent)
         .map_err(|_| resolve_error(GfError::Storage("cannot prepare research export".into())))?;
     let generation = graphforge_storage::research_versions::materialize_research_interchange(
         root,

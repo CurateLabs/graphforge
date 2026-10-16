@@ -35,15 +35,18 @@ pub const UPLOAD_LENGTH_HEADER: &str = "upload-length";
 pub const DIGEST_PLACEHOLDER: &str = "{digest}";
 /// SHA-256 hex placeholder without algorithm prefix.
 pub const HEX_PLACEHOLDER: &str = "{hex}";
+/// Bounded asynchronous verification and uniform nonfinal upload parts.
+pub const LARGE_OBJECT_PUBLISH_CAPABILITY: &str = "large-object-publish";
 /// Negotiated client, chunk and template extension.
 pub const PUBLISH_NEGOTIATION_CAPABILITY: &str = "publish-negotiation";
 
 /// Capability names this release understands, with the major it supports.
-pub const SUPPORTED_CAPABILITIES: [(&str, u16); 4] = [
+pub const SUPPORTED_CAPABILITIES: [(&str, u16); 5] = [
     ("device-authorization", 1),
     ("publish-session", 1),
     ("resumable-upload", 1),
     (PUBLISH_NEGOTIATION_CAPABILITY, 1),
+    (LARGE_OBJECT_PUBLISH_CAPABILITY, 1),
 ];
 
 const MAX_REQUIREMENTS: usize = 64;
@@ -321,6 +324,24 @@ impl PublishCapabilities {
         {
             return Err(invalid("negotiated fields require publish-negotiation@1"));
         }
+        if self
+            .requirements
+            .iter()
+            .any(|c| c.capability == LARGE_OBJECT_PUBLISH_CAPABILITY && c.major == 1)
+        {
+            let chunk = self
+                .limits
+                .preferred_chunk_bytes
+                .ok_or_else(|| invalid("large objects require a uniform chunk size"))?;
+            if chunk == 0
+                || chunk > 95 * 1024 * 1024
+                || self.limits.max_object_bytes.div_ceil(chunk) > 10_000
+            {
+                return Err(invalid(
+                    "large-object limits exceed uniform multipart bounds",
+                ));
+            }
+        }
         validate_https_url(&self.object_location(&sha256_digest(b"")))?;
         self.limits.validate()
     }
@@ -507,6 +528,11 @@ pub enum SessionResponse {
         session_id: PublishSessionId,
         /// One upload location per inventory object, in inventory order.
         uploads: Vec<UploadTarget>,
+    },
+    /// Verification is running; poll this operation until a receipt is present.
+    Pending {
+        /// Bound operation identity; never an arbitrary poll URL.
+        operation_uuid: Uuid,
     },
     /// The publication already committed; this is its original receipt.
     Complete {

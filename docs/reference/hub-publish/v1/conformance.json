@@ -238,6 +238,222 @@
       ]
     },
     {
+      "large_objects": true,
+      "name": "large-object-async-commit",
+      "description": "Uniform parts negotiate bounded asynchronous re-verification before the atomic ref advance.",
+      "steps": [
+        {
+          "action": {
+            "action": "issue_token",
+            "scope": "publish:openalex/demo",
+            "ttl_seconds": 900,
+            "capture": "token"
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "url": "https://hub.example/openalex/demo/.gf/publish/sessions",
+            "headers": {
+              "authorization": "Bearer ${token}",
+              "content-type": "application/json"
+            },
+            "json": {
+              "format": "graphforge-hub-publish/1",
+              "intent_digest": "sha256:4958d22fc78f93bf84db50407cdfe76390ea160ff80e1fdf1d46f9406482034a",
+              "objects": [
+                {
+                  "digest": "sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60",
+                  "length": 47,
+                  "media_type": "application/vnd.graphforge.project"
+                }
+              ],
+              "operation_uuid": "00000000-0000-7000-8000-000000001776",
+              "repository": {
+                "owner": "openalex",
+                "repository": "demo"
+              },
+              "request_commitment": "sha256:118ba9c5ba8431b726c79189099a0d36a9651780ead1d1077b87468be2427659",
+              "requirements": [
+                {
+                  "capability": "publish-negotiation",
+                  "major": 1
+                },
+                {
+                  "capability": "large-object-publish",
+                  "major": 1
+                }
+              ]
+            }
+          },
+          "expect": {
+            "status": 201,
+            "json": {
+              "session_id": "${async_session}",
+              "state": "open",
+              "uploads": [
+                {
+                  "chunk_bytes": 47,
+                  "digest": "sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60",
+                  "length": 47,
+                  "received": 0,
+                  "upload_url": "${async_upload_0}"
+                }
+              ]
+            },
+            "capture": {
+              "async_session": "/session_id",
+              "async_upload_0": "/uploads/0/upload_url"
+            }
+          }
+        },
+        {
+          "request": {
+            "method": "PUT",
+            "url": "${async_upload_0}",
+            "headers": {
+              "content-range": "bytes 0-46/47"
+            },
+            "body_text": "graphforge project package fixture: version one"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "upload-offset": "47"
+            },
+            "json": {
+              "digest": "sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60",
+              "length": 47,
+              "received": 47
+            }
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "url": "https://hub.example/openalex/demo/.gf/publish/sessions/${async_session}/commit",
+            "headers": {
+              "authorization": "Bearer ${token}",
+              "content-type": "application/json"
+            },
+            "json": {
+              "expected_revision": null,
+              "manifest": {
+                "capabilities": [
+                  {
+                    "capability": "range-requests",
+                    "major": 1
+                  }
+                ],
+                "default_ref": "main",
+                "format": "graphforge-discovery/1",
+                "immutable_version": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "objects": [
+                  {
+                    "digest": "sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60",
+                    "length": 47,
+                    "locations": [
+                      "https://hub.example/openalex/demo/.gf/objects/sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60"
+                    ],
+                    "media_type": "application/vnd.graphforge.project"
+                  }
+                ],
+                "package": {
+                  "format": "graphforge-project/2",
+                  "object_digest": "sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60",
+                  "package_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                },
+                "repository": {
+                  "owner": "openalex",
+                  "repository": "demo"
+                },
+                "requirements": [
+                  {
+                    "capability": "portable-v2",
+                    "major": 1
+                  }
+                ],
+                "resolved_ref": "main",
+                "version": {
+                  "major": 1,
+                  "minor": 1
+                }
+              },
+              "refs": [
+                "main"
+              ]
+            }
+          },
+          "expect": {
+            "status": 202,
+            "json": {
+              "operation_uuid": "00000000-0000-7000-8000-000000001776",
+              "state": "pending"
+            }
+          }
+        },
+        {
+          "request": {
+            "method": "GET",
+            "url": "https://hub.example/openalex/demo/.gf/refs"
+          },
+          "expect": {
+            "status": 404,
+            "error": "invalid_input"
+          }
+        },
+        {
+          "request": {
+            "method": "GET",
+            "url": "https://hub.example/openalex/demo/.gf/publish/operations/00000000-0000-7000-8000-000000001776",
+            "headers": {
+              "authorization": "Bearer ${token}"
+            }
+          },
+          "expect": {
+            "status": 200,
+            "json": {
+              "format": "graphforge-hub-publish/1",
+              "intent_digest": "sha256:4958d22fc78f93bf84db50407cdfe76390ea160ff80e1fdf1d46f9406482034a",
+              "operation_uuid": "00000000-0000-7000-8000-000000001776",
+              "receipt": {
+                "format": "graphforge-hub-publish/1",
+                "manifest_validator": "sha256:00512c4b695097aa9b40de4b63a482caf43dedcce9cbe7187f153ee09aec9eab",
+                "operation_uuid": "00000000-0000-7000-8000-000000001776",
+                "previous_revision": null,
+                "refs": [
+                  "main"
+                ],
+                "repository": {
+                  "owner": "openalex",
+                  "repository": "demo"
+                },
+                "request_commitment": "sha256:118ba9c5ba8431b726c79189099a0d36a9651780ead1d1077b87468be2427659",
+                "revision": "sha256:fa8c5c3c52979537334e3abcf3b0a2882d629eea93e40815be0b995b554ea6ae"
+              },
+              "repository": {
+                "owner": "openalex",
+                "repository": "demo"
+              }
+            }
+          }
+        },
+        {
+          "request": {
+            "method": "GET",
+            "url": "https://hub.example/openalex/demo/.gf/refs"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "etag": "\"sha256:fa8c5c3c52979537334e3abcf3b0a2882d629eea93e40815be0b995b554ea6ae\""
+            },
+            "body_text": "{\"default_ref\":\"main\",\"format\":\"graphforge-discovery/1\",\"refs\":[{\"name\":\"main\",\"target\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"validator\":\"sha256:00512c4b695097aa9b40de4b63a482caf43dedcce9cbe7187f153ee09aec9eab\"}],\"repository\":{\"owner\":\"openalex\",\"repository\":\"demo\"},\"version\":{\"major\":1,\"minor\":1}}"
+          }
+        }
+      ]
+    },
+    {
       "name": "create-and-read-back",
       "description": "Create-if-absent publication; refs, manifest, and object reads (with resumable Range and If-Range) serve exactly the published bytes.",
       "steps": [
