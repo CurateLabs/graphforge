@@ -342,7 +342,18 @@ impl PartitionedStream for RowCursorStream {
         cx: &mut Context<'_>,
         stream_idx: usize,
     ) -> Poll<Option<Self::Output>> {
-        Poll::Ready(ready!(self.streams.poll_next(cx, stream_idx)).map(|r| {
+        let next = ready!(self.streams.poll_next(cx, stream_idx));
+        if next.is_none()
+            && self.copy.as_ref().is_some_and(|copy| {
+                matches!(copy.capability(), CopyCapability::Row { .. })
+            })
+        {
+            // Fuse guarantees conversion cannot run again for this input.
+            // Drop cached Rows before their paired leases; a live previous
+            // cursor still retains its own Rows and lease until merge sees EOF.
+            self.rows.inner[stream_idx] = [None, None];
+        }
+        Poll::Ready(next.map(|r| {
             r.and_then(|batch| {
                 let cursor = self.convert_batch(&batch, stream_idx)?;
                 Ok((cursor, batch))

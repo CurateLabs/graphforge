@@ -227,6 +227,24 @@ impl SpillManager {
             None,
         ))))
     }
+
+    /// One logical FIFO consumer owns the root across file rotations; each
+    /// started blocking worker clones that same permit through actual exit.
+    pub(super) fn read_fifo_with_credit(
+        &self,
+        file: RefCountedTempFile,
+        credit: Arc<super::admission::Credit>,
+        producer: Arc<super::admission::ReaderPermit>,
+    ) -> Result<SendableRecordBatchStream> {
+        Ok(Box::pin(cooperative(SpillReaderStream::new(
+            Arc::clone(&self.schema),
+            file,
+            None,
+            Arc::clone(&self.env.memory_pool),
+            Some(credit),
+            Some(producer),
+        ))))
+    }
 }
 
 pub(crate) trait GetSlicedSize {

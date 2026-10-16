@@ -467,7 +467,12 @@ impl RepartitionExecState {
             };
             let (spill_writers, spill_readers): (Vec<_>, Vec<_>) = (0
                 ..num_spill_channels)
-                .map(|_| spill_pool::channel(max_file_size, Arc::clone(&spill_manager)))
+                .map(|_| {
+                    spill_pool::channel_for_repartition(
+                        max_file_size,
+                        Arc::clone(&spill_manager),
+                    )
+                })
                 .unzip();
 
             // Coalesce on the producer side, before the channel's gate, so
@@ -1234,6 +1239,9 @@ impl ExecutionPlan for RepartitionExec {
             input.schema(),
         );
 
+        let retire_fifo_on_terminal =
+            spill_pool::can_handoff_fifo_workspace(&spill_manager);
+
         // Get existing ordering to use for merging
         let sort_exprs = self.sort_exprs().cloned();
 
@@ -1304,6 +1312,7 @@ impl ExecutionPlan for RepartitionExec {
                             spill_stream,
                             1, // Each receiver handles one input partition
                             BaselineMetrics::new(&metrics, partition),
+                            retire_fifo_on_terminal,
                         )) as SendableRecordBatchStream
                     })
                     .collect::<Vec<_>>();
@@ -1342,6 +1351,7 @@ impl ExecutionPlan for RepartitionExec {
                     spill_stream,
                     num_input_partitions,
                     BaselineMetrics::new(&metrics, partition),
+                    retire_fifo_on_terminal,
                 )) as SendableRecordBatchStream)
             }
         })
@@ -1822,6 +1832,8 @@ struct PerPartitionStream {
 
     /// Execution metrics
     baseline_metrics: BaselineMetrics,
+    retire_fifo_on_terminal: bool,
+    terminal: bool,
 }
 
 impl PerPartitionStream {
@@ -1833,6 +1845,7 @@ impl PerPartitionStream {
         spill_stream: SendableRecordBatchStream,
         num_input_partitions: usize,
         baseline_metrics: BaselineMetrics,
+        retire_fifo_on_terminal: bool,
     ) -> Self {
         Self {
             schema,
@@ -1843,6 +1856,18 @@ impl PerPartitionStream {
             state: StreamState::ReadingMemory,
             remaining_partitions: num_input_partitions,
             baseline_metrics,
+            retire_fifo_on_terminal,
+            terminal: false,
+        }
+    }
+
+    fn retire_fifo(&mut self) {
+        if self.retire_fifo_on_terminal && !self.terminal {
+            // Drop actual readers, their contexts and worker handles before the
+            // logical consumer root retires. Retained output tickets stay live.
+            let schema = self.spill_stream.schema();
+            self.spill_stream = Box::pin(EmptyRecordBatchStream::new(schema));
+            self.terminal = true;
         }
     }
 
@@ -1851,6 +1876,9 @@ impl PerPartitionStream {
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<RecordBatch>>> {
         use futures::StreamExt;
+        if self.terminal {
+            return Poll::Ready(None);
+        }
         let cloned_time = self.baseline_metrics.elapsed_compute().clone();
         let _timer = cloned_time.timer();
 
@@ -1881,6 +1909,7 @@ impl PerPartitionStream {
                                 continue;
                             }
                             Err(e) => {
+                                self.retire_fifo();
                                 return Poll::Ready(Some(Err(e)));
                             }
                         },
@@ -1889,6 +1918,7 @@ impl PerPartitionStream {
                             self.remaining_partitions -= 1;
                             if self.remaining_partitions == 0 {
                                 // All input partitions finished
+                                self.retire_fifo();
                                 return Poll::Ready(None);
                             }
                             // Continue to poll for more data from other partitions
@@ -1896,6 +1926,7 @@ impl PerPartitionStream {
                         }
                         None => {
                             // Channel closed unexpectedly
+                            self.retire_fifo();
                             return Poll::Ready(None);
                         }
                     }
@@ -1908,6 +1939,7 @@ impl PerPartitionStream {
                             return Poll::Ready(Some(Ok(batch)));
                         }
                         Poll::Ready(Some(Err(e))) => {
+                            self.retire_fifo();
                             return Poll::Ready(Some(Err(e)));
                         }
                         Poll::Ready(None) => {

@@ -21,6 +21,8 @@ pub(crate) mod admission;
 mod credit;
 pub(crate) mod in_progress_spill_file;
 pub(crate) mod replayable_spill_input;
+pub(crate) mod resident_metadata;
+mod schema_admission;
 pub(crate) mod spill_manager;
 pub mod spill_pool;
 

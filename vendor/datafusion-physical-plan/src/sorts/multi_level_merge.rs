@@ -310,6 +310,7 @@ impl MultiLevelMergeBuilder {
                 let retiring = all_ipc_inputs
                     && !is_only_merging_memory_streams
                     && !memory_reservation.consumer().can_spill()
+                    && crate::spill::resident_metadata::std_mutex_heap_bound().is_some()
                     && crate::spill::admission::ticket_schema(&self.schema);
                 // Qualification precedes all authority moves and prefetch.
                 let capability = if all_ipc_inputs && !is_only_merging_memory_streams {
@@ -348,7 +349,7 @@ impl MultiLevelMergeBuilder {
                 let copy = if all_ipc_inputs && !is_only_merging_memory_streams {
                     let authority = memory_reservation.take();
                     if capability == CopyCapability::Legacy {
-                        Some(CopyAdmission::new(authority))
+                        Some(CopyAdmission::new(authority)?)
                     } else {
                         let streams = sorted_spill_files.len();
                         let (cursor, merge) = match capability {

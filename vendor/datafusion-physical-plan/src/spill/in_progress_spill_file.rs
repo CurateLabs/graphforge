@@ -41,6 +41,13 @@ pub struct InProgressSpillFile {
     in_progress_file: Option<RefCountedTempFile>,
 }
 
+/// Successful synchronous encoding leaves this authority available only after
+/// its GC batch and Arrow's local encoded buffers have been destroyed. The FIFO
+/// caller holds it through flush and withholds publication until handoff.
+pub(super) struct AppendReceipt {
+    pub(super) workspace: admission::Budget,
+}
+
 impl InProgressSpillFile {
     pub fn new(
         spill_writer: Arc<SpillManager>,
@@ -80,6 +87,25 @@ impl InProgressSpillFile {
         batch: &RecordBatch,
         credit: usize,
     ) -> Result<usize> {
+        self.append_with_workspace(batch, credit, None)
+            .map(|(size, _receipt)| size)
+    }
+
+    pub(super) fn append_for_fifo(
+        &mut self,
+        batch: &RecordBatch,
+        bank: Option<Arc<admission::Credit>>,
+    ) -> Result<AppendReceipt> {
+        self.append_with_workspace(batch, 0, bank)
+            .map(|(_size, receipt)| receipt)
+    }
+
+    fn append_with_workspace(
+        &mut self,
+        batch: &RecordBatch,
+        credit: usize,
+        bank: Option<Arc<admission::Credit>>,
+    ) -> Result<(usize, AppendReceipt)> {
         if self.in_progress_file.is_none() {
             return Err(exec_datafusion_err!(
                 "Append operation failed: No active in-progress file. The file may have already been finalized."
@@ -89,10 +115,11 @@ impl InProgressSpillFile {
         let pool = &self.spill_writer.env.memory_pool;
         let schema_bytes = admission::schema_bound(self.spill_writer.schema())?;
         // Admit metadata before to_data() in the checked data-layout walk.
-        let metadata = admission::reserve(
+        let metadata = admission::reserve_with_credit(
             pool,
             admission::source_metadata(batch)?,
             "SpillWriterMetadata",
+            bank.clone(),
         )?;
         let bytes = admission::write_bound(
             batch,
@@ -100,8 +127,12 @@ impl InProgressSpillFile {
             self.spill_writer.compression,
             self.spill_writer.schema(),
         )?;
-        let _workspace =
-            admission::reserve(pool, bytes.saturating_sub(credit), "SpillWriterEncode")?;
+        let workspace = admission::reserve_with_credit(
+            pool,
+            bytes.saturating_sub(credit),
+            "SpillWriterEncode",
+            bank,
+        )?;
         let codec = admission::codec_bound(self.spill_writer.compression, true)?;
         self.codec_authority.try_resize(codec)?;
         let gc_batch = gc_view_arrays(batch)?;
@@ -149,7 +180,9 @@ impl InProgressSpillFile {
                 unreachable!() // Already checked inside current function
             }
         }
-        gc_batch.get_sliced_size()
+        let size = gc_batch.get_sliced_size()?;
+        drop(gc_batch);
+        Ok((size, AppendReceipt { workspace }))
     }
 
     pub fn flush(&mut self) -> Result<()> {

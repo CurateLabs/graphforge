@@ -66,6 +66,33 @@ tickets then release their authority. Buffer tickets never retain producer permi
 Reader-root registration completes before prefetch. Partial construction, error,
 cancellation and retained exhausted streams follow the same retirement rule.
 
+Construction and resident ownership use separate phases. A parsed IPC schema or
+decoded array keeps its complete preparation grant until construction ends, then
+transfers only a checked resident bound. A merge copy admits source preparation,
+the complete serial kernel peak and output reconciliation in the same reservation;
+each transition preserves sources and earlier outputs. Qualified uncompressed IPC
+frames use one full body allocation after a recursive descriptor check proves
+that Arrow needs no alignment copies. Other frame layouts retain their existing
+conservative bounds. Controlled Row copies require a checked payload bound before
+executing an interleave kernel; unproved payload types fail with a named resource
+refusal. Offset overflow still retries a smaller output prefix before allocation.
+
+The controlled merge retains an input batch only while a future cursor or pending
+row index needs it. It releases consumed inputs before refilling and after copying
+emitted rows. Independent key cursors remain through their last comparison;
+controlled Row streams release cached keys after actual input EOF. Escaped buffer
+tokens retain their own lifetimes. Aggregates release the consumed input handle
+when grouping ends, before state reservation or spilling; genuine state aliases
+retain their own buffer tickets.
+
+The qualified private Repartition FIFO donates one independently admitted,
+nonspilling writer workspace after encoding and flush, before publishing the
+batch. Later writes and reads borrow available credit and admit any fresh deficit;
+they never merge more donors into that bank. One consumer permit spans file
+rotations and started workers. Actual EOF, error or cancellation retires unused
+credit, including when the exhausted outer stream remains alive. This does not
+guarantee that concurrent writer and reader workspaces fit every constrained pool.
+
 A buffered producer reserves an existing channel slot before polling its input.
 That slot covers a queued or in-flight item, so a full queue cannot retain an
 additional decoded batch awaiting send. Channel capacity, batch size, merge fan-in

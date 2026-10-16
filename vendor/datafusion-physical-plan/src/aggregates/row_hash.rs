@@ -743,6 +743,9 @@ impl Stream for GroupedHashAggregateStream {
                             // The rest of the code will first try to reduce memory usage by
                             // already emitting results.
                             self.group_aggregate_batch(&batch)?;
+                            // Grouping has finished reading the input. Any state
+                            // that aliases its buffers owns those aliases itself.
+                            drop(batch);
 
                             assert!(!self.input_done);
 

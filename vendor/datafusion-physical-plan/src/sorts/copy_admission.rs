@@ -16,8 +16,10 @@
 // under the License.
 
 //! Copy authority follows allocation phases and the last retained backing.
-//! Qualified kernels use checked current-operation bounds; other kernels keep
-//! the existing merge-copy envelope. This is not a universal kernel estimator.
+//! Qualified kernels use checked current-operation bounds. Controlled Row
+//! kernels without a proof refuse before execution; unqualified merges retain
+//! their existing envelope. This is not a universal kernel estimator.
+use super::builder::BufferedBatch;
 use crate::spill::admission::{add, array_metadata, mul, schema_bound, source_metadata};
 use arrow::array::ArrayRef;
 use arrow::datatypes::SchemaRef;
@@ -26,6 +28,7 @@ use arrow_buffer::{Buffer, MemoryPool, MemoryReservation as ArrowReservation};
 use arrow_data::ArrayData;
 use datafusion_common::{DataFusionError, Result};
 use datafusion_execution::memory_pool::MemoryReservation;
+use std::alloc::Layout;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -62,19 +65,36 @@ pub(super) struct CopyAdmission {
     state: Mutex<State>,
 }
 impl CopyAdmission {
-    pub(super) fn new(authority: MemoryReservation) -> Arc<Self> {
-        Arc::new(Self {
-            envelope: authority.size(),
+    fn control_bytes() -> usize {
+        size_of::<Self>()
+            + 2 * size_of::<usize>()
+            + crate::spill::resident_metadata::std_mutex_heap_bound().unwrap_or(0)
+    }
+    pub(super) fn new(authority: MemoryReservation) -> Result<Arc<Self>> {
+        let envelope = authority.size();
+        // Preserve sufficient original authority. Admit any missing known
+        // control bytes BEFORE the first Mutex lock or Arc allocation.
+        let missing_control = Self::control_bytes().saturating_sub(envelope);
+        if missing_control > 0 {
+            authority.try_grow(missing_control)?;
+        }
+        let state = Mutex::new(State {
+            authority,
+            rows: 0,
+            outputs: 0,
+            active: false,
+            preparing: false,
+            field: FieldLifetime::None,
+        });
+        // On macOS, the first lock allocates one pthread mutex Box. Initialize
+        // while uniquely owned, so no OnceBox initializer can allocate a loser
+        // Box concurrently. The State's authority survives mutex destruction.
+        drop(state.lock().unwrap());
+        Ok(Arc::new(Self {
+            envelope,
             capability: CopyCapability::Legacy,
-            state: Mutex::new(State {
-                authority,
-                rows: 0,
-                outputs: 0,
-                active: false,
-                preparing: false,
-                field: FieldLifetime::None,
-            }),
-        })
+            state,
+        }))
     }
     pub(super) fn preparing(
         authority: MemoryReservation,
@@ -84,18 +104,23 @@ impl CopyAdmission {
         let envelope = authority.size();
         // This occurs before starting any prefetched reader. Constructor
         // allowance remains earmarked until both row/merge constructors finish.
-        authority.try_resize(metadata)?;
+        let heap = crate::spill::resident_metadata::std_mutex_heap_bound().unwrap_or(0);
+        authority.try_resize(add(metadata, heap)?)?;
+        let state = Mutex::new(State {
+            authority,
+            rows: 0,
+            outputs: 0,
+            active: false,
+            preparing: true,
+            field: FieldLifetime::None,
+        });
+        // Full constructor grant remains live through this unique-owner first
+        // lock and the later Arc allocation. No public Arc exists yet.
+        drop(state.lock().unwrap());
         Ok(Arc::new(Self {
             envelope,
             capability,
-            state: Mutex::new(State {
-                authority,
-                rows: 0,
-                outputs: 0,
-                active: false,
-                preparing: true,
-                field: FieldLifetime::None,
-            }),
+            state,
         }))
     }
     pub(super) fn encoded_width(&self) -> Option<usize> {
@@ -114,7 +139,7 @@ impl CopyAdmission {
     // gone. Keep its control allocation directly, without a Resident self-cycle.
     fn control(&self, state: &State) -> usize {
         if self.bounded_operations() || state.field != FieldLifetime::None {
-            size_of::<Self>() + 2 * size_of::<usize>()
+            Self::control_bytes()
         } else {
             0
         }
@@ -148,7 +173,7 @@ impl CopyAdmission {
         {
             return Err(bound_error());
         }
-        let control = add(size_of::<Self>(), 2 * size_of::<usize>())?;
+        let control = Self::control_bytes();
         let target = self.envelope.max(add(control, metadata)?);
         if target > state.authority.size() {
             state.authority.try_grow(target - state.authority.size())?;
@@ -177,6 +202,13 @@ impl CopyAdmission {
         self: &Arc<Self>,
         workspace: Option<usize>,
     ) -> Result<Phase> {
+        if workspace.is_none() && matches!(self.capability, CopyCapability::Row { .. }) {
+            let state = self.state.lock().unwrap();
+            return Err(DataFusionError::ResourcesExhausted(format!(
+                "Row interleave lacks a checked payload allocation bound: {}",
+                state.authority.consumer().name(),
+            )));
+        }
         if workspace.is_none() && self.state.lock().unwrap().field != FieldLifetime::None
         {
             return Err(DataFusionError::ResourcesExhausted(
@@ -311,6 +343,17 @@ impl Phase {
         add(state.authority.size(), bytes)?;
         state.authority.try_grow(bytes)
     }
+    /// Replace dead operation workspace, preserving every actual resident and
+    /// the live Field production floor in the SAME original reservation.
+    pub(super) fn transition(&self, operation: usize) -> Result<()> {
+        let state = self.admission.state.lock().unwrap();
+        if !state.active || state.preparing {
+            return Err(bound_error());
+        }
+        state
+            .authority
+            .try_resize(add(self.admission.retained(&state), operation)?)
+    }
 }
 impl Drop for Phase {
     fn drop(&mut self) {
@@ -375,7 +418,121 @@ pub(super) struct SourceOwners {
     slots: usize,
     metadata: usize,
 }
+
+/// Only the private all-IPC copy path uses this plan. The caller pins all
+/// source batches through reconciliation; schema equality alone is not proof
+/// that datatype Field/Fields trees share allocations with the declared schema.
+pub(super) struct CopyPlan {
+    slots: usize,
+    ledger: usize,
+    walk: usize,
+    metadata: usize,
+    kernel: usize,
+    payload: usize,
+}
+impl CopyPlan {
+    pub(super) fn prepare(&self) -> Result<usize> {
+        add(self.ledger, self.walk)
+    }
+    pub(super) fn kernel(&self) -> Result<usize> {
+        add(self.ledger, self.kernel)
+    }
+}
 impl SourceOwners {
+    pub(super) fn plan(
+        batches: &[BufferedBatch],
+        schema: &SchemaRef,
+        payload: &super::copy_bounds::SerialPayload,
+    ) -> Result<Option<CopyPlan>> {
+        use crate::spill::resident_metadata;
+        // This unchanged per-owner allowance covers the opaque Bytes Arc and
+        // two overlapping claim boxes. Prove the whole control allocation
+        // BEFORE choosing this path; other targets keep their existing fees.
+        let control = resident_metadata::raw_bytes_arc_bound()
+            .and_then(|bytes| size_of::<Claimed>().checked_mul(2)?.checked_add(bytes));
+        if !control.is_some_and(|bytes| bytes <= 256) {
+            return Ok(None);
+        }
+        let Some(first) = batches.first() else {
+            return Ok(None);
+        };
+        let mut buffers = 0;
+        for input in batches {
+            let batch = &input.batch;
+            let Some(headers) = resident_metadata::batch(batch) else {
+                return Ok(None);
+            };
+            buffers = add(buffers, headers.buffers)?;
+        }
+        let Some(headers) = resident_metadata::batch(&first.batch) else {
+            return Ok(None);
+        };
+        let mut walk = 0;
+        let mut kernel_scratch = 0;
+        for column in 0..first.batch.num_columns() {
+            let mut active_sources = 0;
+            for input in batches {
+                let batch = &input.batch;
+                let size = array_metadata(batch.column(column).as_ref())?;
+                walk = walk.max(size);
+                active_sources = add(active_sources, size)?;
+            }
+            // FixedBinary fallback materializes ALL source ArrayData trees,
+            // reference Vecs and closures simultaneously. Recursive List/Struct
+            // parent references remain live; the full column tree covers them.
+            kernel_scratch = kernel_scratch.max(active_sources);
+        }
+        let slots = add(buffers, 1)?;
+        let ledger = mul(slots, size_of::<Owner>())?;
+        Layout::array::<Owner>(slots).map_err(|_| bound_error())?;
+        let column_capacity = if first.batch.num_columns() == 0 {
+            0
+        } else {
+            mul(first.batch.num_columns(), 2)?.max(4)
+        };
+        // Root Result<Vec> may reallocate old+new backing while collecting
+        // columns. The resident header bound already includes the new backing.
+        let root_growth = mul(column_capacity, size_of::<ArrayRef>())?;
+        let kernel_metadata = add(
+            add(headers.headers, mul(buffers, 256)?)?,
+            add(kernel_scratch, root_growth)?,
+        )?;
+        // Output arrays clone actual first-source datatype subtrees; output
+        // RecordBatch clones the declared root. Retain BOTH old schema fees.
+        let metadata = add(
+            schema_bound(schema)?,
+            schema_bound(first.batch.schema_ref())?,
+        )?;
+        Ok(Some(CopyPlan {
+            slots,
+            ledger,
+            walk,
+            metadata,
+            kernel: add(payload.peak, kernel_metadata)?,
+            payload: payload.resident,
+        }))
+    }
+    pub(super) fn new_planned(
+        batches: &[BufferedBatch],
+        plan: &CopyPlan,
+    ) -> Result<Self> {
+        let mut owners = Vec::new();
+        owners
+            .try_reserve_exact(plan.slots)
+            .map_err(|_| bound_error())?;
+        for input in batches {
+            let batch = &input.batch;
+            for column in batch.columns() {
+                walk(&column.to_data(), &mut |buffer| insert(&mut owners, buffer))?;
+            }
+        }
+        dedup(&mut owners);
+        Ok(Self {
+            owners,
+            slots: plan.slots,
+            metadata: plan.metadata,
+        })
+    }
     pub(super) fn new<'a>(
         phase: &Phase,
         batches: impl Clone + Iterator<Item = &'a RecordBatch>,
@@ -433,6 +590,82 @@ impl SourceOwners {
             Ok(_) => Err(bound_error()),
             Err(_) => Ok(false),
         }
+    }
+    pub(super) fn retain_planned(
+        &self,
+        phase: &Phase,
+        columns: &[ArrayRef],
+        plan: &CopyPlan,
+    ) -> Result<()> {
+        use crate::spill::resident_metadata;
+        let headers = resident_metadata::columns(columns).ok_or_else(bound_error)?;
+        let resident_arc = resident_metadata::arc_bytes(Layout::new::<Resident>())
+            .ok_or_else(bound_error)?;
+        // Resident Arc allocation is separately explicit. The preserved opaque
+        // Bytes/claim allowance was proved before the kernel in plan().
+        let mut physical = 0;
+        let mut buffers = 0;
+        for column in columns {
+            walk(&column.to_data(), &mut |buffer| {
+                if buffer.capacity() != 0 && !self.existing(buffer)? {
+                    physical = add(physical, buffer.capacity())?;
+                    buffers = add(buffers, 1)?;
+                }
+                Ok(())
+            })?;
+        }
+        if physical > plan.payload {
+            return Err(bound_error());
+        }
+        let slots = add(headers.buffers, 1)?;
+        Layout::array::<Owner>(slots).map_err(|_| bound_error())?;
+        let metadata = add(self.metadata, headers.headers)?;
+        let operation = add(
+            add(plan.ledger, mul(slots, size_of::<Owner>())?)?,
+            add(
+                add(physical, add(metadata, resident_arc)?)?,
+                add(mul(buffers, add(256, resident_arc)?)?, plan.walk)?,
+            )?,
+        )?;
+        // Kernels have returned and their local scratch has dropped. Full live
+        // output remains protected while the NEXT metadata allocation is
+        // admitted. Refusal occurs before fresh Vec/Resident/claim construction.
+        phase.transition(operation).map_err(|error| {
+            DataFusionError::Context(
+                "Merge output reconciliation".into(),
+                Box::new(error),
+            )
+        })?;
+        let mut fresh = Vec::new();
+        fresh.try_reserve_exact(slots).map_err(|_| bound_error())?;
+        for column in columns {
+            walk(&column.to_data(), &mut |buffer| {
+                if !self.existing(buffer)? {
+                    insert(&mut fresh, buffer)?;
+                }
+                Ok(())
+            })?;
+        }
+        dedup(&mut fresh);
+        let headers = phase.output(metadata)?;
+        for owner in &mut fresh {
+            owner.lease = Some(phase.output(add(owner.capacity, 256)?)?);
+        }
+        for column in columns {
+            walk(&column.to_data(), &mut |buffer| {
+                if buffer.capacity() != 0 && !self.existing(buffer)? {
+                    let index = fresh
+                        .binary_search_by_key(&buffer.data_ptr(), |owner| owner.base)
+                        .map_err(|_| bound_error())?;
+                    buffer.claim(&Claims {
+                        lease: Arc::clone(fresh[index].lease.as_ref().unwrap()),
+                        headers: Arc::clone(&headers),
+                    });
+                }
+                Ok(())
+            })?;
+        }
+        Ok(())
     }
     pub(super) fn retain_fresh(
         &self,

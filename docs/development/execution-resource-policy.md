@@ -121,6 +121,19 @@ funded while their sources remain alive. Buffered readers reserve a configured
 channel slot before polling, including an in-flight decode in that capacity;
 queue capacity and merge/batch settings are unchanged.
 
+The qualified private Repartition FIFO transfers one completed writer workspace
+to its reader bank before publishing a spilled batch. Later writes and reads
+reuse available credit and admit fresh deficits before allocation. Its consumer
+permit spans file rotations and started workers, and retires unused credit at
+EOF, error or cancellation. Parsed schema, decoded-array and merge-copy phases
+release preparation workspace only after construction ends; source buffers and
+earlier outputs remain funded through each transition. Qualified uncompressed
+frames share one full body after recursive alignment and descriptor checks;
+other frames retain their conservative bounds. Controlled Row copies refuse
+unproved payload bounds before the kernel, while offset overflow preserves the
+existing smaller-prefix retry. Aggregates drop consumed input handles before
+state admission; genuine state aliases retain their buffer charges.
+
 Property inventory admission counts route/path/map capacities and one
 `ParquetMetaData::memory_size()` plus two Arrow schema allowances per cached
 footer (the second schema allows merged route summaries). A footer beyond the

@@ -264,8 +264,19 @@ impl<C: CursorValues> SortPreservingMergeStream<C> {
             return Poll::Ready(Ok(()));
         }
 
+        // Release dead sealed input owners before a refill can allocate its
+        // next body. Pending rows and future cursors remain pinned by builder.
+        self.in_progress.release_consumed_inputs();
         match futures::ready!(self.streams.poll_next(cx, idx)) {
-            None => Poll::Ready(Ok(())),
+            None => {
+                if self.in_progress.uses_row_copy() {
+                    // Actual fused EOF cannot produce another key to compare
+                    // with this one. Pending output indices own batch payload,
+                    // independently of these encoded key Rows and their lease.
+                    self.prev_cursors[idx].take();
+                }
+                Poll::Ready(Ok(()))
+            }
             Some(Err(e)) => Poll::Ready(Err(e)),
             Some(Ok((cursor, batch))) => {
                 self.cursors[idx] = Some(Cursor::new(cursor));

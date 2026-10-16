@@ -84,6 +84,28 @@ impl Budget {
         if bytes >= size {
             return self.try_grow(bytes - size);
         }
+        self.shrink_to(bytes);
+        Ok(())
+    }
+    /// Move a fresh nonspilling workspace into its next owned phase without
+    /// releasing bytes or changing consumer registration/sponsor eligibility.
+    pub(super) fn take_owned_authority(&mut self) -> Result<MemoryReservation> {
+        if self.credit.is_some()
+            || self.borrowed.load(Ordering::Relaxed) != 0
+            || self.fresh.consumer().can_spill()
+        {
+            return Err(DataFusionError::Internal(
+                "Owned spill authority requires a fresh nonspilling workspace".into(),
+            ));
+        }
+        Ok(self.fresh.take())
+    }
+    /// Return only excess existing authority; never allocate or readmit.
+    fn shrink_to(&self, bytes: usize) {
+        let size = self.size();
+        if bytes >= size {
+            return;
+        }
         let shrink = size - bytes;
         let fresh = self.fresh.size().min(shrink);
         self.fresh.shrink(fresh);
@@ -92,7 +114,6 @@ impl Budget {
         if let Some(credit) = &self.credit {
             credit.give(borrowed);
         }
-        Ok(())
     }
 }
 impl Drop for Budget {
@@ -485,11 +506,23 @@ impl SharedSchema {
             add(size_of::<Self>(), 2 * size_of::<usize>())?,
         )
     }
+    /// Called only for the fresh schema returned by our private unprojected
+    /// StreamReader. Conversion temporaries have ended; MessageReader's buffer
+    /// and BufReader remain separately funded by the reader's persistent grant.
     pub(super) fn new(schema: SchemaRef, authority: Budget) -> Arc<Self> {
-        Arc::new(Self {
+        let resident = super::schema_admission::fresh_resident_schema_bound(&schema);
+        // Allocate this owner while complete construction authority is live.
+        // Its schema drops before authority, including on the final body token.
+        let owner = Arc::new(Self {
             schema,
             _authority: authority,
-        })
+        });
+        if let Some(bytes) = resident {
+            // Unknown/overflowing representations keep the old grant. A bound
+            // above the construction grant cannot trigger post-parse admission.
+            owner._authority.shrink_to(bytes);
+        }
+        owner
     }
     fn matches(&self, batch: &RecordBatch) -> bool {
         Arc::ptr_eq(&self.schema, batch.schema_ref())
@@ -600,6 +633,47 @@ fn claim_owners(
         claim_owners(child, owners, work, metadata);
     }
 }
+/// Keep the existing 256-byte buffer/control allowance. Pinned Bytes owns
+/// ptr + len + Deallocation (three usize words), and the actual reservation
+/// mutex. Include its Arc, our payload Budget Arc and the claim token Box.
+/// Private IPC allocations have no external custom-deallocator side owner.
+fn resident_controls_fit() -> Option<()> {
+    use std::alloc::Layout;
+    let bytes = super::resident_metadata::raw_bytes_arc_bound()?;
+    let payload = super::resident_metadata::arc_bytes(Layout::new::<Budget>())?;
+    let token = size_of::<OwnerReservation>();
+    // Each split also retains the shared registration and its fixed consumer
+    // name. Counting it per occurrence conservatively covers the final split.
+    let registration =
+        super::resident_metadata::literal_registration_bytes("SpillReaderDecode")?;
+    (bytes
+        .checked_add(payload)?
+        .checked_add(token)?
+        .checked_add(registration)?
+        <= 256)
+        .then_some(())
+}
+
+fn resident_batch_metadata(
+    batch: &RecordBatch,
+    shared: bool,
+    old_metadata: usize,
+) -> Option<usize> {
+    if !shared {
+        return None;
+    }
+    resident_controls_fit()?;
+    let resident = super::resident_metadata::batch(batch)?;
+    let owner =
+        super::resident_metadata::arc_bytes(std::alloc::Layout::new::<BatchMetadata>())?;
+    let bytes = resident
+        .headers
+        .checked_add(resident.buffers.checked_mul(256)?)?
+        .checked_add(owner)?;
+    // The complete old preparation fee still protects all following ArrayData
+    // walks and owner tables. A larger/unknown candidate keeps that fee.
+    (bytes <= old_metadata).then_some(bytes)
+}
 /// Transfer each distinct full physical owner exactly once. Prior dictionary
 /// value roots remain alive throughout this function, so matching bases cannot
 /// be freed/reused, and their existing tickets must never be overwritten.
@@ -696,10 +770,13 @@ pub(super) fn retain_batch(
             pin_values(&column.to_data(), &mut next.values);
         }
     }
+    let resident = resident_batch_metadata(batch, shared, metadata).unwrap_or(metadata);
     let metadata = Arc::new(BatchMetadata {
-        _authority: work.split(metadata),
+        _authority: work.split(resident),
         _schema: shared.then(|| Arc::clone(schema)),
     });
+    // Only the resident metadata moves into tokens. The remaining complete
+    // preparation grant stays in work through final to_data and table drops.
     for column in batch.columns() {
         claim_owners(&column.to_data(), &mut owners, work, &metadata);
     }
@@ -752,24 +829,116 @@ pub(super) struct FrameStats {
     buffers: usize,
 }
 
-/// Arrow58.4 MessageReader::maybe_next allocates exactly bodyLength bytes
-/// with MutableBuffer::from_len_zeroed (Arrow ALIGNMENT), and uncompressed
-/// read_buffer returns slices. For this checked flat layout, align_buffers
-/// cannot allocate another body: Int64 requires 8, Utf8 offsets 4, bytes 1.
-/// This is an allocation proof for the same private frame subsequently decoded,
-/// not validation of arbitrary IPC values. Other layouts keep the old bound.
-fn flat_body_matches(
+/// Arrow 58.4 allocates one ALIGNMENT-aligned body in MessageReader::maybe_next.
+/// Uncompressed read_buffer returns body slices. This finite recursive layout
+/// checks every descriptor's range, minimum length and eight-byte alignment,
+/// so align_buffers cannot allocate another payload for its supported types.
+/// Exact DFS node/buffer counts, parent lengths and null counts are checked.
+/// This proves allocation for the same private frame subsequently decoded;
+/// it does not validate arbitrary IPC values. Other layouts keep the old bound.
+fn aligned_body_matches(
     schema: &Schema,
     message: &arrow_ipc::Message<'_>,
     body: usize,
 ) -> Result<bool> {
+    // Finite primitive/container domain: each accepted typed buffer requires
+    // at most 8-byte alignment. Arrow 58.4 read_buffer returns body slices;
+    // align_buffers therefore makes no aligned payload copies in this domain.
+    fn descriptor(buffer: &arrow_ipc::Buffer, minimum: usize, body: usize) -> bool {
+        let (Ok(offset), Ok(length)) = (
+            usize::try_from(buffer.offset()),
+            usize::try_from(buffer.length()),
+        ) else {
+            return false;
+        };
+        offset % 8 == 0
+            && length >= minimum
+            && offset.checked_add(length).is_some_and(|end| end <= body)
+    }
+    fn array<'a>(
+        data_type: &DataType,
+        expected_length: Option<usize>,
+        depth: usize,
+        nodes: &mut impl Iterator<Item = &'a arrow_ipc::FieldNode>,
+        buffers: &mut impl Iterator<Item = &'a arrow_ipc::Buffer>,
+        body: usize,
+    ) -> Result<bool> {
+        if depth >= 64
+            || !matches!(
+                data_type,
+                DataType::Int64
+                    | DataType::UInt64
+                    | DataType::UInt32
+                    | DataType::FixedSizeBinary(16)
+                    | DataType::Timestamp(_, _)
+                    | DataType::Utf8
+                    | DataType::List(_)
+                    | DataType::Struct(_)
+            )
+        {
+            return Ok(false);
+        }
+        let Some(node) = nodes.next() else {
+            return Ok(false);
+        };
+        let (Ok(length), Ok(nulls)) = (
+            usize::try_from(node.length()),
+            usize::try_from(node.null_count()),
+        ) else {
+            return Ok(false);
+        };
+        if expected_length.is_some_and(|expected| length != expected) || nulls > length {
+            return Ok(false);
+        }
+        let bitmap = if nulls == 0 { 0 } else { add(length, 7)? / 8 };
+        if !buffers
+            .next()
+            .is_some_and(|buffer| descriptor(buffer, bitmap, body))
+        {
+            return Ok(false);
+        }
+        let mut next = |minimum| {
+            buffers
+                .next()
+                .is_some_and(|buffer| descriptor(buffer, minimum, body))
+        };
+        match data_type {
+            DataType::Int64 | DataType::UInt64 | DataType::Timestamp(_, _) => {
+                Ok(next(mul(length, 8)?))
+            }
+            DataType::UInt32 => Ok(next(mul(length, 4)?)),
+            DataType::FixedSizeBinary(16) => Ok(next(mul(length, 16)?)),
+            DataType::Utf8 => Ok(next(mul(add(length, 1)?, 4)?) && next(0)),
+            DataType::List(child) => {
+                if !next(mul(add(length, 1)?, 4)?) {
+                    return Ok(false);
+                }
+                // A List's child count comes from its OWN FieldNode. It is
+                // not the parent row count, including for NULL parent spans.
+                array(child.data_type(), None, depth + 1, nodes, buffers, body)
+            }
+            DataType::Struct(children) => {
+                // Struct children must each carry exactly the parent row count.
+                for child in children {
+                    if !array(
+                        child.data_type(),
+                        Some(length),
+                        depth + 1,
+                        nodes,
+                        buffers,
+                        body,
+                    )? {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            }
+            _ => unreachable!(),
+        }
+    }
     if message.version() != arrow_ipc::MetadataVersion::V5
         || message.header_type() != MessageHeader::RecordBatch
         || schema.fields().is_empty()
-        || !schema
-            .fields()
-            .iter()
-            .all(|field| matches!(field.data_type(), DataType::Int64 | DataType::Utf8))
     {
         return Ok(false);
     }
@@ -782,68 +951,28 @@ fn flat_body_matches(
     let (Some(nodes), Some(buffers)) = (batch.nodes(), batch.buffers()) else {
         return Ok(false);
     };
-    let expected = schema.fields().iter().try_fold(0, |total, field| {
-        add(
-            total,
-            if field.data_type() == &DataType::Int64 {
-                2
-            } else {
-                3
-            },
-        )
-    })?;
-    if nodes.len() != schema.fields().len() || buffers.len() != expected {
-        return Ok(false);
-    }
-    // from_len_zeroed unwraps this exact Layout before allocating.
-    std::alloc::Layout::from_size_align(body, arrow_buffer::alloc::ALIGNMENT)
-        .map_err(|_| overflow())?;
     let Ok(rows) = usize::try_from(batch.length()) else {
         return Ok(false);
     };
-    let descriptor = |index: usize, minimum: usize| -> bool {
-        let buffer = buffers.get(index);
-        let (Ok(offset), Ok(len)) = (
-            usize::try_from(buffer.offset()),
-            usize::try_from(buffer.length()),
-        ) else {
-            return false;
-        };
-        offset % 8 == 0
-            && len >= minimum
-            && offset.checked_add(len).is_some_and(|end| end <= body)
-    };
-    let mut index = 0;
-    for (field, node) in schema.fields().iter().zip(nodes) {
-        let Ok(nulls) = usize::try_from(node.null_count()) else {
+    // Same Layout that Arrow MutableBuffer::from_len_zeroed unwraps.
+    std::alloc::Layout::from_size_align(body, arrow_buffer::alloc::ALIGNMENT)
+        .map_err(|_| overflow())?;
+    let mut nodes = nodes.iter();
+    let mut buffers = buffers.iter();
+    for field in schema.fields() {
+        if !array(
+            field.data_type(),
+            Some(rows),
+            0,
+            &mut nodes,
+            &mut buffers,
+            body,
+        )? {
             return Ok(false);
-        };
-        if node.length() != batch.length() || nulls > rows {
-            return Ok(false);
-        }
-        let bitmap = if nulls == 0 { 0 } else { add(rows, 7)? / 8 };
-        if !descriptor(index, bitmap) {
-            return Ok(false);
-        }
-        index += 1;
-        match field.data_type() {
-            DataType::Int64 => {
-                if !descriptor(index, mul(rows, 8)?) {
-                    return Ok(false);
-                }
-                index += 1;
-            }
-            DataType::Utf8 => {
-                if !descriptor(index, mul(add(rows, 1)?, 4)?) || !descriptor(index + 1, 0)
-                {
-                    return Ok(false);
-                }
-                index += 2;
-            }
-            _ => unreachable!(),
         }
     }
-    Ok(true)
+    // Exact DFS counts; no omitted or unused field/buffer descriptors qualify.
+    Ok(nodes.next().is_none() && buffers.next().is_none())
 }
 
 pub(super) fn preflight(
@@ -967,7 +1096,7 @@ fn scan(
         // Wire body, decompressed buffers (Vec growth at most 2x on valid
         // frames), plus an aligned copy of all buffers when Arrow requires it.
         stats.decoded_bytes = add(stats.decoded_bytes, decoded)?;
-        let payload = if ordinary && flat_body_matches(schema, &message, body)? {
+        let payload = if ordinary && aligned_body_matches(schema, &message, body)? {
             body
         } else {
             mul(add(body, mul(decoded, 2)?)?, 2)?

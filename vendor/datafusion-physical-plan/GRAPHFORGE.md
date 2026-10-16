@@ -22,10 +22,11 @@ The port adapts only the 54.1 API names: one cloneable `SpillPoolWriter` and
 
 GraphForge #2146 covers `src/spill/admission.rs`, `src/spill/credit.rs`, `src/spill/mod.rs`,
 `src/spill/in_progress_spill_file.rs`, `src/spill/spill_manager.rs`,
+`src/spill/schema_admission.rs`, `src/spill/resident_metadata.rs`,
+`src/spill/spill_pool.rs`, `src/repartition/mod.rs`, `src/aggregates/row_hash.rs`,
 `src/sorts/sort.rs`, `src/sorts/multi_level_merge.rs`,
 `src/sorts/copy_admission.rs`, `src/sorts/copy_bounds.rs`, the
-merge/cursor/builder plumbing, and Cargo
-features.
+merge/cursor/builder plumbing, and Cargo features.
 It keeps Arrow's existing IPC writer, reader, codecs and record-batch layouts.
 
 The sorter admits each completed sorted batch's actual retained backing before
@@ -68,7 +69,20 @@ readers remain distinct. Per-batch array/control metadata and per-decode scratch
 stay independently funded; a nonidentical batch schema keeps its original full
 schema bound. BufReader and MessageReader metadata high-water authority remain
 separate after extracting the shared schema owner. This does not extend the
-existing external SchemaRef/bufferless-header guarantee.
+existing external SchemaRef/bufferless-header guarantee. Full schema parsing and
+array construction grants remain live until those phases finish. Qualified
+constructor provenance then permits a checked resident grant; unknown container
+or target layouts retain their original fees. Schema/datatype heaps, full buffer
+backing, owner ledgers and platform-specific control allocations stay separate.
+
+The qualified private Repartition FIFO transfers one independently admitted,
+nonspilling writer workspace after encoding and flush, before publication. Later
+writes and reads reuse available tickets and admit fresh deficits before
+allocation; they never add another donor to the bank. One logical consumer root
+spans rotations, and workers retain their own permit until actual exit. Terminal
+paths drop real readers before retiring unused credit. This preserves allocation
+safety without claiming every simultaneous writer/read workspace fits a pool.
+
 Pre-existing multi-run
 admission is divided explicitly: input credit moves to the readers, while
 sorted-copy credit remains independent of input credit. Numeric input-credit
@@ -135,11 +149,12 @@ cached SchemaRef clones the same schema already retained by the outer
 RecordBatchStreamAdapter, adding neither a heap schema nor a last-use extension;
 the existing constant/external schema-header boundary remains.
 
-For uncompressed V5 RecordBatch frames whose actual reader schema is flat
-Int64/Utf8, framing admits one complete body only after checking node/field and
-buffer counts, row/null lengths, signed descriptor ranges, required lengths,
-8-byte offsets, no dictionaries/variadic buffers/compression, and a valid body
-allocation Layout. Pinned MessageReader uses from_len_zeroed with exact body
+For uncompressed V5 RecordBatch frames, framing admits one complete body only
+for Int64, UInt64, UInt32, UUID16, Timestamp, Utf8 and recursive List/Struct
+layouts. An allocation-free, depth-limited walk checks exact DFS node/buffer
+counts, root/Struct row lengths, each List child's own length, null counts,
+signed descriptor ranges, required lengths, 8-byte offsets, absent dictionary/
+variadic/compression messages, and a valid body allocation Layout. Pinned MessageReader uses from_len_zeroed with exact body
 capacity and Arrow alignment; these layouts need no alignment copy. The whole
 body, including padding, stays charged through the final alias. Compressed,
 unknown or unmatched layouts keep the original body/decompression allowance;
@@ -156,16 +171,24 @@ input full backing remains independently charged. Flat Utf8View/BinaryView
 payloads additionally bound the complete source handle mapping table (including
 unused and empty buffers), raw NULL views, descriptor/null buffers, Buffer Vec
 growth and Arc conversion; source payloads keep their existing IPC tickets.
-Unqualified Row kernels and mixed inputs retain the original envelope. Earlier
-copied output leases cannot pay for another allocation. Unqualified Row operations
-restore that full envelope; the separate FixedField path requires a checked
-interleave bound as described above. No alternate engine is introduced. This
-finite proof does not replace upstream estimates for unqualified Row kernels.
+Merges without the controlled Row capability and mixed inputs retain the
+original envelope. Within the controlled Row path, unproved payload kernels fail
+with a named resource refusal before execution. Offset overflow is reported
+before allocation to the existing smaller-prefix retry. Earlier copied output
+leases cannot pay for another allocation. Source preparation, complete serial
+kernel peak and output reconciliation transition on the same reservation while
+protecting sources and earlier outputs. FixedField retains its production floor
+and requires the checked interleave bound described above. No alternate engine
+or universal kernel estimator is introduced.
 
 While waiting for input, exact resident Rows, converter and vector authority
 remains. Reusable slots and current/previous cursors share each Rows lease;
 converter metadata stays protected while Rows retain its configuration. A
-failed mutation keeps its phase alive until its owning backing drops.
+failed mutation keeps its phase alive until its owning backing drops. Controlled
+merges release source batches after their final future-cursor/pending-index use;
+actual Row EOF releases cached keys. Aggregate grouping drops its consumed input
+handle before state admission or spilling. Genuine accumulator aliases retain
+their own buffer tickets.
 
 Interleave additionally admits its temporary local owner ledgers before their
 allocation. Source batches remain alive while numeric owner identities are
@@ -225,7 +248,7 @@ through the workspace CI runner:
 
 ```sh
 python3 scripts/test_environment.py -- cargo nextest run --locked --no-fail-fast \
-  -p graphforge-exec -E 'test(spill_admission_)'
+  -p graphforge-exec --lib -E 'test(spill_admission_) | test(copy_phase_) | test(spill_fifo_) | test(spill_schema_preparation) | test(spill_array_preparation) | test(spill_aggregate_input_last_use)'
 python3 scripts/test_environment.py -- cargo nextest run --locked --no-fail-fast \
   -p graphforge-api --test sort_spill_memory
 ```

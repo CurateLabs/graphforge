@@ -52,14 +52,21 @@ impl Credit {
         control: Option<MemoryReservation>,
         producers: usize,
     ) -> Arc<Self> {
+        let state = Mutex::new(State {
+            available: authority.size(),
+            authority,
+            outstanding: 0,
+            producers,
+            lifecycle: Lifecycle::Open,
+        });
+        if control.is_some() {
+            // A pthread-backed mutex can lazily allocate on its first lock.
+            // Its checked heap fee is already held, and this unique local
+            // state cannot race to allocate transient OnceBox candidates.
+            drop(state.lock().unwrap());
+        }
         Arc::new(Self {
-            state: Mutex::new(State {
-                available: authority.size(),
-                authority,
-                outstanding: 0,
-                producers,
-                lifecycle: Lifecycle::Open,
-            }),
+            state,
             _control: control,
         })
     }
@@ -71,20 +78,39 @@ impl Credit {
         authority: MemoryReservation,
         readers: usize,
     ) -> Result<(Arc<Self>, Vec<Arc<ReaderPermit>>)> {
+        Self::with_readers_and_control(authority, readers, 0)
+    }
+    /// An owned FIFO donor also retains its literal-name registration after
+    /// encoding ends. That checked control fee cannot become borrowable credit.
+    pub(super) fn with_readers_and_control(
+        authority: MemoryReservation,
+        readers: usize,
+        owned_control: usize,
+    ) -> Result<(Arc<Self>, Vec<Arc<ReaderPermit>>)> {
         if authority.consumer().can_spill() || readers == 0 {
             return Err(DataFusionError::Internal(
                 "Retiring IPC credit requires a nonspilling sponsor and readers".into(),
             ));
         }
+        let mutex_heap =
+            super::resident_metadata::std_mutex_heap_bound().ok_or_else(|| {
+                DataFusionError::ResourcesExhausted(
+                    "IPC reader credit mutex control is not bounded on this target"
+                        .into(),
+                )
+            })?;
         let control = add(
-            add(size_of::<Self>(), 2 * size_of::<usize>())?,
+            add(owned_control, mutex_heap)?,
             add(
-                size_of::<Vec<Arc<ReaderPermit>>>(),
-                mul(
-                    readers,
-                    add(
-                        add(size_of::<ReaderPermit>(), 2 * size_of::<usize>())?,
-                        size_of::<Arc<ReaderPermit>>(),
+                add(size_of::<Self>(), 2 * size_of::<usize>())?,
+                add(
+                    size_of::<Vec<Arc<ReaderPermit>>>(),
+                    mul(
+                        readers,
+                        add(
+                            add(size_of::<ReaderPermit>(), 2 * size_of::<usize>())?,
+                            size_of::<Arc<ReaderPermit>>(),
+                        )?,
                     )?,
                 )?,
             )?,

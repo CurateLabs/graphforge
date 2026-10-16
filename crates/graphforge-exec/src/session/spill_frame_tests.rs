@@ -1,6 +1,6 @@
 //! Checked one-body IPC admission, with real files and an unchanged fixed pool.
 use super::*;
-use arrow::array::{AsArray, Int64Array, UInt64Array};
+use arrow::array::{AsArray, Float64Array, Int64Array, UInt64Array};
 use arrow::buffer::{Buffer, NullBuffer, OffsetBuffer, ScalarBuffer};
 use arrow::ipc::{MessageHeader, MetadataVersion, reader::StreamReader};
 use datafusion::common::config::SpillCompression;
@@ -290,18 +290,18 @@ async fn spill_admission_flat_frame_compression_unknown_types_and_variadic_stay_
     let batch = flat_batch(ROWS);
     let unknown = RecordBatch::try_new(
         Arc::new(Schema::new(vec![
-            Field::new("key", DataType::UInt64, true),
+            Field::new("key", DataType::Float64, true),
             Field::new("value", DataType::Utf8, true),
         ])),
         vec![
-            Arc::new(UInt64Array::from_iter(
+            Arc::new(Float64Array::from_iter(
                 batch
                     .column(0)
                     .as_any()
                     .downcast_ref::<Int64Array>()
                     .unwrap()
                     .iter()
-                    .map(|v| v.map(|v| v as u64)),
+                    .map(|v| v.map(|v| v as f64)),
             )),
             Arc::clone(batch.column(1)),
         ],

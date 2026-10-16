@@ -16,10 +16,13 @@
 // under the License.
 
 //! Checked allocation bounds for the pinned Arrow 58.4 operation families.
-//! Unknown expressions/types use the existing full merge-copy envelope.
+//! Unqualified expressions keep the existing envelope. Controlled Row kernels
+//! require a checked payload bound before execution.
+use super::builder::BufferedBatch;
 use crate::spill::admission::{add, mul};
 use arrow::array::{Array, AsArray};
 use arrow::datatypes::{DataType, Schema};
+use arrow::error::ArrowError;
 use arrow::record_batch::RecordBatch;
 use arrow_buffer::Buffer;
 use datafusion_common::{DataFusionError, Result};
@@ -215,7 +218,7 @@ fn span(array: &dyn Array, row: usize) -> Result<(usize, usize)> {
 }
 /// Stack-borrowed paths select a child without building ArrayRef vectors.
 enum Arrays<'a> {
-    Column(&'a [(usize, RecordBatch)], usize),
+    Column(&'a [BufferedBatch], usize),
     Struct(&'a Arrays<'a>, usize),
     List(&'a Arrays<'a>),
 }
@@ -228,7 +231,9 @@ impl Arrays<'_> {
     }
     fn array(&self, source: usize) -> &dyn Array {
         match self {
-            Self::Column(batches, column) => batches[source].1.column(*column).as_ref(),
+            Self::Column(batches, column) => {
+                batches[source].batch.column(*column).as_ref()
+            }
             Self::Struct(parent, column) => {
                 parent.array(source).as_struct().column(*column).as_ref()
             }
@@ -354,7 +359,7 @@ fn node(arrays: &Arrays<'_>, selected: &Selection<'_>) -> Result<Option<usize>> 
             })?;
             // Preserve the kernel's existing offset-overflow/partial-output path.
             if !large && count > i32::MAX as usize {
-                return Ok(None);
+                return Err(ArrowError::OffsetOverflowError(count).into());
             }
             let offsets = mul(add(rows, 1)?, if large { 8 } else { 4 })?;
             let base = add(nulls, offsets)?;
@@ -394,16 +399,135 @@ fn node(arrays: &Arrays<'_>, selected: &Selection<'_>) -> Result<Option<usize>> 
 /// two boxed 24-byte closures and their fat-pointer Vecs as well as to_data.
 /// Input backing remains fully charged independently of these visible spans.
 pub(super) fn interleave(
-    batches: &[(usize, RecordBatch)],
+    batches: &[BufferedBatch],
     indices: &[(usize, usize)],
 ) -> Result<Option<usize>> {
     let selected = Selection::Rows(indices);
     let mut total = 0;
-    for column in 0..batches[0].1.num_columns() {
+    for column in 0..batches[0].batch.num_columns() {
         let Some(bytes) = node(&Arrays::Column(batches, column), &selected)? else {
             return Ok(None);
         };
         total = add(total, bytes)?;
     }
     Ok(Some(total))
+}
+
+/// Payloads survive their sibling kernels; List child-index scratch does not.
+/// Metadata is deliberately separate: SourceOwners adds the complete active
+/// source-column construction bound and accumulating output headers.
+pub(super) struct SerialPayload {
+    pub(super) resident: usize,
+    pub(super) peak: usize,
+}
+fn serial_node(
+    arrays: &Arrays<'_>,
+    selected: &Selection<'_>,
+    depth: usize,
+) -> Result<Option<SerialPayload>> {
+    if depth >= 64 {
+        return Ok(None);
+    }
+    let data_type = arrays.array(0).data_type();
+    let rows = selected.len();
+    let nulls = bitmap(rows)?;
+    let resident = if let Some(width) = data_type.primitive_width() {
+        add(nulls, mul(rows, width)?)?
+    } else {
+        match data_type {
+            DataType::Null => 0,
+            DataType::Boolean => mul(nulls, 2)?,
+            DataType::FixedSizeBinary(width) => add(
+                nulls,
+                aligned(mul(rows, usize::try_from(*width).map_err(|_| overflow())?)?)?,
+            )?,
+            DataType::Utf8
+            | DataType::LargeUtf8
+            | DataType::Binary
+            | DataType::LargeBinary
+            | DataType::List(_)
+            | DataType::LargeList(_) => {
+                let large = matches!(
+                    data_type,
+                    DataType::LargeUtf8 | DataType::LargeBinary | DataType::LargeList(_)
+                );
+                let mut count = 0;
+                selected.each(&mut |source, row| {
+                    let (start, end) = span(arrays.array(source), row)?;
+                    count = add(count, end - start)?;
+                    Ok(())
+                })?;
+                if !large && count > i32::MAX as usize {
+                    return Err(ArrowError::OffsetOverflowError(count).into());
+                }
+                let base = add(nulls, mul(add(rows, 1)?, if large { 8 } else { 4 })?)?;
+                if matches!(data_type, DataType::List(_) | DataType::LargeList(_)) {
+                    let children = Selection::Children {
+                        parent: selected,
+                        arrays,
+                        len: count,
+                    };
+                    let Some(child) =
+                        serial_node(&Arrays::List(arrays), &children, depth + 1)?
+                    else {
+                        return Ok(None);
+                    };
+                    return Ok(Some(SerialPayload {
+                        resident: add(base, child.resident)?,
+                        // Parent offsets/validity and child_indices remain live
+                        // throughout the complete recursive child invocation.
+                        peak: add(
+                            base,
+                            add(mul(count, size_of::<(usize, usize)>())?, child.peak)?,
+                        )?,
+                    }));
+                }
+                add(base, count)?
+            }
+            DataType::Struct(fields) => {
+                let mut resident = nulls;
+                let mut peak = nulls;
+                for column in 0..fields.len() {
+                    let Some(child) = serial_node(
+                        &Arrays::Struct(arrays, column),
+                        selected,
+                        depth + 1,
+                    )?
+                    else {
+                        return Ok(None);
+                    };
+                    peak = peak.max(add(resident, child.peak)?);
+                    resident = add(resident, child.resident)?;
+                }
+                return Ok(Some(SerialPayload { resident, peak }));
+            }
+            // Views/dictionaries and every unproved kernel keep the old path.
+            _ => return Ok(None),
+        }
+    };
+    Ok(Some(SerialPayload {
+        resident,
+        peak: resident,
+    }))
+}
+
+pub(super) fn serial_interleave(
+    batches: &[BufferedBatch],
+    indices: &[(usize, usize)],
+) -> Result<Option<SerialPayload>> {
+    if batches.is_empty() || indices.is_empty() {
+        return Ok(None);
+    }
+    let selected = Selection::Rows(indices);
+    let mut resident = 0;
+    let mut peak = 0;
+    for column in 0..batches[0].batch.num_columns() {
+        let Some(child) = serial_node(&Arrays::Column(batches, column), &selected, 0)?
+        else {
+            return Ok(None);
+        };
+        peak = peak.max(add(resident, child.peak)?);
+        resident = add(resident, child.resident)?;
+    }
+    Ok(Some(SerialPayload { resident, peak }))
 }
