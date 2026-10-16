@@ -196,3 +196,44 @@ rewritten. This validates bytes and resource bounds, not visualization meaning.
 also check PNG/SVG retrieval, unchanged package bytes, no-upload refusals,
 clone-ignore behavior, and hostile callers bypassing client validation. WASM
 export/parity and host memory qualification are owned by the binding follow-up.
+
+### Negotiated OAuth, upload chunks and digest locations
+
+A Hub using any of the following optional fields or templates must require
+`publish-negotiation@1` in `requirements`. The format remains
+`graphforge-hub-publish/1`: older readers check required capabilities before
+strict document decoding and reject this extension as `unsupported_future`.
+Legacy documents omit these fields and retain their existing behavior.
+
+- `authorization.client_id` is a nonempty identifier of at most 128 UTF-8 bytes,
+  with no whitespace or control characters. The CLI sends the same identifier
+  to device authorization and token polling; omission uses `graphforge-cli`.
+- `limits.preferred_chunk_bytes` is positive and no greater than
+  `max_chunk_bytes`. The CLI uses that size, including after a non-aligned resume
+  offset, and sends a shorter final chunk. Without a preference it uses the
+  smaller of 1 MiB and the Hub maximum. The CLI owns one upload buffer with an
+  explicit 64 MiB resource budget; larger preferences fail before opening a
+  session rather than being silently clamped. Request-body deadlines scale from
+  the existing per-MiB budget; connection and response bounds do not change.
+- A client accepting this extension echoes `publish-negotiation@1` in the
+  session-open request's `requirements`. The Hub may then include a positive
+  `uploads[].chunk_bytes`, at most `max_chunk_bytes`, chosen for that object's
+  declared length. It overrides the capabilities preference and uses the same
+  client buffer budget and timeout scaling. Omission preserves the capabilities
+  preference or legacy default. Explicit JSON null is invalid. A Hub must omit
+  the field for clients that do not request the extension; the CLI rejects it
+  unless the capabilities document requires the extension. The ReferenceHub
+  chooses the smaller of its preference and the object's declared length and
+  preserves that size when the same session resumes. The client starts at the
+  exact retained offset and uses full selected chunks followed by a final
+  remainder; uniform storage-part semantics are specified separately.
+- `object_location_template` contains exactly one `{digest}` or `{hex}` and no
+  other braces. `{digest}` expands to `sha256:<64 lowercase hex>`; `{hex}` expands
+  to the same 64 lowercase hex digits without the prefix. For example,
+  `https://data.example/objects/sha256/{hex}`. Credential-free HTTPS and the
+  existing query/fragment restrictions still apply. Commit validation uses the
+  exact expanded location, not a second spelling of the digest.
+
+The checked-in conformance corpus includes a negotiated reference Hub with a
+provider-style client identifier, 8 MiB preferred chunks and `{hex}` locations,
+and exercises provider OAuth, per-object session sizes and object uploads.
