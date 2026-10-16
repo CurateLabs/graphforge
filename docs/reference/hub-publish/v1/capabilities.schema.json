@@ -137,6 +137,12 @@
     "authorization": {
       "additionalProperties": false,
       "properties": {
+        "client_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[^\\s\\x00-\\x1f\\x7f]+$",
+          "type": "string"
+        },
         "device_authorization_endpoint": {
           "$ref": "#/$defs/https_url"
         },
@@ -187,6 +193,10 @@
         "max_session_bytes": {
           "minimum": 1,
           "type": "integer"
+        },
+        "preferred_chunk_bytes": {
+          "minimum": 1,
+          "type": "integer"
         }
       },
       "required": [
@@ -199,7 +209,7 @@
       "type": "object"
     },
     "object_location_template": {
-      "pattern": "^https://[^{}]*\\{digest\\}[^{}]*$",
+      "pattern": "^https://[^{}]*\\{(?:digest|hex)\\}[^{}]*$",
       "type": "string"
     },
     "repository": {

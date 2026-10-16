@@ -757,6 +757,158 @@ fn primitive_field_batch(parity: usize, rows: usize) -> RecordBatch {
     .slice(1, rows + 1)
 }
 
+#[derive(Debug)]
+struct AggregateCopyPool {
+    inner: Arc<crate::query_pool::QueryMemoryPool>,
+    pressure: std::sync::Mutex<datafusion::execution::memory_pool::MemoryReservation>,
+    reading: std::sync::atomic::AtomicBool,
+    pressured: std::sync::atomic::AtomicBool,
+}
+impl AggregateCopyPool {
+    const LIMIT: usize = 64 * 1024 * 1024;
+}
+impl std::fmt::Display for AggregateCopyPool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "aggregate copy interleaving")
+    }
+}
+impl MemoryPool for AggregateCopyPool {
+    fn name(&self) -> &str {
+        "aggregate copy interleaving"
+    }
+    fn unregister(&self, consumer: &MemoryConsumer) {
+        self.inner.unregister(consumer);
+    }
+    fn grow(&self, r: &datafusion::execution::memory_pool::MemoryReservation, bytes: usize) {
+        self.inner.grow(r, bytes);
+    }
+    fn shrink(&self, r: &datafusion::execution::memory_pool::MemoryReservation, bytes: usize) {
+        self.inner.shrink(r, bytes);
+    }
+    fn try_grow(
+        &self,
+        r: &datafusion::execution::memory_pool::MemoryReservation,
+        bytes: usize,
+    ) -> Result<()> {
+        if r.consumer().name() == "SpillReaderMetadata" {
+            self.reading
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
+        // The IPC readers and constructor are already live. Fill the pool at
+        // the first payload-sized copy request: a repartition can take this
+        // space immediately before the aggregate needs its one progress loan.
+        if r.consumer()
+            .name()
+            .starts_with("GroupedHashAggregateStream[1]")
+            && bytes >= 32 * 1024
+            && self.reading.load(std::sync::atomic::Ordering::Acquire)
+            && !self
+                .pressured
+                .swap(true, std::sync::atomic::Ordering::AcqRel)
+        {
+            self.pressure
+                .lock()
+                .unwrap()
+                .try_grow(Self::LIMIT - self.inner.reserved())?;
+        }
+        self.inner.try_grow(r, bytes)
+    }
+    fn reserved(&self) -> usize {
+        self.inner.reserved()
+    }
+}
+
+#[tokio::test]
+async fn spill_admission_aggregate_merge_keeps_one_grant_through_output_reconciliation()
+-> Result<()> {
+    const LIMIT: usize = AggregateCopyPool::LIMIT;
+    let inner = Arc::new(crate::query_pool::QueryMemoryPool::new(LIMIT));
+    let underlying: Arc<dyn MemoryPool> = inner.clone();
+    let observed = Arc::new(AggregateCopyPool {
+        inner,
+        pressure: std::sync::Mutex::new(
+            MemoryConsumer::new("RepartitionExec retained input")
+                .with_can_spill(true)
+                .register(&underlying),
+        ),
+        reading: std::sync::atomic::AtomicBool::new(false),
+        pressured: std::sync::atomic::AtomicBool::new(false),
+    });
+    let pool: Arc<dyn MemoryPool> = observed.clone();
+    let batches = [
+        primitive_field_batch(0, 2048),
+        primitive_field_batch(1, 2048),
+    ];
+    let roomy: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(LIMIT));
+    let (mut oracle, _) = merge_sponsored(&roomy, &batches, 512, &[0], true)?;
+    let expected = oracle.next().await.unwrap()?;
+    drop(oracle);
+    let schema = batches[0].schema();
+    let manager = manager(Arc::clone(&pool), Arc::clone(&schema));
+    let mut files = Vec::new();
+    let mut prepaid = 0;
+    for batch in &batches {
+        let mut writer = manager.create_in_progress_file("aggregate merge handoff")?;
+        let maximum = writer.append_batch(batch)?;
+        files.push(SortedSpillFile {
+            file: writer.finish()?.unwrap(),
+            max_record_batch_memory: maximum,
+        });
+        prepaid += 4 * maximum;
+    }
+    let reservation = MemoryConsumer::new("GroupedHashAggregateStream[1] (merge control)")
+        .with_can_spill(true)
+        .register(&pool);
+    // A real bulk state release arms one progress grant. Keep this consumer
+    // above its 10 MiB floor through a separate live reservation, so the floor
+    // cannot fund another request after the payload copy consumes that grant.
+    reservation.try_grow(24 * 1024 * 1024 + prepaid)?;
+    reservation.shrink(12 * 1024 * 1024 + prepaid);
+    let retained_partition = reservation.split(12 * 1024 * 1024);
+    reservation.try_grow(prepaid)?;
+    let sibling = MemoryConsumer::new("GroupedHashAggregateStream[0] (retained state)")
+        .with_can_spill(true)
+        .register(&pool);
+    sibling.try_grow(24 * 1024 * 1024)?;
+    let writer = MemoryConsumer::new("SpillWriterEncode").register(&pool);
+    writer.try_grow(1024 * 1024)?;
+    let order = [PhysicalSortExpr::new_default(Arc::new(Column::new(
+        "key", 0,
+    )))]
+    .into();
+    let mut stream = StreamingMergeBuilder::new()
+        .with_sorted_spill_files(files)
+        .with_spill_manager(manager)
+        .with_schema(schema)
+        .with_expressions(&order)
+        .with_metrics(BaselineMetrics::new(&ExecutionPlanMetricsSet::new(), 0))
+        .with_batch_size(512)
+        .with_reservation(reservation)
+        .build()?;
+    let output = stream.next().await.unwrap()?;
+    assert!(
+        observed
+            .pressured
+            .load(std::sync::atomic::Ordering::Acquire)
+    );
+    assert!(
+        pool.reserved() > LIMIT,
+        "the copy consumed the single progress loan"
+    );
+    assert_eq!(output, expected);
+    let alias = output.column(1).slice(511, 1);
+    drop(output);
+    drop(stream);
+    drop(retained_partition);
+    drop(sibling);
+    drop(writer);
+    observed.pressure.lock().unwrap().free();
+    assert!(pool.reserved() >= alias.to_data().buffers()[1].capacity());
+    drop(alias);
+    assert_eq!(pool.reserved(), 0);
+    Ok(())
+}
+
 #[tokio::test]
 async fn spill_admission_primitive_field_releases_idle_copy_and_retains_escaped_output()
 -> Result<()> {

@@ -26,9 +26,10 @@ use graphforge_discovery::{
 use graphforge_hub_publish::{
     CommitRequest, DEVICE_CODE_GRANT_TYPE, DeviceAuthorizationResponse, DevicePoll,
     HUB_PUBLISH_FORMAT, HubErrorBody, HubMethod, HubPublishErrorCode, HubRequest, HubResponse,
-    ObjectDeclaration, OpenSessionRequest, OperationStatus, PublishCapabilities, PublishIntent,
-    PublishReceipt, PublishToken, SessionResponse, UPLOAD_OFFSET_HEADER, UploadStatus,
-    UploadTarget, canonical_json, content_range, parse_unique_json, publish_scope, sha256_digest,
+    ObjectDeclaration, OpenSessionRequest, OperationStatus, PUBLISH_NEGOTIATION_CAPABILITY,
+    PublishCapabilities, PublishIntent, PublishReceipt, PublishToken, SessionResponse,
+    UPLOAD_OFFSET_HEADER, UploadStatus, UploadTarget, canonical_json, content_range,
+    parse_unique_json, publish_scope, sha256_digest,
 };
 use publication::{
     ManifestInputs, PACKAGE_MEDIA_TYPE, SUMMARY_MEDIA_TYPE, VerifiedBundle, build_manifest,
@@ -58,10 +59,12 @@ pub(crate) fn allow_device_flow() {
 
 /// OAuth client identifier the CLI presents to device authorization.
 const CLIENT_ID: &str = "graphforge-cli";
-/// Largest upload chunk the client sends, whatever the Hub allows.
+/// Legacy upload size when a Hub does not advertise a preference.
 /// Smaller chunks bound the progress a dropped connection loses and, with
 /// [`crate::hub_http::WRITE_TIMEOUTS`], the slowest uplink that completes one.
 const MAX_CLIENT_CHUNK_BYTES: u64 = 1024 * 1024;
+/// Explicit uploader resource budget for its one owned chunk buffer.
+const MAX_NEGOTIATED_CHUNK_BYTES: u64 = 64 * 1024 * 1024;
 /// Longest the client waits for a device authorization, whatever the Hub allows.
 const MAX_DEVICE_WAIT_SECONDS: u64 = 15 * 60;
 /// Longest pause between device-flow polls, whatever the Hub asks for.
@@ -95,6 +98,10 @@ pub(crate) struct PublishArgs {
     /// Read a Vercel preview bypass secret from this environment variable.
     #[arg(long)]
     pub protection_bypass_env: Option<String>,
+    /// Explicit PNG/SVG image selection for this exact immutable Version.
+    /// Repeat for multiple images; never reads unselected workbench files.
+    #[arg(long = "preview")]
+    pub previews: Vec<std::path::PathBuf>,
 }
 
 /// How the CLI obtains its publish token.
@@ -519,7 +526,13 @@ fn obtain_token(
     let authorization = &capabilities.authorization;
     let response = hub.oauth(
         &authorization.device_authorization_endpoint,
-        &[("client_id", CLIENT_ID), ("scope", &authorization.scope)],
+        &[
+            (
+                "client_id",
+                authorization.client_id.as_deref().unwrap_or(CLIENT_ID),
+            ),
+            ("scope", &authorization.scope),
+        ],
     )?;
     if response.status != 200 {
         return Err(publish_error(
@@ -577,7 +590,10 @@ fn obtain_token(
             &[
                 ("grant_type", DEVICE_CODE_GRANT_TYPE),
                 ("device_code", &device.device_code),
-                ("client_id", CLIENT_ID),
+                (
+                    "client_id",
+                    authorization.client_id.as_deref().unwrap_or(CLIENT_ID),
+                ),
             ],
         )?;
         match DevicePoll::from_response(response.status, &response.body)
@@ -712,6 +728,62 @@ fn intent_digest(
         "project_content": selection.project_content,
         "fork_of": fork_of.map(RepositoryIdentity::canonical_name),
     })))
+}
+
+struct SelectedPreview {
+    descriptor: graphforge_hub_publish::preview::PreviewDescriptor,
+    bytes: Vec<u8>,
+}
+fn select_previews(
+    args: &PublishArgs,
+    version_uuid: Uuid,
+) -> Result<Vec<SelectedPreview>, GfError> {
+    use graphforge_hub_publish::preview as p;
+    use std::io::Read;
+    if args.previews.len() > p::MAX_PREVIEWS {
+        return Err(derivation("preview.limit"));
+    }
+    let mut selected = Vec::new();
+    let mut total = 0_u64;
+    for path in &args.previews {
+        let file = std::fs::File::open(path).map_err(|_| derivation("preview.content"))?;
+        let mut bytes = Vec::new();
+        file.take(p::MAX_PREVIEW_BYTES as u64 + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|_| derivation("preview.content"))?;
+        total += bytes.len() as u64;
+        if total > p::MAX_TOTAL_PREVIEW_BYTES {
+            return Err(derivation("preview.limit"));
+        }
+        let media_type = if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+            "image/png"
+        } else {
+            "image/svg+xml"
+        };
+        let (width, height) = p::validate_image(media_type, &bytes)
+            .map_err(|error| derivation(&error.to_string()))?;
+        selected.push(SelectedPreview {
+            descriptor: p::PreviewDescriptor {
+                version_uuid: version_uuid.to_string(),
+                digest: p::digest(&bytes),
+                media_type: media_type.into(),
+                length: bytes.len() as u64,
+                width,
+                height,
+                caption: None,
+                alt: None,
+            },
+            bytes,
+        });
+    }
+    p::validate_descriptors(
+        &selected
+            .iter()
+            .map(|p| p.descriptor.clone())
+            .collect::<Vec<_>>(),
+    )
+    .map_err(|error| derivation(&error.to_string()))?;
+    Ok(selected)
 }
 
 // ---------------------------------------------------------- repository side
@@ -1241,8 +1313,12 @@ fn read_chunk(source: &Source, offset: u64, length: u64) -> Result<Vec<u8>, GfEr
         Source::File(path) => {
             let mut file = File::open(path).map_err(io)?;
             file.seek(SeekFrom::Start(offset)).map_err(io)?;
-            let mut buffer =
-                vec![0; usize::try_from(length).map_err(|_| network("chunk overflow"))?];
+            let size = usize::try_from(length).map_err(|_| network("chunk overflow"))?;
+            let mut buffer = Vec::new();
+            buffer
+                .try_reserve_exact(size)
+                .map_err(|_| network("chunk allocation exceeds available memory"))?;
+            buffer.resize(size, 0);
             file.read_exact(&mut buffer).map_err(io)?;
             Ok(buffer)
         }
@@ -1264,6 +1340,30 @@ fn upload_offset(response: &HubResponse, length: u64) -> Result<u64, GfError> {
                 "upload offset is missing or out of range",
             )
         })
+}
+
+fn negotiated_chunk_size(limits: &graphforge_hub_publish::PublishLimits) -> Result<u64, GfError> {
+    let size = limits
+        .preferred_chunk_bytes
+        .unwrap_or(limits.max_chunk_bytes.min(MAX_CLIENT_CHUNK_BYTES));
+    if size > MAX_NEGOTIATED_CHUNK_BYTES {
+        return Err(publish_error(
+            HubPublishErrorCode::InvalidInput,
+            "preferred upload chunk exceeds the client's 64 MiB buffer budget",
+        ));
+    }
+    Ok(size)
+}
+
+fn upload_chunk_size(
+    capabilities: &PublishCapabilities,
+    target: &UploadTarget,
+) -> Result<u64, GfError> {
+    let mut limits = capabilities.limits;
+    limits.preferred_chunk_bytes = capabilities
+        .upload_chunk_bytes(target)
+        .map_err(|error| protocol(&error))?;
+    negotiated_chunk_size(&limits)
 }
 
 /// Upload whatever the Hub has not retained, resuming at its reported offset.
@@ -1381,15 +1481,34 @@ pub(crate) fn publish(
             )
         })?;
     let selection = select(graph, args)?;
+    let previews = select_previews(args, selection.version_uuid)?;
+    let preview_metadata = previews
+        .iter()
+        .map(|p| p.descriptor.clone())
+        .collect::<Vec<_>>();
+    let operation_content = if previews.is_empty() {
+        selection.project_content.clone()
+    } else {
+        sha256_digest(&canonical_json(
+            &json!({"project_content":selection.project_content,"previews":preview_metadata}),
+        ))
+    };
     let operation_uuid = operation_uuid.unwrap_or_else(|| {
         graphforge_api::hub_publish_operation(
             &identity.canonical_name(),
             selection.git_ref.as_deref(),
             &selection.version_uuid.to_string(),
-            &selection.project_content,
+            &operation_content,
         )
     });
-    let intent_digest = intent_digest(&identity, &selection, fork.as_ref().map(|(id, _)| id));
+    let base_intent = intent_digest(&identity, &selection, fork.as_ref().map(|(id, _)| id));
+    let intent_digest = if previews.is_empty() {
+        base_intent
+    } else {
+        sha256_digest(&canonical_json(
+            &json!({"intent":base_intent,"previews":preview_metadata}),
+        ))
+    };
     let hub = Hub {
         bypass: environment.bypass,
         transport,
@@ -1413,6 +1532,17 @@ pub(crate) fn publish(
         return Err(publish_error(
             HubPublishErrorCode::InvalidInput,
             "capabilities describe another repository",
+        ));
+    }
+    if !previews.is_empty()
+        && !capabilities
+            .capabilities
+            .iter()
+            .any(|c| c.capability == "version-previews" && c.major == 1)
+    {
+        return Err(publish_error(
+            HubPublishErrorCode::UnsupportedFuture,
+            "Hub does not support the selected preview channel",
         ));
     }
     let token = obtain_token(&hub, &capabilities, environment)?;
@@ -1472,7 +1602,7 @@ pub(crate) fn publish(
         (None, None) => None,
     };
     let scratch = tempfile::tempdir().map_err(|error| GfError::Storage(error.to_string()))?;
-    let (snapshot, lineage) = build_snapshot(
+    let (mut snapshot, lineage) = build_snapshot(
         graph,
         &identity,
         &capabilities,
@@ -1481,6 +1611,46 @@ pub(crate) fn publish(
         fork_origin_repository,
         scratch.path(),
     )?;
+    if !previews.is_empty() {
+        use graphforge_hub_publish::preview as p;
+        for item in previews {
+            snapshot.manifest.objects.push(object_descriptor(
+                item.descriptor.digest.clone(),
+                item.descriptor.length,
+                &item.descriptor.media_type,
+                capabilities.object_location(&item.descriptor.digest),
+            ));
+            snapshot
+                .sources
+                .insert(item.descriptor.digest, Source::Bytes(item.bytes));
+        }
+        snapshot
+            .manifest
+            .objects
+            .sort_by(|a, b| a.digest.cmp(&b.digest));
+        snapshot.manifest.extensions.insert(
+            p::PREVIEW_EXTENSION.into(),
+            serde_json::to_value(p::PreviewSet {
+                format: "graphforge-previews/1".into(),
+                previews: preview_metadata,
+            })
+            .map_err(|_| derivation("preview.content"))?,
+        );
+        snapshot
+            .manifest
+            .validate(DiscoveryLimits::default())
+            .map_err(|error| discovery(&error))?;
+        snapshot.objects = snapshot
+            .manifest
+            .objects
+            .iter()
+            .map(|object| ObjectDeclaration {
+                digest: object.digest.0.clone(),
+                length: object.length,
+                media_type: object.media_type.clone(),
+            })
+            .collect();
+    }
     // The packages must come from the generation the intent names.
     if project_content(graph)? != selection.project_content {
         return Err(publish_error(
@@ -1522,8 +1692,18 @@ pub(crate) fn publish(
         intent_digest,
         repository: identity.clone(),
         objects: snapshot.objects.clone(),
-        requirements: Vec::new(),
+        requirements: capabilities
+            .requirements
+            .iter()
+            .filter(|capability| capability.capability == PUBLISH_NEGOTIATION_CAPABILITY)
+            .cloned()
+            .chain(
+                (!args.previews.is_empty())
+                    .then(|| graphforge_hub_publish::Capability::new("version-previews", 1)),
+            )
+            .collect(),
     };
+    negotiated_chunk_size(&capabilities.limits)?;
     let sessions = endpoint(&base, "publish/sessions");
     let opened = session_response(&hub.control(
         HubRequest::new(HubMethod::Post, sessions.as_str()).with_json(&open),
@@ -1555,11 +1735,11 @@ pub(crate) fn publish(
             "upload locations do not match the declared inventory",
         ));
     }
-    let max_chunk = capabilities
-        .limits
-        .max_chunk_bytes
-        .min(MAX_CLIENT_CHUNK_BYTES);
-    for target in &uploads {
+    let chunk_sizes = uploads
+        .iter()
+        .map(|target| upload_chunk_size(&capabilities, target))
+        .collect::<Result<Vec<_>, _>>()?;
+    for (target, max_chunk) in uploads.iter().zip(chunk_sizes) {
         let source = snapshot.sources.get(&target.digest).ok_or_else(|| {
             publish_error(
                 HubPublishErrorCode::InvalidInput,
