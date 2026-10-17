@@ -365,16 +365,14 @@ impl ResearchLineage {
                 .branches
                 .iter()
                 .find(|branch| branch.branch_uuid == anchor.origin_branch_uuid)
+                && (branch.parent_branch_uuid.is_some()
+                    || branch.origin_version_uuid != anchor.version_uuid)
             {
-                if branch.parent_branch_uuid.is_some()
-                    || branch.origin_version_uuid != anchor.version_uuid
-                {
-                    return Err(DiscoveryError::new(
-                        DiscoveryErrorCode::IntegrityFailure,
-                        Some("boundary_anchors"),
-                        "boundary anchor differs from Branch origin",
-                    ));
-                }
+                return Err(DiscoveryError::new(
+                    DiscoveryErrorCode::IntegrityFailure,
+                    Some("boundary_anchors"),
+                    "boundary anchor differs from Branch origin",
+                ));
             }
             prior_anchor = Some(anchor.version_uuid.as_str());
             anchors.insert(anchor.version_uuid.as_str(), anchor);
@@ -422,10 +420,10 @@ impl ResearchLineage {
                         "Version ancestry is cyclic",
                     ));
                 }
-                if seen.insert(id.clone()) {
-                    if let Some(record) = version_ids.get(id.as_str()) {
-                        pending.extend(record.parents.iter().cloned());
-                    }
+                if seen.insert(id.clone())
+                    && let Some(record) = version_ids.get(id.as_str())
+                {
+                    pending.extend(record.parents.iter().cloned());
                 }
             }
         }
@@ -569,10 +567,10 @@ impl ResearchLineage {
             if id == ancestor {
                 return true;
             }
-            if seen.insert(id) {
-                if let Some(record) = self.version(id) {
-                    pending.extend(record.parents.iter().map(String::as_str));
-                }
+            if seen.insert(id)
+                && let Some(record) = self.version(id)
+            {
+                pending.extend(record.parents.iter().map(String::as_str));
             }
         }
         false

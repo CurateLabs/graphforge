@@ -73,9 +73,8 @@ impl HubPublishErrorCode {
         match self {
             Self::AuthDenied => 401,
             Self::EntitlementDenied => 403,
-            Self::IdempotencyConflict => 409,
+            Self::IdempotencyConflict | Self::NonFastForward => 409,
             Self::RefConflict => 412,
-            Self::NonFastForward => 409,
             Self::UnsupportedFuture | Self::IntegrityFailure => 422,
             Self::InvalidInput => 400,
             Self::Internal => 500,
