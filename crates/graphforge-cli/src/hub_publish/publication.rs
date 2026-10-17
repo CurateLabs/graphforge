@@ -21,7 +21,6 @@ use graphforge_discovery::{
 use sha2::{Digest as _, Sha256};
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
-use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
 /// Error text from any derivation step.
@@ -35,23 +34,6 @@ fn err(error: impl std::fmt::Display) -> DerivationError {
 #[must_use]
 pub fn digest_bytes(bytes: &[u8]) -> String {
     format!("sha256:{}", hex(&Sha256::digest(bytes)))
-}
-
-/// Streamed `sha256:` digest and length of the file at `path`.
-pub fn digest_file(path: &Path) -> Result<(String, u64), DerivationError> {
-    let mut file = std::fs::File::open(path).map_err(err)?;
-    let mut hash = Sha256::new();
-    let mut buffer = vec![0_u8; 64 * 1024].into_boxed_slice();
-    let mut length = 0_u64;
-    loop {
-        let read = file.read(&mut buffer).map_err(err)?;
-        if read == 0 {
-            break;
-        }
-        hash.update(&buffer[..read]);
-        length += read as u64;
-    }
-    Ok((format!("sha256:{}", hex(&hash.finalize())), length))
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -127,7 +109,13 @@ pub fn verify_exported_bundle(
     transport_digest: &str,
 ) -> Result<VerifiedBundle, DerivationError> {
     let report = verify_full(path)?;
-    let (object_digest, length) = digest_file(path)?;
+    // Full verification streams both semantic entries and the transport digest.
+    // Reuse it instead of opening the entire bundle a third time just to hash.
+    let object_digest = report
+        .transport_digest
+        .clone()
+        .ok_or("bundle transport digest missing")?;
+    let length = std::fs::metadata(path).map_err(err)?.len();
     if report.package_digest != package_digest
         || report.transport_digest.as_deref() != Some(transport_digest)
         || object_digest != transport_digest

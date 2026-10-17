@@ -1,9 +1,10 @@
-//! In-memory reference Hub implementing the full publish and read mapping.
+//! Temporary-file-backed reference Hub implementing publish and bounded reads.
 //!
 //! [`ReferenceHub::handle`] maps one [`HubRequest`] to one [`HubResponse`]
 //! under a single lock, so every commit is one atomic critical section. It is
 //! a conformance target, not a production Hub: identifiers derive from a
-//! configurable seed and are predictable, and all state lives in memory.
+//! configurable seed and are predictable. Control state is in memory; object
+//! bytes spill to unlinked temporary files.
 
 use crate::canonical::{sha256_digest, validate_digest};
 use crate::error::{HubPublishError, HubPublishErrorCode, invalid};
@@ -21,7 +22,10 @@ use graphforge_discovery::{
     RefSet, RepositoryIdentity, RepositoryRef, Sha256Digest,
 };
 use serde::Serialize;
-use std::collections::BTreeMap;
+use sha2::{Digest as _, Sha256};
+use std::collections::{BTreeMap, BTreeSet};
+use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
+use std::sync::Arc;
 use std::sync::Mutex;
 use url::Url;
 use uuid::Uuid;
@@ -35,6 +39,8 @@ pub struct ReferenceHubConfig {
     pub object_location_hex: bool,
     /// HTTPS origin the Hub serves, without a path (e.g. `https://hub.example`).
     pub base_url: String,
+    /// Opt into bounded asynchronous commit and uniform multipart uploads.
+    pub large_objects: bool,
     /// Advertised and enforced upload bounds.
     pub limits: PublishLimits,
     /// Lifetime of issued publish tokens.
@@ -51,6 +57,7 @@ impl Default for ReferenceHubConfig {
     fn default() -> Self {
         Self {
             authorization_client_id: None,
+            large_objects: false,
             object_location_hex: false,
             base_url: "https://hub.example".to_owned(),
             limits: PublishLimits {
@@ -69,7 +76,7 @@ impl Default for ReferenceHubConfig {
     }
 }
 
-/// In-memory reference implementation of the publish and read HTTP mapping.
+/// Reference implementation of publish and bounded buffered read HTTP mapping.
 pub struct ReferenceHub {
     config: ReferenceHubConfig,
     base: Url,
@@ -116,12 +123,133 @@ struct Session {
     request: OpenSessionRequest,
     uploads: Vec<Upload>,
     receipt: Option<PublishReceipt>,
+    pending: Option<PendingCommit>,
+    verified: bool,
+}
+
+struct PendingCommit {
+    request: HubRequest,
+    object: usize,
+    offset: u64,
+    hash: Sha256,
 }
 
 struct Upload {
     id: String,
-    bytes: Vec<u8>,
+    bytes: Blob,
     complete: bool,
+}
+
+/// Reference storage spills to an unlinked temporary file. Zero extents stay sparse;
+/// ordinary bytes use the same reader and SHA-256 path, without object-sized buffers.
+#[derive(Clone)]
+struct Blob {
+    file: Option<Arc<std::fs::File>>,
+    length: u64,
+    hash: Sha256,
+    intact: Arc<std::sync::atomic::AtomicBool>,
+}
+impl Default for Blob {
+    fn default() -> Self {
+        Self {
+            file: None,
+            length: 0,
+            hash: Sha256::new(),
+            intact: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        }
+    }
+}
+impl Blob {
+    fn len(&self) -> u64 {
+        self.length
+    }
+    fn append(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        if self.file.is_none() {
+            self.file = Some(Arc::new(tempfile::tempfile()?));
+        }
+        let mut file = self.file.as_ref().expect("created above").try_clone()?;
+        file.seek(SeekFrom::Start(self.length))?;
+        if bytes.iter().all(|b| *b == 0) {
+            file.set_len(self.length + bytes.len() as u64)?;
+        } else {
+            file.write_all(bytes)?;
+        }
+        self.length += bytes.len() as u64;
+        self.hash.update(bytes);
+        Ok(())
+    }
+    fn read(&self, offset: u64, length: usize) -> std::io::Result<Vec<u8>> {
+        let mut file = self
+            .file
+            .as_ref()
+            .ok_or_else(|| std::io::Error::other("missing reference storage"))?
+            .try_clone()?;
+        file.seek(SeekFrom::Start(offset))?;
+        let mut bytes = vec![0; length];
+        file.read_exact(&mut bytes)?;
+        Ok(bytes)
+    }
+    fn corrupt(&self) -> bool {
+        if self.length == 0 {
+            return false;
+        }
+        let Some(file) = &self.file else {
+            return false;
+        };
+        let Ok(mut file) = file.try_clone() else {
+            return false;
+        };
+        let Ok(mut bytes) = self.read(0, 1) else {
+            return false;
+        };
+        bytes[0] ^= 0xff;
+        self.intact
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        file.seek(SeekFrom::Start(0))
+            .and_then(|_| file.write_all(&bytes))
+            .is_ok()
+    }
+}
+const VERIFY_BYTES_PER_POLL: u64 = 64 * 1024 * 1024;
+const REFERENCE_READ_LIMIT: u64 = 95 * 1024 * 1024;
+fn hash_digest(hash: Sha256) -> String {
+    let mut output = String::from("sha256:");
+    for byte in hash.finalize() {
+        use std::fmt::Write as _;
+        write!(&mut output, "{byte:02x}").expect("string write");
+    }
+    output
+}
+fn storage_failure(_: std::io::Error) -> HubPublishError {
+    HubPublishError::new(
+        HubPublishErrorCode::Internal,
+        "reference storage unavailable",
+    )
+}
+fn storage_error(error: std::io::Error) -> Reject {
+    storage_failure(error).into()
+}
+fn bounded_blob_read(blob: &Blob, limit: usize) -> Result<Vec<u8>, HubPublishError> {
+    if blob.len() > limit as u64 {
+        return Err(invalid("control object byte budget exceeded"));
+    }
+    let length =
+        usize::try_from(blob.len()).map_err(|_| invalid("control object byte budget exceeded"))?;
+    blob.read(0, length).map_err(storage_failure)
+}
+fn stored_control<'a>(
+    repository: &'a Repository,
+    object: &graphforge_discovery::ObjectDescriptor,
+    limit: usize,
+) -> Result<&'a Blob, HubPublishError> {
+    let blob = repository
+        .objects
+        .get(&object.digest.0)
+        .ok_or_else(|| invalid("stored control object is absent"))?;
+    if blob.len() != object.length || object.length > limit as u64 {
+        return Err(invalid("stored control object length is invalid"));
+    }
+    Ok(blob)
 }
 
 struct Repository {
@@ -130,7 +258,7 @@ struct Repository {
     revision: String,
     refs_document: Vec<u8>,
     manifests: BTreeMap<String, Vec<u8>>,
-    objects: BTreeMap<String, Vec<u8>>,
+    objects: BTreeMap<String, Blob>,
     history: Vec<String>,
 }
 
@@ -207,8 +335,8 @@ fn rehome_inputs(
         .iter()
         .map(|item| item.validator.0.clone())
         .collect::<std::collections::BTreeSet<_>>();
-    let mut snapshots = Vec::new();
-    let mut bytes = repository.refs_document.len();
+    let mut pending = Vec::new();
+    let mut bytes = repository.refs_document.len() as u64;
     for validator in validators {
         let raw = repository
             .manifests
@@ -216,40 +344,53 @@ fn rehome_inputs(
             .ok_or_else(|| invalid("referenced manifest is absent"))?;
         let manifest = DiscoveryManifest::from_json(raw, limits)
             .map_err(|_| invalid("stored manifest is invalid"))?;
-        let summary = manifest
-            .summary
-            .as_ref()
-            .map(|reference| {
-                repository
-                    .objects
-                    .get(&reference.object_digest.0)
-                    .ok_or_else(|| invalid("stored summary is absent"))
-            })
-            .transpose()?;
-        let lineage = manifest
-            .lineage
-            .as_ref()
-            .map(|reference| {
-                repository
-                    .objects
-                    .get(&reference.object_digest.0)
-                    .ok_or_else(|| invalid("stored lineage is absent"))
-            })
-            .transpose()?;
+        let summary = if manifest.summary.is_some() {
+            Some(stored_control(
+                repository,
+                manifest
+                    .summary_object()
+                    .map_err(|_| invalid("stored summary is invalid"))?,
+                limits.max_response_bytes,
+            )?)
+        } else {
+            None
+        };
+        let lineage = if manifest.lineage.is_some() {
+            Some(stored_control(
+                repository,
+                manifest
+                    .lineage_object()
+                    .map_err(|_| invalid("stored lineage is invalid"))?,
+                limits.max_response_bytes,
+            )?)
+        } else {
+            None
+        };
         bytes = bytes
-            .checked_add(raw.len())
-            .and_then(|n| n.checked_add(summary.map_or(0, Vec::len)))
-            .and_then(|n| n.checked_add(lineage.map_or(0, Vec::len)))
+            .checked_add(raw.len() as u64)
+            .and_then(|n| n.checked_add(summary.map_or(0, Blob::len)))
+            .and_then(|n| n.checked_add(lineage.map_or(0, Blob::len)))
             .ok_or_else(|| invalid("rehome byte budget exceeded"))?;
-        if bytes > limits.max_response_bytes {
+        if bytes > limits.max_response_bytes as u64 {
             return Err(invalid("rehome byte budget exceeded"));
         }
-        snapshots.push(graphforge_discovery::RepositorySnapshot {
-            manifest,
-            summary: summary.cloned(),
-            lineage: lineage.cloned(),
-        });
+        pending.push((manifest, summary, lineage));
     }
+    // Admit the complete aggregate before materializing any file-backed control.
+    let snapshots = pending
+        .into_iter()
+        .map(|(manifest, summary, lineage)| {
+            Ok(graphforge_discovery::RepositorySnapshot {
+                manifest,
+                summary: summary
+                    .map(|blob| bounded_blob_read(blob, limits.max_response_bytes))
+                    .transpose()?,
+                lineage: lineage
+                    .map(|blob| bounded_blob_read(blob, limits.max_response_bytes))
+                    .transpose()?,
+            })
+        })
+        .collect::<Result<Vec<_>, HubPublishError>>()?;
     Ok((refs, snapshots))
 }
 
@@ -297,6 +438,9 @@ impl ReferenceHub {
             || self.config.limits.preferred_chunk_bytes.is_some()
         {
             requirements.push(Capability::new(PUBLISH_NEGOTIATION_CAPABILITY, 1));
+        }
+        if self.config.large_objects {
+            requirements.push(Capability::new("large-object-publish", 1));
         }
         PublishCapabilities {
             format: HUB_PUBLISH_FORMAT.to_owned(),
@@ -402,7 +546,7 @@ impl ReferenceHub {
                         self.commit(state, &identity, id, request)
                     }
                     (HubMethod::Get, ["publish", "operations", id]) => {
-                        Self::operation_status(state, &identity, id, request)
+                        self.operation_status(state, &identity, id, request)
                     }
                     (HubMethod::Get, ["refs"]) => read_refs(state, &identity),
                     (HubMethod::Get, ["manifest"]) => read_manifest(state, &identity),
@@ -490,6 +634,32 @@ impl ReferenceHub {
         Ok(())
     }
 
+    fn check_large_inventory(&self, open: &OpenSessionRequest) -> Result<(), Reject> {
+        let limits = self.config.limits;
+        if self.config.large_objects {
+            if !open
+                .requirements
+                .iter()
+                .any(|c| c.capability == "large-object-publish" && c.major == 1)
+            {
+                return Err(invalid("large-object capability must be negotiated").into());
+            }
+            let chunk = limits
+                .preferred_chunk_bytes
+                .ok_or_else(|| invalid("uniform upload chunk must be configured"))?;
+            if chunk > 95 * 1024 * 1024
+                || open
+                    .objects
+                    .iter()
+                    .any(|o| o.length.div_ceil(chunk) > 10_000)
+            {
+                return Err(too_large("object exceeds the uniform multipart ceiling"));
+            }
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_lines)]
     fn open_session(
         &self,
         state: &mut State,
@@ -506,6 +676,7 @@ impl ReferenceHub {
         if u64::try_from(open.objects.len()).unwrap_or(u64::MAX) > limits.max_objects {
             return Err(too_large("object count exceeds the advertised limit"));
         }
+        self.check_large_inventory(&open)?;
         let mut total = 0_u64;
         for object in &open.objects {
             if object.length > limits.max_object_bytes {
@@ -546,7 +717,31 @@ impl ReferenceHub {
                     ));
                 }
                 if session.request == open {
-                    return Ok(json_response(200, &self.open_response(session_id, session)));
+                    let session_id = session_id.clone();
+                    let session = state
+                        .sessions
+                        .get_mut(&session_id)
+                        .expect("operation session");
+                    let mut reset = false;
+                    for upload in &mut session.uploads {
+                        if !upload
+                            .bytes
+                            .intact
+                            .load(std::sync::atomic::Ordering::Relaxed)
+                        {
+                            upload.bytes = Blob::default();
+                            upload.complete = false;
+                            reset = true;
+                        }
+                    }
+                    if reset {
+                        session.pending = None;
+                        session.verified = false;
+                    }
+                    return Ok(json_response(
+                        200,
+                        &self.open_response(&session_id, session),
+                    ));
                 }
                 Some(session_id.clone())
             }
@@ -560,7 +755,7 @@ impl ReferenceHub {
                 .iter()
                 .filter(|(identity, _)| identity.owner == repository.owner)
                 .flat_map(|(_, stored)| stored.objects.values())
-                .map(|bytes| bytes.len() as u64)
+                .map(Blob::len)
                 .sum();
             let added: u64 = open
                 .objects
@@ -598,6 +793,8 @@ impl ReferenceHub {
             request: open,
             uploads,
             receipt: None,
+            pending: None,
+            verified: false,
         };
         let response = self.open_response(&session_id, &session);
         state.sessions.insert(session_id, session);
@@ -606,7 +803,8 @@ impl ReferenceHub {
 
     /// Report an operation's intent and, once committed, its original receipt.
     fn operation_status(
-        state: &State,
+        &self,
+        state: &mut State,
         repository: &RepositoryIdentity,
         operation: &str,
         request: &HubRequest,
@@ -614,6 +812,19 @@ impl ReferenceHub {
         Self::authorize(state, request, repository)?;
         let unknown = || not_found("publish operation is unknown");
         let operation_uuid = Uuid::parse_str(operation).map_err(|_| unknown())?;
+        let session_id = state
+            .operations
+            .get(&operation_uuid)
+            .cloned()
+            .ok_or_else(unknown)?;
+        let session = state
+            .sessions
+            .get(&session_id)
+            .filter(|s| &s.request.repository == repository)
+            .ok_or_else(unknown)?;
+        if session.pending.is_some() {
+            self.advance_verification(state, repository, &session_id, request)?;
+        }
         let session = state
             .operations
             .get(&operation_uuid)
@@ -632,6 +843,67 @@ impl ReferenceHub {
         ))
     }
 
+    fn advance_verification(
+        &self,
+        state: &mut State,
+        repository: &RepositoryIdentity,
+        id: &str,
+        request: &HubRequest,
+    ) -> Result<(), Reject> {
+        // Each poll authenticates anew. Only bounded retained bytes are hashed;
+        // refs are untouched until all verification and the final CAS succeed.
+        Self::authorize(state, request, repository)?;
+        let session = state.sessions.get_mut(id).expect("operation session");
+        let mut pending = session.pending.take().expect("pending commit");
+        let mut remaining = VERIFY_BYTES_PER_POLL;
+        while pending.object < session.uploads.len() && remaining > 0 {
+            let object = &session.request.objects[pending.object];
+            let upload = &session.uploads[pending.object];
+            if !upload.complete || upload.bytes.len() != object.length {
+                return Err(integrity("an inventory object is missing or incomplete"));
+            }
+            let count = remaining
+                .min(object.length - pending.offset)
+                .min(1024 * 1024);
+            let bytes = upload
+                .bytes
+                .read(pending.offset, count as usize)
+                .map_err(storage_error)?;
+            pending.hash.update(&bytes);
+            pending.offset += count;
+            remaining -= count;
+            if pending.offset == object.length {
+                if hash_digest(pending.hash.clone()) != object.digest {
+                    upload
+                        .bytes
+                        .intact
+                        .store(false, std::sync::atomic::Ordering::Relaxed);
+                    return Err(integrity("an inventory object failed digest verification"));
+                }
+                pending.object += 1;
+                pending.offset = 0;
+                pending.hash = Sha256::new();
+            }
+        }
+        if pending.object == session.uploads.len() {
+            session.verified = true;
+            // Preserve fresh authentication headers rather than a stale bearer.
+            pending.request.headers.clone_from(&request.headers);
+            let result = self.commit(state, repository, id, &pending.request);
+            if result.is_err() {
+                state
+                    .sessions
+                    .get_mut(id)
+                    .expect("operation session")
+                    .verified = false;
+            }
+            result?;
+        } else {
+            session.pending = Some(pending);
+        }
+        Ok(())
+    }
+
     fn open_response(&self, session_id: &str, session: &Session) -> SessionResponse {
         SessionResponse::Open {
             session_id: PublishSessionId::parse(session_id).expect("hub ids are valid"),
@@ -644,7 +916,7 @@ impl ReferenceHub {
                     digest: object.digest.clone(),
                     length: object.length,
                     upload_url: format!("{}/.gf/uploads/{}", self.config.base_url, upload.id),
-                    received: upload.bytes.len() as u64,
+                    received: upload.bytes.len(),
                     chunk_bytes: session
                         .request
                         .requirements
@@ -687,7 +959,7 @@ impl ReferenceHub {
         if chunk > self.config.limits.max_chunk_bytes {
             return Err(too_large("upload chunk exceeds the advertised limit"));
         }
-        let received = upload.bytes.len() as u64;
+        let received = upload.bytes.len();
         if upload.complete || start != received {
             let mut rejected = reject(
                 416,
@@ -699,10 +971,25 @@ impl ReferenceHub {
                 .push((UPLOAD_OFFSET_HEADER.to_owned(), received.to_string()));
             return Err(rejected);
         }
-        upload.bytes.extend_from_slice(&request.body);
-        if upload.bytes.len() as u64 == declared.length {
-            if sha256_digest(&upload.bytes) != declared.digest {
-                upload.bytes = Vec::new();
+        if self.config.large_objects {
+            let part = self
+                .config
+                .limits
+                .preferred_chunk_bytes
+                .expect("validated at open")
+                .min(declared.length);
+            if start % part != 0 || (end + 1 != total && chunk != part) || chunk > part {
+                return Err(
+                    invalid("nonfinal upload parts must use the negotiated uniform size").into(),
+                );
+            }
+        }
+        upload.bytes.append(&request.body).map_err(storage_error)?;
+
+        if upload.bytes.len() == declared.length {
+            if hash_digest(upload.bytes.hash.clone()) != declared.digest {
+                upload.bytes = Blob::default();
+
                 let mut rejected = integrity("uploaded bytes do not match the declared digest");
                 rejected
                     .headers
@@ -711,7 +998,7 @@ impl ReferenceHub {
             }
             upload.complete = true;
         }
-        let received = upload.bytes.len() as u64;
+        let received = upload.bytes.len();
         let mut response = json_response(
             200,
             &UploadStatus {
@@ -800,13 +1087,57 @@ impl ReferenceHub {
             ));
         }
 
-        // 2. Every inventory object finalized and re-verified.
-        for (object, upload) in session.request.objects.iter().zip(&session.uploads) {
-            if !upload.complete || upload.bytes.len() as u64 != object.length {
+        // The negotiated asynchronous path never hashes an entire object in
+        // the commit request. The operation status endpoint advances it instead.
+        if self.config.large_objects && !session.verified {
+            if session
+                .uploads
+                .iter()
+                .zip(&session.request.objects)
+                .any(|(u, o)| !u.complete || u.bytes.len() != o.length)
+            {
                 return Err(integrity("an inventory object is missing or incomplete"));
             }
-            if sha256_digest(&upload.bytes) != object.digest {
-                return Err(integrity("an inventory object failed digest verification"));
+            let operation_uuid = session.request.operation_uuid;
+            let session = state
+                .sessions
+                .get_mut(session_id.as_str())
+                .expect("session");
+            if session.pending.is_none() {
+                session.pending = Some(PendingCommit {
+                    request: request.clone(),
+                    object: 0,
+                    offset: 0,
+                    hash: Sha256::new(),
+                });
+            }
+            return Ok(json_response(
+                202,
+                &SessionResponse::Pending { operation_uuid },
+            ));
+        }
+        if !self.config.large_objects {
+            for (object, upload) in session.request.objects.iter().zip(&session.uploads) {
+                if !upload.complete || upload.bytes.len() != object.length {
+                    return Err(integrity("an inventory object is missing or incomplete"));
+                }
+                let mut hash = Sha256::new();
+                let mut offset = 0;
+                while offset < object.length {
+                    let bytes = upload
+                        .bytes
+                        .read(offset, (object.length - offset).min(1024 * 1024) as usize)
+                        .map_err(storage_error)?;
+                    offset += bytes.len() as u64;
+                    hash.update(bytes);
+                }
+                if hash_digest(hash) != object.digest {
+                    upload
+                        .bytes
+                        .intact
+                        .store(false, std::sync::atomic::Ordering::Relaxed);
+                    return Err(integrity("an inventory object failed digest verification"));
+                }
             }
         }
 
@@ -841,11 +1172,16 @@ impl ReferenceHub {
                 .zip(&session.uploads)
                 .find(|(object, _)| object.digest == lineage_object.digest.0)
                 .ok_or_else(|| invalid("preview lineage is absent"))?;
-            let lineage = graphforge_discovery::ResearchLineage::from_json(
-                &lineage_upload.1.bytes,
-                discovery_limits,
-            )
-            .map_err(|_| invalid("preview lineage is invalid"))?;
+            if lineage_upload.0.length != lineage_object.length
+                || lineage_upload.1.bytes.len() != lineage_object.length
+            {
+                return Err(invalid("preview lineage length is invalid").into());
+            }
+            let lineage_bytes =
+                bounded_blob_read(&lineage_upload.1.bytes, discovery_limits.max_response_bytes)?;
+            let lineage =
+                graphforge_discovery::ResearchLineage::from_json(&lineage_bytes, discovery_limits)
+                    .map_err(|_| invalid("preview lineage is invalid"))?;
             let reference = manifest
                 .lineage
                 .as_ref()
@@ -870,7 +1206,14 @@ impl ReferenceHub {
                     .zip(&session.uploads)
                     .find(|(object, _)| object.digest == preview.digest)
                     .ok_or_else(|| invalid("preview bytes are absent"))?;
-                crate::preview::validate_preview(preview, &upload.1.bytes)
+                if upload.0.length != preview.length
+                    || upload.1.bytes.len() != preview.length
+                    || upload.0.media_type != preview.media_type
+                {
+                    return Err(invalid("preview object binding is invalid").into());
+                }
+                let bytes = bounded_blob_read(&upload.1.bytes, crate::preview::MAX_PREVIEW_BYTES)?;
+                crate::preview::validate_preview(preview, &bytes)
                     .map_err(|_| invalid("preview bytes fail Core image admission"))?;
             }
         }
@@ -967,7 +1310,7 @@ impl ReferenceHub {
             .sessions
             .get_mut(session_id.as_str())
             .expect("session was found above");
-        let objects: Vec<(String, Vec<u8>)> = session
+        let objects: Vec<(String, Blob)> = session
             .request
             .objects
             .iter()
@@ -1171,23 +1514,34 @@ impl ReferenceHub {
     pub fn corrupt_object(&self, digest: &str) -> usize {
         let mut state = self.state.lock().expect("hub state");
         let mut changed = 0;
+        let mut seen = BTreeSet::new();
         for session in state.sessions.values_mut() {
             for (object, upload) in session.request.objects.iter().zip(&mut session.uploads) {
-                if object.digest == digest
-                    && let Some(byte) = upload.bytes.first_mut()
+                if object.digest != digest {
+                    continue;
+                }
+                // Reused objects share one immutable storage handle. Flip each
+                // retained file once, and invalidate every verification cursor.
+                if let Some(file) = &upload.bytes.file
+                    && seen.insert(Arc::as_ptr(file) as usize)
+                    && upload.bytes.corrupt()
                 {
-                    *byte ^= 0xff;
                     changed += 1;
+                }
+                session.verified = false;
+                if let Some(pending) = &mut session.pending {
+                    pending.object = 0;
+                    pending.offset = 0;
+                    pending.hash = Sha256::new();
                 }
             }
         }
         for repository in state.repositories.values_mut() {
-            if let Some(byte) = repository
-                .objects
-                .get_mut(digest)
-                .and_then(|bytes| bytes.first_mut())
+            if let Some(bytes) = repository.objects.get(digest)
+                && let Some(file) = &bytes.file
+                && seen.insert(Arc::as_ptr(file) as usize)
+                && bytes.corrupt()
             {
-                *byte ^= 0xff;
                 changed += 1;
             }
         }
@@ -1245,7 +1599,14 @@ impl ReferenceHub {
                 .manifest
                 .to_canonical_json()
                 .map_err(|_| invalid("re-homed manifest is invalid"))?;
-            documents.push((validator, manifest, snapshot.summary, snapshot.lineage));
+            let mut controls = Vec::new();
+            for bytes in [snapshot.summary, snapshot.lineage].into_iter().flatten() {
+                let digest = sha256_digest(&bytes);
+                let mut blob = Blob::default();
+                blob.append(&bytes).map_err(storage_failure)?;
+                controls.push((digest, blob));
+            }
+            documents.push((validator, manifest, controls));
         }
         // Everything above is read-only and fallible. Apply only the complete
         // validated replacement set while holding the same repository lock.
@@ -1262,11 +1623,9 @@ impl ReferenceHub {
         repository.revision = result.revision.0;
         repository.refs_document = refs_document;
         repository.history.push(repository.revision.clone());
-        for (validator, manifest, summary, lineage) in documents {
+        for (validator, manifest, controls) in documents {
             repository.manifests.insert(validator, manifest);
-            for bytes in [summary, lineage].into_iter().flatten() {
-                repository.objects.insert(sha256_digest(&bytes), bytes);
-            }
+            repository.objects.extend(controls);
         }
         state.repositories.insert(new.clone(), repository);
         for current in state.moved.values_mut() {
@@ -1305,8 +1664,9 @@ impl HubExchange for ReferenceHub {
 
 /// Retained bytes and completion for each object of a new session.
 ///
-/// Objects already stored in this repository start complete only while they
-/// still verify; a copy corrupted at rest must be uploaded again. A superseded
+/// Sealed objects already stored in this repository may reuse their immutable
+/// handle; every commit re-verifies actual bytes. A known corrupted copy must
+/// be uploaded again. A superseded
 /// attempt hands its retained bytes to the new session by digest, so identical
 /// bytes are never sent twice.
 fn initial_uploads(
@@ -1314,8 +1674,8 @@ fn initial_uploads(
     repository: &RepositoryIdentity,
     open: &OpenSessionRequest,
     superseded: Option<&str>,
-) -> Vec<(Vec<u8>, bool)> {
-    let mut carried: BTreeMap<String, (Vec<u8>, bool)> = BTreeMap::new();
+) -> Vec<(Blob, bool)> {
+    let mut carried: BTreeMap<String, (Blob, bool)> = BTreeMap::new();
     if let Some(previous) = superseded {
         let previous = state.sessions.remove(previous).expect("operation session");
         for (object, upload) in previous.request.objects.iter().zip(previous.uploads) {
@@ -1330,10 +1690,15 @@ fn initial_uploads(
             admitted
                 .and_then(|r| r.objects.get(&object.digest))
                 .filter(|bytes| {
-                    bytes.len() as u64 == object.length && sha256_digest(bytes) == object.digest
+                    bytes.len() == object.length
+                        && bytes.intact.load(std::sync::atomic::Ordering::Relaxed)
                 })
                 .map(|bytes| (bytes.clone(), true))
-                .or_else(|| carried.remove(&object.digest))
+                .or_else(|| {
+                    carried.remove(&object.digest).filter(|(bytes, _)| {
+                        bytes.intact.load(std::sync::atomic::Ordering::Relaxed)
+                    })
+                })
                 .unwrap_or_default()
         })
         .collect()
@@ -1406,7 +1771,7 @@ fn read_object(
         .get(digest)
         .ok_or_else(|| not_found("object is not published"))?;
     let etag = quoted(digest);
-    let length = bytes.len() as u64;
+    let length = bytes.len();
     let mut headers = vec![
         ("accept-ranges".to_owned(), "bytes".to_owned()),
         ("etag".to_owned(), etag.clone()),
@@ -1420,11 +1785,20 @@ fn read_object(
         .and_then(|range| range.strip_prefix("bytes="))
         .and_then(|range| range.strip_suffix('-'))
         .and_then(|start| start.parse::<u64>().ok());
+    if length.saturating_sub(start.unwrap_or(0)) > REFERENCE_READ_LIMIT {
+        return Err(too_large("reference buffered GET exceeds response limit"));
+    }
     match start {
         None => Ok(HubResponse {
             status: 200,
             headers,
-            body: bytes.clone(),
+            body: bytes
+                .read(
+                    0,
+                    usize::try_from(length)
+                        .map_err(|_| too_large("reference response too large"))?,
+                )
+                .map_err(storage_error)?,
         }),
         Some(start) if start < length => {
             headers.push((
@@ -1434,7 +1808,13 @@ fn read_object(
             Ok(HubResponse {
                 status: 206,
                 headers,
-                body: bytes[usize::try_from(start).expect("bounded by length")..].to_vec(),
+                body: bytes
+                    .read(
+                        start,
+                        usize::try_from(length - start)
+                            .map_err(|_| too_large("reference response too large"))?,
+                    )
+                    .map_err(storage_error)?,
             })
         }
         Some(_) => {

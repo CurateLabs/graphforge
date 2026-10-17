@@ -1,7 +1,7 @@
 {
   "contract_version": 1,
   "scope": "Rust non-Cypher public release surface",
-  "public_method_digest": "cb04e18eab2910e065772b3b0f6815ad3a41880d3be6cd20707c7b48935dd77f",
+  "public_method_digest": "835f0e77d48d063cd8d3d68412d786d11af20807c2dc810d2dcb96d974056940",
   "method_policy": {
     "receiver_defaults": {
       "PortableV2ImportResult": "release-tested",
@@ -1445,7 +1445,8 @@
       "ids": [
         "GraphForge.research_reference",
         "GraphForge.export_research",
-        "GraphForge.fork_research"
+        "GraphForge.fork_research",
+        "GraphForge.publication_payload_bytes"
       ],
       "test_refs": [
         {
@@ -1467,6 +1468,14 @@
         {
           "path": "crates/graphforge-cli/tests/research_journey.rs",
           "symbol": "two_story_cli_research_survives_partial_review_restore_and_interchange"
+        },
+        {
+          "path": "crates/graphforge-cli/src/hub_publish/tests/staging.rs",
+          "symbol": "publication_staging_counts_current_graph_files_without_research"
+        },
+        {
+          "path": "crates/graphforge-cli/src/hub_publish/tests/staging.rs",
+          "symbol": "publication_staging_counts_historical_only_graph_payload"
         }
       ]
     },
