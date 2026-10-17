@@ -1575,6 +1575,18 @@ pub(crate) fn publish(
             )
         })?;
     let selection = select(graph, args)?;
+    let previews = select_previews(args, selection.version_uuid)?;
+    let preview_metadata = previews
+        .iter()
+        .map(|p| p.descriptor.clone())
+        .collect::<Vec<_>>();
+    let operation_content = if previews.is_empty() {
+        selection.project_content.clone()
+    } else {
+        sha256_digest(&canonical_json(
+            &json!({"project_content":selection.project_content,"previews":preview_metadata}),
+        ))
+    };
     let resolution = match environment.resolution.take() {
         Some(resolution) => {
             if resolution.requested != identity || resolution.requested_base != base {
@@ -1595,18 +1607,6 @@ pub(crate) fn publish(
         ..
     } = resolution;
 
-    let previews = select_previews(args, selection.version_uuid)?;
-    let preview_metadata = previews
-        .iter()
-        .map(|p| p.descriptor.clone())
-        .collect::<Vec<_>>();
-    let operation_content = if previews.is_empty() {
-        selection.project_content.clone()
-    } else {
-        sha256_digest(&canonical_json(
-            &json!({"project_content":selection.project_content,"previews":preview_metadata}),
-        ))
-    };
     let operation_uuid = operation_uuid.unwrap_or_else(|| {
         graphforge_api::hub_publish_operation(
             &identity.canonical_name(),

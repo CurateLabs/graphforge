@@ -2434,6 +2434,50 @@ fn selected_png_svg_previews_are_version_bound_but_not_native_package_data() {
                 .any(|r| r.method == "GET" && r.path.contains(&item.digest[7..]))
         );
     }
+
+    // Re-homing preserves the selected presentation channel, while publication
+    // through either name derives the same current-identity operation.
+    let old = RepositoryIdentity::parse("curate/claims").unwrap();
+    let new = RepositoryIdentity::parse("research/renamed").unwrap();
+    selected.hub.move_repository(&old, &new).unwrap();
+    let (moved_manifest, _) = served_lineage(selected, "research/renamed");
+    assert_eq!(moved_manifest.preview_descriptors().unwrap(), previews);
+    assert_eq!(moved_manifest.package, final_manifest.package);
+    for (item, path) in previews.iter().zip(&paths) {
+        let object = moved_manifest
+            .objects
+            .iter()
+            .find(|object| object.digest.0 == item.digest)
+            .unwrap();
+        let response = selected
+            .hub
+            .handle(&HubRequest::new(HubMethod::Get, &object.locations[0]));
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, std::fs::read(path).unwrap());
+    }
+    let before = selected.log().len();
+    let moved = run_publish_with(
+        selected,
+        &history.graph,
+        &args,
+        Credential::Token(token(selected, "research/renamed")),
+    )
+    .result
+    .unwrap();
+    assert_eq!(moved.receipt.repository, new);
+    assert_eq!(moved.moved.as_ref().unwrap().moved_from, old);
+    args.repository = "research/renamed".into();
+    let before_replay = selected.log().len();
+    let canonical = publish_ok(selected, &history.graph, &args).result.unwrap();
+    assert!(canonical.replayed);
+    assert_eq!(canonical.receipt, moved.receipt);
+    assert!(puts(&selected.log()[before_replay..]).is_empty());
+    assert!(
+        selected.log()[before..]
+            .iter()
+            .filter(|entry| entry.method == "POST")
+            .all(|entry| entry.path.starts_with("/research/renamed/"))
+    );
 }
 
 #[test]
