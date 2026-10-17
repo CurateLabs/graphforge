@@ -29,6 +29,17 @@ pub struct CommittedGenerationIdentity {
     pub manifest_sha256: [u8; 32],
 }
 
+/// Inspect an existing committed project without opening a mutable facade or recovery.
+pub fn read_committed_generation_identity(
+    project_path: &std::path::Path,
+) -> Result<CommittedGenerationIdentity, GfError> {
+    let generation = graphforge_storage::resolve_project_generation(project_path)?;
+    Ok(CommittedGenerationIdentity {
+        generation_uuid: generation.generation_uuid(),
+        manifest_sha256: generation.manifest_sha256(),
+    })
+}
+
 /// Hard preflight limits. No stream bytes are returned when either is exceeded.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct GenerationDiffLimits {

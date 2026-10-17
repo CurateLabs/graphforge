@@ -1301,12 +1301,8 @@ fn import_committed(staging: &CloneStaging, operation: &OperationId) -> bool {
         return false;
     }
     let expected = graphforge_api::portable_v2_import_generation(&operation.0);
-    staging
-        .project
-        .to_str()
-        .and_then(|path| GraphForge::new(Some(path)).ok())
-        .and_then(|graph| graph.committed_generation_identity().ok())
-        .is_some_and(|identity| identity.generation_uuid == expected)
+    graphforge_api::read_committed_generation_identity(&staging.project)
+        .is_ok_and(|identity| identity.generation_uuid == expected)
 }
 
 /// Remove research validation scratch an interrupted run left in the staging
@@ -1968,7 +1964,7 @@ fn clone_into_staging(
     check_free_space(
         staging,
         object.length,
-        research_context.is_none() && import_committed(staging, &planned),
+        import_committed(staging, &planned),
         env.available_space,
     )?;
     let partial = staging.partial.clone();

@@ -1278,6 +1278,8 @@ fn branch_activation_retries_exact_native_receipt_but_never_resets_advanced_stag
         .is_err()
     );
     assert!(!absent.exists());
+    assert!(graphforge_api::read_committed_generation_identity(&absent).is_err());
+    assert!(!absent.exists());
     let expected_import = graphforge_api::hub_research_clone_operation(
         REPOSITORY,
         &lineage.immutable_version.0,
@@ -1348,6 +1350,7 @@ fn branch_activation_retries_exact_native_receipt_but_never_resets_advanced_stag
         };
         if name == "unreadable" {
             std::fs::write(staged.join("CURRENT"), b"unreadable staged CURRENT\n").unwrap();
+            assert!(graphforge_api::read_committed_generation_identity(&staged).is_err());
         }
         let result = clone_into(&hub, &destination, Some("main"), None);
         if name == "unreadable" {
@@ -1385,6 +1388,10 @@ fn branch_activation_retries_exact_native_receipt_but_never_resets_advanced_stag
             );
             assert_eq!(score(&graph), 1);
             let prior = generation(&graph);
+            assert_eq!(
+                graphforge_api::read_committed_generation_identity(&destination).unwrap(),
+                graph.committed_generation_identity().unwrap()
+            );
             let mut graph = graph;
             assert!(
                 graph
