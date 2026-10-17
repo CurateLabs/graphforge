@@ -1120,14 +1120,20 @@ fn merge_lineage(
         .map(|version| (version.version_uuid.clone(), version.clone()))
         .collect();
     for version in next.versions.drain(..) {
-        match versions.get(&version.version_uuid) {
+        match versions.get_mut(&version.version_uuid) {
             Some(published) if published.identity_digest != version.identity_digest => {
                 return Err(publish_error(
                     HubPublishErrorCode::IntegrityFailure,
                     "a published Version has a different identity than the local Version",
                 ));
             }
-            Some(_) => {}
+            Some(published) => {
+                // Metadata history does not imply a retained payload. Explicit
+                // publication may supply it later without replacing identity/history.
+                if published.package.is_none() {
+                    published.package = version.package;
+                }
+            }
             None => {
                 versions.insert(version.version_uuid.clone(), version);
             }

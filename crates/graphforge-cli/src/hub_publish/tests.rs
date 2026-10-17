@@ -24,6 +24,8 @@ use std::net::{TcpListener, TcpStream};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
+mod ancestor_publication;
+
 const HUB: &str = "https://hub.test";
 
 // ------------------------------------------------------------ loopback Hub

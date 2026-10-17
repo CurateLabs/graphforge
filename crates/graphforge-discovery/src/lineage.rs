@@ -409,24 +409,7 @@ impl ResearchLineage {
                 }
             }
         }
-        for version in &self.versions {
-            let mut pending = version.parents.clone();
-            let mut seen = BTreeSet::new();
-            while let Some(id) = pending.pop() {
-                if id == version.version_uuid {
-                    return Err(DiscoveryError::new(
-                        DiscoveryErrorCode::IntegrityFailure,
-                        Some("versions.parents"),
-                        "Version ancestry is cyclic",
-                    ));
-                }
-                if seen.insert(id.clone())
-                    && let Some(record) = version_ids.get(id.as_str())
-                {
-                    pending.extend(record.parents.iter().cloned());
-                }
-            }
-        }
+        validate_parent_graph(&version_ids)?;
         let mut prior = None;
         for proposal in &self.proposals {
             check_uuid(&proposal.proposal_uuid, "proposals.proposal_uuid", limits)?;
@@ -622,6 +605,44 @@ pub(super) fn validate_package_reference(
     let _ = limits;
     Ok(())
 }
+
+/// Expand each record at most once, independent of ancestry depth.
+fn validate_parent_graph(
+    versions: &BTreeMap<&str, &LineageVersion>,
+) -> Result<usize, DiscoveryError> {
+    let mut done = BTreeSet::new();
+    let mut expanded = 0;
+    for start in versions.keys() {
+        let mut visiting = BTreeSet::new();
+        let mut stack = vec![(*start, false)];
+        while let Some((id, exiting)) = stack.pop() {
+            if exiting {
+                visiting.remove(id);
+                done.insert(id);
+                continue;
+            }
+            if done.contains(id) {
+                continue;
+            }
+            if !visiting.insert(id) {
+                return Err(DiscoveryError::new(
+                    DiscoveryErrorCode::IntegrityFailure,
+                    Some("versions.parents"),
+                    "Version ancestry is cyclic",
+                ));
+            }
+            stack.push((id, true));
+            if let Some(record) = versions.get(id) {
+                expanded += 1;
+                stack.extend(record.parents.iter().map(|parent| (parent.as_str(), false)));
+            }
+        }
+    }
+    Ok(expanded)
+}
+
+#[cfg(test)]
+mod ancestry_tests;
 
 fn check_uuid(
     value: &str,
