@@ -330,10 +330,13 @@ fn download_transport(
             calls: RefCell::new(Vec::new()),
         },
         hub: origin(DEFAULT_HUB).unwrap(),
-        metadata: [
+        metadata: RefCell::new([
             Url::parse("https://graphforge.sh/owner/repo/.gf/refs").unwrap(),
             Url::parse("https://graphforge.sh/owner/repo/.gf/manifest").unwrap(),
-        ],
+        ]),
+        identity: std::rc::Rc::new(RefCell::new(
+            graphforge_discovery::RepositoryIdentity::parse("owner/repo").unwrap(),
+        )),
         discovery_acquire: Box::new(|| panic!("unexpected discovery vault access")),
         discovery_token: RefCell::new(None),
         acquire,
@@ -845,10 +848,13 @@ fn private_clone_authenticates_metadata_and_objects_then_imports_and_reopens_fix
             object,
         },
         hub: origin(DEFAULT_HUB).unwrap(),
-        metadata: [
+        metadata: RefCell::new([
             Url::parse("https://graphforge.sh/openalex/openalex/.gf/refs").unwrap(),
             Url::parse("https://graphforge.sh/openalex/openalex/.gf/manifest").unwrap(),
-        ],
+        ]),
+        identity: std::rc::Rc::new(RefCell::new(
+            graphforge_discovery::RepositoryIdentity::parse("openalex/openalex").unwrap(),
+        )),
         discovery_acquire: Box::new(|| Ok(Some("workos-secret".into()))),
         discovery_token: RefCell::new(None),
         acquire: Box::new(move || {
@@ -944,4 +950,334 @@ fn saved_publish_refresh_and_repository_exchange_keep_preview_bypass_on_hub() {
         requests[1].header("authorization"),
         Some("Bearer new-access")
     );
+}
+
+#[derive(Clone, Copy)]
+enum MoveFault {
+    None,
+    Foreign,
+    Disagree,
+    Chain,
+}
+struct MovedPrivateFixture {
+    base: PrivateFixture,
+    fault: MoveFault,
+    protected: bool,
+    marker_reads: Cell<usize>,
+    calls: RefCell<Vec<(String, bool, bool)>>,
+}
+impl MovedPrivateFixture {
+    fn reply(
+        &self,
+        url: &Url,
+        headers: &[(&str, ureq::http::HeaderValue)],
+    ) -> Result<crate::hub_http::HttpResponse, GfError> {
+        let bearer = headers
+            .iter()
+            .find(|(name, _)| *name == "authorization")
+            .map(|(_, value)| value.to_str().unwrap());
+        let bypass = headers.iter().any(|(name, value)| {
+            *name == "x-vercel-protection-bypass" && value == "preview-secret"
+        });
+        self.calls
+            .borrow_mut()
+            .push((url.to_string(), bearer.is_some(), bypass));
+        if url == &self.base.object {
+            assert!(
+                !bypass,
+                "object request must never carry protection credentials"
+            );
+            if bearer.is_none() {
+                return Ok(PrivateFixture::response(401, Vec::new()));
+            }
+            assert_eq!(
+                bearer,
+                Some("Bearer new-repository-secret"),
+                "old repository scope must never be reused"
+            );
+            return Ok(PrivateFixture::response(200, self.base.project.clone()));
+        }
+        assert_eq!(
+            url.origin(),
+            origin(DEFAULT_HUB).unwrap().origin(),
+            "foreign target was contacted"
+        );
+        if self.protected && !bypass {
+            return Ok(PrivateFixture::response(403, Vec::new()));
+        }
+        if bearer != Some("Bearer workos-secret") {
+            return Ok(PrivateFixture::response(401, Vec::new()));
+        }
+        let old = url.path().starts_with("/openalex/openalex/.gf/");
+        let chained = !old && matches!(self.fault, MoveFault::Chain);
+        if old || chained {
+            self.marker_reads
+                .set(self.marker_reads.get() + usize::from(old));
+            let from = if old {
+                "openalex/openalex"
+            } else {
+                "research/renamed"
+            };
+            let to = if chained
+                || matches!(self.fault, MoveFault::Disagree) && url.path().ends_with("manifest")
+            {
+                "other/third"
+            } else {
+                "research/renamed"
+            };
+            let marker = graphforge_discovery::RepositoryMoved {
+                format: "graphforge-repository-moved/1".into(),
+                moved_from: graphforge_discovery::RepositoryIdentity::parse(from).unwrap(),
+                moved_to: graphforge_discovery::RepositoryIdentity::parse(to).unwrap(),
+            };
+            let host = if matches!(self.fault, MoveFault::Foreign) {
+                "foreign.example"
+            } else {
+                "graphforge.sh"
+            };
+            let suffix = if url.path().ends_with("refs") {
+                "refs"
+            } else {
+                "manifest"
+            };
+            let mut response = PrivateFixture::response(308, serde_json::to_vec(&marker).unwrap());
+            response.location = Some(format!("https://{host}/{to}/.gf/{suffix}"));
+            return Ok(response);
+        }
+        assert!(
+            self.marker_reads.get() >= 2,
+            "new metadata was contacted before both old markers"
+        );
+        assert!(url.path().starts_with("/research/renamed/.gf/"));
+        Ok(PrivateFixture::response(
+            200,
+            if url.path().ends_with("refs") {
+                self.base.refs.clone()
+            } else {
+                self.base.manifest.clone()
+            },
+        ))
+    }
+}
+impl Transport for MovedPrivateFixture {
+    fn get(
+        &self,
+        url: &Url,
+        _: Option<u64>,
+        _: Option<&str>,
+        _: u64,
+    ) -> Result<crate::hub_http::HttpResponse, GfError> {
+        self.reply(url, &[])
+    }
+    fn get_authorized(
+        &self,
+        url: &Url,
+        _: Option<u64>,
+        _: Option<&str>,
+        _: u64,
+        headers: &[(&str, ureq::http::HeaderValue)],
+    ) -> Result<crate::hub_http::HttpResponse, GfError> {
+        self.reply(url, headers)
+    }
+    fn get_discovery(
+        &self,
+        url: &Url,
+        headers: &[(&str, ureq::http::HeaderValue)],
+        _: u64,
+    ) -> Result<crate::hub_http::HttpResponse, GfError> {
+        self.reply(url, headers)
+    }
+}
+fn moved_private_transport(
+    fault: MoveFault,
+    protected: bool,
+) -> (
+    CloneTransport<MovedPrivateFixture>,
+    std::rc::Rc<RefCell<Vec<String>>>,
+) {
+    let mut manifest = graphforge_discovery::DiscoveryManifest::from_json(
+        include_bytes!("../../../../tests/fixtures/hub/generated/v1/manifest.json"),
+        graphforge_discovery::DiscoveryLimits::default(),
+    )
+    .unwrap();
+    let object = Url::parse(&manifest.package_object().unwrap().locations[0]).unwrap();
+    manifest.repository =
+        graphforge_discovery::RepositoryIdentity::parse("research/renamed").unwrap();
+    let mut refs = graphforge_discovery::RefSet::from_json(
+        include_bytes!("../../../../tests/fixtures/hub/generated/v1/refs.json"),
+        graphforge_discovery::DiscoveryLimits::default(),
+    )
+    .unwrap();
+    refs.repository = manifest.repository.clone();
+    for reference in &mut refs.refs {
+        reference.validator = manifest.canonical_digest().unwrap();
+    }
+    let identity = std::rc::Rc::new(RefCell::new(
+        graphforge_discovery::RepositoryIdentity::parse("openalex/openalex").unwrap(),
+    ));
+    let current = identity.clone();
+    let grants = std::rc::Rc::new(RefCell::new(Vec::new()));
+    let acquired = grants.clone();
+    let object_origin = origin(&object.origin().ascii_serialization()).unwrap();
+    let old_object_origin = object_origin.clone();
+    let transport = CloneTransport {
+        inner: MovedPrivateFixture {
+            base: PrivateFixture {
+                calls: RefCell::new(Vec::new()),
+                manifest: manifest.to_canonical_json().unwrap(),
+                refs: refs.to_canonical_json().unwrap(),
+                project: include_bytes!(
+                    "../../../../tests/fixtures/hub/generated/v1/objects/openalex-openalex.gfpb"
+                )
+                .to_vec(),
+                object,
+            },
+            fault,
+            protected,
+            marker_reads: Cell::new(0),
+            calls: RefCell::new(Vec::new()),
+        },
+        hub: origin(DEFAULT_HUB).unwrap(),
+        metadata: RefCell::new([
+            Url::parse("https://graphforge.sh/openalex/openalex/.gf/refs").unwrap(),
+            Url::parse("https://graphforge.sh/openalex/openalex/.gf/manifest").unwrap(),
+        ]),
+        identity,
+        discovery_acquire: Box::new(|| Ok(Some("workos-secret".into()))),
+        discovery_token: RefCell::new(Some("workos-secret".into())),
+        acquire: Box::new(move || {
+            acquired
+                .borrow_mut()
+                .push(current.borrow().canonical_name());
+            assert_eq!(current.borrow().canonical_name(), "research/renamed");
+            Ok(Some(RepositoryToken {
+                token: "new-repository-secret".into(),
+                origin: object_origin.clone(),
+            }))
+        }),
+        token: RefCell::new(Some(RepositoryToken {
+            token: "old-repository-secret".into(),
+            origin: old_object_origin,
+        })),
+    };
+    (transport, grants)
+}
+fn moved_clone_args(destination: &std::path::Path) -> crate::hub_clone::CloneArgs {
+    crate::hub_clone::CloneArgs {
+        repository: "openalex/openalex".into(),
+        hub: None,
+        token_env: None,
+        protection_bypass_env: None,
+        destination: Some(destination.into()),
+        telemetry_endpoint: None,
+        git_ref: None,
+        version_uuid: None,
+    }
+}
+#[test]
+fn private_moved_clone_reacquires_current_scope_and_reopens_native_project() {
+    let (transport, grants) = moved_private_transport(MoveFault::None, false);
+    let root = tempfile::tempdir().unwrap();
+    let destination = root.path().join("clone");
+    let mut output = Vec::new();
+    crate::hub_clone::run_clone_with(
+        &transport,
+        moved_clone_args(&destination),
+        true,
+        &mut output,
+    )
+    .unwrap();
+    let result: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(result["repository"], "research/renamed");
+    assert_eq!(&*grants.borrow(), &["research/renamed"]);
+    assert_eq!(
+        transport.discovery_token.borrow().as_deref(),
+        Some("workos-secret")
+    );
+    let reopened = graphforge_api::GraphForge::new(destination.to_str()).unwrap();
+    assert_eq!(
+        reopened
+            .research_project_metadata()
+            .unwrap()
+            .title
+            .as_deref(),
+        Some("OpenAlex")
+    );
+}
+#[test]
+fn malformed_private_moves_never_acquire_a_current_grant_or_publish_output() {
+    for fault in [MoveFault::Foreign, MoveFault::Disagree, MoveFault::Chain] {
+        let (transport, grants) = moved_private_transport(fault, false);
+        let root = tempfile::tempdir().unwrap();
+        let destination = root.path().join("clone");
+        let mut output = Vec::new();
+        assert!(
+            crate::hub_clone::run_clone_with(
+                &transport,
+                moved_clone_args(&destination),
+                true,
+                &mut output
+            )
+            .is_err()
+        );
+        assert!(grants.borrow().is_empty());
+        assert!(output.is_empty());
+        assert!(!destination.exists());
+        assert!(
+            transport
+                .inner
+                .calls
+                .borrow()
+                .iter()
+                .all(|(url, _, _)| !url.contains("foreign.example")
+                    && !url.contains("/other/third/"))
+        );
+    }
+}
+#[test]
+fn verified_current_metadata_reapplies_only_configured_same_origin_protection_policy() {
+    let (transport, grants) = moved_private_transport(MoveFault::None, true);
+    let base = Url::parse("https://graphforge.sh/openalex/openalex").unwrap();
+    let identity = graphforge_discovery::RepositoryIdentity::parse("openalex/openalex").unwrap();
+    let credentials =
+        crate::hub_http::DiscoveryCredentials::load(&base, None, Some("BYPASS"), |_| {
+            Ok("preview-secret".into())
+        })
+        .unwrap()
+        .unwrap();
+    let moved = crate::hub_http::RepositoryMoveTransport::new(&transport, &identity, &base)
+        .with_credentials(Some(&credentials));
+    let mut attempts = 0;
+    let response = crate::hub_http::fetch_discovery_with_attempts(
+        &moved,
+        &crate::hub_http::endpoint(&base, "refs"),
+        Some(&credentials),
+        16 * 1024 * 1024,
+        &mut attempts,
+        &crate::hub_http::RETRY_POLICY,
+    )
+    .unwrap();
+    assert_eq!(response.status, 200);
+    assert_eq!(
+        moved.resolved(false).unwrap().0.canonical_name(),
+        "research/renamed"
+    );
+    assert!(
+        grants.borrow().is_empty(),
+        "metadata does not request an object grant"
+    );
+    assert!(
+        transport
+            .inner
+            .calls
+            .borrow()
+            .iter()
+            .all(|(_, _, bypass)| *bypass)
+    );
+    assert_eq!(moved.extra_metadata_requests(), 1);
+    let response = moved
+        .get(&transport.inner.base.object, None, None, 1024 * 1024)
+        .unwrap();
+    assert_eq!(response.status, 200);
+    assert_eq!(&*grants.borrow(), &["research/renamed"]);
 }

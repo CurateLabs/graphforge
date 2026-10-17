@@ -392,6 +392,16 @@ impl Transport for LoopbackTransport {
             .get(&self.route(url.as_str())?, range, if_range, limit)
     }
 
+    fn get_discovery(
+        &self,
+        url: &Url,
+        headers: &[(&str, ureq::http::HeaderValue)],
+        limit: u64,
+    ) -> Result<HttpResponse, GfError> {
+        self.inner
+            .get_discovery(&self.route(url.as_str())?, headers, limit)
+    }
+
     fn exchange(&self, request: &HubRequest, limit: usize) -> Result<HubResponse, GfError> {
         let mut routed = request.clone();
         routed.url = self.route(&request.url)?.to_string();
@@ -550,6 +560,7 @@ fn run_publish_with_bypass(
             credential,
             wait: &|_| panic!("no device flow expected"),
             notices: &mut stderr,
+            resolution: None,
         };
         publish(&hub.transport(), graph, args, &mut environment)
     };
@@ -992,6 +1003,53 @@ fn published_fork_clones_back_with_origin_citation() {
             source.origin_project_uuid
         );
     }
+    // A citation remains the original published identity, while resolution may
+    // follow its verified one-hop move only for that exact Version identity.
+    let citation = lineage.fork.as_ref().unwrap().clone();
+    hub.hub
+        .move_repository(
+            &citation.origin_repository,
+            &RepositoryIdentity::parse("research/moved-origin").unwrap(),
+        )
+        .unwrap();
+    let transport = hub.transport();
+    let source_base = Url::parse(&repository_url("curate/claims")).unwrap();
+    let bypass = crate::hub_http::DiscoveryCredentials::load(
+        &Url::parse(HUB).unwrap(),
+        None,
+        Some("PREVIEW_SECRET"),
+        |_| Ok("fork-preview".into()),
+    )
+    .unwrap();
+    let reader = Hub {
+        transport: &transport,
+        base: source_base.clone(),
+        bypass: bypass.as_ref(),
+    };
+    let before = hub.log().len();
+    verify_fork_origin(&reader, &source_base, &citation).unwrap();
+    let log = hub.log();
+    assert!(
+        log[before..]
+            .iter()
+            .any(|r| r.path == "/research/moved-origin/.gf/refs")
+    );
+    for request in &log[before..] {
+        assert!(request.bearer.is_none());
+        assert_eq!(
+            request.bypass.as_deref(),
+            if request.path.ends_with("/.gf/refs") || request.path.ends_with("/.gf/manifest") {
+                Some("fork-preview")
+            } else {
+                None
+            }
+        );
+    }
+    let mut wrong = citation.clone();
+    wrong.origin_version_identity = Sha256Digest(sha256_digest(b"another identity"));
+    assert!(verify_fork_origin(&reader, &source_base, &wrong).is_err());
+    let (_, retained) = served_lineage(&hub, "curate/claims-fork");
+    assert_eq!(retained.fork.as_ref(), Some(&citation));
 }
 
 /// Consistent refs, manifest, and lineage for `repository` whose lineage lists
@@ -1340,6 +1398,7 @@ fn a_slow_but_progressing_upload_succeeds_in_bounded_chunks() {
         credential: Credential::Token(token(&hub, "curate/claims")),
         wait: &|_| panic!("no device flow expected"),
         notices: &mut notices,
+        resolution: None,
     };
     let outcome = publish(
         &transport,
@@ -1440,6 +1499,7 @@ fn device_flow(
             credential: Credential::DeviceFlow,
             wait: &wait,
             notices: &mut writer,
+            resolution: None,
         };
         publish(
             &hub.transport(),
@@ -1712,11 +1772,28 @@ fn preview_publish_keeps_bypass_on_control_requests_and_off_upload_retries() {
         bypass.as_ref(),
     );
     run.result.unwrap();
+    let old = RepositoryIdentity::parse("curate/claims").unwrap();
+    let new = RepositoryIdentity::parse("research/renamed").unwrap();
+    hub.hub.move_repository(&old, &new).unwrap();
+    let moved = run_publish_with_bypass(
+        &hub,
+        &history.graph,
+        &on_ref("curate/claims", "main"),
+        Credential::Token(token(&hub, "research/renamed")),
+        bypass.as_ref(),
+    )
+    .result
+    .unwrap();
+    assert_eq!(moved.receipt.repository, new);
+    assert_eq!(moved.moved.unwrap().moved_from, old);
     let log = hub.log();
     assert!(log.iter().any(|entry| entry.method == "HEAD"));
     assert!(log.iter().filter(|entry| entry.method == "PUT").count() >= 2);
     for entry in log {
-        if entry.method == "HEAD" || entry.method == "PUT" {
+        if entry.method == "HEAD"
+            || entry.method == "PUT"
+            || (entry.method == "GET" && entry.path.contains("/.gf/objects/"))
+        {
             assert!(
                 entry.bypass.is_none(),
                 "upload purpose must exclude preview credentials"
@@ -2162,6 +2239,133 @@ fn per_object_chunk_selection_overrides_the_hub_preference_with_the_same_budget(
     );
 }
 
+fn assert_rehomed_clones(hub: &LoopbackHub, history: &History) {
+    let root = tempfile::tempdir().unwrap();
+    for (name, repository) in [
+        ("old", "curate/claims"),
+        ("short", "curate/claims"),
+        ("new", "research/renamed"),
+    ] {
+        let destination = root.path().join(name);
+        let cloned = if name == "short" {
+            let mut output = Vec::new();
+            run_clone_with(
+                &hub.transport(),
+                CloneArgs {
+                    hub: Some(HUB.into()),
+                    token_env: None,
+                    protection_bypass_env: None,
+                    repository: repository.into(),
+                    destination: Some(destination.clone()),
+                    telemetry_endpoint: None,
+                    git_ref: None,
+                    version_uuid: None,
+                },
+                true,
+                &mut output,
+            )
+            .unwrap();
+            serde_json::from_slice(&output).unwrap()
+        } else {
+            clone_into(&hub, repository, &destination, None, None)
+        };
+        assert_eq!(cloned["repository"], "research/renamed");
+        if name != "new" {
+            assert_eq!(cloned["moved_from"], "curate/claims");
+            assert_eq!(cloned["moved_to"], "research/renamed");
+        }
+        let reopened = GraphForge::new(destination.to_str()).unwrap();
+        assert_eq!(
+            reference(&reopened, history.head).identity_sha256,
+            reference(&history.graph, history.head).identity_sha256
+        );
+        let query = reopened
+            .execute("MATCH (n:Item) RETURN count(n) AS total, sum(n.score) AS score")
+            .unwrap();
+        for (column, expected) in [(0, 1), (1, 1)] {
+            assert_eq!(
+                query.batches[0]
+                    .column(column)
+                    .as_any()
+                    .downcast_ref::<arrow::array::Int64Array>()
+                    .unwrap()
+                    .value(0),
+                expected
+            );
+        }
+    }
+    let mut human_clone = Vec::new();
+    run_clone_with(
+        &hub.transport(),
+        CloneArgs {
+            hub: Some(HUB.into()),
+            token_env: None,
+            protection_bypass_env: None,
+            repository: "curate/claims".into(),
+            destination: Some(root.path().join("human")),
+            telemetry_endpoint: None,
+            git_ref: None,
+            version_uuid: None,
+        },
+        false,
+        &mut human_clone,
+    )
+    .unwrap();
+    assert!(
+        String::from_utf8(human_clone)
+            .unwrap()
+            .contains("Repository moved from curate/claims to research/renamed")
+    );
+}
+
+#[test]
+fn moved_repository_clones_both_names_and_publishes_only_with_current_scope() {
+    let mut history = history();
+    let hub = LoopbackHub::start();
+    publish_ok(&hub, &history.graph, &on_ref("curate/claims", "main"));
+    let old = RepositoryIdentity::parse("curate/claims").unwrap();
+    let new = RepositoryIdentity::parse("research/renamed").unwrap();
+    let (_, before) = served_lineage(&hub, "curate/claims");
+    hub.hub.move_repository(&old, &new).unwrap();
+    let (_, after) = served_lineage(&hub, "research/renamed");
+    assert_eq!(after.versions, before.versions);
+    assert_rehomed_clones(&hub, &history);
+    edit(&mut history.graph, history.branch, 3);
+    let before_log = hub.log().len();
+    let stale = run_publish_with(
+        &hub,
+        &history.graph,
+        &on_ref("curate/claims", "main"),
+        Credential::Token(token(&hub, "curate/claims")),
+    );
+    assert!(stale.result.is_err());
+    assert!(puts(&hub.log()[before_log..]).is_empty());
+    let current = run_publish_with(
+        &hub,
+        &history.graph,
+        &on_ref("curate/claims", "main"),
+        Credential::Token(token(&hub, "research/renamed")),
+    );
+    let outcome = current.result.unwrap();
+    assert_eq!(outcome.receipt.repository, new);
+    assert_eq!(outcome.moved.as_ref().unwrap().moved_from, old);
+    let mut human = Vec::new();
+    write_outcome(&outcome, false, &mut human).unwrap();
+    assert!(
+        String::from_utf8(human)
+            .unwrap()
+            .contains("Repository moved from curate/claims to research/renamed")
+    );
+    let json: serde_json::Value = serde_json::from_slice(&current.stdout).unwrap();
+    assert_eq!(json["moved_to"], "research/renamed");
+    assert!(
+        hub.log()[before_log..]
+            .iter()
+            .filter(|entry| entry.method == "POST")
+            .all(|entry| entry.path.starts_with("/research/renamed/"))
+    );
+}
+
 #[test]
 fn selected_png_svg_previews_are_version_bound_but_not_native_package_data() {
     let history = history();
@@ -2282,6 +2486,50 @@ fn selected_png_svg_previews_are_version_bound_but_not_native_package_data() {
                 .any(|r| r.method == "GET" && r.path.contains(&item.digest[7..]))
         );
     }
+
+    // Re-homing preserves the selected presentation channel, while publication
+    // through either name derives the same current-identity operation.
+    let old = RepositoryIdentity::parse("curate/claims").unwrap();
+    let new = RepositoryIdentity::parse("research/renamed").unwrap();
+    selected.hub.move_repository(&old, &new).unwrap();
+    let (moved_manifest, _) = served_lineage(selected, "research/renamed");
+    assert_eq!(moved_manifest.preview_descriptors().unwrap(), previews);
+    assert_eq!(moved_manifest.package, final_manifest.package);
+    for (item, path) in previews.iter().zip(&paths) {
+        let object = moved_manifest
+            .objects
+            .iter()
+            .find(|object| object.digest.0 == item.digest)
+            .unwrap();
+        let response = selected
+            .hub
+            .handle(&HubRequest::new(HubMethod::Get, &object.locations[0]));
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, std::fs::read(path).unwrap());
+    }
+    let before = selected.log().len();
+    let moved = run_publish_with(
+        selected,
+        &history.graph,
+        &args,
+        Credential::Token(token(selected, "research/renamed")),
+    )
+    .result
+    .unwrap();
+    assert_eq!(moved.receipt.repository, new);
+    assert_eq!(moved.moved.as_ref().unwrap().moved_from, old);
+    args.repository = repository_url("research/renamed");
+    let before_replay = selected.log().len();
+    let canonical = publish_ok(selected, &history.graph, &args).result.unwrap();
+    assert!(canonical.replayed);
+    assert_eq!(canonical.receipt, moved.receipt);
+    assert!(puts(&selected.log()[before_replay..]).is_empty());
+    assert!(
+        selected.log()[before..]
+            .iter()
+            .filter(|entry| entry.method == "POST")
+            .all(|entry| entry.path.starts_with("/research/renamed/"))
+    );
 }
 
 #[test]
