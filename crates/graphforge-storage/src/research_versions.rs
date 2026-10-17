@@ -58,7 +58,7 @@ pub use project_restore::{materialize_prepared_research_version, materialize_res
 mod projection;
 mod retained_content;
 pub use projection::{ResearchGraphProjection, ResearchGraphSelection};
-pub use retained_content::materialize_research_graph;
+pub use retained_content::{materialize_research_graph, publication_payload_bytes};
 
 use crate::{
     ProjectCapability, ProjectGenerationRequest, ProjectParticipant, ProjectParticipantEncoding,

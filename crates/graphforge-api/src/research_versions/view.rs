@@ -174,8 +174,7 @@ pub(super) fn materialize_with_resources(
     read_only: bool,
     resource_policy: crate::NormalizedResourcePolicy,
 ) -> Result<GraphForge, GfError> {
-    let directory =
-        Arc::new(tempfile::tempdir().map_err(|error| GfError::Storage(error.to_string()))?);
+    let directory = Arc::new(owner.private_materialization_directory()?);
     let generation = graphforge_storage::research_versions::materialize_research_project(
         owner.resolved_generation.container_root(),
         version,
@@ -192,6 +191,9 @@ pub(super) fn materialize_with_resources(
             generation.generation_uuid(),
         ),
     )?;
+    graph
+        .research_staging_parent
+        .clone_from(&owner.research_staging_parent);
     graph.lifecycle_mode =
         graphforge_storage::filesystem_admission::ProjectLifecycleMode::Ephemeral;
     graph.research_materialization = Some(Arc::clone(&directory));

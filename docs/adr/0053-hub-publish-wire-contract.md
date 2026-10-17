@@ -13,7 +13,7 @@ revisit_when: "The control-plane publish session shape, data-plane upload URL po
 
 **Implementation:** `graphforge-hub-publish` holds the `graphforge-hub-publish/1`
 documents, error classification, request commitment, and `ReferenceHub`, an
-in-memory implementation of the whole mapping below. `gf publish`
+reference implementation of the mapping below. `gf publish`
 (`crates/graphforge-cli/src/hub_publish.rs`) is the client; it shares HTTPS
 plumbing with `gf clone` (`hub_http.rs`) and discovery derivation with the Hub
 fixture generator (`hub_publication.rs`). Python and Node reach it through the
@@ -87,9 +87,8 @@ revision). Superseding closes the old session and its upload URLs and answers
 so identical bytes are never sent twice and a partial upload still resumes.
 Otherwise the Hub answers `201 {state: "open", session_id, uploads: [{digest,
 length, upload_url, received}]}`. Objects already stored in the same repository
-start complete only if they still verify against their digest and length; a copy
-corrupted at rest starts empty and must be uploaded again, and the commit
-replaces it. Nothing is deduplicated across repositories.
+may reuse sealed storage of the same length; commit re-verifies actual bytes.
+A copy known to be corrupted starts empty and must be uploaded again. Nothing is deduplicated across repositories.
 
 **Uploads.** `upload_url` is a capability URL on the data plane. A client must
 never send the publish token to it and must never log it. `PUT` appends exactly
@@ -278,3 +277,56 @@ through its HTTP adapter.
 ## Alternatives
 
 Embedding publish types in `graphforge-discovery` would couple read and write evolution. Keeping publish only in the CLI would forfeit shared conformance and binding parity. Letting the Hub rewrite object locations in a submitted manifest would change the manifest digest the client committed to, so locations come from the capabilities template instead. Accepting the publish token on upload URLs would send the credential to whatever data-plane host the Hub names, so upload URLs are capabilities instead. Publishing the Project package with the `DataComponents` profile dropped the workspace research metadata and configuration participants (they are `settings` components), so the derived summary of every published research repository had no title, licence or ontology mode. Exporting a `Complete` package with the research registry projected to the published Versions would put research in the Project package too, but it changes what a Project package's research component means, duplicates the Version packages, and is a storage-format decision (ADR 0044); revisit it only if a consumer needs research history from the Project package alone. Deriving the summary from the head Version's package instead would break the summary's binding to `manifest.package` (ADR 0051).
+
+### Large objects: asynchronous commit (#1776)
+
+The selected policy is **asynchronous commit with full stored-byte
+re-verification**, not upload-only verification. A Hub requiring
+`large-object-publish@1` also requires `publish-negotiation@1`, advertises a
+positive uniform `preferred_chunk_bytes` no greater than 95 MiB, and sets
+`max_object_bytes` no higher than 10,000 such parts. Every nonfinal PUT has
+that exact size; the last may be shorter. The retained offset is a part boundary
+or the object's full length. Existing unnegotiated Hubs retain their old behavior.
+At 64 MiB the multipart ceiling is 625 GiB; a Hub may advertise a smaller ceiling.
+Multiple portable Project objects remain a separate future decision.
+
+Commit accepts `{state:"pending", operation_uuid}` with HTTP 202. The client
+polls the existing authenticated operation endpoint, binds every response to the
+repository, operation and intent, and accepts only the final original receipt.
+It never treats 202 as a completed publication. A reference operation advances
+at most 64 MiB of real retained bytes per poll in 1 MiB read buffers. Hashing is
+incremental across polls; after all object hashes match, the existing atomic
+ref critical section rechecks current authorization and expected revision and
+applies objects, documents, refs and receipt together. An expired token or
+conflicting ref cannot advance a pending publication. A rerun can obtain fresh
+authorization and resume the same operation. Client polling has a finite 24-hour
+bound; timeout does not cancel or resubmit commit.
+
+Reference object storage uses unlinked temporary files and sparse zero extents,
+not object-sized vectors. The reference `HubResponse` adapter still buffers
+read responses and refuses responses over 95 MiB; the large-object qualification
+is publication, not a claim that this adapter streams a 200 GiB clone. A deployed
+Hub chooses a verification step budget appropriate to its runtime. The reference
+operator test records request time against the existing 300-second request
+budget; it is not a Workers CPU guarantee.
+
+Before constructing any publication package or research materialization,
+`gf publish` checks filesystem admission and estimated free space for staging.
+The default package directory is beside the Project; `--staging-directory`
+selects an existing explicit directory. Research export and all its nested
+private views inherit the output-local stage through an immutable scoped facade;
+ordinary historical queries retain their existing temporary-directory policy.
+Whole-package publication staging does not silently fall back to TMPDIR. Bounded
+engine adjacency caches retain their existing query-budgeted temporary-directory
+policy; this is not a promise that every engine tempfile avoids TMPDIR. Free-space
+checks include current graph files, retained research participant and graph
+payloads, and local evidence. Retained Versions are counted separately because
+private views can copy shared objects independently. The client reserves advisory
+headroom of three times this source inventory plus 512 MiB for coexisting private
+views, interchange copies, bundles, verification, and bounded controls. This is a
+conservative estimate, not an exact peak or a filesystem reservation; concurrent
+writers and later I/O errors still fail closed. Sizing reads bounded graph control
+records and source metadata without materializing historical views or packages;
+portable selection fingerprints retain their existing meaning. Full semantic package verification
+remains mandatory. Its already-computed transport digest is reused for the
+publication descriptor instead of rereading the file solely to hash it again.

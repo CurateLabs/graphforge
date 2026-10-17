@@ -188,6 +188,23 @@
     {
       "additionalProperties": false,
       "properties": {
+        "operation_uuid": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "state": {
+          "const": "pending"
+        }
+      },
+      "required": [
+        "state",
+        "operation_uuid"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
         "receipt": {
           "$ref": "#/$defs/receipt"
         },
