@@ -4,7 +4,7 @@ use super::*;
 use graphforge_api::{
     DiscoveryResearchVersionRequest, FetchResearchBranchRequest, FetchedResearchBranch,
 };
-use graphforge_core::portable::{PortableV2Limits, PortableV2Mode};
+use graphforge_api::{PortableV2Limits, PortableV2Mode};
 
 struct Package {
     manifest: Vec<u8>,

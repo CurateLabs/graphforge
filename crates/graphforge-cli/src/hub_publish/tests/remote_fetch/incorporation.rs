@@ -98,7 +98,7 @@ fn divergent_remote_fetch_review_incorporation_fast_forwards_and_reopens() {
     assert!(matches!(
         error,
         GfError::Project {
-            code: graphforge_core::ProjectErrorCode::WriteConflict,
+            code: graphforge_api::ProjectErrorCode::WriteConflict,
             ..
         }
     ));
@@ -196,7 +196,7 @@ fn historical_review_remains_pinned(
     assert!(matches!(
         error,
         GfError::Project {
-            code: graphforge_core::ProjectErrorCode::WriteConflict,
+            code: graphforge_api::ProjectErrorCode::WriteConflict,
             ..
         }
     ));
