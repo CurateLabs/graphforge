@@ -193,8 +193,16 @@ impl ResearchInterchangeManifest {
         };
         registry.validate()?;
         let mut ancestors = BTreeSet::new();
-        for id in self.versions.keys() {
-            ancestors.extend(registry.ancestors(*id));
+        let mut pending: Vec<_> = self
+            .versions
+            .keys()
+            .flat_map(|id| registry.ancestry.get(id).into_iter().flatten())
+            .copied()
+            .collect();
+        while let Some(id) = pending.pop() {
+            if ancestors.insert(id) {
+                pending.extend(registry.ancestry.get(&id).into_iter().flatten().copied());
+            }
         }
         for (id, record) in &self.history {
             if self.versions.contains_key(id)
