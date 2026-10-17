@@ -961,85 +961,13 @@ fn apply_mutation(
             project_uuid,
             lineage_sha256: _,
             remote_branches,
-        } => {
-            let archive = registry
-                .interchange
-                .get(head_version_uuid)
-                .ok_or_else(|| invalid("selected imported Branch archive is unavailable"))?;
-            if archive.source_project_uuid != *project_uuid
-                || archive.fork.is_some()
-                || !matches!(
-                    archive.selection,
-                    ResearchInterchangeSelection::Complete { .. }
-                )
-            {
-                return Err(invalid(
-                    "only a same-Project complete imported Branch can continue",
-                ));
-            }
-            let branch = archive
-                .genealogy
-                .get(branch_uuid)
-                .ok_or_else(|| invalid("selected imported Branch genealogy is unavailable"))?
-                .clone();
-            let head = registry
-                .versions
-                .get(head_version_uuid)
-                .ok_or_else(|| invalid("selected imported Branch head is unavailable"))?;
-            if branch.project_uuid != *project_uuid
-                || head.context_uuid != *branch_uuid
-                || registry
-                    .heads
-                    .get(branch_uuid)
-                    .is_some_and(|old| old != head_version_uuid)
-                || registry
-                    .branches
-                    .get(branch_uuid)
-                    .is_some_and(|old| old != &branch)
-            {
-                return Err(invalid(
-                    "selected imported Branch conflicts with native authority",
-                ));
-            }
-            let mut references = BTreeMap::new();
-            let mut selected = false;
-            let mut repository = None;
-            if remote_branches.len() > MAX_CONTEXTS {
-                return Err(invalid("remote Branch reference capacity exceeded"));
-            }
-            for reference in remote_branches {
-                let key = reference.key()?;
-                if reference.project_uuid != *project_uuid
-                    || references.insert(key.clone(), reference.clone()).is_some()
-                    || registry
-                        .remote_branches
-                        .get(&key)
-                        .is_some_and(|old| old != reference)
-                    || repository.is_some_and(|old: &str| old != reference.repository_url)
-                {
-                    return Err(invalid("conflicting imported remote Branch reference"));
-                }
-                repository = Some(reference.repository_url.as_str());
-                if reference.branch_uuid == *branch_uuid {
-                    if reference.head_version_uuid != *head_version_uuid
-                        || registry.identities.get(head_version_uuid)
-                            != Some(&reference.identity_sha256)
-                    {
-                        return Err(invalid(
-                            "selected remote Branch does not bind the imported head",
-                        ));
-                    }
-                    selected = true;
-                }
-            }
-            if !selected {
-                return Err(invalid("selected Branch remote reference is absent"));
-            }
-            registry.remote_branches.extend(references);
-            registry.branches.insert(*branch_uuid, branch);
-            registry.heads.insert(*branch_uuid, *head_version_uuid);
-            Some(*head_version_uuid)
-        }
+        } => remote::activate_imported_branch(
+            registry,
+            branch_uuid,
+            head_version_uuid,
+            project_uuid,
+            remote_branches,
+        )?,
         ResearchMutation::SubmitProposal { .. }
         | ResearchMutation::ReviewProposal { .. }
         | ResearchMutation::ReleaseProposal { .. } => {
