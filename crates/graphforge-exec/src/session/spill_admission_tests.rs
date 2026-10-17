@@ -12,7 +12,7 @@ use futures::StreamExt;
 
 use datafusion::physical_plan::spill::SpillManager;
 
-fn manager(pool: Arc<dyn MemoryPool>, schema: Arc<Schema>) -> SpillManager {
+pub(super) fn manager(pool: Arc<dyn MemoryPool>, schema: Arc<Schema>) -> SpillManager {
     let env = RuntimeEnvBuilder::new()
         .with_memory_pool(pool)
         .build_arc()
