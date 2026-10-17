@@ -51,9 +51,8 @@ pub fn portable_v2_import_pending(target: &Path, transaction: Uuid) -> Result<bo
         .ok_or_else(|| GfError::Validation("invalid import target".into()))?;
     let owner = target.with_file_name(format!(".{name}.portable-v2-{transaction}.owner"));
     let expected = transaction.hyphenated().to_string();
-    let bytes = match read_bounded_payload(&owner, 36, "import ownership") {
-        Ok(bytes) => bytes,
-        Err(_) => return Ok(false),
+    let Ok(bytes) = read_bounded_payload(&owner, 36, "import ownership") else {
+        return Ok(false);
     };
     if bytes != expected.as_bytes() {
         return Ok(false);

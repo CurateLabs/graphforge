@@ -1968,7 +1968,7 @@ fn clone_into_staging(
     check_free_space(
         staging,
         object.length,
-        import_committed(staging, &planned),
+        research_context.is_none() && import_committed(staging, &planned),
         env.available_space,
     )?;
     let partial = staging.partial.clone();

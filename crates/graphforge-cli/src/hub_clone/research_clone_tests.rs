@@ -1278,6 +1278,16 @@ fn branch_activation_retries_exact_native_receipt_but_never_resets_advanced_stag
         .is_err()
     );
     assert!(!absent.exists());
+    let expected_import = graphforge_api::hub_research_clone_operation(
+        REPOSITORY,
+        &lineage.immutable_version.0,
+        &selected.head_version_uuid,
+        &lineage
+            .version(&selected.head_version_uuid)
+            .unwrap()
+            .identity_digest
+            .0,
+    );
     for (name, failpoint, advance) in [
         ("before", "clone.before_branch_continuation", false),
         ("after", "clone.after_branch_continuation", false),
@@ -1303,6 +1313,10 @@ fn branch_activation_retries_exact_native_receipt_but_never_resets_advanced_stag
                 "graphforge-internal-subprocess-v1",
             )
             .env("GRAPHFORGE_PROJECT_FAILPOINT", failpoint)
+            .env(
+                "GRAPHFORGE_PROJECT_FAILPOINT_TRANSACTION",
+                expected_import.to_string(),
+            )
             .output()
             .unwrap();
         assert_eq!(
