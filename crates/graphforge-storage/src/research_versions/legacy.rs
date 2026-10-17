@@ -1,11 +1,12 @@
 //! Research revision 6 compatibility (ADR 0055).
 //!
-//! A revision 6 registry is a valid revision 7 registry with no commit fields:
+//! Revisions 6 and 7 remain readable without a registry rewrite. A revision 6
+//! registry is a valid revision 7 registry with no commit fields:
 //! every field revision 7 added is omitted when empty, so the same bytes decode,
 //! validate and digest identically under either label. Revision 6 is therefore
 //! read as-is, its Versions are parentless legacy roots, and publishers that do
 //! not write research carry it unchanged. The first research write relabels the
-//! research capability and its participants to revision 7 through the ordinary
+//! research capability and its participants to the current revision through the ordinary
 //! atomic publication; no record's bytes are rewritten.
 use super::{
     Digest, GfError, ProjectCapability, ProjectParticipant, RESEARCH_CAPABILITY, RESEARCH_REGISTRY,
@@ -74,8 +75,8 @@ pub fn current_registry_schema() -> [u8; 32] {
 }
 
 /// Relabel a publication's research capability and participants to the current
-/// revision. Participant bytes are unchanged: revision 6 bytes are valid
-/// revision 7 bytes. Requests without a legacy research label are untouched.
+/// revision. Empty commit and remote-citation fields are omitted, so existing
+/// revision 6/7 participant bytes remain valid without rewriting Version records.
 pub fn upgrade_research_request<'a>(
     capabilities: &mut [ProjectCapability],
     participants: impl IntoIterator<Item = &'a mut ProjectParticipant>,
