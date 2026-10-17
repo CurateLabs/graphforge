@@ -41,6 +41,8 @@ mod ancestry;
 mod remote;
 pub use ancestry::{MAX_PARENTS, ResearchVersionProvenance};
 pub use remote::ResearchRemoteBranch;
+mod remote_fetch;
+pub use remote_fetch::{ResearchRemoteBranchFetch, ResearchRemoteFetchBinding};
 mod legacy;
 pub use legacy::{
     RESEARCH_LEGACY_VERSION, current_registry_schema, research_revision_readable,
