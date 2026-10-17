@@ -2466,7 +2466,7 @@ fn selected_png_svg_previews_are_version_bound_but_not_native_package_data() {
     .unwrap();
     assert_eq!(moved.receipt.repository, new);
     assert_eq!(moved.moved.as_ref().unwrap().moved_from, old);
-    args.repository = "research/renamed".into();
+    args.repository = repository_url("research/renamed");
     let before_replay = selected.log().len();
     let canonical = publish_ok(selected, &history.graph, &args).result.unwrap();
     assert!(canonical.replayed);
