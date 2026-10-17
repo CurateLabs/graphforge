@@ -177,6 +177,13 @@ impl ResearchInterchangeManifest {
                 ));
             }
         }
+        self.validate_records()?;
+        self.validate_content_closure()?;
+        self.validate_genealogy()?;
+        self.validate_accepted()
+    }
+
+    fn validate_records(&self) -> Result<(), GfError> {
         let registry = ResearchRegistry {
             versions: self.versions.clone(),
             identities: self.identities.clone(),
@@ -185,13 +192,6 @@ impl ResearchInterchangeManifest {
             ..ResearchRegistry::default()
         };
         registry.validate()?;
-        self.validate_history(&registry)?;
-        self.validate_content_closure()?;
-        self.validate_genealogy()?;
-        self.validate_accepted()
-    }
-
-    fn validate_history(&self, registry: &ResearchRegistry) -> Result<(), GfError> {
         let mut ancestors = BTreeSet::new();
         for id in self.versions.keys() {
             ancestors.extend(registry.ancestors(*id));
@@ -206,7 +206,7 @@ impl ResearchInterchangeManifest {
                     "interchange history record is outside authenticated ancestry",
                 ));
             }
-            super::super::ancestry::validate_record(registry, record)?;
+            super::super::ancestry::validate_record(&registry, record)?;
         }
         Ok(())
     }
