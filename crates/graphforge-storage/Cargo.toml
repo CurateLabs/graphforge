@@ -51,6 +51,7 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 unicode-normalization = { workspace = true }
 uuid = { workspace = true }
+url = { workspace = true }
 zstd = { version = "=0.14.2", default-features = false }
 
 [target.'cfg(unix)'.dependencies]

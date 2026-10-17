@@ -80,6 +80,7 @@ fn archived_queries() -> (
         .insert(historical.version_uuid);
     let project_uuid = Uuid::new_v4();
     let archive = ResearchInterchangeManifest {
+        history: BTreeMap::new(),
         contract_version: 1,
         research_capability_version: RESEARCH_VERSION,
         producer: concat!(

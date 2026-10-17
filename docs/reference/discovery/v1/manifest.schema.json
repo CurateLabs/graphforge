@@ -56,7 +56,7 @@
       "additionalProperties": false,
       "properties": {
         "format": {
-          "const": "graphforge-research-lineage/1"
+          "const": "graphforge-research-lineage/2"
         },
         "lineage_digest": {
           "$ref": "#/$defs/digest"

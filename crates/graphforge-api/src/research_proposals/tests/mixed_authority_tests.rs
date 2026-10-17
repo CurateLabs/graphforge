@@ -142,8 +142,10 @@ fn reject_conflicting_citations(
     second.versions.retain(|id, _| *id == proof);
     second.version_projects.retain(|id, _| *id == proof);
     second.genealogy.clear();
-    // An acceptance proof is frozen content without parents: it has no descent.
+    // An acceptance proof is frozen content without parents: it has no descent
+    // or metadata-only ancestor history from the original selected archive.
     second.ancestry.clear();
+    second.history.clear();
     let changed_project = Uuid::now_v7();
     second.source_project_uuid = changed_project;
     second.version_projects.insert(proof, changed_project);

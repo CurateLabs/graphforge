@@ -34,6 +34,7 @@ use materialized_graph::prepare_compact_import_graph_with_allocation;
 mod allocation;
 use allocation::{capture_import_tree, record_import_file_identity};
 mod outcome;
+pub use outcome::portable_v2_import_pending;
 use outcome::{storage, storage_or_cancel};
 
 use crate::project_publication::{

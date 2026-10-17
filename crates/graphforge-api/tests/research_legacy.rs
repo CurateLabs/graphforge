@@ -106,6 +106,14 @@ fn canonical_choices(graph: &GraphForge) -> usize {
 /// Every revision 6 identity the registry knows is unchanged, and every
 /// revision 6 Version reads as a parentless legacy root.
 fn assert_legacy_roots(registry: &ResearchRegistry, ids: &Ids) {
+    assert!(registry.remote_branches.is_empty());
+    assert!(
+        serde_json::to_value(registry)
+            .unwrap()
+            .get("remote_branches")
+            .is_none(),
+        "empty remote citations never rewrite legacy registry bytes"
+    );
     for (id, digest) in ids.identities() {
         let Some(committed) = registry.identities.get(&id) else {
             continue;
@@ -330,7 +338,7 @@ fn research_v6_package_from_old_producer_is_rejected_without_publication() {
 }
 
 #[test]
-fn research_v6_project_exports_research_as_v7() {
+fn research_v6_project_exports_research_as_current() {
     let (directory, project, ids) = fixture();
     let graph = GraphForge::new(project.to_str()).unwrap();
     let head = ids.uuid("branch_head_version_uuid");
@@ -373,7 +381,7 @@ fn research_v6_project_exports_research_as_v7() {
         concat!(
             "graphforge-storage/",
             env!("CARGO_PKG_VERSION"),
-            ";research-interchange/1"
+            ";research-interchange/2"
         )
     );
     // The producer-version contract and research-revision contract are separate.
@@ -496,7 +504,7 @@ fn synthesize_current_producer_revision_six(package: &Path) {
             concat!(
                 "graphforge-storage/",
                 env!("CARGO_PKG_VERSION"),
-                ";research-interchange/1"
+                ";research-interchange/2"
             )
         );
         archive.research_capability_version = RESEARCH_LEGACY_VERSION;
