@@ -88,16 +88,7 @@ pub(super) fn build(
     let ancestry = descent(registry, &versions, &mut identities, cancellation)?;
     let version_projects = project_citations(owner, registry, &versions)?;
     let source_project_uuid = version_projects[&selected.version_uuid];
-    let history = versions
-        .keys()
-        .flat_map(|id| registry.ancestors(*id))
-        .filter(|id| !versions.contains_key(id))
-        .filter_map(|id| {
-            registry
-                .historical_version(id)
-                .map(|record| (id, record.clone()))
-        })
-        .collect();
+    let history = historical_records(registry, &versions);
     let manifest = ResearchInterchangeManifest {
         history,
         contract_version: 2,
@@ -206,4 +197,20 @@ fn project_citations(
             (version.version_uuid, project)
         })
         .collect())
+}
+
+fn historical_records(
+    registry: &ResearchRegistry,
+    versions: &BTreeMap<Uuid, ResearchVersionRecord>,
+) -> BTreeMap<Uuid, ResearchVersionRecord> {
+    versions
+        .keys()
+        .flat_map(|id| registry.ancestors(*id))
+        .filter(|id| !versions.contains_key(id))
+        .filter_map(|id| {
+            registry
+                .historical_version(id)
+                .map(|record| (id, record.clone()))
+        })
+        .collect()
 }

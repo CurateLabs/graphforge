@@ -183,15 +183,16 @@ fn verify_selected_research_version(
                                     let branch = uuid::Uuid::parse_str(&anchor.origin_branch_uuid)
                                         .ok()
                                         .and_then(|id| registry.historical_branch(id));
-                                    let digest = registry.identities.get(&id).map(|bytes| {
-                                        format!(
-                                            "sha256:{}",
-                                            bytes
-                                                .iter()
-                                                .map(|b| format!("{b:02x}"))
-                                                .collect::<String>()
-                                        )
-                                    });
+                                    let digest = registry
+                                        .identities
+                                        .get(&id)
+                                        .and_then(|bytes| {
+                                            crate::discovery_research_lineage::identity_digest(
+                                                bytes,
+                                            )
+                                            .ok()
+                                        })
+                                        .map(|digest| digest.0);
                                     branch.is_some_and(|branch| {
                                         branch.parent_branch_uuid.is_none()
                                             && branch.origin_version_uuid == id

@@ -278,7 +278,7 @@ fn fork_origin(
     }
 }
 
-fn identity_digest(bytes: &[u8; 32]) -> Result<Sha256Digest, DiscoveryError> {
+pub(super) fn identity_digest(bytes: &[u8; 32]) -> Result<Sha256Digest, DiscoveryError> {
     let hex = bytes
         .iter()
         .fold(String::with_capacity(64), |mut output, byte| {

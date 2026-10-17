@@ -1504,7 +1504,18 @@ fn bind_import_target(
     operation: &OperationId,
 ) -> Result<(), graphforge_api::GfError> {
     let expected = operation.0.hyphenated().to_string();
-    let recorded = match std::fs::symlink_metadata(&staging.operation) {
+    let recorded = read_import_operation(staging)?;
+    if recorded.as_deref() == Some(expected.as_bytes()) {
+        return Ok(());
+    }
+    clear_import_target(staging)?;
+    write_staging_file(&staging.operation, expected.as_bytes())
+}
+
+fn read_import_operation(
+    staging: &CloneStaging,
+) -> Result<Option<Vec<u8>>, graphforge_api::GfError> {
+    Ok(match std::fs::symlink_metadata(&staging.operation) {
         Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
             let mut bytes = Vec::new();
             open_read_nofollow(&staging.operation)
@@ -1522,12 +1533,7 @@ fn bind_import_target(
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => return Err(storage(error)),
-    };
-    if recorded.as_deref() == Some(expected.as_bytes()) {
-        return Ok(());
-    }
-    clear_import_target(staging)?;
-    write_staging_file(&staging.operation, expected.as_bytes())
+    })
 }
 
 /// Remove the staged import target with the import's residue and the
@@ -2092,22 +2098,29 @@ fn clone_into_staging(
             // The import targets a private directory inside the staging
             // directory; only a complete, reopened project is installed at
             // the destination, by one atomic rename.
-            bind_import_target(staging, &operation_id)?;
-            // Verification above has revalidated the exact downloaded package.
-            // A continued clone has its own native receipt after the unchanged
-            // generic import. Replay that exact request rather than relaxing the
-            // importer's CURRENT/generation binding.
+            let existing_project = match std::fs::symlink_metadata(&staging.project) {
+                Ok(_) => true,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+                Err(error) => return Err(storage(error)),
+            };
+            // Research staging is admitted read-only before any constructor or
+            // generic error cleanup. Foreign or unreadable projects are preserved.
             if let Some(context) = &research_context
                 && let Some(branch) = &context.selected_branch
-                && let Ok(mut graph) = GraphForge::new(staging.project.to_str())
-                && graph
-                    .research_version_retention()?
-                    .branches
-                    .contains_key(&uuid::Uuid::parse_str(&branch.branch_uuid).map_err(storage)?)
+                && existing_project
             {
+                if read_import_operation(staging)?.as_deref()
+                    != Some(operation_id.0.hyphenated().to_string().as_bytes())
+                {
+                    return Err(validation(
+                        "hub.destination_conflict",
+                        "research staging has another import operation",
+                    ));
+                }
                 let lineage = ResearchLineage::from_json(&context.lineage_bytes, limits)
                     .map_err(|e| protocol_error(&e))?;
-                let receipt = graph.continue_imported_research_branch(
+                let receipt = GraphForge::continue_imported_research_branch(
+                    &staging.project,
                     branch,
                     &lineage,
                     &format!(
@@ -2117,13 +2130,6 @@ fn clone_into_staging(
                     ),
                     graphforge_api::portable_v2_import_generation(&operation_id.0),
                 )?;
-                if graph.committed_generation_identity()?.generation_uuid != receipt.generation_uuid
-                {
-                    return Err(validation(
-                        "hub.destination_conflict",
-                        "continued staging has advanced since its native receipt",
-                    ));
-                }
                 return Ok((
                     CloneImported {
                         package_digest: context.package_digest.clone(),
@@ -2133,6 +2139,7 @@ fn clone_into_staging(
                     None,
                 ));
             }
+            bind_import_target(staging, &operation_id)?;
             GraphForge::import_portable_v2(
                 &staging.project,
                 &PortableV2ImportRequest {
@@ -2181,8 +2188,6 @@ fn clone_into_staging(
         .as_ref()
         .and_then(|context| context.selected_branch.as_ref())
     {
-        let mut graph = GraphForge::new(staging.project.to_str())
-            .map_err(|error| validation("hub.integrity_failure", &error.to_string()))?;
         let lineage = ResearchLineage::from_json(
             &research_context
                 .as_ref()
@@ -2192,7 +2197,8 @@ fn clone_into_staging(
         )
         .map_err(|e| protocol_error(&e))?;
         clone_failpoint("clone.before_branch_continuation");
-        let receipt = graph.continue_imported_research_branch(
+        let receipt = GraphForge::continue_imported_research_branch(
+            &staging.project,
             branch,
             &lineage,
             &format!(
@@ -2202,14 +2208,8 @@ fn clone_into_staging(
             ),
             graphforge_api::portable_v2_import_generation(&operation_id.0),
         )?;
-        if graph.committed_generation_identity()?.generation_uuid != receipt.generation_uuid {
-            return Err(validation(
-                "hub.destination_conflict",
-                "continued staging has advanced since its native receipt",
-            ));
-        }
+        imported.generation_uuid = receipt.generation_uuid;
         clone_failpoint("clone.after_branch_continuation");
-        imported.generation_uuid = graph.committed_generation_identity()?.generation_uuid;
     }
     profile.handoff(
         ComponentKind::PortableImport,

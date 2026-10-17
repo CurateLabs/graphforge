@@ -1261,10 +1261,29 @@ fn branch_activation_retries_exact_native_receipt_but_never_resets_advanced_stag
     )
     .unwrap();
     let root = tempfile::tempdir().unwrap();
+    let absent = root.path().join("must-not-be-initialized");
+    let selected = lineage
+        .branches
+        .iter()
+        .find(|b| b.ref_name == "main")
+        .unwrap();
+    assert!(
+        GraphForge::continue_imported_research_branch(
+            &absent,
+            selected,
+            &lineage,
+            "https://graphforge.sh/curate/claims-fork",
+            Uuid::now_v7()
+        )
+        .is_err()
+    );
+    assert!(!absent.exists());
     for (name, failpoint, advance) in [
         ("before", "clone.before_branch_continuation", false),
         ("after", "clone.after_branch_continuation", false),
         ("advanced", "clone.after_branch_continuation", true),
+        ("foreign", "clone.before_branch_continuation", false),
+        ("unreadable", "clone.before_branch_continuation", false),
     ] {
         let destination = root.path().join(name);
         let child = std::process::Command::new(std::env::current_exe().unwrap())
@@ -1295,13 +1314,32 @@ fn branch_activation_retries_exact_native_receipt_but_never_resets_advanced_stag
             let mut graph = GraphForge::new(staged.to_str()).unwrap();
             edit(&mut graph, published.main_branch, 77);
             Some(generation(&graph))
+        } else if name == "foreign" {
+            std::fs::rename(&staged, staging.join("saved-original-project")).unwrap();
+            let graph = GraphForge::new(staged.to_str()).unwrap();
+            graph.execute("CREATE (:Foreign {marker:42})").unwrap();
+            Some(generation(&graph))
         } else {
             None
         };
+        if name == "unreadable" {
+            std::fs::write(staged.join("CURRENT"), b"unreadable staged CURRENT\n").unwrap();
+        }
         let result = clone_into(&hub, &destination, Some("main"), None);
-        if let Some(prior) = prior {
+        if name == "unreadable" {
             assert!(result.is_err());
             assert!(!destination.exists());
+            assert_eq!(
+                std::fs::read(staged.join("CURRENT")).unwrap(),
+                b"unreadable staged CURRENT\n"
+            );
+        } else if let Some(prior) = prior {
+            assert!(result.is_err());
+            assert!(!destination.exists());
+            assert!(
+                staged.exists(),
+                "{name}: refused staging must not be removed"
+            );
             assert_eq!(
                 generation(&GraphForge::new(staged.to_str()).unwrap()),
                 prior
@@ -1347,14 +1385,14 @@ fn branch_activation_retries_exact_native_receipt_but_never_resets_advanced_stag
                 .iter()
                 .find(|b| b.ref_name == "main")
                 .unwrap();
-            let receipt = graph
-                .continue_imported_research_branch(
-                    selected,
-                    &lineage,
-                    "https://graphforge.sh/curate/claims-fork",
-                    imported_generation,
-                )
-                .unwrap();
+            let receipt = GraphForge::continue_imported_research_branch(
+                &destination,
+                selected,
+                &lineage,
+                "https://graphforge.sh/curate/claims-fork",
+                imported_generation,
+            )
+            .unwrap();
             assert_eq!(receipt.generation_uuid, prior);
             let mut altered = lineage.clone();
             altered
@@ -1364,14 +1402,14 @@ fn branch_activation_retries_exact_native_receipt_but_never_resets_advanced_stag
                 .unwrap()
                 .ref_name = "feature/renamed".into();
             assert!(
-                graph
-                    .continue_imported_research_branch(
-                        selected,
-                        &altered,
-                        "https://graphforge.sh/curate/claims-fork",
-                        imported_generation,
-                    )
-                    .is_err(),
+                GraphForge::continue_imported_research_branch(
+                    &destination,
+                    selected,
+                    &altered,
+                    "https://graphforge.sh/curate/claims-fork",
+                    imported_generation,
+                )
+                .is_err(),
                 "a changed bound remote snapshot cannot reuse the activation receipt"
             );
             assert_eq!(generation(&graph), prior);
@@ -1384,26 +1422,26 @@ fn branch_activation_retries_exact_native_receipt_but_never_resets_advanced_stag
                 .label
                 .push_str(" changed");
             assert!(
-                graph
-                    .continue_imported_research_branch(
-                        selected,
-                        &altered_metadata,
-                        "https://graphforge.sh/curate/claims-fork",
-                        imported_generation,
-                    )
-                    .is_err(),
+                GraphForge::continue_imported_research_branch(
+                    &destination,
+                    selected,
+                    &altered_metadata,
+                    "https://graphforge.sh/curate/claims-fork",
+                    imported_generation,
+                )
+                .is_err(),
                 "the entire bound discovery snapshot is committed, including remote metadata"
             );
             assert_eq!(generation(&graph), prior);
             assert!(
-                graph
-                    .continue_imported_research_branch(
-                        selected,
-                        &lineage,
-                        "https://graphforge.sh/curate/claims-fork",
-                        Uuid::now_v7(),
-                    )
-                    .is_err(),
+                GraphForge::continue_imported_research_branch(
+                    &destination,
+                    selected,
+                    &lineage,
+                    "https://graphforge.sh/curate/claims-fork",
+                    Uuid::now_v7(),
+                )
+                .is_err(),
                 "same operation cannot replay with another import generation"
             );
             assert_eq!(generation(&graph), prior);
