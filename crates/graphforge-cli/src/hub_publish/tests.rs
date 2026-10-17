@@ -2288,26 +2288,7 @@ fn per_object_chunk_selection_overrides_the_hub_preference_with_the_same_budget(
     );
 }
 
-#[test]
-fn publication_staging_is_project_adjacent_or_explicit_and_preflighted() {
-    let history = history();
-    let default = prepare_staging(&history.graph, None).unwrap();
-    assert_eq!(default.path().parent(), Some(history.root.path()));
-    let explicit = history.root.path().join("stage");
-    std::fs::create_dir(&explicit).unwrap();
-    let staged = prepare_staging(&history.graph, Some(&explicit)).unwrap();
-    assert_eq!(staged.path().parent(), Some(explicit.as_path()));
-    let before = std::fs::read_dir(&explicit).unwrap().count();
-    assert!(prepare_staging_with_space(&history.graph, Some(&explicit), |_| Ok(0)).is_err());
-    assert_eq!(
-        std::fs::read_dir(&explicit).unwrap().count(),
-        before,
-        "low space fails before creating a materialization"
-    );
-    let missing = history.root.path().join("missing");
-    assert!(prepare_staging(&history.graph, Some(&missing)).is_err());
-    assert!(!missing.exists());
-}
+mod staging;
 
 #[test]
 fn native_publish_polls_async_verification_and_replays_the_original_receipt() {

@@ -6,6 +6,102 @@ use super::{
 
 const MAX_PARTICIPANT_BYTES: u64 = 256 * 1024 * 1024;
 
+/// Conservative logical payload inventory for publication staging. Count each
+/// retained Version separately: simultaneous private views can copy shared
+/// objects independently. Only graph control records are read; payload bodies
+/// remain unopened until the normal export authentication path.
+pub fn publication_payload_bytes(
+    generation: &crate::ResolvedProjectGeneration,
+) -> Result<u64, GfError> {
+    let mut total = 0_u64;
+    let mut add = |bytes: u64| -> Result<(), GfError> {
+        total = total
+            .checked_add(bytes)
+            .ok_or_else(|| invalid("publication size overflow"))?;
+        Ok(())
+    };
+    for participant in generation.participant_descriptors()? {
+        add(participant.byte_length)?;
+    }
+    if let Some(inventory) = generation.graph_files_inventory()? {
+        for entry in inventory.files {
+            add(entry.byte_length)?;
+        }
+    }
+    let root = generation.container_root();
+    let registry = read_research_registry(generation)?;
+    for version in registry.versions.values() {
+        let source = if registry.materialized.contains(&version.version_uuid) {
+            None
+        } else {
+            let source = crate::resolve_generation_by_uuid(root, version.content.generation_uuid)?;
+            if source.manifest_sha256() != version.content.manifest_sha256 {
+                return Err(invalid("research source manifest identity changed"));
+            }
+            Some(source)
+        };
+        let available = source.as_ref().map(super::commitments).transpose()?;
+        for participant in &version.content.participants {
+            let digest = hex(&participant.content_sha256);
+            let length = if let Some(source) = &source {
+                if !available
+                    .as_ref()
+                    .expect("source commitments")
+                    .contains(participant)
+                {
+                    return Err(invalid("research participant commitment changed"));
+                }
+                source
+                    .portable_participant_identity(
+                        &participant.key.capability,
+                        &participant.key.family,
+                    )?
+                    .byte_length()
+            } else {
+                std::fs::metadata(crate::graph_object_path(root, &digest)?)
+                    .map_err(|_| invalid("missing retained participant"))?
+                    .len()
+            };
+            if length > super::participant_byte_bound(participant) {
+                return Err(invalid(
+                    "research participant exceeds materialization limit",
+                ));
+            }
+            add(length)?;
+            if participant.key.capability == "graph" && participant.key.family == "files" {
+                let bytes = if let Some(source) = &source {
+                    source
+                        .participant_snapshot("graph", "files")?
+                        .ok_or_else(|| invalid("missing retained graph inventory"))?
+                        .bytes
+                } else {
+                    read(
+                        root,
+                        None,
+                        &digest,
+                        super::participant_byte_bound(participant),
+                    )?
+                };
+                let (files, nodes) = graph_closure(root, participant.record_version, &bytes, None)?;
+                for entry in files {
+                    add(entry.byte_length)?;
+                }
+                for node in nodes {
+                    add(std::fs::metadata(crate::graph_object_path(root, &node)?)
+                        .map_err(|_| invalid("missing graph manifest object"))?
+                        .len())?;
+                }
+            }
+        }
+        for evidence in &version.content.evidence {
+            if let super::ResearchEvidenceReference::Local { byte_length, .. } = evidence {
+                add(*byte_length)?;
+            }
+        }
+    }
+    Ok(total)
+}
+
 pub(super) fn compact(
     root: &Path,
     registry: &mut ResearchRegistry,

@@ -319,7 +319,14 @@ ordinary historical queries retain their existing temporary-directory policy.
 Whole-package publication staging does not silently fall back to TMPDIR. Bounded
 engine adjacency caches retain their existing query-budgeted temporary-directory
 policy; this is not a promise that every engine tempfile avoids TMPDIR. Free-space
-checks are advisory under concurrent
-writers; later I/O errors still fail closed. Full semantic package verification
+checks include current graph files, retained research participant and graph
+payloads, and local evidence. Retained Versions are counted separately because
+private views can copy shared objects independently. The client reserves advisory
+headroom of three times this source inventory plus 512 MiB for coexisting private
+views, interchange copies, bundles, verification, and bounded controls. This is a
+conservative estimate, not an exact peak or a filesystem reservation; concurrent
+writers and later I/O errors still fail closed. Sizing reads bounded graph control
+records and source metadata without materializing historical views or packages;
+portable selection fingerprints retain their existing meaning. Full semantic package verification
 remains mandatory. Its already-computed transport digest is reused for the
 publication descriptor instead of rereading the file solely to hash it again.

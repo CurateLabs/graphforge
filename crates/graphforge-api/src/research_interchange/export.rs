@@ -22,6 +22,15 @@ pub struct ExportResearchRequest {
 }
 
 impl GraphForge {
+    /// Conservative source payload bytes for publication staging, including
+    /// current graph files and all retained historical research. No package or
+    /// private historical view is materialized by this advisory sizing pass.
+    pub fn publication_payload_bytes(&self) -> Result<u64, GfError> {
+        graphforge_storage::research_versions::publication_payload_bytes(
+            &self.generation_for_read()?,
+        )
+    }
+
     /// Export exact selected immutable research and its bounded native lineage closure.
     pub fn export_research(
         &self,

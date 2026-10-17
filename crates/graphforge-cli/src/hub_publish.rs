@@ -1549,10 +1549,19 @@ fn prepare_staging(
 fn prepare_staging_with_space(
     graph: &GraphForge,
     explicit: Option<&Path>,
-    available: fn(&Path) -> std::io::Result<u64>,
+    available: impl FnOnce(&Path) -> std::io::Result<u64>,
 ) -> Result<tempfile::TempDir, GfError> {
     let parent = explicit
-        .or_else(|| graph.path().and_then(Path::parent))
+        .or_else(|| {
+            graph.path().and_then(Path::parent).map(|parent| {
+                // A bare relative Project name lives in the current directory.
+                if parent.as_os_str().is_empty() {
+                    Path::new(".")
+                } else {
+                    parent
+                }
+            })
+        })
         .ok_or_else(|| {
             GfError::Validation(
                 "publication requires an explicit staging directory for an in-memory Project"
@@ -1564,20 +1573,12 @@ fn prepare_staging_with_space(
             "publication staging directory must already exist".into(),
         ));
     }
-    let plan = graph
-        .preview_portable_v2_selection(&PortableV2SelectionPreviewRequest {
-            selection: PortableSelection::Current,
-            request: PortableV2SelectionRequest {
-                profile: PortableV2SelectionProfile::Complete,
-                strict: true,
-            },
-            limits: PortableV2Limits::default(),
-        })
-        .map_err(|error| derivation(&error.to_string()))?;
-    // Project package, derived module/research staging, and finite document/tag
-    // overhead. Space is advisory under concurrent writers; every write still fails closed.
-    let needed = plan
-        .estimated_payload_bytes
+    // Include graph payloads and retained research, not just participant
+    // metadata. This is conservative advisory headroom, not a reservation:
+    // private research views, interchange copies, bundles, and verification
+    // can coexist; concurrent writers and generated controls still fail closed.
+    let needed = graph
+        .publication_payload_bytes()?
         .checked_mul(3)
         .and_then(|n| n.checked_add(512 * 1024 * 1024))
         .ok_or_else(|| GfError::Storage("publication staging size overflow".into()))?;
@@ -1604,7 +1605,7 @@ fn poll_commit(
     wait: &dyn Fn(Duration),
 ) -> Result<PublishReceipt, GfError> {
     let url = endpoint(base, &format!("publish/operations/{operation_uuid}"));
-    let deadline = std::time::Instant::now() + Duration::from_secs(24 * 60 * 60);
+    let deadline = std::time::Instant::now() + Duration::from_hours(24);
     // One poll per bounded verification step. No commit resubmission or changed
     // operation identity on unknown outcomes; a later invocation can resume it.
     while std::time::Instant::now() < deadline {
