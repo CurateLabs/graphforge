@@ -343,6 +343,9 @@ fn compact_allocation(bytes: usize) -> Option<usize> {
 }
 
 fn compact_offset_span(data: &arrow::array::ArrayData) -> Option<(usize, usize)> {
+    if data.is_empty() {
+        return Some((0, 0));
+    }
     let last = data.offset().checked_add(data.len())?;
     let (first, last) = match data.data_type() {
         DataType::Utf8 | DataType::Binary | DataType::List(_) => {
@@ -389,6 +392,62 @@ fn compact_view_charge(data: &arrow::array::ArrayData) -> Option<usize> {
     Some(bytes)
 }
 
+// The second concat input is an empty dictionary. Pinned Arrow merges flat
+// primitive/byte dictionaries when the value count reaches the output length
+// or overflows the key type. Final copied values do not cover its workspace.
+fn compact_dictionary_charge(data: &arrow::array::ArrayData, keys: &DataType) -> Option<usize> {
+    match keys {
+        DataType::Int8 => compact_dictionary_workspace::<i8>(data),
+        DataType::Int16 => compact_dictionary_workspace::<i16>(data),
+        DataType::Int32 => compact_dictionary_workspace::<i32>(data),
+        DataType::Int64 => compact_dictionary_workspace::<i64>(data),
+        DataType::UInt8 => compact_dictionary_workspace::<u8>(data),
+        DataType::UInt16 => compact_dictionary_workspace::<u16>(data),
+        DataType::UInt32 => compact_dictionary_workspace::<u32>(data),
+        DataType::UInt64 => compact_dictionary_workspace::<u64>(data),
+        _ => None,
+    }
+}
+
+fn compact_dictionary_workspace<K: TryFrom<usize>>(
+    data: &arrow::array::ArrayData,
+) -> Option<usize> {
+    let values = &data.child_data()[0];
+    if !(values.data_type().is_primitive()
+        || matches!(
+            values.data_type(),
+            DataType::Utf8 | DataType::LargeUtf8 | DataType::Binary | DataType::LargeBinary
+        ))
+        || (values.len() < data.len() && K::try_from(values.len()).is_ok())
+    {
+        return Some(0);
+    }
+    // Every nonnull key can reference at most one dictionary slot. Duplicate
+    // values do not reduce the masked Vec or initial interner/indices capacity.
+    let referenced = data.len().checked_sub(data.null_count())?.min(values.len());
+    // Interner::new allocates the power of two strictly greater than N+128.
+    let buckets = referenced.checked_add(129)?.checked_next_power_of_two()?;
+    let allocations = [
+        values.len().checked_add(7)? / 8, // compute_values_mask
+        referenced.checked_mul(size_of::<(usize, Option<&[u8]>)>())?,
+        buckets.checked_mul(size_of::<Option<(Option<&[u8]>, K)>>())?,
+        referenced.checked_mul(size_of::<(usize, usize)>())?, // interleave indices
+        values.len().checked_mul(size_of::<K>())?,            // full key mapping
+        // Two-input dictionary/value references and nested Vec descriptors.
+        2 * size_of::<&arrow::array::ArrayData>(),
+        2 * size_of::<Arc<dyn Array>>(),
+        2 * size_of::<Vec<(usize, Option<&[u8]>)>>(),
+        2 * size_of::<Vec<K>>(),
+    ];
+    // Mask construction and dictionary merging have different peaks. Summing
+    // their allocations is conservative across both and the value interleave.
+    allocations
+        .into_iter()
+        .try_fold(0usize, |bytes, allocation| {
+            bytes.checked_add(compact_allocation(allocation)?)
+        })
+}
+
 fn compact_array_charge(data: &arrow::array::ArrayData, retained: bool) -> Option<usize> {
     let rows = data.len();
     // Apply the existing metadata allowance recursively, including empty
@@ -399,6 +458,9 @@ fn compact_array_charge(data: &arrow::array::ArrayData, retained: bool) -> Optio
     }
     let mut bytes = 512usize.checked_add(compact_allocation(validity)?)?;
     let mut children_retained = retained;
+    if let DataType::Dictionary(keys, _) = data.data_type() {
+        bytes = bytes.checked_add(compact_dictionary_charge(data, keys)?)?;
+    }
     if matches!(data.data_type(), DataType::Utf8View | DataType::BinaryView) {
         return bytes.checked_add(compact_view_charge(data)?);
     }

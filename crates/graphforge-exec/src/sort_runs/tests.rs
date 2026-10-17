@@ -651,3 +651,137 @@ fn dictionary_keys_and_list_view_offsets_copy_only_the_selected_rows() {
         assert_physical_copy_bound(&batch);
     }
 }
+
+fn dictionary_workspace_batch() -> RecordBatch {
+    use arrow::array::{DictionaryArray, Int8Array, Int32Array};
+    use arrow::datatypes::Int32Type;
+
+    // Duplicate values still occupy distinct dictionary slots and masked-value
+    // entries. The interner is sized before it can deduplicate their values.
+    let values: ArrayRef = Arc::new(Int8Array::from_iter_values(
+        (0..8_192).map(|value| i8::try_from(value % 128).unwrap()),
+    ));
+    let keys = Int32Array::from_iter_values((0..65_536).map(|row| row % 8_192));
+    batch_with_column(Arc::new(
+        DictionaryArray::<Int32Type>::try_new(keys, values).unwrap(),
+    ))
+}
+
+#[test]
+fn dictionary_copy_bound_covers_simultaneous_merge_workspace() {
+    use arrow::datatypes::Int32Type;
+    use std::collections::BTreeSet;
+
+    let batch = dictionary_workspace_batch();
+    let rows = compact_window_rows(batch.num_rows(), RUN_BYTES, |rows| {
+        compact_charge(&batch.slice(0, rows))
+    });
+    // Check fixed windows as well: shrinking the chosen window must not hide
+    // under-admission at the original failing cardinality or bucket boundaries.
+    for rows in [rows, 1, 128, 1_024, 5_456, 8_192] {
+        let selected = batch.slice(0, rows);
+        let dictionary = selected.column(0).as_dictionary::<Int32Type>();
+        let referenced = dictionary
+            .keys()
+            .iter()
+            .flatten()
+            .collect::<BTreeSet<_>>()
+            .len();
+        assert!(
+            dictionary.values().len() >= rows,
+            "Arrow's merge heuristic applies"
+        );
+        // Pinned dictionary.rs: Interner::new uses the bit length of N+128,
+        // including an extra power-of-two step when N+128 is itself a power of two.
+        let shift = (u64::try_from(referenced).unwrap() + 128).leading_zeros();
+        let buckets = usize::try_from((u64::MAX >> shift) + 1).unwrap();
+        // Immediately after allocating the first mapping, the consumed masked
+        // Vec, interner and indices capacities are all still resident. This lower
+        // bound excludes the earlier values_mask and every output allocation.
+        let simultaneous = referenced * size_of::<(usize, Option<&[u8]>)>()
+            + buckets * size_of::<Option<(Option<&[u8]>, i32)>>()
+            + referenced * size_of::<(usize, usize)>()
+            + dictionary.values().len() * size_of::<i32>();
+        assert!(
+            compact_charge(&selected) >= simultaneous,
+            "{rows} selected rows admit {} bytes below {simultaneous} bytes of simultaneous dictionary scratch",
+            compact_charge(&selected),
+        );
+    }
+}
+
+#[tokio::test]
+async fn dictionary_merge_workspace_fits_fixed_headroom_and_releases_on_drop() {
+    let batch = dictionary_workspace_batch();
+    let source_bytes = batch.get_array_memory_size();
+    let mut outputs = Vec::new();
+    for capacity in [16 * 1024 * 1024, source_bytes + 2 * RUN_BYTES] {
+        let pool = Arc::new(QueryMemoryPool::new(capacity));
+        let source =
+            MemorySourceConfig::try_new_exec(&[vec![batch.clone()]], batch.schema(), None).unwrap();
+        let plan = SortRunCoalesceExec::new(source, RUN_BYTES);
+        let mut stream = plan.execute(0, context(&pool)).unwrap();
+        let first = stream.next().await.unwrap().unwrap();
+        assert_eq!(first, batch.slice(0, first.num_rows()));
+        assert_eq!(pool.reserved(), source_bytes);
+        assert!(pool.peak_gauge().load(std::sync::atomic::Ordering::Relaxed) <= capacity);
+        drop(stream);
+        assert_eq!(pool.reserved(), 0);
+        outputs.push(first);
+    }
+    assert_eq!(outputs[0], outputs[1], "exact roomy first-window oracle");
+}
+
+#[test]
+fn empty_array_data_can_omit_its_offset_sentinel() {
+    use arrow::array::ArrayData;
+    use arrow_buffer::Buffer;
+
+    let item = Arc::new(Field::new("item", DataType::Int64, true));
+    for data_type in [
+        DataType::Utf8,
+        DataType::Binary,
+        DataType::LargeUtf8,
+        DataType::LargeBinary,
+        DataType::List(Arc::clone(&item)),
+        DataType::LargeList(item),
+    ] {
+        let mut builder = ArrayData::builder(data_type.clone())
+            .len(0)
+            .add_buffer(Buffer::from_vec(Vec::<i64>::new()));
+        if matches!(data_type, DataType::List(_) | DataType::LargeList(_)) {
+            builder = builder.add_child_data(Int64Array::from(Vec::<i64>::new()).to_data());
+        } else {
+            builder = builder.add_buffer(Buffer::from(Vec::<u8>::new()));
+        }
+        let data = builder.build().unwrap();
+        assert!(data.buffers()[0].is_empty());
+        // Concrete arrays canonicalize the sentinel; raw ArrayData remains a
+        // valid input to the recursive sizing helper before that conversion.
+        assert!(!make_array(data.clone()).to_data().buffers()[0].is_empty());
+        assert_eq!(compact_offset_span(&data), Some((0, 0)));
+        assert!(compact_array_charge(&data, false).is_some());
+    }
+}
+
+#[test]
+fn dictionary_key_overflow_also_admits_merge_workspace() {
+    use arrow::array::{DictionaryArray, Int8Array};
+    use arrow::datatypes::Int8Type;
+
+    let values: ArrayRef = Arc::new(Int8Array::from_iter_values(
+        (0..256).map(|value| i8::try_from(value % 128).unwrap()),
+    ));
+    let keys = Int8Array::from_iter_values((0..512).map(|row| i8::try_from(row % 128).unwrap()));
+    let array: ArrayRef = Arc::new(DictionaryArray::<Int8Type>::try_new(keys, values).unwrap());
+    let batch = batch_with_column(array);
+    // Values < output rows, but the dictionary slot count overflows Int8.
+    // All 128 valid nonnegative keys are referenced; N+128 is a power of two,
+    // so Arrow's Interner allocates 512 buckets, not 256.
+    let simultaneous = 128 * size_of::<(usize, Option<&[u8]>)>()
+        + 512 * size_of::<Option<(Option<&[u8]>, i8)>>()
+        + 128 * size_of::<(usize, usize)>()
+        + 256 * size_of::<i8>();
+    assert!(compact_charge(&batch) >= simultaneous);
+    assert_physical_copy_bound(&batch);
+}
