@@ -93,6 +93,7 @@ struct State {
     operations: BTreeMap<Uuid, String>,
     uploads: BTreeMap<String, (String, usize)>,
     repositories: BTreeMap<RepositoryIdentity, Repository>,
+    moved: BTreeMap<RepositoryIdentity, RepositoryIdentity>,
     quotas: BTreeMap<String, u64>,
 }
 
@@ -219,12 +220,36 @@ fn hash_digest(hash: Sha256) -> String {
     }
     output
 }
-fn storage_error(_: std::io::Error) -> Reject {
+fn storage_failure(_: std::io::Error) -> HubPublishError {
     HubPublishError::new(
         HubPublishErrorCode::Internal,
         "reference storage unavailable",
     )
-    .into()
+}
+fn storage_error(error: std::io::Error) -> Reject {
+    storage_failure(error).into()
+}
+fn bounded_blob_read(blob: &Blob, limit: usize) -> Result<Vec<u8>, HubPublishError> {
+    if blob.len() > limit as u64 {
+        return Err(invalid("control object byte budget exceeded"));
+    }
+    let length =
+        usize::try_from(blob.len()).map_err(|_| invalid("control object byte budget exceeded"))?;
+    blob.read(0, length).map_err(storage_failure)
+}
+fn stored_control<'a>(
+    repository: &'a Repository,
+    object: &graphforge_discovery::ObjectDescriptor,
+    limit: usize,
+) -> Result<&'a Blob, HubPublishError> {
+    let blob = repository
+        .objects
+        .get(&object.digest.0)
+        .ok_or_else(|| invalid("stored control object is absent"))?;
+    if blob.len() != object.length || object.length > limit as u64 {
+        return Err(invalid("stored control object length is invalid"));
+    }
+    Ok(blob)
 }
 
 struct Repository {
@@ -299,6 +324,76 @@ fn quoted(validator: &str) -> String {
     format!("\"{validator}\"")
 }
 
+fn rehome_inputs(
+    repository: &Repository,
+    limits: DiscoveryLimits,
+) -> Result<(RefSet, Vec<graphforge_discovery::RepositorySnapshot>), HubPublishError> {
+    let refs = RefSet::from_json(&repository.refs_document, limits)
+        .map_err(|_| invalid("stored refs are invalid"))?;
+    let validators = refs
+        .refs
+        .iter()
+        .map(|item| item.validator.0.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut pending = Vec::new();
+    let mut bytes = repository.refs_document.len() as u64;
+    for validator in validators {
+        let raw = repository
+            .manifests
+            .get(&validator)
+            .ok_or_else(|| invalid("referenced manifest is absent"))?;
+        let manifest = DiscoveryManifest::from_json(raw, limits)
+            .map_err(|_| invalid("stored manifest is invalid"))?;
+        let summary = if manifest.summary.is_some() {
+            Some(stored_control(
+                repository,
+                manifest
+                    .summary_object()
+                    .map_err(|_| invalid("stored summary is invalid"))?,
+                limits.max_response_bytes,
+            )?)
+        } else {
+            None
+        };
+        let lineage = if manifest.lineage.is_some() {
+            Some(stored_control(
+                repository,
+                manifest
+                    .lineage_object()
+                    .map_err(|_| invalid("stored lineage is invalid"))?,
+                limits.max_response_bytes,
+            )?)
+        } else {
+            None
+        };
+        bytes = bytes
+            .checked_add(raw.len() as u64)
+            .and_then(|n| n.checked_add(summary.map_or(0, Blob::len)))
+            .and_then(|n| n.checked_add(lineage.map_or(0, Blob::len)))
+            .ok_or_else(|| invalid("rehome byte budget exceeded"))?;
+        if bytes > limits.max_response_bytes as u64 {
+            return Err(invalid("rehome byte budget exceeded"));
+        }
+        pending.push((manifest, summary, lineage));
+    }
+    // Admit the complete aggregate before materializing any file-backed control.
+    let snapshots = pending
+        .into_iter()
+        .map(|(manifest, summary, lineage)| {
+            Ok(graphforge_discovery::RepositorySnapshot {
+                manifest,
+                summary: summary
+                    .map(|blob| bounded_blob_read(blob, limits.max_response_bytes))
+                    .transpose()?,
+                lineage: lineage
+                    .map(|blob| bounded_blob_read(blob, limits.max_response_bytes))
+                    .transpose()?,
+            })
+        })
+        .collect::<Result<Vec<_>, HubPublishError>>()?;
+    Ok((refs, snapshots))
+}
+
 impl ReferenceHub {
     /// Hub with the default configuration.
     #[must_use]
@@ -351,7 +446,10 @@ impl ReferenceHub {
             format: HUB_PUBLISH_FORMAT.to_owned(),
             repository: repository.clone(),
             requirements,
-            capabilities: vec![Capability::new("device-authorization", 1)],
+            capabilities: vec![
+                Capability::new("device-authorization", 1),
+                Capability::new("version-previews", 1),
+            ],
             authorization: PublishAuthorization {
                 client_id: self.config.authorization_client_id.clone(),
                 device_authorization_endpoint: format!(
@@ -412,6 +510,30 @@ impl ReferenceHub {
                 };
                 if identity.validate().is_err() {
                     return Err(not_found("repository identity is invalid"));
+                }
+                if let Some(current) = state.moved.get(&identity) {
+                    // Immutable object URLs survive a move. Only repository
+                    // control endpoints redirect; no write is ever replayed.
+                    match rest {
+                        ["objects", "sha256", hex] => {
+                            return read_object(state, current, &format!("sha256:{hex}"), request);
+                        }
+                        ["objects", digest] => return read_object(state, current, digest, request),
+                        ["refs" | "manifest"] | ["publish", ..] => {
+                            let moved = graphforge_discovery::RepositoryMoved {
+                                format: "graphforge-repository-moved/1".into(),
+                                moved_from: identity,
+                                moved_to: current.clone(),
+                            };
+                            let mut response = json_response(308, &moved);
+                            response.headers.push((
+                                "location".into(),
+                                format!("{}/.gf/{}", self.repository_url(current), rest.join("/")),
+                            ));
+                            return Ok(response);
+                        }
+                        _ => return Err(not_found("resource does not exist")),
+                    }
                 }
                 match (method, rest) {
                     (HubMethod::Get, ["publish"]) => {
@@ -1019,6 +1141,83 @@ impl ReferenceHub {
             }
         }
 
+        // Optional presentation bytes have a separate, closed Core admission
+        // boundary. Digest validation alone cannot make arbitrary files images.
+        let previews = manifest
+            .preview_descriptors()
+            .map_err(|_| invalid("preview descriptors are invalid"))?;
+        for object in &session.request.objects {
+            if matches!(object.media_type.as_str(), "image/png" | "image/svg+xml")
+                && !previews.iter().any(|p| p.digest == object.digest)
+            {
+                return Err(invalid("image objects require Version preview descriptors").into());
+            }
+        }
+        if !previews.is_empty() {
+            if !session
+                .request
+                .requirements
+                .iter()
+                .any(|r| r.capability == "version-previews" && r.major == 1)
+            {
+                return Err(invalid("previews require version-previews capability").into());
+            }
+            let lineage_object = manifest
+                .lineage_object()
+                .map_err(|_| invalid("previews require native Version lineage"))?;
+            let lineage_upload = session
+                .request
+                .objects
+                .iter()
+                .zip(&session.uploads)
+                .find(|(object, _)| object.digest == lineage_object.digest.0)
+                .ok_or_else(|| invalid("preview lineage is absent"))?;
+            if lineage_upload.0.length != lineage_object.length
+                || lineage_upload.1.bytes.len() != lineage_object.length
+            {
+                return Err(invalid("preview lineage length is invalid").into());
+            }
+            let lineage_bytes =
+                bounded_blob_read(&lineage_upload.1.bytes, discovery_limits.max_response_bytes)?;
+            let lineage =
+                graphforge_discovery::ResearchLineage::from_json(&lineage_bytes, discovery_limits)
+                    .map_err(|_| invalid("preview lineage is invalid"))?;
+            let reference = manifest
+                .lineage
+                .as_ref()
+                .ok_or_else(|| invalid("preview lineage reference is absent"))?;
+            if lineage.repository != manifest.repository
+                || lineage.immutable_version != manifest.immutable_version
+                || lineage
+                    .canonical_digest()
+                    .map_err(|_| invalid("preview lineage digest is invalid"))?
+                    != reference.lineage_digest
+            {
+                return Err(invalid("preview lineage does not bind this manifest").into());
+            }
+            for preview in &previews {
+                if lineage.version(&preview.version_uuid).is_none() {
+                    return Err(invalid("preview Version is absent from native lineage").into());
+                }
+                let upload = session
+                    .request
+                    .objects
+                    .iter()
+                    .zip(&session.uploads)
+                    .find(|(object, _)| object.digest == preview.digest)
+                    .ok_or_else(|| invalid("preview bytes are absent"))?;
+                if upload.0.length != preview.length
+                    || upload.1.bytes.len() != preview.length
+                    || upload.0.media_type != preview.media_type
+                {
+                    return Err(invalid("preview object binding is invalid").into());
+                }
+                let bytes = bounded_blob_read(&upload.1.bytes, crate::preview::MAX_PREVIEW_BYTES)?;
+                crate::preview::validate_preview(preview, &bytes)
+                    .map_err(|_| invalid("preview bytes fail Core image admission"))?;
+            }
+        }
+
         // 3. The manifest names this repository and lists exactly the admitted
         //    objects at this Hub's locations.
         if &manifest.repository != repository {
@@ -1347,6 +1546,95 @@ impl ReferenceHub {
             }
         }
         changed
+    }
+
+    /// Atomically rename one current repository using Core's pure re-homing
+    /// contract. Old names remain permanent, flattened move tombstones; native
+    /// object locations continue serving their original bytes. No upload,
+    /// credential, operation commitment or historical receipt is rewritten.
+    pub fn move_repository(
+        &self,
+        old: &RepositoryIdentity,
+        new: &RepositoryIdentity,
+    ) -> Result<(), HubPublishError> {
+        old.validate()
+            .map_err(|_| invalid("old repository identity is invalid"))?;
+        new.validate()
+            .map_err(|_| invalid("new repository identity is invalid"))?;
+        let mut state = self.state.lock().expect("hub state");
+        if old == new
+            || state.moved.contains_key(old)
+            || state.moved.contains_key(new)
+            || state.repositories.contains_key(new)
+        {
+            return Err(invalid(
+                "repository move conflicts with an existing identity",
+            ));
+        }
+        let repository = state
+            .repositories
+            .get(old)
+            .ok_or_else(|| invalid("repository to move is absent"))?;
+        let limits = DiscoveryLimits::default();
+        let (refs, snapshots) = rehome_inputs(repository, limits)?;
+        let template = graphforge_discovery::ObjectLocationTemplate::parse(
+            &self.capabilities(new).object_location_template,
+        )
+        .map_err(|_| invalid("new object location template is invalid"))?;
+        let result =
+            graphforge_discovery::rehome_repository(&refs, &snapshots, new, &template, limits)
+                .map_err(|_| invalid("stored repository re-homing bindings failed"))?;
+        let refs_document = result
+            .refs
+            .to_canonical_json()
+            .map_err(|_| invalid("re-homed refs are invalid"))?;
+        let mut documents = Vec::new();
+        for snapshot in result.snapshots {
+            let validator = snapshot
+                .manifest
+                .canonical_digest()
+                .map_err(|_| invalid("re-homed manifest is invalid"))?
+                .0;
+            let manifest = snapshot
+                .manifest
+                .to_canonical_json()
+                .map_err(|_| invalid("re-homed manifest is invalid"))?;
+            let mut controls = Vec::new();
+            for bytes in [snapshot.summary, snapshot.lineage].into_iter().flatten() {
+                let digest = sha256_digest(&bytes);
+                let mut blob = Blob::default();
+                blob.append(&bytes).map_err(storage_failure)?;
+                controls.push((digest, blob));
+            }
+            documents.push((validator, manifest, controls));
+        }
+        // Everything above is read-only and fallible. Apply only the complete
+        // validated replacement set while holding the same repository lock.
+        let mut repository = state
+            .repositories
+            .remove(old)
+            .expect("validated repository");
+        repository.refs = result
+            .refs
+            .refs
+            .into_iter()
+            .map(|item| (item.name.clone(), item))
+            .collect();
+        repository.revision = result.revision.0;
+        repository.refs_document = refs_document;
+        repository.history.push(repository.revision.clone());
+        for (validator, manifest, controls) in documents {
+            repository.manifests.insert(validator, manifest);
+            repository.objects.extend(controls);
+        }
+        state.repositories.insert(new.clone(), repository);
+        for current in state.moved.values_mut() {
+            if current == old {
+                *current = new.clone();
+            }
+        }
+        state.moved.insert(old.clone(), new.clone());
+        Ok(())
     }
 
     /// Revisions `repository` has moved through, oldest first.

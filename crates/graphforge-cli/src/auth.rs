@@ -4,7 +4,7 @@ use clap::{Args, Subcommand};
 use graphforge_api::GfError;
 use graphforge_hub_publish::{HubMethod, HubRequest, HubResponse};
 use serde::{Deserialize, Serialize};
-use std::io::Write;
+use std::io::{Read as _, Write};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use url::Url;
 
@@ -667,7 +667,8 @@ fn exchange_repository_token(
 pub(crate) struct CloneTransport<T = crate::hub_http::HttpTransport> {
     inner: T,
     hub: Url,
-    metadata: [Url; 2],
+    metadata: std::cell::RefCell<[Url; 2]>,
+    identity: std::rc::Rc<std::cell::RefCell<graphforge_discovery::RepositoryIdentity>>,
     discovery_acquire: Box<dyn Fn() -> Result<Option<String>, GfError>>,
     discovery_token: std::cell::RefCell<Option<String>>,
     acquire: Box<dyn Fn() -> Result<Option<RepositoryToken>, GfError>>,
@@ -746,6 +747,8 @@ impl CloneTransport<crate::hub_http::HttpTransport> {
         bypass_env: Option<&str>,
     ) -> Result<Self, GfError> {
         let (identity, base) = crate::hub_http::parse_input_at(repository, hub)?;
+        let identity = std::rc::Rc::new(std::cell::RefCell::new(identity));
+        let grant_identity = identity.clone();
         let hub = origin(&base.origin().ascii_serialization())?;
         let auth_hub = hub.clone();
         let metadata_hub = hub.clone();
@@ -756,10 +759,11 @@ impl CloneTransport<crate::hub_http::HttpTransport> {
         Ok(Self {
             inner: crate::hub_http::HttpTransport::new(),
             hub,
-            metadata: [
+            metadata: std::cell::RefCell::new([
                 crate::hub_http::endpoint(&base, "refs"),
                 crate::hub_http::endpoint(&base, "manifest"),
-            ],
+            ]),
+            identity,
             discovery_acquire: Box::new(move || {
                 saved_bearer(
                     &metadata_hub,
@@ -778,8 +782,8 @@ impl CloneTransport<crate::hub_http::HttpTransport> {
                     &PreviewTransport::new(&auth_hub, bypass_env.as_deref())?,
                     &auth_hub,
                     &bearer,
-                    &identity.owner,
-                    &identity.repository,
+                    &grant_identity.borrow().owner,
+                    &grant_identity.borrow().repository,
                     "read",
                 )
                 .map(Some)
@@ -789,6 +793,65 @@ impl CloneTransport<crate::hub_http::HttpTransport> {
     }
 }
 impl<T: Transport> CloneTransport<T> {
+    fn discovery_authorized(
+        &self,
+        url: &Url,
+        limit: u64,
+        bearer: &str,
+    ) -> Result<crate::hub_http::HttpResponse, GfError> {
+        validate_secret(bearer)?;
+        let mut header = ureq::http::HeaderValue::from_str(&format!("Bearer {bearer}"))
+            .map_err(|_| denied("invalid discovery credential"))?;
+        header.set_sensitive(true);
+        let response =
+            self.inner
+                .get_authorized(url, None, None, limit, &[("authorization", header)])?;
+        self.discovery_response(url, response)
+    }
+    fn discovery_response(
+        &self,
+        url: &Url,
+        mut response: crate::hub_http::HttpResponse,
+    ) -> Result<crate::hub_http::HttpResponse, GfError> {
+        if matches!(response.status, 301 | 302 | 303 | 307 | 308) {
+            if response.status != 308 {
+                return Err(denied("authenticated discovery cannot redirect"));
+            }
+            let mut bytes = Vec::new();
+            response
+                .body
+                .take(4097)
+                .read_to_end(&mut bytes)
+                .map_err(|_| denied("move response read failed"))?;
+            if bytes.len() > 4096 {
+                return Err(denied("move response exceeds bound"));
+            }
+            let moved = graphforge_discovery::RepositoryMoved::from_json(
+                &bytes,
+                graphforge_discovery::DiscoveryLimits {
+                    max_response_bytes: 4096,
+                    ..Default::default()
+                },
+            )
+            .map_err(|_| denied("authenticated discovery move is invalid"))?;
+            if moved.moved_from != *self.identity.borrow() {
+                return Err(denied("authenticated discovery move identity mismatch"));
+            }
+            moved
+                .destination(
+                    url,
+                    response
+                        .location
+                        .as_deref()
+                        .ok_or_else(|| denied("move destination is absent"))?,
+                )
+                .map_err(|_| denied("authenticated discovery move destination is invalid"))?;
+            // Only expose the bounded marker to the outer agreement checker.
+            // No authenticated redirect is followed here.
+            response.body = Box::new(std::io::Cursor::new(bytes));
+        }
+        Ok(response)
+    }
     fn send_authorized(
         &self,
         url: &Url,
@@ -829,14 +892,14 @@ impl<T: Transport> CloneTransport<T> {
     }
     fn discovery(&self, url: &Url, limit: u64) -> Result<crate::hub_http::HttpResponse, GfError> {
         let response = if let Some(bearer) = self.discovery_token.borrow().as_ref() {
-            self.send_authorized(url, None, None, limit, bearer)?
+            self.discovery_authorized(url, limit, bearer)?
         } else {
             self.inner.get(url, None, None, limit)?
         };
         if matches!(response.status, 401 | 403 | 404)
             && let Some(bearer) = (self.discovery_acquire)()?
         {
-            let response = self.send_authorized(url, None, None, limit, &bearer)?;
+            let response = self.discovery_authorized(url, limit, &bearer)?;
             self.discovery_token.replace(Some(bearer));
             return Ok(response);
         }
@@ -844,6 +907,29 @@ impl<T: Transport> CloneTransport<T> {
     }
 }
 impl<T: Transport> Transport for CloneTransport<T> {
+    fn repository_moved(
+        &self,
+        moved: &graphforge_discovery::RepositoryMoved,
+        current: &Url,
+    ) -> Result<(), GfError> {
+        moved
+            .validate()
+            .map_err(|_| denied("repository move identity is invalid"))?;
+        let mut expected = self.hub.clone();
+        expected.set_path(&format!("/{}", moved.moved_to.canonical_name()));
+        if moved.moved_from != *self.identity.borrow() || current != &expected {
+            return Err(denied("repository authentication rebind is invalid"));
+        }
+        self.metadata.replace([
+            crate::hub_http::endpoint(current, "refs"),
+            crate::hub_http::endpoint(current, "manifest"),
+        ]);
+        self.identity.replace(moved.moved_to.clone());
+        self.token.replace(None);
+        // The cached WorkOS bearer remains bound to exactly the same Hub
+        // origin. A new repository grant must be acquired under the new name.
+        Ok(())
+    }
     fn get(
         &self,
         url: &Url,
@@ -851,7 +937,7 @@ impl<T: Transport> Transport for CloneTransport<T> {
         if_range: Option<&str>,
         limit: u64,
     ) -> Result<crate::hub_http::HttpResponse, GfError> {
-        if self.metadata.contains(url) {
+        if self.metadata.borrow().contains(url) {
             return self.discovery(url, limit);
         }
         let response = if self.token.borrow().is_some() {
@@ -873,7 +959,7 @@ impl<T: Transport> Transport for CloneTransport<T> {
         headers: &[(&str, ureq::http::HeaderValue)],
         limit: u64,
     ) -> Result<crate::hub_http::HttpResponse, GfError> {
-        if url.origin() != self.hub.origin() || !self.metadata.contains(url) {
+        if url.origin() != self.hub.origin() || !self.metadata.borrow().contains(url) {
             return Err(denied("discovery credential origin mismatch"));
         }
         // Explicit Hub bearers take precedence. A preview bypass on its own
@@ -890,10 +976,8 @@ impl<T: Transport> Transport for CloneTransport<T> {
             authorization.set_sensitive(true);
             let mut combined = headers.to_vec();
             combined.push(("authorization", authorization));
-            let response = self.inner.get_discovery(url, &combined, limit)?;
-            if matches!(response.status, 301 | 302 | 303 | 307 | 308) {
-                return Err(denied("authenticated discovery cannot redirect"));
-            }
+            let response =
+                self.discovery_response(url, self.inner.get_discovery(url, &combined, limit)?)?;
             self.discovery_token.replace(Some(bearer));
             return Ok(response);
         }

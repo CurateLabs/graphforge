@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 
 use graphforge_core::GfError;
-use graphforge_storage::{PortableProjectLimits, ProjectCapability};
+use graphforge_storage::ProjectCapability;
 use serde::Serialize;
 use uuid::Uuid;
 
@@ -18,24 +18,6 @@ pub enum PortableSelection {
     Current,
     /// Resolve an active named checkpoint.
     Checkpoint(String),
-}
-
-/// Portable export request.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PortableExportRequest {
-    /// Current or named-checkpoint selection.
-    pub selection: PortableSelection,
-    /// Destination file. Existing paths are rejected.
-    pub output: PathBuf,
-}
-
-/// Portable import request.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PortableImportRequest {
-    /// Bounded regular envelope file.
-    pub input: PathBuf,
-    /// Caller-owned idempotency identity.
-    pub operation_id: OperationId,
 }
 
 /// Verification-first portable-v2 complete-project import request.
@@ -215,42 +197,6 @@ pub struct PortableV2ExportFacadeResult {
     #[doc(hidden)]
     #[serde(skip)]
     pub allocation_physical_objects: u64,
-}
-
-/// Stable export result.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-pub struct PortableExportResult {
-    /// Contract name.
-    pub contract: &'static str,
-    /// Source selector kind.
-    pub source: &'static str,
-    /// Named checkpoint, when selected.
-    pub checkpoint: Option<String>,
-    /// Exported generation UUID.
-    pub generation_uuid: Uuid,
-    /// Complete envelope SHA-256.
-    pub envelope_sha256: String,
-    /// Complete envelope bytes.
-    pub byte_length: u64,
-    /// Participant count.
-    pub participant_count: usize,
-    /// Caller-selected output path.
-    pub output: PathBuf,
-}
-
-/// Stable import result.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-pub struct PortableImportResult {
-    /// Contract name.
-    pub contract: &'static str,
-    /// Original exported generation UUID.
-    pub source_generation_uuid: Uuid,
-    /// Newly published local generation UUID.
-    pub generation_uuid: Uuid,
-    /// Complete envelope SHA-256.
-    pub envelope_sha256: String,
-    /// Whether an identical operation was replayed.
-    pub idempotent_replay: bool,
 }
 
 /// Verify portable-v2 content without admitting or mutating a destination Project.
@@ -503,64 +449,6 @@ impl GraphForge {
         })
     }
 
-    /// Export one pinned current/checkpoint generation without copying live layout metadata.
-    pub fn export_portable(
-        &self,
-        request: PortableExportRequest,
-    ) -> Result<PortableExportResult, GfError> {
-        let (generation, source, checkpoint) =
-            self.resolve_portable_generation(&request.selection)?;
-        let receipt = graphforge_storage::export_portable_project(
-            &generation,
-            &request.output,
-            PortableProjectLimits::default(),
-        )?;
-        Ok(PortableExportResult {
-            contract: "graphforge-portable-export/1",
-            source,
-            checkpoint,
-            generation_uuid: receipt.generation_uuid,
-            envelope_sha256: hex(receipt.envelope_sha256),
-            byte_length: receipt.byte_length,
-            participant_count: receipt.participant_count,
-            output: request.output,
-        })
-    }
-
-    /// Validate and import into a new, empty, or pristine initialized project.
-    pub fn import_portable(
-        project_root: &Path,
-        request: &PortableImportRequest,
-    ) -> Result<PortableImportResult, GfError> {
-        let generation_uuid =
-            graphforge_core::uuid::portable_import_generation(&request.operation_id.0);
-        let receipt = graphforge_storage::import_portable_project_file(
-            &request.input,
-            project_root,
-            request.operation_id.0,
-            generation_uuid,
-            &supported_capabilities(),
-            PortableProjectLimits::default(),
-        )?;
-        // Reopen through the public facade so success also proves normal runtime readability.
-        let root = project_root
-            .to_str()
-            .ok_or_else(|| GfError::Validation("project path must be valid UTF-8".into()))?;
-        let reopened = Self::new(Some(root))?;
-        if reopened.resolved_generation.generation_uuid() != receipt.publication.generation_uuid {
-            return Err(GfError::Lifecycle(
-                "imported generation did not reopen as CURRENT".into(),
-            ));
-        }
-        Ok(PortableImportResult {
-            contract: "graphforge-portable-import/1",
-            source_generation_uuid: receipt.source_generation_uuid,
-            generation_uuid: receipt.publication.generation_uuid,
-            envelope_sha256: hex(receipt.envelope_sha256),
-            idempotent_replay: receipt.publication.idempotent_replay,
-        })
-    }
-
     /// Verify and atomically import a complete portable-v2 package.
     pub fn import_portable_v2(
         project_root: &Path,
@@ -711,7 +599,50 @@ mod tests {
         SpatialType as OntologySpatialType,
     };
 
-    const ONTOLOGY: &str = "ontology_id: portable-authority\nversion: \"1\"\nentity_types:\n  - name: Person\n    abstract: false\nrelation_types: []\n";
+    const ONTOLOGY: &str = "ontology_id: urn:graphforge:portable-authority\nversion: \"1\"\nentity_types:\n  - name: Person\n    abstract: false\nrelation_types: []\n";
+
+    #[test]
+    fn retired_format_is_rejected_before_target_is_touched() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("unsupported.bin");
+        std::fs::write(&source, b"graphforge-exp\0\n").unwrap();
+        for existing in [false, true] {
+            let target = root
+                .path()
+                .join(if existing { "existing" } else { "absent" });
+            if existing {
+                std::fs::create_dir(&target).unwrap();
+                std::fs::write(target.join("sentinel"), b"unchanged").unwrap();
+            }
+            let error = GraphForge::import_portable_v2(
+                &target,
+                &PortableV2ImportRequest {
+                    input: source.clone(),
+                    operation_id: OperationId(Uuid::new_v4()),
+                    limits: crate::PortableV2Limits::default(),
+                },
+                None,
+            )
+            .unwrap_err();
+            assert_eq!(
+                error.code,
+                crate::PortableV2ErrorCode::UnsupportedProjectFormat
+            );
+            assert_eq!(
+                crate::MultiOntologyError::from(error).code,
+                "GF_UNSUPPORTED_PROJECT_FORMAT"
+            );
+            if existing {
+                assert_eq!(
+                    std::fs::read(target.join("sentinel")).unwrap(),
+                    b"unchanged"
+                );
+                assert_eq!(std::fs::read_dir(&target).unwrap().count(), 1);
+            } else {
+                assert!(!target.exists());
+            }
+        }
+    }
 
     #[test]
     fn portable_v2_verification_facade_preserves_typed_cancellation() {
@@ -746,31 +677,39 @@ mod tests {
         let source_path = source.path().join("source");
         std::fs::create_dir(&source_path).unwrap();
         let graph = GraphForge::new(source_path.to_str()).unwrap();
-        let envelope = source.path().join("portable.gfportable");
+        let bundle = source.path().join("portable.gfpb");
 
         let exported = graph
-            .export_portable(PortableExportRequest {
-                selection: PortableSelection::Current,
-                output: envelope.clone(),
-            })
+            .export_portable_v2(
+                &PortableV2ExportRequest {
+                    selection: PortableSelection::Current,
+                    output_path: bundle.clone(),
+                    representation: crate::PortableV2Output::Bundle,
+                    profile: crate::PortableV2SelectionProfile::Complete,
+                    subset: None,
+                    limits: crate::PortableV2Limits::default(),
+                },
+                None,
+                |_| {},
+            )
             .unwrap();
-        assert_eq!(exported.contract, "graphforge-portable-export/1");
+        assert_eq!(exported.contract, "graphforge-portable-export/2");
         assert_eq!(exported.source, "current");
         assert_eq!(exported.checkpoint, None);
-        assert_eq!(exported.output, envelope);
+        assert_eq!(exported.output, bundle);
 
         let target = source.path().join("imported");
-        let imported = GraphForge::import_portable(
+        let imported = GraphForge::import_portable_v2(
             &target,
-            &PortableImportRequest {
+            &PortableV2ImportRequest {
                 input: exported.output,
                 operation_id: OperationId(Uuid::new_v4()),
+                limits: crate::PortableV2Limits::default(),
             },
+            None,
         )
         .unwrap();
-        assert_eq!(imported.contract, "graphforge-portable-import/1");
-        assert_eq!(imported.source_generation_uuid, exported.generation_uuid);
-        assert_eq!(imported.envelope_sha256, exported.envelope_sha256);
+        assert_eq!(imported.package_digest, exported.package_digest);
 
         let reopened = GraphForge::new(target.to_str()).expect("imported CURRENT must reopen");
         let first_label = reopened.execute("CREATE (:ImportedLabel)").unwrap();
@@ -1374,13 +1313,21 @@ mod tests {
             })
             .unwrap();
         let output_dir = tempfile::tempdir().unwrap();
-        let output = output_dir.path().join("checkpoint.gfportable");
+        let output = output_dir.path().join("checkpoint.gfpb");
 
         let exported = graph
-            .export_portable(PortableExportRequest {
-                selection: PortableSelection::Checkpoint("Export".into()),
-                output,
-            })
+            .export_portable_v2(
+                &PortableV2ExportRequest {
+                    selection: PortableSelection::Checkpoint("Export".into()),
+                    output_path: output,
+                    representation: crate::PortableV2Output::Bundle,
+                    profile: crate::PortableV2SelectionProfile::Complete,
+                    subset: None,
+                    limits: crate::PortableV2Limits::default(),
+                },
+                None,
+                |_| {},
+            )
             .unwrap();
 
         assert_eq!(exported.source, "checkpoint");
@@ -1393,28 +1340,38 @@ mod tests {
         let source_path = source.path().join("source");
         std::fs::create_dir(&source_path).unwrap();
         let graph = GraphForge::new(source_path.to_str()).unwrap();
-        let envelope = source.path().join("portable.gfportable");
+        let bundle = source.path().join("portable.gfpb");
         graph
-            .export_portable(PortableExportRequest {
-                selection: PortableSelection::Current,
-                output: envelope.clone(),
-            })
+            .export_portable_v2(
+                &PortableV2ExportRequest {
+                    selection: PortableSelection::Current,
+                    output_path: bundle.clone(),
+                    representation: crate::PortableV2Output::Bundle,
+                    profile: crate::PortableV2SelectionProfile::Complete,
+                    subset: None,
+                    limits: crate::PortableV2Limits::default(),
+                },
+                None,
+                |_| {},
+            )
             .unwrap();
 
         let target = source.path().join("occupied");
         std::fs::create_dir(&target).unwrap();
         let sentinel = target.join("keep.txt");
         std::fs::write(&sentinel, b"preserve me").unwrap();
-        let error = GraphForge::import_portable(
+        let error = GraphForge::import_portable_v2(
             &target,
-            &PortableImportRequest {
-                input: envelope,
+            &PortableV2ImportRequest {
+                input: bundle,
                 operation_id: OperationId(Uuid::new_v4()),
+                limits: crate::PortableV2Limits::default(),
             },
+            None,
         )
         .unwrap_err();
 
-        assert!(error.to_string().contains("must be empty"));
+        assert_eq!(error.code, crate::PortableV2ErrorCode::Io);
         assert_eq!(std::fs::read(sentinel).unwrap(), b"preserve me");
     }
 
@@ -1434,21 +1391,31 @@ mod tests {
             })
             .unwrap();
         let expected = source.workspace_ontology().unwrap();
-        let envelope = root.path().join("adopted.gfportable");
+        let bundle = root.path().join("adopted.gfpb");
         source
-            .export_portable(PortableExportRequest {
-                selection: PortableSelection::Current,
-                output: envelope.clone(),
-            })
+            .export_portable_v2(
+                &PortableV2ExportRequest {
+                    selection: PortableSelection::Current,
+                    output_path: bundle.clone(),
+                    representation: crate::PortableV2Output::Bundle,
+                    profile: crate::PortableV2SelectionProfile::Complete,
+                    subset: None,
+                    limits: crate::PortableV2Limits::default(),
+                },
+                None,
+                |_| {},
+            )
             .unwrap();
 
         let target_path = root.path().join("imported-adopted");
-        GraphForge::import_portable(
+        GraphForge::import_portable_v2(
             &target_path,
-            &PortableImportRequest {
-                input: envelope,
+            &PortableV2ImportRequest {
+                input: bundle,
                 operation_id: OperationId(Uuid::from_u128(2)),
+                limits: crate::PortableV2Limits::default(),
             },
+            None,
         )
         .unwrap();
         let imported = GraphForge::new(target_path.to_str()).unwrap();
@@ -1469,21 +1436,31 @@ mod tests {
             .load_ontology(ontology_path.to_str().unwrap())
             .unwrap();
         assert_eq!(source.ontology_mode(), OntologyMode::Advisory);
-        let session_envelope = root.path().join("session.gfportable");
+        let session_bundle = root.path().join("session.gfpb");
         source
-            .export_portable(PortableExportRequest {
-                selection: PortableSelection::Current,
-                output: session_envelope.clone(),
-            })
+            .export_portable_v2(
+                &PortableV2ExportRequest {
+                    selection: PortableSelection::Current,
+                    output_path: session_bundle.clone(),
+                    representation: crate::PortableV2Output::Bundle,
+                    profile: crate::PortableV2SelectionProfile::Complete,
+                    subset: None,
+                    limits: crate::PortableV2Limits::default(),
+                },
+                None,
+                |_| {},
+            )
             .unwrap();
 
         let session_target = root.path().join("imported-session");
-        GraphForge::import_portable(
+        GraphForge::import_portable_v2(
             &session_target,
-            &PortableImportRequest {
-                input: session_envelope,
+            &PortableV2ImportRequest {
+                input: session_bundle,
                 operation_id: OperationId(Uuid::from_u128(3)),
+                limits: crate::PortableV2Limits::default(),
             },
+            None,
         )
         .unwrap();
         let imported_session = GraphForge::new(session_target.to_str()).unwrap();
@@ -1508,21 +1485,31 @@ mod tests {
                 context: write_context(5),
             })
             .unwrap();
-        let cleared_envelope = root.path().join("cleared.gfportable");
+        let cleared_bundle = root.path().join("cleared.gfpb");
         source
-            .export_portable(PortableExportRequest {
-                selection: PortableSelection::Current,
-                output: cleared_envelope.clone(),
-            })
+            .export_portable_v2(
+                &PortableV2ExportRequest {
+                    selection: PortableSelection::Current,
+                    output_path: cleared_bundle.clone(),
+                    representation: crate::PortableV2Output::Bundle,
+                    profile: crate::PortableV2SelectionProfile::Complete,
+                    subset: None,
+                    limits: crate::PortableV2Limits::default(),
+                },
+                None,
+                |_| {},
+            )
             .unwrap();
 
         let cleared_target = root.path().join("imported-cleared");
-        GraphForge::import_portable(
+        GraphForge::import_portable_v2(
             &cleared_target,
-            &PortableImportRequest {
-                input: cleared_envelope,
+            &PortableV2ImportRequest {
+                input: cleared_bundle,
                 operation_id: OperationId(Uuid::from_u128(6)),
+                limits: crate::PortableV2Limits::default(),
             },
+            None,
         )
         .unwrap();
         let imported_clear = GraphForge::new(cleared_target.to_str()).unwrap();

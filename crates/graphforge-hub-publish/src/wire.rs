@@ -41,7 +41,8 @@ pub const LARGE_OBJECT_PUBLISH_CAPABILITY: &str = "large-object-publish";
 pub const PUBLISH_NEGOTIATION_CAPABILITY: &str = "publish-negotiation";
 
 /// Capability names this release understands, with the major it supports.
-pub const SUPPORTED_CAPABILITIES: [(&str, u16); 5] = [
+pub const SUPPORTED_CAPABILITIES: [(&str, u16); 6] = [
+    ("version-previews", 1),
     ("device-authorization", 1),
     ("publish-session", 1),
     ("resumable-upload", 1),
@@ -297,26 +298,14 @@ impl PublishCapabilities {
                 return Err(invalid("authorization client identifier is invalid"));
             }
         }
-        let digest_count = self
-            .object_location_template
-            .matches(DIGEST_PLACEHOLDER)
-            .count();
-        let hex_count = self
-            .object_location_template
-            .matches(HEX_PLACEHOLDER)
-            .count();
-        let rest = self
-            .object_location_template
-            .replace(DIGEST_PLACEHOLDER, "")
-            .replace(HEX_PLACEHOLDER, "");
-        if digest_count + hex_count != 1 || rest.contains(['{', '}']) {
-            return Err(invalid(
-                "object location template needs exactly one {digest} or {hex}",
-            ));
-        }
+        let location_template =
+            graphforge_discovery::ObjectLocationTemplate::parse(&self.object_location_template)
+                .map_err(|_| {
+                    invalid("object location template needs exactly one safe {digest} or {hex}")
+                })?;
         if (self.authorization.client_id.is_some()
             || self.limits.preferred_chunk_bytes.is_some()
-            || hex_count == 1)
+            || location_template.uses_hex())
             && !self
                 .requirements
                 .iter()

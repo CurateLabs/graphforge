@@ -357,7 +357,6 @@ pub use graphforge_storage::{
 #[cfg(feature = "portable")]
 #[cfg(feature = "portable")]
 pub use portable::{
-    PortableExportRequest, PortableExportResult, PortableImportRequest, PortableImportResult,
     PortableSelection, PortableV2ExportFacadeResult, PortableV2ExportReceiptView,
     PortableV2ExportRequest, PortableV2ImportRequest, PortableV2ImportResult,
     PortableV2OciPublishFacadeRequest, PortableV2OciPullFacadeRequest, PortableV2RepackRequest,

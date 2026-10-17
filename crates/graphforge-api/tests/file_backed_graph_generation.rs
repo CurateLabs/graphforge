@@ -19,8 +19,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use arrow::array::{FixedSizeBinaryArray, Int64Array};
 use graphforge_api::{
-    CheckpointRequest, GraphForge, OperationId, PortableExportRequest, PortableSelection,
-    PortableV2ExportRequest, PortableV2ImportRequest, PortableVerifyRequest, verify_portable_v2,
+    CheckpointRequest, GraphForge, OperationId, PortableSelection, PortableV2ExportRequest,
+    PortableV2ImportRequest, PortableVerifyRequest, verify_portable_v2,
 };
 use graphforge_core::OntologyMode;
 use graphforge_storage::{
@@ -661,33 +661,40 @@ fn project_open_exposes_recovery_evidence_and_repeat_open_stays_stable() {
 }
 
 #[test]
-fn portable_export_of_file_backed_generation_is_structured_unsupported() {
+fn streaming_export_supports_file_backed_generation_and_reopens() {
     let root = tempfile::tempdir().unwrap();
-    let path = root.path().to_str().unwrap();
-    let graph = GraphForge::new(Some(path)).unwrap();
+    let source = root.path().join("source");
+    let graph = GraphForge::new(source.to_str()).unwrap();
     graph.execute("CREATE (:Person {name: 'Ada'})").unwrap();
-
-    let generation = resolve_project_generation(root.path()).unwrap();
-    assert!(
-        generation
-            .participant_snapshot("graph", GRAPH_FILES_FAMILY)
-            .unwrap()
-            .is_some()
-    );
-
-    let output = root.path().join("file-backed.gfportable");
-    let error = graph
-        .export_portable(PortableExportRequest {
-            selection: PortableSelection::Current,
-            output,
-        })
-        .expect_err("file-backed portable export must fail closed");
-    assert_eq!(error.code(), "GF_UNSUPPORTED_PROJECT_FORMAT");
-    assert!(
-        error
-            .to_string()
-            .contains("portable interchange does not yet encode file-backed graph trees")
-    );
+    let output = root.path().join("file-backed.gfpb");
+    let exported = graph
+        .export_portable_v2(
+            &PortableV2ExportRequest {
+                selection: PortableSelection::Current,
+                output_path: output.clone(),
+                representation: graphforge_api::PortableV2Output::Bundle,
+                profile: graphforge_api::PortableV2SelectionProfile::Complete,
+                subset: None,
+                limits: graphforge_api::PortableV2Limits::default(),
+            },
+            None,
+            |_| {},
+        )
+        .unwrap();
+    let target = root.path().join("imported");
+    let imported = GraphForge::import_portable_v2(
+        &target,
+        &PortableV2ImportRequest {
+            input: output,
+            operation_id: OperationId(Uuid::now_v7()),
+            limits: graphforge_api::PortableV2Limits::default(),
+        },
+        None,
+    )
+    .unwrap();
+    assert_eq!(imported.package_digest, exported.package_digest);
+    let reopened = GraphForge::new(target.to_str()).unwrap();
+    assert_eq!(reopened.node_count("Person").unwrap(), 1);
 }
 
 #[test]

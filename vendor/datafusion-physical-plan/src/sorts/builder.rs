@@ -286,7 +286,7 @@ impl BatchBuilder {
             .as_ref()
             .map(|copy| {
                 let workspace = if let Some(plan) = &plan {
-                    Some(plan.prepare()?)
+                    Some(plan.workspace()?)
                 } else if copy.has_output_bounds() {
                     super::copy_bounds::interleave(&self.batches, indices)?
                 } else {
@@ -308,9 +308,6 @@ impl BatchBuilder {
                 }
             })
             .transpose()?;
-        if let (Some(phase), Some(plan)) = (&phase, &plan) {
-            phase.transition(plan.kernel()?)?;
-        }
         let columns = (0..self.schema.fields.len())
             .map(|column_idx| {
                 let arrays: Vec<_> = self

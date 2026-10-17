@@ -477,8 +477,8 @@ fn copy_file_participant(
     copy_buffer_bytes: usize,
     capture: Option<&crate::project_portable_v2::MaterializedCapture>,
 ) -> Result<u8, GfError> {
-    let mut input =
-        crate::project_portable::open_regular_nofollow(&source.source).map_err(publication_io)?;
+    let mut input = crate::project_import_target::open_regular_nofollow(&source.source)
+        .map_err(publication_io)?;
     let admitted = capture.is_some_and(|capture| {
         capture.matches_file(
             &input,
@@ -1028,7 +1028,7 @@ fn checksum_participant_source(
     expected_length: u64,
     cancelled: Option<&std::sync::atomic::AtomicBool>,
 ) -> Result<u64, GfError> {
-    let file = crate::project_portable::open_regular_nofollow(path).map_err(publication_io)?;
+    let file = crate::project_import_target::open_regular_nofollow(path).map_err(publication_io)?;
     let identity = graphforge_filesystem::file_identity(&file).map_err(publication_io)?;
     if file.metadata().map_err(publication_io)?.len() != expected_length {
         return Err(project_error(

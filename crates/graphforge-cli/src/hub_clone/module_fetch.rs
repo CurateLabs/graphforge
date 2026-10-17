@@ -61,6 +61,10 @@ struct ModuleFetchResult {
     package_digest: String,
     module_sha256: String,
     output: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    moved_from: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    moved_to: Option<String>,
 }
 
 pub(crate) fn run_module_fetch(
@@ -92,6 +96,9 @@ fn write_module_fetch_result(
             .map_err(|e| graphforge_api::GfError::Execution(e.to_string()))?;
         writeln!(output).map_err(storage)?;
     } else {
+        if let (Some(from), Some(to)) = (&result.moved_from, &result.moved_to) {
+            writeln!(output, "Repository moved from {from} to {to}").map_err(storage)?;
+        }
         writeln!(
             output,
             "Fetched ontology module {} {} from {} to {}",
@@ -167,8 +174,12 @@ fn run_module_fetch_job(
     let (identity, base) = parse_input_at(&args.repository, args.hub.as_deref())?;
     let module = module_identity(args)?;
     ensure_output_available(&args.output)?;
+    let move_transport = crate::hub_http::RepositoryMoveTransport::new(transport, &identity, &base);
+    let transport = &move_transport as &dyn Transport;
     let refs_bytes = fetch_document(transport, &endpoint(&base, "refs"), retry)?;
-    let manifest_bytes = fetch_document(transport, &endpoint(&base, "manifest"), retry)?;
+    let (_, current_base, _) = move_transport.resolved(false)?;
+    let manifest_bytes = fetch_document(transport, &endpoint(&current_base, "manifest"), retry)?;
+    let (identity, _, moved) = move_transport.resolved(false)?;
     let limits = DiscoveryLimits {
         max_response_bytes: MAX_METADATA_BYTES,
         max_module_package_bytes: MAX_MODULE_PACKAGE_BYTES,
@@ -199,7 +210,11 @@ fn run_module_fetch_job(
         retry,
     );
     release_staging(staging);
-    result
+    result.map(|mut result| {
+        result.moved_from = moved.as_ref().map(|m| m.moved_from.canonical_name());
+        result.moved_to = moved.as_ref().map(|m| m.moved_to.canonical_name());
+        result
+    })
 }
 
 // `release_staging` removes everything this fetch staged, on success and on
@@ -250,6 +265,8 @@ fn fetch_and_publish_module(
         package_digest: resolved.package_digest,
         module_sha256: resolved.module_sha256,
         output: args.output.display().to_string(),
+        moved_from: None,
+        moved_to: None,
     })
 }
 
@@ -400,6 +417,94 @@ mod tests {
             "a failed fetch leaves no output or staging file"
         );
         transport.requested.lock().unwrap().clone()
+    }
+
+    #[test]
+    fn module_fetch_follows_one_verified_move_without_changing_package_bytes() {
+        let mut manifest =
+            DiscoveryManifest::from_json(FIXTURE_MANIFEST, DiscoveryLimits::default()).unwrap();
+        let old = manifest.repository.clone();
+        let new = graphforge_discovery::RepositoryIdentity::parse("research/renamed").unwrap();
+        manifest.repository = new.clone();
+        let manifest_bytes = manifest.to_canonical_json().unwrap();
+        let mut refs = RefSet::from_json(FIXTURE_REFS, DiscoveryLimits::default()).unwrap();
+        refs.repository = new.clone();
+        for reference in &mut refs.refs {
+            reference.validator = manifest.canonical_digest().unwrap();
+        }
+        let refs_bytes = refs.to_canonical_json().unwrap();
+        let body = serde_json::to_vec(&graphforge_discovery::RepositoryMoved {
+            format: "graphforge-repository-moved/1".into(),
+            moved_from: old,
+            moved_to: new,
+        })
+        .unwrap();
+        let redirect = |suffix| {
+            let mut r = response(308, None, &body);
+            r.location = Some(format!(
+                "https://graphforge.sh/research/renamed/.gf/{suffix}"
+            ));
+            r
+        };
+        let package = fixture_module_package();
+        let transport = RecordingTransport {
+            inner: Scripted::new(vec![
+                redirect("refs"),
+                redirect("manifest"),
+                response(200, None, &refs_bytes),
+                response(200, None, &manifest_bytes),
+                response(200, None, &package),
+            ]),
+            requested: Mutex::new(Vec::new()),
+        };
+        let root = tempfile::tempdir().unwrap();
+        let args = fixture_module_args(&root.path().join("module.json"));
+        let receipt = fetch_module(&transport, &args).unwrap();
+        assert_eq!(receipt["repository"], "research/renamed");
+        assert_eq!(receipt["moved_from"], "openalex/openalex");
+        assert_eq!(receipt["moved_to"], "research/renamed");
+        assert!(args.output.is_file());
+        assert_eq!(transport.inner.remaining(), 0);
+        let requests = transport.requested.lock().unwrap();
+        assert_eq!(requests.len(), 5);
+        assert_eq!(
+            requests[4],
+            manifest
+                .ontology_module_selection(&ExactIdentity {
+                    id: args.ontology_id.clone(),
+                    version: args.version.clone(),
+                    content_digest: Sha256Digest(args.digest.clone())
+                })
+                .unwrap()
+                .2
+                .locations[0]
+        );
+    }
+
+    #[test]
+    fn module_fetch_rejects_foreign_move_before_target_request_or_output() {
+        let body = serde_json::to_vec(&graphforge_discovery::RepositoryMoved {
+            format: "graphforge-repository-moved/1".into(),
+            moved_from: graphforge_discovery::RepositoryIdentity::parse("openalex/openalex")
+                .unwrap(),
+            moved_to: graphforge_discovery::RepositoryIdentity::parse("research/renamed").unwrap(),
+        })
+        .unwrap();
+        let mut redirect = response(308, None, &body);
+        redirect.location = Some("https://foreign.example/research/renamed/.gf/refs".into());
+        let transport = RecordingTransport {
+            inner: Scripted::new(vec![redirect]),
+            requested: Mutex::new(Vec::new()),
+        };
+        let root = tempfile::tempdir().unwrap();
+        let args = fixture_module_args(&root.path().join("module.json"));
+        let requests =
+            assert_module_fetch_fails("hub.integrity_failure", &transport, &args, root.path(), &[]);
+        assert_eq!(
+            requests,
+            ["https://graphforge.sh/openalex/openalex/.gf/refs"]
+        );
+        assert_eq!(transport.inner.remaining(), 0);
     }
 
     #[test]

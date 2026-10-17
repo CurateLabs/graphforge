@@ -1,0 +1,68 @@
+[
+  {
+    "name": "png-pixel",
+    "media_type": "image/png",
+    "hex": "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000b49444154789c6360000200000500017a5eab3f0000000049454e44ae426082",
+    "error": null
+  },
+  {
+    "name": "svg-path",
+    "media_type": "image/svg+xml",
+    "utf8": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"16\" height=\"16\"><path d=\"M0 0L1 1\"/></svg>",
+    "error": null
+  },
+  {
+    "name": "script",
+    "media_type": "image/svg+xml",
+    "utf8": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"16\" height=\"16\"><script/></svg>",
+    "error": "unsafe_svg"
+  },
+  {
+    "name": "event",
+    "media_type": "image/svg+xml",
+    "utf8": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"16\" height=\"16\"><path onclick=\"alert(1)\"/></svg>",
+    "error": "unsafe_svg"
+  },
+  {
+    "name": "external",
+    "media_type": "image/svg+xml",
+    "utf8": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"16\" height=\"16\"><path fill=\"url(https://evil.test/x)\"/></svg>",
+    "error": "unsafe_svg"
+  },
+  {
+    "name": "foreign",
+    "media_type": "image/svg+xml",
+    "utf8": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"16\" height=\"16\"><foreignObject/></svg>",
+    "error": "unsafe_svg"
+  },
+  {
+    "name": "css",
+    "media_type": "image/svg+xml",
+    "utf8": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"16\" height=\"16\"><style/></svg>",
+    "error": "unsafe_svg"
+  },
+  {
+    "name": "recursive-use",
+    "media_type": "image/svg+xml",
+    "utf8": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"16\" height=\"16\"><use href=\"#a\"/></svg>",
+    "error": "unsafe_svg"
+  },
+  {
+    "name": "html-type",
+    "media_type": "text/html",
+    "utf8": "<html/>",
+    "error": "media_type"
+  },
+  {
+    "name": "png-truncated",
+    "media_type": "image/png",
+    "hex": "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000b49444154789c6360000200000500017a5eab3f",
+    "error": "content"
+  },
+  {
+    "name": "png-adam7-pixel",
+    "media_type": "image/png",
+    "hex": "89504e470d0a1a0a0000000d49484452000000010000000108060000016812f41f0000000b49444154789c6360000200000500017a5eab3f0000000049454e44ae426082",
+    "error": null
+  }
+]

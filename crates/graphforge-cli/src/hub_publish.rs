@@ -102,6 +102,10 @@ pub(crate) struct PublishArgs {
     /// Read a Vercel preview bypass secret from this environment variable.
     #[arg(long)]
     pub protection_bypass_env: Option<String>,
+    /// Explicit PNG/SVG image selection for this exact immutable Version.
+    /// Repeat for multiple images; never reads unselected workbench files.
+    #[arg(long = "preview")]
+    pub previews: Vec<std::path::PathBuf>,
 }
 
 /// How the CLI obtains its publish token.
@@ -122,6 +126,7 @@ pub(crate) struct PublishEnvironment<'a> {
     pub wait: &'a dyn Fn(Duration),
     /// Human instructions (device flow); never receives secrets.
     pub notices: &'a mut dyn Write,
+    resolution: Option<PublicationResolution>,
 }
 
 /// Captured bindings accept explicit credentials without consulting the user's
@@ -160,6 +165,7 @@ pub(crate) struct PublishOutcome {
     pub receipt: PublishReceipt,
     /// Whether this run replayed a committed operation without any upload.
     pub replayed: bool,
+    pub moved: Option<graphforge_discovery::RepositoryMoved>,
 }
 
 /// Dispatch the Hub commands, `gf clone` and `gf publish`.
@@ -218,7 +224,17 @@ fn run_command(
         args.protection_bypass_env.as_deref(),
         |name| std::env::var(name),
     )?;
-    let credential = select_credential(PublishToken::from_env(), streaming, interactive, || {
+    let explicit = PublishToken::from_env();
+    if explicit.is_none() && !streaming {
+        return Err(publish_error(
+            HubPublishErrorCode::AuthDenied,
+            "no publish credential: set GRAPHFORGE_HUB_PUBLISH_TOKEN or run gf publish in a terminal",
+        ));
+    }
+    let transport = crate::hub_http::HubTransport::new();
+    let resolution = resolve_publication(&transport, &identity, &base, bypass.as_ref())?;
+    let (identity, base) = (resolution.identity.clone(), resolution.base.clone());
+    let credential = select_credential(explicit, streaming, interactive, || {
         let grant = crate::auth::repository_token(
             &base,
             &identity.owner,
@@ -250,13 +266,9 @@ fn run_command(
         credential,
         wait: &std::thread::sleep,
         notices: &mut notices,
+        resolution: Some(resolution),
     };
-    let outcome = publish(
-        &crate::hub_http::HubTransport::new(),
-        &graph,
-        args,
-        &mut environment,
-    )?;
+    let outcome = publish(&transport, &graph, args, &mut environment)?;
     write_outcome(&outcome, json, output)
 }
 
@@ -267,10 +279,25 @@ pub(crate) fn write_outcome(
 ) -> Result<(), GfError> {
     let io = |error: std::io::Error| GfError::Storage(error.to_string());
     if json {
-        serde_json::to_writer(&mut *output, &outcome.receipt)
+        let mut result = serde_json::to_value(&outcome.receipt)
+            .map_err(|error| GfError::Execution(error.to_string()))?;
+        if let Some(moved) = &outcome.moved {
+            result["moved_from"] = json!(moved.moved_from.canonical_name());
+            result["moved_to"] = json!(moved.moved_to.canonical_name());
+        }
+        serde_json::to_writer(&mut *output, &result)
             .map_err(|error| GfError::Execution(error.to_string()))?;
         writeln!(output).map_err(io)
     } else {
+        if let Some(moved) = &outcome.moved {
+            writeln!(
+                output,
+                "Repository moved from {} to {}",
+                moved.moved_from.canonical_name(),
+                moved.moved_to.canonical_name()
+            )
+            .map_err(io)?;
+        }
         writeln!(
             output,
             "Published {} ({}) at revision {}",
@@ -280,6 +307,55 @@ pub(crate) fn write_outcome(
         )
         .map_err(io)
     }
+}
+
+struct PublicationResolution {
+    requested: RepositoryIdentity,
+    requested_base: Url,
+    identity: RepositoryIdentity,
+    base: Url,
+    moved: Option<graphforge_discovery::RepositoryMoved>,
+    capabilities: PublishCapabilities,
+}
+fn resolve_publication(
+    transport: &dyn Transport,
+    identity: &RepositoryIdentity,
+    base: &Url,
+    bypass: Option<&crate::hub_http::DiscoveryCredentials>,
+) -> Result<PublicationResolution, GfError> {
+    let tracker = crate::hub_http::RepositoryMoveTransport::new(transport, identity, base)
+        .with_credentials(bypass);
+    let hub = Hub {
+        transport: &tracker,
+        base: base.clone(),
+        bypass,
+    };
+    let (bytes, _) = hub
+        .read_control(&endpoint(base, "publish"), MAX_CONTROL_RESPONSE_BYTES)?
+        .ok_or_else(|| {
+            publish_error(
+                HubPublishErrorCode::InvalidInput,
+                "the Hub does not accept publications for this repository",
+            )
+        })?;
+    let (current, current_base, moved) = tracker.resolved(true)?;
+    let capabilities = PublishCapabilities::from_json(&bytes).map_err(|error| protocol(&error))?;
+    if capabilities.repository != current
+        || capabilities.authorization.scope != publish_scope(&current)
+    {
+        return Err(publish_error(
+            HubPublishErrorCode::InvalidInput,
+            "capabilities describe another repository",
+        ));
+    }
+    Ok(PublicationResolution {
+        requested: identity.clone(),
+        requested_base: base.clone(),
+        identity: current,
+        base: current_base,
+        moved,
+        capabilities,
+    })
 }
 
 // ------------------------------------------------------------------- errors
@@ -730,6 +806,62 @@ fn intent_digest(
     })))
 }
 
+struct SelectedPreview {
+    descriptor: graphforge_hub_publish::preview::PreviewDescriptor,
+    bytes: Vec<u8>,
+}
+fn select_previews(
+    args: &PublishArgs,
+    version_uuid: Uuid,
+) -> Result<Vec<SelectedPreview>, GfError> {
+    use graphforge_hub_publish::preview as p;
+    use std::io::Read;
+    if args.previews.len() > p::MAX_PREVIEWS {
+        return Err(derivation("preview.limit"));
+    }
+    let mut selected = Vec::new();
+    let mut total = 0_u64;
+    for path in &args.previews {
+        let file = std::fs::File::open(path).map_err(|_| derivation("preview.content"))?;
+        let mut bytes = Vec::new();
+        file.take(p::MAX_PREVIEW_BYTES as u64 + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|_| derivation("preview.content"))?;
+        total += bytes.len() as u64;
+        if total > p::MAX_TOTAL_PREVIEW_BYTES {
+            return Err(derivation("preview.limit"));
+        }
+        let media_type = if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+            "image/png"
+        } else {
+            "image/svg+xml"
+        };
+        let (width, height) = p::validate_image(media_type, &bytes)
+            .map_err(|error| derivation(&error.to_string()))?;
+        selected.push(SelectedPreview {
+            descriptor: p::PreviewDescriptor {
+                version_uuid: version_uuid.to_string(),
+                digest: p::digest(&bytes),
+                media_type: media_type.into(),
+                length: bytes.len() as u64,
+                width,
+                height,
+                caption: None,
+                alt: None,
+            },
+            bytes,
+        });
+    }
+    p::validate_descriptors(
+        &selected
+            .iter()
+            .map(|p| p.descriptor.clone())
+            .collect::<Vec<_>>(),
+    )
+    .map_err(|error| derivation(&error.to_string()))?;
+    Ok(selected)
+}
+
 // ---------------------------------------------------------- repository side
 
 /// Published state of a repository, read before building the next snapshot.
@@ -745,11 +877,19 @@ fn read_published(
     base: &Url,
     identity: &RepositoryIdentity,
 ) -> Result<Option<Published>, GfError> {
-    let Some((refs_bytes, etag)) = hub.read_control(&endpoint(base, "refs"), MAX_METADATA_BYTES)?
+    let tracker = crate::hub_http::RepositoryMoveTransport::new(hub.transport, identity, base)
+        .with_credentials(hub.bypass.filter(|_| base.origin() == hub.base.origin()));
+    let read_hub = Hub {
+        transport: &tracker,
+        base: hub.base.clone(),
+        bypass: hub.bypass,
+    };
+    let Some((refs_bytes, etag)) =
+        read_hub.read_control(&endpoint(base, "refs"), MAX_METADATA_BYTES)?
     else {
         return Ok(None);
     };
-    let (manifest_bytes, _) = hub
+    let (manifest_bytes, _) = read_hub
         .read_control(&endpoint(base, "manifest"), MAX_METADATA_BYTES)?
         .ok_or_else(|| {
             publish_error(
@@ -757,11 +897,12 @@ fn read_published(
                 "repository refs exist without a manifest",
             )
         })?;
+    let (identity, _, _) = tracker.resolved(false)?;
     bind_published(
         &refs_bytes,
         etag.as_deref(),
         &manifest_bytes,
-        identity,
+        &identity,
         |object, limit| read_object(hub, object, limit),
     )
     .map(Some)
@@ -1552,38 +1693,69 @@ pub(crate) fn publish(
             )
         })?;
     let selection = select(graph, args)?;
+    let previews = select_previews(args, selection.version_uuid)?;
+    let preview_metadata = previews
+        .iter()
+        .map(|p| p.descriptor.clone())
+        .collect::<Vec<_>>();
+    let operation_content = if previews.is_empty() {
+        selection.project_content.clone()
+    } else {
+        sha256_digest(&canonical_json(
+            &json!({"project_content":selection.project_content,"previews":preview_metadata}),
+        ))
+    };
+    let resolution = match environment.resolution.take() {
+        Some(resolution) => {
+            if resolution.requested != identity || resolution.requested_base != base {
+                return Err(validation(
+                    "hub.integrity_failure",
+                    "resolved publication does not match the request",
+                ));
+            }
+            resolution
+        }
+        None => resolve_publication(transport, &identity, &base, environment.bypass)?,
+    };
+    let PublicationResolution {
+        identity,
+        base,
+        moved,
+        capabilities,
+        ..
+    } = resolution;
+
     let operation_uuid = operation_uuid.unwrap_or_else(|| {
         graphforge_api::hub_publish_operation(
             &identity.canonical_name(),
             selection.git_ref.as_deref(),
             &selection.version_uuid.to_string(),
-            &selection.project_content,
+            &operation_content,
         )
     });
-    let intent_digest = intent_digest(&identity, &selection, fork.as_ref().map(|(id, _)| id));
+    let base_intent = intent_digest(&identity, &selection, fork.as_ref().map(|(id, _)| id));
+    let intent_digest = if previews.is_empty() {
+        base_intent
+    } else {
+        sha256_digest(&canonical_json(
+            &json!({"intent":base_intent,"previews":preview_metadata}),
+        ))
+    };
     let hub = Hub {
         bypass: environment.bypass,
         transport,
         base: base.clone(),
     };
 
-    // Capabilities first: an unsupported future Hub fails before publish-token use.
-    let (capabilities_bytes, _) = hub
-        .read_control(&endpoint(&base, "publish"), MAX_CONTROL_RESPONSE_BYTES)?
-        .ok_or_else(|| {
-            publish_error(
-                HubPublishErrorCode::InvalidInput,
-                "the Hub does not accept publications for this repository",
-            )
-        })?;
-    let capabilities =
-        PublishCapabilities::from_json(&capabilities_bytes).map_err(|error| protocol(&error))?;
-    if capabilities.repository != identity
-        || capabilities.authorization.scope != publish_scope(&identity)
+    if !previews.is_empty()
+        && !capabilities
+            .capabilities
+            .iter()
+            .any(|c| c.capability == "version-previews" && c.major == 1)
     {
         return Err(publish_error(
-            HubPublishErrorCode::InvalidInput,
-            "capabilities describe another repository",
+            HubPublishErrorCode::UnsupportedFuture,
+            "Hub does not support the selected preview channel",
         ));
     }
     let token = obtain_token(&hub, &capabilities, environment)?;
@@ -1612,6 +1784,7 @@ pub(crate) fn publish(
                 return Ok(PublishOutcome {
                     receipt,
                     replayed: true,
+                    moved,
                 });
             }
         }
@@ -1643,7 +1816,7 @@ pub(crate) fn publish(
         (None, None) => None,
     };
     let scratch = prepare_staging(graph, args.staging_directory.as_deref())?;
-    let (snapshot, lineage) = build_snapshot(
+    let (mut snapshot, lineage) = build_snapshot(
         graph,
         &identity,
         &capabilities,
@@ -1652,6 +1825,46 @@ pub(crate) fn publish(
         fork_origin_repository,
         scratch.path(),
     )?;
+    if !previews.is_empty() {
+        use graphforge_hub_publish::preview as p;
+        for item in previews {
+            snapshot.manifest.objects.push(object_descriptor(
+                item.descriptor.digest.clone(),
+                item.descriptor.length,
+                &item.descriptor.media_type,
+                capabilities.object_location(&item.descriptor.digest),
+            ));
+            snapshot
+                .sources
+                .insert(item.descriptor.digest, Source::Bytes(item.bytes));
+        }
+        snapshot
+            .manifest
+            .objects
+            .sort_by(|a, b| a.digest.cmp(&b.digest));
+        snapshot.manifest.extensions.insert(
+            p::PREVIEW_EXTENSION.into(),
+            serde_json::to_value(p::PreviewSet {
+                format: "graphforge-previews/1".into(),
+                previews: preview_metadata,
+            })
+            .map_err(|_| derivation("preview.content"))?,
+        );
+        snapshot
+            .manifest
+            .validate(DiscoveryLimits::default())
+            .map_err(|error| discovery(&error))?;
+        snapshot.objects = snapshot
+            .manifest
+            .objects
+            .iter()
+            .map(|object| ObjectDeclaration {
+                digest: object.digest.0.clone(),
+                length: object.length,
+                media_type: object.media_type.clone(),
+            })
+            .collect();
+    }
     // The packages must come from the generation the intent names.
     if project_content(graph)? != selection.project_content {
         return Err(publish_error(
@@ -1703,6 +1916,10 @@ pub(crate) fn publish(
                 )
             })
             .cloned()
+            .chain(
+                (!args.previews.is_empty())
+                    .then(|| graphforge_hub_publish::Capability::new("version-previews", 1)),
+            )
             .collect(),
     };
     negotiated_chunk_size(&capabilities.limits)?;
@@ -1717,6 +1934,7 @@ pub(crate) fn publish(
             return Ok(PublishOutcome {
                 receipt,
                 replayed: true,
+                moved,
             });
         }
         SessionResponse::Open {
@@ -1817,6 +2035,7 @@ pub(crate) fn publish(
     Ok(PublishOutcome {
         receipt,
         replayed: false,
+        moved,
     })
 }
 

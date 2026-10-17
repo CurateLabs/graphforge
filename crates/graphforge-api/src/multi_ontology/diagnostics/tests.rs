@@ -8,6 +8,11 @@ fn portable_error_conversion_is_complete_and_stable() {
     use graphforge_storage::{PortableV2Error, PortableV2ErrorCode};
     let cases = [
         (
+            PortableV2ErrorCode::UnsupportedProjectFormat,
+            "GF_UNSUPPORTED_PROJECT_FORMAT",
+            "interchange.unsupported_format",
+        ),
+        (
             PortableV2ErrorCode::Cancelled,
             "GF_CANCELLED",
             "lifecycle.cancelled",

@@ -403,6 +403,16 @@ impl Transport for LoopbackTransport {
             .get(&self.route(url.as_str())?, range, if_range, limit)
     }
 
+    fn get_discovery(
+        &self,
+        url: &Url,
+        headers: &[(&str, ureq::http::HeaderValue)],
+        limit: u64,
+    ) -> Result<HttpResponse, GfError> {
+        self.inner
+            .get_discovery(&self.route(url.as_str())?, headers, limit)
+    }
+
     fn exchange(&self, request: &HubRequest, limit: usize) -> Result<HubResponse, GfError> {
         let mut routed = request.clone();
         routed.url = self.route(&request.url)?.to_string();
@@ -517,6 +527,7 @@ fn args(repository: &str) -> PublishArgs {
         operation_uuid: None,
         protection_bypass_env: None,
         staging_directory: None,
+        previews: Vec::new(),
     }
 }
 
@@ -561,6 +572,7 @@ fn run_publish_with_bypass(
             credential,
             wait: &|_| panic!("no device flow expected"),
             notices: &mut stderr,
+            resolution: None,
         };
         publish(&hub.transport(), graph, args, &mut environment)
     };
@@ -1003,6 +1015,53 @@ fn published_fork_clones_back_with_origin_citation() {
             source.origin_project_uuid
         );
     }
+    // A citation remains the original published identity, while resolution may
+    // follow its verified one-hop move only for that exact Version identity.
+    let citation = lineage.fork.as_ref().unwrap().clone();
+    hub.hub
+        .move_repository(
+            &citation.origin_repository,
+            &RepositoryIdentity::parse("research/moved-origin").unwrap(),
+        )
+        .unwrap();
+    let transport = hub.transport();
+    let source_base = Url::parse(&repository_url("curate/claims")).unwrap();
+    let bypass = crate::hub_http::DiscoveryCredentials::load(
+        &Url::parse(HUB).unwrap(),
+        None,
+        Some("PREVIEW_SECRET"),
+        |_| Ok("fork-preview".into()),
+    )
+    .unwrap();
+    let reader = Hub {
+        transport: &transport,
+        base: source_base.clone(),
+        bypass: bypass.as_ref(),
+    };
+    let before = hub.log().len();
+    verify_fork_origin(&reader, &source_base, &citation).unwrap();
+    let log = hub.log();
+    assert!(
+        log[before..]
+            .iter()
+            .any(|r| r.path == "/research/moved-origin/.gf/refs")
+    );
+    for request in &log[before..] {
+        assert!(request.bearer.is_none());
+        assert_eq!(
+            request.bypass.as_deref(),
+            if request.path.ends_with("/.gf/refs") || request.path.ends_with("/.gf/manifest") {
+                Some("fork-preview")
+            } else {
+                None
+            }
+        );
+    }
+    let mut wrong = citation.clone();
+    wrong.origin_version_identity = Sha256Digest(sha256_digest(b"another identity"));
+    assert!(verify_fork_origin(&reader, &source_base, &wrong).is_err());
+    let (_, retained) = served_lineage(&hub, "curate/claims-fork");
+    assert_eq!(retained.fork.as_ref(), Some(&citation));
 }
 
 /// Consistent refs, manifest, and lineage for `repository` whose lineage lists
@@ -1351,6 +1410,7 @@ fn a_slow_but_progressing_upload_succeeds_in_bounded_chunks() {
         credential: Credential::Token(token(&hub, "curate/claims")),
         wait: &|_| panic!("no device flow expected"),
         notices: &mut notices,
+        resolution: None,
     };
     let outcome = publish(
         &transport,
@@ -1451,6 +1511,7 @@ fn device_flow(
             credential: Credential::DeviceFlow,
             wait: &wait,
             notices: &mut writer,
+            resolution: None,
         };
         publish(
             &hub.transport(),
@@ -1723,11 +1784,28 @@ fn preview_publish_keeps_bypass_on_control_requests_and_off_upload_retries() {
         bypass.as_ref(),
     );
     run.result.unwrap();
+    let old = RepositoryIdentity::parse("curate/claims").unwrap();
+    let new = RepositoryIdentity::parse("research/renamed").unwrap();
+    hub.hub.move_repository(&old, &new).unwrap();
+    let moved = run_publish_with_bypass(
+        &hub,
+        &history.graph,
+        &on_ref("curate/claims", "main"),
+        Credential::Token(token(&hub, "research/renamed")),
+        bypass.as_ref(),
+    )
+    .result
+    .unwrap();
+    assert_eq!(moved.receipt.repository, new);
+    assert_eq!(moved.moved.unwrap().moved_from, old);
     let log = hub.log();
     assert!(log.iter().any(|entry| entry.method == "HEAD"));
     assert!(log.iter().filter(|entry| entry.method == "PUT").count() >= 2);
     for entry in log {
-        if entry.method == "HEAD" || entry.method == "PUT" {
+        if entry.method == "HEAD"
+            || entry.method == "PUT"
+            || (entry.method == "GET" && entry.path.contains("/.gf/objects/"))
+        {
             assert!(
                 entry.bypass.is_none(),
                 "upload purpose must exclude preview credentials"
@@ -2265,5 +2343,510 @@ fn native_publish_polls_async_verification_and_replays_the_original_receipt() {
             .revisions(&RepositoryIdentity::parse("curate/async-publication").unwrap())
             .len(),
         1
+    );
+}
+
+fn assert_rehomed_clones(hub: &LoopbackHub, history: &History) {
+    let root = tempfile::tempdir().unwrap();
+    for (name, repository) in [
+        ("old", "curate/claims"),
+        ("short", "curate/claims"),
+        ("new", "research/renamed"),
+    ] {
+        let destination = root.path().join(name);
+        let cloned = if name == "short" {
+            let mut output = Vec::new();
+            run_clone_with(
+                &hub.transport(),
+                CloneArgs {
+                    hub: Some(HUB.into()),
+                    token_env: None,
+                    protection_bypass_env: None,
+                    repository: repository.into(),
+                    destination: Some(destination.clone()),
+                    telemetry_endpoint: None,
+                    git_ref: None,
+                    version_uuid: None,
+                },
+                true,
+                &mut output,
+            )
+            .unwrap();
+            serde_json::from_slice(&output).unwrap()
+        } else {
+            clone_into(&hub, repository, &destination, None, None)
+        };
+        assert_eq!(cloned["repository"], "research/renamed");
+        if name != "new" {
+            assert_eq!(cloned["moved_from"], "curate/claims");
+            assert_eq!(cloned["moved_to"], "research/renamed");
+        }
+        let reopened = GraphForge::new(destination.to_str()).unwrap();
+        assert_eq!(
+            reference(&reopened, history.head).identity_sha256,
+            reference(&history.graph, history.head).identity_sha256
+        );
+        let query = reopened
+            .execute("MATCH (n:Item) RETURN count(n) AS total, sum(n.score) AS score")
+            .unwrap();
+        for (column, expected) in [(0, 1), (1, 1)] {
+            assert_eq!(
+                query.batches[0]
+                    .column(column)
+                    .as_any()
+                    .downcast_ref::<arrow::array::Int64Array>()
+                    .unwrap()
+                    .value(0),
+                expected
+            );
+        }
+    }
+    let mut human_clone = Vec::new();
+    run_clone_with(
+        &hub.transport(),
+        CloneArgs {
+            hub: Some(HUB.into()),
+            token_env: None,
+            protection_bypass_env: None,
+            repository: "curate/claims".into(),
+            destination: Some(root.path().join("human")),
+            telemetry_endpoint: None,
+            git_ref: None,
+            version_uuid: None,
+        },
+        false,
+        &mut human_clone,
+    )
+    .unwrap();
+    assert!(
+        String::from_utf8(human_clone)
+            .unwrap()
+            .contains("Repository moved from curate/claims to research/renamed")
+    );
+}
+
+#[test]
+fn moved_repository_clones_both_names_and_publishes_only_with_current_scope() {
+    let mut history = history();
+    let hub = LoopbackHub::start();
+    publish_ok(&hub, &history.graph, &on_ref("curate/claims", "main"));
+    let old = RepositoryIdentity::parse("curate/claims").unwrap();
+    let new = RepositoryIdentity::parse("research/renamed").unwrap();
+    let (_, before) = served_lineage(&hub, "curate/claims");
+    hub.hub.move_repository(&old, &new).unwrap();
+    let (_, after) = served_lineage(&hub, "research/renamed");
+    assert_eq!(after.versions, before.versions);
+    assert_rehomed_clones(&hub, &history);
+    edit(&mut history.graph, history.branch, 3);
+    let before_log = hub.log().len();
+    let stale = run_publish_with(
+        &hub,
+        &history.graph,
+        &on_ref("curate/claims", "main"),
+        Credential::Token(token(&hub, "curate/claims")),
+    );
+    assert!(stale.result.is_err());
+    assert!(puts(&hub.log()[before_log..]).is_empty());
+    let current = run_publish_with(
+        &hub,
+        &history.graph,
+        &on_ref("curate/claims", "main"),
+        Credential::Token(token(&hub, "research/renamed")),
+    );
+    let outcome = current.result.unwrap();
+    assert_eq!(outcome.receipt.repository, new);
+    assert_eq!(outcome.moved.as_ref().unwrap().moved_from, old);
+    let mut human = Vec::new();
+    write_outcome(&outcome, false, &mut human).unwrap();
+    assert!(
+        String::from_utf8(human)
+            .unwrap()
+            .contains("Repository moved from curate/claims to research/renamed")
+    );
+    let json: serde_json::Value = serde_json::from_slice(&current.stdout).unwrap();
+    assert_eq!(json["moved_to"], "research/renamed");
+    assert!(
+        hub.log()[before_log..]
+            .iter()
+            .filter(|entry| entry.method == "POST")
+            .all(|entry| entry.path.starts_with("/research/renamed/"))
+    );
+}
+
+#[test]
+fn selected_png_svg_previews_are_version_bound_but_not_native_package_data() {
+    let history = history();
+    let mut config = ReferenceHubConfig {
+        base_url: HUB.into(),
+        authorization_client_id: Some("client_workos_preview".into()),
+        object_location_hex: true,
+        ..ReferenceHubConfig::default()
+    };
+    config.limits.preferred_chunk_bytes = Some(8 * 1024 * 1024);
+    let plain = LoopbackHub::with_config(config);
+    publish_ok(&plain, &history.graph, &on_ref("curate/claims", "main"))
+        .result
+        .unwrap();
+    let (plain_manifest, _) = served_lineage(&plain, "curate/claims");
+    let root = tempfile::tempdir().unwrap();
+    let cases: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../docs/reference/hub-publish/v1/previews.json"
+    ))
+    .unwrap();
+    let hex = cases[0]["hex"].as_str().unwrap();
+    let png: Vec<u8> = (0..hex.len())
+        .step_by(2)
+        .map(|n| u8::from_str_radix(&hex[n..n + 2], 16).unwrap())
+        .collect();
+    let svg = cases[1]["utf8"].as_str().unwrap().as_bytes();
+    let paths = [
+        root.path().join("selected.png"),
+        root.path().join("selected.svg"),
+    ];
+    std::fs::write(&paths[0], &png).unwrap();
+    std::fs::write(&paths[1], svg).unwrap();
+    // Adjacent unsafe/private workbench files are never inferred as selections.
+    std::fs::write(root.path().join("unselected.svg"), b"<script/>").unwrap();
+    let selected = &plain;
+    let mut args = on_ref("curate/claims", "main");
+    args.previews = paths.to_vec();
+    let first = publish_ok(selected, &history.graph, &args).result.unwrap();
+    assert!(!first.replayed);
+    assert!(
+        publish_ok(selected, &history.graph, &args)
+            .result
+            .unwrap()
+            .replayed
+    );
+    let (manifest, _) = served_lineage(&selected, "curate/claims");
+    assert_eq!(plain_manifest.package, manifest.package);
+    let plain_package = plain.hub.handle(&HubRequest::new(
+        HubMethod::Get,
+        &plain_manifest.package_object().unwrap().locations[0],
+    ));
+    let selected_package = selected.hub.handle(&HubRequest::new(
+        HubMethod::Get,
+        &manifest.package_object().unwrap().locations[0],
+    ));
+    assert_eq!(
+        plain_package.body, selected_package.body,
+        "preview channel never alters native package bytes"
+    );
+    let previews = manifest.preview_descriptors().unwrap();
+    assert_eq!(previews.len(), 2);
+    for (item, expected) in previews.iter().zip([png.as_slice(), svg]) {
+        assert_eq!(item.version_uuid, history.head.to_string());
+        let object = manifest
+            .objects
+            .iter()
+            .find(|object| object.digest.0 == item.digest)
+            .unwrap();
+        let response = selected
+            .hub
+            .handle(&HubRequest::new(HubMethod::Get, &object.locations[0]));
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, expected);
+        graphforge_hub_publish::preview::validate_preview(item, &response.body).unwrap();
+    }
+    // New validated image selections get new default identities. An explicit
+    // reused operation remains a conflict, preserving caller-stable CAS intent.
+    std::fs::write(&paths[1],br#"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16"><rect width="2" height="2"/></svg>"#).unwrap();
+    let explicit = PublishArgs {
+        operation_uuid: Some(first.receipt.operation_uuid.to_string()),
+        previews: args.previews.clone(),
+        ..on_ref("curate/claims", "main")
+    };
+    let refused = run_publish_with(
+        selected,
+        &history.graph,
+        &explicit,
+        Credential::Token(token(selected, "curate/claims")),
+    );
+    assert_eq!(
+        refused.result.unwrap_err().code(),
+        "GF_IDEMPOTENCY_CONFLICT"
+    );
+    let changed = publish_ok(selected, &history.graph, &args).result.unwrap();
+    assert!(!changed.replayed);
+    assert_ne!(changed.receipt.operation_uuid, first.receipt.operation_uuid);
+    assert!(
+        publish_ok(selected, &history.graph, &args)
+            .result
+            .unwrap()
+            .replayed
+    );
+    let (final_manifest, _) = served_lineage(selected, "curate/claims");
+    let previews = final_manifest.preview_descriptors().unwrap();
+    let before = selected.log().len();
+    clone_into(
+        &selected,
+        "curate/claims",
+        &root.path().join("clone"),
+        Some("main"),
+        None,
+    );
+    let reads = selected.log();
+    for item in &previews {
+        assert!(
+            !reads[before..]
+                .iter()
+                .any(|r| r.method == "GET" && r.path.contains(&item.digest[7..]))
+        );
+    }
+
+    // Re-homing preserves the selected presentation channel, while publication
+    // through either name derives the same current-identity operation.
+    let old = RepositoryIdentity::parse("curate/claims").unwrap();
+    let new = RepositoryIdentity::parse("research/renamed").unwrap();
+    selected.hub.move_repository(&old, &new).unwrap();
+    let (moved_manifest, _) = served_lineage(selected, "research/renamed");
+    assert_eq!(moved_manifest.preview_descriptors().unwrap(), previews);
+    assert_eq!(moved_manifest.package, final_manifest.package);
+    for (item, path) in previews.iter().zip(&paths) {
+        let object = moved_manifest
+            .objects
+            .iter()
+            .find(|object| object.digest.0 == item.digest)
+            .unwrap();
+        let response = selected
+            .hub
+            .handle(&HubRequest::new(HubMethod::Get, &object.locations[0]));
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, std::fs::read(path).unwrap());
+    }
+    let before = selected.log().len();
+    let moved = run_publish_with(
+        selected,
+        &history.graph,
+        &args,
+        Credential::Token(token(selected, "research/renamed")),
+    )
+    .result
+    .unwrap();
+    assert_eq!(moved.receipt.repository, new);
+    assert_eq!(moved.moved.as_ref().unwrap().moved_from, old);
+    args.repository = repository_url("research/renamed");
+    let before_replay = selected.log().len();
+    let canonical = publish_ok(selected, &history.graph, &args).result.unwrap();
+    assert!(canonical.replayed);
+    assert_eq!(canonical.receipt, moved.receipt);
+    assert!(puts(&selected.log()[before_replay..]).is_empty());
+    assert!(
+        selected.log()[before..]
+            .iter()
+            .filter(|entry| entry.method == "POST")
+            .all(|entry| entry.path.starts_with("/research/renamed/"))
+    );
+}
+
+#[test]
+fn unsafe_or_oversize_selected_preview_fails_before_any_upload() {
+    let history = history();
+    let root = tempfile::tempdir().unwrap();
+    for (name, bytes) in [
+        (
+            "unsafe.svg",
+            br#"<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"><script/></svg>"#
+                .to_vec(),
+        ),
+        (
+            "oversize.png",
+            vec![0; graphforge_hub_publish::preview::MAX_PREVIEW_BYTES + 1],
+        ),
+        ("not-image.html", b"<html/>".to_vec()),
+    ] {
+        let path = root.path().join(name);
+        std::fs::write(&path, bytes).unwrap();
+        let hub = LoopbackHub::start();
+        let mut args = on_ref("curate/claims", "main");
+        args.previews = vec![path];
+        let run = run_publish_with(
+            &hub,
+            &history.graph,
+            &args,
+            Credential::Token(token(&hub, "curate/claims")),
+        );
+        let error = run.result.unwrap_err();
+        assert!(error.to_string().contains("preview."));
+        assert!(puts(&hub.log()).is_empty());
+        assert!(
+            hub.log().is_empty(),
+            "invalid selected images fail before networking"
+        );
+    }
+}
+
+#[test]
+fn reference_hub_revalidates_unsafe_images_even_when_client_admission_is_bypassed() {
+    use graphforge_hub_publish::preview::{PREVIEW_EXTENSION, PreviewDescriptor, PreviewSet};
+    use graphforge_hub_publish::{Capability, content_range};
+    let history = history();
+    let hub = LoopbackHub::start();
+    publish_ok(&hub, &history.graph, &on_ref("curate/claims", "main"))
+        .result
+        .unwrap();
+    let (original, _) = served_lineage(&hub, "curate/claims");
+    let bytes=br#"<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"><script>alert(1)</script></svg>"#.to_vec();
+    let valid =
+        br#"<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"><path d="M0 0"/></svg>"#
+            .to_vec();
+    for (bytes, version, detail) in [
+        (bytes, history.head.to_string(), "Core image admission"),
+        (
+            valid,
+            Uuid::now_v7().to_string(),
+            "absent from native lineage",
+        ),
+    ] {
+        let digest = sha256_digest(&bytes);
+        let mut manifest = original.clone();
+        manifest.objects.push(object_descriptor(
+            digest.clone(),
+            bytes.len() as u64,
+            "image/svg+xml",
+            format!("{HUB}/curate/claims/.gf/objects/{digest}"),
+        ));
+        manifest.objects.sort_by(|a, b| a.digest.cmp(&b.digest));
+        manifest.extensions.insert(
+            PREVIEW_EXTENSION.into(),
+            serde_json::to_value(PreviewSet {
+                format: "graphforge-previews/1".into(),
+                previews: vec![PreviewDescriptor {
+                    version_uuid: version,
+                    digest: digest.clone(),
+                    media_type: "image/svg+xml".into(),
+                    length: bytes.len() as u64,
+                    width: 1,
+                    height: 1,
+                    caption: None,
+                    alt: None,
+                }],
+            })
+            .unwrap(),
+        );
+        manifest.validate(DiscoveryLimits::default()).unwrap(); // Metadata alone is valid.
+        let objects: Vec<_> = manifest
+            .objects
+            .iter()
+            .map(|o| ObjectDeclaration {
+                digest: o.digest.0.clone(),
+                length: o.length,
+                media_type: o.media_type.clone(),
+            })
+            .collect();
+        let expected_revision = Some(sha256_digest(&refs_document(&hub, "curate/claims").body));
+        let intent = PublishIntent {
+            repository: manifest.repository.clone(),
+            intent_digest: sha256_digest(b"untrusted preview caller"),
+            objects: objects.clone(),
+            manifest_validator: manifest.canonical_digest().unwrap().0,
+            refs: vec!["main".into()],
+            expected_revision: expected_revision.clone(),
+        };
+        let token = token(&hub, "curate/claims");
+        let response = hub.hub.handle(
+            &HubRequest::new(
+                HubMethod::Post,
+                format!("{HUB}/curate/claims/.gf/publish/sessions"),
+            )
+            .with_header("authorization", token.authorization())
+            .with_json(&OpenSessionRequest {
+                format: HUB_PUBLISH_FORMAT.into(),
+                operation_uuid: Uuid::now_v7(),
+                request_commitment: intent.request_commitment(),
+                intent_digest: intent.intent_digest.clone(),
+                repository: manifest.repository.clone(),
+                objects,
+                requirements: vec![Capability::new("version-previews", 1)],
+            }),
+        );
+        assert_eq!(response.status, 201);
+        let SessionResponse::Open {
+            session_id,
+            uploads,
+        } = serde_json::from_slice(&response.body).unwrap()
+        else {
+            panic!("new session")
+        };
+        for upload in uploads {
+            if upload.received == upload.length {
+                continue;
+            }
+            let body = if upload.digest == digest {
+                bytes.clone()
+            } else {
+                let location = manifest
+                    .objects
+                    .iter()
+                    .find(|o| o.digest.0 == upload.digest)
+                    .unwrap()
+                    .locations[0]
+                    .clone();
+                hub.hub
+                    .handle(&HubRequest::new(HubMethod::Get, location))
+                    .body
+            };
+            let response = hub.hub.handle(
+                &HubRequest::new(HubMethod::Put, upload.upload_url)
+                    .with_header(
+                        "content-range",
+                        content_range(0, body.len() as u64, body.len() as u64),
+                    )
+                    .with_body(body),
+            );
+            assert_eq!(response.status, 200);
+        }
+        let before = refs_document(&hub, "curate/claims").body;
+        let response = hub.hub.handle(
+            &HubRequest::new(
+                HubMethod::Post,
+                format!("{HUB}/curate/claims/.gf/publish/sessions/{session_id}/commit"),
+            )
+            .with_header("authorization", token.authorization())
+            .with_json(&CommitRequest {
+                manifest: serde_json::to_value(manifest).unwrap(),
+                refs: vec!["main".into()],
+                expected_revision,
+            }),
+        );
+        assert_eq!(response.status, 400);
+        let body: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
+        assert_eq!(body["code"], "invalid_input");
+        assert!(body["message"].as_str().unwrap().contains(detail));
+        assert_eq!(refs_document(&hub, "curate/claims").body, before);
+    }
+}
+
+#[test]
+fn opaque_workbench_file_cannot_be_selected_as_native_package_data() {
+    use graphforge_api::{
+        PortableV2ErrorCode, PortableV2Limits, PortableV2ParticipantId, PortableV2SelectionProfile,
+        PortableV2SelectionRequest,
+    };
+    let history = history();
+    std::fs::write(
+        history.root.path().join("project/notebook.ipynb"),
+        b"{\"cells\":[]}",
+    )
+    .unwrap();
+    let error = history
+        .graph
+        .preview_portable_v2_selection(&graphforge_api::PortableV2SelectionPreviewRequest {
+            selection: graphforge_api::PortableSelection::Current,
+            request: PortableV2SelectionRequest {
+                profile: PortableV2SelectionProfile::Custom(vec![PortableV2ParticipantId {
+                    capability_id: "opaque-files".into(),
+                    record_family_id: "notebook.ipynb".into(),
+                }]),
+                strict: true,
+            },
+            limits: PortableV2Limits::default(),
+        })
+        .unwrap_err();
+    assert_eq!(error.code, PortableV2ErrorCode::Incompatible);
+    assert!(
+        error
+            .to_string()
+            .contains("custom selector is missing or ambiguous")
     );
 }

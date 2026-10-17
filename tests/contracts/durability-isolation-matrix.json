@@ -762,8 +762,8 @@
   "filesystem_evidence": [
     {
       "kind": "rust",
-      "path": "crates/graphforge-storage/src/project_portable.rs",
-      "symbol": "linked_ancestor_is_rejected_for_source_export_and_target"
+      "path": "crates/graphforge-storage/src/project_import_target.rs",
+      "symbol": "linked_target_ancestor_is_rejected_before_admission"
     },
     {
       "kind": "rust",

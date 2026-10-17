@@ -1037,3 +1037,65 @@ fn actual_200_gib_object_publishes_in_uniform_64_mib_parts() {
         started.elapsed().as_secs()
     );
 }
+
+#[test]
+fn repository_move_rehomes_control_documents_without_rewriting_native_objects() {
+    let hub = ReferenceHub::new();
+    let old = demo();
+    let new = RepositoryIdentity::parse("research/renamed").unwrap();
+    let client = Client::new(&hub, old.clone());
+    let plan = Plan::new("unchanged native package", 'b', None);
+    client.publish(&plan);
+    let old_manifest = hub.handle(&HubRequest::new(
+        HubMethod::Get,
+        format!("{}/.gf/manifest", hub.repository_url(&old)),
+    ));
+    let original =
+        DiscoveryManifest::from_json(&old_manifest.body, DiscoveryLimits::default()).unwrap();
+    hub.move_repository(&old, &new).unwrap();
+    for suffix in ["refs", "manifest", "publish", "publish/sessions"] {
+        let response = hub.handle(&HubRequest::new(
+            if suffix.ends_with("sessions") {
+                HubMethod::Post
+            } else {
+                HubMethod::Get
+            },
+            format!("{}/.gf/{suffix}", hub.repository_url(&old)),
+        ));
+        assert_eq!(response.status, 308);
+        let marker = graphforge_discovery::RepositoryMoved::from_json(
+            &response.body,
+            DiscoveryLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(marker.moved_from, old);
+        assert_eq!(marker.moved_to, new);
+        assert_eq!(
+            response
+                .headers
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case("location"))
+                .map(|(_, value)| value)
+                .unwrap(),
+            &format!("{}/.gf/{suffix}", hub.repository_url(&new))
+        );
+    }
+    let current = hub.handle(&HubRequest::new(
+        HubMethod::Get,
+        format!("{}/.gf/manifest", hub.repository_url(&new)),
+    ));
+    assert_eq!(current.status, 200);
+    let manifest = DiscoveryManifest::from_json(&current.body, DiscoveryLimits::default()).unwrap();
+    assert_eq!(manifest.repository, new);
+    assert_eq!(manifest.package, original.package);
+    assert_eq!(manifest.objects, original.objects);
+    for object in &original.objects {
+        let retained = hub.handle(&HubRequest::new(
+            HubMethod::Get,
+            object.locations[0].as_str(),
+        ));
+        assert_eq!(retained.status, 200);
+        assert_eq!(retained.body, plan.bytes);
+    }
+    assert!(hub.move_repository(&old, &new).is_err());
+}
