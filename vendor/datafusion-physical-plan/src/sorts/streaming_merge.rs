@@ -19,6 +19,7 @@
 //! This is an order-preserving merge.
 
 use crate::metrics::BaselineMetrics;
+use crate::sorts::copy_admission::{CopyAdmission, CopyCapability};
 use crate::sorts::multi_level_merge::MultiLevelMergeBuilder;
 use crate::sorts::{
     merge::SortPreservingMergeStream,
@@ -43,7 +44,41 @@ macro_rules! primitive_merge_helper {
 }
 
 macro_rules! merge_helper {
-    ($t:ty, $sort:ident, $streams:ident, $schema:ident, $tracking_metrics:ident, $batch_size:ident, $fetch:ident, $reservation:ident, $enable_round_robin_tie_breaker:ident) => {{
+    ($t:ty, $sort:ident, $streams:ident, $schema:ident, $tracking_metrics:ident, $batch_size:ident, $fetch:ident, $reservation:ident, $enable_round_robin_tie_breaker:ident, $copy:ident) => {{
+        if let Some(copy) = $copy.as_ref() {
+            // Actual Field dispatch, without qualifying key evaluation/GC for
+            // dynamic progress. Its complete original guard stays live.
+            let metadata = crate::spill::admission::add(
+                FieldCursorStream::<$t>::constructor_bound(
+                    $streams.len(),
+                    $streams.capacity(),
+                )?,
+                SortPreservingMergeStream::<
+                    super::cursor::ArrayValues<
+                        <$t as super::cursor::CursorArray>::Values,
+                    >,
+                >::constructor_bound($streams.len(), $batch_size)?,
+            )?;
+            copy.preparing_field(metadata)?;
+            let streams = FieldCursorStream::<$t>::try_new_with_copy(
+                $sort,
+                $streams,
+                $reservation.new_empty(),
+                copy,
+            )?;
+            let stream = SortPreservingMergeStream::new_with_copy(
+                Box::new(streams),
+                $schema,
+                $tracking_metrics,
+                $batch_size,
+                $fetch,
+                $reservation,
+                $enable_round_robin_tie_breaker,
+                Some(Arc::clone(copy)),
+            )?;
+            copy.finish_preparing();
+            return Ok(Box::pin(stream));
+        }
         let streams =
             FieldCursorStream::<$t>::new($sort, $streams, $reservation.new_empty());
         return Ok(Box::pin(SortPreservingMergeStream::new(
@@ -88,6 +123,7 @@ pub struct StreamingMergeBuilder<'a> {
     fetch: Option<usize>,
     reservation: Option<MemoryReservation>,
     enable_round_robin_tie_breaker: bool,
+    copy: Option<Arc<CopyAdmission>>,
 }
 
 impl<'a> StreamingMergeBuilder<'a> {
@@ -141,6 +177,11 @@ impl<'a> StreamingMergeBuilder<'a> {
         self
     }
 
+    pub(super) fn with_copy(mut self, copy: Option<Arc<CopyAdmission>>) -> Self {
+        self.copy = copy;
+        self
+    }
+
     pub fn with_reservation(mut self, reservation: MemoryReservation) -> Self {
         self.reservation = Some(reservation);
         self
@@ -181,6 +222,7 @@ impl<'a> StreamingMergeBuilder<'a> {
             fetch,
             expressions,
             enable_round_robin_tie_breaker,
+            copy,
         } = self;
 
         // Early return if expressions are empty:
@@ -226,28 +268,53 @@ impl<'a> StreamingMergeBuilder<'a> {
         let reservation =
             reservation.expect("Reservation cannot be empty for streaming merge");
 
+        if let Some(copy) = copy
+            .as_ref()
+            .filter(|copy| copy.capability() == CopyCapability::PrimitiveField)
+        {
+            let streams = FieldCursorStream::<Int64Array>::try_new_with_copy(
+                expressions[0].clone(),
+                streams,
+                reservation.new_empty(),
+                copy,
+            )?;
+            let stream = SortPreservingMergeStream::new_with_copy(
+                Box::new(streams),
+                schema,
+                metrics,
+                batch_size,
+                fetch,
+                reservation,
+                enable_round_robin_tie_breaker,
+                Some(Arc::clone(copy)),
+            )?;
+            copy.finish_preparing();
+            return Ok(Box::pin(stream));
+        }
+
         // Special case single column comparisons with optimized cursor implementations
         if expressions.len() == 1 {
             let sort = expressions[0].clone();
             let data_type = sort.expr.data_type(schema.as_ref())?;
             downcast_primitive! {
-                data_type => (primitive_merge_helper, sort, streams, schema, metrics, batch_size, fetch, reservation, enable_round_robin_tie_breaker),
-                DataType::Utf8 => merge_helper!(StringArray, sort, streams, schema, metrics, batch_size, fetch, reservation, enable_round_robin_tie_breaker)
-                DataType::Utf8View => merge_helper!(StringViewArray, sort, streams, schema, metrics, batch_size, fetch, reservation, enable_round_robin_tie_breaker)
-                DataType::LargeUtf8 => merge_helper!(LargeStringArray, sort, streams, schema, metrics, batch_size, fetch, reservation, enable_round_robin_tie_breaker)
-                DataType::Binary => merge_helper!(BinaryArray, sort, streams, schema, metrics, batch_size, fetch, reservation, enable_round_robin_tie_breaker)
-                DataType::LargeBinary => merge_helper!(LargeBinaryArray, sort, streams, schema, metrics, batch_size, fetch, reservation, enable_round_robin_tie_breaker)
+                data_type => (primitive_merge_helper, sort, streams, schema, metrics, batch_size, fetch, reservation, enable_round_robin_tie_breaker, copy),
+                DataType::Utf8 => merge_helper!(StringArray, sort, streams, schema, metrics, batch_size, fetch, reservation, enable_round_robin_tie_breaker, copy)
+                DataType::Utf8View => merge_helper!(StringViewArray, sort, streams, schema, metrics, batch_size, fetch, reservation, enable_round_robin_tie_breaker, copy)
+                DataType::LargeUtf8 => merge_helper!(LargeStringArray, sort, streams, schema, metrics, batch_size, fetch, reservation, enable_round_robin_tie_breaker, copy)
+                DataType::Binary => merge_helper!(BinaryArray, sort, streams, schema, metrics, batch_size, fetch, reservation, enable_round_robin_tie_breaker, copy)
+                DataType::LargeBinary => merge_helper!(LargeBinaryArray, sort, streams, schema, metrics, batch_size, fetch, reservation, enable_round_robin_tie_breaker, copy)
                 _ => {}
             }
         }
 
-        let streams = RowCursorStream::try_new(
+        let streams = RowCursorStream::try_new_with_copy(
             schema.as_ref(),
             expressions,
             streams,
             reservation.new_empty(),
+            copy.clone(),
         )?;
-        Ok(Box::pin(SortPreservingMergeStream::new(
+        let stream = SortPreservingMergeStream::new_with_copy(
             Box::new(streams),
             schema,
             metrics,
@@ -255,6 +322,11 @@ impl<'a> StreamingMergeBuilder<'a> {
             fetch,
             reservation,
             enable_round_robin_tie_breaker,
-        )))
+            copy.clone(),
+        )?;
+        if let Some(copy) = &copy {
+            copy.finish_preparing();
+        }
+        Ok(Box::pin(stream))
     }
 }

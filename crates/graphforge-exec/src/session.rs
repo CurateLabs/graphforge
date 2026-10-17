@@ -1937,3 +1937,18 @@ mod query_memory_tests;
 
 #[cfg(test)]
 mod spill_pool_regression_tests;
+
+#[cfg(test)]
+mod spill_admission_tests;
+
+#[cfg(test)]
+mod spill_schema_tests;
+
+#[cfg(test)]
+mod copy_phase_tests;
+
+#[cfg(test)]
+mod spill_fifo_tests;
+
+#[cfg(test)]
+mod aggregate_input_tests;

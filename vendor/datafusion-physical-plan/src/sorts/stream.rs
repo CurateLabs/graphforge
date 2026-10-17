@@ -15,8 +15,10 @@
 // specific language governing permissions and limitations
 // under the License.
 
+use super::copy_admission::{CopyAdmission, CopyCapability, Phase, Resident};
 use crate::SendableRecordBatchStream;
 use crate::sorts::cursor::{ArrayValues, CursorArray, RowValues};
+use crate::spill::admission::{add, mul};
 use crate::{PhysicalExpr, PhysicalSortExpr};
 use arrow::array::{Array, UInt32Array};
 use arrow::compute::take_record_batch;
@@ -89,22 +91,30 @@ struct ReusableRows {
     // .0 is the rows from the previous poll (at start),
     // .1 is the one that is being written to
     // at end of a poll, .0 will be swapped with .1,
-    inner: Vec<[Option<Arc<Rows>>; 2]>,
+    inner: Vec<[Option<(Arc<Rows>, Option<Arc<Resident>>)>; 2]>,
 }
 
 impl ReusableRows {
     // return a Rows for writing,
     // does not clone if the existing rows can be reused
-    fn take_next(&mut self, stream_idx: usize) -> Result<Rows> {
-        Arc::try_unwrap(self.inner[stream_idx][1].take().unwrap()).map_err(|_| {
-            internal_datafusion_err!(
-                "Rows from RowCursorStream is still in use by consumer"
-            )
-        })
+    fn take_next(&mut self, stream_idx: usize) -> Result<(Rows, Option<Arc<Resident>>)> {
+        let (rows, resident) = self.inner[stream_idx][1].take().unwrap();
+        Arc::try_unwrap(rows)
+            .map(|rows| (rows, resident))
+            .map_err(|_| {
+                internal_datafusion_err!(
+                    "Rows from RowCursorStream is still in use by consumer"
+                )
+            })
     }
     // save the Rows
-    fn save(&mut self, stream_idx: usize, rows: &Arc<Rows>) {
-        self.inner[stream_idx][1] = Some(Arc::clone(rows));
+    fn save(
+        &mut self,
+        stream_idx: usize,
+        rows: &Arc<Rows>,
+        resident: Option<Arc<Resident>>,
+    ) {
+        self.inner[stream_idx][1] = Some((Arc::clone(rows), resident));
         // swap the current with the previous one, so that the next poll can reuse the Rows from the previous poll
         let [a, b] = &mut self.inner[stream_idx];
         mem::swap(a, b);
@@ -117,6 +127,7 @@ impl ReusableRows {
 /// from the same partition at the same time).
 #[derive(Debug)]
 pub struct RowCursorStream {
+    copy: Option<Arc<CopyAdmission>>,
     /// Converter to convert output of physical expressions
     converter: RowConverter,
     /// The physical expressions to sort by
@@ -128,15 +139,52 @@ pub struct RowCursorStream {
     /// Allocated rows for each partition, we keep two to allow for buffering one
     /// in the consumer of the stream
     rows: ReusableRows,
+    copy_resident: Option<Arc<Resident>>,
+    // A failed mutation can retain converter/reuse backing until stream drop.
+    failed_phase: Option<Phase>,
 }
 
 impl RowCursorStream {
+    fn copy_header(copy: Option<&Arc<CopyAdmission>>) -> usize {
+        if copy
+            .is_some_and(|copy| matches!(copy.capability(), CopyCapability::Row { .. }))
+        {
+            0 // The dynamic control floor owns these bytes through escaped output.
+        } else {
+            size_of::<CopyAdmission>() + 2 * size_of::<usize>()
+        }
+    }
+    pub(super) fn constructor_bound(streams: usize, keys: usize) -> Result<usize> {
+        // Stateless Codec/SortField/encoder headers fit 1024/key in Arrow58.4.
+        // Include simultaneous old/new stream vectors and all 2N empty Rows,
+        // their initial offset slot, Arc controls and resident lease controls.
+        let slots = mul(
+            2,
+            size_of::<[Option<(Arc<Rows>, Option<Arc<Resident>>)>; 2]>(),
+        )?;
+        let vectors = mul(2, size_of::<Fuse<SendableRecordBatchStream>>())?;
+        let per_stream = add(1024, add(slots, vectors)?)?;
+        let fixed = add(size_of::<Self>(), add(size_of::<CopyAdmission>(), 4096)?)?;
+        add(fixed, add(mul(keys, 1024)?, mul(streams, per_stream)?)?)
+    }
+    #[cfg(test)]
     pub fn try_new(
         schema: &Schema,
         expressions: &LexOrdering,
         streams: Vec<SendableRecordBatchStream>,
         reservation: MemoryReservation,
     ) -> Result<Self> {
+        Self::try_new_with_copy(schema, expressions, streams, reservation, None)
+    }
+
+    pub(super) fn try_new_with_copy(
+        schema: &Schema,
+        expressions: &LexOrdering,
+        streams: Vec<SendableRecordBatchStream>,
+        reservation: MemoryReservation,
+        copy: Option<Arc<CopyAdmission>>,
+    ) -> Result<Self> {
+        let phase = copy.as_ref().map(|copy| copy.begin()).transpose()?;
         let sort_fields = expressions
             .iter()
             .map(|expr| {
@@ -149,13 +197,41 @@ impl RowCursorStream {
         let converter = RowConverter::new(sort_fields)?;
         let mut rows = Vec::with_capacity(streams.len());
         for _ in &streams {
-            // Initialize each stream with an empty Rows
-            rows.push([
-                Some(Arc::new(converter.empty_rows(0, 0))),
-                Some(Arc::new(converter.empty_rows(0, 0))),
-            ]);
+            // The pair owns one lease for each exact reusable Rows allocation.
+            let make_empty = || -> Result<_> {
+                let rows = Arc::new(converter.empty_rows(0, 0));
+                let resident = phase
+                    .as_ref()
+                    .map(|p| p.resident(add(rows.size(), 2 * size_of::<usize>())?))
+                    .transpose()?;
+                Ok((rows, resident))
+            };
+            rows.push([Some(make_empty()?), Some(make_empty()?)]);
         }
+        let metadata = add(
+            add(size_of::<Self>(), Self::copy_header(copy.as_ref()))?,
+            add(
+                converter.size(),
+                add(
+                    mul(
+                        rows.capacity(),
+                        size_of::<[Option<(Arc<Rows>, Option<Arc<Resident>>)>; 2]>(),
+                    )?,
+                    add(
+                        mul(
+                            streams.capacity(),
+                            size_of::<Fuse<SendableRecordBatchStream>>(),
+                        )?,
+                        mul(expressions.len(), size_of::<Arc<dyn PhysicalExpr>>())?,
+                    )?,
+                )?,
+            )?,
+        )?;
+        let resident = phase.as_ref().map(|p| p.resident(metadata)).transpose()?;
         Ok(Self {
+            copy,
+            copy_resident: resident,
+            failed_phase: None,
             converter,
             reservation,
             column_expressions: expressions.iter().map(|x| Arc::clone(&x.expr)).collect(),
@@ -164,29 +240,93 @@ impl RowCursorStream {
         })
     }
 
+    fn metadata(&self) -> Result<usize> {
+        add(
+            add(size_of::<Self>(), Self::copy_header(self.copy.as_ref()))?,
+            add(
+                self.converter.size(),
+                add(
+                    mul(
+                        self.rows.inner.capacity(),
+                        size_of::<[Option<(Arc<Rows>, Option<Arc<Resident>>)>; 2]>(),
+                    )?,
+                    add(
+                        mul(
+                            self.streams.0.capacity(),
+                            size_of::<Fuse<SendableRecordBatchStream>>(),
+                        )?,
+                        mul(
+                            self.column_expressions.capacity(),
+                            size_of::<Arc<dyn PhysicalExpr>>(),
+                        )?,
+                    )?,
+                )?,
+            )?,
+        )
+    }
+
     fn convert_batch(
         &mut self,
         batch: &RecordBatch,
         stream_idx: usize,
     ) -> Result<RowValues> {
-        let cols = evaluate_expressions_to_arrays(&self.column_expressions, batch)?;
+        // Poll input first, then admit this operation before evaluation or
+        // encoding. Unknown expressions retain the old full-copy envelope.
+        let mut phase = self
+            .copy
+            .as_ref()
+            .map(|copy| {
+                let workspace = copy
+                    .encoded_width()
+                    .map(|width| {
+                        let old =
+                            self.rows.inner[stream_idx][1].as_ref().unwrap().0.size();
+                        super::copy_bounds::row_workspace(
+                            old,
+                            batch,
+                            &self.column_expressions,
+                            width,
+                        )
+                    })
+                    .transpose()?;
+                copy.begin_operation(workspace)
+            })
+            .transpose()?;
+        let result = (|| {
+            let cols = evaluate_expressions_to_arrays(&self.column_expressions, batch)?;
 
-        // At this point, ownership should of this Rows should be unique
-        let mut rows = self.rows.take_next(stream_idx)?;
+            // At this point, ownership should of this Rows should be unique
+            let (mut rows, previous_resident) = self.rows.take_next(stream_idx)?;
+            // try_unwrap proved no cursor can still use this physical Rows. The
+            // active phase now covers its mutation, including every error path.
+            drop(previous_resident);
+            rows.clear();
 
-        rows.clear();
+            self.converter.append(&mut rows, &cols)?;
+            self.reservation.try_resize(self.converter.size())?;
+            if let Some(phase) = &phase {
+                let metadata = self.metadata()?;
+                phase.resize(self.copy_resident.as_ref().unwrap(), metadata)?;
+            }
 
-        self.converter.append(&mut rows, &cols)?;
-        self.reservation.try_resize(self.converter.size())?;
+            let rows = Arc::new(rows);
 
-        let rows = Arc::new(rows);
+            let resident = phase
+                .as_ref()
+                .map(|p| p.resident(add(rows.size(), 2 * size_of::<usize>())?))
+                .transpose()?;
+            self.rows.save(stream_idx, &rows, resident.clone());
 
-        self.rows.save(stream_idx, &rows);
-
-        // track the memory in the newly created Rows.
-        let rows_reservation = self.reservation.new_empty();
-        rows_reservation.try_grow(rows.size())?;
-        Ok(RowValues::new(rows, rows_reservation))
+            // track the memory in the newly created Rows.
+            let rows_reservation = self.reservation.new_empty();
+            rows_reservation.try_grow(rows.size())?;
+            Ok(RowValues::new(rows, rows_reservation)
+                .with_copy_resident(resident, self.copy_resident.clone()))
+        })();
+        if result.is_err() {
+            self.failed_phase = phase.take();
+        }
+        result
     }
 }
 
@@ -202,7 +342,18 @@ impl PartitionedStream for RowCursorStream {
         cx: &mut Context<'_>,
         stream_idx: usize,
     ) -> Poll<Option<Self::Output>> {
-        Poll::Ready(ready!(self.streams.poll_next(cx, stream_idx)).map(|r| {
+        let next = ready!(self.streams.poll_next(cx, stream_idx));
+        if next.is_none()
+            && self.copy.as_ref().is_some_and(|copy| {
+                matches!(copy.capability(), CopyCapability::Row { .. })
+            })
+        {
+            // Fuse guarantees conversion cannot run again for this input.
+            // Drop cached Rows before their paired leases; a live previous
+            // cursor still retains its own Rows and lease until merge sees EOF.
+            self.rows.inner[stream_idx] = [None, None];
+        }
+        Poll::Ready(next.map(|r| {
             r.and_then(|batch| {
                 let cursor = self.convert_batch(&batch, stream_idx)?;
                 Ok((cursor, batch))
@@ -220,6 +371,8 @@ pub struct FieldCursorStream<T: CursorArray> {
     /// Create new reservations for each array
     reservation: MemoryReservation,
     phantom: PhantomData<fn(T) -> T>,
+    // This lease is last: fused input streams and their backing drop first.
+    _copy_resident: Option<Arc<Resident>>,
 }
 
 impl<T: CursorArray> std::fmt::Debug for FieldCursorStream<T> {
@@ -242,7 +395,56 @@ impl<T: CursorArray> FieldCursorStream<T> {
             streams: FusedStreams(streams),
             reservation,
             phantom: Default::default(),
+            _copy_resident: None,
         }
+    }
+
+    pub(super) fn constructor_bound(
+        streams: usize,
+        input_capacity: usize,
+    ) -> Result<usize> {
+        // The incoming Vec and newly allocated Fuse Vec coexist. Do not
+        // assume collect can reuse its differently sized source allocation.
+        add(
+            add(size_of::<Self>(), add(size_of::<CopyAdmission>(), 512)?)?,
+            add(
+                mul(input_capacity, size_of::<SendableRecordBatchStream>())?,
+                mul(streams, size_of::<Fuse<SendableRecordBatchStream>>())?,
+            )?,
+        )
+    }
+
+    pub(super) fn try_new_with_copy(
+        sort: PhysicalSortExpr,
+        streams: Vec<SendableRecordBatchStream>,
+        reservation: MemoryReservation,
+        copy: &Arc<CopyAdmission>,
+    ) -> Result<Self> {
+        let phase = copy.begin()?;
+        let mut fused = Vec::new();
+        fused.try_reserve_exact(streams.len()).map_err(|error| {
+            datafusion_common::DataFusionError::ResourcesExhausted(format!(
+                "Field cursor stream allocation failed: {error}"
+            ))
+        })?;
+        for stream in streams {
+            fused.push(stream.fuse());
+        }
+        let metadata = add(
+            size_of::<Self>(),
+            mul(
+                fused.capacity(),
+                size_of::<Fuse<SendableRecordBatchStream>>(),
+            )?,
+        )?;
+        let resident = phase.resident(metadata)?;
+        Ok(Self {
+            sort,
+            streams: FusedStreams(fused),
+            reservation,
+            phantom: Default::default(),
+            _copy_resident: Some(resident),
+        })
     }
 
     fn convert_batch(&mut self, batch: &RecordBatch) -> Result<ArrayValues<T::Values>> {

@@ -31,6 +31,7 @@ use datafusion_common::Result;
 use datafusion_execution::memory_pool::MemoryReservation;
 
 use crate::sorts::builder::try_grow_reservation_to_at_least;
+use crate::sorts::copy_admission::{CopyAdmission, CopyCapability};
 use crate::sorts::sort::get_reserved_bytes_for_record_batch_size;
 use crate::sorts::streaming_merge::{SortedSpillFile, StreamingMergeBuilder};
 use crate::stream::RecordBatchStreamAdapter;
@@ -249,6 +250,7 @@ impl MultiLevelMergeBuilder {
                     // If we have no sorted spill files left, this is the last run
                     true,
                     true,
+                    None,
                 )
             }
 
@@ -264,6 +266,9 @@ impl MultiLevelMergeBuilder {
                 // Don't account for existing streams memory
                 // as we are not holding the memory for them
                 let mut sorted_streams = mem::take(&mut self.sorted_streams);
+                // Only these sources carry IPC buffer authority. Mixed memory
+                // inputs continue using the existing fixed-copy reservation.
+                let all_ipc_inputs = sorted_streams.is_empty();
 
                 let (sorted_spill_files, buffer_size) = self
                     .get_sorted_spill_files_to_merge(
@@ -284,14 +289,134 @@ impl MultiLevelMergeBuilder {
                     mem::swap(&mut self.reservation, &mut memory_reservation);
                 }
 
+                // Preserve the existing sorted-copy half of the reservation.
+                // Only the previously prepaid input-buffer half is transferable
+                // to readers; leases protect queues and escaped aliases.
+                let input_bytes =
+                    sorted_spill_files
+                        .iter()
+                        .try_fold(0_usize, |total, spill| {
+                            crate::spill::admission::add(
+                                total,
+                                crate::spill::admission::mul(
+                                    spill.max_record_batch_memory,
+                                    buffer_size,
+                                )?,
+                            )
+                        })?;
+                // Decide eligibility before moving any authority. Stock split
+                // preserves consumer identity: spilling aggregate sponsors must
+                // keep their existing loan/floor and reservation lifecycle.
+                let retiring = all_ipc_inputs
+                    && !is_only_merging_memory_streams
+                    && !memory_reservation.consumer().can_spill()
+                    && crate::spill::resident_metadata::std_mutex_heap_bound().is_some()
+                    && crate::spill::admission::ticket_schema(&self.schema);
+                // Qualification precedes all authority moves and prefetch.
+                let capability = if all_ipc_inputs && !is_only_merging_memory_streams {
+                    if let Some(encoded_width) =
+                        super::copy_bounds::qualified_columns(&self.schema, &self.expr)?
+                    {
+                        CopyCapability::Row { encoded_width }
+                    } else if retiring
+                        && super::copy_bounds::primitive_field(&self.schema, &self.expr)
+                    {
+                        CopyCapability::PrimitiveField
+                    } else {
+                        CopyCapability::Legacy
+                    }
+                } else {
+                    CopyCapability::Legacy
+                };
+                let (input_credit, producers) = if retiring {
+                    crate::spill::admission::Credit::with_readers(
+                        memory_reservation.split(input_bytes),
+                        sorted_spill_files.len(),
+                    )?
+                } else {
+                    (
+                        crate::spill::admission::Credit::new(
+                            memory_reservation.split(input_bytes),
+                        ),
+                        Vec::new(),
+                    )
+                };
+                // All roots are registered/sealed above, before spawn_buffered
+                // can poll the first reader. The iterator owns any unused roots
+                // if a later constructor fails.
+                let mut producers = producers.into_iter();
+
+                let copy = if all_ipc_inputs && !is_only_merging_memory_streams {
+                    let authority = memory_reservation.take();
+                    if capability == CopyCapability::Legacy {
+                        Some(CopyAdmission::new(authority)?)
+                    } else {
+                        let streams = sorted_spill_files.len();
+                        let (cursor, merge) = match capability {
+                            CopyCapability::Row { .. } => (
+                                super::stream::RowCursorStream::constructor_bound(
+                                    streams,
+                                    self.expr.len(),
+                                )?,
+                                super::merge::SortPreservingMergeStream::<
+                                    super::cursor::RowValues,
+                                >::constructor_bound(
+                                    streams, self.batch_size
+                                )?,
+                            ),
+                            CopyCapability::PrimitiveField => {
+                                // An empty supplied Vec can retain capacity.
+                                // Fund that backing and possible push growth;
+                                // Field separately allocates N Fuse slots.
+                                let capacity = sorted_streams.capacity().max(
+                                    crate::spill::admission::mul(streams, 2)?.max(4),
+                                );
+                                (
+                                    super::stream::FieldCursorStream::<
+                                        arrow::array::Int64Array,
+                                    >::constructor_bound(
+                                        streams, capacity
+                                    )?,
+                                    super::merge::SortPreservingMergeStream::<
+                                        super::cursor::ArrayValues<
+                                            super::cursor::PrimitiveValues<i64>,
+                                        >,
+                                    >::constructor_bound(
+                                        streams, self.batch_size
+                                    )?,
+                                )
+                            }
+                            CopyCapability::Legacy => unreachable!(),
+                        };
+                        let metadata = crate::spill::admission::add(
+                            cursor,
+                            crate::spill::admission::add(
+                                merge,
+                                crate::spill::admission::add(
+                                    crate::spill::admission::schema_bound(&self.schema)?,
+                                    crate::spill::admission::mul(
+                                        sorted_spill_files.capacity(),
+                                        size_of::<SortedSpillFile>(),
+                                    )?,
+                                )?,
+                            )?,
+                        )?;
+                        Some(CopyAdmission::preparing(authority, metadata, capability)?)
+                    }
+                } else {
+                    None
+                };
+
                 for spill in sorted_spill_files {
                     let stream = self
                         .spill_manager
                         .clone()
                         .with_batch_read_buffer_capacity(buffer_size)
-                        .read_spill_as_stream(
+                        .read_spill_with_credit(
                             spill.file,
-                            Some(spill.max_record_batch_memory),
+                            spill.max_record_batch_memory,
+                            Arc::clone(&input_credit),
+                            producers.next(),
                         )?;
                     sorted_streams.push(stream);
                 }
@@ -300,6 +425,7 @@ impl MultiLevelMergeBuilder {
                     // If we have no sorted spill files left, this is the last run
                     self.sorted_spill_files.is_empty(),
                     is_only_merging_memory_streams,
+                    copy.clone(),
                 )?;
 
                 // If we're only merging memory streams, we don't need to attach the memory reservation
@@ -318,6 +444,7 @@ impl MultiLevelMergeBuilder {
                     Ok(Box::pin(StreamAttachedReservation::new(
                         merge_sort_stream,
                         memory_reservation,
+                        copy,
                     )))
                 }
             }
@@ -329,6 +456,7 @@ impl MultiLevelMergeBuilder {
         streams: Vec<SendableRecordBatchStream>,
         is_output: bool,
         all_in_memory: bool,
+        copy: Option<Arc<CopyAdmission>>,
     ) -> Result<SendableRecordBatchStream> {
         let mut builder = StreamingMergeBuilder::new()
             .with_schema(Arc::clone(&self.schema))
@@ -342,7 +470,8 @@ impl MultiLevelMergeBuilder {
                 self.metrics.intermediate()
             })
             .with_round_robin_tie_breaker(self.enable_round_robin_tie_breaker)
-            .with_streams(streams);
+            .with_streams(streams)
+            .with_copy(copy);
 
         if !all_in_memory {
             // Don't track memory used by this stream as we reserve that memory by worst case sceneries
@@ -432,16 +561,39 @@ impl MultiLevelMergeBuilder {
 }
 
 struct StreamAttachedReservation {
-    stream: SendableRecordBatchStream,
+    stream: Option<SendableRecordBatchStream>,
+    schema: SchemaRef,
     reservation: MemoryReservation,
+    copy: Option<Arc<CopyAdmission>>,
 }
 
 impl StreamAttachedReservation {
-    fn new(stream: SendableRecordBatchStream, reservation: MemoryReservation) -> Self {
+    fn new(
+        stream: SendableRecordBatchStream,
+        reservation: MemoryReservation,
+        copy: Option<Arc<CopyAdmission>>,
+    ) -> Self {
+        let schema = stream.schema();
         Self {
-            stream,
+            stream: Some(stream),
+            schema,
             reservation,
+            copy,
         }
+    }
+    fn retire(&mut self) {
+        // Cursor values, GC buffers and failed phases must die while the
+        // original production floor is still held. No Arrow drop under its lock.
+        self.stream.take();
+        if let Some(copy) = self.copy.take() {
+            copy.retire_field();
+        }
+        self.reservation.free();
+    }
+}
+impl Drop for StreamAttachedReservation {
+    fn drop(&mut self) {
+        self.retire();
     }
 }
 
@@ -452,7 +604,10 @@ impl Stream for StreamAttachedReservation {
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Option<Self::Item>> {
-        let res = self.stream.poll_next_unpin(cx);
+        let Some(stream) = self.stream.as_mut() else {
+            return Poll::Ready(None);
+        };
+        let res = stream.poll_next_unpin(cx);
 
         match res {
             Poll::Ready(res) => {
@@ -460,12 +615,12 @@ impl Stream for StreamAttachedReservation {
                     Some(Ok(batch)) => Poll::Ready(Some(Ok(batch))),
                     Some(Err(err)) => {
                         // Had an error so drop the data
-                        self.reservation.free();
+                        self.retire();
                         Poll::Ready(Some(Err(err)))
                     }
                     None => {
                         // Stream is done so free the memory
-                        self.reservation.free();
+                        self.retire();
 
                         Poll::Ready(None)
                     }
@@ -478,6 +633,6 @@ impl Stream for StreamAttachedReservation {
 
 impl RecordBatchStream for StreamAttachedReservation {
     fn schema(&self) -> SchemaRef {
-        self.stream.schema()
+        Arc::clone(&self.schema)
     }
 }

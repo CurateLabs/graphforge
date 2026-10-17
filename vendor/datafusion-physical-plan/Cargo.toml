@@ -82,8 +82,19 @@ harness = false
 version = "58.3.0"
 features = [
     "prettyprint",
+    "pool",
     "chrono-tz",
 ]
+
+[dependencies.arrow-buffer]
+version = "58.3.0"
+features = ["pool"]
+default-features = false
+
+[dependencies.zstd-sys]
+version = "2.1.1"
+features = ["experimental"]
+default-features = false
 
 [dependencies.arrow-data]
 version = "58.3.0"

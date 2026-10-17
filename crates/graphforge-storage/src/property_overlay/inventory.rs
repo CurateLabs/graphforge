@@ -68,6 +68,17 @@ impl AuthenticatedPropertyInventory {
             .collect()
     }
 
+    /// Borrow the authenticated route without allocating a path inventory.
+    pub(crate) fn borrowed_edge_files<'a>(
+        &'a self,
+        relation: Option<&'a str>,
+    ) -> impl Iterator<Item = &'a Path> + 'a {
+        self.edge_routes
+            .iter()
+            .filter(move |(route, _)| relation.is_none_or(|expected| expected == route.as_str()))
+            .flat_map(|(_, paths)| paths.iter().map(|path| path.path.as_path()))
+    }
+
     /// Every admitted edge payload with its inventory-relative path, from
     /// which planning takes a row-count hint without opening the file (#1388).
     #[must_use]
@@ -2315,17 +2326,19 @@ fn authenticated_snapshot_bytes(
         if read == 0 {
             break;
         }
-        data.extend_from_slice(&buffer[..read]);
         bytes = bytes
             .checked_add(u64::try_from(read).map_err(|_| corrupt("authentication byte overflow"))?)
             .ok_or_else(|| corrupt("authentication byte overflow"))?;
+        // The admitted source capacity comes from this exact authority. A file
+        // that grows after the metadata check must fail before Vec can grow.
+        if bytes > entry.byte_length {
+            return Err(corrupt("property checksum digest conflicts with inventory"));
+        }
+        data.extend_from_slice(&buffer[..read]);
         read_calls = read_calls
             .checked_add(1)
             .ok_or_else(|| corrupt("authentication read call overflow"))?;
         checksum.update(&buffer[..read]);
-        if bytes > entry.byte_length {
-            return Err(corrupt("property checksum digest conflicts with inventory"));
-        }
         #[cfg(test)]
         if read_calls == 1
             && let Some(barrier) = mutation_barrier.as_ref()

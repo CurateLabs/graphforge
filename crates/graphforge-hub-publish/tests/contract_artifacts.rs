@@ -12,8 +12,11 @@
 )]
 
 use graphforge_discovery::{
-    DISCOVERY_FORMAT, DiscoveryLimits, DiscoveryManifest, PORTABLE_V2_MEDIA_TYPE, ProtocolVersion,
-    RefSet, RepositoryIdentity, RepositoryRef, Sha256Digest,
+    DISCOVERY_FORMAT, DiscoveryErrorCode, DiscoveryLimits, DiscoveryManifest, LineageBranch,
+    LineageForkOrigin, LineageVersion, PORTABLE_V2_FORMAT, PORTABLE_V2_MEDIA_TYPE,
+    PortablePackageReference, ProtocolRequirement, ProtocolVersion, RESEARCH_LINEAGE_CAPABILITY,
+    RESEARCH_LINEAGE_FORMAT, RESEARCH_LINEAGE_MEDIA_TYPE, RefSet, RepositoryIdentity,
+    RepositoryRef, ResearchLineage, ResearchLineageReference, Sha256Digest,
 };
 use graphforge_hub_publish::{
     DEVICE_CODE_GRANT_TYPE, HubMethod, HubRequest, HubResponse, ObjectDeclaration, PublishIntent,
@@ -75,6 +78,8 @@ struct Corpus {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Case {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    negotiated: bool,
     name: String,
     description: String,
     steps: Vec<Step>,
@@ -187,13 +192,6 @@ impl Object {
         }
     }
 
-    fn other(media_type: &'static str, text: &str) -> Self {
-        Self {
-            media_type,
-            bytes: text.as_bytes().to_vec(),
-        }
-    }
-
     fn digest(&self) -> String {
         sha256_digest(&self.bytes)
     }
@@ -210,6 +208,7 @@ struct Publication {
     operation: Uuid,
     objects: Vec<Object>,
     package_digest: String,
+    project_object_digest: String,
     refs: Vec<String>,
     resolved_ref: String,
     expected_revision: Option<String>,
@@ -223,11 +222,17 @@ impl Publication {
     fn new(repository: &RepositoryIdentity, operation: Uuid, objects: Vec<Object>) -> Self {
         let mut objects = objects;
         objects.sort_by_key(Object::digest);
+        let project_object_digest = objects
+            .iter()
+            .find(|object| object.media_type == PORTABLE_V2_MEDIA_TYPE)
+            .unwrap()
+            .digest();
         Self {
             repository: repository.clone(),
             operation,
             objects,
             package_digest: digest_of('b'),
+            project_object_digest,
             refs: vec!["main".into()],
             resolved_ref: "main".into(),
             expected_revision: None,
@@ -255,12 +260,12 @@ impl Publication {
     fn package_object(&self) -> &Object {
         self.objects
             .iter()
-            .find(|object| object.media_type == PORTABLE_V2_MEDIA_TYPE)
+            .find(|object| object.digest() == self.project_object_digest)
             .unwrap()
     }
 
     fn manifest(&self) -> Value {
-        json!({
+        let mut manifest = json!({
             "format": DISCOVERY_FORMAT,
             "version": {"major": 1, "minor": 1},
             "repository": self.repository,
@@ -284,7 +289,22 @@ impl Publication {
                     object.digest(),
                 )],
             })).collect::<Vec<_>>(),
-        })
+        });
+        if let Some(object) = self
+            .objects
+            .iter()
+            .find(|object| object.media_type == RESEARCH_LINEAGE_MEDIA_TYPE)
+        {
+            let lineage =
+                ResearchLineage::from_json(&object.bytes, DiscoveryLimits::default()).unwrap();
+            manifest["lineage"] = serde_json::to_value(ResearchLineageReference {
+                format: RESEARCH_LINEAGE_FORMAT.into(),
+                lineage_digest: lineage.canonical_digest().unwrap(),
+                object_digest: Sha256Digest(object.digest()),
+            })
+            .unwrap();
+        }
+        manifest
     }
 
     fn manifest_document(&self) -> Vec<u8> {
@@ -625,6 +645,7 @@ fn refs_absent(repository: &RepositoryIdentity) -> Step {
 
 fn case(name: &str, description: &str, steps: Vec<Step>) -> Case {
     Case {
+        negotiated: false,
         name: name.into(),
         description: description.into(),
         steps,
@@ -643,6 +664,105 @@ fn v1(operation_id: u128) -> Publication {
             "graphforge project package fixture: version one",
         )],
     )
+}
+
+/// Adds typed research metadata and a distinct Version package to a publication.
+fn research_publication(
+    mut publication: Publication,
+    project: u128,
+    branch: u128,
+    version: u128,
+    identity: char,
+    origin: Option<&Publication>,
+) -> Publication {
+    let project_uuid = operation(project).to_string();
+    let branch_uuid = operation(branch).to_string();
+    let version_uuid = operation(version).to_string();
+    let research_package = Object::package(&format!("research Version package fixture: {version}"));
+    let mut extensions = BTreeMap::new();
+    let fork = origin.map(|origin| {
+        let object = origin
+            .objects
+            .iter()
+            .find(|object| object.media_type == RESEARCH_LINEAGE_MEDIA_TYPE)
+            .unwrap();
+        let lineage =
+            ResearchLineage::from_json(&object.bytes, DiscoveryLimits::default()).unwrap();
+        let version = lineage
+            .version(&lineage.branches[0].head_version_uuid)
+            .unwrap();
+        let mut model = RepoModel::default();
+        model.advance(origin);
+        extensions.insert(
+            "x-origin-revision".into(),
+            json!(model.revision(&origin.repository)),
+        );
+        LineageForkOrigin {
+            origin_repository: lineage.repository.clone(),
+            origin_project_uuid: lineage.project_uuid.clone(),
+            origin_version_uuid: version.version_uuid.clone(),
+            origin_version_identity: version.identity_digest.clone(),
+        }
+    });
+    let lineage = ResearchLineage {
+        format: RESEARCH_LINEAGE_FORMAT.into(),
+        version: ProtocolVersion::CURRENT,
+        repository: publication.repository.clone(),
+        immutable_version: Sha256Digest(publication.package_digest.clone()),
+        project_uuid: project_uuid.clone(),
+        requirements: vec![ProtocolRequirement {
+            capability: RESEARCH_LINEAGE_CAPABILITY.into(),
+            major: 1,
+        }],
+        capabilities: vec![],
+        fork,
+        branches: vec![LineageBranch {
+            branch_uuid: branch_uuid.clone(),
+            ref_name: "main".into(),
+            project_uuid,
+            head_version_uuid: version_uuid.clone(),
+            parent_branch_uuid: None,
+            origin_version_uuid: version_uuid.clone(),
+            base_version_uuid: version_uuid.clone(),
+            selection_sha256: Sha256Digest(sha256_digest(b"research fixture: main selection")),
+            label: "main".into(),
+        }],
+        versions: vec![LineageVersion {
+            version_uuid,
+            identity_digest: Sha256Digest(digest_of(identity)),
+            kind: "complete".into(),
+            branch_uuid,
+            source_version_uuid: None,
+            package: Some(PortablePackageReference {
+                format: PORTABLE_V2_FORMAT.into(),
+                package_digest: Sha256Digest(digest_of('e')),
+                object_digest: Sha256Digest(research_package.digest()),
+            }),
+        }],
+        proposals: vec![],
+        extensions,
+    };
+    publication.objects.push(research_package);
+    publication.objects.push(Object {
+        media_type: RESEARCH_LINEAGE_MEDIA_TYPE,
+        bytes: lineage.to_canonical_json().unwrap(),
+    });
+    publication.objects.sort_by_key(Object::digest);
+    publication
+}
+
+fn fork_origin() -> Publication {
+    research_publication(v1(12), 100, 105, 101, 'c', None)
+}
+
+/// A distinct research authority citing the origin's published native Version.
+fn fork_publication(origin: &Publication) -> Publication {
+    let publication = Publication::new(
+        &identity("alice", "demo-fork"),
+        operation(13),
+        vec![origin.package_object().clone()],
+    );
+    research_publication(publication, 102, 103, 104, 'd', Some(origin))
 }
 
 fn v2(operation_id: u128, expected: Option<String>) -> Publication {
@@ -675,7 +795,7 @@ fn corpus() -> Corpus {
                     {"capability": "publish-session", "major": 1},
                     {"capability": "resumable-upload", "major": 1},
                 ],
-                "capabilities": [{"capability": "device-authorization", "major": 1}],
+                "capabilities": [{"capability": "device-authorization", "major": 1}, {"capability":"version-previews","major":1}],
                 "authorization": {
                     "device_authorization_endpoint": format!("{HUB}/.gf/oauth/device_authorization"),
                     "token_endpoint": format!("{HUB}/.gf/oauth/token"),
@@ -692,6 +812,79 @@ fn corpus() -> Corpus {
             })),
         )],
     ));
+
+    let mut negotiated = case(
+        "negotiated-capabilities",
+        "A Hub advertises its OAuth client, preferred chunk and unprefixed hex locations under a required extension.",
+        vec![],
+    );
+    negotiated.negotiated = true;
+    let mut config = graphforge_hub_publish::ReferenceHubConfig {
+        authorization_client_id: Some("client_workos_example".into()),
+        object_location_hex: true,
+        ..graphforge_hub_publish::ReferenceHubConfig::default()
+    };
+    config.limits.preferred_chunk_bytes = Some(8_388_608);
+    let expected = ReferenceHub::with_config(config)
+        .unwrap()
+        .capabilities(&repository);
+    negotiated.steps.push(send(
+        request(
+            HubMethod::Get,
+            format!("{}/.gf/publish", repo_url(&repository)),
+        ),
+        status(200).json(serde_json::to_value(expected).unwrap()),
+    ));
+    negotiated.steps.extend([
+        send(
+            request(
+                HubMethod::Post,
+                format!("{HUB}/.gf/oauth/device_authorization"),
+            )
+            .form(&[
+                ("client_id", "client_workos_example"),
+                ("scope", "publish:openalex/demo"),
+            ]),
+            status(200)
+                .capture("device", "/device_code")
+                .capture("user", "/user_code"),
+        ),
+        act(Action::ApproveDevice {
+            user_code: "${user}".into(),
+        }),
+        act(Action::AdvanceClock { seconds: 5 }),
+        send(
+            request(HubMethod::Post, format!("{HUB}/.gf/oauth/token")).form(&[
+                ("client_id", "client_workos_example"),
+                ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
+                ("device_code", "${device}"),
+            ]),
+            status(200).capture("token", "/access_token"),
+        ),
+    ]);
+    let publication = v1(1);
+    let mut opened = open_new(&publication, "token", "negotiated");
+    let Step::Request {
+        request: session_request,
+        expect,
+    } = &mut opened
+    else {
+        unreachable!()
+    };
+    session_request.json.as_mut().unwrap()["requirements"] = json!([{
+        "capability": "publish-negotiation", "major": 1
+    }]);
+    for upload in expect.json.as_mut().unwrap()["uploads"]
+        .as_array_mut()
+        .unwrap()
+    {
+        upload["chunk_bytes"] = json!(upload["length"].as_u64().unwrap().min(8_388_608));
+    }
+    negotiated.steps.push(opened);
+    negotiated
+        .steps
+        .extend(upload_all(&publication, "negotiated"));
+    cases.push(negotiated);
 
     // Create, then read back the way `gf clone` does.
     {
@@ -1051,28 +1244,15 @@ fn corpus() -> Corpus {
 
     // Fork: create-if-absent of a new repository identity.
     {
-        let origin = v1(12);
-        let fork_repository = identity("alice", "demo-fork");
-        let citation = format!(
-            "{{\"origin\":{{\"repository\":\"openalex/demo\",\"revision\":\"{}\"}}}}",
-            {
-                let mut model = RepoModel::default();
-                model.advance(&origin);
-                model.revision(&repository)
-            }
-        );
-        let lineage = Object::other(
-            "application/vnd.graphforge.research-lineage+json",
-            &citation,
-        );
-        let fork = Publication::new(
-            &fork_repository,
-            operation(13),
-            vec![
-                Object::package("graphforge project package fixture: version one"),
-                lineage.clone(),
-            ],
-        );
+        let origin = fork_origin();
+        let fork = fork_publication(&origin);
+        let fork_repository = fork.repository.clone();
+        let lineage = fork
+            .objects
+            .iter()
+            .find(|object| object.media_type == RESEARCH_LINEAGE_MEDIA_TYPE)
+            .unwrap();
+        let citation = lineage.text();
         let mut origin_model = RepoModel::default();
         let mut fork_model = RepoModel::default();
         let mut steps = vec![
@@ -1106,7 +1286,7 @@ fn corpus() -> Corpus {
         steps.push(get_refs(&repository, &origin_model));
         cases.push(case(
             "fork-is-create-if-absent",
-            "A Fork publishes a new repository identity with expected_revision null and its origin citation object stored verbatim; create-if-absent on an existing repository fails ref_conflict.",
+            "A Fork publishes a new repository identity with expected_revision null and its typed research lineage and origin citation stored verbatim and bound by the manifest; create-if-absent on an existing repository fails ref_conflict.",
             steps,
         ));
     }
@@ -1385,8 +1565,9 @@ fn capabilities_schema() -> Value {
                     "properties": {
                         "device_authorization_endpoint": {"$ref": "#/$defs/https_url"},
                         "token_endpoint": {"$ref": "#/$defs/https_url"},
+                        "client_id": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[^\\s\\x00-\\x1f\\x7f]+$"},
                         "scope": {"type": "string", "pattern": "^publish:[a-z0-9._-]+/[a-z0-9._-]+$"}}},
-                "object_location_template": {"type": "string", "pattern": "^https://[^{}]*\\{digest\\}[^{}]*$"},
+                "object_location_template": {"type": "string", "pattern": "^https://[^{}]*\\{(?:digest|hex)\\}[^{}]*$"},
                 "limits": {"type": "object", "additionalProperties": false,
                     "required": ["max_object_bytes", "max_objects", "max_session_bytes", "max_chunk_bytes", "max_document_bytes"],
                     "properties": {
@@ -1394,6 +1575,7 @@ fn capabilities_schema() -> Value {
                         "max_objects": {"type": "integer", "minimum": 1},
                         "max_session_bytes": {"type": "integer", "minimum": 1},
                         "max_chunk_bytes": {"type": "integer", "minimum": 1},
+                        "preferred_chunk_bytes": {"type": "integer", "minimum": 1},
                         "max_document_bytes": {"type": "integer", "minimum": 1}}}
             },
             "$defs": defs(),
@@ -1432,7 +1614,8 @@ fn session_response_schema() -> Value {
                     "uploads": {"type": "array", "minItems": 1, "items": {"type": "object", "additionalProperties": false,
                         "required": ["digest", "length", "upload_url", "received"], "properties": {
                             "digest": {"$ref": "#/$defs/digest"}, "length": {"type": "integer", "minimum": 1},
-                            "upload_url": {"$ref": "#/$defs/https_url"}, "received": {"type": "integer", "minimum": 0}}}}}},
+                            "upload_url": {"$ref": "#/$defs/https_url"}, "received": {"type": "integer", "minimum": 0},
+                            "chunk_bytes": {"type": "integer", "minimum": 1}}}}}},
                 {"type": "object", "additionalProperties": false, "required": ["state", "receipt"], "properties": {
                     "state": {"const": "complete"}, "receipt": {"$ref": "#/$defs/receipt"}}}
             ],
@@ -1545,6 +1728,131 @@ fn generated() -> Vec<(&'static str, Vec<u8>)> {
         ("error.schema.json", pretty(&error_schema())),
         ("conformance.json", pretty(&corpus())),
     ]
+}
+
+#[test]
+fn fork_lineage_parses_and_binds_its_origin_and_package_metadata() {
+    let origin = fork_origin();
+    let fork = fork_publication(&origin);
+    let origin_object = origin
+        .objects
+        .iter()
+        .find(|object| object.media_type == RESEARCH_LINEAGE_MEDIA_TYPE)
+        .unwrap();
+    let origin_lineage =
+        ResearchLineage::from_json(&origin_object.bytes, DiscoveryLimits::default()).unwrap();
+    let origin_manifest =
+        DiscoveryManifest::from_json(&origin.manifest_document(), DiscoveryLimits::default())
+            .unwrap();
+    let mut origin_model = RepoModel::default();
+    origin_model.advance(&origin);
+    let origin_refs = RefSet::from_json(
+        &origin_model.document(&origin.repository),
+        DiscoveryLimits::default(),
+    )
+    .unwrap();
+    origin_refs.validate_manifest(&origin_manifest).unwrap();
+    origin_manifest
+        .bind_lineage(&origin_refs, &origin_lineage)
+        .unwrap();
+    let origin_version = origin_lineage
+        .version(&origin_lineage.branches[0].head_version_uuid)
+        .unwrap();
+    assert!(origin_version.package.is_some());
+    let object = fork
+        .objects
+        .iter()
+        .find(|object| object.media_type == RESEARCH_LINEAGE_MEDIA_TYPE)
+        .unwrap();
+    let lineage = ResearchLineage::from_json(&object.bytes, DiscoveryLimits::default()).unwrap();
+    assert_eq!(lineage.to_canonical_json().unwrap(), object.bytes);
+    let manifest =
+        DiscoveryManifest::from_json(&fork.manifest_document(), DiscoveryLimits::default())
+            .unwrap();
+    let mut model = RepoModel::default();
+    model.advance(&fork);
+    let refs = RefSet::from_json(
+        &model.document(&fork.repository),
+        DiscoveryLimits::default(),
+    )
+    .unwrap();
+    refs.validate_manifest(&manifest).unwrap();
+    manifest.bind_lineage(&refs, &lineage).unwrap();
+    let citation = lineage.fork.as_ref().unwrap();
+    assert_eq!(citation.origin_repository, origin.repository);
+    assert_eq!(citation.origin_project_uuid, origin_lineage.project_uuid);
+    assert_eq!(citation.origin_version_uuid, origin_version.version_uuid);
+    assert_eq!(
+        citation.origin_version_identity,
+        origin_version.identity_digest
+    );
+    assert_ne!(citation.origin_repository, lineage.repository);
+    assert_eq!(citation.origin_project_uuid, operation(100).to_string());
+    assert_eq!(citation.origin_version_uuid, operation(101).to_string());
+    assert_eq!(citation.origin_version_identity.0, digest_of('c'));
+    assert_ne!(citation.origin_project_uuid, lineage.project_uuid);
+    let mut origin_model = RepoModel::default();
+    origin_model.advance(&origin);
+    assert_eq!(
+        lineage.extensions["x-origin-revision"],
+        json!(origin_model.revision(&origin.repository))
+    );
+    let branch = &lineage.branches[0];
+    let version = lineage.version(&branch.head_version_uuid).unwrap();
+    assert_eq!(branch.ref_name, refs.default_ref);
+    assert_eq!(branch.project_uuid, lineage.project_uuid);
+    assert_eq!(version.branch_uuid, branch.branch_uuid);
+    let research_package = version.package.as_ref().unwrap();
+    assert_eq!(research_package.package_digest.0, digest_of('e'));
+    assert_ne!(
+        research_package.object_digest,
+        manifest.package.object_digest
+    );
+    assert!(
+        manifest
+            .objects
+            .iter()
+            .any(|object| object.digest == research_package.object_digest)
+    );
+    assert_eq!(lineage.immutable_version, manifest.package.package_digest);
+    let reference = manifest.lineage.as_ref().unwrap();
+    assert_eq!(reference.object_digest.0, object.digest());
+    assert_eq!(
+        reference.lineage_digest,
+        lineage.canonical_digest().unwrap()
+    );
+    for (field, changed) in [
+        (
+            "lineage.repository",
+            ResearchLineage {
+                repository: origin.repository.clone(),
+                ..lineage.clone()
+            },
+        ),
+        (
+            "lineage.immutable_version",
+            ResearchLineage {
+                immutable_version: Sha256Digest(digest_of('e')),
+                ..lineage.clone()
+            },
+        ),
+        (
+            "lineage.lineage_digest",
+            ResearchLineage {
+                project_uuid: operation(999).to_string(),
+                ..lineage.clone()
+            },
+        ),
+    ] {
+        let error = manifest.bind_lineage(&refs, &changed).unwrap_err();
+        assert_eq!(error.code, DiscoveryErrorCode::IntegrityFailure);
+        assert_eq!(error.field, Some(field));
+    }
+    let mut wrong_ref = refs.clone();
+    wrong_ref.refs[0].target = Sha256Digest(digest_of('f'));
+    let error = manifest.bind_lineage(&wrong_ref, &lineage).unwrap_err();
+    assert_eq!(error.code, DiscoveryErrorCode::IntegrityFailure);
+    assert_eq!(error.field, Some("lineage.branches.ref_name"));
 }
 
 #[test]
@@ -1691,7 +1999,17 @@ fn every_conformance_case_replays_through_the_reference_hub() {
     assert_eq!(corpus.hub, HUB);
     assert!(corpus.cases.len() >= 15, "corpus lost cases");
     for case in &corpus.cases {
-        let hub = ReferenceHub::new();
+        let hub = if case.negotiated {
+            let mut config = graphforge_hub_publish::ReferenceHubConfig {
+                authorization_client_id: Some("client_workos_example".into()),
+                object_location_hex: true,
+                ..graphforge_hub_publish::ReferenceHubConfig::default()
+            };
+            config.limits.preferred_chunk_bytes = Some(8_388_608);
+            ReferenceHub::with_config(config).unwrap()
+        } else {
+            ReferenceHub::new()
+        };
         let mut variables = BTreeMap::new();
         for (index, step) in case.steps.iter().enumerate() {
             let label = format!("{} step {index}", case.name);

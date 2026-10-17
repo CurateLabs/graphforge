@@ -74,10 +74,12 @@ pub use export_streams::{
     visit_node_identities, visit_node_property_values,
 };
 pub use filtered_parquet::edge_decode_admission_bytes;
+pub use filtered_parquet::node_decode_admission_bytes;
 pub use filtered_parquet::read_edges_filtered;
 pub use filtered_parquet::read_edges_filtered_from_inventory;
 pub use filtered_parquet::read_edges_filtered_observed;
 pub use filtered_parquet::read_edges_filtered_observed_from_inventory;
+pub use filtered_parquet::read_edges_filtered_prepaid_from_inventory;
 pub use filtered_parquet::read_edges_filtered_projected_from_inventory;
 pub use filtered_parquet::read_edges_filtered_projected_observed;
 pub(crate) use filtered_parquet::read_node_fragment_filtered;
@@ -99,8 +101,10 @@ pub use property_readers::visit_node_property_overlay_admitted;
 pub use property_readers::visit_properties_batched;
 pub use property_readers::visit_property_fragments_admitted;
 pub(crate) use property_readers::visit_property_overlay_batched;
-pub(crate) use property_readers::visit_property_overlay_batched_selected;
 pub(crate) use property_readers::visit_property_overlay_batched_with_inventory;
+pub(crate) use property_readers::{
+    visit_property_overlay_batched_admitted, visit_property_overlay_batched_selected,
+};
 pub use providers::EdgePropertyTable;
 pub use providers::PropertyTable;
 pub use providers::TopologyNodeTable;

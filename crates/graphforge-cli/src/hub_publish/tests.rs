@@ -34,6 +34,7 @@ struct Logged {
     method: String,
     path: String,
     bearer: Option<String>,
+    bypass: Option<String>,
     content_range: Option<String>,
     body_len: usize,
     /// Object a successful `PUT` appended to.
@@ -63,8 +64,16 @@ struct LoopbackHub {
     fault: Arc<Mutex<Option<Fault>>>,
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum ContextMode {
+    Legacy,
+    Private,
+    Public,
+}
+
 /// Server state shared with the accept thread.
 struct ServerState {
+    private_context: ContextMode,
     hub: Arc<ReferenceHub>,
     log: Arc<Mutex<Vec<Logged>>>,
     fault: Arc<Mutex<Option<Fault>>>,
@@ -80,12 +89,27 @@ impl LoopbackHub {
     }
 
     fn with_config(config: ReferenceHubConfig) -> Self {
+        Self::configured(config, ContextMode::Legacy)
+    }
+
+    fn private() -> Self {
+        Self::configured(
+            ReferenceHubConfig {
+                base_url: HUB.into(),
+                ..ReferenceHubConfig::default()
+            },
+            ContextMode::Private,
+        )
+    }
+
+    fn configured(config: ReferenceHubConfig, private_context: ContextMode) -> Self {
         let hub = Arc::new(ReferenceHub::with_config(config).unwrap());
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let log = Arc::new(Mutex::new(Vec::new()));
         let fault = Arc::new(Mutex::new(None));
         let state = ServerState {
+            private_context,
             hub: hub.clone(),
             log: log.clone(),
             fault: fault.clone(),
@@ -197,6 +221,7 @@ fn serve(state: &ServerState, stream: TcpStream) {
         method: method.clone(),
         path: path.clone(),
         bearer: header("authorization"),
+        bypass: header("x-vercel-protection-bypass"),
         content_range: header("content-range"),
         body_len: request.body.len(),
         digest: None,
@@ -247,6 +272,9 @@ fn serve(state: &ServerState, stream: TcpStream) {
             headers: vec![("etag".into(), format!("\"{}\"", sha256_digest(&body)))],
             body,
         },
+        None if state.private_context != ContextMode::Legacy => {
+            private_context_response(hub, &request, state.private_context == ContextMode::Private)
+        }
         None => hub.handle(&request),
     };
     if hub_method == HubMethod::Put && response.status == 200 {
@@ -270,6 +298,67 @@ fn serve(state: &ServerState, stream: TcpStream) {
     head = head + "content-length: " + &body.len().to_string() + "\r\nconnection: close\r\n\r\n";
     stream.write_all(head.as_bytes()).unwrap();
     stream.write_all(body).unwrap();
+}
+
+/// Emulates the Hub context contract over the real HTTP transport while hiding
+/// all anonymous discovery/object reads. ReferenceHub remains admission authority.
+fn private_context_response(
+    hub: &ReferenceHub,
+    request: &HubRequest,
+    hide_discovery: bool,
+) -> HubResponse {
+    let mut response = hub.handle(request);
+    if request.method != HubMethod::Get {
+        return response;
+    }
+    if request.url.ends_with("/.gf/publish") {
+        let mut document: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
+        document["capabilities"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"capability":"publish-read-context", "major":1}));
+        response.body = serde_json::to_vec(&document).unwrap();
+    } else if let Some(base) = request.url.strip_suffix("/.gf/publish/context") {
+        let probe = HubRequest {
+            url: format!("{base}/.gf/publish/operations/{}", Uuid::nil()),
+            ..request.clone()
+        };
+        let authorization = hub.handle(&probe);
+        if authorization.status != 404 {
+            return authorization;
+        }
+        let get = |suffix: &str| {
+            hub.handle(&HubRequest::new(
+                HubMethod::Get,
+                format!("{base}/.gf/{suffix}"),
+            ))
+        };
+        let refs = get("refs");
+        let value = if refs.status == 404 {
+            json!({"refs_json":null,"manifest_json":null,"lineage_json":null})
+        } else {
+            let manifest = get("manifest");
+            let parsed =
+                DiscoveryManifest::from_json(&manifest.body, DiscoveryLimits::default()).unwrap();
+            let lineage = hub.handle(&HubRequest::new(
+                HubMethod::Get,
+                &parsed.lineage_object().unwrap().locations[0],
+            ));
+            json!({"refs_json":String::from_utf8(refs.body).unwrap(),"manifest_json":String::from_utf8(manifest.body).unwrap(),"lineage_json":String::from_utf8(lineage.body).unwrap()})
+        };
+        response = HubResponse {
+            status: 200,
+            headers: vec![],
+            body: serde_json::to_vec(&value).unwrap(),
+        };
+    } else if hide_discovery && !request.url.contains("/.gf/publish/") {
+        response = HubResponse {
+            status: 404,
+            headers: vec![],
+            body: vec![],
+        };
+    }
+    response
 }
 
 /// Routes `https://hub.test` to the loopback server after product validation.
@@ -415,6 +504,8 @@ fn args(repository: &str) -> PublishArgs {
         version_uuid: None,
         fork_of: None,
         operation_uuid: None,
+        protection_bypass_env: None,
+        previews: Vec::new(),
     }
 }
 
@@ -442,10 +533,20 @@ fn run_publish_with(
     args: &PublishArgs,
     credential: Credential,
 ) -> Run {
+    run_publish_with_bypass(hub, graph, args, credential, None)
+}
+fn run_publish_with_bypass(
+    hub: &LoopbackHub,
+    graph: &GraphForge,
+    args: &PublishArgs,
+    credential: Credential,
+    bypass: Option<&crate::hub_http::DiscoveryCredentials>,
+) -> Run {
     let mut stderr = Vec::new();
     let mut stdout = Vec::new();
     let result = {
         let mut environment = PublishEnvironment {
+            bypass,
             credential,
             wait: &|_| panic!("no device flow expected"),
             notices: &mut stderr,
@@ -521,6 +622,9 @@ fn clone_into(
     run_clone_with(
         &hub.transport(),
         CloneArgs {
+            hub: None,
+            token_env: None,
+            protection_bypass_env: None,
             repository: repository_url(repository),
             destination: Some(destination.to_path_buf()),
             telemetry_endpoint: None,
@@ -664,7 +768,7 @@ fn interrupted_upload_resumes_from_hub_offset() {
     // The committed result clones back through the real clone path.
     let root = tempfile::tempdir().unwrap();
     let destination = root.path().join("clone");
-    let cloned = clone_into(&hub, "curate/claims", &destination, Some("main"), None);
+    let cloned = clone_into(&hub, "curate/claims", &destination, None, None);
     assert_eq!(cloned["research_version_uuid"], history.head.to_string());
     let reopened = GraphForge::new(destination.to_str()).unwrap();
     assert_eq!(
@@ -728,7 +832,13 @@ fn corrupt_object_is_refused_before_ref_moves() {
 fn published_fork_clones_back_with_origin_citation() {
     let cancellation = CancellationToken::new();
     let origin = history();
-    let hub = LoopbackHub::start();
+    let hub = LoopbackHub::configured(
+        ReferenceHubConfig {
+            base_url: HUB.into(),
+            ..ReferenceHubConfig::default()
+        },
+        ContextMode::Public,
+    );
     publish_ok(&hub, &origin.graph, &on_ref("curate/claims", "main"));
 
     // Fork the published origin head into an independent Project.
@@ -806,6 +916,23 @@ fn published_fork_clones_back_with_origin_citation() {
     );
 
     // The served lineage cites the origin Project, Version, and identity.
+    assert!(
+        hub.log()
+            .iter()
+            .filter(|request| request.method == "GET"
+                && request.path.starts_with("/curate/claims/.gf/")
+                && !request.path.contains("/publish"))
+            .all(|request| request.bearer.is_none()),
+        "Fork origin reads must never borrow destination credentials, even on the same Hub"
+    );
+    assert_eq!(
+        hub.log()
+            .iter()
+            .filter(|request| request.path == "/curate/claims/.gf/publish/context")
+            .count(),
+        1,
+        "only the origin own publication may read its authenticated context"
+    );
     let (_, lineage) = served_lineage(&hub, "curate/claims-fork");
     let cited = lineage.fork.as_ref().expect("Fork origin is published");
     let origin_reference = reference(&origin.graph, origin.head);
@@ -1209,6 +1336,7 @@ fn a_slow_but_progressing_upload_succeeds_in_bounded_chunks() {
     hub.inject(Fault::SlowPut(Duration::from_secs(2)));
     let mut notices = Vec::new();
     let mut environment = PublishEnvironment {
+        bypass: None,
         credential: Credential::Token(token(&hub, "curate/claims")),
         wait: &|_| panic!("no device flow expected"),
         notices: &mut notices,
@@ -1308,6 +1436,7 @@ fn device_flow(
     let mut writer = notices.clone();
     let result = {
         let mut environment = PublishEnvironment {
+            bypass: None,
             credential: Credential::DeviceFlow,
             wait: &wait,
             notices: &mut writer,
@@ -1512,5 +1641,857 @@ fn saved_query_definition_and_parameterized_aggregate_survive_hub_publish_and_cl
     assert_eq!(
         reference(&reopened, version).identity_sha256,
         reference(&graph, version).identity_sha256
+    );
+}
+
+#[test]
+fn captured_publish_credentials_never_consult_the_vault_or_network() {
+    let error = select_credential(None, false, false, || {
+        panic!("captured publish must not consult saved credentials")
+    })
+    .err()
+    .unwrap();
+    assert_eq!(
+        error.to_string(),
+        "validation error: hub.publish.auth_denied: no publish credential: set GRAPHFORGE_HUB_PUBLISH_TOKEN or run gf publish in a terminal"
+    );
+    let credential = select_credential(
+        Some(PublishToken::new("explicit-token".into())),
+        false,
+        false,
+        || panic!("explicit credentials take precedence"),
+    )
+    .unwrap();
+    assert!(matches!(credential, Credential::Token(token) if token.expose() == "explicit-token"));
+}
+
+#[test]
+fn streaming_publish_can_reuse_saved_credentials_without_a_terminal() {
+    let credential = select_credential(None, true, false, || {
+        Ok(Some(PublishToken::new("saved-token".into())))
+    })
+    .unwrap();
+    assert!(matches!(credential, Credential::Token(token) if token.expose() == "saved-token"));
+    assert!(matches!(
+        select_credential(None, true, true, || Ok(None)).unwrap(),
+        Credential::DeviceFlow
+    ));
+}
+
+#[test]
+fn preview_publish_keeps_bypass_on_control_requests_and_off_upload_retries() {
+    let history = history();
+    let hub = LoopbackHub::start();
+    let bypass = crate::hub_http::DiscoveryCredentials::load(
+        &Url::parse(HUB).unwrap(),
+        None,
+        Some("PREVIEW_SECRET"),
+        |_| Ok("preview-secret".into()),
+    )
+    .unwrap();
+    hub.inject(Fault::CutPut);
+    let interrupted = run_publish_with_bypass(
+        &hub,
+        &history.graph,
+        &on_ref("curate/claims", "main"),
+        Credential::Token(token(&hub, "curate/claims")),
+        bypass.as_ref(),
+    );
+    assert!(
+        interrupted
+            .result
+            .unwrap_err()
+            .to_string()
+            .contains("hub.network")
+    );
+    let run = run_publish_with_bypass(
+        &hub,
+        &history.graph,
+        &on_ref("curate/claims", "main"),
+        Credential::Token(token(&hub, "curate/claims")),
+        bypass.as_ref(),
+    );
+    run.result.unwrap();
+    let log = hub.log();
+    assert!(log.iter().any(|entry| entry.method == "HEAD"));
+    assert!(log.iter().filter(|entry| entry.method == "PUT").count() >= 2);
+    for entry in log {
+        if entry.method == "HEAD" || entry.method == "PUT" {
+            assert!(
+                entry.bypass.is_none(),
+                "upload purpose must exclude preview credentials"
+            );
+            assert!(
+                entry.bearer.is_none(),
+                "upload purpose must exclude publish bearer"
+            );
+        } else {
+            assert_eq!(
+                entry.bypass.as_deref(),
+                Some("preview-secret"),
+                "{} {}",
+                entry.method,
+                entry.path
+            );
+        }
+    }
+    assert!(
+        !String::from_utf8(run.stdout)
+            .unwrap()
+            .contains("preview-secret")
+    );
+    assert!(
+        !String::from_utf8(run.stderr)
+            .unwrap()
+            .contains("preview-secret")
+    );
+}
+
+#[test]
+fn private_context_first_publish_republish_and_replay_use_only_authorized_hub_metadata() {
+    let mut history = history();
+    let hub = LoopbackHub::private();
+    let credential = || Credential::Token(token(&hub, "curate/claims"));
+    let bypass = crate::hub_http::DiscoveryCredentials::load(
+        &Url::parse(HUB).unwrap(),
+        None,
+        Some("BYPASS"),
+        |_| Ok("context-preview".into()),
+    )
+    .unwrap()
+    .unwrap();
+    let first_args = on_ref("curate/claims", "main");
+    let first = run_publish_with_bypass(
+        &hub,
+        &history.graph,
+        &first_args,
+        credential(),
+        Some(&bypass),
+    );
+    assert!(first.result.is_ok(), "{:?}", first.result.err());
+    edit(&mut history.graph, history.branch, 9);
+    let second_args = on_ref("curate/claims", "main");
+    let second = run_publish_with_bypass(
+        &hub,
+        &history.graph,
+        &second_args,
+        credential(),
+        Some(&bypass),
+    );
+    assert!(second.result.is_ok(), "{:?}", second.result.err());
+    let replay = run_publish_with_bypass(
+        &hub,
+        &history.graph,
+        &second_args,
+        credential(),
+        Some(&bypass),
+    );
+    assert!(replay.result.unwrap().replayed);
+    let log = hub.log();
+    let contexts: Vec<_> = log
+        .iter()
+        .filter(|r| r.path.ends_with("/publish/context"))
+        .collect();
+    assert_eq!(contexts.len(), 2);
+    assert!(
+        contexts
+            .iter()
+            .all(|r| r.bearer.is_some() && r.bypass.as_deref() == Some("context-preview"))
+    );
+    assert!(!log.iter().any(|r| r.method == "GET"
+        && (r.path.ends_with("/.gf/refs")
+            || r.path.ends_with("/.gf/manifest")
+            || r.path.contains("/objects/"))));
+    assert!(
+        log.iter()
+            .filter(|r| r.method == "PUT" || r.method == "HEAD")
+            .all(|r| r.bearer.is_none() && r.bypass.is_none())
+    );
+    let transport = hub.transport();
+    let control = Hub {
+        transport: &transport,
+        bypass: Some(&bypass),
+        base: Url::parse(&repository_url("curate/claims")).unwrap(),
+    };
+    let identity = RepositoryIdentity::parse("curate/claims").unwrap();
+    assert!(read_private_context(&control, &identity, &token(&hub, "curate/another")).is_err());
+    let expired = token(&hub, "curate/claims");
+    hub.hub.advance_clock(901);
+    assert!(read_private_context(&control, &identity, &expired).is_err());
+}
+
+fn changed_lineage_binding(
+    parsed: &DiscoveryManifest,
+    lineage: &[u8],
+    base: &Url,
+) -> (Vec<u8>, Vec<u8>) {
+    // Keep outer descriptors and canonical digests correct so this reaches
+    // the semantic ref/Version binding check instead of an earlier hash failure.
+    let mut document: serde_json::Value = serde_json::from_slice(lineage).unwrap();
+    document["branches"][0]["ref_name"] = json!("unpublished");
+    let changed_binding = serde_json::to_vec(&document).unwrap();
+    let changed_binding_lineage =
+        ResearchLineage::from_json(&changed_binding, DiscoveryLimits::default()).unwrap();
+    let mut changed_binding_manifest = parsed.clone();
+    let lineage_digest = parsed.lineage.as_ref().unwrap().object_digest.clone();
+    let reference = changed_binding_manifest.lineage.as_mut().unwrap();
+    reference.lineage_digest = changed_binding_lineage.canonical_digest().unwrap();
+    reference.object_digest = Sha256Digest(digest_bytes(&changed_binding));
+    let object = changed_binding_manifest
+        .objects
+        .iter_mut()
+        .find(|object| object.digest == lineage_digest)
+        .unwrap();
+    object.digest = reference.object_digest.clone();
+    object.length = changed_binding.len() as u64;
+    object.locations = vec![format!(
+        "{}/.gf/objects/{}",
+        base.as_str().trim_end_matches('/'),
+        object.digest.0
+    )];
+    changed_binding_manifest
+        .objects
+        .sort_by(|a, b| a.digest.cmp(&b.digest));
+    let changed_binding_manifest = serde_json::to_vec(&changed_binding_manifest).unwrap();
+    (changed_binding_manifest, changed_binding)
+}
+
+fn refs_for_manifest(refs: &[u8], bytes: &[u8]) -> Vec<u8> {
+    let manifest = DiscoveryManifest::from_json(bytes, DiscoveryLimits::default()).unwrap();
+    let mut refs = RefSet::from_json(refs, DiscoveryLimits::default()).unwrap();
+    for reference in &mut refs.refs {
+        reference.validator = manifest.canonical_digest().unwrap();
+    }
+    serde_json::to_vec(&refs).unwrap()
+}
+
+fn mutate_context_document(bytes: &[u8], pointer: &str, value: serde_json::Value) -> Vec<u8> {
+    let mut document: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+    *document.pointer_mut(pointer).unwrap() = value;
+    serde_json::to_vec(&document).unwrap()
+}
+
+#[test]
+fn private_context_checks_exact_revision_and_raw_lineage_integrity_and_bindings() {
+    let history = history();
+    let server = LoopbackHub::start();
+    publish_ok(&server, &history.graph, &on_ref("curate/claims", "main"));
+    let base = Url::parse(&repository_url("curate/claims")).unwrap();
+    let refs = server.get(endpoint(&base, "refs").as_str()).body;
+    let manifest = server.get(endpoint(&base, "manifest").as_str()).body;
+    let parsed = DiscoveryManifest::from_json(&manifest, DiscoveryLimits::default()).unwrap();
+    let lineage = server
+        .get(&parsed.lineage_object().unwrap().locations[0])
+        .body;
+    let context = |r: &[u8], m: &[u8], l: &[u8]| {
+        serde_json::to_vec(&json!({"refs_json":std::str::from_utf8(r).unwrap(),"manifest_json":std::str::from_utf8(m).unwrap(),"lineage_json":std::str::from_utf8(l).unwrap()})).unwrap()
+    };
+    let transport = server.transport();
+    let hub = Hub {
+        transport: &transport,
+        bypass: None,
+        base: base.clone(),
+    };
+    let identity = RepositoryIdentity::parse("curate/claims").unwrap();
+    let credential = token(&server, "curate/claims");
+    let path = endpoint(&base, "publish/context").path().to_owned();
+    let mut exact_refs = refs.clone();
+    exact_refs.push(b'\n');
+    server.inject(Fault::Serve(BTreeMap::from([(
+        path.clone(),
+        context(&exact_refs, &manifest, &lineage),
+    )])));
+    let state = read_private_context(&hub, &identity, &credential)
+        .unwrap()
+        .unwrap();
+    assert_eq!(state.revision, sha256_digest(&exact_refs));
+    let wrong_repo = mutate_context_document(&refs, "/repository/owner", json!("other"));
+    let wrong_validator = mutate_context_document(
+        &refs,
+        "/refs/0/validator",
+        json!(format!("sha256:{}", "0".repeat(64))),
+    );
+    let wrong_ref = mutate_context_document(
+        &refs,
+        "/refs/0/target",
+        json!(format!("sha256:{}", "0".repeat(64))),
+    );
+    let wrong_package = mutate_context_document(
+        &manifest,
+        "/package/package_digest",
+        json!(format!("sha256:{}", "0".repeat(64))),
+    );
+    let mut wrong_length = parsed.clone();
+    let lineage_digest = wrong_length.lineage.as_ref().unwrap().object_digest.clone();
+    wrong_length
+        .objects
+        .iter_mut()
+        .find(|object| object.digest == lineage_digest)
+        .unwrap()
+        .length += 1;
+    let wrong_length = serde_json::to_vec(&wrong_length).unwrap();
+    let wrong_canonical = mutate_context_document(
+        &manifest,
+        "/lineage/lineage_digest",
+        json!(format!("sha256:{}", "0".repeat(64))),
+    );
+    let (changed_binding_manifest, changed_binding) =
+        changed_lineage_binding(&parsed, &lineage, &base);
+    let mut changed_lineage = lineage.clone();
+    changed_lineage.push(b' ');
+    let malformed_refs = br#"{"repository":{},"repository":{}}"#.to_vec();
+    for (index, body) in [
+        context(&wrong_repo, &manifest, &lineage),
+        context(&wrong_validator, &manifest, &lineage),
+        context(&wrong_ref, &manifest, &lineage),
+        context(&refs, &wrong_package, &lineage),
+        context(
+            &refs_for_manifest(&refs, &wrong_length),
+            &wrong_length,
+            &lineage,
+        ),
+        context(
+            &refs_for_manifest(&refs, &wrong_canonical),
+            &wrong_canonical,
+            &lineage,
+        ),
+        context(
+            &refs_for_manifest(&refs, &changed_binding_manifest),
+            &changed_binding_manifest,
+            &changed_binding,
+        ),
+        context(&refs, &manifest, &changed_lineage),
+        context(&malformed_refs, &manifest, &lineage),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        server.inject(Fault::Serve(BTreeMap::from([(path.clone(), body)])));
+        assert!(
+            read_private_context(&hub, &identity, &credential).is_err(),
+            "corruption case {index} must fail"
+        );
+    }
+}
+
+#[test]
+fn negotiated_workos_client_eight_mib_chunks_and_hex_locations_publish_real_project() {
+    let root = tempfile::tempdir().unwrap();
+    let mut graph = GraphForge::new(root.path().join("project").to_str()).unwrap();
+    // A native owned Artifact carries real incompressible content while the
+    // historical graph validator retains its normal small semantic footprint.
+    // This avoids changing native graph capture/query admission for this test.
+    use graphforge_api::{
+        ArtifactKind, ArtifactPayloadRequest, CapabilityId, EnableCapabilityRequest,
+        RegisterArtifactRequest, RegisterSourceRequest, SourceKind,
+    };
+    let context = || WriteContext {
+        operation_uuid: OperationId(Uuid::now_v7()),
+        actor_uuid: None,
+    };
+    for capability_id in [CapabilityId::Provenance, CapabilityId::Knowledge] {
+        graph
+            .enable_capability(EnableCapabilityRequest {
+                context: context(),
+                capability_id,
+                capability_version: 1,
+            })
+            .unwrap();
+    }
+    let source_uuid = Uuid::now_v7();
+    graph
+        .register_source(RegisterSourceRequest {
+            context: context(),
+            source_uuid,
+            label: "Negotiated upload evidence".into(),
+            source_kind: SourceKind::Manuscript,
+            identity_uri: None,
+        })
+        .unwrap();
+    let mut state = 0x1234_5678_u32;
+    let bytes: Vec<u8> = (0..12 * 1024 * 1024)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            state as u8
+        })
+        .collect();
+    graph
+        .register_artifact(RegisterArtifactRequest {
+            context: context(),
+            source_uuid,
+            artifact_uuid: Uuid::now_v7(),
+            artifact_kind: ArtifactKind::RawScan,
+            media_type: "application/octet-stream".into(),
+            payload: ArtifactPayloadRequest::LocalBytes(bytes),
+            derivation_inputs: vec![],
+            run_uuid: None,
+        })
+        .unwrap();
+    create_branch(&mut graph, "main", current());
+    let mut config = ReferenceHubConfig {
+        base_url: HUB.into(),
+        authorization_client_id: Some("client_workos_example".into()),
+        object_location_hex: true,
+        ..ReferenceHubConfig::default()
+    };
+    config.limits.preferred_chunk_bytes = Some(8 * 1024 * 1024);
+    let hub = LoopbackHub::with_config(config);
+    hub.inject(Fault::CutPut);
+    let (interrupted, _, _) = device_flow(&hub, &graph, |_, hub, code| {
+        assert!(hub.approve_device(code));
+        hub.advance_clock(5);
+    });
+    let error = interrupted.unwrap_err();
+    assert!(
+        error.to_string().contains("hub.network"),
+        "expected the injected connection cut, got {error}"
+    );
+    let first_run = hub.log();
+    let cut = puts(&first_run)[0].clone();
+    let (_, _, total) =
+        graphforge_hub_publish::parse_content_range(cut.content_range.as_deref().unwrap()).unwrap();
+    let retained = cut.body_len as u64;
+    assert!(retained > 0 && retained < total && retained < 8 * 1024 * 1024);
+    let (result, _, _) = device_flow(&hub, &graph, |_, hub, code| {
+        assert!(hub.approve_device(code));
+        hub.advance_clock(5);
+    });
+    result.unwrap();
+    let log = hub.log();
+    let resumed = puts(&log[first_run.len()..])
+        .into_iter()
+        .find(|x| x.path == cut.path)
+        .unwrap();
+    let (start, end, advertised_total) =
+        graphforge_hub_publish::parse_content_range(resumed.content_range.as_deref().unwrap())
+            .unwrap();
+    assert_eq!(
+        start, retained,
+        "resume starts at exact native retained offset"
+    );
+    assert_eq!(advertised_total, total);
+    assert_eq!(resumed.body_len as u64, end - start + 1);
+
+    assert!(
+        log.iter()
+            .any(|x| x.method == "PUT" && x.body_len == 8 * 1024 * 1024),
+        "a real 8 MiB upload must reach the Hub"
+    );
+    assert!(
+        log.iter()
+            .filter(|x| x.method == "PUT")
+            .all(|x| x.body_len <= 8 * 1024 * 1024 && x.bearer.is_none() && x.bypass.is_none())
+    );
+    let response = hub.hub.handle(&HubRequest::new(
+        HubMethod::Get,
+        format!("{HUB}/curate/claims/.gf/manifest"),
+    ));
+    let manifest =
+        DiscoveryManifest::from_json(&response.body, DiscoveryLimits::default()).unwrap();
+    assert!(
+        manifest
+            .objects
+            .iter()
+            .any(|object| object.length > 8 * 1024 * 1024)
+    );
+    for object in manifest.objects {
+        let stored = hub
+            .hub
+            .handle(&HubRequest::new(HubMethod::Get, &object.locations[0]));
+        assert_eq!(stored.status, 200);
+        assert_eq!(stored.body.len() as u64, object.length);
+        assert_eq!(sha256_digest(&stored.body), object.digest.0);
+        assert_eq!(
+            object.locations,
+            vec![format!(
+                "{HUB}/curate/claims/.gf/objects/sha256/{}",
+                &object.digest.0[7..]
+            )]
+        );
+    }
+}
+
+#[test]
+fn negotiated_chunk_budget_refuses_hostile_preferences_without_clamping() {
+    let mut limits = ReferenceHubConfig::default().limits;
+    assert_eq!(negotiated_chunk_size(&limits).unwrap(), 1024 * 1024);
+    limits.preferred_chunk_bytes = Some(8 * 1024 * 1024);
+    assert_eq!(negotiated_chunk_size(&limits).unwrap(), 8 * 1024 * 1024);
+    limits.preferred_chunk_bytes = Some(u64::MAX);
+    assert_eq!(
+        error_code(&negotiated_chunk_size(&limits).unwrap_err()),
+        "hub.publish.invalid_input"
+    );
+    assert!(crate::hub_http::chunk_send_timeout(Duration::from_secs(u64::MAX), u64::MAX).is_err());
+    assert_eq!(
+        crate::hub_http::chunk_send_timeout(Duration::from_secs(300), 8 * 1024 * 1024).unwrap(),
+        Duration::from_secs(2400)
+    );
+}
+
+#[test]
+fn per_object_chunk_selection_overrides_the_hub_preference_with_the_same_budget() {
+    let mut config = ReferenceHubConfig::default();
+    config.limits.preferred_chunk_bytes = Some(8 * 1024 * 1024);
+    config.limits.max_chunk_bytes = u64::MAX;
+    let capabilities = ReferenceHub::with_config(config)
+        .unwrap()
+        .capabilities(&RepositoryIdentity::parse("curate/claims").unwrap());
+    let mut target = UploadTarget {
+        digest: sha256_digest(b"object"),
+        length: 128 * 1024 * 1024,
+        upload_url: format!("{HUB}/.gf/uploads/test"),
+        received: 0,
+        chunk_bytes: Some(4 * 1024 * 1024),
+    };
+    assert_eq!(
+        upload_chunk_size(&capabilities, &target).unwrap(),
+        4 * 1024 * 1024
+    );
+    target.chunk_bytes = None;
+    assert_eq!(
+        upload_chunk_size(&capabilities, &target).unwrap(),
+        8 * 1024 * 1024
+    );
+    target.chunk_bytes = Some(64 * 1024 * 1024 + 1);
+    assert_eq!(
+        error_code(&upload_chunk_size(&capabilities, &target).unwrap_err()),
+        "hub.publish.invalid_input"
+    );
+}
+
+#[test]
+fn selected_png_svg_previews_are_version_bound_but_not_native_package_data() {
+    let history = history();
+    let mut config = ReferenceHubConfig {
+        base_url: HUB.into(),
+        authorization_client_id: Some("client_workos_preview".into()),
+        object_location_hex: true,
+        ..ReferenceHubConfig::default()
+    };
+    config.limits.preferred_chunk_bytes = Some(8 * 1024 * 1024);
+    let plain = LoopbackHub::with_config(config);
+    publish_ok(&plain, &history.graph, &on_ref("curate/claims", "main"))
+        .result
+        .unwrap();
+    let (plain_manifest, _) = served_lineage(&plain, "curate/claims");
+    let root = tempfile::tempdir().unwrap();
+    let cases: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../docs/reference/hub-publish/v1/previews.json"
+    ))
+    .unwrap();
+    let hex = cases[0]["hex"].as_str().unwrap();
+    let png: Vec<u8> = (0..hex.len())
+        .step_by(2)
+        .map(|n| u8::from_str_radix(&hex[n..n + 2], 16).unwrap())
+        .collect();
+    let svg = cases[1]["utf8"].as_str().unwrap().as_bytes();
+    let paths = [
+        root.path().join("selected.png"),
+        root.path().join("selected.svg"),
+    ];
+    std::fs::write(&paths[0], &png).unwrap();
+    std::fs::write(&paths[1], svg).unwrap();
+    // Adjacent unsafe/private workbench files are never inferred as selections.
+    std::fs::write(root.path().join("unselected.svg"), b"<script/>").unwrap();
+    let selected = &plain;
+    let mut args = on_ref("curate/claims", "main");
+    args.previews = paths.to_vec();
+    let first = publish_ok(selected, &history.graph, &args).result.unwrap();
+    assert!(!first.replayed);
+    assert!(
+        publish_ok(selected, &history.graph, &args)
+            .result
+            .unwrap()
+            .replayed
+    );
+    let (manifest, _) = served_lineage(&selected, "curate/claims");
+    assert_eq!(plain_manifest.package, manifest.package);
+    let plain_package = plain.hub.handle(&HubRequest::new(
+        HubMethod::Get,
+        &plain_manifest.package_object().unwrap().locations[0],
+    ));
+    let selected_package = selected.hub.handle(&HubRequest::new(
+        HubMethod::Get,
+        &manifest.package_object().unwrap().locations[0],
+    ));
+    assert_eq!(
+        plain_package.body, selected_package.body,
+        "preview channel never alters native package bytes"
+    );
+    let previews = manifest.preview_descriptors().unwrap();
+    assert_eq!(previews.len(), 2);
+    for (item, expected) in previews.iter().zip([png.as_slice(), svg]) {
+        assert_eq!(item.version_uuid, history.head.to_string());
+        let object = manifest
+            .objects
+            .iter()
+            .find(|object| object.digest.0 == item.digest)
+            .unwrap();
+        let response = selected
+            .hub
+            .handle(&HubRequest::new(HubMethod::Get, &object.locations[0]));
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, expected);
+        graphforge_hub_publish::preview::validate_preview(item, &response.body).unwrap();
+    }
+    // New validated image selections get new default identities. An explicit
+    // reused operation remains a conflict, preserving caller-stable CAS intent.
+    std::fs::write(&paths[1],br#"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16"><rect width="2" height="2"/></svg>"#).unwrap();
+    let explicit = PublishArgs {
+        operation_uuid: Some(first.receipt.operation_uuid.to_string()),
+        previews: args.previews.clone(),
+        ..on_ref("curate/claims", "main")
+    };
+    let refused = run_publish_with(
+        selected,
+        &history.graph,
+        &explicit,
+        Credential::Token(token(selected, "curate/claims")),
+    );
+    assert_eq!(
+        refused.result.unwrap_err().code(),
+        "GF_IDEMPOTENCY_CONFLICT"
+    );
+    let changed = publish_ok(selected, &history.graph, &args).result.unwrap();
+    assert!(!changed.replayed);
+    assert_ne!(changed.receipt.operation_uuid, first.receipt.operation_uuid);
+    assert!(
+        publish_ok(selected, &history.graph, &args)
+            .result
+            .unwrap()
+            .replayed
+    );
+    let (final_manifest, _) = served_lineage(selected, "curate/claims");
+    let previews = final_manifest.preview_descriptors().unwrap();
+    let before = selected.log().len();
+    clone_into(
+        &selected,
+        "curate/claims",
+        &root.path().join("clone"),
+        Some("main"),
+        None,
+    );
+    let reads = selected.log();
+    for item in &previews {
+        assert!(
+            !reads[before..]
+                .iter()
+                .any(|r| r.method == "GET" && r.path.contains(&item.digest[7..]))
+        );
+    }
+}
+
+#[test]
+fn unsafe_or_oversize_selected_preview_fails_before_any_upload() {
+    let history = history();
+    let root = tempfile::tempdir().unwrap();
+    for (name, bytes) in [
+        (
+            "unsafe.svg",
+            br#"<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"><script/></svg>"#
+                .to_vec(),
+        ),
+        (
+            "oversize.png",
+            vec![0; graphforge_hub_publish::preview::MAX_PREVIEW_BYTES + 1],
+        ),
+        ("not-image.html", b"<html/>".to_vec()),
+    ] {
+        let path = root.path().join(name);
+        std::fs::write(&path, bytes).unwrap();
+        let hub = LoopbackHub::start();
+        let mut args = on_ref("curate/claims", "main");
+        args.previews = vec![path];
+        let run = run_publish_with(
+            &hub,
+            &history.graph,
+            &args,
+            Credential::Token(token(&hub, "curate/claims")),
+        );
+        let error = run.result.unwrap_err();
+        assert!(error.to_string().contains("preview."));
+        assert!(puts(&hub.log()).is_empty());
+        assert!(
+            hub.log().is_empty(),
+            "invalid selected images fail before networking"
+        );
+    }
+}
+
+#[test]
+fn reference_hub_revalidates_unsafe_images_even_when_client_admission_is_bypassed() {
+    use graphforge_hub_publish::preview::{PREVIEW_EXTENSION, PreviewDescriptor, PreviewSet};
+    use graphforge_hub_publish::{Capability, content_range};
+    let history = history();
+    let hub = LoopbackHub::start();
+    publish_ok(&hub, &history.graph, &on_ref("curate/claims", "main"))
+        .result
+        .unwrap();
+    let (original, _) = served_lineage(&hub, "curate/claims");
+    let bytes=br#"<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"><script>alert(1)</script></svg>"#.to_vec();
+    let valid =
+        br#"<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"><path d="M0 0"/></svg>"#
+            .to_vec();
+    for (bytes, version, detail) in [
+        (bytes, history.head.to_string(), "Core image admission"),
+        (
+            valid,
+            Uuid::now_v7().to_string(),
+            "absent from native lineage",
+        ),
+    ] {
+        let digest = sha256_digest(&bytes);
+        let mut manifest = original.clone();
+        manifest.objects.push(object_descriptor(
+            digest.clone(),
+            bytes.len() as u64,
+            "image/svg+xml",
+            format!("{HUB}/curate/claims/.gf/objects/{digest}"),
+        ));
+        manifest.objects.sort_by(|a, b| a.digest.cmp(&b.digest));
+        manifest.extensions.insert(
+            PREVIEW_EXTENSION.into(),
+            serde_json::to_value(PreviewSet {
+                format: "graphforge-previews/1".into(),
+                previews: vec![PreviewDescriptor {
+                    version_uuid: version,
+                    digest: digest.clone(),
+                    media_type: "image/svg+xml".into(),
+                    length: bytes.len() as u64,
+                    width: 1,
+                    height: 1,
+                    caption: None,
+                    alt: None,
+                }],
+            })
+            .unwrap(),
+        );
+        manifest.validate(DiscoveryLimits::default()).unwrap(); // Metadata alone is valid.
+        let objects: Vec<_> = manifest
+            .objects
+            .iter()
+            .map(|o| ObjectDeclaration {
+                digest: o.digest.0.clone(),
+                length: o.length,
+                media_type: o.media_type.clone(),
+            })
+            .collect();
+        let expected_revision = Some(sha256_digest(&refs_document(&hub, "curate/claims").body));
+        let intent = PublishIntent {
+            repository: manifest.repository.clone(),
+            intent_digest: sha256_digest(b"untrusted preview caller"),
+            objects: objects.clone(),
+            manifest_validator: manifest.canonical_digest().unwrap().0,
+            refs: vec!["main".into()],
+            expected_revision: expected_revision.clone(),
+        };
+        let token = token(&hub, "curate/claims");
+        let response = hub.hub.handle(
+            &HubRequest::new(
+                HubMethod::Post,
+                format!("{HUB}/curate/claims/.gf/publish/sessions"),
+            )
+            .with_header("authorization", token.authorization())
+            .with_json(&OpenSessionRequest {
+                format: HUB_PUBLISH_FORMAT.into(),
+                operation_uuid: Uuid::now_v7(),
+                request_commitment: intent.request_commitment(),
+                intent_digest: intent.intent_digest.clone(),
+                repository: manifest.repository.clone(),
+                objects,
+                requirements: vec![Capability::new("version-previews", 1)],
+            }),
+        );
+        assert_eq!(response.status, 201);
+        let SessionResponse::Open {
+            session_id,
+            uploads,
+        } = serde_json::from_slice(&response.body).unwrap()
+        else {
+            panic!("new session")
+        };
+        for upload in uploads {
+            if upload.received == upload.length {
+                continue;
+            }
+            let body = if upload.digest == digest {
+                bytes.clone()
+            } else {
+                let location = manifest
+                    .objects
+                    .iter()
+                    .find(|o| o.digest.0 == upload.digest)
+                    .unwrap()
+                    .locations[0]
+                    .clone();
+                hub.hub
+                    .handle(&HubRequest::new(HubMethod::Get, location))
+                    .body
+            };
+            let response = hub.hub.handle(
+                &HubRequest::new(HubMethod::Put, upload.upload_url)
+                    .with_header(
+                        "content-range",
+                        content_range(0, body.len() as u64, body.len() as u64),
+                    )
+                    .with_body(body),
+            );
+            assert_eq!(response.status, 200);
+        }
+        let before = refs_document(&hub, "curate/claims").body;
+        let response = hub.hub.handle(
+            &HubRequest::new(
+                HubMethod::Post,
+                format!("{HUB}/curate/claims/.gf/publish/sessions/{session_id}/commit"),
+            )
+            .with_header("authorization", token.authorization())
+            .with_json(&CommitRequest {
+                manifest: serde_json::to_value(manifest).unwrap(),
+                refs: vec!["main".into()],
+                expected_revision,
+            }),
+        );
+        assert_eq!(response.status, 400);
+        let body: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
+        assert_eq!(body["code"], "invalid_input");
+        assert!(body["message"].as_str().unwrap().contains(detail));
+        assert_eq!(refs_document(&hub, "curate/claims").body, before);
+    }
+}
+
+#[test]
+fn opaque_workbench_file_cannot_be_selected_as_native_package_data() {
+    use graphforge_api::{
+        PortableV2ErrorCode, PortableV2Limits, PortableV2ParticipantId, PortableV2SelectionProfile,
+        PortableV2SelectionRequest,
+    };
+    let history = history();
+    std::fs::write(
+        history.root.path().join("project/notebook.ipynb"),
+        b"{\"cells\":[]}",
+    )
+    .unwrap();
+    let error = history
+        .graph
+        .preview_portable_v2_selection(&graphforge_api::PortableV2SelectionPreviewRequest {
+            selection: graphforge_api::PortableSelection::Current,
+            request: PortableV2SelectionRequest {
+                profile: PortableV2SelectionProfile::Custom(vec![PortableV2ParticipantId {
+                    capability_id: "opaque-files".into(),
+                    record_family_id: "notebook.ipynb".into(),
+                }]),
+                strict: true,
+            },
+            limits: PortableV2Limits::default(),
+        })
+        .unwrap_err();
+    assert_eq!(error.code, PortableV2ErrorCode::Incompatible);
+    assert!(
+        error
+            .to_string()
+            .contains("custom selector is missing or ambiguous")
     );
 }

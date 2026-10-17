@@ -23,6 +23,10 @@
                 {
                   "capability": "device-authorization",
                   "major": 1
+                },
+                {
+                  "capability": "version-previews",
+                  "major": 1
                 }
               ],
               "format": "graphforge-hub-publish/1",
@@ -48,6 +52,194 @@
                   "major": 1
                 }
               ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "negotiated": true,
+      "name": "negotiated-capabilities",
+      "description": "A Hub advertises its OAuth client, preferred chunk and unprefixed hex locations under a required extension.",
+      "steps": [
+        {
+          "request": {
+            "method": "GET",
+            "url": "https://hub.example/openalex/demo/.gf/publish"
+          },
+          "expect": {
+            "status": 200,
+            "json": {
+              "authorization": {
+                "client_id": "client_workos_example",
+                "device_authorization_endpoint": "https://hub.example/.gf/oauth/device_authorization",
+                "scope": "publish:openalex/demo",
+                "token_endpoint": "https://hub.example/.gf/oauth/token"
+              },
+              "capabilities": [
+                {
+                  "capability": "device-authorization",
+                  "major": 1
+                },
+                {
+                  "capability": "version-previews",
+                  "major": 1
+                }
+              ],
+              "format": "graphforge-hub-publish/1",
+              "limits": {
+                "max_chunk_bytes": 8388608,
+                "max_document_bytes": 4194304,
+                "max_object_bytes": 67108864,
+                "max_objects": 1024,
+                "max_session_bytes": 268435456,
+                "preferred_chunk_bytes": 8388608
+              },
+              "object_location_template": "https://hub.example/openalex/demo/.gf/objects/sha256/{hex}",
+              "repository": {
+                "owner": "openalex",
+                "repository": "demo"
+              },
+              "requirements": [
+                {
+                  "capability": "publish-session",
+                  "major": 1
+                },
+                {
+                  "capability": "resumable-upload",
+                  "major": 1
+                },
+                {
+                  "capability": "publish-negotiation",
+                  "major": 1
+                }
+              ]
+            }
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "url": "https://hub.example/.gf/oauth/device_authorization",
+            "headers": {
+              "content-type": "application/x-www-form-urlencoded"
+            },
+            "form": {
+              "client_id": "client_workos_example",
+              "scope": "publish:openalex/demo"
+            }
+          },
+          "expect": {
+            "status": 200,
+            "capture": {
+              "device": "/device_code",
+              "user": "/user_code"
+            }
+          }
+        },
+        {
+          "action": {
+            "action": "approve_device",
+            "user_code": "${user}"
+          }
+        },
+        {
+          "action": {
+            "action": "advance_clock",
+            "seconds": 5
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "url": "https://hub.example/.gf/oauth/token",
+            "headers": {
+              "content-type": "application/x-www-form-urlencoded"
+            },
+            "form": {
+              "client_id": "client_workos_example",
+              "device_code": "${device}",
+              "grant_type": "urn:ietf:params:oauth:grant-type:device_code"
+            }
+          },
+          "expect": {
+            "status": 200,
+            "capture": {
+              "token": "/access_token"
+            }
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "url": "https://hub.example/openalex/demo/.gf/publish/sessions",
+            "headers": {
+              "authorization": "Bearer ${token}",
+              "content-type": "application/json"
+            },
+            "json": {
+              "format": "graphforge-hub-publish/1",
+              "intent_digest": "sha256:a8c322a442f50d5420afb497bbeefc6992d504cd4820582283b7ed96087b9481",
+              "objects": [
+                {
+                  "digest": "sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60",
+                  "length": 47,
+                  "media_type": "application/vnd.graphforge.project"
+                }
+              ],
+              "operation_uuid": "00000000-0000-7000-8000-000000000001",
+              "repository": {
+                "owner": "openalex",
+                "repository": "demo"
+              },
+              "request_commitment": "sha256:23e848008534dcc20d5c13d1298d52b0f3a2535f4b4206d9d6cacd79614322ef",
+              "requirements": [
+                {
+                  "capability": "publish-negotiation",
+                  "major": 1
+                }
+              ]
+            }
+          },
+          "expect": {
+            "status": 201,
+            "json": {
+              "session_id": "${negotiated_session}",
+              "state": "open",
+              "uploads": [
+                {
+                  "chunk_bytes": 47,
+                  "digest": "sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60",
+                  "length": 47,
+                  "received": 0,
+                  "upload_url": "${negotiated_upload_0}"
+                }
+              ]
+            },
+            "capture": {
+              "negotiated_session": "/session_id",
+              "negotiated_upload_0": "/uploads/0/upload_url"
+            }
+          }
+        },
+        {
+          "request": {
+            "method": "PUT",
+            "url": "${negotiated_upload_0}",
+            "headers": {
+              "content-range": "bytes 0-46/47"
+            },
+            "body_text": "graphforge project package fixture: version one"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "upload-offset": "47"
+            },
+            "json": {
+              "digest": "sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60",
+              "length": 47,
+              "received": 47
             }
           }
         }
@@ -2646,7 +2838,7 @@
     },
     {
       "name": "fork-is-create-if-absent",
-      "description": "A Fork publishes a new repository identity with expected_revision null and its origin citation object stored verbatim; create-if-absent on an existing repository fails ref_conflict.",
+      "description": "A Fork publishes a new repository identity with expected_revision null and its typed research lineage and origin citation stored verbatim and bound by the manifest; create-if-absent on an existing repository fails ref_conflict.",
       "steps": [
         {
           "action": {
@@ -2680,6 +2872,16 @@
                   "digest": "sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60",
                   "length": 47,
                   "media_type": "application/vnd.graphforge.project"
+                },
+                {
+                  "digest": "sha256:611bbb5b1f2111402a87cd32e278b8d54fa55f8ddb02215d896f1062655068aa",
+                  "length": 37,
+                  "media_type": "application/vnd.graphforge.project"
+                },
+                {
+                  "digest": "sha256:c51015a64dcbfd53d92e442b6e4ff8820a2dc4e066cf99f57fd80ebdc5fd2f3b",
+                  "length": 1254,
+                  "media_type": "application/vnd.graphforge.research-lineage+json"
                 }
               ],
               "operation_uuid": "00000000-0000-7000-8000-00000000000c",
@@ -2687,7 +2889,7 @@
                 "owner": "openalex",
                 "repository": "demo"
               },
-              "request_commitment": "sha256:bfa4504acc23451e29598696ce9b9600e9ab2dcaed1199b9f3f1b4a83b4109e1"
+              "request_commitment": "sha256:3c4ae2cd69103da1732138fec0a428f358f34617750f9a3e76cb9df975e06021"
             }
           },
           "expect": {
@@ -2701,12 +2903,26 @@
                   "length": 47,
                   "received": 0,
                   "upload_url": "${origin_upload_0}"
+                },
+                {
+                  "digest": "sha256:611bbb5b1f2111402a87cd32e278b8d54fa55f8ddb02215d896f1062655068aa",
+                  "length": 37,
+                  "received": 0,
+                  "upload_url": "${origin_upload_1}"
+                },
+                {
+                  "digest": "sha256:c51015a64dcbfd53d92e442b6e4ff8820a2dc4e066cf99f57fd80ebdc5fd2f3b",
+                  "length": 1254,
+                  "received": 0,
+                  "upload_url": "${origin_upload_2}"
                 }
               ]
             },
             "capture": {
               "origin_session": "/session_id",
-              "origin_upload_0": "/uploads/0/upload_url"
+              "origin_upload_0": "/uploads/0/upload_url",
+              "origin_upload_1": "/uploads/1/upload_url",
+              "origin_upload_2": "/uploads/2/upload_url"
             }
           }
         },
@@ -2733,6 +2949,48 @@
         },
         {
           "request": {
+            "method": "PUT",
+            "url": "${origin_upload_1}",
+            "headers": {
+              "content-range": "bytes 0-36/37"
+            },
+            "body_text": "research Version package fixture: 101"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "upload-offset": "37"
+            },
+            "json": {
+              "digest": "sha256:611bbb5b1f2111402a87cd32e278b8d54fa55f8ddb02215d896f1062655068aa",
+              "length": 37,
+              "received": 37
+            }
+          }
+        },
+        {
+          "request": {
+            "method": "PUT",
+            "url": "${origin_upload_2}",
+            "headers": {
+              "content-range": "bytes 0-1253/1254"
+            },
+            "body_text": "{\"branches\":[{\"base_version_uuid\":\"00000000-0000-7000-8000-000000000065\",\"branch_uuid\":\"00000000-0000-7000-8000-000000000069\",\"head_version_uuid\":\"00000000-0000-7000-8000-000000000065\",\"label\":\"main\",\"origin_version_uuid\":\"00000000-0000-7000-8000-000000000065\",\"project_uuid\":\"00000000-0000-7000-8000-000000000064\",\"ref_name\":\"main\",\"selection_sha256\":\"sha256:1b7643d1e40a56a711760b58ee093e011adb9824ddf7862da8ba3e2d04c7aa25\"}],\"capabilities\":[],\"format\":\"graphforge-research-lineage/1\",\"immutable_version\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"project_uuid\":\"00000000-0000-7000-8000-000000000064\",\"proposals\":[],\"repository\":{\"owner\":\"openalex\",\"repository\":\"demo\"},\"requirements\":[{\"capability\":\"research-lineage\",\"major\":1}],\"version\":{\"major\":1,\"minor\":1},\"versions\":[{\"branch_uuid\":\"00000000-0000-7000-8000-000000000069\",\"identity_digest\":\"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"kind\":\"complete\",\"package\":{\"format\":\"graphforge-project/2\",\"object_digest\":\"sha256:611bbb5b1f2111402a87cd32e278b8d54fa55f8ddb02215d896f1062655068aa\",\"package_digest\":\"sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"},\"version_uuid\":\"00000000-0000-7000-8000-000000000065\"}]}"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "upload-offset": "1254"
+            },
+            "json": {
+              "digest": "sha256:c51015a64dcbfd53d92e442b6e4ff8820a2dc4e066cf99f57fd80ebdc5fd2f3b",
+              "length": 1254,
+              "received": 1254
+            }
+          }
+        },
+        {
+          "request": {
             "method": "POST",
             "url": "https://hub.example/openalex/demo/.gf/publish/sessions/${origin_session}/commit",
             "headers": {
@@ -2751,6 +3009,11 @@
                 "default_ref": "main",
                 "format": "graphforge-discovery/1",
                 "immutable_version": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "lineage": {
+                  "format": "graphforge-research-lineage/1",
+                  "lineage_digest": "sha256:c51015a64dcbfd53d92e442b6e4ff8820a2dc4e066cf99f57fd80ebdc5fd2f3b",
+                  "object_digest": "sha256:c51015a64dcbfd53d92e442b6e4ff8820a2dc4e066cf99f57fd80ebdc5fd2f3b"
+                },
                 "objects": [
                   {
                     "digest": "sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60",
@@ -2759,6 +3022,22 @@
                       "https://hub.example/openalex/demo/.gf/objects/sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60"
                     ],
                     "media_type": "application/vnd.graphforge.project"
+                  },
+                  {
+                    "digest": "sha256:611bbb5b1f2111402a87cd32e278b8d54fa55f8ddb02215d896f1062655068aa",
+                    "length": 37,
+                    "locations": [
+                      "https://hub.example/openalex/demo/.gf/objects/sha256:611bbb5b1f2111402a87cd32e278b8d54fa55f8ddb02215d896f1062655068aa"
+                    ],
+                    "media_type": "application/vnd.graphforge.project"
+                  },
+                  {
+                    "digest": "sha256:c51015a64dcbfd53d92e442b6e4ff8820a2dc4e066cf99f57fd80ebdc5fd2f3b",
+                    "length": 1254,
+                    "locations": [
+                      "https://hub.example/openalex/demo/.gf/objects/sha256:c51015a64dcbfd53d92e442b6e4ff8820a2dc4e066cf99f57fd80ebdc5fd2f3b"
+                    ],
+                    "media_type": "application/vnd.graphforge.research-lineage+json"
                   }
                 ],
                 "package": {
@@ -2792,7 +3071,7 @@
             "json": {
               "receipt": {
                 "format": "graphforge-hub-publish/1",
-                "manifest_validator": "sha256:00512c4b695097aa9b40de4b63a482caf43dedcce9cbe7187f153ee09aec9eab",
+                "manifest_validator": "sha256:28a580c7cf52d53458265fb10bda483fe4f6dc0dd646e3337980dd4dc1129a7e",
                 "operation_uuid": "00000000-0000-7000-8000-00000000000c",
                 "previous_revision": null,
                 "refs": [
@@ -2802,8 +3081,8 @@
                   "owner": "openalex",
                   "repository": "demo"
                 },
-                "request_commitment": "sha256:bfa4504acc23451e29598696ce9b9600e9ab2dcaed1199b9f3f1b4a83b4109e1",
-                "revision": "sha256:fa8c5c3c52979537334e3abcf3b0a2882d629eea93e40815be0b995b554ea6ae"
+                "request_commitment": "sha256:3c4ae2cd69103da1732138fec0a428f358f34617750f9a3e76cb9df975e06021",
+                "revision": "sha256:ae6e8e7b350e72865b3dcd36b9e5aa8733a145ec380af7549fdb981679d06ee7"
               },
               "state": "complete"
             }
@@ -2827,8 +3106,13 @@
                   "media_type": "application/vnd.graphforge.project"
                 },
                 {
-                  "digest": "sha256:be4ac61de4ca9065a15e30ab991d699b4bdfaa3e7dd9194e3aa132eabe75845e",
-                  "length": 126,
+                  "digest": "sha256:6be86b70aed7fedd320c7d5d6512e11932341110f62ee11b06fe9a94c46c7065",
+                  "length": 37,
+                  "media_type": "application/vnd.graphforge.project"
+                },
+                {
+                  "digest": "sha256:f3552b37c5a1db8c7fa5b09e786b3b805a0d2dc6014592df0057276229871916",
+                  "length": 1657,
                   "media_type": "application/vnd.graphforge.research-lineage+json"
                 }
               ],
@@ -2837,7 +3121,7 @@
                 "owner": "alice",
                 "repository": "demo-fork"
               },
-              "request_commitment": "sha256:9418ab63dffc7f1e0a5b9d47d3e32ba40f2d4b9620bfae5c005ca393c70b145a"
+              "request_commitment": "sha256:684979c682d44d606bb698a46e2a557e5db359da87c215b51de568fb7e81fe7a"
             }
           },
           "expect": {
@@ -2853,17 +3137,24 @@
                   "upload_url": "${fork_upload_0}"
                 },
                 {
-                  "digest": "sha256:be4ac61de4ca9065a15e30ab991d699b4bdfaa3e7dd9194e3aa132eabe75845e",
-                  "length": 126,
+                  "digest": "sha256:6be86b70aed7fedd320c7d5d6512e11932341110f62ee11b06fe9a94c46c7065",
+                  "length": 37,
                   "received": 0,
                   "upload_url": "${fork_upload_1}"
+                },
+                {
+                  "digest": "sha256:f3552b37c5a1db8c7fa5b09e786b3b805a0d2dc6014592df0057276229871916",
+                  "length": 1657,
+                  "received": 0,
+                  "upload_url": "${fork_upload_2}"
                 }
               ]
             },
             "capture": {
               "fork_session": "/session_id",
               "fork_upload_0": "/uploads/0/upload_url",
-              "fork_upload_1": "/uploads/1/upload_url"
+              "fork_upload_1": "/uploads/1/upload_url",
+              "fork_upload_2": "/uploads/2/upload_url"
             }
           }
         },
@@ -2893,19 +3184,40 @@
             "method": "PUT",
             "url": "${fork_upload_1}",
             "headers": {
-              "content-range": "bytes 0-125/126"
+              "content-range": "bytes 0-36/37"
             },
-            "body_text": "{\"origin\":{\"repository\":\"openalex/demo\",\"revision\":\"sha256:fa8c5c3c52979537334e3abcf3b0a2882d629eea93e40815be0b995b554ea6ae\"}}"
+            "body_text": "research Version package fixture: 104"
           },
           "expect": {
             "status": 200,
             "headers": {
-              "upload-offset": "126"
+              "upload-offset": "37"
             },
             "json": {
-              "digest": "sha256:be4ac61de4ca9065a15e30ab991d699b4bdfaa3e7dd9194e3aa132eabe75845e",
-              "length": 126,
-              "received": 126
+              "digest": "sha256:6be86b70aed7fedd320c7d5d6512e11932341110f62ee11b06fe9a94c46c7065",
+              "length": 37,
+              "received": 37
+            }
+          }
+        },
+        {
+          "request": {
+            "method": "PUT",
+            "url": "${fork_upload_2}",
+            "headers": {
+              "content-range": "bytes 0-1656/1657"
+            },
+            "body_text": "{\"branches\":[{\"base_version_uuid\":\"00000000-0000-7000-8000-000000000068\",\"branch_uuid\":\"00000000-0000-7000-8000-000000000067\",\"head_version_uuid\":\"00000000-0000-7000-8000-000000000068\",\"label\":\"main\",\"origin_version_uuid\":\"00000000-0000-7000-8000-000000000068\",\"project_uuid\":\"00000000-0000-7000-8000-000000000066\",\"ref_name\":\"main\",\"selection_sha256\":\"sha256:1b7643d1e40a56a711760b58ee093e011adb9824ddf7862da8ba3e2d04c7aa25\"}],\"capabilities\":[],\"extensions\":{\"x-origin-revision\":\"sha256:ae6e8e7b350e72865b3dcd36b9e5aa8733a145ec380af7549fdb981679d06ee7\"},\"fork\":{\"origin_project_uuid\":\"00000000-0000-7000-8000-000000000064\",\"origin_repository\":{\"owner\":\"openalex\",\"repository\":\"demo\"},\"origin_version_identity\":\"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"origin_version_uuid\":\"00000000-0000-7000-8000-000000000065\"},\"format\":\"graphforge-research-lineage/1\",\"immutable_version\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"project_uuid\":\"00000000-0000-7000-8000-000000000066\",\"proposals\":[],\"repository\":{\"owner\":\"alice\",\"repository\":\"demo-fork\"},\"requirements\":[{\"capability\":\"research-lineage\",\"major\":1}],\"version\":{\"major\":1,\"minor\":1},\"versions\":[{\"branch_uuid\":\"00000000-0000-7000-8000-000000000067\",\"identity_digest\":\"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\",\"kind\":\"complete\",\"package\":{\"format\":\"graphforge-project/2\",\"object_digest\":\"sha256:6be86b70aed7fedd320c7d5d6512e11932341110f62ee11b06fe9a94c46c7065\",\"package_digest\":\"sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"},\"version_uuid\":\"00000000-0000-7000-8000-000000000068\"}]}"
+          },
+          "expect": {
+            "status": 200,
+            "headers": {
+              "upload-offset": "1657"
+            },
+            "json": {
+              "digest": "sha256:f3552b37c5a1db8c7fa5b09e786b3b805a0d2dc6014592df0057276229871916",
+              "length": 1657,
+              "received": 1657
             }
           }
         },
@@ -2929,6 +3241,11 @@
                 "default_ref": "main",
                 "format": "graphforge-discovery/1",
                 "immutable_version": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "lineage": {
+                  "format": "graphforge-research-lineage/1",
+                  "lineage_digest": "sha256:f3552b37c5a1db8c7fa5b09e786b3b805a0d2dc6014592df0057276229871916",
+                  "object_digest": "sha256:f3552b37c5a1db8c7fa5b09e786b3b805a0d2dc6014592df0057276229871916"
+                },
                 "objects": [
                   {
                     "digest": "sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60",
@@ -2939,10 +3256,18 @@
                     "media_type": "application/vnd.graphforge.project"
                   },
                   {
-                    "digest": "sha256:be4ac61de4ca9065a15e30ab991d699b4bdfaa3e7dd9194e3aa132eabe75845e",
-                    "length": 126,
+                    "digest": "sha256:6be86b70aed7fedd320c7d5d6512e11932341110f62ee11b06fe9a94c46c7065",
+                    "length": 37,
                     "locations": [
-                      "https://hub.example/alice/demo-fork/.gf/objects/sha256:be4ac61de4ca9065a15e30ab991d699b4bdfaa3e7dd9194e3aa132eabe75845e"
+                      "https://hub.example/alice/demo-fork/.gf/objects/sha256:6be86b70aed7fedd320c7d5d6512e11932341110f62ee11b06fe9a94c46c7065"
+                    ],
+                    "media_type": "application/vnd.graphforge.project"
+                  },
+                  {
+                    "digest": "sha256:f3552b37c5a1db8c7fa5b09e786b3b805a0d2dc6014592df0057276229871916",
+                    "length": 1657,
+                    "locations": [
+                      "https://hub.example/alice/demo-fork/.gf/objects/sha256:f3552b37c5a1db8c7fa5b09e786b3b805a0d2dc6014592df0057276229871916"
                     ],
                     "media_type": "application/vnd.graphforge.research-lineage+json"
                   }
@@ -2978,7 +3303,7 @@
             "json": {
               "receipt": {
                 "format": "graphforge-hub-publish/1",
-                "manifest_validator": "sha256:176967fe3b46a57b28e0480b09cfee9672ce1fe51438f0b79a052902c77b520e",
+                "manifest_validator": "sha256:75b0ae86af412e6ff359fc8f957ac53850b775472b615bbe5bad2c433ce807ae",
                 "operation_uuid": "00000000-0000-7000-8000-00000000000d",
                 "previous_revision": null,
                 "refs": [
@@ -2988,8 +3313,8 @@
                   "owner": "alice",
                   "repository": "demo-fork"
                 },
-                "request_commitment": "sha256:9418ab63dffc7f1e0a5b9d47d3e32ba40f2d4b9620bfae5c005ca393c70b145a",
-                "revision": "sha256:fd3d4167d8742ddab6bfe19214b44f03829ab30ade707bacf49f0bfb8bdee151"
+                "request_commitment": "sha256:684979c682d44d606bb698a46e2a557e5db359da87c215b51de568fb7e81fe7a",
+                "revision": "sha256:6ea52534825f9fc2267d2d5dc68fb23171a44b159e5b515eea35941898698725"
               },
               "state": "complete"
             }
@@ -3003,19 +3328,19 @@
           "expect": {
             "status": 200,
             "headers": {
-              "etag": "\"sha256:fd3d4167d8742ddab6bfe19214b44f03829ab30ade707bacf49f0bfb8bdee151\""
+              "etag": "\"sha256:6ea52534825f9fc2267d2d5dc68fb23171a44b159e5b515eea35941898698725\""
             },
-            "body_text": "{\"default_ref\":\"main\",\"format\":\"graphforge-discovery/1\",\"refs\":[{\"name\":\"main\",\"target\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"validator\":\"sha256:176967fe3b46a57b28e0480b09cfee9672ce1fe51438f0b79a052902c77b520e\"}],\"repository\":{\"owner\":\"alice\",\"repository\":\"demo-fork\"},\"version\":{\"major\":1,\"minor\":1}}"
+            "body_text": "{\"default_ref\":\"main\",\"format\":\"graphforge-discovery/1\",\"refs\":[{\"name\":\"main\",\"target\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"validator\":\"sha256:75b0ae86af412e6ff359fc8f957ac53850b775472b615bbe5bad2c433ce807ae\"}],\"repository\":{\"owner\":\"alice\",\"repository\":\"demo-fork\"},\"version\":{\"major\":1,\"minor\":1}}"
           }
         },
         {
           "request": {
             "method": "GET",
-            "url": "https://hub.example/alice/demo-fork/.gf/objects/sha256:be4ac61de4ca9065a15e30ab991d699b4bdfaa3e7dd9194e3aa132eabe75845e"
+            "url": "https://hub.example/alice/demo-fork/.gf/objects/sha256:f3552b37c5a1db8c7fa5b09e786b3b805a0d2dc6014592df0057276229871916"
           },
           "expect": {
             "status": 200,
-            "body_text": "{\"origin\":{\"repository\":\"openalex/demo\",\"revision\":\"sha256:fa8c5c3c52979537334e3abcf3b0a2882d629eea93e40815be0b995b554ea6ae\"}}"
+            "body_text": "{\"branches\":[{\"base_version_uuid\":\"00000000-0000-7000-8000-000000000068\",\"branch_uuid\":\"00000000-0000-7000-8000-000000000067\",\"head_version_uuid\":\"00000000-0000-7000-8000-000000000068\",\"label\":\"main\",\"origin_version_uuid\":\"00000000-0000-7000-8000-000000000068\",\"project_uuid\":\"00000000-0000-7000-8000-000000000066\",\"ref_name\":\"main\",\"selection_sha256\":\"sha256:1b7643d1e40a56a711760b58ee093e011adb9824ddf7862da8ba3e2d04c7aa25\"}],\"capabilities\":[],\"extensions\":{\"x-origin-revision\":\"sha256:ae6e8e7b350e72865b3dcd36b9e5aa8733a145ec380af7549fdb981679d06ee7\"},\"fork\":{\"origin_project_uuid\":\"00000000-0000-7000-8000-000000000064\",\"origin_repository\":{\"owner\":\"openalex\",\"repository\":\"demo\"},\"origin_version_identity\":\"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"origin_version_uuid\":\"00000000-0000-7000-8000-000000000065\"},\"format\":\"graphforge-research-lineage/1\",\"immutable_version\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"project_uuid\":\"00000000-0000-7000-8000-000000000066\",\"proposals\":[],\"repository\":{\"owner\":\"alice\",\"repository\":\"demo-fork\"},\"requirements\":[{\"capability\":\"research-lineage\",\"major\":1}],\"version\":{\"major\":1,\"minor\":1},\"versions\":[{\"branch_uuid\":\"00000000-0000-7000-8000-000000000067\",\"identity_digest\":\"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\",\"kind\":\"complete\",\"package\":{\"format\":\"graphforge-project/2\",\"object_digest\":\"sha256:6be86b70aed7fedd320c7d5d6512e11932341110f62ee11b06fe9a94c46c7065\",\"package_digest\":\"sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"},\"version_uuid\":\"00000000-0000-7000-8000-000000000068\"}]}"
           }
         },
         {
@@ -3154,9 +3479,9 @@
           "expect": {
             "status": 200,
             "headers": {
-              "etag": "\"sha256:fa8c5c3c52979537334e3abcf3b0a2882d629eea93e40815be0b995b554ea6ae\""
+              "etag": "\"sha256:ae6e8e7b350e72865b3dcd36b9e5aa8733a145ec380af7549fdb981679d06ee7\""
             },
-            "body_text": "{\"default_ref\":\"main\",\"format\":\"graphforge-discovery/1\",\"refs\":[{\"name\":\"main\",\"target\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"validator\":\"sha256:00512c4b695097aa9b40de4b63a482caf43dedcce9cbe7187f153ee09aec9eab\"}],\"repository\":{\"owner\":\"openalex\",\"repository\":\"demo\"},\"version\":{\"major\":1,\"minor\":1}}"
+            "body_text": "{\"default_ref\":\"main\",\"format\":\"graphforge-discovery/1\",\"refs\":[{\"name\":\"main\",\"target\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"validator\":\"sha256:28a580c7cf52d53458265fb10bda483fe4f6dc0dd646e3337980dd4dc1129a7e\"}],\"repository\":{\"owner\":\"openalex\",\"repository\":\"demo\"},\"version\":{\"major\":1,\"minor\":1}}"
           }
         }
       ]

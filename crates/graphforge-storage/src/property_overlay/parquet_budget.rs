@@ -386,12 +386,17 @@ pub(super) fn validate_parquet_resource_admission(
         false,
         corrupt,
     )?
-    .decoded_bytes)
+    .decoded)
 }
 
 pub(super) struct ParquetDecoderMemory {
-    decoded_bytes: u64,
-    pub(super) with_codec_bytes: u64,
+    pub(super) decoded: u64,
+    pub(super) with_codec: u64,
+    /// Decoder state remaining after a flat Arrow batch without row selection drops.
+    pub(super) retained: u64,
+    /// Compressed page Bytes alias a separately admitted complete Memory source.
+    pub(super) memory_with_codec: u64,
+    pub(super) memory_retained: u64,
 }
 
 pub(super) fn replay_decoder_limit(message: &str) -> GfError {
@@ -423,7 +428,7 @@ pub(crate) fn replay_parquet_reader_reservation(
         true,
         replay_decoder_limit,
     )?;
-    let bytes = usize::try_from(admission.with_codec_bytes)
+    let bytes = usize::try_from(admission.with_codec)
         .map_err(|_| replay_decoder_limit("replay decoder reservation overflows"))?;
     if bytes > max_memory_bytes {
         return Err(replay_decoder_limit(
@@ -463,16 +468,23 @@ pub(super) fn parquet_resource_admission(
     } else {
         Vec::new()
     };
+    let mut memory_column_memory = vec![0_u64; column_memory.len()];
+    let mut retained_column_memory = vec![0_u64; column_memory.len()];
+    let mut memory_retained_column_memory = vec![0_u64; column_memory.len()];
     let mut group_values = Vec::with_capacity(if include_codec {
         metadata.num_row_groups()
     } else {
         0
     });
+    let mut retained_group_values = Vec::with_capacity(group_values.capacity());
+    let mut retain_complete = false;
     for group in metadata.row_groups() {
         let mut group_value_bytes = 0_u64;
+        let mut retained_value_bytes = 0_u64;
         let mut group_exposure = 0_u64;
         for (column_index, column) in group.columns().iter().enumerate() {
             let selected = projected_columns.is_none_or(|columns| columns.contains(&column_index));
+            let mut plain_byte_pages = true;
             let mut dictionary_exposure = 0_u64;
             let mut data_exposure = 0_u64;
             let mut compressed_dictionary = 0_u64;
@@ -498,6 +510,7 @@ pub(super) fn parquet_resource_admission(
                 return Err(corrupt("property column chunk escapes authenticated file"));
             }
             let mut position = start;
+            let mut uncompressed_pages = 0_u64;
             while position < end {
                 let consumed = Arc::new(AtomicU64::new(0));
                 let transport = HeaderRead {
@@ -527,12 +540,75 @@ pub(super) fn parquet_resource_admission(
                     return Err(corrupt("property page exceeds pre-decode byte admission"));
                 }
                 if selected {
+                    let no_decompression = column.compression()
+                        == parquet::basic::Compression::UNCOMPRESSED
+                        || (header.type_ == parquet::format::PageType::DATA_PAGE_V2
+                            && header
+                                .data_page_header_v2
+                                .as_ref()
+                                .is_some_and(|page| page.is_compressed == Some(false)));
+                    // Parquet returns the body directly on these paths and
+                    // does not compare its length with uncompressed_page_size.
+                    if no_decompression && compressed_page != uncompressed_page {
+                        return Err(corrupt(
+                            "uncompressed property page body and header sizes disagree",
+                        ));
+                    }
+                    uncompressed_pages = uncompressed_pages
+                        .checked_add(header_bytes)
+                        .and_then(|bytes| bytes.checked_add(uncompressed_page))
+                        .ok_or_else(|| corrupt("property uncompressed page sizes overflow"))?;
+                    if uncompressed_pages > uncompressed {
+                        return Err(corrupt(
+                            "property page bytes exceed column uncompressed size",
+                        ));
+                    }
                     if header.type_ == parquet::format::PageType::DICTIONARY_PAGE {
+                        if column.column_descr().physical_type() == parquet::basic::Type::BYTE_ARRAY
+                        {
+                            let dictionary =
+                                header.dictionary_page_header.as_ref().ok_or_else(|| {
+                                    corrupt("property dictionary page lacks its header")
+                                })?;
+                            let values = u64::try_from(dictionary.num_values).map_err(|_| {
+                                corrupt("property dictionary page has negative value count")
+                            })?;
+                            // The byte-array decoder reserves its offset Vec
+                            // from this count before reading any value lengths.
+                            // Every PLAIN dictionary entry needs a four-byte
+                            // length even when the stored string is empty.
+                            let lengths = values.checked_mul(4).ok_or_else(|| {
+                                corrupt("property dictionary value count overflows")
+                            })?;
+                            if lengths > uncompressed_page {
+                                return Err(corrupt(
+                                    "property dictionary value count exceeds its page bytes",
+                                ));
+                            }
+                        }
                         dictionary_exposure = dictionary_exposure.max(uncompressed_page);
                         compressed_dictionary = compressed_dictionary.max(compressed_page);
                     } else {
                         data_exposure = data_exposure.max(uncompressed_page);
                         compressed_data = compressed_data.max(compressed_page);
+                        let encoding = match header.type_ {
+                            parquet::format::PageType::DATA_PAGE => {
+                                header.data_page_header.as_ref().map(|page| page.encoding)
+                            }
+                            parquet::format::PageType::DATA_PAGE_V2 => header
+                                .data_page_header_v2
+                                .as_ref()
+                                .map(|page| page.encoding),
+                            _ => None,
+                        };
+                        plain_byte_pages &= matches!(
+                            encoding,
+                            Some(
+                                parquet::format::Encoding::PLAIN
+                                    | parquet::format::Encoding::RLE_DICTIONARY
+                                    | parquet::format::Encoding::PLAIN_DICTIONARY
+                            )
+                        );
                     }
                 }
                 position = position
@@ -555,7 +631,7 @@ pub(super) fn parquet_resource_admission(
                         parquet::basic::Compression::ZSTD(_) => {
                             crate::permanent_parquet::ZSTD_DECODER_WORKSPACE as u64
                         }
-                        // Ordinary property callers use only decoded_bytes. Replay admission
+                        // Ordinary property callers use only decoded. Replay admission
                         // refuses a codec without a justified native-memory bound.
                         _ => u64::MAX,
                     };
@@ -563,6 +639,7 @@ pub(super) fn parquet_resource_admission(
                     // leaves have a value-count bound; variable and repeated leaves
                     // conservatively reserve the entire contributing row group.
                     let descriptor = column.column_descr();
+                    retain_complete |= descriptor.max_rep_level() > 0 || !plain_byte_pages;
                     let values = u64::try_from(column.num_values())
                         .map_err(|_| corrupt("negative Parquet value count"))?;
                     let values = if descriptor.max_rep_level() == 0 {
@@ -581,23 +658,29 @@ pub(super) fn parquet_resource_admission(
                         ),
                         parquet::basic::Type::BYTE_ARRAY => None,
                     };
-                    let decoded = width
-                        .map_or_else(
-                            || {
-                                uncompressed
-                                    .saturating_add(dictionary_exposure.saturating_mul(values))
-                            },
-                            |width| values.saturating_mul(width),
-                        )
-                        .saturating_add(
-                            values.saturating_mul(16).saturating_mul(
-                                1 + u64::try_from(descriptor.max_def_level())
-                                    .map_err(|_| corrupt("negative definition level"))?
-                                    + u64::try_from(descriptor.max_rep_level())
-                                        .map_err(|_| corrupt("negative repetition level"))?,
-                            ),
-                        );
+                    let payload = width.map_or_else(
+                        || uncompressed.saturating_add(dictionary_exposure.saturating_mul(values)),
+                        |width| values.saturating_mul(width),
+                    );
+                    // ArrayReader retains definition/repetition vectors after
+                    // consume_batch. Only qualified byte payloads transfer to
+                    // the returned Arrow array; DELTA and unknown decoders keep
+                    // their complete previous envelope while idle.
+                    let bookkeeping = values.saturating_mul(16).saturating_mul(
+                        1 + u64::try_from(descriptor.max_def_level())
+                            .map_err(|_| corrupt("negative definition level"))?
+                            + u64::try_from(descriptor.max_rep_level())
+                                .map_err(|_| corrupt("negative repetition level"))?,
+                    );
+                    let decoded = payload.saturating_add(bookkeeping);
                     group_value_bytes = group_value_bytes.saturating_add(decoded);
+                    retained_value_bytes = retained_value_bytes.saturating_add(
+                        if width.is_none() && plain_byte_pages {
+                            bookkeeping
+                        } else {
+                            decoded
+                        },
+                    );
                     let memory = data_exposure
                         .saturating_mul(2)
                         .saturating_add(dictionary_exposure.saturating_mul(2))
@@ -609,6 +692,55 @@ pub(super) fn parquet_resource_admission(
                         corrupt("Parquet row-group column count disagrees with schema")
                     })?;
                     *column_max = (*column_max).max(memory);
+                    // CountingChunkReader returns Bytes::slice for a Memory
+                    // source. Its complete encoded allocation has its own
+                    // source guard; page bodies borrow that same allocation.
+                    // Keep a separate joint maximum: subtracting independently
+                    // maximized compressed sizes could understate another group.
+                    let memory = data_exposure
+                        .saturating_mul(2)
+                        .saturating_add(dictionary_exposure.saturating_mul(2))
+                        .saturating_add(native)
+                        .saturating_add(8 * 1024);
+                    let column_max =
+                        memory_column_memory.get_mut(column_index).ok_or_else(|| {
+                            corrupt("Parquet row-group column count disagrees with schema")
+                        })?;
+                    *column_max = (*column_max).max(memory);
+                    // Parquet 58's flat ByteArrayColumnValueDecoder replaces
+                    // its single PLAIN/dictionary decoder on set_data. Level
+                    // decoders borrow slices of that same current page. The
+                    // old/new page and ZSTD's temporary output overlap during
+                    // a read, but only one data page survives consume_batch.
+                    // Other decoders can cache old encodings or repeated state.
+                    let retained_data =
+                        if width.is_none() && descriptor.max_rep_level() == 0 && plain_byte_pages {
+                            data_exposure
+                        } else {
+                            data_exposure.saturating_mul(2)
+                        };
+                    let retained = retained_data
+                        .saturating_add(dictionary_exposure.saturating_mul(2))
+                        .saturating_add(native)
+                        .saturating_add(8 * 1024);
+                    let column_max = memory_retained_column_memory
+                        .get_mut(column_index)
+                        .ok_or_else(|| {
+                            corrupt("Parquet row-group column count disagrees with schema")
+                        })?;
+                    *column_max = (*column_max).max(retained);
+                    // Compute each row group's joint idle envelope before
+                    // maximizing: independent maxima cannot be subtracted.
+                    let retained = retained
+                        .saturating_add(compressed_data)
+                        .saturating_add(compressed_dictionary);
+                    let column_max =
+                        retained_column_memory
+                            .get_mut(column_index)
+                            .ok_or_else(|| {
+                                corrupt("Parquet row-group column count disagrees with schema")
+                            })?;
+                    *column_max = (*column_max).max(retained);
                 }
                 group_exposure = group_exposure
                     .checked_add(data_exposure)
@@ -636,21 +768,60 @@ pub(super) fn parquet_resource_admission(
         }
         largest_group_exposure = largest_group_exposure.max(group_exposure);
         if include_codec {
-            group_values.push((
-                u64::try_from(group.num_rows()).map_err(|_| corrupt("negative row-group rows"))?,
-                group_value_bytes,
-            ));
+            let rows =
+                u64::try_from(group.num_rows()).map_err(|_| corrupt("negative row-group rows"))?;
+            group_values.push((rows, group_value_bytes));
+            retained_group_values.push((rows, retained_value_bytes));
         }
     }
-    Ok(ParquetDecoderMemory {
-        decoded_bytes: largest_group_exposure,
-        // The raw-header audit ends before decoding. Its bounded temporary
-        // memory does not overlap decoder states or returned Arrow values.
-        with_codec_bytes: column_memory
+    let column_memory = column_memory.into_iter().fold(0, u64::saturating_add);
+    let with_codec_bytes = column_memory
+        .saturating_add(contributing_row_group_bytes(&group_values, batch_rows))
+        .max(64 * 1024);
+    let retained_bytes = if retain_complete {
+        with_codec_bytes
+    } else {
+        retained_column_memory
             .into_iter()
             .fold(0, u64::saturating_add)
-            .saturating_add(contributing_row_group_bytes(&group_values, batch_rows))
-            .max(64 * 1024),
+            .saturating_add(contributing_row_group_bytes(
+                &retained_group_values,
+                batch_rows,
+            ))
+            .max(64 * 1024)
+    };
+    if retained_bytes > with_codec_bytes {
+        return Err(limit_error("decoder retention exceeds complete admission"));
+    }
+    let memory_column_memory = memory_column_memory
+        .into_iter()
+        .fold(0, u64::saturating_add);
+    let memory_with_codec_bytes = memory_column_memory
+        .saturating_add(contributing_row_group_bytes(&group_values, batch_rows))
+        .max(64 * 1024);
+    let memory_retained_bytes = if retain_complete {
+        memory_with_codec_bytes
+    } else {
+        memory_retained_column_memory
+            .into_iter()
+            .fold(0, u64::saturating_add)
+            .saturating_add(contributing_row_group_bytes(
+                &retained_group_values,
+                batch_rows,
+            ))
+            .max(64 * 1024)
+    };
+    if memory_retained_bytes > memory_with_codec_bytes {
+        return Err(limit_error("decoder retention exceeds complete admission"));
+    }
+    Ok(ParquetDecoderMemory {
+        decoded: largest_group_exposure,
+        // The raw-header audit ends before decoding. Its bounded temporary
+        // memory does not overlap decoder states or returned Arrow values.
+        with_codec: with_codec_bytes,
+        retained: retained_bytes,
+        memory_with_codec: memory_with_codec_bytes,
+        memory_retained: memory_retained_bytes,
     })
 }
 

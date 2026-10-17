@@ -699,6 +699,7 @@ pub struct PropertyOverlayLimits {
 
 #[derive(Debug)]
 pub(crate) struct LiveByteBudget {
+    execution: Option<Arc<crate::property_scan_memory::Budget>>,
     max: u64,
     state: Mutex<(u64, u64)>,
 }
@@ -706,6 +707,18 @@ pub(crate) struct LiveByteBudget {
 impl LiveByteBudget {
     fn new(max: u64) -> Self {
         Self {
+            execution: None,
+            max,
+            state: Mutex::new((0, 0)),
+        }
+    }
+
+    fn with_execution(
+        max: u64,
+        execution: Option<Arc<crate::property_scan_memory::Budget>>,
+    ) -> Self {
+        Self {
+            execution,
             max,
             state: Mutex::new((0, 0)),
         }

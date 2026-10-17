@@ -18,6 +18,8 @@
 //! Sort functionalities
 
 mod builder;
+mod copy_admission;
+mod copy_bounds;
 mod cursor;
 mod merge;
 mod multi_level_merge;

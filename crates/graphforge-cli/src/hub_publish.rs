@@ -26,9 +26,10 @@ use graphforge_discovery::{
 use graphforge_hub_publish::{
     CommitRequest, DEVICE_CODE_GRANT_TYPE, DeviceAuthorizationResponse, DevicePoll,
     HUB_PUBLISH_FORMAT, HubErrorBody, HubMethod, HubPublishErrorCode, HubRequest, HubResponse,
-    ObjectDeclaration, OpenSessionRequest, OperationStatus, PublishCapabilities, PublishIntent,
-    PublishReceipt, PublishToken, SessionResponse, UPLOAD_OFFSET_HEADER, UploadStatus,
-    UploadTarget, canonical_json, content_range, publish_scope, sha256_digest,
+    ObjectDeclaration, OpenSessionRequest, OperationStatus, PUBLISH_NEGOTIATION_CAPABILITY,
+    PublishCapabilities, PublishIntent, PublishReceipt, PublishToken, SessionResponse,
+    UPLOAD_OFFSET_HEADER, UploadStatus, UploadTarget, canonical_json, content_range,
+    parse_unique_json, publish_scope, sha256_digest,
 };
 use publication::{
     ManifestInputs, PACKAGE_MEDIA_TYPE, SUMMARY_MEDIA_TYPE, VerifiedBundle, build_manifest,
@@ -58,10 +59,12 @@ pub(crate) fn allow_device_flow() {
 
 /// OAuth client identifier the CLI presents to device authorization.
 const CLIENT_ID: &str = "graphforge-cli";
-/// Largest upload chunk the client sends, whatever the Hub allows.
+/// Legacy upload size when a Hub does not advertise a preference.
 /// Smaller chunks bound the progress a dropped connection loses and, with
 /// [`crate::hub_http::WRITE_TIMEOUTS`], the slowest uplink that completes one.
 const MAX_CLIENT_CHUNK_BYTES: u64 = 1024 * 1024;
+/// Explicit uploader resource budget for its one owned chunk buffer.
+const MAX_NEGOTIATED_CHUNK_BYTES: u64 = 64 * 1024 * 1024;
 /// Longest the client waits for a device authorization, whatever the Hub allows.
 const MAX_DEVICE_WAIT_SECONDS: u64 = 15 * 60;
 /// Longest pause between device-flow polls, whatever the Hub asks for.
@@ -92,6 +95,13 @@ pub(crate) struct PublishArgs {
     /// repository, ref, and Version, so a rerun replays the original receipt.
     #[arg(long)]
     pub operation_uuid: Option<String>,
+    /// Read a Vercel preview bypass secret from this environment variable.
+    #[arg(long)]
+    pub protection_bypass_env: Option<String>,
+    /// Explicit PNG/SVG image selection for this exact immutable Version.
+    /// Repeat for multiple images; never reads unselected workbench files.
+    #[arg(long = "preview")]
+    pub previews: Vec<std::path::PathBuf>,
 }
 
 /// How the CLI obtains its publish token.
@@ -104,12 +114,43 @@ pub(crate) enum Credential {
 
 /// Process-side effects a publish needs besides the Hub transport.
 pub(crate) struct PublishEnvironment<'a> {
+    /// Opt-in credentials for selected-origin control requests only.
+    pub bypass: Option<&'a crate::hub_http::DiscoveryCredentials>,
     /// Credential source.
     pub credential: Credential,
     /// Waits between device-flow polls.
     pub wait: &'a dyn Fn(Duration),
     /// Human instructions (device flow); never receives secrets.
     pub notices: &'a mut dyn Write,
+}
+
+/// Captured bindings accept explicit credentials without consulting the user's
+/// vault. The native process may reuse a saved session even without a terminal.
+fn select_credential(
+    explicit: Option<PublishToken>,
+    streaming: bool,
+    interactive: bool,
+    saved: impl FnOnce() -> Result<Option<PublishToken>, GfError>,
+) -> Result<Credential, GfError> {
+    if let Some(token) = explicit {
+        return Ok(Credential::Token(token));
+    }
+    if !streaming {
+        return Err(publish_error(
+            HubPublishErrorCode::AuthDenied,
+            "no publish credential: set GRAPHFORGE_HUB_PUBLISH_TOKEN or run gf publish in a terminal",
+        ));
+    }
+    if let Some(token) = saved()? {
+        return Ok(Credential::Token(token));
+    }
+    if interactive {
+        return Ok(Credential::DeviceFlow);
+    }
+    Err(publish_error(
+        HubPublishErrorCode::AuthDenied,
+        "no saved session: run gf auth login or set GRAPHFORGE_HUB_PUBLISH_TOKEN",
+    ))
 }
 
 /// Published result written to stdout.
@@ -163,24 +204,40 @@ fn run_command(
     output: &mut dyn Write,
 ) -> Result<(), GfError> {
     use std::io::IsTerminal as _;
-    let interactive = DEVICE_FLOW_ALLOWED.load(Ordering::Relaxed)
-        && std::io::stdin().is_terminal()
-        && std::io::stderr().is_terminal();
+    let streaming = DEVICE_FLOW_ALLOWED.load(Ordering::Relaxed);
+    let interactive =
+        streaming && std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
     // Locations and arguments are validated before any credential or network use.
-    parse_input(&args.repository)?;
+    let (identity, base) = parse_input(&args.repository)?;
     if let Some(origin) = &args.fork_of {
         parse_input(origin)?;
     }
-    let credential = match PublishToken::from_env() {
-        Some(token) => Credential::Token(token),
-        None if interactive => Credential::DeviceFlow,
-        None => {
-            return Err(publish_error(
-                HubPublishErrorCode::AuthDenied,
-                "no publish credential: set GRAPHFORGE_HUB_PUBLISH_TOKEN or run gf publish in a terminal",
-            ));
-        }
-    };
+    let bypass = crate::hub_http::DiscoveryCredentials::load(
+        &base,
+        None,
+        args.protection_bypass_env.as_deref(),
+        |name| std::env::var(name),
+    )?;
+    let credential = select_credential(PublishToken::from_env(), streaming, interactive, || {
+        let grant = crate::auth::repository_token(
+            &base,
+            &identity.owner,
+            &identity.repository,
+            "publish",
+            args.protection_bypass_env.as_deref(),
+        )?;
+        grant
+            .map(|grant| {
+                if grant.origin.origin() != base.origin() {
+                    return Err(validation(
+                        "hub.auth_denied",
+                        "publish capability must match the Hub origin",
+                    ));
+                }
+                Ok(PublishToken::new(grant.token))
+            })
+            .transpose()
+    })?;
     let path = crate::resolve_project_path(project, project_dir)?;
     let path = path
         .to_str()
@@ -189,6 +246,7 @@ fn run_command(
     let stderr = std::io::stderr();
     let mut notices = stderr.lock();
     let mut environment = PublishEnvironment {
+        bypass: bypass.as_ref(),
         credential,
         wait: &std::thread::sleep,
         notices: &mut notices,
@@ -331,20 +389,55 @@ type Document = (Vec<u8>, Option<String>);
 
 /// Control-plane and data-plane exchange over one transport.
 struct Hub<'a> {
+    bypass: Option<&'a crate::hub_http::DiscoveryCredentials>,
     transport: &'a dyn Transport,
     base: Url,
 }
 
 impl Hub<'_> {
-    /// Public, redirect-bounded read of a repository document or object.
-    /// `None` on 404. Every hop is validated; no credential is sent.
+    /// Public object reads never receive identity or preview credentials.
     fn read(&self, url: &Url, limit: usize) -> Result<Option<Document>, GfError> {
+        self.read_inner(url, limit, false)
+    }
+    /// Repository metadata receives bypass only on its initial selected-origin hop.
+    fn read_control(&self, url: &Url, limit: usize) -> Result<Option<Document>, GfError> {
+        self.read_inner(url, limit, true)
+    }
+    fn with_bypass(&self, mut request: HubRequest, url: &Url) -> Result<HubRequest, GfError> {
+        if url.origin() == self.base.origin()
+            && let Some(bypass) = self.bypass
+        {
+            for (name, value) in bypass
+                .headers_for(url)?
+                .iter()
+                .filter(|(name, _)| *name == "x-vercel-protection-bypass")
+            {
+                request = request.with_header(
+                    name,
+                    value
+                        .to_str()
+                        .map_err(|_| validation("hub.auth_denied", "invalid preview credential"))?,
+                );
+            }
+        }
+        Ok(request)
+    }
+    fn read_inner(
+        &self,
+        url: &Url,
+        limit: usize,
+        control: bool,
+    ) -> Result<Option<Document>, GfError> {
         let mut url = url.clone();
         for hop in 0..=MAX_REDIRECTS {
             self.transport.validate(&url)?;
-            let response = self
-                .transport
-                .exchange(&HubRequest::new(HubMethod::Get, url.as_str()), limit)?;
+            let request = HubRequest::new(HubMethod::Get, url.as_str());
+            let request = if control && hop == 0 {
+                self.with_bypass(request, &url)?
+            } else {
+                request
+            };
+            let response = self.transport.exchange(&request, limit)?;
             match response.status {
                 301 | 302 | 303 | 307 | 308 if hop < MAX_REDIRECTS => {
                     let location = response
@@ -378,10 +471,12 @@ impl Hub<'_> {
                 "control-plane URL is not on the repository origin",
             ));
         }
-        self.transport.exchange(
-            &request.with_header("authorization", token.authorization()),
-            MAX_CONTROL_RESPONSE_BYTES,
-        )
+        let request = self.with_bypass(
+            request.with_header("authorization", token.authorization()),
+            &url,
+        )?;
+        self.transport
+            .exchange(&request, MAX_CONTROL_RESPONSE_BYTES)
     }
 
     /// Unauthenticated data-plane request to a Hub-issued upload capability URL.
@@ -389,11 +484,19 @@ impl Hub<'_> {
         let url = Url::parse(&request.url)
             .map_err(|_| validation("hub.unsafe_location", "upload URL is invalid"))?;
         validate_upload_url(&url)?;
-        debug_assert!(request.header("authorization").is_none());
+        if request.headers.iter().any(|(name, _)| {
+            name.eq_ignore_ascii_case("authorization")
+                || name.eq_ignore_ascii_case("x-vercel-protection-bypass")
+        }) {
+            return Err(validation(
+                "hub.auth_denied",
+                "upload capabilities cannot carry Hub credentials",
+            ));
+        }
         self.transport.exchange(request, MAX_CONTROL_RESPONSE_BYTES)
     }
 
-    /// Unauthenticated form POST to an OAuth endpoint the capabilities named.
+    /// Device-grant form POST; preview bypass applies only at the selected origin.
     fn oauth(&self, endpoint: &str, form: &[(&str, &str)]) -> Result<HubResponse, GfError> {
         let url = Url::parse(endpoint)
             .map_err(|_| validation("hub.unsafe_location", "OAuth endpoint is invalid"))?;
@@ -401,12 +504,12 @@ impl Hub<'_> {
         let body = url::form_urlencoded::Serializer::new(String::new())
             .extend_pairs(form)
             .finish();
-        self.transport.exchange(
-            &HubRequest::new(HubMethod::Post, endpoint)
-                .with_header("content-type", "application/x-www-form-urlencoded")
-                .with_body(body.into_bytes()),
-            MAX_CONTROL_RESPONSE_BYTES,
-        )
+        let request = HubRequest::new(HubMethod::Post, endpoint)
+            .with_header("content-type", "application/x-www-form-urlencoded")
+            .with_body(body.into_bytes());
+        let request = self.with_bypass(request, &url)?;
+        self.transport
+            .exchange(&request, MAX_CONTROL_RESPONSE_BYTES)
     }
 }
 
@@ -423,7 +526,13 @@ fn obtain_token(
     let authorization = &capabilities.authorization;
     let response = hub.oauth(
         &authorization.device_authorization_endpoint,
-        &[("client_id", CLIENT_ID), ("scope", &authorization.scope)],
+        &[
+            (
+                "client_id",
+                authorization.client_id.as_deref().unwrap_or(CLIENT_ID),
+            ),
+            ("scope", &authorization.scope),
+        ],
     )?;
     if response.status != 200 {
         return Err(publish_error(
@@ -481,7 +590,10 @@ fn obtain_token(
             &[
                 ("grant_type", DEVICE_CODE_GRANT_TYPE),
                 ("device_code", &device.device_code),
-                ("client_id", CLIENT_ID),
+                (
+                    "client_id",
+                    authorization.client_id.as_deref().unwrap_or(CLIENT_ID),
+                ),
             ],
         )?;
         match DevicePoll::from_response(response.status, &response.body)
@@ -618,6 +730,62 @@ fn intent_digest(
     })))
 }
 
+struct SelectedPreview {
+    descriptor: graphforge_hub_publish::preview::PreviewDescriptor,
+    bytes: Vec<u8>,
+}
+fn select_previews(
+    args: &PublishArgs,
+    version_uuid: Uuid,
+) -> Result<Vec<SelectedPreview>, GfError> {
+    use graphforge_hub_publish::preview as p;
+    use std::io::Read;
+    if args.previews.len() > p::MAX_PREVIEWS {
+        return Err(derivation("preview.limit"));
+    }
+    let mut selected = Vec::new();
+    let mut total = 0_u64;
+    for path in &args.previews {
+        let file = std::fs::File::open(path).map_err(|_| derivation("preview.content"))?;
+        let mut bytes = Vec::new();
+        file.take(p::MAX_PREVIEW_BYTES as u64 + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|_| derivation("preview.content"))?;
+        total += bytes.len() as u64;
+        if total > p::MAX_TOTAL_PREVIEW_BYTES {
+            return Err(derivation("preview.limit"));
+        }
+        let media_type = if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+            "image/png"
+        } else {
+            "image/svg+xml"
+        };
+        let (width, height) = p::validate_image(media_type, &bytes)
+            .map_err(|error| derivation(&error.to_string()))?;
+        selected.push(SelectedPreview {
+            descriptor: p::PreviewDescriptor {
+                version_uuid: version_uuid.to_string(),
+                digest: p::digest(&bytes),
+                media_type: media_type.into(),
+                length: bytes.len() as u64,
+                width,
+                height,
+                caption: None,
+                alt: None,
+            },
+            bytes,
+        });
+    }
+    p::validate_descriptors(
+        &selected
+            .iter()
+            .map(|p| p.descriptor.clone())
+            .collect::<Vec<_>>(),
+    )
+    .map_err(|error| derivation(&error.to_string()))?;
+    Ok(selected)
+}
+
 // ---------------------------------------------------------- repository side
 
 /// Published state of a repository, read before building the next snapshot.
@@ -633,31 +801,99 @@ fn read_published(
     base: &Url,
     identity: &RepositoryIdentity,
 ) -> Result<Option<Published>, GfError> {
-    let limits = DiscoveryLimits {
-        max_response_bytes: MAX_METADATA_BYTES,
-        ..DiscoveryLimits::default()
-    };
-    let Some((refs_bytes, etag)) = hub.read(&endpoint(base, "refs"), MAX_METADATA_BYTES)? else {
+    let Some((refs_bytes, etag)) = hub.read_control(&endpoint(base, "refs"), MAX_METADATA_BYTES)?
+    else {
         return Ok(None);
     };
-    let revision = sha256_digest(&refs_bytes);
-    if etag.is_some_and(|etag| etag.trim_matches('"') != revision) {
-        return Err(publish_error(
-            HubPublishErrorCode::IntegrityFailure,
-            "refs validator does not match the refs document",
-        ));
-    }
-    let refs = RefSet::from_json(&refs_bytes, limits).map_err(|error| discovery(&error))?;
     let (manifest_bytes, _) = hub
-        .read(&endpoint(base, "manifest"), MAX_METADATA_BYTES)?
+        .read_control(&endpoint(base, "manifest"), MAX_METADATA_BYTES)?
         .ok_or_else(|| {
             publish_error(
                 HubPublishErrorCode::InvalidInput,
                 "repository refs exist without a manifest",
             )
         })?;
+    bind_published(
+        &refs_bytes,
+        etag.as_deref(),
+        &manifest_bytes,
+        identity,
+        |object, limit| read_object(hub, object, limit),
+    )
+    .map(Some)
+}
+
+/// Read one authorized snapshot; an advertised context endpoint never falls back.
+fn read_private_context(
+    hub: &Hub<'_>,
+    identity: &RepositoryIdentity,
+    token: &PublishToken,
+) -> Result<Option<Published>, GfError> {
+    let url = endpoint(&hub.base, "publish/context");
+    let response = hub.control(HubRequest::new(HubMethod::Get, url.as_str()), token)?;
+    if response.status != 200 {
+        return Err(hub_failure(&response));
+    }
+    if response.body.len() > MAX_CONTROL_RESPONSE_BYTES {
+        return Err(network("publish context exceeds response limit"));
+    }
+    let value = parse_unique_json(&response.body).map_err(|error| protocol(&error))?;
+    let malformed = || {
+        publish_error(
+            HubPublishErrorCode::InvalidInput,
+            "publish context must contain exactly refs_json, manifest_json and lineage_json, all strings or all null",
+        )
+    };
+    let object = value.as_object().ok_or_else(malformed)?;
+    let keys = ["refs_json", "manifest_json", "lineage_json"];
+    if object.len() != keys.len() || keys.iter().any(|key| !object.contains_key(*key)) {
+        return Err(malformed());
+    }
+    if keys.iter().all(|key| object[*key].is_null()) {
+        return Ok(None);
+    }
+    let refs = object["refs_json"].as_str().ok_or_else(malformed)?;
+    let manifest = object["manifest_json"].as_str().ok_or_else(malformed)?;
+    let lineage = object["lineage_json"].as_str().ok_or_else(malformed)?;
+    bind_published(
+        refs.as_bytes(),
+        None,
+        manifest.as_bytes(),
+        identity,
+        |object, limit| {
+            let bytes = lineage.as_bytes();
+            if bytes.len() > limit {
+                return Err(network("lineage exceeds response limit"));
+            }
+            validate_object_bytes(object, bytes)?;
+            Ok(bytes.to_vec())
+        },
+    )
+    .map(Some)
+}
+
+/// Both discovery paths validate the same exact documents and package bindings.
+fn bind_published(
+    refs_bytes: &[u8],
+    etag: Option<&str>,
+    manifest_bytes: &[u8],
+    identity: &RepositoryIdentity,
+    load_lineage: impl FnOnce(&ObjectDescriptor, usize) -> Result<Vec<u8>, GfError>,
+) -> Result<Published, GfError> {
+    let limits = DiscoveryLimits {
+        max_response_bytes: MAX_METADATA_BYTES,
+        ..DiscoveryLimits::default()
+    };
+    let revision = sha256_digest(refs_bytes);
+    if etag.is_some_and(|etag| etag.trim_matches('"') != revision) {
+        return Err(publish_error(
+            HubPublishErrorCode::IntegrityFailure,
+            "refs validator does not match the refs document",
+        ));
+    }
+    let refs = RefSet::from_json(refs_bytes, limits).map_err(|error| discovery(&error))?;
     let manifest =
-        DiscoveryManifest::from_json(&manifest_bytes, limits).map_err(|error| discovery(&error))?;
+        DiscoveryManifest::from_json(manifest_bytes, limits).map_err(|error| discovery(&error))?;
     if refs.repository != *identity || manifest.repository != *identity {
         return Err(publish_error(
             HubPublishErrorCode::IntegrityFailure,
@@ -666,24 +902,38 @@ fn read_published(
     }
     refs.validate_manifest(&manifest)
         .map_err(|error| discovery(&error))?;
+    let validator = manifest
+        .canonical_digest()
+        .map_err(|error| discovery(&error))?;
+    if refs
+        .refs
+        .iter()
+        .find(|reference| reference.name == manifest.resolved_ref)
+        .is_none_or(|reference| reference.validator != validator)
+    {
+        return Err(publish_error(
+            HubPublishErrorCode::IntegrityFailure,
+            "ref validator does not match the canonical manifest",
+        ));
+    }
     let object = manifest.lineage_object().map_err(|_| {
         publish_error(
             HubPublishErrorCode::InvalidInput,
             "the repository has no research lineage to extend",
         )
     })?;
-    let lineage_bytes = read_object(hub, object, limits.max_lineage_bytes)?;
+    let lineage_bytes = load_lineage(object, limits.max_lineage_bytes)?;
     let lineage =
         ResearchLineage::from_json(&lineage_bytes, limits).map_err(|error| discovery(&error))?;
     manifest
         .bind_lineage(&refs, &lineage)
         .map_err(|error| discovery(&error))?;
-    Ok(Some(Published {
+    Ok(Published {
         refs,
         revision,
         manifest,
         lineage,
-    }))
+    })
 }
 
 fn read_object(hub: &Hub<'_>, object: &ObjectDescriptor, limit: usize) -> Result<Vec<u8>, GfError> {
@@ -696,13 +946,18 @@ fn read_object(hub: &Hub<'_>, object: &ObjectDescriptor, limit: usize) -> Result
     let (bytes, _) = hub.read(&url, limit)?.ok_or_else(|| {
         publish_error(HubPublishErrorCode::InvalidInput, "object is not published")
     })?;
-    if digest_bytes(&bytes) != object.digest.0 || bytes.len() as u64 != object.length {
+    validate_object_bytes(object, &bytes)?;
+    Ok(bytes)
+}
+
+fn validate_object_bytes(object: &ObjectDescriptor, bytes: &[u8]) -> Result<(), GfError> {
+    if digest_bytes(bytes) != object.digest.0 || bytes.len() as u64 != object.length {
         return Err(publish_error(
             HubPublishErrorCode::IntegrityFailure,
             "object bytes disagree with their descriptor",
         ));
     }
-    Ok(bytes)
+    Ok(())
 }
 
 /// Fail closed unless the origin repository publishes the cited origin Version
@@ -1058,8 +1313,12 @@ fn read_chunk(source: &Source, offset: u64, length: u64) -> Result<Vec<u8>, GfEr
         Source::File(path) => {
             let mut file = File::open(path).map_err(io)?;
             file.seek(SeekFrom::Start(offset)).map_err(io)?;
-            let mut buffer =
-                vec![0; usize::try_from(length).map_err(|_| network("chunk overflow"))?];
+            let size = usize::try_from(length).map_err(|_| network("chunk overflow"))?;
+            let mut buffer = Vec::new();
+            buffer
+                .try_reserve_exact(size)
+                .map_err(|_| network("chunk allocation exceeds available memory"))?;
+            buffer.resize(size, 0);
             file.read_exact(&mut buffer).map_err(io)?;
             Ok(buffer)
         }
@@ -1081,6 +1340,30 @@ fn upload_offset(response: &HubResponse, length: u64) -> Result<u64, GfError> {
                 "upload offset is missing or out of range",
             )
         })
+}
+
+fn negotiated_chunk_size(limits: &graphforge_hub_publish::PublishLimits) -> Result<u64, GfError> {
+    let size = limits
+        .preferred_chunk_bytes
+        .unwrap_or(limits.max_chunk_bytes.min(MAX_CLIENT_CHUNK_BYTES));
+    if size > MAX_NEGOTIATED_CHUNK_BYTES {
+        return Err(publish_error(
+            HubPublishErrorCode::InvalidInput,
+            "preferred upload chunk exceeds the client's 64 MiB buffer budget",
+        ));
+    }
+    Ok(size)
+}
+
+fn upload_chunk_size(
+    capabilities: &PublishCapabilities,
+    target: &UploadTarget,
+) -> Result<u64, GfError> {
+    let mut limits = capabilities.limits;
+    limits.preferred_chunk_bytes = capabilities
+        .upload_chunk_bytes(target)
+        .map_err(|error| protocol(&error))?;
+    negotiated_chunk_size(&limits)
 }
 
 /// Upload whatever the Hub has not retained, resuming at its reported offset.
@@ -1198,23 +1481,43 @@ pub(crate) fn publish(
             )
         })?;
     let selection = select(graph, args)?;
+    let previews = select_previews(args, selection.version_uuid)?;
+    let preview_metadata = previews
+        .iter()
+        .map(|p| p.descriptor.clone())
+        .collect::<Vec<_>>();
+    let operation_content = if previews.is_empty() {
+        selection.project_content.clone()
+    } else {
+        sha256_digest(&canonical_json(
+            &json!({"project_content":selection.project_content,"previews":preview_metadata}),
+        ))
+    };
     let operation_uuid = operation_uuid.unwrap_or_else(|| {
         graphforge_api::hub_publish_operation(
             &identity.canonical_name(),
             selection.git_ref.as_deref(),
             &selection.version_uuid.to_string(),
-            &selection.project_content,
+            &operation_content,
         )
     });
-    let intent_digest = intent_digest(&identity, &selection, fork.as_ref().map(|(id, _)| id));
+    let base_intent = intent_digest(&identity, &selection, fork.as_ref().map(|(id, _)| id));
+    let intent_digest = if previews.is_empty() {
+        base_intent
+    } else {
+        sha256_digest(&canonical_json(
+            &json!({"intent":base_intent,"previews":preview_metadata}),
+        ))
+    };
     let hub = Hub {
+        bypass: environment.bypass,
         transport,
         base: base.clone(),
     };
 
-    // Capabilities first: an unsupported future Hub fails before any credential use.
+    // Capabilities first: an unsupported future Hub fails before publish-token use.
     let (capabilities_bytes, _) = hub
-        .read(&endpoint(&base, "publish"), MAX_CONTROL_RESPONSE_BYTES)?
+        .read_control(&endpoint(&base, "publish"), MAX_CONTROL_RESPONSE_BYTES)?
         .ok_or_else(|| {
             publish_error(
                 HubPublishErrorCode::InvalidInput,
@@ -1229,6 +1532,17 @@ pub(crate) fn publish(
         return Err(publish_error(
             HubPublishErrorCode::InvalidInput,
             "capabilities describe another repository",
+        ));
+    }
+    if !previews.is_empty()
+        && !capabilities
+            .capabilities
+            .iter()
+            .any(|c| c.capability == "version-previews" && c.major == 1)
+    {
+        return Err(publish_error(
+            HubPublishErrorCode::UnsupportedFuture,
+            "Hub does not support the selected preview channel",
         ));
     }
     let token = obtain_token(&hub, &capabilities, environment)?;
@@ -1264,7 +1578,14 @@ pub(crate) fn publish(
         _ => return Err(hub_failure(&status)),
     }
 
-    let published = read_published(&hub, &base, &identity)?;
+    let published =
+        if capabilities.capabilities.iter().any(|capability| {
+            capability.capability == "publish-read-context" && capability.major == 1
+        }) {
+            read_private_context(&hub, &identity, &token)?
+        } else {
+            read_published(&hub, &base, &identity)?
+        };
     let fork_origin_repository = match (&fork, &published) {
         (Some(_), Some(_)) => {
             return Err(publish_error(
@@ -1281,7 +1602,7 @@ pub(crate) fn publish(
         (None, None) => None,
     };
     let scratch = tempfile::tempdir().map_err(|error| GfError::Storage(error.to_string()))?;
-    let (snapshot, lineage) = build_snapshot(
+    let (mut snapshot, lineage) = build_snapshot(
         graph,
         &identity,
         &capabilities,
@@ -1290,6 +1611,46 @@ pub(crate) fn publish(
         fork_origin_repository,
         scratch.path(),
     )?;
+    if !previews.is_empty() {
+        use graphforge_hub_publish::preview as p;
+        for item in previews {
+            snapshot.manifest.objects.push(object_descriptor(
+                item.descriptor.digest.clone(),
+                item.descriptor.length,
+                &item.descriptor.media_type,
+                capabilities.object_location(&item.descriptor.digest),
+            ));
+            snapshot
+                .sources
+                .insert(item.descriptor.digest, Source::Bytes(item.bytes));
+        }
+        snapshot
+            .manifest
+            .objects
+            .sort_by(|a, b| a.digest.cmp(&b.digest));
+        snapshot.manifest.extensions.insert(
+            p::PREVIEW_EXTENSION.into(),
+            serde_json::to_value(p::PreviewSet {
+                format: "graphforge-previews/1".into(),
+                previews: preview_metadata,
+            })
+            .map_err(|_| derivation("preview.content"))?,
+        );
+        snapshot
+            .manifest
+            .validate(DiscoveryLimits::default())
+            .map_err(|error| discovery(&error))?;
+        snapshot.objects = snapshot
+            .manifest
+            .objects
+            .iter()
+            .map(|object| ObjectDeclaration {
+                digest: object.digest.0.clone(),
+                length: object.length,
+                media_type: object.media_type.clone(),
+            })
+            .collect();
+    }
     // The packages must come from the generation the intent names.
     if project_content(graph)? != selection.project_content {
         return Err(publish_error(
@@ -1331,8 +1692,18 @@ pub(crate) fn publish(
         intent_digest,
         repository: identity.clone(),
         objects: snapshot.objects.clone(),
-        requirements: Vec::new(),
+        requirements: capabilities
+            .requirements
+            .iter()
+            .filter(|capability| capability.capability == PUBLISH_NEGOTIATION_CAPABILITY)
+            .cloned()
+            .chain(
+                (!args.previews.is_empty())
+                    .then(|| graphforge_hub_publish::Capability::new("version-previews", 1)),
+            )
+            .collect(),
     };
+    negotiated_chunk_size(&capabilities.limits)?;
     let sessions = endpoint(&base, "publish/sessions");
     let opened = session_response(&hub.control(
         HubRequest::new(HubMethod::Post, sessions.as_str()).with_json(&open),
@@ -1364,11 +1735,11 @@ pub(crate) fn publish(
             "upload locations do not match the declared inventory",
         ));
     }
-    let max_chunk = capabilities
-        .limits
-        .max_chunk_bytes
-        .min(MAX_CLIENT_CHUNK_BYTES);
-    for target in &uploads {
+    let chunk_sizes = uploads
+        .iter()
+        .map(|target| upload_chunk_size(&capabilities, target))
+        .collect::<Result<Vec<_>, _>>()?;
+    for (target, max_chunk) in uploads.iter().zip(chunk_sizes) {
         let source = snapshot.sources.get(&target.digest).ok_or_else(|| {
             publish_error(
                 HubPublishErrorCode::InvalidInput,
@@ -1412,3 +1783,6 @@ pub(crate) fn publish(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod preview_tests;

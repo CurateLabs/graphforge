@@ -262,6 +262,27 @@ the partial download, its resume checkpoint, and the import target. The project
 appears at `DESTINATION` only once it is complete and reopened, through one
 atomic rename that never replaces an existing path.
 
+Private repositories use browser/link authentication through WorkOS:
+`gf auth login`, `gf auth status`, then `gf clone OWNER/REPOSITORY`.
+Use `gf auth login --no-browser` to approve on another device. Auth commands
+accept `--hub https://preview.example` for another Hub. Credentials live only
+in the OS credential vault and are removed by `gf auth logout`, which also
+revokes the provider session. Public clone remains anonymous.
+
+Private discovery can return `404` to hide repository existence. Clone then
+exchanges saved authentication for a repository-scoped read credential at its
+Hub. Only the Hub-approved object origin receives that credential; authenticated
+object requests never redirect. Range/resume and digest verification still apply.
+
+Headless Hubs and protected previews also support environment credentials:
+use `--hub https://preview.example --token-env HUB_READ_TOKEN`, adding
+`--protection-bypass-env PREVIEW_BYPASS_SECRET` for Vercel protection. The flags
+name environment variables, keeping secret values out of command arguments.
+The Hub bearer and bypass travel only to initial discovery at the selected Hub.
+If private content requires it, the bearer is exchanged at that Hub for a
+separate object credential. Neither original secret reaches object origins or
+redirects. See the CLI reference above for requirements.
+
 ### Large projects
 
 **Disk space.** Clone needs free space on the destination's filesystem, not in

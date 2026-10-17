@@ -1,3 +1,26 @@
+pub(crate) async fn join_rows(
+    cfg: &OptionalConfig,
+    outer: &[RecordBatch],
+    inner: &[RecordBatch],
+) -> Result<RecordBatch, DataFusionError> {
+    use datafusion::datasource::memory::MemorySourceConfig;
+    let context = datafusion::prelude::SessionContext::new();
+    let budget = optional_memory::Budget::new(&context.task_ctx());
+    let outer =
+        MemorySourceConfig::try_new_exec(&[outer.to_vec()], cfg.outer_schema.clone(), None)?;
+    let inner =
+        MemorySourceConfig::try_new_exec(&[inner.to_vec()], cfg.inner_schema.clone(), None)?;
+    let outer = budget.collect(outer, context.task_ctx()).await?;
+    let inner = budget.collect(inner, context.task_ctx()).await?;
+    let mut prepared = optional_memory::join(cfg, outer, inner, &budget)?;
+    let output = prepared
+        .next(&budget, usize::MAX)?
+        .expect("typed empty output");
+    drop(prepared);
+    budget.output(&output)?;
+    Ok(output)
+}
+
 use super::*;
 use arrow::array::RecordBatch;
 use arrow::array::UInt64Array;
@@ -5,8 +28,8 @@ use arrow::datatypes::DataType;
 use arrow::datatypes::Schema;
 use std::sync::Arc;
 
-#[test]
-fn optional_join_preserves_left_rows_matches_duplicate_keys_and_null_shapes_misses() {
+#[tokio::test]
+async fn optional_join_preserves_left_rows_matches_duplicate_keys_and_null_shapes_misses() {
     use arrow::array::{Int64Array, StringArray};
     use arrow::datatypes::Field;
 
@@ -48,7 +71,7 @@ fn optional_join_preserves_left_rows_matches_duplicate_keys_and_null_shapes_miss
         inner_schema,
     };
 
-    let joined = optional_join(&cfg, &[outer], &[inner]).unwrap();
+    let joined = join_rows(&cfg, &[outer], &[inner]).await.unwrap();
     assert_eq!(
         joined.num_rows(),
         4,
@@ -74,8 +97,8 @@ fn optional_join_preserves_left_rows_matches_duplicate_keys_and_null_shapes_miss
     );
 }
 
-#[test]
-fn optional_join_handles_cartesian_empty_uuid_and_invalid_key_contracts() {
+#[tokio::test]
+async fn optional_join_handles_cartesian_empty_uuid_and_invalid_key_contracts() {
     use arrow::array::{FixedSizeBinaryArray, Int64Array, StringArray};
     use arrow::datatypes::Field;
 
@@ -102,7 +125,7 @@ fn optional_join_handles_cartesian_empty_uuid_and_invalid_key_contracts() {
         outer_schema: outer_schema.clone(),
         inner_schema: inner_schema.clone(),
     };
-    let empty = optional_join(&cfg, &[outer.clone()], &[]).unwrap();
+    let empty = join_rows(&cfg, &[outer.clone()], &[]).await.unwrap();
     assert_eq!(empty.num_rows(), 2);
     assert!(empty.column(1).is_null(0) && empty.column(1).is_null(1));
 
@@ -111,7 +134,7 @@ fn optional_join_handles_cartesian_empty_uuid_and_invalid_key_contracts() {
         vec![Arc::new(StringArray::from(vec!["a", "b"]))],
     )
     .unwrap();
-    let product = optional_join(&cfg, &[outer], &[inner]).unwrap();
+    let product = join_rows(&cfg, &[outer], &[inner]).await.unwrap();
     assert_eq!(product.num_rows(), 4);
 
     let uuid_schema = Arc::new(Schema::new(vec![Field::new(
@@ -130,7 +153,8 @@ fn optional_join_handles_cartesian_empty_uuid_and_invalid_key_contracts() {
         inner_schema: uuid_schema,
     };
     assert_eq!(
-        optional_join(&uuid_cfg, &[uuid_batch.clone()], &[uuid_batch])
+        join_rows(&uuid_cfg, &[uuid_batch.clone()], &[uuid_batch])
+            .await
             .unwrap()
             .num_rows(),
         1
@@ -147,7 +171,8 @@ fn optional_join_handles_cartesian_empty_uuid_and_invalid_key_contracts() {
     let ints =
         RecordBatch::try_new(outer_schema, vec![Arc::new(Int64Array::from(vec![1]))]).unwrap();
     assert!(
-        optional_join(&bad_key_cfg, &[ints.clone()], &[ints])
+        join_rows(&bad_key_cfg, &[ints.clone()], &[ints])
+            .await
             .unwrap_err()
             .to_string()
             .contains("unsupported type")
@@ -169,7 +194,8 @@ fn optional_join_handles_cartesian_empty_uuid_and_invalid_key_contracts() {
     )
     .unwrap();
     assert!(
-        optional_join(&bad_keep_cfg, &[outer], &[inner])
+        join_rows(&bad_keep_cfg, &[outer], &[inner])
+            .await
             .unwrap_err()
             .to_string()
             .contains("inner_keep_idx 9 out of range")
@@ -697,7 +723,7 @@ impl ExecutionPlan for InterruptedSeedExec {
     }
 }
 
-fn interrupted_optional(
+pub(super) fn interrupted_optional(
     panic_on_poll: bool,
 ) -> (
     Arc<OptionalMatchExec>,

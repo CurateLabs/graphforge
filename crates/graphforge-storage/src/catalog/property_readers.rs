@@ -127,7 +127,7 @@ const MAX_EQUALITY_CANDIDATES: usize = 1 << 18;
 /// An interval confines the whole merge to its keys, so a key's base, mutation
 /// and tombstone rows are all read or none are: reading every interval of a
 /// tiling visits each live row exactly once.
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn visit_property_overlay_batched_selected<F>(
     dir: &Path,
     inventory: Option<&crate::AuthenticatedPropertyInventory>,
@@ -142,6 +142,41 @@ pub(crate) fn visit_property_overlay_batched_selected<F>(
 ) -> Result<Option<crate::PropertyOverlayMetrics>, DataFusionError>
 where
     F: FnMut(&RecordBatch) -> Result<bool, DataFusionError>,
+{
+    visit_property_overlay_batched_admitted(
+        dir,
+        inventory,
+        stem,
+        is_edge,
+        batch_size,
+        selected_properties,
+        equality,
+        uuid_sets,
+        interval,
+        None,
+        |batch, _| visit(batch),
+    )
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+pub(crate) fn visit_property_overlay_batched_admitted<F>(
+    dir: &Path,
+    inventory: Option<&crate::AuthenticatedPropertyInventory>,
+    stem: &str,
+    is_edge: bool,
+    batch_size: usize,
+    selected_properties: Option<&std::collections::BTreeSet<String>>,
+    equality: Option<&crate::property_overlay::PropertyEquality>,
+    uuid_sets: &[&dyn crate::uuid_set::UuidMembership],
+    interval: Option<crate::uuid_set::UuidInterval>,
+    execution: Option<&Arc<crate::property_scan_memory::Budget>>,
+    mut visit: F,
+) -> Result<Option<crate::PropertyOverlayMetrics>, DataFusionError>
+where
+    F: FnMut(
+        &RecordBatch,
+        Option<Arc<crate::property_scan_memory::Guard>>,
+    ) -> Result<bool, DataFusionError>,
 {
     if !dir.exists() {
         return Ok(crate::lifecycle_io::is_active().then(crate::PropertyOverlayMetrics::default));
@@ -172,34 +207,79 @@ where
         .map_err(|error| DataFusionError::External(Box::new(error)))?;
     let collect = crate::lifecycle_io::is_active();
     let limits = crate::property_overlay::PropertyOverlayLimits::default();
+    // Query execution reuses the storage reader's bounded row window for
+    // decoded-map handoff as well. This bounds conversion/source overlap;
+    // every allocation still needs its own admission to the shared byte pool.
+    let batch_size = if execution.is_some() {
+        batch_size.max(1).min(limits.max_buffered_rows.max(1))
+    } else {
+        batch_size.max(1)
+    };
     let mut metrics = crate::PropertyOverlayMetrics::default();
-    // Only a node route's equality is answered from statistics; the candidate
-    // read decodes the compared column alone.
     let indexed = match equality.filter(|_| !is_edge) {
-        Some(equality) => crate::property_equality_index::lookup(dir, inventory, stem, equality)
-            .map_err(|error| DataFusionError::External(Box::new(error)))?,
+        Some(equality) => match execution {
+            Some(execution) => crate::property_equality_index::lookup_admitted(
+                dir,
+                inventory,
+                stem,
+                equality,
+                Some(execution),
+            ),
+            None => crate::property_equality_index::lookup(dir, inventory, stem, equality)
+                .map(|value| value.map(|ids| (ids, None))),
+        }
+        .map_err(|error| DataFusionError::External(Box::new(error)))?,
         None => None,
     };
+    // Declare admission before the data owner so all early returns also drop
+    // the candidate set before releasing its reservation.
+    let _indexed_memory;
+    let indexed = if let Some((ids, memory)) = indexed {
+        _indexed_memory = memory;
+        Some(ids)
+    } else {
+        _indexed_memory = None;
+        None
+    };
+    // Adopt fallback candidate admission before moving its UUID data into the
+    // filter owner. Indexed candidates retain their existing shard authority.
+    let mut _candidate_memory = None;
     let candidates = match (indexed, equality.filter(|_| !is_edge)) {
         (Some(found), _) => Some((found, crate::PropertyOverlayMetrics::default())),
-        (None, Some(equality)) => inventory
-            .equality_candidates(
+        (None, Some(equality)) => match execution {
+            Some(_) => inventory
+                .equality_candidates_admitted(
+                    kind,
+                    stem,
+                    equality,
+                    limits,
+                    MAX_EQUALITY_CANDIDATES,
+                    collect,
+                    execution.cloned(),
+                )
+                .map(|result| {
+                    result.map(|(candidates, metrics, memory)| {
+                        _candidate_memory = memory;
+                        (candidates, metrics)
+                    })
+                }),
+            None => inventory.equality_candidates(
                 kind,
                 stem,
                 equality,
                 limits,
                 MAX_EQUALITY_CANDIDATES,
                 collect,
-            )
-            .map_err(|error| DataFusionError::External(Box::new(error)))?,
+            ),
+        }
+        .map_err(|error| DataFusionError::External(Box::new(error)))?,
         (None, None) => None,
     };
-    let candidate_uuids = match candidates {
-        Some((candidates, work)) => {
-            metrics.absorb(&work);
-            Some(candidates)
-        }
-        None => None,
+    let candidate_uuids = if let Some((candidates, work)) = candidates {
+        metrics.absorb(&work);
+        Some(candidates)
+    } else {
+        None
     };
     let uuid_filter = (!uuid_sets.is_empty() || candidate_uuids.is_some()).then_some(
         crate::uuid_set::UuidFilter {
@@ -224,6 +304,67 @@ where
         }
         _ => selected_properties.cloned(),
     };
+    // Keep one accumulator allocation across emissions. Conversion has its own
+    // admission below; draining avoids a fresh growing Vec after every batch.
+    let _vectors = execution
+        .map(|budget| {
+            crate::property_scan_memory::mul(
+                batch_size.max(1),
+                std::mem::size_of::<crate::property_scan_memory::Snapshot>(),
+            )
+            .and_then(|bytes| budget.reserve(bytes))
+        })
+        .transpose()
+        .map_err(|error| DataFusionError::External(Box::new(error)))?;
+    let emit_rows = |rows: &mut Vec<crate::property_scan_memory::Snapshot>| -> Result<
+        (RecordBatch, Option<Arc<crate::property_scan_memory::Guard>>),
+        crate::GfError,
+    > {
+        let codec_bytes = execution
+            .map(|_| {
+                let empty = arrow::datatypes::Schema::empty();
+                crate::property_scan_memory::codec(rows, schema.as_deref().unwrap_or(&empty))
+            })
+            .transpose()?
+            .unwrap_or(0);
+        // Data declared below must drop before its Arrow allocation authority
+        // on normalization/projection errors as well as ordinary completion.
+        let mut guard = None;
+        let batch = if let Some(budget) = execution {
+            crate::writer::admitted_property_snapshots_to_batch(
+                stem,
+                is_edge,
+                rows.drain(..),
+                budget,
+                codec_bytes,
+            )?
+            .map(|(batch, memory)| {
+                guard = Some(memory);
+                batch
+            })
+        } else {
+            crate::writer::property_snapshots_to_batch(
+                stem,
+                is_edge,
+                rows.drain(..).map(|snapshot| snapshot.row).collect(),
+            )?
+        }
+        .ok_or_else(|| crate::GfError::Storage("property batch disappeared".into()))?;
+        let batch = normalize_property_batch(batch, schema.as_ref())?;
+        let batch = project_property_batch(batch, kind.uuid_field(), selected_properties)?;
+        if let Some(guard) = guard.as_mut() {
+            let bytes = crate::property_scan_memory::add(
+                batch.get_array_memory_size(),
+                crate::property_scan_memory::add(
+                    1024,
+                    crate::property_scan_memory::mul(batch.num_columns(), 128)?,
+                )?,
+            )?;
+            guard.shrink_to(bytes)?;
+        }
+        let memory = guard.map(Arc::new);
+        Ok((batch, memory))
+    };
     let mut rows = Vec::with_capacity(batch_size.max(1));
     let mut stopped = false;
     let mut failure = None;
@@ -242,7 +383,7 @@ where
             collect,
         };
         let work = inventory
-            .visit_route_streaming(&read, |row| {
+            .visit_route_streaming_admitted(&read, execution.cloned(), |row| {
                 // A candidate's newest snapshot may differ from the value the
                 // candidate scan saw; the predicate decides.
                 if uuid_filter.is_some()
@@ -251,19 +392,15 @@ where
                     return Ok(true);
                 }
                 rows.push(row);
+                // The accumulator's complete capacity is prepaid above. Its
+                // inline Snapshot now has an owner independent of the reader.
+                rows.last_mut().expect("just pushed").release_carrier()?;
                 if rows.len() >= batch_size.max(1) {
-                    let batch = crate::writer::property_snapshots_to_batch(
-                        stem,
-                        is_edge,
-                        std::mem::take(&mut rows),
-                    )?
-                    .ok_or_else(|| {
-                        graphforge_core::GfError::Storage("property batch disappeared".into())
-                    })?;
-                    let batch = normalize_property_batch(batch, schema.as_ref())?;
-                    let batch =
-                        project_property_batch(batch, kind.uuid_field(), selected_properties)?;
-                    match visit(&batch) {
+                    if let Some(budget) = execution {
+                        budget.check()?;
+                    }
+                    let (batch, memory) = emit_rows(&mut rows)?;
+                    match visit(&batch, memory) {
                         Ok(true) => {}
                         Ok(false) => stopped = true,
                         Err(error) => {
@@ -281,14 +418,14 @@ where
         return Err(error);
     }
     if !stopped && !rows.is_empty() {
-        let batch = crate::writer::property_snapshots_to_batch(stem, is_edge, rows)
-            .map_err(|error| DataFusionError::External(Box::new(error)))?
-            .ok_or_else(|| DataFusionError::Execution("property batch disappeared".into()))?;
-        let batch = normalize_property_batch(batch, schema.as_ref())
-            .map_err(|error| DataFusionError::External(Box::new(error)))?;
-        let batch = project_property_batch(batch, kind.uuid_field(), selected_properties)
-            .map_err(|error| DataFusionError::External(Box::new(error)))?;
-        let _ = visit(&batch)?;
+        if let Some(budget) = execution {
+            budget
+                .check()
+                .map_err(|error| DataFusionError::External(Box::new(error)))?;
+        }
+        let (batch, memory) =
+            emit_rows(&mut rows).map_err(|error| DataFusionError::External(Box::new(error)))?;
+        let _ = visit(&batch, memory)?;
     }
     Ok(collect.then_some(metrics))
 }

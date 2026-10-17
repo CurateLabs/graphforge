@@ -88,7 +88,7 @@ async fn a_tap_past_its_row_cap_abandons_but_still_forwards_every_row() {
         nomination.ids().is_none(),
         "an abandoned nomination must not publish a partial key set"
     );
-    let (consumer, _receiver) = tokio::sync::mpsc::channel(1);
+    let (consumer, _receiver) = tokio::sync::mpsc::channel::<()>(1);
     let waited = tokio::time::timeout(Duration::from_secs(1), nomination.wait(&consumer))
         .await
         .expect("an abandoned nomination must wake its waiters");
@@ -105,7 +105,7 @@ async fn tap_drop_wakes_waiters_without_publishing_partial_keys() {
     assert!(stream.next().await.unwrap().is_ok());
     drop(stream);
 
-    let (consumer, _receiver) = tokio::sync::mpsc::channel(1);
+    let (consumer, _receiver) = tokio::sync::mpsc::channel::<()>(1);
     let result = tokio::time::timeout(Duration::from_secs(1), nomination.wait(&consumer))
         .await
         .expect("dropping the tap must wake nomination waiters");
@@ -133,7 +133,7 @@ async fn tap_batch_error_wakes_waiters_without_publishing_partial_keys() {
     assert!(stream.next().await.unwrap().is_err());
     drop(stream);
 
-    let (consumer, _receiver) = tokio::sync::mpsc::channel(1);
+    let (consumer, _receiver) = tokio::sync::mpsc::channel::<()>(1);
     let result = tokio::time::timeout(Duration::from_secs(1), nomination.wait(&consumer))
         .await
         .expect("tap errors must wake nomination waiters");
@@ -155,7 +155,7 @@ async fn empty_build_publishes_a_complete_empty_uuid_set() {
 #[tokio::test]
 async fn closed_scan_consumer_cancels_a_pending_nomination_wait() {
     let nomination = UuidBuildKeyNomination::new();
-    let (consumer, receiver) = tokio::sync::mpsc::channel(1);
+    let (consumer, receiver) = tokio::sync::mpsc::channel::<()>(1);
     drop(receiver);
 
     let result = tokio::time::timeout(Duration::from_secs(1), nomination.wait(&consumer))

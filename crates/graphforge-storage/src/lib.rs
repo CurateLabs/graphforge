@@ -493,6 +493,9 @@ mod node_anchor;
 pub mod property_overlay;
 mod property_scan;
 mod property_scan_filter;
+mod property_scan_memory;
+#[doc(hidden)]
+pub mod read_memory;
 pub use property_overlay::{
     AuthenticatedPropertyInventory, EdgeOwnerProbeWork, PROPERTY_OVERLAY_FORMAT,
     PROPERTY_OVERLAY_FORMAT_KEY, PROPERTY_TOMBSTONE_FIELD, PropertyFragmentId,
@@ -511,20 +514,22 @@ pub use catalog::{
     AdmittedSourceFile, DenseNodeIdentities, DenseNodeIdentityError, EdgePropertyTable,
     GraphCatalog, PropertyTable, TopologyNodeTable, TypedEdgeTable, UnionEdgeTable,
     count_edge_rows, count_edge_rows_from_inventory, edge_decode_admission_bytes,
-    list_edge_property_stems, list_property_stems, node_property_files, node_property_source_files,
-    node_property_source_fragments, node_topology_present, read_dense_node_identities,
-    read_edge_properties, read_edge_properties_from_inventory, read_edge_properties_projected,
+    list_edge_property_stems, list_property_stems, node_decode_admission_bytes,
+    node_property_files, node_property_source_files, node_property_source_fragments,
+    node_topology_present, read_dense_node_identities, read_edge_properties,
+    read_edge_properties_from_inventory, read_edge_properties_projected,
     read_edge_properties_projected_from_inventory, read_edges, read_edges_filtered,
     read_edges_filtered_from_inventory, read_edges_filtered_observed,
-    read_edges_filtered_observed_from_inventory, read_edges_filtered_projected_from_inventory,
-    read_edges_filtered_projected_observed, read_edges_from_inventory, read_nodes,
-    read_nodes_filtered, read_nodes_filtered_from_files, read_nodes_filtered_observed,
-    read_nodes_filtered_observed_from_files, read_nodes_filtered_projected_observed,
-    read_nodes_filtered_projected_observed_from_files, read_nodes_from_files, read_properties,
-    read_properties_batched, read_properties_from_inventory, topology_node_files,
-    visit_node_fragments_admitted, visit_node_fragments_admitted_from_files,
-    visit_node_property_overlay_admitted, visit_nodes_batched, visit_nodes_batched_from_files,
-    visit_properties_batched, visit_property_fragments_admitted,
+    read_edges_filtered_observed_from_inventory, read_edges_filtered_prepaid_from_inventory,
+    read_edges_filtered_projected_from_inventory, read_edges_filtered_projected_observed,
+    read_edges_from_inventory, read_nodes, read_nodes_filtered, read_nodes_filtered_from_files,
+    read_nodes_filtered_observed, read_nodes_filtered_observed_from_files,
+    read_nodes_filtered_projected_observed, read_nodes_filtered_projected_observed_from_files,
+    read_nodes_from_files, read_properties, read_properties_batched,
+    read_properties_from_inventory, topology_node_files, visit_node_fragments_admitted,
+    visit_node_fragments_admitted_from_files, visit_node_property_overlay_admitted,
+    visit_nodes_batched, visit_nodes_batched_from_files, visit_properties_batched,
+    visit_property_fragments_admitted,
 };
 pub use catalog::{
     EXPORT_STREAM_BATCH_ROWS, count_node_rows, visit_edge_identities, visit_edge_property_batches,

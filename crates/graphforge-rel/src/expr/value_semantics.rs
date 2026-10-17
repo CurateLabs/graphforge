@@ -320,13 +320,20 @@ pub(super) fn cypher_order_key(v: &ScalarValue) -> String {
         ScalarValue::Int64(Some(n)) => {
             #[allow(
                 clippy::cast_precision_loss,
-                reason = "Cypher numeric order shares a number bucket across ints and floats"
+                reason = "the exact rounding residual restores integer order within this primary key"
             )]
-            let n = *n as f64;
-            format!("80:num:{}", ordered_f64_key(n))
+            let primary = *n as f64;
+            // Every rounded Int64 is integral and in [-2^63, 2^63], including
+            // MAX rounding up to 2^63. Its center therefore fits exactly in i128.
+            #[allow(
+                clippy::cast_possible_truncation,
+                reason = "an f64 rounded from Int64 is integral and representable as i128"
+            )]
+            let center = primary as i128;
+            numeric_order_key(primary, i128::from(*n) - center)
         }
         ScalarValue::Float64(Some(f)) if f.is_nan() => "90:nan".to_string(),
-        ScalarValue::Float64(Some(f)) => format!("80:num:{}", ordered_f64_key(*f)),
+        ScalarValue::Float64(Some(f)) => numeric_order_key(*f, 0),
         _ => "98:other".to_string(),
     }
 }
@@ -340,6 +347,19 @@ fn cypher_list_order_key(values: &datafusion::arrow::array::ArrayRef) -> String 
     }
     out.push_str("00:end");
     out
+}
+
+/// Float rounding is monotone. Within one rounded primary, an integer's exact
+/// signed residual orders it relative to both other integers and the float
+/// itself (residual zero). Both components have fixed width so list keys remain
+/// lexicographic. Numeric equality treats both signs of zero as the same value.
+fn numeric_order_key(primary: f64, residual: i128) -> String {
+    let primary = if primary == 0.0 { 0.0 } else { primary };
+    format!(
+        "80:num:{}:{}",
+        ordered_f64_key(primary),
+        ordered_i128_key(residual)
+    )
 }
 
 fn ordered_f64_key(f: f64) -> String {
@@ -1757,6 +1777,120 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("expected boolean operand")
+        );
+    }
+
+    #[test]
+    fn numeric_order_keys_preserve_signed_integer_boundaries() {
+        let mut values = vec![i64::MIN, i64::MIN + 1, i64::MAX - 1, i64::MAX];
+        for exponent in 0..64 {
+            for sign in [-1_i128, 1] {
+                let center = sign * (1_i128 << exponent);
+                for offset in [
+                    -1025, -513, -512, -511, -2, -1, 0, 1, 2, 511, 512, 513, 1025,
+                ] {
+                    if let Ok(value) = i64::try_from(center + offset) {
+                        values.push(value);
+                    }
+                }
+            }
+        }
+        let mut state = 0x62d4_813a_975b_c0ef_u64;
+        for _ in 0..1024 {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1);
+            values.push(i64::from_ne_bytes(state.to_ne_bytes()));
+        }
+        values.sort_unstable();
+        values.dedup();
+        for pair in values.windows(2) {
+            let left = ScalarValue::Int64(Some(pair[0]));
+            let right = ScalarValue::Int64(Some(pair[1]));
+            assert!(
+                cypher_order_key(&left) < cypher_order_key(&right),
+                "integer order collapsed or reversed: {pair:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn numeric_order_keys_compare_exact_integer_float_boundaries() {
+        let int = |n| ScalarValue::Int64(Some(n));
+        let float = |n| ScalarValue::Float64(Some(n));
+        let boundary = 9_007_199_254_740_992_i64;
+        for value in [i64::MIN, -boundary, -1, 0, 1, boundary] {
+            #[allow(
+                clippy::cast_precision_loss,
+                reason = "these integers are exactly representable"
+            )]
+            let represented = value as f64;
+            assert_eq!(
+                cypher_order_key(&int(value)),
+                cypher_order_key(&float(represented))
+            );
+        }
+        for (left, right) in [
+            (float(f64::NEG_INFINITY), int(i64::MIN)),
+            (float(-9_223_372_036_854_775_808.0), int(i64::MIN + 1)),
+            (float(-9_007_199_254_740_996.0), int(-boundary - 3)),
+            (int(-boundary - 1), float(-9_007_199_254_740_992.0)),
+            (int(-2), float(-1.5)),
+            (float(-1.5), int(-1)),
+            (float(-f64::from_bits(1)), int(0)),
+            (int(0), float(f64::from_bits(1))),
+            (float(0.5), int(1)),
+            (float(9_007_199_254_740_992.0), int(boundary + 1)),
+            (int(boundary + 3), float(9_007_199_254_740_996.0)),
+            (int(i64::MAX), float(9_223_372_036_854_775_808.0)),
+            (float(f64::MAX), float(f64::INFINITY)),
+            (float(f64::INFINITY), float(f64::NAN)),
+            (float(f64::NAN), ScalarValue::Null),
+        ] {
+            assert!(
+                cypher_order_key(&left) < cypher_order_key(&right),
+                "mixed numeric order reversed: {left:?}, {right:?}"
+            );
+        }
+        assert_eq!(cypher_order_key(&float(-0.0)), cypher_order_key(&int(0)));
+        assert_eq!(cypher_order_key(&float(0.0)), cypher_order_key(&int(0)));
+        assert_eq!(
+            cypher_order_key(&float(f64::NAN)),
+            cypher_order_key(&float(-f64::NAN))
+        );
+    }
+
+    #[test]
+    fn numeric_list_order_keys_preserve_nested_lexicographic_and_prefix_order() {
+        let list = |values: &[i64]| {
+            ScalarValue::List(ScalarValue::new_list(
+                &values
+                    .iter()
+                    .map(|n| ScalarValue::Int64(Some(*n)))
+                    .collect::<Vec<_>>(),
+                &DataType::Int64,
+                true,
+            ))
+        };
+        let low = list(&[9_007_199_254_740_992, 2]);
+        let high = list(&[9_007_199_254_740_993, 1]);
+        assert!(cypher_order_key(&low) < cypher_order_key(&high));
+        assert!(
+            cypher_order_key(&list(&[0, 9_007_199_254_740_992]))
+                < cypher_order_key(&list(&[0, 9_007_199_254_740_993]))
+        );
+        assert!(cypher_order_key(&list(&[])) < cypher_order_key(&low));
+        assert!(cypher_order_key(&list(&[9_007_199_254_740_992])) < cypher_order_key(&low));
+        let nested = |values: &[ScalarValue]| {
+            ScalarValue::List(ScalarValue::new_list(values, &low.data_type(), true))
+        };
+        assert!(
+            cypher_order_key(&nested(std::slice::from_ref(&low)))
+                < cypher_order_key(&nested(std::slice::from_ref(&high)))
+        );
+        assert!(
+            cypher_order_key(&nested(std::slice::from_ref(&low)))
+                < cypher_order_key(&nested(&[low.clone(), high]))
         );
     }
 

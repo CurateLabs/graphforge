@@ -76,10 +76,18 @@ when those caches are empty. An oversized supplied cache fails with
 admission changes shared state. Compatible supplied authorities are retained;
 attachment never replaces them or raises their ceilings.
 
-An edge-record decode reserves active decoder scratch plus accumulated Arrow
-output before reading pages. Files run sequentially; each projected column can
-advance row groups independently, so active scratch sums each column's largest
-selected chunk. Complete chunk/page/dictionary/level allowances remain
+Projected canonical inventory-backed edge reads prepare one authenticated opened source
+and metadata snapshot per file. Metadata allocations are admitted before the
+ordinary footer/index readers; dense selection and its conservative fallback
+reuse that same source, projection and metadata. Each file reserves its complete
+decoder envelope before reading pages. Sealing its returned buffers transfers
+prepaid authority without releasing and reacquiring payload credit; decoder
+workspace is released before the next file while earlier results remain funded.
+Unprojected inventory reads, wildcard union normalization and legacy discovery
+retain their existing readers.
+
+Each projected column can advance row groups independently, so active scratch
+sums each column's largest selected chunk. Complete chunk/page/dictionary/level allowances remain
 conservative. Uncompressed and Zstandard pages have admitted decoder bounds;
 Zstandard includes the two contexts that can overlap at a group transition.
 Other codecs fail before pages unless their native workspace has a justified
@@ -87,12 +95,44 @@ bound. Fixed output counts full reader batch capacities, including the
 last partial batch; edge selection uses the bounded Selectors policy.
 Variable strings use unencoded value-size statistics; a footer that lacks them
 uses `num_values * uncompressed_size`. The envelope also covers a file's
-concat/filter copies. After decoding, the reservation transfers atomically to
-actual retained batches, and concatenation admits its additional copy before
-allocation. An estimate beyond the query pool fails with the named
+concat/filter copies. A single returned batch forwards its existing buffer
+authority; concatenating multiple files admits a fresh copy while source owners
+remain live. A hop retains sealed source provenance through local alias checks
+and leaves existing buffer tokens intact. Internal batch/schema headers have
+separate owners, including empty results and shared timestamp datatype metadata.
+An estimate beyond the query pool fails with the named
 `ExpandExec hop read` consumer. Storage retains its encoded-footer, row-group
 and column admission caps; noncanonical nested/dictionary Arrow topology is
 refused rather than treated as scalar output.
+
+The [reader handoff decision](../adr/0060-query-memory-handoffs.md) records this
+shared contract for the storage and private IPC integrations. Buffer
+tokens follow physical backing through clones and slices; they do not observe
+arbitrary public Arrow wrapper drops. This is a controlled producer/consumer
+handoff, not a sponsorship lookup for arbitrary batches. The storage adapter uses
+stock DataFusion reservations and declares its own Arrow pool feature, so its
+package build does not depend on repository-only vendor APIs. Existing query
+pool headroom, floors and loans remain unchanged.
+
+Private IPC replay transfers prepaid credit only from a known nonspilling sponsor.
+Its producer and started workers retain separate lifetime permits; escaped buffers
+retain payload tickets without retaining those permits. Fresh merge outputs stay
+funded while their sources remain alive. Buffered readers reserve a configured
+channel slot before polling, including an in-flight decode in that capacity;
+queue capacity and merge/batch settings are unchanged.
+
+The qualified private Repartition FIFO transfers one completed writer workspace
+to its reader bank before publishing a spilled batch. Later writes and reads
+reuse available credit and admit fresh deficits before allocation. Its consumer
+permit spans file rotations and started workers, and retires unused credit at
+EOF, error or cancellation. Parsed schema, decoded-array and merge-copy phases
+release preparation workspace only after construction ends; source buffers and
+earlier outputs remain funded through each transition. Qualified uncompressed
+frames share one full body after recursive alignment and descriptor checks;
+other frames retain their conservative bounds. Controlled Row copies refuse
+unproved payload bounds before the kernel, while offset overflow preserves the
+existing smaller-prefix retry. Aggregates drop consumed input handles before
+state admission; genuine state aliases retain their buffer charges.
 
 Property inventory admission counts route/path/map capacities and one
 `ParquetMetaData::memory_size()` plus two Arrow schema allowances per cached

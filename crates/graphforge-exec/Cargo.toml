@@ -27,7 +27,8 @@ graphforge-ontology = { version = "0.6.0-rc.5", path = "../graphforge-ontology" 
 graphforge-plan = { version = "0.6.0-rc.5", path = "../graphforge-plan" }
 graphforge-rel = { version = "0.6.0-rc.5", path = "../graphforge-rel" }
 graphforge-storage = { version = "0.6.0-rc.5", path = "../graphforge-storage" }
-arrow = { workspace = true }
+arrow = { workspace = true, features = ["pool"] }
+arrow-buffer = { workspace = true }
 datafusion = { workspace = true }
 datafusion-datasource = { workspace = true }
 async-trait = "0.1"

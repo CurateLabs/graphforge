@@ -617,7 +617,7 @@ impl ExecutionPlan for PropertyOverlayExec {
     fn execute(
         &self,
         partition: usize,
-        _context: Arc<TaskContext>,
+        context: Arc<TaskContext>,
     ) -> Result<SendableRecordBatchStream, DataFusionError> {
         if partition >= self.partitions {
             return Err(DataFusionError::Internal(format!(
@@ -628,6 +628,8 @@ impl ExecutionPlan for PropertyOverlayExec {
         if let Some(executed) = &self.partitions_executed {
             executed.add(1);
         }
+        let budget = crate::property_scan_memory::Budget::new(context.memory_pool());
+        let output_budget = Arc::clone(&budget);
         let partitions = self.partitions;
         let cuts = Arc::clone(&self.cuts);
         let (sender, receiver) = tokio::sync::mpsc::channel(2);
@@ -700,20 +702,22 @@ impl ExecutionPlan for PropertyOverlayExec {
                 let mut held_bytes = 0_usize;
                 let limit = remaining;
                 let mut replay_after_validation = false;
-                let send = |batch: RecordBatch| {
-                    // Batches decode under the route's inventory schema, which
-                    // carries storage observation metadata; emit them under
-                    // the query-facing schema this stream advertises.
-                    let batch = RecordBatch::try_new_with_options(
-                        Arc::clone(&output_schema),
-                        batch.columns().to_vec(),
-                        &RecordBatchOptions::new().with_row_count(Some(batch.num_rows())),
-                    )
-                    .map_err(|error| DataFusionError::ArrowError(Box::new(error), None))?;
-                    sender.blocking_send(Ok(batch)).map_err(|_| {
-                        DataFusionError::Execution("property scan consumer closed".into())
-                    })
-                };
+                let send =
+                    |batch: RecordBatch,
+                     memory: Option<Arc<crate::property_scan_memory::Guard>>| {
+                        // Batches decode under the route's inventory schema, which
+                        // carries storage observation metadata; emit them under
+                        // the query-facing schema this stream advertises.
+                        let batch = RecordBatch::try_new_with_options(
+                            Arc::clone(&output_schema),
+                            batch.columns().to_vec(),
+                            &RecordBatchOptions::new().with_row_count(Some(batch.num_rows())),
+                        )
+                        .map_err(|error| DataFusionError::ArrowError(Box::new(error), None))?;
+                        sender.blocking_send(Ok((batch, memory))).map_err(|_| {
+                            DataFusionError::Execution("property scan consumer closed".into())
+                        })
+                    };
                 let project_batch = |batch: &RecordBatch| {
                     projection.as_ref().map_or_else(
                         || Ok(batch.clone()),
@@ -735,6 +739,27 @@ impl ExecutionPlan for PropertyOverlayExec {
                 // Every partition cuts the route the same way from the same
                 // pinned footers, so the intervals tile the key space: a key's
                 // base, mutation and tombstone rows are read by one partition.
+                let _partition_memory = match inventory
+                    .as_ref()
+                    .map(|inventory| {
+                        let kind = if is_edge {
+                            crate::PropertyRouteKind::Edge
+                        } else {
+                            crate::PropertyRouteKind::Node
+                        };
+                        inventory
+                            .route_partition_admission_bytes(kind, &route, partitions)
+                            .and_then(|bytes| budget.reserve(bytes))
+                    })
+                    .transpose()
+                {
+                    Ok(memory) => memory,
+                    Err(error) => {
+                        let _ =
+                            sender.blocking_send(Err(DataFusionError::External(Box::new(error))));
+                        return;
+                    }
+                };
                 let interval = match partition_interval_of(
                     &cuts,
                     inventory.as_deref(),
@@ -749,7 +774,7 @@ impl ExecutionPlan for PropertyOverlayExec {
                         return;
                     }
                 };
-                let first_pass = crate::catalog::visit_property_overlay_batched_selected(
+                let first_pass = crate::catalog::visit_property_overlay_batched_admitted(
                     &project,
                     inventory.as_deref(),
                     &route,
@@ -759,7 +784,8 @@ impl ExecutionPlan for PropertyOverlayExec {
                     equality.as_ref(),
                     &uuid_sets,
                     interval,
-                    |batch| {
+                    Some(&budget),
+                    |batch, memory| {
                         let mut batch = project_batch(batch)?;
                         if let Some(rows) = remaining.as_mut() {
                             if *rows == 0 {
@@ -785,10 +811,10 @@ impl ExecutionPlan for PropertyOverlayExec {
                                 return Ok(true);
                             }
                             held_bytes += batch_bytes;
-                            held.push(batch);
+                            held.push((batch, memory));
                             return Ok(true);
                         }
-                        send(batch)?;
+                        send(batch, memory)?;
                         Ok(true)
                     },
                 );
@@ -805,7 +831,7 @@ impl ExecutionPlan for PropertyOverlayExec {
                 let result = first_pass.and_then(|()| {
                     if replay_after_validation {
                         let mut replay_remaining = limit;
-                        crate::catalog::visit_property_overlay_batched_selected(
+                        crate::catalog::visit_property_overlay_batched_admitted(
                             &project,
                             inventory.as_deref(),
                             &route,
@@ -815,10 +841,11 @@ impl ExecutionPlan for PropertyOverlayExec {
                             equality.as_ref(),
                             &uuid_sets,
                             interval,
-                            |batch| {
+                            Some(&budget),
+                            |batch, memory| {
                                 let mut batch = project_batch(batch)?;
                                 let Some(rows) = replay_remaining.as_mut() else {
-                                    send(batch)?;
+                                    send(batch, memory)?;
                                     return Ok(true);
                                 };
                                 if *rows == 0 {
@@ -828,7 +855,7 @@ impl ExecutionPlan for PropertyOverlayExec {
                                     batch = batch.slice(0, *rows);
                                 }
                                 *rows -= batch.num_rows();
-                                send(batch)?;
+                                send(batch, memory)?;
                                 Ok(*rows > 0)
                             },
                         )
@@ -838,8 +865,8 @@ impl ExecutionPlan for PropertyOverlayExec {
                             }
                         })
                     } else {
-                        for batch in held {
-                            send(batch)?;
+                        for (batch, memory) in held {
+                            send(batch, memory)?;
                         }
                         Ok(())
                     }
@@ -874,9 +901,17 @@ impl ExecutionPlan for PropertyOverlayExec {
             });
         });
         let schema = Arc::clone(&self.schema);
-        let output = stream::unfold(receiver, |mut receiver| async move {
-            receiver.recv().await.map(|item| (item, receiver))
-        });
+        let output = stream::unfold(
+            (receiver, None, CancelOnDrop(output_budget)),
+            |(mut receiver, held, cancel)| async move {
+                drop(held);
+                match receiver.recv().await {
+                    Some(Ok((batch, memory))) => Some((Ok(batch), (receiver, memory, cancel))),
+                    Some(Err(error)) => Some((Err(error), (receiver, None, cancel))),
+                    None => None,
+                }
+            },
+        );
         Ok(Box::pin(RecordBatchStreamAdapter::new(schema, output)))
     }
 }
@@ -936,3 +971,11 @@ mod property_scan_tests;
 #[cfg(test)]
 #[path = "property_scan_partition_tests.rs"]
 pub(crate) mod property_scan_partition_tests;
+
+/// Closing the consumer cancels before another decode or Arrow copy begins.
+struct CancelOnDrop(Arc<crate::property_scan_memory::Budget>);
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
+}

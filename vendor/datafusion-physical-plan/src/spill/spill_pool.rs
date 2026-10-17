@@ -29,6 +29,7 @@ use datafusion_common::Result;
 use datafusion_execution::disk_manager::RefCountedTempFile;
 use datafusion_execution::{RecordBatchStream, SendableRecordBatchStream};
 
+use super::admission::{Credit, ReaderPermit};
 use super::in_progress_spill_file::InProgressSpillFile;
 use super::spill_manager::SpillManager;
 
@@ -65,17 +66,27 @@ struct SpillPoolShared {
     /// `writer_dropped` be set to true. This prevents premature EOF signaling
     /// when one writer clone is dropped while others are still active.
     active_writer_count: usize,
+    // These inline options retain the existing constant channel-header boundary.
+    // Their new heap-backed control is prepaid from the first owned receipt.
+    handoff: bool,
+    consumer_alive: bool,
+    credit: Option<Arc<Credit>>,
+    producer: Option<Arc<ReaderPermit>>,
 }
 
 impl SpillPoolShared {
     /// Creates a new shared pool state
-    fn new(spill_manager: Arc<SpillManager>) -> Self {
+    fn new(spill_manager: Arc<SpillManager>, handoff: bool) -> Self {
         Self {
             new_files: VecDeque::new(),
             spill_manager,
             waker: None,
             open_write_files: VecDeque::new(),
             active_writer_count: 1,
+            handoff,
+            consumer_alive: true,
+            credit: None,
+            producer: None,
         }
     }
 
@@ -200,6 +211,8 @@ impl SpillPoolWriter {
 
         // Release shared lock before file I/O (fine-grained locking)
         // This allows readers to access the queue while we do disk I/O
+        let handoff = shared.handoff;
+        let credit = shared.credit.clone();
         drop(shared);
 
         // Write batch to current file - lock only the specific file
@@ -207,9 +220,21 @@ impl SpillPoolWriter {
 
         // Append the batch
         if let Some(ref mut writer) = file_shared.writer {
-            writer.append_batch(batch)?;
+            let receipt = if handoff {
+                Some(writer.append_for_fifo(batch, credit)?)
+            } else {
+                writer.append_batch(batch)?;
+                None
+            };
             // make sure we flush the writer for readers
             writer.flush()?;
+            if let Some(receipt) = receipt {
+                // No file/outer lock may be held during bank construction,
+                // admission callbacks, or a losing candidate's destruction.
+                drop(file_shared);
+                self.offer_initial_workspace(receipt)?;
+                file_shared = write_file.lock();
+            }
             file_shared.batches_written += 1;
             file_shared.estimated_size += batch_size;
         }
@@ -239,6 +264,44 @@ impl SpillPoolWriter {
             shared.open_write_files.push_back(write_file);
         }
 
+        Ok(())
+    }
+
+    fn offer_initial_workspace(
+        &self,
+        mut receipt: super::in_progress_spill_file::AppendReceipt,
+    ) -> Result<()> {
+        let offer = {
+            let shared = self.shared.lock();
+            shared.consumer_alive && shared.credit.is_none()
+        };
+        if !offer {
+            return Ok(());
+        }
+        let authority = receipt.workspace.take_owned_authority()?;
+        let registration =
+            super::resident_metadata::literal_registration_bytes("SpillWriterEncode")
+                .ok_or_else(|| {
+                    datafusion_common::DataFusionError::ResourcesExhausted(
+                        "FIFO writer registration bound overflow".into(),
+                    )
+                })?;
+        let (credit, mut producers) =
+            Credit::with_readers_and_control(authority, 1, registration)?;
+        let producer = producers.pop().expect("one preadmitted FIFO root");
+        drop(producers);
+        let mut candidate = Some((credit, producer));
+        {
+            let mut shared = self.shared.lock();
+            if shared.consumer_alive && shared.credit.is_none() {
+                let (credit, producer) = candidate.take().unwrap();
+                shared.credit = Some(credit);
+                shared.producer = Some(producer);
+            }
+        }
+        // A concurrent successful donor wins once. No reservation fragments
+        // are merged or added to its bank, and callbacks occur outside locks.
+        drop(candidate);
         Ok(())
     }
 }
@@ -461,15 +524,47 @@ pub fn channel(
     max_file_size_bytes: usize,
     spill_manager: Arc<SpillManager>,
 ) -> (SpillPoolWriter, SendableRecordBatchStream) {
+    channel_inner(max_file_size_bytes, spill_manager, false)
+}
+
+/// Repartition alone opts into handoff for this finite writer/reader family.
+/// Its spillable source reservation is never a donor; only an independently
+/// admitted nonspilling encoding workspace can enter the bank.
+pub(crate) fn channel_for_repartition(
+    max_file_size_bytes: usize,
+    spill_manager: Arc<SpillManager>,
+) -> (SpillPoolWriter, SendableRecordBatchStream) {
+    let handoff = can_handoff_fifo_workspace(&spill_manager);
+    channel_inner(max_file_size_bytes, spill_manager, handoff)
+}
+
+pub(crate) fn can_handoff_fifo_workspace(spill_manager: &SpillManager) -> bool {
+    use arrow::datatypes::DataType;
+    use datafusion_common::config::SpillCompression;
+    super::resident_metadata::std_mutex_heap_bound().is_some()
+        && spill_manager.compression == SpillCompression::Uncompressed
+        && !spill_manager.schema().fields().is_empty()
+        && spill_manager
+            .schema()
+            .fields()
+            .iter()
+            .all(|field| matches!(field.data_type(), DataType::Int64 | DataType::Utf8))
+}
+
+fn channel_inner(
+    max_file_size_bytes: usize,
+    spill_manager: Arc<SpillManager>,
+    handoff: bool,
+) -> (SpillPoolWriter, SendableRecordBatchStream) {
     let schema = Arc::clone(spill_manager.schema());
-    let shared = Arc::new(Mutex::new(SpillPoolShared::new(spill_manager)));
+    let shared = Arc::new(Mutex::new(SpillPoolShared::new(spill_manager, handoff)));
 
     let writer = SpillPoolWriter {
         max_file_size_bytes,
         shared: Arc::clone(&shared),
     };
 
-    let reader = SpillPoolReader::new(shared, schema);
+    let reader = SpillPoolReader::new(shared, schema, handoff);
 
     (writer, Box::pin(reader))
 }
@@ -547,7 +642,12 @@ impl SpillFile {
     /// available, so [`SpillPoolReader`] can move on to a newer file when this
     /// one is only waiting for its writer, but keeps waiting on it while its
     /// data is still being read from disk (which keeps batches in file order).
-    fn poll_file(&mut self, cx: &mut std::task::Context<'_>) -> FilePoll {
+    fn poll_file(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+        pool: &Arc<Mutex<SpillPoolShared>>,
+        producer: &mut Option<Arc<ReaderPermit>>,
+    ) -> FilePoll {
         use std::task::Poll;
 
         // Step 1: Lock shared state and check coordination
@@ -578,10 +678,27 @@ impl SpillFile {
         if self.reader.is_none() {
             if let Some(file) = file {
                 // we want this unbuffered because files are actively being written to
-                match self
-                    .spill_manager
-                    .read_spill_as_stream_unbuffered(file, None)
-                {
+                // Refresh after checking publication and releasing the file
+                // lock: installation may have raced this reader's outer poll.
+                let (handoff, credit) = {
+                    let mut shared = pool.lock();
+                    if producer.is_none() {
+                        *producer = shared.producer.take();
+                    }
+                    (shared.handoff, shared.credit.clone().zip(producer.clone()))
+                };
+                let stream = match (handoff, credit) {
+                    (_, Some((credit, producer))) => self
+                        .spill_manager
+                        .read_fifo_with_credit(file, credit, producer),
+                    (false, None) => self
+                        .spill_manager
+                        .read_spill_as_stream_unbuffered(file, None),
+                    (true, None) => Err(datafusion_common::DataFusionError::Internal(
+                        "FIFO batch published without admitted reader credit".into(),
+                    )),
+                };
+                match stream {
                     Ok(stream) => {
                         self.reader = Some(SpillFileReader {
                             stream,
@@ -665,6 +782,9 @@ pub struct SpillPoolReader {
     files: VecDeque<SpillFile>,
     /// Schema of the spilled data
     schema: SchemaRef,
+    producer: Option<Arc<ReaderPermit>>,
+    handoff: bool,
+    terminal: bool,
 }
 
 impl SpillPoolReader {
@@ -675,12 +795,42 @@ impl SpillPoolReader {
     /// # Arguments
     ///
     /// * `shared` - Shared reference to the pool state
-    fn new(shared: Arc<Mutex<SpillPoolShared>>, schema: SchemaRef) -> Self {
+    fn new(
+        shared: Arc<Mutex<SpillPoolShared>>,
+        schema: SchemaRef,
+        handoff: bool,
+    ) -> Self {
         Self {
             shared,
             files: VecDeque::new(),
             schema,
+            producer: None,
+            handoff,
+            terminal: false,
         }
+    }
+
+    fn retire(&mut self) {
+        if !self.handoff || self.terminal {
+            return;
+        }
+        self.terminal = true;
+        let pending = {
+            let mut shared = self.shared.lock();
+            shared.consumer_alive = false;
+            shared.producer.take()
+        };
+        // Streams drop their data and worker handles first. A started worker
+        // keeps its own clone of the same root until its actual exit.
+        self.files.clear();
+        drop(self.producer.take());
+        drop(pending);
+    }
+}
+
+impl Drop for SpillPoolReader {
+    fn drop(&mut self) {
+        self.retire();
     }
 }
 
@@ -695,6 +845,9 @@ impl Stream for SpillPoolReader {
 
         // `Self: Unpin`; reborrow once so `files` and `shared` can be used together
         let this = &mut *self;
+        if this.terminal {
+            return Poll::Ready(None);
+        }
 
         loop {
             // Pick up the files writers have created since the last poll, in
@@ -718,9 +871,12 @@ impl Stream for SpillPoolReader {
             // of waiting on it.
             let mut idx = 0;
             while idx < this.files.len() {
-                match this.files[idx].poll_file(cx) {
+                match this.files[idx].poll_file(cx, &this.shared, &mut this.producer) {
                     FilePoll::Item(item) => {
                         // Got a batch (or an error), return it
+                        if item.is_err() {
+                            this.retire();
+                        }
                         return Poll::Ready(Some(item));
                     }
                     FilePoll::Done => {
@@ -735,6 +891,7 @@ impl Stream for SpillPoolReader {
                         } else {
                             // Stream exhausted but writer not finished - unexpected
                             // This shouldn't happen with proper coordination
+                            this.retire();
                             return Poll::Ready(None);
                         }
                     }
@@ -762,6 +919,8 @@ impl Stream for SpillPoolReader {
 
             if this.files.is_empty() && shared.active_writer_count == 0 {
                 // Writer is done and no more files will be added - EOF
+                drop(shared);
+                this.retire();
                 return Poll::Ready(None);
             }
 

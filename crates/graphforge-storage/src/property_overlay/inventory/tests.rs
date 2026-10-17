@@ -1493,3 +1493,72 @@ fn paired_inventory_refusal_preserves_both_shared_ceilings() {
         );
     }
 }
+
+#[tokio::test]
+async fn cold_authenticated_key_scan_preserves_partitioned_execution() {
+    use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryPool};
+    use datafusion::execution::runtime_env::RuntimeEnvBuilder;
+    use datafusion::physical_plan::ExecutionPlan;
+    use datafusion::prelude::{SessionConfig, SessionContext};
+
+    let root = footer_budget_fixture();
+    let inventory = Arc::new(capture_lazy_footer_inventory(root.path()));
+    assert!(
+        inventory
+            .routes
+            .values()
+            .flatten()
+            .all(|fragment| fragment.footer.get().is_none())
+    );
+    let pool = Arc::new(GreedyMemoryPool::new(128 * 1024 * 1024));
+    let runtime = RuntimeEnvBuilder::new()
+        .with_memory_pool(pool.clone())
+        .build_arc()
+        .unwrap();
+    let context = SessionContext::new_with_config_rt(SessionConfig::new(), runtime);
+    let scan = crate::property_scan::PropertyOverlayExec::try_new(
+        root.path().to_path_buf(),
+        Some(inventory.clone()),
+        "Route0".into(),
+        false,
+        crate::schemas::PROPERTY_BASE_SCHEMA.clone(),
+        crate::property_scan::PropertyScanOptions {
+            projection: Some(&vec![0]),
+            limit: None,
+            batch_size: 16,
+            footer_statistics: false,
+            equality: None,
+            partitions: 4,
+        },
+    )
+    .unwrap();
+    assert_eq!(scan.properties().output_partitioning().partition_count(), 4);
+    assert!(
+        inventory
+            .routes
+            .values()
+            .flatten()
+            .all(|fragment| fragment.footer.get().is_none())
+    );
+    let batches = datafusion::physical_plan::collect(Arc::new(scan), context.task_ctx())
+        .await
+        .unwrap();
+    assert_eq!(
+        batches
+            .iter()
+            .map(arrow::record_batch::RecordBatch::num_rows)
+            .sum::<usize>(),
+        1
+    );
+    let ids = batches
+        .iter()
+        .filter(|batch| batch.num_rows() > 0)
+        .next()
+        .unwrap()
+        .column(0)
+        .as_any()
+        .downcast_ref::<FixedSizeBinaryArray>()
+        .unwrap();
+    assert_eq!(ids.value(0), &1u128.to_be_bytes());
+    assert_eq!(pool.reserved(), 0);
+}
