@@ -710,10 +710,19 @@ fn publishing_the_same_version_twice_returns_the_original_receipt() {
         lineage
             .versions
             .iter()
+            .filter(|version| version.package.is_some())
             .map(|version| version.version_uuid.clone())
             .collect::<Vec<_>>(),
         [history.head.to_string()],
-        "the Hub holds one Version"
+        "the Hub holds one Version payload, independently of ancestry metadata"
+    );
+
+    let ancestor = lineage.version(&history.base.to_string()).unwrap();
+    assert!(ancestor.package.is_none());
+    assert_eq!(
+        lineage.versions.len(),
+        2,
+        "one head and one metadata-only Branch ancestor"
     );
 
     // The same operation identity with a different Version is refused before
