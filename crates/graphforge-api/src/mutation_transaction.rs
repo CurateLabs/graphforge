@@ -605,10 +605,18 @@ mod recovery_tests {
         let output = std::path::Path::new(&root).join("must-not-export.gf");
         assert!(
             graph
-                .export_portable(crate::PortableExportRequest {
-                    selection: crate::PortableSelection::Current,
-                    output: output.clone()
-                })
+                .export_portable_v2(
+                    &crate::PortableV2ExportRequest {
+                        selection: crate::PortableSelection::Current,
+                        output_path: output.clone(),
+                        representation: crate::PortableV2Output::Bundle,
+                        profile: crate::PortableV2SelectionProfile::Complete,
+                        subset: None,
+                        limits: crate::PortableV2Limits::default(),
+                    },
+                    None,
+                    |_| {}
+                )
                 .is_err()
         );
         assert!(!output.exists());

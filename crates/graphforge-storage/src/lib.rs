@@ -283,13 +283,10 @@ pub use project_retention::{
     preview_project_cleanup_with_mode,
 };
 
-pub mod project_portable;
+mod project_import_target;
 pub mod project_portable_v2_export;
 pub mod project_portable_v2_import;
-pub use project_portable::{
-    PortableExportReceipt, PortableImportReceipt, PortableProjectLimits, encode_portable_project,
-    export_portable_project, import_portable_project, import_portable_project_file,
-};
+
 pub use project_portable_v2_export::{
     PortableV2ExportLimits, PortableV2ExportPlan, PortableV2ExportProgress,
     PortableV2ExportReceipt, PortableV2Output, export_complete_portable_v2,

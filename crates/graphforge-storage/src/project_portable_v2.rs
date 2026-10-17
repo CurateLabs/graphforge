@@ -442,7 +442,7 @@ fn preflight_bundle(
     limits: PortableV2Limits,
     cancelled: Option<&AtomicBool>,
 ) -> Result<(), PortableV2Error> {
-    let mut input = File::open(path)
+    let mut input = crate::project_portable_v2_export::open_source_no_follow(path)
         .map_err(|_| PortableV2Error::new(PortableV2ErrorCode::Io, "cannot open bundle"))?;
     let mut pending_pax: Option<pax::PaxHeader> = None;
     let mut admitted_manifest = None;
@@ -454,9 +454,26 @@ fn preflight_bundle(
     loop {
         check_cancel(cancelled)?;
         let mut header = [0_u8; 512];
-        input.read_exact(&mut header).map_err(|_| {
-            PortableV2Error::new(PortableV2ErrorCode::InvalidStructure, "truncated bundle")
-        })?;
+        // Reject the retired format signature before materialization or target admission.
+        // This is not a decoder or compatibility path.
+        if entries == 0 {
+            input.read_exact(&mut header[..16]).map_err(|_| {
+                PortableV2Error::new(PortableV2ErrorCode::InvalidStructure, "truncated bundle")
+            })?;
+            if &header[..16] == b"graphforge-exp\0\n" {
+                return Err(PortableV2Error::new(
+                    PortableV2ErrorCode::UnsupportedProjectFormat,
+                    "unsupported project format",
+                ));
+            }
+            input.read_exact(&mut header[16..]).map_err(|_| {
+                PortableV2Error::new(PortableV2ErrorCode::InvalidStructure, "truncated bundle")
+            })?;
+        } else {
+            input.read_exact(&mut header).map_err(|_| {
+                PortableV2Error::new(PortableV2ErrorCode::InvalidStructure, "truncated bundle")
+            })?;
+        }
         if header.iter().all(|byte| *byte == 0) {
             break;
         }
