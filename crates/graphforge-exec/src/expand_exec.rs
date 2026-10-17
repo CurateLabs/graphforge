@@ -442,6 +442,10 @@ impl ExecutionPlan for VarLenExpandExec {
             provider: self.provider.clone(),
             capture_epoch: self.capture_epoch,
             edge_filter: self.edge_filter.clone(),
+            read_reservation: Arc::new(std::sync::Mutex::new(ChunkedReservation::register(
+                HOP_READ_CONSUMER,
+                context.memory_pool(),
+            ))),
             lifecycle: graphforge_storage::lifecycle_io::CaptureContext::current(),
             metrics: self.metrics.partition(partition),
         };
@@ -577,6 +581,7 @@ pub(super) struct ExpandConfig {
     pub(super) capture_epoch: u64,
     /// The predicate every crossed edge must satisfy (reachability only).
     pub(super) edge_filter: Option<Arc<PhysicalEdgeFilter>>,
+    pub(super) read_reservation: Arc<std::sync::Mutex<ChunkedReservation>>,
     /// The statement's read-path observer. The traversal runs as a spawned
     /// task, so each synchronous section attaches it to count its reads.
     pub(super) lifecycle: graphforge_storage::lifecycle_io::CaptureContext,
@@ -667,15 +672,23 @@ fn grow_reservation(reservation: &mut ChunkedReservation, bytes: usize) -> Resul
         .map_err(GfError::from_execution_error)
 }
 
+struct VarLenBatch {
+    batch: RecordBatch,
+    charged: usize,
+}
+
 /// Send one built batch and release its charge: the consumer owns it now.
 /// `false` once the consumer is gone.
 async fn send_chunk(
     cfg: &ExpandConfig,
     tx: &tokio::sync::mpsc::Sender<Result<RecordBatch, DataFusionError>>,
-    out: RecordBatch,
+    out: VarLenBatch,
     reservation: &mut ChunkedReservation,
 ) -> bool {
-    let bytes = out.get_array_memory_size();
+    let VarLenBatch {
+        batch: out,
+        charged: bytes,
+    } = out;
     if cfg.capture_epoch != 0 {
         demand::record_emitted(cfg.capture_epoch, cfg.edge_var, out.num_rows());
     }
@@ -939,26 +952,6 @@ fn charge(
     Ok(())
 }
 
-/// The struct fields of the edge-list column, past the four topology fields:
-/// the relation's persisted edge properties (#755).
-fn edge_list_prop_fields(cfg: &ExpandConfig) -> Result<Vec<arrow::datatypes::FieldRef>, GfError> {
-    use arrow::datatypes::DataType;
-
-    let exec_err = |m: String| GfError::Execution(m);
-    let edge_field = cfg
-        .out_schema
-        .fields()
-        .last()
-        .ok_or_else(|| exec_err("output schema has no edge-list column".into()))?;
-    let DataType::List(item) = edge_field.data_type() else {
-        return Err(exec_err("edge-list field must be a List".into()));
-    };
-    let DataType::Struct(struct_fields) = item.data_type() else {
-        return Err(exec_err("edge-list item must be a Struct".into()));
-    };
-    Ok(struct_fields.iter().skip(4).cloned().collect())
-}
-
 /// Read everything `emissions` need from storage. `None` when there is no node
 /// batch to take destinations from, which yields an empty output.
 ///
@@ -1074,7 +1067,17 @@ fn load_chunk_sources(
 
     // The relation's edge properties for every traversed edge.
     let edge_props = if cfg.edge_list_demanded {
-        let prop_fields = edge_list_prop_fields(cfg)?;
+        let mut source_charge = HopReadCharge::new(&cfg.read_reservation);
+        source_charge.charge(hop_read::checked_add(
+            4096,
+            hop_read::checked_mul(cfg.out_schema.fields().len(), 512)?,
+        )?)?;
+        let prop_fields = edge_properties::edge_list_prop_fields(cfg)?;
+        let _targets = graphforge_storage::read_memory::ReadAdmission::reserve(
+            &source_charge,
+            hop_read::checked_mul(traversed.len(), 1024)?,
+        )
+        .map_err(GfError::from_execution_error)?;
         let mut hop_uuids = std::collections::BTreeSet::new();
         for id in &traversed {
             let record = edge_records
@@ -1088,11 +1091,11 @@ fn load_chunk_sources(
             &cfg.dir,
             &prop_fields,
             &hop_uuids,
+            &source_charge,
         )?
     } else {
         EdgePropSource::empty()
     };
-    charge(reservation, &mut charged, edge_props.charged_bytes())?;
 
     reservation.shrink(temporary);
     Ok(Some(ChunkSources {
@@ -1113,7 +1116,7 @@ fn materialise_chunk(
     emissions: &[Emission],
     sources: &ChunkSources,
     reservation: &mut ChunkedReservation,
-) -> Result<RecordBatch, GfError> {
+) -> Result<VarLenBatch, GfError> {
     use arrow::compute::take;
 
     let exec_err = |m: String| GfError::Execution(m);
@@ -1152,13 +1155,18 @@ fn materialise_chunk(
     // Trailing edge-list column (#709): one `List<Struct>` value per emitted
     // path, in schema order (last). Built from each path's ordered edge ids,
     // plus the relation's edge properties (#755).
+    let mut prepaid_property_backing = 0;
     if cfg.edge_list_demanded {
-        columns.push(build_edge_list_column(
+        let mut property_charge = HopReadCharge::new(&cfg.read_reservation);
+        let (list, backing) = build_edge_list_column_admitted(
             cfg,
             emissions,
             &sources.edge_records,
             &sources.edge_props,
-        )?);
+            &mut property_charge,
+        )?;
+        prepaid_property_backing = backing;
+        columns.push(list);
     } else {
         // No operator above reads the list, so no entry of it is ever looked
         // up; the column is nullable and carries nulls.
@@ -1171,8 +1179,15 @@ fn materialise_chunk(
     }
     let out = RecordBatch::try_new(cfg.out_schema.clone(), columns)
         .map_err(|e| exec_err(e.to_string()))?;
-    grow_reservation(reservation, out.get_array_memory_size())?;
-    Ok(out)
+    let charged = out
+        .get_array_memory_size()
+        .checked_sub(prepaid_property_backing)
+        .ok_or_else(|| exec_err("prepaid property backing exceeds output size".into()))?;
+    grow_reservation(reservation, charged)?;
+    Ok(VarLenBatch {
+        batch: out,
+        charged,
+    })
 }
 
 /// Build one output batch for `emissions`, reading what they need.
@@ -1184,11 +1199,14 @@ fn expand_chunk(
     input: &RecordBatch,
     emissions: &[Emission],
     reservation: &mut ChunkedReservation,
-) -> Result<RecordBatch, GfError> {
+) -> Result<VarLenBatch, GfError> {
     let Some(sources) = load_chunk_sources(cfg, emissions, reservation)? else {
         let empty = RecordBatch::new_empty(cfg.out_schema.clone());
         grow_reservation(reservation, empty.get_array_memory_size())?;
-        return Ok(empty);
+        return Ok(VarLenBatch {
+            charged: empty.get_array_memory_size(),
+            batch: empty,
+        });
     };
     let out = materialise_chunk(cfg, input, emissions, &sources, reservation)?;
     sources.release(reservation);
@@ -1421,12 +1439,25 @@ fn build_edge_records(
 /// properties (#755), materialised by `take`ing each property column at the row
 /// matching each hop's `edge_uuid` (null index → NULL for edges with no property
 /// row, i.e. LEFT-join semantics).
+#[cfg(test)]
 pub(super) fn build_edge_list_column(
     cfg: &ExpandConfig,
     emissions: &[(usize, u64, Vec<u64>)],
     edge_records: &std::collections::HashMap<u64, EdgeRecord>,
     edge_props: &EdgePropSource,
 ) -> Result<arrow::array::ArrayRef, GfError> {
+    let mut charge = HopReadCharge::new(&cfg.read_reservation);
+    build_edge_list_column_admitted(cfg, emissions, edge_records, edge_props, &mut charge)
+        .map(|(array, _)| array)
+}
+
+fn build_edge_list_column_admitted(
+    cfg: &ExpandConfig,
+    emissions: &[(usize, u64, Vec<u64>)],
+    edge_records: &std::collections::HashMap<u64, EdgeRecord>,
+    edge_props: &EdgePropSource,
+    charge: &mut HopReadCharge,
+) -> Result<(arrow::array::ArrayRef, usize), GfError> {
     use arrow::array::{
         ArrayRef, FixedSizeBinaryArray, ListArray, StringArray, StructArray, new_empty_array,
     };
@@ -1449,6 +1480,16 @@ pub(super) fn build_edge_list_column(
     let DataType::Struct(struct_fields) = item.data_type() else {
         return Err(exec_err("edge-list item must be a Struct".into()));
     };
+    let hops = emissions
+        .iter()
+        .try_fold(0, |n, (_, _, path)| hop_read::checked_add(n, path.len()))?;
+    charge.charge(hop_read::checked_add(
+        hop_read::checked_mul(hops, 128)?,
+        hop_read::checked_add(
+            hop_read::checked_mul(emissions.len(), 16)?,
+            hop_read::checked_mul(struct_fields.len(), 512)?,
+        )?,
+    )?)?;
     let struct_fields = struct_fields.clone();
     // Property fields are everything past the four topology fields, in order.
     let prop_fields: Vec<arrow::datatypes::FieldRef> =
@@ -1502,7 +1543,14 @@ pub(super) fn build_edge_list_column(
     // Children in `struct_fields` order: edge_uuid, src_uuid, dst_uuid, rel_type,
     // then one array per property field (#755).
     let mut children: Vec<ArrayRef> = vec![edge_arr, src_arr, dst_arr, rel_arr];
-    children.extend(edge_prop_children(edge_props, &prop_fields, &edge_uuids)?);
+    let completed = std::mem::replace(charge, HopReadCharge::new(&cfg.read_reservation));
+    let (properties, backing) = edge_properties::leased_edge_prop_children(
+        edge_props,
+        &prop_fields,
+        &edge_uuids,
+        completed,
+    )?;
+    children.extend(properties);
 
     let struct_arr =
         StructArray::try_new(struct_fields, children, None).map_err(|e| exec_err(e.to_string()))?;
@@ -1510,7 +1558,7 @@ pub(super) fn build_edge_list_column(
     let offsets = OffsetBuffer::<i32>::from_lengths(lengths);
     let list = ListArray::try_new(item.clone(), offsets, Arc::new(struct_arr), None)
         .map_err(|e| exec_err(e.to_string()))?;
-    Ok(Arc::new(list))
+    Ok((Arc::new(list), backing))
 }
 
 // ---------------------------------------------------------------------------
@@ -2224,9 +2272,10 @@ fn expand_single_hop_chunk_inner(
                 examined += 1;
                 if matches!(cfg.direction, Direction::Undirected)
                     && !hop_read::set_insert(
-                        position
-                            .seen_charge
-                            .get_or_insert_with(|| HopReadCharge::new(&cfg.read_reservation)),
+                        position.seen_charge.get_or_insert_with(|| {
+                            HopReadCharge::new(&cfg.read_reservation)
+                                .with_demand(cfg.demand.clone())
+                        }),
                         &mut position.seen_edges,
                         edge_id,
                     )?
@@ -2462,6 +2511,7 @@ fn expand_single_hop_chunk_inner(
                 &cfg.dir,
                 &demanded_property_fields,
                 targets,
+                &hop_read::HopReadAdmission(cfg),
             )
         })?
     } else {

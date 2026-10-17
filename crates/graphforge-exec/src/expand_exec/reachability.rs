@@ -255,7 +255,16 @@ impl ReachOutput<'_> {
         reservation.shrink(self.pending.len().saturating_mul(REACHED_BYTES));
         self.pending.clear();
         self.sent_any = true;
-        Ok(send_chunk(self.cfg, self.tx, out, reservation).await)
+        Ok(send_chunk(
+            self.cfg,
+            self.tx,
+            super::VarLenBatch {
+                charged: out.get_array_memory_size(),
+                batch: out,
+            },
+            reservation,
+        )
+        .await)
     }
 }
 

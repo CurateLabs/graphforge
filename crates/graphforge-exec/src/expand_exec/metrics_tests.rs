@@ -238,6 +238,15 @@ async fn traversal_setup_compute_is_recorded_even_when_adjacency_refuses() {
             provider: Arc::new(RefusingAdjacency),
             capture_epoch: 0,
             edge_filter: None,
+            read_reservation: std::sync::Arc::new(std::sync::Mutex::new(
+                crate::chunked_reservation::ChunkedReservation::register("ExpandExec hop read", &{
+                    let pool: std::sync::Arc<dyn datafusion::execution::memory_pool::MemoryPool> =
+                        std::sync::Arc::new(
+                            datafusion::execution::memory_pool::UnboundedMemoryPool::default(),
+                        );
+                    pool
+                }),
+            )),
             lifecycle: Default::default(),
             metrics: metrics.partition(0),
         };

@@ -1088,7 +1088,7 @@ fn an_id_map_answers_by_id_as_the_shards_do() {
             hits.push(hit);
         }
     }
-    let (direct_ids, direct_columns) = assemble(&hits, &demanded).unwrap();
+    let (direct_ids, direct_columns) = assemble(&hits, &demanded, &mut packs).unwrap();
     assert_eq!(found.ids, direct_ids);
     for ((_, from_map), (_, direct)) in found.columns.iter().zip(&direct_columns) {
         assert_eq!(from_map.to_data(), direct.to_data());

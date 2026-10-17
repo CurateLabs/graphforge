@@ -39,7 +39,11 @@ use arrow::ipc::reader::StreamDecoder;
 use arrow::record_batch::RecordBatch;
 use graphforge_core::GfError;
 
-use super::{BlobSeal, ID_COLUMN, PACK_BYTES, PACK_EXTENSION, UUID_COLUMN, storage, validation};
+use super::{
+    BlobSeal, ID_COLUMN, PACK_BYTES, PACK_EXTENSION, UUID_COLUMN, query_add, query_mul,
+    query_size_error, storage, validation,
+};
+use crate::read_memory::{ReadAdmission, ReadGrant};
 
 /// Rows per page. A lookup decodes the pages that hold its rows, so a page is
 /// the unit of decode work; the directory costs `12 + 2 * key width` bytes per
@@ -334,20 +338,46 @@ fn check_page(
 
 /// The packs of one route, opened when a lookup first reads from them and kept
 /// open for the rest of the lookup.
-pub(super) struct PackHandles {
+pub(super) struct PackHandles<'a> {
     directory: PathBuf,
     /// Rows per page of the route's blobs, from its manifest.
     page_rows: u32,
     open: BTreeMap<u32, (PathBuf, File)>,
+    admission: Option<&'a dyn ReadAdmission>,
+    memory: Option<ReadGrant>,
 }
 
-impl PackHandles {
+impl<'a> PackHandles<'a> {
     pub(super) fn new(directory: PathBuf, page_rows: u32) -> Self {
         Self {
             directory,
             page_rows,
             open: BTreeMap::new(),
+            admission: None,
+            memory: None,
         }
+    }
+
+    pub(super) fn with_admission(
+        mut self,
+        admission: Option<&'a dyn ReadAdmission>,
+    ) -> Result<Self, GfError> {
+        self.admission = admission;
+        self.memory = super::query_reserve(admission, 4096)?;
+        Ok(self)
+    }
+
+    pub(super) fn charge(&mut self, bytes: usize) -> Result<(), GfError> {
+        if let (Some(admission), Some(memory)) = (self.admission, self.memory.as_mut()) {
+            memory
+                .grow(admission, bytes)
+                .map_err(GfError::from_execution_error)?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn take_memory(&mut self) -> Option<ReadGrant> {
+        self.memory.take()
     }
 
     fn corrupt(&self, pack: u32) -> GfError {
@@ -360,13 +390,23 @@ impl PackHandles {
 
     /// `length` bytes of `pack` from `offset`, which must lie inside it.
     fn read_range(&mut self, pack: u32, offset: u64, length: u64) -> Result<Vec<u8>, GfError> {
+        if length > PACK_BYTES as u64
+            || offset
+                .checked_add(length)
+                .is_none_or(|end| end > PACK_BYTES as u64)
+        {
+            return Err(self.corrupt(pack));
+        }
+        // Fund the returned Vec and read_to_end's capacity/probe slack before
+        // opening/reading a pack. Container and path growth are included.
+        self.charge(query_add(
+            query_mul(usize::try_from(length).map_err(|_| query_size_error())?, 2)?,
+            query_add(query_mul(self.directory.as_os_str().len(), 4)?, 4096)?,
+        )?)?;
         if let std::collections::btree_map::Entry::Vacant(slot) = self.open.entry(pack) {
             let path = self.directory.join(format!("{pack:08}.{PACK_EXTENSION}"));
             let file = File::open(&path).map_err(|e| storage("open pack", &e))?;
             slot.insert((path, file));
-        }
-        if length > PACK_BYTES as u64 || offset.saturating_add(length) > PACK_BYTES as u64 {
-            return Err(self.corrupt(pack));
         }
         let (_, file) = self.open.get_mut(&pack).expect("pack was just opened");
         file.seek(SeekFrom::Start(offset))
@@ -399,12 +439,20 @@ impl PackHandles {
         let page_rows = u64::from(self.page_rows);
         let count =
             usize::try_from(rows.div_ceil(page_rows)).map_err(|_| self.corrupt(seal.pack))?;
-        let fixed = count * keys.entry_bytes() + TRAILER_BYTES;
+        let fixed = query_add(query_mul(count, keys.entry_bytes())?, TRAILER_BYTES)?;
+        self.charge(query_add(
+            query_mul(count, std::mem::size_of::<Page>())?,
+            usize::try_from(seal.byte_length).map_err(|_| query_size_error())?,
+        )?)?;
         if seal.byte_length > PACK_BYTES as u64 || seal.byte_length < fixed as u64 {
             self.read_range(seal.pack, 0, 0)?;
             return Err(self.corrupt(seal.pack));
         }
-        let blob_end = seal.offset + seal.byte_length;
+        let blob_end = seal
+            .offset
+            .checked_add(seal.byte_length)
+            .filter(|end| *end <= PACK_BYTES as u64)
+            .ok_or_else(|| self.corrupt(seal.pack))?;
         let window = (fixed + SCHEMA_ALLOWANCE)
             .min(usize::try_from(seal.byte_length).expect("bounded by PACK_BYTES"));
         let mut tail = self.read_range(seal.pack, blob_end - window as u64, window as u64)?;
@@ -476,6 +524,10 @@ impl PackHandles {
         debug_assert!(wanted.windows(2).all(|pair| pair[0] < pair[1]));
         let (schema, pages) = (&blob.schema, &blob.pages);
         let pack = blob.seal.pack;
+        self.charge(query_add(
+            query_mul(blob.schema.len(), 512)?,
+            query_add(query_mul(wanted.len(), 256)?, 64 * 1024)?,
+        )?)?;
         let mut decoder = StreamDecoder::new();
         let mut header = Buffer::from_slice_ref(schema);
         if decoder
@@ -511,6 +563,9 @@ impl PackHandles {
                 if crate::corruption_checksum::checksum(message.as_slice()) != page.xxh64 {
                     return Err(self.corrupt(pack));
                 }
+                if self.admission.is_some() {
+                    self.charge(ipc_page_bytes(message.as_slice())?)?;
+                }
                 let batch = decoder
                     .decode(&mut message)
                     .map_err(|e| validation(e.to_string()))?
@@ -526,5 +581,198 @@ impl PackHandles {
             next = end;
         }
         Ok(arrays)
+    }
+}
+
+/// Inspect authenticated IPC wire descriptors before StreamDecoder can allocate
+/// decompressed buffers or Arrow wrappers. Compressed buffer prefixes are the
+/// actual allocation lengths used by pinned Arrow, including raw (-1) blocks.
+fn ipc_page_bytes(bytes: &[u8]) -> Result<usize, GfError> {
+    let invalid = || validation("malformed IPC page allocation descriptors");
+    let prefix = bytes.get(..4).ok_or_else(invalid)?;
+    let continuation = prefix == [255; 4];
+    let base = if continuation { 8 } else { 4 };
+    let metadata = u32::from_le_bytes(
+        bytes
+            .get(base - 4..base)
+            .ok_or_else(invalid)?
+            .try_into()
+            .unwrap(),
+    ) as usize;
+    let message = arrow::ipc::root_as_message(
+        bytes
+            .get(base..query_add(base, metadata)?)
+            .ok_or_else(invalid)?,
+    )
+    .map_err(|_| invalid())?;
+    let record = message.header_as_record_batch().ok_or_else(invalid)?;
+    let body = bytes
+        .get(query_add(base, metadata)?..)
+        .ok_or_else(invalid)?;
+    let mut size = query_add(query_mul(metadata, 512)?, 64 * 1024)?;
+    let buffers = record.buffers().ok_or_else(invalid)?;
+    for buffer in buffers {
+        let offset = usize::try_from(buffer.offset()).map_err(|_| invalid())?;
+        let length = usize::try_from(buffer.length()).map_err(|_| invalid())?;
+        let stored = body
+            .get(offset..query_add(offset, length)?)
+            .ok_or_else(invalid)?;
+        let decoded = if record.compression().is_some() && !stored.is_empty() {
+            let prefix =
+                i64::from_le_bytes(stored.get(..8).ok_or_else(invalid)?.try_into().unwrap());
+            if prefix == -1 {
+                stored.len() - 8
+            } else {
+                usize::try_from(prefix).map_err(|_| invalid())?
+            }
+        } else {
+            stored.len()
+        };
+        size = query_add(size, query_add(query_mul(decoded, 2)?, 512)?)?;
+    }
+    if let Some(nodes) = record.nodes() {
+        size = query_add(size, query_mul(nodes.len(), 4096)?)?;
+    }
+    Ok(size)
+}
+
+#[cfg(test)]
+mod admission_tests {
+    use super::*;
+    use datafusion::execution::memory_pool::{
+        GreedyMemoryPool, MemoryConsumer, MemoryPool, MemoryReservation,
+    };
+    use std::sync::{
+        Mutex,
+        atomic::{AtomicBool, Ordering},
+    };
+
+    struct Admission {
+        memory: Mutex<MemoryReservation>,
+        cancelled: AtomicBool,
+    }
+    impl ReadAdmission for Admission {
+        fn reserve(&self, bytes: usize) -> datafusion::error::Result<ReadGrant> {
+            self.check_cancelled()?;
+            let memory = self.memory.lock().unwrap();
+            memory.try_grow(bytes)?;
+            Ok(ReadGrant::from_reserved(memory.split(bytes)))
+        }
+        fn check_cancelled(&self) -> datafusion::error::Result<()> {
+            if self.cancelled.load(Ordering::Acquire) {
+                return Err(datafusion::error::DataFusionError::Execution(
+                    "property read cancelled".into(),
+                ));
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn authenticated_pack_bytes_and_ipc_decode_refuse_before_the_protected_boundary() {
+        let root = tempfile::tempdir().unwrap();
+        let text = "authenticated property page ".repeat(16_384);
+        let values: ArrayRef = Arc::new(arrow::array::StringArray::from(vec![text.as_str()]));
+        let (encoded, checksum) = encode_paged(
+            "payload",
+            values.data_type(),
+            &values,
+            Keys::Values,
+            PAGE_ROWS,
+        )
+        .unwrap();
+        let seal = BlobSeal {
+            pack: 0,
+            offset: 0,
+            byte_length: encoded.len() as u64,
+            xxh64: checksum,
+        };
+        std::fs::write(root.path().join("00000000.epk"), &encoded).unwrap();
+        let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(8 * 1024 * 1024));
+        let admission = Admission {
+            memory: Mutex::new(
+                MemoryConsumer::new("authenticated edge-property page").register(&pool),
+            ),
+            cancelled: AtomicBool::new(false),
+        };
+        let mut packs = PackHandles::new(root.path().to_owned(), PAGE_ROWS as u32)
+            .with_admission(Some(&admission))
+            .unwrap();
+        let blob = packs.open_blob(seal, 1, Keys::Values).unwrap();
+        let filler = MemoryConsumer::new("page boundary fixture").register(&pool);
+        filler
+            .try_grow(8 * 1024 * 1024 - pool.reserved() - 1024)
+            .unwrap();
+        let _capture = crate::lifecycle_io::CaptureScope::install();
+        let error = packs.read_range(0, 0, encoded.len() as u64).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("authenticated edge-property page"),
+            "{error}"
+        );
+        assert_eq!(
+            crate::lifecycle_io::snapshot().unwrap().totals.read_bytes,
+            0
+        );
+        let error = packs.read_pages(&blob, &[0]).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("authenticated edge-property page"),
+            "{error}"
+        );
+        assert_eq!(
+            crate::lifecycle_io::snapshot().unwrap().totals.read_bytes,
+            0
+        );
+        drop(filler);
+        let page = packs.read_pages(&blob, &[0]).unwrap().remove(0);
+        assert_eq!(
+            page.as_any()
+                .downcast_ref::<arrow::array::StringArray>()
+                .unwrap()
+                .value(0),
+            text
+        );
+        drop(page);
+        crate::lifecycle_io::reset();
+        admission.cancelled.store(true, Ordering::Release);
+        assert!(
+            packs
+                .read_pages(&blob, &[0])
+                .unwrap_err()
+                .to_string()
+                .contains("cancelled")
+        );
+        assert_eq!(
+            crate::lifecycle_io::snapshot().unwrap().totals.read_bytes,
+            0
+        );
+        admission.cancelled.store(false, Ordering::Release);
+        let mut damaged = encoded.clone();
+        damaged[0] ^= 1;
+        std::fs::write(root.path().join("00000000.epk"), damaged).unwrap();
+        assert!(
+            packs
+                .read_pages(&blob, &[0])
+                .unwrap_err()
+                .to_string()
+                .contains("checksum")
+        );
+        drop(packs);
+        let mut missing = PackHandles::new(root.path().to_owned(), PAGE_ROWS as u32)
+            .with_admission(Some(&admission))
+            .unwrap();
+        assert!(
+            missing
+                .read_range(99, 0, 1)
+                .unwrap_err()
+                .to_string()
+                .contains("open pack")
+        );
+        drop(missing);
+        drop(admission);
+        assert_eq!(pool.reserved(), 0);
     }
 }

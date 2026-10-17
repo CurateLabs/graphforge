@@ -218,7 +218,7 @@ fn decoded_map_bytes(property_fields: usize) -> Result<usize, GfError> {
 /// is exact-sized, so property conversion needs one table and no growth copy.
 /// hashbrown's raw::capacity_to_buckets / TableLayout::calculate_layout_for use
 /// four minimum buckets, a 7/8 load, aligned buckets and trailing control bytes.
-fn hash_map_bytes(entries: usize) -> Result<usize, GfError> {
+pub(crate) fn hash_map_bytes(entries: usize) -> Result<usize, GfError> {
     if entries == 0 {
         return Ok(0);
     }
@@ -476,6 +476,13 @@ fn type_nodes(data_type: &DataType) -> Result<usize, GfError> {
 /// Recursion includes list synthetic rows and their cloned payloads; completed
 /// columns and the active builder overlap.
 pub(crate) fn codec(rows: &[Snapshot], schema: &Schema) -> Result<usize, GfError> {
+    codec_rows(rows.iter().map(|row| &row.row), schema)
+}
+
+pub(crate) fn codec_rows<'a>(
+    rows: impl IntoIterator<Item = &'a crate::PropertySnapshotRow>,
+    schema: &Schema,
+) -> Result<usize, GfError> {
     let mut bytes = 0;
     for field in schema.fields() {
         // Arrow's default primitive/byte builders start at1024 slots. The

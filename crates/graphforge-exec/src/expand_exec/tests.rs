@@ -256,6 +256,15 @@ fn ring_expand_exec(
     resource: &read_resource::GraphReadContext,
     seeds: &[u64],
 ) -> ExpandExec {
+    ring_expand_with_properties(provider, resource, seeds, &[])
+}
+
+fn ring_expand_with_properties(
+    provider: &Arc<dyn AdjacencyProvider>,
+    resource: &read_resource::GraphReadContext,
+    seeds: &[u64],
+    fields: &[arrow::datatypes::FieldRef],
+) -> ExpandExec {
     use datafusion::datasource::memory::MemorySourceConfig;
     use datafusion::logical_expr::LogicalPlanBuilder;
     use datafusion::logical_expr::logical_plan::LogicalTableSource;
@@ -291,7 +300,7 @@ fn ring_expand_exec(
             Arc::new(Field::new("src_id", DataType::UInt64, false)),
             Arc::new(Field::new("dst_id", DataType::UInt64, false)),
         ],
-        vec![],
+        fields.to_vec(),
         graphforge_storage::TOPOLOGY_NODES_SCHEMA
             .fields()
             .iter()
@@ -873,6 +882,15 @@ fn a_skipped_input_column_is_emitted_as_nulls_and_a_demanded_one_is_taken() {
         reverse_edge_list: false,
         expansion: VarLenMode::Trails,
         edge_filter: None,
+        read_reservation: std::sync::Arc::new(std::sync::Mutex::new(
+            crate::chunked_reservation::ChunkedReservation::register("ExpandExec hop read", &{
+                let pool: std::sync::Arc<dyn datafusion::execution::memory_pool::MemoryPool> =
+                    std::sync::Arc::new(
+                        datafusion::execution::memory_pool::UnboundedMemoryPool::default(),
+                    );
+                pool
+            }),
+        )),
         edge_var: 0,
         edge_list_demanded: true,
         copy_input,
@@ -2562,4 +2580,136 @@ fn prepaid_edge_unprojected_read_preserves_nullable_field_compatibility() {
     drop(cfg);
     drop(context);
     assert_eq!(pool.leaked(), 0);
+}
+
+#[tokio::test]
+async fn real_single_hop_properties_keep_query_authority_on_both_routes_and_stream_drop() {
+    use datafusion::execution::runtime_env::RuntimeEnvBuilder;
+    use datafusion::physical_plan::collect;
+    use datafusion::prelude::{SessionConfig, SessionContext};
+    use futures::StreamExt;
+    use graphforge_core::uuid::Uuid;
+    use graphforge_ir::IrLiteral;
+    use std::collections::HashMap;
+
+    let root = tempfile::tempdir().unwrap();
+    let uuids = [Uuid::from_u128(1), Uuid::from_u128(2), Uuid::from_u128(3)];
+    let edge = Uuid::from_u128(4);
+    let text = "real single-hop authenticated payload ".repeat(8192);
+    let label = graphforge_value::EntityTypeId::decode(0).unwrap();
+    let mut writer =
+        graphforge_storage::GraphWriter::open_at(root.path(), OntologyMode::Strict, 1).unwrap();
+    let ids = uuids
+        .iter()
+        .map(|uuid| writer.create_node(*uuid, label).unwrap())
+        .collect::<Vec<_>>();
+    writer
+        .create_edge(edge, "KNOWS", &uuids[0], &uuids[1])
+        .unwrap();
+    writer
+        .create_edge(Uuid::from_u128(5), "KNOWS", &uuids[0], &uuids[2])
+        .unwrap();
+    writer
+        .set_edge_properties(
+            &edge,
+            Some("KNOWS"),
+            HashMap::from([("payload".into(), IrLiteral::Str(text.clone()))]),
+        )
+        .unwrap();
+    writer.flush().unwrap();
+    drop(writer);
+    graphforge_storage::adjacency::build_adjacency_index(root.path(), 1).unwrap();
+    let fields = vec![Arc::new(Field::new("payload", DataType::Utf8, true))];
+    for indexed in [false, true] {
+        let (provider, resource, inventory) = open_ring_provider(root.path());
+        if indexed {
+            assert_eq!(
+                graphforge_storage::edge_property_index::write_edge_property_indexes(
+                    root.path(),
+                    &inventory,
+                    &mut || Ok(())
+                )
+                .unwrap()
+                .indexes,
+                1
+            );
+        }
+        for budget in [64 * 1024 * 1024, 64 * 1024] {
+            let pool = ConsumerPool::new(budget);
+            let runtime = RuntimeEnvBuilder::new()
+                .with_memory_pool(pool.clone())
+                .build_arc()
+                .unwrap();
+            let context = SessionContext::new_with_config_rt(SessionConfig::new(), runtime);
+            let exec = ring_expand_with_properties(&provider, &resource, &ids[..1], &fields);
+            assert_eq!(exec.schema().field(5).name(), "payload");
+            let mut required = vec![false; exec.schema().fields().len()];
+            required[0] = true;
+            required[2] = true; // edge_id only: use the ID route whenever available
+            required[5] = true;
+            let exec = exec.with_required_output(required);
+            let result = collect(exec.clone(), context.task_ctx()).await;
+            if budget == 64 * 1024 {
+                let error = result.unwrap_err().to_string();
+                assert!(error.contains(HOP_READ_CONSUMER), "{error}");
+            } else {
+                let batches = result.unwrap();
+                let mut values = batches
+                    .iter()
+                    .flat_map(|batch| {
+                        batch
+                            .column(5)
+                            .as_any()
+                            .downcast_ref::<StringArray>()
+                            .unwrap()
+                            .iter()
+                            .map(|value| value.map(str::to_owned))
+                    })
+                    .collect::<Vec<_>>();
+                values.sort();
+                assert_eq!(values, vec![None, Some(text.clone())]);
+                let batch = batches
+                    .iter()
+                    .find(|batch| {
+                        batch
+                            .column(5)
+                            .as_any()
+                            .downcast_ref::<StringArray>()
+                            .unwrap()
+                            .iter()
+                            .any(|value| value.is_some())
+                    })
+                    .unwrap();
+                let position = batch
+                    .column(5)
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .unwrap()
+                    .iter()
+                    .position(|value| value.is_some())
+                    .unwrap();
+                let escaped = batch.column(5).slice(position, 1);
+                drop(batches);
+                assert!(pool.leaked() >= escaped.get_buffer_memory_size());
+                assert_eq!(
+                    escaped
+                        .as_any()
+                        .downcast_ref::<StringArray>()
+                        .unwrap()
+                        .value(0),
+                    text
+                );
+                drop(escaped);
+                // A producer stopped after its first batch must release both
+                // its resumable state and every source/construction owner.
+                let mut stream = exec.execute(0, context.task_ctx()).unwrap();
+                let first = stream.next().await.unwrap().unwrap();
+                drop(stream);
+                drop(first);
+            }
+            drop(exec);
+            drop(context);
+            assert_eq!(pool.leaked(), 0);
+        }
+    }
 }
