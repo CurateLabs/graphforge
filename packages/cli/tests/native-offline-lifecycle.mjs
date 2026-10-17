@@ -481,12 +481,7 @@ try {
   assert.equal(exported.contract, "graphforge-portable-export/2");
   assert.equal(exported.source, "current");
   assert.equal(exported.checkpoint, null);
-  const secondExport = success(
-    "export",
-    "--current",
-    "--output",
-    secondBundle,
-  );
+  const secondExport = success("export", "--current", "--output", secondBundle);
   assert.equal(secondExport.package_digest, exported.package_digest);
   assert.deepEqual(readFileSync(secondBundle), readFileSync(bundle));
 
