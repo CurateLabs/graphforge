@@ -319,6 +319,10 @@ struct CloneResult {
     research_version_uuid: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     research_version_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    moved_from: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    moved_to: Option<String>,
 }
 
 struct ResearchCloneContext {
@@ -1709,6 +1713,9 @@ fn run_clone_job(
         args.protection_bypass_env.as_deref(),
         env.credential_lookup,
     )?;
+    let move_transport = crate::hub_http::RepositoryMoveTransport::new(transport, &identity, &base)
+        .with_credentials(credentials.as_ref());
+    let transport = &move_transport as &dyn Transport;
     profile.handoff(
         ComponentKind::Cli,
         ComponentKind::NetworkTransport,
@@ -1739,9 +1746,14 @@ fn run_clone_job(
         },
     );
     if let Some(stage) = profile.stages.last_mut() {
-        stage.attempt = refs_attempts.max(1);
+        stage.attempt = refs_attempts
+            .saturating_add(move_transport.extra_metadata_requests())
+            .max(1);
     }
     let refs_bytes = refs_result?;
+    // Both old markers were verified before the first moved read. Start the
+    // manifest request at that explicit current identity, under its policy.
+    let (_, manifest_base, _) = move_transport.resolved(false)?;
     let mut manifest_attempts = 0;
     let manifest_result = profile.stage(
         Stage::ManifestDiscovery,
@@ -1753,7 +1765,7 @@ fn run_clone_job(
             let bytes = read_bounded(
                 fetch_discovery_with_attempts(
                     transport,
-                    &endpoint(&base, "manifest"),
+                    &endpoint(&manifest_base, "manifest"),
                     credentials.as_ref(),
                     MAX_METADATA_BYTES as u64,
                     &mut manifest_attempts,
@@ -1769,6 +1781,7 @@ fn run_clone_job(
         stage.attempt = manifest_attempts.max(1);
     }
     let manifest_bytes = manifest_result?;
+    let (identity, _, moved) = move_transport.resolved(false)?;
     let limits = DiscoveryLimits {
         max_response_bytes: MAX_METADATA_BYTES,
         ..DiscoveryLimits::default()
@@ -1801,6 +1814,7 @@ fn run_clone_job(
     )?;
     let discovered = Discovered {
         identity: &identity,
+        moved: moved.as_ref(),
         destination: &destination,
         refs_bytes: &refs_bytes,
         manifest_bytes: &manifest_bytes,
@@ -1849,6 +1863,7 @@ fn run_clone_job(
 /// Validated discovery state shared by the staged clone phases.
 struct Discovered<'a> {
     identity: &'a RepositoryIdentity,
+    moved: Option<&'a graphforge_discovery::RepositoryMoved>,
     destination: &'a Path,
     refs_bytes: &'a [u8],
     manifest_bytes: &'a [u8],
@@ -1868,6 +1883,7 @@ fn clone_into_staging(
 ) -> Result<CloneResult, graphforge_api::GfError> {
     let Discovered {
         identity,
+        moved,
         destination,
         refs_bytes,
         manifest_bytes,
@@ -2152,6 +2168,8 @@ fn clone_into_staging(
         resumed_bytes: download.resumed_bytes,
         research_version_uuid,
         research_version_kind,
+        moved_from: moved.map(|m| m.moved_from.canonical_name()),
+        moved_to: moved.map(|m| m.moved_to.canonical_name()),
     };
     let record = InstallRecord {
         generation_uuid: result.generation_uuid.clone(),
@@ -2177,6 +2195,9 @@ fn write_clone_result(
             .map_err(|e| graphforge_api::GfError::Execution(e.to_string()))?;
         writeln!(output).map_err(storage)?;
     } else {
+        if let (Some(from), Some(to)) = (&result.moved_from, &result.moved_to) {
+            writeln!(output, "Repository moved from {from} to {to}").map_err(storage)?;
+        }
         writeln!(
             output,
             "Cloned {} to {}",

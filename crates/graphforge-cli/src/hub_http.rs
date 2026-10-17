@@ -17,7 +17,9 @@ use ureq::unversioned::transport::{
 use url::Url;
 
 mod discovery_auth;
+mod repository_moves;
 pub(crate) use discovery_auth::{DiscoveryCredentials, fetch_discovery_with_attempts};
+pub(crate) use repository_moves::RepositoryMoveTransport;
 
 pub(crate) const DEFAULT_HUB: &str = "https://graphforge.sh";
 pub(crate) const MAX_METADATA_BYTES: usize = 16 * 1024 * 1024;
@@ -106,6 +108,15 @@ pub(crate) struct HttpResponse {
 }
 
 pub(crate) trait Transport {
+    /// Rebind authentication only after the caller verified both old metadata
+    /// move markers. This never authorizes an object or forwards a header.
+    fn repository_moved(
+        &self,
+        _moved: &graphforge_discovery::RepositoryMoved,
+        _current: &Url,
+    ) -> Result<(), graphforge_api::GfError> {
+        Ok(())
+    }
     fn validate(&self, url: &Url) -> Result<(), graphforge_api::GfError> {
         validate_url(url)
     }
@@ -449,6 +460,15 @@ impl Transport for HubTransport {
         limit: u64,
     ) -> Result<HttpResponse, graphforge_api::GfError> {
         self.read.get(url, range, if_range, limit)
+    }
+
+    fn get_discovery(
+        &self,
+        url: &Url,
+        headers: &[(&str, ureq::http::HeaderValue)],
+        limit: u64,
+    ) -> Result<HttpResponse, graphforge_api::GfError> {
+        self.read.get_discovery(url, headers, limit)
     }
 
     fn exchange(

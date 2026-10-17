@@ -295,26 +295,14 @@ impl PublishCapabilities {
                 return Err(invalid("authorization client identifier is invalid"));
             }
         }
-        let digest_count = self
-            .object_location_template
-            .matches(DIGEST_PLACEHOLDER)
-            .count();
-        let hex_count = self
-            .object_location_template
-            .matches(HEX_PLACEHOLDER)
-            .count();
-        let rest = self
-            .object_location_template
-            .replace(DIGEST_PLACEHOLDER, "")
-            .replace(HEX_PLACEHOLDER, "");
-        if digest_count + hex_count != 1 || rest.contains(['{', '}']) {
-            return Err(invalid(
-                "object location template needs exactly one {digest} or {hex}",
-            ));
-        }
+        let location_template =
+            graphforge_discovery::ObjectLocationTemplate::parse(&self.object_location_template)
+                .map_err(|_| {
+                    invalid("object location template needs exactly one safe {digest} or {hex}")
+                })?;
         if (self.authorization.client_id.is_some()
             || self.limits.preferred_chunk_bytes.is_some()
-            || hex_count == 1)
+            || location_template.uses_hex())
             && !self
                 .requirements
                 .iter()
