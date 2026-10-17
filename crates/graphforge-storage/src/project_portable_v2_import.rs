@@ -34,6 +34,7 @@ use materialized_graph::prepare_compact_import_graph_with_allocation;
 mod allocation;
 use allocation::{capture_import_tree, record_import_file_identity};
 mod outcome;
+pub use outcome::portable_v2_import_pending;
 use outcome::{storage, storage_or_cancel};
 
 use crate::project_publication::{
@@ -41,59 +42,6 @@ use crate::project_publication::{
     ProjectParticipantEncoding, ProjectPublicationReceipt, ProjectStageOutcome,
     stage_project_generation_from_files_admitted,
 };
-
-/// Read-only admission of this import's unfinished native target.
-/// Recovery and request-fingerprint validation remain owned by the importer.
-pub fn portable_v2_import_pending(target: &Path, transaction: Uuid) -> Result<bool, GfError> {
-    let name = target
-        .file_name()
-        .and_then(|s| s.to_str())
-        .ok_or_else(|| GfError::Validation("invalid import target".into()))?;
-    let owner = target.with_file_name(format!(".{name}.portable-v2-{transaction}.owner"));
-    let expected = transaction.hyphenated().to_string();
-    let Ok(bytes) = read_bounded_payload(&owner, 36, "import ownership") else {
-        return Ok(false);
-    };
-    if bytes != expected.as_bytes() {
-        return Ok(false);
-    }
-    let bootstrap = graphforge_core::uuid::portable_v2_bootstrap_generation(&transaction);
-    match crate::resolve_project_generation(target) {
-        Ok(generation) => Ok(generation.generation_uuid() == bootstrap
-            && semantically_pristine_generation(target)? == Some(bootstrap)),
-        Err(GfError::Project {
-            code: graphforge_core::ProjectErrorCode::ProjectUninitialized,
-            ..
-        }) => {
-            // FORMAT was authenticated by the resolver. Only this import's
-            // deterministic bootstrap is allowed to resume without CURRENT.
-            if !matches!(fs::symlink_metadata(target.join("CURRENT")),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound)
-            {
-                return Ok(false);
-            }
-            let generations = target.join("generations");
-            let mut entries =
-                fs::read_dir(&generations).map_err(|e| GfError::Storage(e.to_string()))?;
-            let Some(entry) = entries
-                .next()
-                .transpose()
-                .map_err(|e| GfError::Storage(e.to_string()))?
-            else {
-                return Ok(false);
-            };
-            Ok(
-                entry.file_name() == bootstrap.hyphenated().to_string().as_str()
-                    && entry
-                        .file_type()
-                        .map_err(|e| GfError::Storage(e.to_string()))?
-                        .is_dir()
-                    && entries.next().is_none(),
-            )
-        }
-        Err(_) => Ok(false),
-    }
-}
 
 #[derive(Debug)]
 /// Durable receipt for one verified complete-package import.
