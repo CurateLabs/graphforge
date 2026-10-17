@@ -261,6 +261,7 @@ impl ReachOutput<'_> {
             super::VarLenBatch {
                 charged: out.get_array_memory_size(),
                 batch: out,
+                property_owner: None,
             },
             reservation,
         )

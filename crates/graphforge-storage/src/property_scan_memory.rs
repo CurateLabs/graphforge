@@ -497,11 +497,30 @@ pub(crate) fn codec_rows<'a>(
         )?;
         bytes = add(bytes, mul(field.size(), 4)?)?;
     }
+    let mut row_count = 0;
     for snapshot in rows {
+        row_count = add(row_count, 1)?;
         for (key, value) in &snapshot.values {
             bytes = add(bytes, mul(key.capacity(), 8)?)?;
             bytes = add(bytes, literal_codec(value)?)?;
         }
+    }
+    // A row missing a field still appends a NULL slot to that field's typed
+    // builder. Count slots from the complete destination schema, independently
+    // of the literals present in older snapshots; this also funds UUID rows.
+    // Vec/buffer builders double capacity, and offsets have rows + 1 entries.
+    // The null constructor bound at that capacity covers retained slots and
+    // growth copies, recursively including struct children and list offsets.
+    // Empty list-child builders retain the default-node allowance above.
+    let capacity = add(row_count, 1)?
+        .checked_next_power_of_two()
+        .ok_or_else(|| refused("property conversion row capacity overflow"))?;
+    for field in schema.fields() {
+        bytes = add(
+            bytes,
+            crate::read_memory::null_bytes(field.data_type(), capacity)
+                .map_err(GfError::from_execution_error)?,
+        )?;
     }
     Ok(bytes)
 }

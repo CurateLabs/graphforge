@@ -439,10 +439,7 @@ pub(super) fn leased_edge_prop_children(
     fields: &[arrow::datatypes::FieldRef],
     uuids: &[[u8; 16]],
     mut charge: super::HopReadCharge,
-) -> Result<(Vec<arrow::array::ArrayRef>, usize), GfError> {
-    if fields.is_empty() {
-        return Ok((Vec::new(), 0));
-    }
+) -> Result<(hop_read::HopChunk, usize), GfError> {
     let children = edge_prop_children(source, fields, uuids, &mut charge)?;
     lease_children(fields, children, charge)
 }
@@ -451,7 +448,7 @@ pub(super) fn lease_children(
     fields: &[arrow::datatypes::FieldRef],
     children: Vec<arrow::array::ArrayRef>,
     mut charge: super::HopReadCharge,
-) -> Result<(Vec<arrow::array::ArrayRef>, usize), GfError> {
+) -> Result<(hop_read::HopChunk, usize), GfError> {
     charge.charge(hop_read::checked_add(
         4096,
         hop_read::checked_mul(
@@ -460,16 +457,18 @@ pub(super) fn lease_children(
                 + std::mem::size_of::<arrow::array::ArrayRef>(),
         )?,
     )?)?;
-    let batch = RecordBatch::try_new(
+    let batch = RecordBatch::try_new_with_options(
         Arc::new(arrow::datatypes::Schema::new(fields.to_vec())),
         children,
+        &arrow::record_batch::RecordBatchOptions::new()
+            .with_row_count(fields.is_empty().then_some(0)),
     )
     .map_err(GfError::from_execution_error)?;
-    let backing = batch.columns().iter().try_fold(0, |bytes, array| {
-        hop_read::checked_add(bytes, array.get_buffer_memory_size())
-    })?;
+    let bytes = batch.get_array_memory_size();
     let output = hop_read::lease_output(batch, charge)?;
-    Ok((output.batch.columns().to_vec(), backing))
+    // The caller retains the internal header/schema owner through evaluation
+    // or publication, including properties with no physical Arrow buffers.
+    Ok((output, bytes))
 }
 
 /// One child array per field of `prop_fields` for `hops` flattened hops, where
@@ -564,6 +563,53 @@ mod admission_tests {
     use arrow::datatypes::{DataType, Field, Schema};
     use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryPool};
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn bufferless_property_children_keep_authority_until_internal_handoff() {
+        let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1024 * 1024));
+        let reservation = Arc::new(Mutex::new(
+            crate::chunked_reservation::ChunkedReservation::register(
+                super::super::HOP_READ_CONSUMER,
+                &pool,
+            ),
+        ));
+        let mut charge = super::super::HopReadCharge::new(&reservation);
+        let fields = vec![Arc::new(Field::new("removed", DataType::Null, true))];
+        let child = hop_read::construct_array(
+            &mut charge,
+            hop_read::unused_bytes(&DataType::Null, 3).unwrap(),
+            || Ok(arrow::array::new_null_array(&DataType::Null, 3)),
+        )
+        .unwrap();
+        let (children, _) = lease_children(&fields, vec![child], charge).unwrap();
+        assert!(pool.reserved() >= children.batch.column(0).get_array_memory_size());
+        assert_eq!(children.batch.column(0).logical_null_count(), 3);
+        drop(children);
+        drop(reservation);
+        assert_eq!(pool.reserved(), 0);
+    }
+
+    #[test]
+    fn property_children_schema_failure_releases_construction_authority() {
+        let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1024 * 1024));
+        let reservation = Arc::new(Mutex::new(
+            crate::chunked_reservation::ChunkedReservation::register(
+                super::super::HOP_READ_CONSUMER,
+                &pool,
+            ),
+        ));
+        let mut charge = super::super::HopReadCharge::new(&reservation);
+        let fields = vec![Arc::new(Field::new("value", DataType::Int64, true))];
+        let child = hop_read::construct_array(
+            &mut charge,
+            hop_read::unused_bytes(&DataType::Null, 3).unwrap(),
+            || Ok(arrow::array::new_null_array(&DataType::Null, 3)),
+        )
+        .unwrap();
+        assert!(lease_children(&fields, vec![child], charge).is_err());
+        drop(reservation);
+        assert_eq!(pool.reserved(), 0);
+    }
 
     #[test]
     fn authenticated_uuid_fragment_source_requires_query_admission() {

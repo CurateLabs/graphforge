@@ -137,13 +137,18 @@ impl PhysicalEdgeFilter {
             super::hop_read::checked_mul(candidates.len(), std::mem::size_of::<u64>())?,
         )?;
         let ids: Vec<u64> = candidates.iter().copied().collect();
+        let mut property_owner = None;
         let children = if self.fields.is_empty() {
             // The predicate reads no property: nothing to look up.
             Vec::new()
         } else {
-            self.edge_properties(cfg, &candidates, &ids, reservation, &mut temporary)?
+            let properties =
+                self.edge_properties(cfg, &candidates, &ids, reservation, &mut temporary)?;
+            property_owner = Some(properties.charge);
+            properties.batch.into_parts().1
         };
         let verdicts = self.passing(children, ids.len())?;
+        drop(property_owner);
         let crossable: HashSet<u64> = ids
             .iter()
             .zip(verdicts)
@@ -167,7 +172,7 @@ impl PhysicalEdgeFilter {
         ids: &[u64],
         reservation: &mut ChunkedReservation,
         temporary: &mut usize,
-    ) -> Result<Vec<ArrayRef>, GfError> {
+    ) -> Result<super::hop_read::HopChunk, GfError> {
         let mut property_charge = super::HopReadCharge::new(&cfg.read_reservation);
         property_charge.charge(super::hop_read::checked_mul(candidates.len(), 1024)?)?;
         let targets: BTreeSet<u64> = candidates.iter().copied().collect();

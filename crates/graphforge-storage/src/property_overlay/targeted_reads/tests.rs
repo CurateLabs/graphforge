@@ -670,3 +670,95 @@ fn targeted_query_retains_each_snapshot_map_without_recharging_older_schema_fiel
     drop(admission);
     assert_eq!(pool.reserved(), 0);
 }
+
+#[test]
+fn targeted_edge_conversion_admits_missing_later_schema_fields_before_construction() {
+    use crate::read_memory::{ReadAdmission, ReadGrant};
+    use datafusion::execution::memory_pool::{
+        GreedyMemoryPool, MemoryConsumer, MemoryPool, MemoryReservation,
+    };
+    use std::sync::Mutex;
+    struct Admission(Mutex<MemoryReservation>);
+    impl ReadAdmission for Admission {
+        fn reserve(&self, bytes: usize) -> datafusion::error::Result<ReadGrant> {
+            let memory = self.0.lock().unwrap();
+            memory.try_grow(bytes)?;
+            Ok(ReadGrant::from_reserved(memory.split(bytes)))
+        }
+        fn check_cancelled(&self) -> datafusion::error::Result<()> {
+            Ok(())
+        }
+    }
+    // Latest schema can be much wider than the older snapshots selected by a
+    // query. Each missing field still constructs one NULL slot per source row.
+    let rows = (1_u128..=65_536)
+        .map(|id| {
+            let uuid = id.to_be_bytes();
+            (
+                uuid,
+                PropertySnapshotRow {
+                    uuid,
+                    tombstone: false,
+                    values: BTreeMap::new(),
+                },
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut fields = vec![Field::new(
+        "edge_uuid",
+        DataType::FixedSizeBinary(16),
+        false,
+    )];
+    fields.extend((0..50).map(|index| Field::new(format!("later_{index}"), DataType::Int64, true)));
+    fields.push(Field::new("later_text", DataType::Utf8, true));
+    fields.push(Field::new(
+        "later_list",
+        DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+        true,
+    ));
+    fields.push(Field::new(
+        "later_duration",
+        DataType::Struct(crate::schemas::duration_struct_fields()),
+        true,
+    ));
+    let schema = Schema::new(fields);
+    let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(256 * 1024 * 1024));
+    let admission = Admission(Mutex::new(
+        MemoryConsumer::new("targeted sparse conversion").register(&pool),
+    ));
+    let source = PrepaidPropertyTargetData {
+        data: PropertyTargetData {
+            present: rows.keys().copied().collect(),
+            rows,
+        },
+        _memory: admission.reserve(40 * 1024 * 1024).unwrap(),
+    };
+    let expected = source.edge_batch(&schema).unwrap();
+    let actual = source.edge_batch_prepaid(&schema, &admission).unwrap();
+    assert_eq!(actual.batch(), &expected);
+    assert_eq!(actual.batch().num_rows(), source.rows.len());
+    assert!(
+        actual
+            .batch()
+            .columns()
+            .iter()
+            .skip(1)
+            .all(|column| column.null_count() == source.rows.len())
+    );
+    drop(actual);
+    let source_credit = pool.reserved();
+    let filler = MemoryConsumer::new("sparse conversion boundary fixture").register(&pool);
+    filler
+        .try_grow(256 * 1024 * 1024 - source_credit - 1024)
+        .unwrap();
+    let error = source.edge_batch_prepaid(&schema, &admission).unwrap_err();
+    assert!(
+        error.to_string().contains("targeted sparse conversion"),
+        "{error}"
+    );
+    drop(filler);
+    assert_eq!(pool.reserved(), source_credit);
+    drop(source);
+    drop(admission);
+    assert_eq!(pool.reserved(), 0);
+}
