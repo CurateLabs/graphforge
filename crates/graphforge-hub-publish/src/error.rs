@@ -21,6 +21,8 @@ pub enum HubPublishErrorCode {
     IdempotencyConflict,
     /// Ref advance rejected by an expected-revision precondition.
     RefConflict,
+    /// Existing Branch head is not an ancestor of the proposed head.
+    NonFastForward,
     /// Required future protocol format or capability is unsupported.
     UnsupportedFuture,
     /// Transported or stored bytes disagree with the declared digest or length.
@@ -33,11 +35,12 @@ pub enum HubPublishErrorCode {
 
 impl HubPublishErrorCode {
     /// Every code, in declaration order.
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::AuthDenied,
         Self::EntitlementDenied,
         Self::IdempotencyConflict,
         Self::RefConflict,
+        Self::NonFastForward,
         Self::UnsupportedFuture,
         Self::IntegrityFailure,
         Self::InvalidInput,
@@ -52,6 +55,7 @@ impl HubPublishErrorCode {
             Self::EntitlementDenied => "entitlement_denied",
             Self::IdempotencyConflict => "idempotency_conflict",
             Self::RefConflict => "ref_conflict",
+            Self::NonFastForward => "non_fast_forward",
             Self::UnsupportedFuture => "unsupported_future",
             Self::IntegrityFailure => "integrity_failure",
             Self::InvalidInput => "invalid_input",
@@ -71,6 +75,7 @@ impl HubPublishErrorCode {
             Self::EntitlementDenied => 403,
             Self::IdempotencyConflict => 409,
             Self::RefConflict => 412,
+            Self::NonFastForward => 409,
             Self::UnsupportedFuture | Self::IntegrityFailure => 422,
             Self::InvalidInput => 400,
             Self::Internal => 500,
@@ -110,6 +115,7 @@ impl HubPublishError {
             HubPublishErrorCode::EntitlementDenied => "hub.publish.entitlement_denied",
             HubPublishErrorCode::IdempotencyConflict => "hub.publish.idempotency_conflict",
             HubPublishErrorCode::RefConflict => "hub.publish.ref_conflict",
+            HubPublishErrorCode::NonFastForward => "hub.publish.non_fast_forward",
             HubPublishErrorCode::UnsupportedFuture => "hub.publish.unsupported_future",
             HubPublishErrorCode::IntegrityFailure => "hub.publish.integrity_failure",
             HubPublishErrorCode::InvalidInput => "hub.publish.invalid_input",

@@ -708,6 +708,7 @@ fn research_publication(
         }
     });
     let lineage = ResearchLineage {
+        boundary_anchors: vec![],
         format: RESEARCH_LINEAGE_FORMAT.into(),
         version: ProtocolVersion::CURRENT,
         repository: publication.repository.clone(),
@@ -715,7 +716,7 @@ fn research_publication(
         project_uuid: project_uuid.clone(),
         requirements: vec![ProtocolRequirement {
             capability: RESEARCH_LINEAGE_CAPABILITY.into(),
-            major: 1,
+            major: 2,
         }],
         capabilities: vec![],
         fork,
@@ -731,6 +732,7 @@ fn research_publication(
             label: "main".into(),
         }],
         versions: vec![LineageVersion {
+            parents: vec![],
             version_uuid,
             identity_digest: Sha256Digest(digest_of(identity)),
             kind: "complete".into(),

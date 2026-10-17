@@ -158,8 +158,7 @@ pub(super) fn validate(registry: &ResearchRegistry) -> Result<(), GfError> {
                 .and_then(|head| registry.versions.get(head))
                 .is_none_or(|head| head.content.source_version.is_none())
             || registry
-                .versions
-                .get(&branch.base_version_uuid)
+                .historical_version(branch.base_version_uuid)
                 .is_none_or(|base| base.context_uuid != *id)
         {
             return Err(invalid("Branch identity, base or context head is invalid"));
@@ -173,8 +172,7 @@ pub(super) fn validate(registry: &ResearchRegistry) -> Result<(), GfError> {
                 return Err(invalid("Branch genealogy contains a cycle"));
             }
             let record = registry
-                .branches
-                .get(&parent_id)
+                .historical_branch(parent_id)
                 .ok_or_else(|| invalid("Branch immediate parent is unavailable"))?;
             if record.project_uuid != branch.project_uuid {
                 return Err(invalid("Branch genealogy crosses Project authority"));

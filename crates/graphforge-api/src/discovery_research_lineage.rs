@@ -98,17 +98,51 @@ pub fn build_research_lineage_from_registry(
     branches.sort_by(|left, right| left.branch_uuid.cmp(&right.branch_uuid));
 
     let mut versions = Vec::new();
-    for (version_uuid, package) in &request.version_packages {
-        let version = registry
-            .versions
-            .get(version_uuid)
-            .ok_or_else(|| GfError::Validation("version record is missing".into()))?;
+    let mut boundary_anchors = Vec::new();
+    let mut selected: std::collections::BTreeSet<_> =
+        request.version_packages.keys().copied().collect();
+    for id in request.version_packages.keys() {
+        selected.extend(registry.ancestors(*id));
+    }
+    for version_uuid in &selected {
+        let package = request.version_packages.get(version_uuid);
+        let Some(version) = registry.historical_version(*version_uuid) else {
+            let branch = registry
+                .branches
+                .values()
+                .chain(
+                    registry
+                        .interchange
+                        .values()
+                        .flat_map(|archive| archive.genealogy.values()),
+                )
+                .find(|branch| {
+                    branch.parent_branch_uuid.is_none()
+                        && branch.origin_version_uuid == *version_uuid
+                })
+                .filter(|_| !registry.ancestry.contains_key(version_uuid))
+                .ok_or_else(|| {
+                    GfError::Validation("intermediate Version history is unavailable".into())
+                })?;
+            boundary_anchors.push(graphforge_discovery::LineageBoundaryAnchor {
+                version_uuid: version_uuid.to_string(),
+                origin_branch_uuid: branch.branch_uuid.to_string(),
+                identity_digest: identity_digest(
+                    registry.identities.get(version_uuid).ok_or_else(|| {
+                        GfError::Validation("Project origin identity is unavailable".into())
+                    })?,
+                )
+                .map_err(|e| map_discovery_error(&e))?,
+            });
+            continue;
+        };
         let identity = registry
             .identities
             .get(version_uuid)
             .ok_or_else(|| GfError::Validation("version identity is missing".into()))?;
         let source_version = projection_source(registry, version)?;
         versions.push(LineageVersion {
+            parents: version.parents.iter().map(ToString::to_string).collect(),
             version_uuid: version_uuid.to_string(),
             identity_digest: identity_digest(identity)
                 .map_err(|error| map_discovery_error(&error))?,
@@ -120,7 +154,7 @@ pub fn build_research_lineage_from_registry(
             .into(),
             branch_uuid: version.context_uuid.to_string(),
             source_version_uuid: source_version.map(|id| id.to_string()),
-            package: Some(package.clone()),
+            package: package.cloned(),
         });
     }
     versions.sort_by(|left, right| left.version_uuid.cmp(&right.version_uuid));
@@ -155,11 +189,12 @@ pub fn build_research_lineage_from_registry(
         project_uuid: request.project_uuid.to_string(),
         requirements: vec![ProtocolRequirement {
             capability: RESEARCH_LINEAGE_CAPABILITY.into(),
-            major: 1,
+            major: 2,
         }],
         capabilities: vec![],
         fork: fork_origin(request, registry)?,
         branches,
+        boundary_anchors,
         versions,
         proposals,
         extensions: BTreeMap::new(),

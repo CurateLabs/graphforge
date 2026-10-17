@@ -138,7 +138,7 @@ pub fn verify_discovered_research_version(
             DiscoveryPortableV2Mismatch::ResearchVersionIdentity,
         ));
     }
-    let report = verify_selected_research_version(request, version)?;
+    let report = verify_selected_research_version(request, version, &lineage)?;
     Ok(DiscoveredResearchVersion {
         repository: manifest.repository,
         version_uuid: request.version_uuid.to_owned(),
@@ -153,6 +153,7 @@ pub fn verify_discovered_research_version(
 fn verify_selected_research_version(
     request: &DiscoveryResearchVersionRequest<'_>,
     expected: &LineageVersion,
+    lineage: &ResearchLineage,
 ) -> Result<PortableV2Report, DiscoveryResearchVersionError> {
     use graphforge_storage::research_versions::{ResearchRegistry, ResearchVersionRecord};
     let selected = uuid::Uuid::parse_str(&expected.version_uuid).map_err(|_| {
@@ -166,7 +167,41 @@ fn verify_selected_research_version(
                          registry: &ResearchRegistry| {
         crate::research_interchange::validation::validate(generation, version, registry)?;
         if version.version_uuid == selected {
-            matched = Some(selected_matches(expected, version, registry));
+            matched = Some(
+                selected_matches(expected, version, registry)
+                    && registry.ancestors(selected).into_iter().all(|id| {
+                        if let Some(record) = registry.historical_version(id) {
+                            lineage
+                                .version(&id.to_string())
+                                .is_some_and(|item| selected_matches(item, record, registry))
+                        } else {
+                            lineage
+                                .boundary_anchors
+                                .iter()
+                                .find(|anchor| anchor.version_uuid == id.to_string())
+                                .is_some_and(|anchor| {
+                                    let branch = uuid::Uuid::parse_str(&anchor.origin_branch_uuid)
+                                        .ok()
+                                        .and_then(|id| registry.historical_branch(id));
+                                    let digest = registry.identities.get(&id).map(|bytes| {
+                                        format!(
+                                            "sha256:{}",
+                                            bytes
+                                                .iter()
+                                                .map(|b| format!("{b:02x}"))
+                                                .collect::<String>()
+                                        )
+                                    });
+                                    branch.is_some_and(|branch| {
+                                        branch.parent_branch_uuid.is_none()
+                                            && branch.origin_version_uuid == id
+                                    }) && !registry.ancestry.contains_key(&id)
+                                        && digest.as_deref()
+                                            == Some(anchor.identity_digest.0.as_str())
+                                })
+                        }
+                    }),
+            );
         }
         Ok(())
     };
@@ -190,6 +225,7 @@ fn verify_selected_research_version(
 fn verify_selected_research_version(
     _request: &DiscoveryResearchVersionRequest<'_>,
     _expected: &LineageVersion,
+    _lineage: &ResearchLineage,
 ) -> Result<PortableV2Report, DiscoveryResearchVersionError> {
     Err(DiscoveryResearchVersionError::Portable(
         PortableV2Error::new(
@@ -228,8 +264,15 @@ fn selected_matches(
     } else {
         "complete"
     };
-    committed.as_deref() == Some(expected.identity_digest.0.as_str())
+    version.context_uuid.to_string() == expected.branch_uuid
+        && committed.as_deref() == Some(expected.identity_digest.0.as_str())
         && recomputed.as_deref() == Some(expected.identity_digest.0.as_str())
+        && version
+            .parents
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            == expected.parents
         && kind == expected.kind
         && source == expected.source_version_uuid
 }

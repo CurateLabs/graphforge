@@ -2841,3 +2841,90 @@ fn opaque_workbench_file_cannot_be_selected_as_native_package_data() {
             .contains("custom selector is missing or ambiguous")
     );
 }
+
+fn edit_by(graph: &mut GraphForge, branch: Uuid, score: i64, name: &str) -> Uuid {
+    let version_uuid = Uuid::now_v7();
+    let signature = graphforge_storage::research_versions::ResearchSignature {
+        name: name.into(),
+        email: None,
+        orcid: None,
+    };
+    graph
+        .execute_research_branch(
+            &ExecuteResearchBranchRequest {
+                author: Some(signature.clone()),
+                committer: Some(signature),
+                operation_uuid: Uuid::now_v7(),
+                expected_generation_uuid: generation(graph),
+                branch_uuid: branch,
+                version_uuid,
+                created_at: 3,
+                query: format!("MATCH (n:Item) SET n.score={score}"),
+            },
+            &CancellationToken::new(),
+        )
+        .unwrap();
+    version_uuid
+}
+
+#[test]
+fn cloned_branch_continues_with_second_committer_and_fast_forwards_without_payload_history() {
+    let mut history = history();
+    let alice = edit_by(&mut history.graph, history.branch, 2, "Alice");
+    let original_branch =
+        history.graph.research_version_retention().unwrap().branches[&history.branch].clone();
+    let hub = LoopbackHub::start();
+    publish_ok(&hub, &history.graph, &on_ref("curate/claims", "main"))
+        .result
+        .unwrap();
+    let destinations = tempfile::tempdir().unwrap();
+    let bob_path = destinations.path().join("bob");
+    let eve_path = destinations.path().join("eve");
+    clone_into(&hub, "curate/claims", &bob_path, Some("main"), None);
+    clone_into(&hub, "curate/claims", &eve_path, Some("main"), None);
+    let mut bob = GraphForge::new(bob_path.to_str()).unwrap();
+    let imported = bob.research_version_retention().unwrap();
+    assert_eq!(imported.branches[&history.branch], original_branch);
+    assert_eq!(imported.heads[&history.branch], alice);
+    assert_eq!(imported.heads.len(), 1);
+    assert!(!imported.versions.contains_key(&history.base));
+    assert!(imported.historical_version(history.base).is_some());
+    let bob_version = edit_by(&mut bob, history.branch, 3, "Bob");
+    assert_eq!(
+        bob.research_version(bob_version).unwrap().parents,
+        vec![alice]
+    );
+    publish_ok(&hub, &bob, &on_ref("curate/claims", "main"))
+        .result
+        .unwrap();
+    let (_, lineage) = served_lineage(&hub, "curate/claims");
+    assert!(lineage.descends_from(&bob_version.to_string(), &alice.to_string()));
+    let ancestor = lineage.version(&alice.to_string()).unwrap();
+    // Historical records travel independently of native payload retention.
+    assert_eq!(ancestor.parents, vec![history.head.to_string()]);
+    let final_path = destinations.path().join("final");
+    clone_into(&hub, "curate/claims", &final_path, Some("main"), None);
+    let reopened = GraphForge::new(final_path.to_str()).unwrap();
+    for (version, name) in [(alice, "Alice"), (bob_version, "Bob")] {
+        let record = reopened.research_version(version).unwrap();
+        assert_eq!(record.author.as_ref().unwrap().name, name);
+        assert_eq!(record.committer.as_ref().unwrap().name, name);
+    }
+    let before = refs_document(&hub, "curate/claims");
+    let mut eve = GraphForge::new(eve_path.to_str()).unwrap();
+    edit_by(&mut eve, history.branch, 4, "Eve");
+    let log = hub.log().len();
+    let refused = run_publish_with(
+        &hub,
+        &eve,
+        &on_ref("curate/claims", "main"),
+        Credential::Token(token(&hub, "curate/claims")),
+    );
+    assert_eq!(
+        error_code(&refused.result.unwrap_err()),
+        "hub.publish.non_fast_forward"
+    );
+    assert!(puts(&hub.log()[log..]).is_empty());
+    let after = refs_document(&hub, "curate/claims");
+    assert_eq!(before, after);
+}

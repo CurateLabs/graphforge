@@ -65,6 +65,9 @@ pub struct ResearchInterchangeManifest {
     pub selection: ResearchInterchangeSelection,
     /// Only selected content and its explicit required Version closure.
     pub versions: BTreeMap<Uuid, ResearchVersionRecord>,
+    /// Identity-authenticated ancestor records, without payload retention authority.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub history: BTreeMap<Uuid, ResearchVersionRecord>,
     /// Original Project citation for each retained Version; independent of local governance.
     pub version_projects: BTreeMap<Uuid, Uuid>,
     /// Permanent original identity commitments, including unavailable ancestors.
@@ -84,14 +87,16 @@ pub struct ResearchInterchangeManifest {
 impl ResearchInterchangeManifest {
     /// Validate identity, bounds, selected closure, and provenance before admission.
     pub fn validate(&self) -> Result<(), GfError> {
-        if self.contract_version != 1
+        if !matches!(self.contract_version, 1 | 2)
+            || (self.contract_version == 1 && !self.history.is_empty())
             || !super::super::research_revision_readable(self.research_capability_version)
             || self.producer
-                != concat!(
-                    "graphforge-storage/",
+                != format!(
+                    "graphforge-storage/{};research-interchange/{}",
                     env!("CARGO_PKG_VERSION"),
-                    ";research-interchange/1"
+                    self.contract_version
                 )
+            || self.history.len() > MAX_RECEIPTS
             || self.source_project_uuid.is_nil()
             || self
                 .fork_project_uuid
@@ -180,6 +185,22 @@ impl ResearchInterchangeManifest {
             ..ResearchRegistry::default()
         };
         registry.validate()?;
+        let mut ancestors = BTreeSet::new();
+        for id in self.versions.keys() {
+            ancestors.extend(registry.ancestors(*id));
+        }
+        for (id, record) in &self.history {
+            if self.versions.contains_key(id)
+                || !ancestors.contains(id)
+                || *id != record.version_uuid
+                || self.identities.get(id) != Some(&identity_digest(record)?)
+            {
+                return Err(invalid(
+                    "interchange history record is outside authenticated ancestry",
+                ));
+            }
+            super::super::ancestry::validate_record(&registry, record)?;
+        }
         self.validate_content_closure()?;
         self.validate_genealogy()?;
         self.validate_accepted()

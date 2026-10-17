@@ -83,9 +83,116 @@ impl GraphForge {
     /// Inspect immutable citation metadata without following current context heads.
     pub fn research_version(&self, version_uuid: Uuid) -> Result<ResearchVersionRecord, GfError> {
         registry(self)?
-            .versions
-            .remove(&version_uuid)
+            .historical_version(version_uuid)
+            .cloned()
             .ok_or_else(not_retained)
+    }
+
+    /// Continue one verified imported Branch in its original Project.
+    /// Historical/archive readers never call this durable transition.
+    pub fn continue_imported_research_branch(
+        &mut self,
+        expected: &graphforge_discovery::LineageBranch,
+        lineage: &graphforge_discovery::ResearchLineage,
+        repository_url: &str,
+        imported_generation: Uuid,
+    ) -> Result<ResearchOperationReceipt, GfError> {
+        let branch_uuid = Uuid::parse_str(&expected.branch_uuid)
+            .map_err(|_| GfError::Validation("invalid imported Branch".into()))?;
+        let head = Uuid::parse_str(&expected.head_version_uuid)
+            .map_err(|_| GfError::Validation("invalid imported Branch head".into()))?;
+        let generation = self.generation_for_read()?;
+        let project_uuid = crate::research_claims::authority::project_uuid(&generation)?;
+        let state = read_research_registry(&generation)?;
+        let branch = state
+            .historical_branch(branch_uuid)
+            .ok_or_else(not_retained)?;
+        if expected.project_uuid != project_uuid.to_string()
+            || expected.parent_branch_uuid != branch.parent_branch_uuid.map(|id| id.to_string())
+            || expected.origin_version_uuid != branch.origin_version_uuid.to_string()
+            || expected.base_version_uuid != branch.base_version_uuid.to_string()
+            || expected.label != branch.label
+            || expected.selection_sha256.0
+                != format!(
+                    "sha256:{}",
+                    branch
+                        .selection_sha256
+                        .iter()
+                        .map(|b| format!("{b:02x}"))
+                        .collect::<String>()
+                )
+        {
+            return Err(GfError::Validation(
+                "discovery Branch differs from imported genealogy".into(),
+            ));
+        }
+        let mut hash = sha2::Sha256::new();
+        use sha2::Digest as _;
+        hash.update(b"graphforge-clone-branch-continuation/1");
+        hash.update(branch_uuid.as_bytes());
+        hash.update(head.as_bytes());
+        lineage
+            .validate(graphforge_discovery::DiscoveryLimits::default())
+            .map_err(|e| GfError::Validation(e.to_string()))?;
+        let repository = url::Url::parse(repository_url)
+            .map_err(|_| GfError::Validation("invalid clone repository".into()))?;
+        if repository.path() != format!("/{}", lineage.repository.canonical_name())
+            || lineage.project_uuid != project_uuid.to_string()
+            || !lineage.branches.contains(expected)
+        {
+            return Err(GfError::Validation(
+                "clone repository does not bind native Branch".into(),
+            ));
+        }
+        let remote_branches = lineage
+            .branches
+            .iter()
+            .map(|reference| {
+                let version = lineage
+                    .version(&reference.head_version_uuid)
+                    .ok_or_else(not_retained)?;
+                let digest = version
+                    .identity_digest
+                    .0
+                    .strip_prefix("sha256:")
+                    .ok_or_else(not_retained)?;
+                let mut identity_sha256 = [0_u8; 32];
+                for (index, byte) in identity_sha256.iter_mut().enumerate() {
+                    *byte = u8::from_str_radix(&digest[index * 2..index * 2 + 2], 16)
+                        .map_err(|_| not_retained())?;
+                }
+                Ok(
+                    graphforge_storage::research_versions::ResearchRemoteBranch {
+                        repository_url: repository_url.into(),
+                        project_uuid,
+                        ref_name: reference.ref_name.clone(),
+                        branch_uuid: Uuid::parse_str(&reference.branch_uuid)
+                            .map_err(|_| not_retained())?,
+                        head_version_uuid: Uuid::parse_str(&reference.head_version_uuid)
+                            .map_err(|_| not_retained())?,
+                        identity_sha256,
+                    },
+                )
+            })
+            .collect::<Result<Vec<_>, GfError>>()?;
+        let operation = ResearchOperation {
+            operation_uuid: graphforge_core::canonical::uuid_v8(hash.finalize().into()),
+            expected_generation_uuid: imported_generation,
+            mutation: ResearchMutation::ActivateImportedBranch {
+                branch_uuid,
+                head_version_uuid: head,
+                project_uuid,
+                remote_branches,
+            },
+        };
+        let receipt =
+            self.commit_research_version_operation(operation, &CancellationToken::new())?;
+        if self.committed_generation_identity()?.generation_uuid != receipt.generation_uuid {
+            return Err(GfError::Validation(
+                "imported Branch activation receipt is not the current native generation".into(),
+            ));
+        }
+        Ok(receipt)
     }
 
     /// Return the authenticated current retention graph and durable receipts.
@@ -181,6 +288,18 @@ impl GraphForge {
             None
         } else {
             match &operation.mutation {
+                ResearchMutation::ActivateImportedBranch { project_uuid, .. } => {
+                    if *project_uuid
+                        != crate::research_claims::authority::project_uuid(
+                            &self.generation_for_read()?,
+                        )?
+                    {
+                        return Err(GfError::Validation(
+                            "imported Branch crosses Project authority".into(),
+                        ));
+                    }
+                    None
+                }
                 ResearchMutation::Register(spec) => {
                     if spec.selection.is_some() || spec.source_version.is_some() {
                         return Err(GfError::Validation(
@@ -334,7 +453,10 @@ impl GraphForge {
         version_uuid: Uuid,
         resource_policy: crate::NormalizedResourcePolicy,
     ) -> Result<ResearchVersionView, GfError> {
-        let version = self.research_version(version_uuid)?;
+        let version = registry(self)?
+            .versions
+            .remove(&version_uuid)
+            .ok_or_else(not_retained)?;
         let graph = view::materialize_with_resources(self, &version, true, resource_policy)?;
         Ok(ResearchVersionView { version, graph })
     }

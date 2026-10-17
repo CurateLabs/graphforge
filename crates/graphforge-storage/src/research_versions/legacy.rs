@@ -25,6 +25,7 @@ pub fn research_revision_readable(version: u32) -> bool {
 pub(super) fn registry_schema(version: u32) -> Option<[u8; 32]> {
     match version {
         RESEARCH_LEGACY_VERSION => Some(Sha256::digest(b"graphforge-research-registry/6").into()),
+        7 => Some(Sha256::digest(b"graphforge-research-registry/7").into()),
         RESEARCH_VERSION => Some(Sha256::digest(super::REGISTRY_SCHEMA).into()),
         _ => None,
     }
@@ -39,6 +40,15 @@ pub(super) fn legacy_record(version: &ResearchVersionRecord) -> bool {
 }
 
 impl ResearchRegistry {
+    pub(super) fn validate_remote_revision(&self, revision: u32) -> Result<(), GfError> {
+        if revision < 8 && !self.remote_branches.is_empty() {
+            return Err(invalid(
+                "legacy research registry carries revision 8 remote references",
+            ));
+        }
+        Ok(())
+    }
+
     /// Refuse a registry labelled revision 6 that holds revision 7 data.
     pub(super) fn validate_legacy(&self) -> Result<(), GfError> {
         if !self.ancestry.is_empty()

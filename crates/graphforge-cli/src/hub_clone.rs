@@ -325,7 +325,13 @@ struct CloneResult {
     moved_to: Option<String>,
 }
 
+struct CloneImported {
+    package_digest: String,
+    generation_uuid: uuid::Uuid,
+}
+
 struct ResearchCloneContext {
+    selected_branch: Option<graphforge_discovery::LineageBranch>,
     lineage_bytes: Vec<u8>,
     version_uuid: String,
     version_kind: String,
@@ -439,6 +445,15 @@ fn prepare_research_clone(
     Ok(Some((
         object.clone(),
         ResearchCloneContext {
+            selected_branch: git_ref
+                .filter(|_| version_uuid.is_none())
+                .and_then(|name| {
+                    lineage
+                        .branches
+                        .iter()
+                        .find(|branch| branch.ref_name == name)
+                })
+                .cloned(),
             lineage_bytes,
             version_uuid: selected_uuid,
             version_kind: version.kind.clone(),
@@ -1813,6 +1828,7 @@ fn run_clone_job(
         },
     )?;
     let discovered = Discovered {
+        base: &manifest_base,
         identity: &identity,
         moved: moved.as_ref(),
         destination: &destination,
@@ -1862,6 +1878,7 @@ fn run_clone_job(
 
 /// Validated discovery state shared by the staged clone phases.
 struct Discovered<'a> {
+    base: &'a Url,
     identity: &'a RepositoryIdentity,
     moved: Option<&'a graphforge_discovery::RepositoryMoved>,
     destination: &'a Path,
@@ -1882,6 +1899,7 @@ fn clone_into_staging(
     env: &mut CloneEnv<'_>,
 ) -> Result<CloneResult, graphforge_api::GfError> {
     let Discovered {
+        base,
         identity,
         moved,
         destination,
@@ -2059,7 +2077,7 @@ fn clone_into_staging(
         Some(object.length),
     );
     env.progress.phase("importing the project");
-    let imported = profile.stage(
+    let mut imported = profile.stage(
         Stage::AtomicImport,
         ComponentKind::PortableImport,
         ComponentRole::Persistence,
@@ -2075,6 +2093,46 @@ fn clone_into_staging(
             // directory; only a complete, reopened project is installed at
             // the destination, by one atomic rename.
             bind_import_target(staging, &operation_id)?;
+            // Verification above has revalidated the exact downloaded package.
+            // A continued clone has its own native receipt after the unchanged
+            // generic import. Replay that exact request rather than relaxing the
+            // importer's CURRENT/generation binding.
+            if let Some(context) = &research_context
+                && let Some(branch) = &context.selected_branch
+                && let Ok(mut graph) = GraphForge::new(staging.project.to_str())
+                && graph
+                    .research_version_retention()?
+                    .branches
+                    .contains_key(&uuid::Uuid::parse_str(&branch.branch_uuid).map_err(storage)?)
+            {
+                let lineage = ResearchLineage::from_json(&context.lineage_bytes, limits)
+                    .map_err(|e| protocol_error(&e))?;
+                let receipt = graph.continue_imported_research_branch(
+                    branch,
+                    &lineage,
+                    &format!(
+                        "{}/{}",
+                        base.origin().ascii_serialization(),
+                        identity.canonical_name()
+                    ),
+                    graphforge_api::portable_v2_import_generation(&operation_id.0),
+                )?;
+                if graph.committed_generation_identity()?.generation_uuid != receipt.generation_uuid
+                {
+                    return Err(validation(
+                        "hub.destination_conflict",
+                        "continued staging has advanced since its native receipt",
+                    ));
+                }
+                return Ok((
+                    CloneImported {
+                        package_digest: context.package_digest.clone(),
+                        generation_uuid: receipt.generation_uuid,
+                    },
+                    None,
+                    None,
+                ));
+            }
             GraphForge::import_portable_v2(
                 &staging.project,
                 &PortableV2ImportRequest {
@@ -2099,7 +2157,16 @@ fn clone_into_staging(
                 }
                 import_error(&error)
             })
-            .map(|imported| (imported, Some(object.length), None))
+            .map(|imported| {
+                (
+                    CloneImported {
+                        package_digest: imported.package_digest,
+                        generation_uuid: imported.generation_uuid,
+                    },
+                    Some(object.length),
+                    None,
+                )
+            })
         },
     )?;
     if let Some(context) = &research_context
@@ -2109,6 +2176,40 @@ fn clone_into_staging(
             "hub.package.package_digest_mismatch",
             "imported research package differs from the verified Version package",
         ));
+    }
+    if let Some(branch) = research_context
+        .as_ref()
+        .and_then(|context| context.selected_branch.as_ref())
+    {
+        let mut graph = GraphForge::new(staging.project.to_str())
+            .map_err(|error| validation("hub.integrity_failure", &error.to_string()))?;
+        let lineage = ResearchLineage::from_json(
+            &research_context
+                .as_ref()
+                .expect("selected context")
+                .lineage_bytes,
+            limits,
+        )
+        .map_err(|e| protocol_error(&e))?;
+        clone_failpoint("clone.before_branch_continuation");
+        let receipt = graph.continue_imported_research_branch(
+            branch,
+            &lineage,
+            &format!(
+                "{}/{}",
+                base.origin().ascii_serialization(),
+                identity.canonical_name()
+            ),
+            graphforge_api::portable_v2_import_generation(&operation_id.0),
+        )?;
+        if graph.committed_generation_identity()?.generation_uuid != receipt.generation_uuid {
+            return Err(validation(
+                "hub.destination_conflict",
+                "continued staging has advanced since its native receipt",
+            ));
+        }
+        clone_failpoint("clone.after_branch_continuation");
+        imported.generation_uuid = graph.committed_generation_identity()?.generation_uuid;
     }
     profile.handoff(
         ComponentKind::PortableImport,

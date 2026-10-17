@@ -388,6 +388,9 @@ const fn code_detail(code: HubPublishErrorCode) -> &'static str {
         HubPublishErrorCode::RefConflict => {
             "the repository changed since its revision was read; publish again"
         }
+        HubPublishErrorCode::NonFastForward => {
+            "the proposed head does not descend from the published Branch"
+        }
         HubPublishErrorCode::UnsupportedFuture => {
             "the Hub requires an unsupported protocol version or capability"
         }
@@ -1145,9 +1148,40 @@ fn merge_lineage(
         }
         branches.insert(branch.branch_uuid.clone(), branch);
     }
+    let mut anchors: BTreeMap<_, _> = previous
+        .boundary_anchors
+        .iter()
+        .chain(&next.boundary_anchors)
+        .map(|anchor| (anchor.version_uuid.clone(), anchor.clone()))
+        .collect();
+    for anchor in &previous.boundary_anchors {
+        if next
+            .boundary_anchors
+            .iter()
+            .any(|new| new.version_uuid == anchor.version_uuid && new != anchor)
+        {
+            return Err(publish_error(
+                HubPublishErrorCode::IntegrityFailure,
+                "native Project-origin anchor changed",
+            ));
+        }
+    }
+    anchors.retain(|id, _| !versions.contains_key(id));
+    next.boundary_anchors = anchors.into_values().collect();
     next.versions = versions.into_values().collect();
     next.branches = branches.into_values().collect();
     next.proposals.clone_from(&previous.proposals);
+    let refs = next
+        .branches
+        .iter()
+        .map(|branch| branch.ref_name.clone())
+        .collect::<Vec<_>>();
+    if !next.fast_forwards(previous, &refs) {
+        return Err(publish_error(
+            HubPublishErrorCode::NonFastForward,
+            "published Branch head is not an ancestor of the proposed head",
+        ));
+    }
     next.validate(DiscoveryLimits::default())
         .map_err(|error| discovery(&error))?;
     Ok(next)

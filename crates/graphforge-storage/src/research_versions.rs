@@ -38,7 +38,9 @@ pub use upstream::{
     ResearchUpstreamResolutionRecord, ResearchUpstreamReview,
 };
 mod ancestry;
+mod remote;
 pub use ancestry::{MAX_PARENTS, ResearchVersionProvenance};
+pub use remote::ResearchRemoteBranch;
 mod legacy;
 pub use legacy::{
     RESEARCH_LEGACY_VERSION, current_registry_schema, research_revision_readable,
@@ -68,7 +70,7 @@ use crate::{
 /// Required research capability; unsupported readers must refuse it.
 pub const RESEARCH_CAPABILITY: &str = "research";
 /// Frozen research capability and registry record version.
-pub const RESEARCH_VERSION: u32 = 7;
+pub const RESEARCH_VERSION: u32 = 8;
 /// Authenticated registry record family.
 pub const RESEARCH_REGISTRY: &str = "registry";
 /// Maximum canonical registry payload; no unbounded history growth.
@@ -82,11 +84,11 @@ pub const MAX_CONTEXTS: usize = 256;
 /// Maximum explicit dependency roots.
 pub const MAX_ROOTS: usize = 4_096;
 /// Registry participant schema identity for `RESEARCH_VERSION`.
-const REGISTRY_SCHEMA: &[u8] = b"graphforge-research-registry/7";
+const REGISTRY_SCHEMA: &[u8] = b"graphforge-research-registry/8";
 const PRODUCER: &str = concat!(
     "graphforge-storage/",
     env!("CARGO_PKG_VERSION"),
-    ";research/7"
+    ";research/8"
 );
 
 /// Exact participant identity, never a filesystem path.
@@ -248,6 +250,9 @@ pub struct ResearchOperationReceipt {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResearchRegistry {
+    /// Read-only remote discovery citations, never native heads or payload roots.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub remote_branches: BTreeMap<String, ResearchRemoteBranch>,
     /// Imported provenance, separate from live heads and local acceptance authority.
     #[serde(default)]
     pub interchange: BTreeMap<Uuid, ResearchInterchangeManifest>,
@@ -311,6 +316,17 @@ pub struct RegisterResearchVersion {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ResearchMutation {
+    /// Continue exactly one same-Project imported Branch at its selected head.
+    ActivateImportedBranch {
+        /// Immutable imported creation identity.
+        branch_uuid: Uuid,
+        /// Exact complete selected Version, never a projected snapshot.
+        head_version_uuid: Uuid,
+        /// Verified importing Project authority.
+        project_uuid: Uuid,
+        /// Read-only references from the same verified repository snapshot.
+        remote_branches: Vec<ResearchRemoteBranch>,
+    },
     /// Freeze exact selected research and root it without advancing any head.
     SubmitProposal {
         /// Native public request commitment.
@@ -481,6 +497,7 @@ impl ResearchRegistry {
     /// Validate bounded identities and dependency closure before publication or use.
     pub fn validate(&self) -> Result<(), GfError> {
         self.validate_capacity()?;
+        self.validate_remote_branches()?;
         for (id, version) in &self.versions {
             if id.is_nil()
                 || *id != version.version_uuid
@@ -711,6 +728,7 @@ fn read_registry_revision(
     let registry: ResearchRegistry = serde_json::from_slice(&snapshot.bytes)
         .map_err(|_| invalid("malformed research registry"))?;
     registry.validate()?;
+    registry.validate_remote_revision(revision)?;
     if revision == RESEARCH_LEGACY_VERSION {
         registry.validate_legacy()?;
     }
@@ -935,6 +953,90 @@ fn apply_mutation(
     registry: &mut ResearchRegistry,
 ) -> Result<Option<Uuid>, GfError> {
     let version_uuid = match mutation {
+        ResearchMutation::ActivateImportedBranch {
+            branch_uuid,
+            head_version_uuid,
+            project_uuid,
+            remote_branches,
+        } => {
+            let archive = registry
+                .interchange
+                .get(head_version_uuid)
+                .ok_or_else(|| invalid("selected imported Branch archive is unavailable"))?;
+            if archive.source_project_uuid != *project_uuid
+                || archive.fork.is_some()
+                || !matches!(
+                    archive.selection,
+                    ResearchInterchangeSelection::Complete { .. }
+                )
+            {
+                return Err(invalid(
+                    "only a same-Project complete imported Branch can continue",
+                ));
+            }
+            let branch = archive
+                .genealogy
+                .get(branch_uuid)
+                .ok_or_else(|| invalid("selected imported Branch genealogy is unavailable"))?
+                .clone();
+            let head = registry
+                .versions
+                .get(head_version_uuid)
+                .ok_or_else(|| invalid("selected imported Branch head is unavailable"))?;
+            if branch.project_uuid != *project_uuid
+                || head.context_uuid != *branch_uuid
+                || registry
+                    .heads
+                    .get(branch_uuid)
+                    .is_some_and(|old| old != head_version_uuid)
+                || registry
+                    .branches
+                    .get(branch_uuid)
+                    .is_some_and(|old| old != &branch)
+            {
+                return Err(invalid(
+                    "selected imported Branch conflicts with native authority",
+                ));
+            }
+            let mut references = BTreeMap::new();
+            let mut selected = false;
+            let mut repository = None;
+            if remote_branches.len() > MAX_CONTEXTS {
+                return Err(invalid("remote Branch reference capacity exceeded"));
+            }
+            for reference in remote_branches {
+                let key = reference.key()?;
+                if reference.project_uuid != *project_uuid
+                    || references.insert(key.clone(), reference.clone()).is_some()
+                    || registry
+                        .remote_branches
+                        .get(&key)
+                        .is_some_and(|old| old != reference)
+                    || repository.is_some_and(|old: &str| old != reference.repository_url)
+                {
+                    return Err(invalid("conflicting imported remote Branch reference"));
+                }
+                repository = Some(reference.repository_url.as_str());
+                if reference.branch_uuid == *branch_uuid {
+                    if reference.head_version_uuid != *head_version_uuid
+                        || registry.identities.get(head_version_uuid)
+                            != Some(&reference.identity_sha256)
+                    {
+                        return Err(invalid(
+                            "selected remote Branch does not bind the imported head",
+                        ));
+                    }
+                    selected = true;
+                }
+            }
+            if !selected {
+                return Err(invalid("selected Branch remote reference is absent"));
+            }
+            registry.remote_branches.extend(references);
+            registry.branches.insert(*branch_uuid, branch);
+            registry.heads.insert(*branch_uuid, *head_version_uuid);
+            Some(*head_version_uuid)
+        }
         ResearchMutation::SubmitProposal { .. }
         | ResearchMutation::ReviewProposal { .. }
         | ResearchMutation::ReleaseProposal { .. } => {
@@ -1418,7 +1520,7 @@ fn registry_publication_revision(
     {
         return Err(invalid("unsupported research registry publication"));
     }
-    if revision == RESEARCH_LEGACY_VERSION && parent_revision != RESEARCH_LEGACY_VERSION {
+    if revision < parent_revision {
         return Err(invalid(
             "publication cannot write a revision 6 research registry",
         ));
@@ -1454,6 +1556,7 @@ pub(crate) fn validate_publication_transition(
     let after: ResearchRegistry = serde_json::from_slice(&bytes)
         .map_err(|_| invalid("malformed research registry publication"))?;
     after.validate()?;
+    after.validate_remote_revision(revision)?;
     if revision == RESEARCH_LEGACY_VERSION {
         after.validate_legacy()?;
     }
@@ -1491,6 +1594,13 @@ pub(crate) fn validate_publication_transition(
         }
     }
     ancestry::preserve(&before, &after)?;
+    for (key, reference) in &before.remote_branches {
+        if after.remote_branches.get(key) != Some(reference) {
+            return Err(invalid(
+                "publication cannot rewrite remote Branch citations",
+            ));
+        }
+    }
     for (id, root) in &before.roots {
         if root.kind == ResearchRootKind::AcceptedProvenance && after.roots.get(id) != Some(root) {
             return Err(invalid(

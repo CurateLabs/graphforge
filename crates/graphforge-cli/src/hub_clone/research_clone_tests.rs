@@ -823,7 +823,7 @@ fn minimal_documents(
 #[test]
 fn unknown_required_lineage_capability_fails_before_package_reads_or_project_mutation() {
     let lineage = serde_json::to_vec(&serde_json::json!({
-        "format":"graphforge-research-lineage/1","version":{"major":1,"minor":1},
+        "boundary_anchors":[],"format":"graphforge-research-lineage/2","version":{"major":1,"minor":1},
         "repository":{"owner":"curate","repository":"claims-fork"},
         "immutable_version":format!("sha256:{}", "a".repeat(64)),
         "project_uuid":"01900000-0000-7000-8000-000000000001",
@@ -1112,6 +1112,7 @@ fn branchless_hub(
 ) -> (Hub, Sha256Digest, Sha256Digest) {
     let project_object = sha256(&bytes);
     let lineage = ResearchLineage {
+        boundary_anchors: vec![],
         format: RESEARCH_LINEAGE_FORMAT.into(),
         version: ProtocolVersion::CURRENT,
         repository: RepositoryIdentity::parse(REPOSITORY).unwrap(),

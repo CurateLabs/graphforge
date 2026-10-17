@@ -36,10 +36,23 @@ local research while retaining acceptance evidence from another Project; those
 Project identities and genealogy remain distinct. Conflicting citations for one
 immutable Version are rejected.
 
-Carry selected genealogy and acceptance evidence as historical provenance, not
-as imported live Branch heads or destination governance decisions. Historical
+Ordinary portable imports carry selected genealogy and acceptance evidence as
+historical provenance, not live Branch heads or destination governance decisions.
+A discovery-verified same-Project Branch clone additionally publishes one explicit
+native continuation transition: its exact original Branch record, UUID and
+selected head become live. Immutable-Version selection stays detached. Other
+published refs are durable read-only remote citations, not native Branch creation
+records or heads. They grant no retained payload, access or publication authority. Historical
 ancestor references need identity metadata; they do not require full ancestor
-payloads. The selected Version's incorporated field baselines travel with its
+payloads. Interchange contract 2 separates identity-verified ancestor records
+from the exact `required_versions` payload closure. Imported metadata is inspectable
+but cannot be opened as retained content. A transient Project capture deliberately
+released by root Branch creation can remain an identity-only boundary anchor;
+its native Branch origin and permanent identity ledger must prove the boundary.
+No author, committer or parent record is invented. A missing ordinary intermediate
+commit is refused before upload. Research registry revision 8 stores remote citations;
+revision 6/7 reads preserve old Version digests and cannot contain this facet.
+The selected Version's incorporated field baselines travel with its
 native content. Missing historical expansion remains explicitly unavailable.
 
 A live Branch reference resolves its current head once. An immutable Version
