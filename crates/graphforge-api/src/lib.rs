@@ -420,6 +420,7 @@ pub use query_evidence::{
 pub use generation_diff::{
     CommittedGenerationIdentity, GenerationDiffDisposition, GenerationDiffLimits,
     GenerationDiffRequest, GenerationGraphDiff, GraphChangeStream, ReloadRequiredReason,
+    read_committed_generation_identity,
 };
 pub use graphforge_exec::validate_embedding_options;
 pub use graphforge_exec::{

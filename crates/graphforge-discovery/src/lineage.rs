@@ -1,4 +1,4 @@
-//! Bounded, versioned research lineage document (`graphforge-research-lineage/1`).
+//! Bounded, versioned research lineage document (`graphforge-research-lineage/2`).
 //!
 //! Lineage exposes published Versions, Branch heads, Fork origin citations, and
 //! frozen Proposal projections without graph payload I/O. Transport locations
@@ -16,10 +16,10 @@ use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Research lineage document format emitted and accepted by this release.
-pub const RESEARCH_LINEAGE_FORMAT: &str = "graphforge-research-lineage/1";
+pub const RESEARCH_LINEAGE_FORMAT: &str = "graphforge-research-lineage/2";
 /// Media type of an immutable research lineage object selected by discovery.
 pub const RESEARCH_LINEAGE_MEDIA_TYPE: &str = "application/vnd.graphforge.research-lineage+json";
-/// Capability that a lineage document may require, at major version 1.
+/// Required native commit-history semantics at major version 2.
 pub const RESEARCH_LINEAGE_CAPABILITY: &str = "research-lineage";
 const RESEARCH_LINEAGE_FORMAT_NAME: &str = "graphforge-research-lineage";
 const VERSION_KINDS: [&str; 2] = ["complete", "projection"];
@@ -63,12 +63,27 @@ pub struct LineageBranch {
     pub label: String,
 }
 
+/// Identity-only boundary for a transient native Project capture at Branch creation.
+/// No Version record, authorship, payload, or Branch creation authority is inferred.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LineageBoundaryAnchor {
+    /// Transient Project capture UUID, not a missing intermediate Branch commit.
+    pub version_uuid: String,
+    /// Permanent native identity commitment.
+    pub identity_digest: Sha256Digest,
+    /// Native root Branch whose exact origin is this Project capture.
+    pub origin_branch_uuid: String,
+}
+
 /// One published immutable research Version or distinct projection.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LineageVersion {
     /// Immutable research Version UUID.
     pub version_uuid: String,
+    /// Ordered immutable parents, first parent before merge parents.
+    pub parents: Vec<String>,
     /// Native identity commitment digest for this Version.
     pub identity_digest: Sha256Digest,
     /// `complete` for a retained Version, `projection` for a distinct subset.
@@ -113,7 +128,7 @@ pub struct ResearchLineage {
     pub immutable_version: Sha256Digest,
     /// Research Project authority UUID for this repository.
     pub project_uuid: String,
-    /// Required semantics; only `research-lineage@1` is understood.
+    /// Required semantics; only `research-lineage@2` is understood.
     pub requirements: Vec<ProtocolRequirement>,
     /// Optional advertised semantics.
     pub capabilities: Vec<ProtocolCapability>,
@@ -122,6 +137,8 @@ pub struct ResearchLineage {
     pub fork: Option<LineageForkOrigin>,
     /// Branches in strictly ascending `branch_uuid` order.
     pub branches: Vec<LineageBranch>,
+    /// Identity-only native Project-origin boundaries, sorted by Version UUID.
+    pub boundary_anchors: Vec<LineageBoundaryAnchor>,
     /// Versions in strictly ascending `version_uuid` order.
     pub versions: Vec<LineageVersion>,
     /// Published Proposals in strictly ascending `proposal_uuid` order.
@@ -140,7 +157,21 @@ impl ResearchLineage {
         if bytes.len() > limits.max_lineage_bytes {
             return Err(limit("lineage"));
         }
-        let lineage: Self = parse_unique_json(bytes)?;
+        let header: Value = parse_unique_json(bytes)?;
+        if header.get("format").and_then(Value::as_str) != Some(RESEARCH_LINEAGE_FORMAT) {
+            return Err(DiscoveryError::new(
+                DiscoveryErrorCode::UnsupportedFuture,
+                Some("format"),
+                "research lineage format is unsupported",
+            ));
+        }
+        let lineage: Self = serde_json::from_value(header).map_err(|_| {
+            DiscoveryError::new(
+                DiscoveryErrorCode::MalformedResponse,
+                None,
+                "research lineage fields are invalid",
+            )
+        })?;
         lineage.validate(limits)?;
         Ok(lineage)
     }
@@ -158,7 +189,7 @@ impl ResearchLineage {
                 match format_major(&self.format, RESEARCH_LINEAGE_FORMAT_NAME) {
                     Some(requested_major) => error.with_version(DiscoveryVersionDetails {
                         subject: DiscoveryVersionSubject::ResearchLineage,
-                        supported_major: Some(1),
+                        supported_major: Some(2),
                         requested_major,
                     }),
                     None => error,
@@ -173,6 +204,17 @@ impl ResearchLineage {
             RESEARCH_LINEAGE_CAPABILITY,
             limits,
         )?;
+        if !self
+            .requirements
+            .iter()
+            .any(|r| r.capability == RESEARCH_LINEAGE_CAPABILITY && r.major == 2)
+        {
+            return Err(DiscoveryError::new(
+                DiscoveryErrorCode::UnsupportedFuture,
+                Some("requirements"),
+                "research lineage 2 is required",
+            ));
+        }
         self.repository.validate()?;
         self.immutable_version.validate()?;
         check_uuid(&self.project_uuid, "project_uuid", limits)?;
@@ -193,6 +235,9 @@ impl ResearchLineage {
         }
         if self.branches.len() > limits.max_lineage_entries {
             return Err(limit("branches"));
+        }
+        if self.boundary_anchors.len() > limits.max_lineage_entries {
+            return Err(limit("boundary_anchors"));
         }
         if self.versions.len() > limits.max_lineage_entries {
             return Err(limit("versions"));
@@ -293,6 +338,95 @@ impl ResearchLineage {
             prior = Some(version.version_uuid.as_str());
             version_ids.insert(version.version_uuid.as_str(), version);
         }
+        let mut anchors = BTreeMap::new();
+        let mut prior_anchor = None;
+        for anchor in &self.boundary_anchors {
+            check_uuid(
+                &anchor.version_uuid,
+                "boundary_anchors.version_uuid",
+                limits,
+            )?;
+            check_uuid(
+                &anchor.origin_branch_uuid,
+                "boundary_anchors.origin_branch_uuid",
+                limits,
+            )?;
+            anchor.identity_digest.validate()?;
+            if version_ids.contains_key(anchor.version_uuid.as_str())
+                || prior_anchor.is_some_and(|old: &str| old >= anchor.version_uuid.as_str())
+            {
+                return Err(DiscoveryError::new(
+                    DiscoveryErrorCode::IntegrityFailure,
+                    Some("boundary_anchors"),
+                    "boundary anchor overlaps native records or is unordered",
+                ));
+            }
+            if let Some(branch) = self
+                .branches
+                .iter()
+                .find(|branch| branch.branch_uuid == anchor.origin_branch_uuid)
+                && (branch.parent_branch_uuid.is_some()
+                    || branch.origin_version_uuid != anchor.version_uuid)
+            {
+                return Err(DiscoveryError::new(
+                    DiscoveryErrorCode::IntegrityFailure,
+                    Some("boundary_anchors"),
+                    "boundary anchor differs from Branch origin",
+                ));
+            }
+            prior_anchor = Some(anchor.version_uuid.as_str());
+            anchors.insert(anchor.version_uuid.as_str(), anchor);
+        }
+        if anchors.keys().any(|id| {
+            !self
+                .versions
+                .iter()
+                .any(|v| v.parents.iter().any(|parent| parent == id))
+        }) {
+            return Err(DiscoveryError::new(
+                DiscoveryErrorCode::IntegrityFailure,
+                Some("boundary_anchors"),
+                "Project-origin anchor is outside the parent closure",
+            ));
+        }
+        for version in &self.versions {
+            if version.parents.len() > 8 {
+                return Err(limit("versions.parents"));
+            }
+            let mut seen = BTreeSet::new();
+            for parent in &version.parents {
+                check_uuid(parent, "versions.parents", limits)?;
+                if parent == &version.version_uuid
+                    || !seen.insert(parent)
+                    || (!version_ids.contains_key(parent.as_str())
+                        && !anchors.contains_key(parent.as_str()))
+                {
+                    return Err(DiscoveryError::new(
+                        DiscoveryErrorCode::IntegrityFailure,
+                        Some("versions.parents"),
+                        "Version parent is duplicated, unknown or itself",
+                    ));
+                }
+            }
+        }
+        for version in &self.versions {
+            let mut pending = version.parents.clone();
+            let mut seen = BTreeSet::new();
+            while let Some(id) = pending.pop() {
+                if id == version.version_uuid {
+                    return Err(DiscoveryError::new(
+                        DiscoveryErrorCode::IntegrityFailure,
+                        Some("versions.parents"),
+                        "Version ancestry is cyclic",
+                    ));
+                }
+                if seen.insert(id.clone())
+                    && let Some(record) = version_ids.get(id.as_str())
+                {
+                    pending.extend(record.parents.iter().cloned());
+                }
+            }
+        }
         let mut prior = None;
         for proposal in &self.proposals {
             check_uuid(&proposal.proposal_uuid, "proposals.proposal_uuid", limits)?;
@@ -384,7 +518,65 @@ impl ResearchLineage {
         Ok(sha256_digest(&self.to_canonical_json()?))
     }
 
-    /// Return the lineage Version entry for one UUID, if present.
+    /// Prove advanced refs preserve their Branch identity and immutable ancestry.
+    #[must_use]
+    pub fn fast_forwards(&self, previous: &Self, refs: &[String]) -> bool {
+        self.project_uuid == previous.project_uuid
+            && previous.boundary_anchors.iter().all(|old| {
+                self.boundary_anchors.iter().any(|new| new == old)
+                    || self.version(&old.version_uuid).is_some_and(|record| {
+                        record.identity_digest == old.identity_digest && record.parents.is_empty()
+                    })
+            })
+            && previous.versions.iter().all(|old| {
+                self.version(&old.version_uuid).is_some_and(|new| {
+                    new.identity_digest == old.identity_digest
+                        && new.parents == old.parents
+                        && new.branch_uuid == old.branch_uuid
+                })
+            })
+            && refs.iter().all(|name| {
+                let old = previous
+                    .branches
+                    .iter()
+                    .find(|branch| &branch.ref_name == name);
+                old.is_none_or(|old| {
+                    self.branches
+                        .iter()
+                        .find(|branch| &branch.ref_name == name)
+                        .is_some_and(|new| {
+                            new.branch_uuid == old.branch_uuid
+                                && {
+                                    let mut binding = new.clone();
+                                    binding.head_version_uuid.clone_from(&old.head_version_uuid);
+                                    binding == *old
+                                }
+                                && self
+                                    .descends_from(&new.head_version_uuid, &old.head_version_uuid)
+                        })
+                })
+            })
+    }
+
+    /// Test descent through the validated bounded native parent graph.
+    #[must_use]
+    pub fn descends_from(&self, head: &str, ancestor: &str) -> bool {
+        let mut pending = vec![head];
+        let mut seen = BTreeSet::new();
+        while let Some(id) = pending.pop() {
+            if id == ancestor {
+                return true;
+            }
+            if seen.insert(id)
+                && let Some(record) = self.version(id)
+            {
+                pending.extend(record.parents.iter().map(String::as_str));
+            }
+        }
+        false
+    }
+
+    /// Return one published Version, including metadata-only ancestors.
     #[must_use]
     pub fn version(&self, version_uuid: &str) -> Option<&LineageVersion> {
         self.versions

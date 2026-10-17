@@ -9,6 +9,7 @@
         "entitlement_denied",
         "idempotency_conflict",
         "ref_conflict",
+        "non_fast_forward",
         "unsupported_future",
         "integrity_failure",
         "invalid_input",

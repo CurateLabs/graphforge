@@ -1,7 +1,7 @@
 {
   "contract_version": 1,
   "scope": "Rust non-Cypher public release surface",
-  "public_method_digest": "835f0e77d48d063cd8d3d68412d786d11af20807c2dc810d2dcb96d974056940",
+  "public_method_digest": "80f8e2d20fdf78137c87a624e562052154bcac401647a3a751570a9e5b3b38e0",
   "method_policy": {
     "receiver_defaults": {
       "PortableV2ImportResult": "release-tested",
@@ -1095,7 +1095,9 @@
         "GraphForge.build_research_lineage_for_discovery",
         "crate.repack_verified_expanded_portable_v2",
         "crate.summarize_verified_portable_v2",
-        "crate.resolve_discovered_ontology_module"
+        "crate.resolve_discovered_ontology_module",
+        "GraphForge.continue_imported_research_branch",
+        "crate.read_committed_generation_identity"
       ],
       "test_refs": [
         {
@@ -1145,6 +1147,10 @@
         {
           "path": "crates/graphforge-cli/src/hub_clone/research_clone_tests.rs",
           "symbol": "fork_branches_and_versions_clone_into_distinct_destinations_with_identical_lineage"
+        },
+        {
+          "path": "crates/graphforge-cli/src/hub_clone/research_clone_tests.rs",
+          "symbol": "branch_activation_retries_exact_native_receipt_but_never_resets_advanced_staging"
         }
       ]
     },

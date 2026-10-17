@@ -330,3 +330,14 @@ records and source metadata without materializing historical views or packages;
 portable selection fingerprints retain their existing meaning. Full semantic package verification
 remains mandatory. Its already-computed transport digest is reused for the
 publication descriptor instead of rereading the file solely to hash it again.
+
+## Fast-forward Branch publication
+
+Ordinary publication advances an existing Branch only when its old head is in the
+new head's structurally validated parent closure. The client refuses before upload;
+the server independently checks the bound old/new lineage before ref mutation,
+including final asynchronous commit. Existing Version commitments, parent lists
+and Branch creation metadata cannot change. `non_fast_forward` is a stable HTTP
+409 refusal. A stale revision lease remains `ref_conflict` (HTTP 412), checked
+before descent. Exact operation replay retains its original receipt. This does not
+implement rewrite, prune or merging divergent heads.

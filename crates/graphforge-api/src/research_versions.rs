@@ -17,6 +17,7 @@ use graphforge_storage::research_versions::{
     ResearchOperationReceipt, ResearchRegistry, ResearchVersionRecord, read_research_registry,
 };
 use serde::{Deserialize, Serialize};
+use sha2::Digest as _;
 use uuid::Uuid;
 
 use crate::{CancellationToken, ExecutionResult, GraphForge};
@@ -83,9 +84,76 @@ impl GraphForge {
     /// Inspect immutable citation metadata without following current context heads.
     pub fn research_version(&self, version_uuid: Uuid) -> Result<ResearchVersionRecord, GfError> {
         registry(self)?
-            .versions
-            .remove(&version_uuid)
+            .historical_version(version_uuid)
+            .cloned()
             .ok_or_else(not_retained)
+    }
+
+    /// Continue one verified imported Branch in its original Project.
+    /// Historical/archive readers never call this durable transition.
+    /// `None` admits only an unfinished target owned by this exact native import;
+    /// the caller must resume the unchanged importer before continuing the Branch.
+    pub fn continue_imported_research_branch(
+        project_path: &std::path::Path,
+        expected: &graphforge_discovery::LineageBranch,
+        lineage: &graphforge_discovery::ResearchLineage,
+        repository_url: &str,
+        import_operation: Uuid,
+    ) -> Result<Option<ResearchOperationReceipt>, GfError> {
+        let imported_generation =
+            graphforge_core::uuid::portable_v2_import_generation(&import_operation);
+        if graphforge_storage::portable_v2_import_pending(project_path, import_operation)? {
+            return Ok(None);
+        }
+        // Admission is read-only: never initialize or repair a staged target as a probe.
+        let generation = graphforge_storage::resolve_project_generation(project_path)?;
+        let state = read_research_registry(&generation)?;
+        let operation = imported_branch_operation(
+            &generation,
+            &state,
+            expected,
+            lineage,
+            repository_url,
+            imported_generation,
+        )?;
+        let current = generation.generation_uuid();
+        let request_sha256: [u8; 32] = sha2::Sha256::digest(
+            serde_json::to_vec(&operation)
+                .map_err(|_| GfError::Validation("activation request cannot be encoded".into()))?,
+        )
+        .into();
+        if let Some(receipt) = state.receipts.get(&operation.operation_uuid) {
+            if receipt.request_sha256 != request_sha256 || receipt.generation_uuid != current {
+                return Err(GfError::Validation(
+                    "activation receipt conflicts with the request or current native generation"
+                        .into(),
+                ));
+            }
+            return Ok(Some(receipt.clone()));
+        }
+        if current != imported_generation {
+            return Err(GfError::Validation(
+                "staging is not the original committed import generation".into(),
+            ));
+        }
+        // Only the admitted, committed import may enter the mutable facade.
+        let path = project_path
+            .to_str()
+            .ok_or_else(|| GfError::Validation("project path is not UTF-8".into()))?;
+        let mut graph = Self::new(Some(path))?;
+        if graph.committed_generation_identity()?.generation_uuid != current {
+            return Err(GfError::Validation(
+                "staging changed after read-only admission".into(),
+            ));
+        }
+        let receipt =
+            graph.commit_research_version_operation(operation, &CancellationToken::new())?;
+        if graph.committed_generation_identity()?.generation_uuid != receipt.generation_uuid {
+            return Err(GfError::Validation(
+                "activation receipt is not the current native generation".into(),
+            ));
+        }
+        Ok(Some(receipt))
     }
 
     /// Return the authenticated current retention graph and durable receipts.
@@ -181,6 +249,18 @@ impl GraphForge {
             None
         } else {
             match &operation.mutation {
+                ResearchMutation::ActivateImportedBranch { project_uuid, .. } => {
+                    if *project_uuid
+                        != crate::research_claims::authority::project_uuid(
+                            &self.generation_for_read()?,
+                        )?
+                    {
+                        return Err(GfError::Validation(
+                            "imported Branch crosses Project authority".into(),
+                        ));
+                    }
+                    None
+                }
                 ResearchMutation::Register(spec) => {
                     if spec.selection.is_some() || spec.source_version.is_some() {
                         return Err(GfError::Validation(
@@ -334,7 +414,10 @@ impl GraphForge {
         version_uuid: Uuid,
         resource_policy: crate::NormalizedResourcePolicy,
     ) -> Result<ResearchVersionView, GfError> {
-        let version = self.research_version(version_uuid)?;
+        let version = registry(self)?
+            .versions
+            .remove(&version_uuid)
+            .ok_or_else(not_retained)?;
         let graph = view::materialize_with_resources(self, &version, true, resource_policy)?;
         Ok(ResearchVersionView { version, graph })
     }
@@ -384,4 +467,146 @@ pub(crate) fn complete_evidence(
             })
         })
         .collect()
+}
+
+fn imported_branch_operation(
+    generation: &graphforge_storage::ResolvedProjectGeneration,
+    state: &ResearchRegistry,
+    expected: &graphforge_discovery::LineageBranch,
+    lineage: &graphforge_discovery::ResearchLineage,
+    repository_url: &str,
+    imported_generation: Uuid,
+) -> Result<ResearchOperation, GfError> {
+    let branch_uuid = Uuid::parse_str(&expected.branch_uuid)
+        .map_err(|_| GfError::Validation("invalid imported Branch".into()))?;
+    let head = Uuid::parse_str(&expected.head_version_uuid)
+        .map_err(|_| GfError::Validation("invalid imported Branch head".into()))?;
+    let project_uuid = crate::research_claims::authority::project_uuid(generation)?;
+    let archive = state.interchange.get(&head).ok_or_else(not_retained)?;
+    if archive.source_project_uuid != project_uuid
+        || archive.selected_version_uuid != head
+        || archive.fork.is_some()
+        || !matches!(
+            archive.selection,
+            graphforge_storage::research_versions::ResearchInterchangeSelection::Complete { .. }
+        )
+    {
+        return Err(GfError::Validation(
+            "staging is not the selected same-Project import".into(),
+        ));
+    }
+    let branch = archive
+        .genealogy
+        .get(&branch_uuid)
+        .ok_or_else(not_retained)?;
+    if expected.project_uuid != project_uuid.to_string()
+        || expected.parent_branch_uuid != branch.parent_branch_uuid.map(|id| id.to_string())
+        || expected.origin_version_uuid != branch.origin_version_uuid.to_string()
+        || expected.base_version_uuid != branch.base_version_uuid.to_string()
+        || expected.label != branch.label
+        || expected.selection_sha256
+            != crate::discovery_research_lineage::identity_digest(&branch.selection_sha256)
+                .map_err(|e| GfError::Validation(e.to_string()))?
+    {
+        return Err(GfError::Validation(
+            "discovery Branch differs from imported genealogy".into(),
+        ));
+    }
+    let mut hash = sha2::Sha256::new();
+    hash.update(b"graphforge-clone-branch-continuation/1");
+    hash.update(branch_uuid.as_bytes());
+    hash.update(head.as_bytes());
+    lineage
+        .validate(graphforge_discovery::DiscoveryLimits::default())
+        .map_err(|e| GfError::Validation(e.to_string()))?;
+    let native_head = state.versions.get(&head).ok_or_else(not_retained)?;
+    let advertised = lineage
+        .version(&head.to_string())
+        .ok_or_else(not_retained)?;
+    if native_head.context_uuid != branch_uuid
+        || state
+            .identities
+            .get(&head)
+            .and_then(|digest| crate::discovery_research_lineage::identity_digest(digest).ok())
+            .as_ref()
+            != Some(&advertised.identity_digest)
+        || state
+            .branches
+            .get(&branch_uuid)
+            .is_some_and(|old| old != branch)
+        || state
+            .heads
+            .get(&branch_uuid)
+            .is_some_and(|old| *old != head)
+    {
+        return Err(GfError::Validation(
+            "staging differs from the selected native Branch/head".into(),
+        ));
+    }
+    let repository = url::Url::parse(repository_url)
+        .map_err(|_| GfError::Validation("invalid clone repository".into()))?;
+    if repository.path() != format!("/{}", lineage.repository.canonical_name())
+        || lineage.project_uuid != project_uuid.to_string()
+        || !lineage.branches.contains(expected)
+    {
+        return Err(GfError::Validation(
+            "clone repository does not bind native Branch".into(),
+        ));
+    }
+    let remote_branches = imported_remote_branches(lineage, repository_url, project_uuid)?;
+    let operation = ResearchOperation {
+        operation_uuid: graphforge_core::canonical::uuid_v8(hash.finalize().into()),
+        expected_generation_uuid: imported_generation,
+        mutation: ResearchMutation::ActivateImportedBranch {
+            branch_uuid,
+            head_version_uuid: head,
+            project_uuid,
+            lineage_sha256: sha2::Sha256::digest(
+                lineage
+                    .to_canonical_json()
+                    .map_err(|e| GfError::Validation(e.to_string()))?,
+            )
+            .into(),
+            remote_branches,
+        },
+    };
+    Ok(operation)
+}
+
+fn imported_remote_branches(
+    lineage: &graphforge_discovery::ResearchLineage,
+    repository_url: &str,
+    project_uuid: Uuid,
+) -> Result<Vec<graphforge_storage::research_versions::ResearchRemoteBranch>, GfError> {
+    let references = lineage
+        .branches
+        .iter()
+        .map(|reference| {
+            let version = lineage
+                .version(&reference.head_version_uuid)
+                .ok_or_else(not_retained)?;
+            let digest = version
+                .identity_digest
+                .0
+                .strip_prefix("sha256:")
+                .ok_or_else(not_retained)?;
+            let mut identity_sha256 = [0_u8; 32];
+            for (index, byte) in identity_sha256.iter_mut().enumerate() {
+                *byte = u8::from_str_radix(&digest[index * 2..index * 2 + 2], 16)
+                    .map_err(|_| not_retained())?;
+            }
+            let citation = graphforge_storage::research_versions::ResearchRemoteBranch {
+                repository_url: repository_url.into(),
+                project_uuid,
+                ref_name: reference.ref_name.clone(),
+                branch_uuid: Uuid::parse_str(&reference.branch_uuid).map_err(|_| not_retained())?,
+                head_version_uuid: Uuid::parse_str(&reference.head_version_uuid)
+                    .map_err(|_| not_retained())?,
+                identity_sha256,
+            };
+            citation.key()?;
+            Ok(citation)
+        })
+        .collect::<Result<Vec<_>, GfError>>()?;
+    Ok(references)
 }

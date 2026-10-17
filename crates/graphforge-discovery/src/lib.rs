@@ -26,9 +26,9 @@ pub use rehome::{RehomedRepository, RepositorySnapshot, rehome_repository};
 pub use repository::{ObjectLocationTemplate, RepositoryMoved};
 
 pub use lineage::{
-    LineageBranch, LineageForkOrigin, LineageProposal, LineageVersion, RESEARCH_LINEAGE_CAPABILITY,
-    RESEARCH_LINEAGE_FORMAT, RESEARCH_LINEAGE_MEDIA_TYPE, ResearchLineage,
-    ResearchLineageReference,
+    LineageBoundaryAnchor, LineageBranch, LineageForkOrigin, LineageProposal, LineageVersion,
+    RESEARCH_LINEAGE_CAPABILITY, RESEARCH_LINEAGE_FORMAT, RESEARCH_LINEAGE_MEDIA_TYPE,
+    ResearchLineage, ResearchLineageReference,
 };
 pub use summary::{
     ProjectSummary, SummaryAccess, SummaryCorpusSize, SummaryFacts, SummaryGeographicCoverage,
@@ -1033,7 +1033,7 @@ impl DiscoveryManifest {
                 match format_major(&reference.format, "graphforge-research-lineage") {
                     Some(requested_major) => error.with_version(DiscoveryVersionDetails {
                         subject: DiscoveryVersionSubject::ResearchLineage,
-                        supported_major: Some(1),
+                        supported_major: Some(2),
                         requested_major,
                     }),
                     None => error,
@@ -1269,7 +1269,12 @@ fn validate_semantics(
             ));
         }
         prior = Some(current);
-        if requirement.capability != accepted_capability || requirement.major != 1 {
+        let accepted_major = if accepted_capability == RESEARCH_LINEAGE_CAPABILITY {
+            2
+        } else {
+            1
+        };
+        if requirement.capability != accepted_capability || requirement.major != accepted_major {
             return Err(DiscoveryError::new(
                 DiscoveryErrorCode::UnsupportedFuture,
                 Some("requirements"),
@@ -1277,7 +1282,8 @@ fn validate_semantics(
             )
             .with_version(DiscoveryVersionDetails {
                 subject: DiscoveryVersionSubject::Capability,
-                supported_major: (requirement.capability == accepted_capability).then_some(1),
+                supported_major: (requirement.capability == accepted_capability)
+                    .then_some(accepted_major),
                 requested_major: requirement.major,
             }));
         }

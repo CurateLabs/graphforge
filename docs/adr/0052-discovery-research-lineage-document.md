@@ -21,7 +21,7 @@ Hub consumers need read-only research lineage: Branch heads, immutable Versions,
 
 ## Decision
 
-Add optional manifest field `lineage { format, lineage_digest, object_digest }` selecting a `graphforge-research-lineage/1` object (`application/vnd.graphforge.research-lineage+json`). The document lists Branches (with `ref_name`, genealogy, and `selection_sha256`), Versions (`complete` or `projection` with optional per-Version package references), Fork origin citations, and published Proposals. Unknown required capabilities fail `unsupported_future` before content is read.
+Add optional manifest field `lineage { format, lineage_digest, object_digest }` selecting a `graphforge-research-lineage/2` object (`application/vnd.graphforge.research-lineage+json`). The document lists Branches (with `ref_name`, genealogy, and `selection_sha256`), Versions (`complete` or `projection` with optional per-Version package references), Fork origin citations, and published Proposals. Unknown required capabilities fail `unsupported_future` before content is read.
 
 `DiscoveryManifest::bind_lineage` requires repository and `immutable_version` agreement, digest match, and every Branch `ref_name` in the refs snapshot with a target equal to the manifest's `immutable_version`: one lineage document describes the Branch heads of exactly one repository snapshot, so a ref that targets another snapshot fails closed. `research_version_object` selects a Version's portable object separately from the Project package object; research packages obey the same byte rules as the Project package.
 
@@ -34,3 +34,22 @@ Cloning a Version verifies the package, then requires its research registry to c
 - Hubs can render lineage without graph I/O. Clone consumers validate advertised lineage and select its default Branch head unless a ref or immutable Version is explicit.
 - Partial projections are labeled `projection` and must cite `source_version_uuid`; Proposals reference projection payload Versions only.
 - Publish and resumable upload remain #1749; this ADR does not define write paths.
+
+## Continuable Branch history
+
+`graphforge-research-lineage/2` requires `research-lineage@2` and records ordered
+parents and intermediate Versions even when they have no package. The discovery
+envelope retains its own version. Older lineage readers reject the new format;
+unknown history semantics never become empty parents. The Rust schema and corpus
+are generated from the same parser authority.
+
+Identity-only `boundary_anchors` represent native-authenticated transient Project
+captures at root Branch creation. They carry a UUID, permanent identity commitment
+and owning root Branch UUID, never invented credit or content. Native package
+admission checks the exact genealogy, identity ledger and parentless boundary.
+Missing intermediate Branch commit records are not boundary anchors.
+
+A Branch clone installs the selected Branch as live through the native publication
+owner, preserving its record and head. Other advertised refs persist as read-only
+remote citations. An immutable-Version clone does not activate a Branch. Neither
+path changes archive read-only authority or imports destination access policy.

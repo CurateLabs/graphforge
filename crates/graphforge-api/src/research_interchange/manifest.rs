@@ -88,11 +88,13 @@ pub(super) fn build(
     let ancestry = descent(registry, &versions, &mut identities, cancellation)?;
     let version_projects = project_citations(owner, registry, &versions)?;
     let source_project_uuid = version_projects[&selected.version_uuid];
+    let history = historical_records(registry, &versions);
     let manifest = ResearchInterchangeManifest {
-        contract_version: 1,
+        history,
+        contract_version: 2,
         research_capability_version: graphforge_storage::research_versions::RESEARCH_VERSION,
         producer: format!(
-            "graphforge-storage/{};research-interchange/1",
+            "graphforge-storage/{};research-interchange/2",
             env!("CARGO_PKG_VERSION")
         ),
         source_project_uuid,
@@ -195,4 +197,20 @@ fn project_citations(
             (version.version_uuid, project)
         })
         .collect())
+}
+
+fn historical_records(
+    registry: &ResearchRegistry,
+    versions: &BTreeMap<Uuid, ResearchVersionRecord>,
+) -> BTreeMap<Uuid, ResearchVersionRecord> {
+    versions
+        .keys()
+        .flat_map(|id| registry.ancestors(*id))
+        .filter(|id| !versions.contains_key(id))
+        .filter_map(|id| {
+            registry
+                .historical_version(id)
+                .map(|record| (id, record.clone()))
+        })
+        .collect()
 }
