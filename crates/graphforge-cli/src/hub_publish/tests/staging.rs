@@ -81,6 +81,7 @@ fn publication_staging_accepts_a_bare_relative_project_path() {
             stage.path().parent().unwrap().canonicalize().unwrap(),
             std::env::current_dir().unwrap()
         );
+        std::fs::write("relative-stage-verified", b"verified").unwrap();
         return;
     }
     // Isolate the real relative-path invocation and its parent admission lock;
@@ -96,6 +97,11 @@ fn publication_staging_accepts_a_bare_relative_project_path() {
         .status()
         .unwrap();
     assert!(status.success());
+    assert_eq!(
+        std::fs::read(root.path().join("relative-stage-verified")).unwrap(),
+        b"verified",
+        "the child must execute its assertions, not merely match zero tests"
+    );
 }
 
 #[test]
