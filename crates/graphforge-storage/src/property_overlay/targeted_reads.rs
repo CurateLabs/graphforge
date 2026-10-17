@@ -1,5 +1,7 @@
 //! Targeted reads for authenticated property overlays.
 
+use crate::read_memory::{PrepaidBatch, ReadAdmission, ReadGrant};
+
 use parquet::arrow::arrow_reader::{
     ArrowReaderMetadata, ArrowReaderOptions, ParquetRecordBatchReaderBuilder, RowSelection,
     RowSelector,
@@ -198,6 +200,70 @@ impl PropertyTargetData {
     }
 }
 
+/// Targeted snapshot rows retained under the caller's actual query authority.
+#[doc(hidden)]
+pub struct PrepaidPropertyTargetData {
+    data: PropertyTargetData,
+    _memory: ReadGrant,
+}
+impl std::ops::Deref for PrepaidPropertyTargetData {
+    type Target = PropertyTargetData;
+    fn deref(&self) -> &Self::Target {
+        &self.data
+    }
+}
+impl PrepaidPropertyTargetData {
+    /// Construct the selected edge Arrow rows only after query admission.
+    ///
+    /// # Errors
+    /// Propagates cancellation, pool refusal, or a conversion error.
+    pub fn edge_batch_prepaid(
+        &self,
+        schema: &arrow::datatypes::Schema,
+        admission: &dyn ReadAdmission,
+    ) -> Result<PrepaidBatch, GfError> {
+        let mut bound = crate::property_scan_memory::codec_rows(self.rows.values(), schema)?;
+        // The legacy edge codec clones selected values into one HashMap per
+        // row before Arrow conversion. Pay these actual tables and their row
+        // vector independently; key/value payload copies are in codec_rows.
+        bound = crate::edge_property_index::query_add(
+            bound,
+            crate::edge_property_index::query_mul(
+                self.rows.len(),
+                std::mem::size_of::<(
+                    [u8; 16],
+                    std::collections::HashMap<String, graphforge_ir::IrLiteral>,
+                )>(),
+            )?,
+        )?;
+        for row in self.rows.values() {
+            let entries = row
+                .values
+                .keys()
+                .filter(|name| schema.column_with_name(name).is_some())
+                .count();
+            bound = crate::edge_property_index::query_add(
+                bound,
+                crate::property_scan_memory::hash_map_bytes(entries)?,
+            )?;
+        }
+        let mut grant = admission
+            .reserve(bound)
+            .map_err(GfError::from_execution_error)?;
+        let schema_bytes = schema
+            .fields
+            .size()
+            .checked_mul(4)
+            .ok_or_else(super::super::edge_property_index::query_size_error)?;
+        let schema_credit = grant
+            .split(schema_bytes)
+            .map_err(GfError::from_execution_error)?;
+        let batch = self.edge_batch(schema)?;
+        PrepaidBatch::seal_with_schema_credit(batch, grant, Some(schema_credit), None)
+            .map_err(GfError::from_execution_error)
+    }
+}
+
 /// Execute a data-only query read with the same corruption/resource refusal.
 #[doc(hidden)]
 pub fn read_authenticated_property_target_data_for_inventory(
@@ -218,6 +284,40 @@ pub fn read_authenticated_property_target_data_for_inventory(
     Ok(PropertyTargetData {
         present: targets.difference(&result.unresolved).copied().collect(),
         rows: result.rows,
+    })
+}
+
+/// Read targeted snapshots while retaining the caller's actual query authority.
+///
+/// # Errors
+/// Propagates cancellation, pool refusal, or authenticated corruption.
+#[doc(hidden)]
+pub fn read_authenticated_property_target_data_admitted(
+    inventory: &AuthenticatedPropertyInventory,
+    kind: PropertyRouteKind,
+    route: &str,
+    targets: &BTreeSet<[u8; 16]>,
+    admission: &dyn ReadAdmission,
+) -> Result<PrepaidPropertyTargetData, GfError> {
+    let result = read_property_targets_admitted(
+        inventory,
+        kind,
+        route,
+        targets,
+        None,
+        crate::lifecycle_io::is_active(),
+        true,
+        Some(admission),
+    )?;
+    let memory = result
+        .query_memory
+        .ok_or_else(crate::edge_property_index::query_size_error)?;
+    Ok(PrepaidPropertyTargetData {
+        data: PropertyTargetData {
+            present: targets.difference(&result.unresolved).copied().collect(),
+            rows: result.rows,
+        },
+        _memory: memory,
     })
 }
 
@@ -303,6 +403,7 @@ pub(super) struct TargetPropertyRows {
     pub(super) rows: BTreeMap<[u8; 16], PropertySnapshotRow>,
     unresolved: BTreeSet<[u8; 16]>,
     pub(super) metrics: PropertyOverlayMetrics,
+    query_memory: Option<ReadGrant>,
 }
 
 /// Whether a fragment whose footer proves `range` can hold a row for any
@@ -320,10 +421,6 @@ fn range_may_hold_unresolved(
 /// resolves later targets from row-group statistics and the UUID column. Every
 /// other caller (mutation baselines, ownership probes, replay) walks and
 /// decodes exactly as before.
-#[allow(
-    clippy::too_many_lines,
-    reason = "authenticated targeted read and its resource accounting share one lifecycle"
-)]
 pub(super) fn read_property_targets(
     inventory: &AuthenticatedPropertyInventory,
     kind: PropertyRouteKind,
@@ -333,6 +430,38 @@ pub(super) fn read_property_targets(
     collect: bool,
     frontier: bool,
 ) -> Result<TargetPropertyRows, GfError> {
+    read_property_targets_admitted(
+        inventory,
+        kind,
+        route,
+        targets,
+        replay_budget,
+        collect,
+        frontier,
+        None,
+    )
+}
+
+#[allow(
+    clippy::too_many_lines,
+    clippy::too_many_arguments,
+    reason = "authenticated targeted read and its resource accounting share one lifecycle"
+)]
+fn read_property_targets_admitted(
+    inventory: &AuthenticatedPropertyInventory,
+    kind: PropertyRouteKind,
+    route: &str,
+    targets: &BTreeSet<[u8; 16]>,
+    replay_budget: Option<usize>,
+    collect: bool,
+    frontier: bool,
+    query: Option<&dyn ReadAdmission>,
+) -> Result<TargetPropertyRows, GfError> {
+    let initial = crate::edge_property_index::query_add(
+        crate::edge_property_index::query_mul(targets.len(), 2048)?,
+        4096,
+    )?;
+    let mut query_memory = crate::edge_property_index::query_reserve(query, initial)?;
     let mut limits = PropertyOverlayLimits::default();
     if let Some(bytes) = replay_budget {
         limits.max_buffered_bytes = bytes as u64;
@@ -352,6 +481,7 @@ pub(super) fn read_property_targets(
             rows: found,
             unresolved,
             metrics: metrics.unwrap_or_default(),
+            query_memory,
         });
     };
     // Replay bounds its memory tightly and keeps file snapshots. Every other
@@ -378,6 +508,40 @@ pub(super) fn read_property_targets(
             )
         {
             continue;
+        }
+        let mut fragment_memory = crate::edge_property_index::query_reserve(query, 0)?;
+        if let (Some(query), Some(memory)) = (query, fragment_memory.as_mut()) {
+            let footer = inventory.fragment_footer_of(fragment, kind, route)?;
+            let object = fragment
+                .object
+                .get()
+                .and_then(|result| result.as_ref().ok())
+                .ok_or_else(crate::edge_property_index::query_size_error)?;
+            let source = if object.envelope.is_some() {
+                2 * super::bounded_object::MAX_PROPERTY_OBJECT_BYTES
+            } else if fragment.entry.byte_length <= super::inventory::MAX_IN_MEMORY_SNAPSHOT_BYTES {
+                usize::try_from(fragment.entry.byte_length)
+                    .map_err(|_| crate::edge_property_index::query_size_error())?
+            } else {
+                usize::try_from(super::readonly_snapshot::reservation_bytes(
+                    fragment.entry.byte_length,
+                )?)
+                .map_err(|_| crate::edge_property_index::query_size_error())?
+            };
+            let metadata = crate::edge_property_index::query_mul(footer.metadata.memory_size(), 4)?;
+            let selection = crate::edge_property_index::query_mul(footer.physical_rows, 128)?;
+            memory
+                .grow(
+                    query,
+                    crate::edge_property_index::query_add(
+                        source,
+                        crate::edge_property_index::query_add(
+                            metadata,
+                            crate::edge_property_index::query_add(selection, 64 * 1024)?,
+                        )?,
+                    )?,
+                )
+                .map_err(GfError::from_execution_error)?;
         }
         let counts = ReadCounts::new(collect);
         let opened = inventory.open_fragment(fragment, snapshot_scratch)?;
@@ -424,6 +588,25 @@ pub(super) fn read_property_targets(
                 None,
             )?
         };
+        if let (Some(query), Some(memory)) = (query, fragment_memory.as_mut()) {
+            let decoder = super::parquet_budget::parquet_resource_admission(
+                builder.metadata(),
+                limits,
+                opened.file.as_ref(),
+                &counts,
+                None,
+                targeted_batch_rows,
+                true,
+                corrupt,
+            )?;
+            memory
+                .grow(
+                    query,
+                    usize::try_from(decoder.with_codec)
+                        .map_err(|_| crate::edge_property_index::query_size_error())?,
+                )
+                .map_err(GfError::from_execution_error)?;
+        }
         let page_reservation_bytes = page_reservation_bytes.saturating_add(source_reservation);
         let admission = TargetReadAdmission {
             limits,
@@ -505,6 +688,9 @@ pub(super) fn read_property_targets(
                     paged: target_rows.paged,
                     batch_rows: targeted_batch_rows,
                     admission,
+                    query: query
+                        .zip(query_memory.as_mut())
+                        .map(|(query, memory)| (query, memory, initial)),
                 },
                 &counts,
                 &mut unresolved,
@@ -595,6 +781,7 @@ pub(super) fn read_property_targets(
         rows: found,
         unresolved,
         metrics: metrics.unwrap_or_default(),
+        query_memory,
     })
 }
 
@@ -790,10 +977,11 @@ struct TargetDecodeOptions<'a> {
     paged: Option<ArrowReaderMetadata>,
     batch_rows: usize,
     admission: TargetReadAdmission,
+    query: Option<(&'a dyn ReadAdmission, &'a mut ReadGrant, usize)>,
 }
 
 fn decode_target_row_groups(
-    options: TargetDecodeOptions<'_>,
+    mut options: TargetDecodeOptions<'_>,
     counts: &ReadCounts,
     unresolved: &mut std::collections::BTreeSet<[u8; 16]>,
     found: &mut BTreeMap<[u8; 16], PropertySnapshotRow>,
@@ -824,6 +1012,14 @@ fn decode_target_row_groups(
             options.admission,
             *retained_bytes,
         )?;
+        if let Some((query, memory, _)) = options.query.as_mut() {
+            memory
+                .grow(
+                    *query,
+                    crate::property_scan_memory::decoded_rows(&batch, options.kind.uuid_field())?,
+                )
+                .map_err(GfError::from_execution_error)?;
+        }
         let decoded = decode_snapshot_batch(&batch, options.kind.uuid_field())?;
         if decoded
             .iter()
@@ -867,6 +1063,26 @@ fn decode_target_row_groups(
                     found.insert(row.uuid, row);
                 }
             }
+        }
+        if let Some((_, memory, base)) = options.query.as_mut() {
+            // Builders and source Arrow batches retain their separate fragment
+            // authority. Transfer only the actual newest snapshot heaps; this
+            // never grows credit after allocation or charges old fragments twice.
+            let retained = found.values().try_fold(*base, |bytes, row| {
+                crate::edge_property_index::query_add(
+                    bytes,
+                    // The decoder inserts non-NULL values and removes only
+                    // the tombstone key. Older wider schemas never change a
+                    // previously resolved row's own map allocation.
+                    crate::property_scan_memory::retained_decoded_row(
+                        row,
+                        crate::edge_property_index::query_add(row.values.len(), 1)?,
+                    )?,
+                )
+            })?;
+            memory
+                .shrink_to(retained)
+                .map_err(GfError::from_execution_error)?;
         }
     }
     Ok(())

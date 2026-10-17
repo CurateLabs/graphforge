@@ -40,9 +40,10 @@ pub(crate) use streaming_merge::RouteRead;
 mod targeted_reads;
 use targeted_reads::read_property_targets;
 pub use targeted_reads::{
-    EdgeOwnerProbeWork, PropertyTargetData, PropertyTargetSnapshots,
+    EdgeOwnerProbeWork, PrepaidPropertyTargetData, PropertyTargetData, PropertyTargetSnapshots,
     read_authenticated_property_presence_for_inventory,
     read_authenticated_property_snapshot_data_for_inventory,
+    read_authenticated_property_target_data_admitted,
     read_authenticated_property_target_data_for_inventory,
     read_authenticated_property_targets_for_inventory, resolve_existing_edge_property_owner_data,
     resolve_existing_edge_property_owners,

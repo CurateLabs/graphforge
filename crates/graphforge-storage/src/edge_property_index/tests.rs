@@ -4,8 +4,196 @@
 //! `graphforge-api/tests/edge_property_index.rs`.
 
 use super::*;
+use crate::read_memory::{ReadAdmission, ReadGrant};
 use arrow::array::{BooleanArray, FixedSizeBinaryBuilder, Float64Array, Int64Array, StringArray};
 use arrow::datatypes::Field;
+use datafusion::execution::memory_pool::{
+    GreedyMemoryPool, MemoryConsumer, MemoryPool, MemoryReservation,
+};
+use std::sync::Mutex;
+
+struct QueryAdmission(Mutex<MemoryReservation>);
+impl ReadAdmission for QueryAdmission {
+    fn reserve(&self, bytes: usize) -> datafusion::error::Result<ReadGrant> {
+        let memory = self.0.lock().unwrap();
+        memory.try_grow(bytes)?;
+        Ok(ReadGrant::from_reserved(memory.split(bytes)))
+    }
+    fn check_cancelled(&self) -> datafusion::error::Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn multishard_property_gather_fits_query_pool_with_complete_columns() {
+    bounded_multishard_gather(false);
+}
+
+#[test]
+fn multishard_property_gather_fits_query_pool_with_sparse_columns() {
+    bounded_multishard_gather(true);
+}
+
+fn bounded_multishard_gather(sparse: bool) {
+    const SHARDS: usize = 64;
+    const ROWS: usize = 64;
+    // A roomy oracle and a constrained pool must return exactly the same
+    // values. All input shards have separate authority before construction.
+    for budget in [32 * 1024 * 1024, 2 * 1024 * 1024] {
+        let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(budget));
+        let admission = QueryAdmission(Mutex::new(
+            MemoryConsumer::new("multishard property gather").register(&pool),
+        ));
+        let inputs = admission.reserve(512 * 1024).unwrap();
+        let hits = (0..SHARDS)
+            .rev()
+            .map(|shard| {
+                let keys = (shard * ROWS..(shard + 1) * ROWS).collect::<Vec<_>>();
+                let columns = if sparse && shard % 2 == 1 {
+                    BTreeMap::new()
+                } else {
+                    BTreeMap::from([(
+                        0,
+                        Arc::new(Int64Array::from_iter_values(
+                            keys.iter().map(|key| *key as i64 * 3),
+                        )) as ArrayRef,
+                    )])
+                };
+                HitShard { keys, columns }
+            })
+            .collect::<Vec<_>>();
+        let property = "timestamp".to_owned();
+        let demanded = BTreeMap::from([(0, &property)]);
+        let root = tempfile::tempdir().unwrap();
+        let mut packs = PackHandles::new(root.path().to_owned(), PAGE_ROWS as u32)
+            .with_admission(Some(&admission))
+            .unwrap();
+        let (keys, columns) = assemble(&hits, &demanded, &mut packs).unwrap();
+        assert_eq!(keys, (0..SHARDS * ROWS).collect::<Vec<_>>());
+        assert_eq!(columns.len(), 1);
+        assert_eq!(columns[0].0, property);
+        let actual = columns[0].1.as_any().downcast_ref::<Int64Array>().unwrap();
+        let expected = (0..SHARDS * ROWS)
+            .map(|key| (!(sparse && key / ROWS % 2 == 1)).then_some(key as i64 * 3))
+            .collect::<Vec<_>>();
+        assert_eq!(actual.iter().collect::<Vec<_>>(), expected);
+        assert!(pool.reserved() >= inputs.size() + actual.get_array_memory_size());
+        drop(columns);
+        drop(keys);
+        drop(packs);
+        drop(hits);
+        drop(inputs);
+        drop(admission);
+        assert_eq!(pool.reserved(), 0);
+    }
+}
+
+#[test]
+fn property_page_take_admits_nested_child_index_workspace() {
+    bounded_nested_interleave(true);
+}
+
+#[test]
+fn property_gather_admits_nested_child_index_workspace() {
+    bounded_nested_interleave(false);
+}
+
+fn bounded_nested_interleave(from_page: bool) {
+    use arrow::array::{ListArray, StructArray};
+    use arrow::buffer::{OffsetBuffer, ScalarBuffer};
+
+    const ELEMENTS: i32 = 1_000_000;
+    for wrapped in [false, true] {
+        let values = BooleanArray::from_iter((0..ELEMENTS).map(|i| Some(i % 3 == 0)));
+        let list: ArrayRef = Arc::new(ListArray::new(
+            Arc::new(Field::new("item", DataType::Boolean, true)),
+            OffsetBuffer::new(ScalarBuffer::from(vec![0, ELEMENTS])),
+            Arc::new(values),
+            None,
+        ));
+        let source: ArrayRef = if wrapped {
+            Arc::new(StructArray::new(
+                vec![Arc::new(Field::new(
+                    "flags",
+                    list.data_type().clone(),
+                    true,
+                ))]
+                .into(),
+                vec![list],
+                None,
+            ))
+        } else {
+            list
+        };
+        let property = "flags".to_owned();
+        let demanded = BTreeMap::from([(0, &property)]);
+        let root = tempfile::tempdir().unwrap();
+        let (encoded, checksum) = encode_paged(
+            &property,
+            source.data_type(),
+            &source,
+            Keys::Values,
+            PAGE_ROWS,
+        )
+        .unwrap();
+        std::fs::write(root.path().join("00000000.epk"), &encoded).unwrap();
+        let seal = BlobSeal {
+            pack: 0,
+            offset: 0,
+            byte_length: encoded.len() as u64,
+            xxh64: checksum,
+        };
+        let shard = ShardEntry {
+            rows: 1,
+            first: String::new(),
+            last: String::new(),
+            uuids: seal,
+            columns: vec![ColumnEntry {
+                column: 0,
+                blob: seal,
+            }],
+            ids: None,
+            id_min: None,
+            id_max: None,
+        };
+        for budget in [64 * 1024 * 1024, 2 * 1024 * 1024] {
+            let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(budget));
+            let admission = QueryAdmission(Mutex::new(
+                MemoryConsumer::new("nested property interleave").register(&pool),
+            ));
+            let inputs = admission.reserve(512 * 1024).unwrap();
+            let mut packs = PackHandles::new(root.path().to_owned(), PAGE_ROWS as u32)
+                .with_admission(Some(&admission))
+                .unwrap();
+            let hits = [HitShard {
+                keys: vec![10_u64],
+                columns: BTreeMap::from([(0, source.clone())]),
+            }];
+            let result = if from_page {
+                take_columns(&mut packs, &shard, &[0], &demanded)
+                    .map(|mut columns| columns.remove(&0).unwrap())
+            } else {
+                assemble(&hits, &demanded, &mut packs).map(|(_, mut columns)| columns.remove(0).1)
+            };
+            if budget == 2 * 1024 * 1024 {
+                let error =
+                    result.expect_err("child index workspace must be admitted before interleave");
+                assert!(
+                    error.to_string().contains("nested property interleave"),
+                    "{error}"
+                );
+            } else {
+                let actual = result.unwrap();
+                assert_eq!(actual.as_ref(), source.as_ref());
+            }
+            drop(hits);
+            drop(packs);
+            drop(inputs);
+            drop(admission);
+            assert_eq!(pool.reserved(), 0);
+        }
+    }
+}
 
 fn uuid(index: u128) -> [u8; 16] {
     (0x2000_0000_0000_0000_0000_0000_0000_0000_u128 | (index + 1)).to_be_bytes()
@@ -1088,7 +1276,7 @@ fn an_id_map_answers_by_id_as_the_shards_do() {
             hits.push(hit);
         }
     }
-    let (direct_ids, direct_columns) = assemble(&hits, &demanded).unwrap();
+    let (direct_ids, direct_columns) = assemble(&hits, &demanded, &mut packs).unwrap();
     assert_eq!(found.ids, direct_ids);
     for ((_, from_map), (_, direct)) in found.columns.iter().zip(&direct_columns) {
         assert_eq!(from_map.to_data(), direct.to_data());

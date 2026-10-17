@@ -91,8 +91,10 @@ use crate::property_overlay::{
     AuthenticatedPropertyInventory, MAX_PROPERTY_OBJECT_BYTES, PROPERTY_TOMBSTONE_FIELD,
     PropertyOverlayLimits, PropertyRouteKind, RouteRead,
 };
+use crate::read_memory::{PrepaidBatch, ReadAdmission, ReadGrant};
 use crate::topology_identity::EdgeIdResolver;
 
+mod interleave_memory;
 mod pages;
 use pages::{Keys, PAGE_ROWS, PackHandles, encode_paged};
 
@@ -143,11 +145,38 @@ struct BlobSeal {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(from = "ColumnEntryFields")]
 struct ColumnEntry {
     /// Index into the manifest's `columns`.
     column: usize,
     #[serde(flatten)]
     blob: BlobSeal,
+}
+
+/// Decode the flat wire fields directly. Serde's generic flatten decoder
+/// buffers arbitrary unknown JSON values before visiting the fixed fields.
+/// A typed wire record instead skips unknown values without constructing them.
+#[derive(Deserialize)]
+struct ColumnEntryFields {
+    column: usize,
+    pack: u32,
+    offset: u64,
+    byte_length: u64,
+    xxh64: u64,
+}
+
+impl From<ColumnEntryFields> for ColumnEntry {
+    fn from(fields: ColumnEntryFields) -> Self {
+        Self {
+            column: fields.column,
+            blob: BlobSeal {
+                pack: fields.pack,
+                offset: fields.offset,
+                byte_length: fields.byte_length,
+                xxh64: fields.xxh64,
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -755,6 +784,7 @@ mod tests;
 struct CurrentManifest {
     manifest: Manifest,
     ranges: Vec<([u8; 16], [u8; 16])>,
+    _query_memory: Option<ReadGrant>,
 }
 
 /// The manifest of a current index for this route, `None` when no current
@@ -765,15 +795,41 @@ fn current_manifest(
     inventory: &AuthenticatedPropertyInventory,
     route: &str,
 ) -> Result<Option<CurrentManifest>, GfError> {
+    current_manifest_admitted(project_dir, inventory, route, None)
+}
+
+fn current_manifest_admitted(
+    project_dir: &Path,
+    inventory: &AuthenticatedPropertyInventory,
+    route: &str,
+    admission: Option<&dyn ReadAdmission>,
+) -> Result<Option<CurrentManifest>, GfError> {
+    let _path_memory = query_reserve(
+        admission,
+        query_add(query_mul(project_dir.as_os_str().len(), 4)?, 4096)?,
+    )?;
     let path = project_dir.join(manifest_relative_path(route));
-    let mut file = match File::open(&path) {
+    let file = match File::open(&path) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(storage("open manifest", &error)),
     };
     crate::graph_admission::admit_file(&file)?;
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)
+    let length = usize::try_from(
+        file.metadata()
+            .map_err(|e| storage("stat manifest", &e))?
+            .len(),
+    )
+    .map_err(|_| query_size_error())?;
+    // Typed records skip unknown JSON values. The largest repeated expansion
+    // is Vec<String>: old/new capacity overlap costs at most three 24-byte
+    // slots per three-byte empty-string token. 32 wire bytes cover that,
+    // owned strings, the input Vec and escaped-string scratch. The fixed
+    // allowance covers singleton capacities, record headers and UUID ranges.
+    let mut query_memory = query_reserve(admission, query_add(query_mul(length, 32)?, 64 * 1024)?)?;
+    let mut bytes = Vec::with_capacity(query_add(length, 1)?);
+    file.take(query_add(length, 1)? as u64)
+        .read_to_end(&mut bytes)
         .map_err(|e| storage("read manifest", &e))?;
     crate::lifecycle_io::record_read(crate::StorageIoPhase::ReadPathScan, bytes.len() as u64, 1);
     let manifest = decode_manifest(&bytes, &path)?;
@@ -802,7 +858,23 @@ fn current_manifest(
         })
         .collect::<Option<Vec<_>>>()
         .ok_or_else(|| validation("manifest holds a malformed shard range"))?;
-    Ok(Some(CurrentManifest { manifest, ranges }))
+    drop(bytes);
+    if let Some(memory) = query_memory.as_mut() {
+        memory
+            .shrink_to(query_add(
+                manifest_allocation_bytes(&manifest)?,
+                query_mul(
+                    ranges.capacity(),
+                    std::mem::size_of::<([u8; 16], [u8; 16])>(),
+                )?,
+            )?)
+            .map_err(GfError::from_execution_error)?;
+    }
+    Ok(Some(CurrentManifest {
+        manifest,
+        ranges,
+        _query_memory: query_memory,
+    }))
 }
 
 /// Whether a current index describes this route.
@@ -848,6 +920,19 @@ struct HitShard<K> {
     columns: BTreeMap<usize, ArrayRef>,
 }
 
+/// Only the selected keys and arrays survive a shard read. Page directories,
+/// decoded sources and kernel scratch have dropped before this is measured.
+fn retained_hit_bytes<K>(hit: Option<&HitShard<K>>) -> Result<usize, GfError> {
+    let Some(hit) = hit else { return Ok(0) };
+    hit.columns.values().try_fold(
+        query_add(
+            query_mul(hit.keys.capacity(), std::mem::size_of::<K>())?,
+            query_add(256, query_mul(hit.columns.len(), 1024)?)?,
+        )?,
+        |bytes, array| query_add(bytes, pages::retained_array_bytes(array.as_ref())?),
+    )
+}
+
 /// Look the properties of `targets` up in the index of `route`. Reads the
 /// manifest, the UUID blob of the shards whose UUID range holds a target, and
 /// the demanded column blobs of the shards that hold a match, each byte range
@@ -865,18 +950,50 @@ pub fn lookup_edge_properties(
     targets: &BTreeSet<[u8; 16]>,
     properties: &[String],
 ) -> Result<EdgePropertyLookup, GfError> {
+    lookup_edge_properties_inner(project_dir, inventory, route, targets, properties, None)
+        .map(|(rows, _)| rows)
+}
+
+/// The existing targeted lookup with query authority before source allocation.
+/// Non-query callers retain the original lookup's independent authority.
+///
+/// # Errors
+/// Returns corruption, cancellation, or a typed query-pool refusal.
+#[allow(clippy::too_many_arguments)]
+fn lookup_edge_properties_inner(
+    project_dir: &Path,
+    inventory: &AuthenticatedPropertyInventory,
+    route: &str,
+    targets: &BTreeSet<[u8; 16]>,
+    properties: &[String],
+    admission: Option<&dyn ReadAdmission>,
+) -> Result<(EdgePropertyLookup, Option<ReadGrant>), GfError> {
     if !inventory.has_property_route(PropertyRouteKind::Edge, route) {
-        return Ok(EdgePropertyLookup::Absent);
+        return Ok((EdgePropertyLookup::Absent, None));
     }
-    let Some(current) = current_manifest(project_dir, inventory, route)? else {
-        return Ok(EdgePropertyLookup::NotIndexed);
+    let Some(current) = current_manifest_admitted(project_dir, inventory, route, admission)? else {
+        return Ok((EdgePropertyLookup::NotIndexed, None));
     };
+    let _request_memory = query_reserve(
+        admission,
+        query_add(
+            4096,
+            query_add(
+                query_add(
+                    query_mul(targets.len(), std::mem::size_of::<[u8; 16]>())?,
+                    query_mul(current.manifest.shards.len(), 1024)?,
+                )?,
+                query_mul(properties.len(), 256)?,
+            )?,
+        )?,
+    )?;
     let demanded = demanded_columns(&current.manifest, properties);
     let sorted: Vec<[u8; 16]> = targets.iter().copied().collect();
     let mut packs = PackHandles::new(
         index_dir(project_dir).join(&current.manifest.pack_dir),
         current.manifest.page_rows,
-    );
+    )
+    .with_admission(admission)?;
     let mut hits: Vec<HitShard<[u8; 16]>> = Vec::new();
     for (shard, (first, last)) in current.manifest.shards.iter().zip(&current.ranges) {
         let begin = sorted.partition_point(|target| target < first);
@@ -884,15 +1001,29 @@ pub fn lookup_edge_properties(
         if begin == end {
             continue;
         }
-        if let Some(hit) = read_hit_shard(&mut packs, shard, &sorted[begin..end], &demanded)? {
+        let checkpoint = packs.checkpoint();
+        packs.charge(query_add(
+            // UUID keys/row Vec growth and page/range selection can coexist.
+            // A valid manifest may use one row per page.
+            query_mul(
+                usize::try_from(shard.rows).map_err(|_| query_size_error())?,
+                128,
+            )?,
+            4096,
+        )?)?;
+        let hit = read_hit_shard(&mut packs, shard, &sorted[begin..end], &demanded)?;
+        if packs.is_admitted() {
+            packs.retain_since(checkpoint, retained_hit_bytes(hit.as_ref())?)?;
+        }
+        if let Some(hit) = hit {
             hits.push(hit);
         }
     }
-    let (uuids, columns) = assemble(&hits, &demanded)?;
-    Ok(EdgePropertyLookup::Indexed(IndexedEdgeProperties {
-        uuids,
-        columns,
-    }))
+    let (uuids, columns) = assemble(&hits, &demanded, &mut packs)?;
+    Ok((
+        EdgePropertyLookup::Indexed(IndexedEdgeProperties { uuids, columns }),
+        packs.take_memory(),
+    ))
 }
 
 /// The outcome of looking edges up by surrogate id.
@@ -939,24 +1070,65 @@ pub fn lookup_edge_properties_by_id(
     properties: &[String],
     map: Option<&EdgeIdMap>,
 ) -> Result<EdgePropertyIdLookup, GfError> {
+    lookup_edge_properties_by_id_inner(
+        project_dir,
+        inventory,
+        route,
+        targets,
+        properties,
+        map,
+        None,
+    )
+    .map(|(rows, _)| rows)
+}
+
+/// The existing targeted lookup with query authority before source allocation.
+/// Non-query callers retain the original lookup's independent authority.
+///
+/// # Errors
+/// Returns corruption, cancellation, or a typed query-pool refusal.
+#[allow(clippy::too_many_arguments)]
+fn lookup_edge_properties_by_id_inner(
+    project_dir: &Path,
+    inventory: &AuthenticatedPropertyInventory,
+    route: &str,
+    targets: &BTreeSet<u64>,
+    properties: &[String],
+    map: Option<&EdgeIdMap>,
+    admission: Option<&dyn ReadAdmission>,
+) -> Result<(EdgePropertyIdLookup, Option<ReadGrant>), GfError> {
     if !inventory.has_property_route(PropertyRouteKind::Edge, route) {
-        return Ok(EdgePropertyIdLookup::Absent);
+        return Ok((EdgePropertyIdLookup::Absent, None));
     }
     if let Some(map) = map.filter(|map| map.describes(inventory, route)) {
-        return map.lookup(targets, properties);
+        return map.lookup_admitted(targets, properties, admission);
     }
-    let Some(current) = current_manifest(project_dir, inventory, route)? else {
-        return Ok(EdgePropertyIdLookup::NotAddressable);
+    let Some(current) = current_manifest_admitted(project_dir, inventory, route, admission)? else {
+        return Ok((EdgePropertyIdLookup::NotAddressable, None));
     };
     if !ids_are_current(&current.manifest, inventory, route) {
-        return Ok(EdgePropertyIdLookup::NotAddressable);
+        return Ok((EdgePropertyIdLookup::NotAddressable, None));
     }
+    let _request_memory = query_reserve(
+        admission,
+        query_add(
+            4096,
+            query_add(
+                query_add(
+                    query_mul(targets.len(), std::mem::size_of::<u64>())?,
+                    query_mul(current.manifest.shards.len(), 1024)?,
+                )?,
+                query_mul(properties.len(), 256)?,
+            )?,
+        )?,
+    )?;
     let demanded = demanded_columns(&current.manifest, properties);
     let sorted: Vec<u64> = targets.iter().copied().collect();
     let mut packs = PackHandles::new(
         index_dir(project_dir).join(&current.manifest.pack_dir),
         current.manifest.page_rows,
-    );
+    )
+    .with_admission(admission)?;
     let mut hits: Vec<HitShard<u64>> = Vec::new();
     for shard in &current.manifest.shards {
         let (Some(seal), Some(min), Some(max)) = (shard.ids, shard.id_min, shard.id_max) else {
@@ -967,22 +1139,27 @@ pub fn lookup_edge_properties_by_id(
         if begin == end {
             continue;
         }
-        if let Some(hit) = read_hit_shard_by_id(
+        let checkpoint = packs.checkpoint();
+        let hit = read_hit_shard_by_id(
             &mut packs,
             shard,
             seal,
             (min, max),
             &sorted[begin..end],
             &demanded,
-        )? {
+        )?;
+        if packs.is_admitted() {
+            packs.retain_since(checkpoint, retained_hit_bytes(hit.as_ref())?)?;
+        }
+        if let Some(hit) = hit {
             hits.push(hit);
         }
     }
-    let (ids, columns) = assemble(&hits, &demanded)?;
-    Ok(EdgePropertyIdLookup::Indexed(IndexedEdgeIds {
-        ids,
-        columns,
-    }))
+    let (ids, columns) = assemble(&hits, &demanded, &mut packs)?;
+    Ok((
+        EdgePropertyIdLookup::Indexed(IndexedEdgeIds { ids, columns }),
+        packs.take_memory(),
+    ))
 }
 
 /// Where the row of one edge id is: its shard in the manifest and its row
@@ -1146,7 +1323,7 @@ impl EdgeIdMap {
     /// Read every id page of shard `index` into `out`, one entry per row of the
     /// shard, and return the number of pages read.
     fn decode_shard(
-        packs: &mut PackHandles,
+        packs: &mut PackHandles<'_>,
         index: usize,
         shard: &ShardEntry,
         out: &mut [IdLocation],
@@ -1224,11 +1401,42 @@ impl EdgeIdMap {
 
     /// The rows of the edges `targets` the route holds and their demanded
     /// columns, reading only the column pages that hold those rows.
+    #[cfg(test)]
     fn lookup(
         &self,
         targets: &BTreeSet<u64>,
         properties: &[String],
     ) -> Result<EdgePropertyIdLookup, GfError> {
+        self.lookup_admitted(targets, properties, None)
+            .map(|(rows, _)| rows)
+    }
+
+    fn lookup_admitted(
+        &self,
+        targets: &BTreeSet<u64>,
+        properties: &[String],
+        admission: Option<&dyn ReadAdmission>,
+    ) -> Result<(EdgePropertyIdLookup, Option<ReadGrant>), GfError> {
+        let _request_memory = query_reserve(
+            admission,
+            query_add(
+                query_add(query_mul(self.pack_dir.as_os_str().len(), 4)?, 4096)?,
+                query_add(
+                    // Each matched target contributes one u64 and usize to
+                    // the per-shard vectors. Their doubling growth overlaps
+                    // old/new capacities by at most three elements per row.
+                    // BTreeMap nodes scale with hit shards, not target rows.
+                    query_add(
+                        query_mul(
+                            targets.len(),
+                            3 * (std::mem::size_of::<u64>() + std::mem::size_of::<usize>()),
+                        )?,
+                        query_mul(targets.len().min(self.manifest.shards.len()), 1024)?,
+                    )?,
+                    query_mul(properties.len(), 256)?,
+                )?,
+            )?,
+        )?;
         let demanded = demanded_columns(&self.manifest, properties);
         // The rows of each shard in ascending id order, which is the order the
         // targets are taken in.
@@ -1256,7 +1464,8 @@ impl EdgeIdMap {
             ids.push(*target);
             rows.push(location.row as usize);
         }
-        let mut packs = PackHandles::new(self.pack_dir.clone(), self.manifest.page_rows);
+        let mut packs = PackHandles::new(self.pack_dir.clone(), self.manifest.page_rows)
+            .with_admission(admission)?;
         let mut hits: Vec<HitShard<u64>> = Vec::with_capacity(by_shard.len());
         for (shard, (ids, rows)) in by_shard {
             let entry = &self.manifest.shards[shard as usize];
@@ -1264,11 +1473,11 @@ impl EdgeIdMap {
             hits.push(HitShard { keys: ids, columns });
         }
         crate::io_stats::record_edge_property_id_map_hit();
-        let (ids, columns) = assemble(&hits, &demanded)?;
-        Ok(EdgePropertyIdLookup::Indexed(IndexedEdgeIds {
-            ids,
-            columns,
-        }))
+        let (ids, columns) = assemble(&hits, &demanded, &mut packs)?;
+        Ok((
+            EdgePropertyIdLookup::Indexed(IndexedEdgeIds { ids, columns }),
+            packs.take_memory(),
+        ))
     }
 }
 
@@ -1283,6 +1492,42 @@ fn manifest_resident_bytes(manifest: &Manifest) -> u64 {
             .map(|entry| entry.first.len() + entry.last.len())
             .sum::<usize>();
     (manifest.shards.len() * shard + strings + std::mem::size_of::<Manifest>()) as u64
+}
+
+fn manifest_allocation_bytes(manifest: &Manifest) -> Result<usize, GfError> {
+    let mut bytes = query_add(
+        std::mem::size_of::<Manifest>(),
+        query_add(
+            query_mul(
+                manifest.shards.capacity(),
+                std::mem::size_of::<ShardEntry>(),
+            )?,
+            query_mul(manifest.columns.capacity(), std::mem::size_of::<String>())?,
+        )?,
+    )?;
+    for value in [
+        &manifest.format,
+        &manifest.route,
+        &manifest.source_digest,
+        &manifest.pack_dir,
+    ]
+    .into_iter()
+    .chain(manifest.topology_digest.iter())
+    .chain(manifest.columns.iter())
+    {
+        bytes = query_add(bytes, value.capacity())?;
+    }
+    for shard in &manifest.shards {
+        bytes = query_add(
+            bytes,
+            query_add(shard.first.capacity(), shard.last.capacity())?,
+        )?;
+        bytes = query_add(
+            bytes,
+            query_mul(shard.columns.capacity(), std::mem::size_of::<ColumnEntry>())?,
+        )?;
+    }
+    Ok(bytes)
 }
 
 /// Whether the ids of a current manifest were joined from the topology the
@@ -1384,7 +1629,28 @@ fn shard_length(stored: &[StoredColumn<'_>], start: usize, remaining: usize) -> 
 fn assemble<K: Ord + Copy>(
     hits: &[HitShard<K>],
     demanded: &BTreeMap<usize, &String>,
+    packs: &mut PackHandles<'_>,
 ) -> Result<(Vec<K>, GatheredColumns), GfError> {
+    let rows = hits
+        .iter()
+        .try_fold(0, |n, hit| query_add(n, hit.keys.len()))?;
+    packs.charge(query_add(
+        query_mul(rows, 128)?,
+        query_mul(demanded.len(), 4096)?,
+    )?)?;
+    for hit in hits {
+        for array in hit.columns.values() {
+            // All hit rows occur exactly once in final order. interleave can
+            // grow buffers and creates a validity bitmap even for all NULLs.
+            packs.charge(query_add(
+                query_mul(array.get_array_memory_size(), 4)?,
+                // Recursive child-index scratch is admitted by interleave.
+                // Only the output validity bitmap adds row-scaled storage
+                // beyond the copied source payload here.
+                query_add(array.len().div_ceil(8), 4096)?,
+            )?)?;
+        }
+    }
     let mut located: Vec<(K, usize, usize)> = hits
         .iter()
         .enumerate()
@@ -1408,7 +1674,7 @@ fn assemble<K: Ord + Copy>(
         .collect::<Vec<_>>();
     Ok((
         located.iter().map(|(key, _, _)| *key).collect(),
-        gather_columns(hits, &indices, demanded)?,
+        gather_columns(hits, &indices, demanded, packs)?,
     ))
 }
 
@@ -1416,7 +1682,7 @@ fn assemble<K: Ord + Copy>(
 /// the shard holds any of `targets`, the demanded column blobs. `None` when the
 /// shard holds none of them.
 fn read_hit_shard(
-    packs: &mut PackHandles,
+    packs: &mut PackHandles<'_>,
     shard: &ShardEntry,
     targets: &[[u8; 16]],
     demanded: &BTreeMap<usize, &String>,
@@ -1456,13 +1722,23 @@ fn read_hit_shard(
 /// its UUID blob. The shard's ids are in UUID order, not id order, so the blob
 /// is scanned once and each id is checked against the sorted `targets`.
 fn read_hit_shard_by_id(
-    packs: &mut PackHandles,
+    packs: &mut PackHandles<'_>,
     shard: &ShardEntry,
     seal: BlobSeal,
     (min, max): (u64, u64),
     targets: &[u64],
     demanded: &BTreeMap<usize, &String>,
 ) -> Result<Option<HitShard<u64>>, GfError> {
+    // A corrupt id page can repeat one requested id in every row. Bound
+    // location/sort/row vectors from the authenticated shard row count before
+    // any push, independently of the number of distinct requested targets.
+    packs.charge(query_add(
+        query_mul(
+            usize::try_from(shard.rows).map_err(|_| query_size_error())?,
+            64,
+        )?,
+        4096,
+    )?)?;
     let blob = packs.open_blob(seal, shard.rows, Keys::Id)?;
     blob.check_id_range(min, max)?;
     let wanted = blob.id_pages(targets);
@@ -1503,7 +1779,7 @@ fn read_hit_shard_by_id(
 
 /// The demanded column blobs of `shard`, reduced to `rows`.
 fn take_columns(
-    packs: &mut PackHandles,
+    packs: &mut PackHandles<'_>,
     shard: &ShardEntry,
     rows: &[usize],
     demanded: &BTreeMap<usize, &String>,
@@ -1513,12 +1789,30 @@ fn take_columns(
         if !demanded.contains_key(&entry.column) {
             continue;
         }
+        let checkpoint = packs.checkpoint();
+        packs.charge(query_add(query_mul(rows.len(), 128)?, 4096)?)?;
         let blob = packs.open_blob(entry.blob, shard.rows, Keys::Values)?;
         let (wanted, positions) = blob.row_pages(rows);
         let decoded = packs.read_pages(&blob, &wanted)?;
-        let sources = decoded.iter().map(AsRef::as_ref).collect::<Vec<_>>();
-        let taken = arrow::compute::interleave(&sources, &positions)
-            .map_err(|e| validation(e.to_string()))?;
+        let bytes = decoded
+            .iter()
+            .try_fold(0, |n, array| query_add(n, array.get_array_memory_size()))?;
+        // Target keys and row locations are unique within a shard, so the
+        // selected nested payload cannot exceed all decoded page payloads.
+        packs.charge(query_add(query_mul(bytes, 4)?, 4096)?)?;
+        let taken = packs.interleave(&decoded, &positions)?;
+        // The kernel may retain source backing (notably view payloads), so
+        // count complete backing capacities before releasing source credit.
+        let retained = if packs.is_admitted() {
+            query_add(pages::retained_array_bytes(taken.as_ref())?, 1024)?
+        } else {
+            0
+        };
+        drop(decoded);
+        drop(positions);
+        drop(wanted);
+        drop(blob);
+        packs.retain_since(checkpoint, retained)?;
         columns.insert(entry.column, taken);
     }
     Ok(columns)
@@ -1530,6 +1824,7 @@ fn gather_columns<K>(
     hits: &[HitShard<K>],
     indices: &[(usize, usize)],
     demanded: &BTreeMap<usize, &String>,
+    packs: &mut PackHandles<'_>,
 ) -> Result<GatheredColumns, GfError> {
     let mut columns = Vec::new();
     for (index, property) in demanded {
@@ -1541,6 +1836,20 @@ fn gather_columns<K>(
         }) else {
             continue;
         };
+        // Fund the final gathered slots once. Only shards missing this
+        // property construct NULL sources, each at that shard's own length.
+        let mut construction = crate::read_memory::null_bytes(&data_type, indices.len())
+            .map_err(GfError::from_execution_error)?;
+        for hit in hits {
+            if !hit.columns.contains_key(index) {
+                construction = query_add(
+                    construction,
+                    crate::read_memory::null_bytes(&data_type, hit.keys.len())
+                        .map_err(GfError::from_execution_error)?,
+                )?;
+            }
+        }
+        packs.charge(construction)?;
         let sources: Vec<ArrayRef> = hits
             .iter()
             .map(|hit| {
@@ -1549,9 +1858,7 @@ fn gather_columns<K>(
                     .map_or_else(|| new_null_array(&data_type, hit.keys.len()), Arc::clone)
             })
             .collect();
-        let references = sources.iter().map(AsRef::as_ref).collect::<Vec<_>>();
-        let gathered = arrow::compute::interleave(&references, indices)
-            .map_err(|e| validation(e.to_string()))?;
+        let gathered = packs.interleave(&sources, indices)?;
         columns.push(((*property).clone(), gathered));
     }
     Ok(columns)
@@ -1568,4 +1875,162 @@ fn find_uuid(uuids: &FixedSizeBinaryArray, target: &[u8; 16]) -> Option<usize> {
         }
     }
     None
+}
+
+pub(crate) fn query_size_error() -> GfError {
+    GfError::from_execution_error(datafusion::error::DataFusionError::ResourcesExhausted(
+        "traversal edge-property read: cannot bound allocation".into(),
+    ))
+}
+pub(crate) fn query_add(a: usize, b: usize) -> Result<usize, GfError> {
+    a.checked_add(b).ok_or_else(query_size_error)
+}
+pub(crate) fn query_mul(a: usize, b: usize) -> Result<usize, GfError> {
+    a.checked_mul(b)
+        .filter(|n| isize::try_from(*n).is_ok())
+        .ok_or_else(query_size_error)
+}
+pub(crate) fn query_reserve(
+    admission: Option<&dyn ReadAdmission>,
+    bytes: usize,
+) -> Result<Option<ReadGrant>, GfError> {
+    admission
+        .map(|admission| {
+            admission
+                .check_cancelled()
+                .map_err(GfError::from_execution_error)?;
+            admission
+                .reserve(bytes)
+                .map_err(GfError::from_execution_error)
+        })
+        .transpose()
+}
+
+/// Outcome of a query-owned targeted index read.
+#[derive(Debug)]
+pub enum PrepaidEdgePropertyLookup {
+    /// The route has no property fragments.
+    Absent,
+    /// The requested UUID/id route has no usable index.
+    NotIndexed,
+    /// Selected identity and property columns with retained query authority.
+    Indexed(PrepaidBatch),
+}
+
+/// Read UUID-keyed properties with admission before every query allocation.
+///
+/// # Errors
+/// Propagates corruption, cancellation, or the query pool's typed refusal.
+pub fn lookup_edge_properties_admitted(
+    project_dir: &Path,
+    inventory: &AuthenticatedPropertyInventory,
+    route: &str,
+    targets: &BTreeSet<[u8; 16]>,
+    properties: &[String],
+    admission: &dyn ReadAdmission,
+) -> Result<PrepaidEdgePropertyLookup, GfError> {
+    let (rows, memory) = lookup_edge_properties_inner(
+        project_dir,
+        inventory,
+        route,
+        targets,
+        properties,
+        Some(admission),
+    )?;
+    let rows = match rows {
+        EdgePropertyLookup::Absent => return Ok(PrepaidEdgePropertyLookup::Absent),
+        EdgePropertyLookup::NotIndexed => return Ok(PrepaidEdgePropertyLookup::NotIndexed),
+        EdgePropertyLookup::Indexed(rows) => rows,
+    };
+    prepaid_uuid_rows(rows, memory.ok_or_else(query_size_error)?)
+        .map(PrepaidEdgePropertyLookup::Indexed)
+}
+
+/// Read ID-keyed properties with admission, retaining the provider cache's authority.
+///
+/// # Errors
+/// Propagates corruption, cancellation, or the query pool's typed refusal.
+pub fn lookup_edge_properties_by_id_admitted(
+    project_dir: &Path,
+    inventory: &AuthenticatedPropertyInventory,
+    route: &str,
+    targets: &BTreeSet<u64>,
+    properties: &[String],
+    map: Option<&EdgeIdMap>,
+    admission: &dyn ReadAdmission,
+) -> Result<PrepaidEdgePropertyLookup, GfError> {
+    let (rows, memory) = lookup_edge_properties_by_id_inner(
+        project_dir,
+        inventory,
+        route,
+        targets,
+        properties,
+        map,
+        Some(admission),
+    )?;
+    let rows = match rows {
+        EdgePropertyIdLookup::Absent => return Ok(PrepaidEdgePropertyLookup::Absent),
+        EdgePropertyIdLookup::NotAddressable => return Ok(PrepaidEdgePropertyLookup::NotIndexed),
+        EdgePropertyIdLookup::Indexed(rows) => rows,
+    };
+    prepaid_id_rows(rows, memory.ok_or_else(query_size_error)?)
+        .map(PrepaidEdgePropertyLookup::Indexed)
+}
+
+fn prepaid_uuid_rows(
+    rows: IndexedEdgeProperties,
+    grant: ReadGrant,
+) -> Result<PrepaidBatch, GfError> {
+    let grant = grant;
+    let rows = rows;
+    let mut keys = arrow::array::FixedSizeBinaryBuilder::with_capacity(rows.uuids.len(), 16);
+    for uuid in rows.uuids {
+        keys.append_value(uuid)
+            .map_err(GfError::from_execution_error)?;
+    }
+    prepaid_columns("edge_uuid", Arc::new(keys.finish()), rows.columns, grant)
+}
+fn prepaid_id_rows(rows: IndexedEdgeIds, grant: ReadGrant) -> Result<PrepaidBatch, GfError> {
+    let grant = grant;
+    let rows = rows;
+    prepaid_columns(
+        "edge_id",
+        Arc::new(UInt64Array::from(rows.ids)),
+        rows.columns,
+        grant,
+    )
+}
+
+fn prepaid_columns(
+    key: &str,
+    keys: ArrayRef,
+    columns: GatheredColumns,
+    grant: ReadGrant,
+) -> Result<PrepaidBatch, GfError> {
+    let mut grant = grant;
+    let keys = keys;
+    let columns = columns;
+    let mut fields = Vec::with_capacity(columns.len() + 1);
+    let mut arrays = Vec::with_capacity(columns.len() + 1);
+    fields.push(arrow::datatypes::Field::new(
+        key,
+        keys.data_type().clone(),
+        false,
+    ));
+    arrays.push(keys);
+    for (name, column) in columns {
+        fields.push(arrow::datatypes::Field::new(
+            name,
+            column.data_type().clone(),
+            true,
+        ));
+        arrays.push(column);
+    }
+    let schema = Arc::new(Schema::new(fields));
+    let schema_credit = grant
+        .split(query_mul(schema.fields.size(), 4)?)
+        .map_err(GfError::from_execution_error)?;
+    let batch = RecordBatch::try_new(schema, arrays).map_err(GfError::from_execution_error)?;
+    PrepaidBatch::seal_with_schema_credit(batch, grant, Some(schema_credit), None)
+        .map_err(GfError::from_execution_error)
 }

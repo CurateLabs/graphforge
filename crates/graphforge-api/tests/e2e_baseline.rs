@@ -5780,3 +5780,98 @@ fn empty_remove_node_frontier_preserves_graph_and_following_writes() {
 fn empty_remove_edge_frontier_preserves_graph_and_following_writes() {
     exercise_empty_remove_frontier(true);
 }
+
+#[test]
+fn variable_length_relationship_properties_match_exactly_through_fragments_and_index() {
+    let gf = GraphForge::new(None).unwrap();
+    let payload = "returned relationship payload ".repeat(2048);
+    gf.execute_with_params(
+        "CREATE (a:Entity {name:'source'}), (b:Entity {name:'middle'}), (c:Entity {name:'end'}), \
+         (a)-[:LINK {payload:$payload, nested:[1,null,3]}]->(b), (b)-[:LINK]->(c)",
+        &HashMap::from([("payload".to_owned(), IrLiteral::Str(payload.clone()))]),
+    )
+    .unwrap();
+    let mut oracle: Option<arrow::record_batch::RecordBatch> = None;
+    for indexed in [false, true] {
+        if indexed {
+            gf.rebuild_property_indexes(None).unwrap();
+        }
+        let result = gf.execute(
+            "MATCH (:Entity {name:'source'})-[r:LINK*1..2]->() RETURN r AS rels ORDER BY size(r)",
+        ).unwrap();
+        assert_eq!(result.stats.rows_produced, 2);
+        let combined = arrow::compute::concat_batches(&result.schema, &result.batches).unwrap();
+        let lists = combined
+            .column(0)
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .unwrap();
+        let mut actual = Vec::new();
+        for row in 0..lists.len() {
+            let items = lists.value(row);
+            let relationships = items.as_any().downcast_ref::<StructArray>().unwrap();
+            let strings = relationships
+                .column_by_name("payload")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap();
+            let nested = relationships
+                .column_by_name("nested")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<ListArray>()
+                .unwrap();
+            let mut path = Vec::new();
+            for index in 0..relationships.len() {
+                let nested_value = if nested.is_null(index) {
+                    None
+                } else {
+                    let values = nested.value(index);
+                    Some(
+                        values
+                            .as_any()
+                            .downcast_ref::<Int64Array>()
+                            .unwrap()
+                            .iter()
+                            .collect::<Vec<_>>(),
+                    )
+                };
+                path.push((
+                    (!strings.is_null(index)).then(|| strings.value(index).to_owned()),
+                    nested_value,
+                ));
+            }
+            actual.push(path);
+        }
+        let first = (Some(payload.clone()), Some(vec![Some(1), None, Some(3)]));
+        assert_eq!(actual, vec![vec![first.clone()], vec![first, (None, None)]]);
+        if let Some(expected) = &oracle {
+            let mut metadata = expected.schema().metadata().clone();
+            // Every execution intentionally creates its own request identity.
+            let query_id = combined.schema().metadata()["graphforge.query_id"].clone();
+            assert_ne!(metadata["graphforge.query_id"], query_id);
+            metadata.insert("graphforge.query_id".into(), query_id);
+            let expected = arrow::record_batch::RecordBatch::try_new(
+                std::sync::Arc::new(expected.schema().as_ref().clone().with_metadata(metadata)),
+                expected.columns().to_vec(),
+            )
+            .unwrap();
+            assert_eq!(combined, expected);
+        } else {
+            oracle = Some(combined.clone());
+        }
+        // Retained nested children remain valid after their result wrapper drops.
+        let escaped = lists.value(1);
+        drop(result);
+        drop(combined);
+        assert_eq!(
+            escaped
+                .as_any()
+                .downcast_ref::<StructArray>()
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+}
