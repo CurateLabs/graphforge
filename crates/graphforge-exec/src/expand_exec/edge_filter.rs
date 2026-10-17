@@ -174,16 +174,26 @@ impl PhysicalEdgeFilter {
         temporary: &mut usize,
     ) -> Result<super::hop_read::HopChunk, GfError> {
         let mut property_charge = super::HopReadCharge::new(&cfg.read_reservation);
-        property_charge.charge(super::hop_read::checked_mul(candidates.len(), 1024)?)?;
-        let targets: BTreeSet<u64> = candidates.iter().copied().collect();
-        let children = if let Some(source) = super::edge_properties::load_edge_prop_source_by_id(
+        let target_memory = graphforge_storage::read_memory::ReadAdmission::reserve(
+            &property_charge,
+            super::hop_read::btree_set_bytes::<u64>(candidates.len())?,
+        )
+        .map_err(GfError::from_execution_error)?;
+        let mut targets = BTreeSet::new();
+        for &id in candidates {
+            targets.insert(id);
+        }
+        let source = super::edge_properties::load_edge_prop_source_by_id(
             &*cfg.provider,
             &cfg.rel_type_name,
             &cfg.dir,
             &self.fields,
             &targets,
             &property_charge,
-        )? {
+        )?;
+        drop(targets);
+        drop(target_memory);
+        let children = if let Some(source) = source {
             super::edge_properties::edge_prop_children_by_id_admitted(
                 &source,
                 &self.fields,
@@ -230,7 +240,11 @@ impl PhysicalEdgeFilter {
         let records = build_edge_records(cfg, &edge_batches)?;
         charge(reservation, temporary, edge_record_table_bytes(&records))?;
         drop(edge_batches);
-        property_charge.charge(super::hop_read::checked_mul(ids.len(), 16 + 1024)?)?;
+        let uuid_memory = graphforge_storage::read_memory::ReadAdmission::reserve(
+            property_charge,
+            super::hop_read::checked_mul(ids.len(), std::mem::size_of::<[u8; 16]>())?,
+        )
+        .map_err(GfError::from_execution_error)?;
         let mut uuids = Vec::with_capacity(ids.len());
         for id in ids {
             let record = records
@@ -239,7 +253,15 @@ impl PhysicalEdgeFilter {
             uuids.push(record.edge_uuid);
         }
         drop(records);
-        let uuid_targets: BTreeSet<[u8; 16]> = uuids.iter().copied().collect();
+        let target_memory = graphforge_storage::read_memory::ReadAdmission::reserve(
+            property_charge,
+            super::hop_read::btree_set_bytes::<[u8; 16]>(uuids.len())?,
+        )
+        .map_err(GfError::from_execution_error)?;
+        let mut uuid_targets = BTreeSet::new();
+        for &uuid in &uuids {
+            uuid_targets.insert(uuid);
+        }
         let source = load_edge_prop_source(
             cfg.provider.admitted_inventory().as_deref(),
             &cfg.rel_type_name,
@@ -248,7 +270,12 @@ impl PhysicalEdgeFilter {
             &uuid_targets,
             property_charge,
         )?;
-        edge_prop_children(&source, &self.fields, &uuids, property_charge)
+        drop(uuid_targets);
+        drop(target_memory);
+        let children = edge_prop_children(&source, &self.fields, &uuids, property_charge);
+        drop(uuids);
+        drop(uuid_memory);
+        children
     }
 
     /// Evaluate the predicate for `rows` edges whose property values are

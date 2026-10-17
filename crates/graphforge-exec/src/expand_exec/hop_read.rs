@@ -51,6 +51,27 @@ pub(super) fn table_bytes<T>(entries: usize) -> Result<usize, GfError> {
     Ok(bytes)
 }
 
+/// Pinned std BTree nodes hold eleven keys and twelve child pointers. Every
+/// non-root node has at least five keys, and the root can hold only one. Pay
+/// the internal-node layout for every node, including leaf nodes. Callers
+/// insert directly: FromIterator also allocates a sorting Vec of all inputs.
+pub(super) fn btree_set_bytes<T>(entries: usize) -> Result<usize, GfError> {
+    if entries == 0 {
+        return Ok(0);
+    }
+    let nodes = checked_add(1, (entries - 1) / 5)?;
+    let alignment = std::mem::align_of::<T>().max(std::mem::align_of::<usize>());
+    let header = checked_add(
+        std::mem::size_of::<Option<std::ptr::NonNull<()>>>(),
+        2 * std::mem::size_of::<u16>(),
+    )?;
+    let keys = checked_add(header, alignment - 1)? & !(alignment - 1);
+    let leaf = checked_add(keys, checked_mul(11, std::mem::size_of::<T>())?)?;
+    let edges = checked_add(leaf, alignment - 1)? & !(alignment - 1);
+    let internal = checked_add(edges, 12 * std::mem::size_of::<usize>())?;
+    checked_mul(nodes, internal)
+}
+
 /// Admission is deliberately outside the allocation closure. Tests can observe
 /// the real constructor boundary without a process-global allocator hook.
 pub(super) fn admitted_table<T, R>(

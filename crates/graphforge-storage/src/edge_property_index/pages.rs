@@ -345,6 +345,8 @@ pub(super) struct PackHandles<'a> {
     open: BTreeMap<u32, (PathBuf, File)>,
     admission: Option<&'a dyn ReadAdmission>,
     memory: Option<ReadGrant>,
+    /// Open pack paths and map entries outlive every scoped decode.
+    handles_memory: Option<ReadGrant>,
 }
 
 impl<'a> PackHandles<'a> {
@@ -355,6 +357,7 @@ impl<'a> PackHandles<'a> {
             open: BTreeMap::new(),
             admission: None,
             memory: None,
+            handles_memory: None,
         }
     }
 
@@ -363,7 +366,8 @@ impl<'a> PackHandles<'a> {
         admission: Option<&'a dyn ReadAdmission>,
     ) -> Result<Self, GfError> {
         self.admission = admission;
-        self.memory = super::query_reserve(admission, 4096)?;
+        self.handles_memory = super::query_reserve(admission, 4096)?;
+        self.memory = super::query_reserve(admission, 0)?;
         Ok(self)
     }
 
@@ -371,6 +375,30 @@ impl<'a> PackHandles<'a> {
         if let (Some(admission), Some(memory)) = (self.admission, self.memory.as_mut()) {
             memory
                 .grow(admission, bytes)
+                .map_err(GfError::from_execution_error)?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn is_admitted(&self) -> bool {
+        self.admission.is_some()
+    }
+
+    /// Existing owners stay funded while a constructor borrows new authority.
+    pub(super) fn checkpoint(&self) -> usize {
+        self.memory.as_ref().map_or(0, ReadGrant::size)
+    }
+
+    /// Call only after the scoped constructor's temporary allocations drop.
+    /// This transfers already admitted authority; it can never grow the pool.
+    pub(super) fn retain_since(
+        &mut self,
+        checkpoint: usize,
+        retained: usize,
+    ) -> Result<(), GfError> {
+        if let Some(memory) = self.memory.as_mut() {
+            memory
+                .shrink_to(query_add(checkpoint, retained)?)
                 .map_err(GfError::from_execution_error)?;
         }
         Ok(())
@@ -416,11 +444,20 @@ impl<'a> PackHandles<'a> {
         }
         // Fund the returned Vec and read_to_end's capacity/probe slack before
         // opening/reading a pack. Container and path growth are included.
-        self.charge(query_add(
-            query_mul(usize::try_from(length).map_err(|_| query_size_error())?, 2)?,
-            query_add(query_mul(self.directory.as_os_str().len(), 4)?, 4096)?,
+        self.charge(query_mul(
+            usize::try_from(length).map_err(|_| query_size_error())?,
+            2,
         )?)?;
         if let std::collections::btree_map::Entry::Vacant(slot) = self.open.entry(pack) {
+            if let (Some(admission), Some(memory)) = (self.admission, self.handles_memory.as_mut())
+            {
+                memory
+                    .grow(
+                        admission,
+                        query_add(query_mul(self.directory.as_os_str().len(), 4)?, 4096)?,
+                    )
+                    .map_err(GfError::from_execution_error)?;
+            }
             let path = self.directory.join(format!("{pack:08}.{PACK_EXTENSION}"));
             let file = File::open(&path).map_err(|e| storage("open pack", &e))?;
             slot.insert((path, file));
@@ -453,13 +490,14 @@ impl<'a> PackHandles<'a> {
         rows: u64,
         keys: Keys,
     ) -> Result<OpenBlob, GfError> {
+        let checkpoint = self.checkpoint();
         let page_rows = u64::from(self.page_rows);
         let count =
             usize::try_from(rows.div_ceil(page_rows)).map_err(|_| self.corrupt(seal.pack))?;
         let fixed = query_add(query_mul(count, keys.entry_bytes())?, TRAILER_BYTES)?;
         self.charge(query_add(
             query_mul(count, std::mem::size_of::<Page>())?,
-            usize::try_from(seal.byte_length).map_err(|_| query_size_error())?,
+            std::mem::size_of::<OpenBlob>(),
         )?)?;
         if seal.byte_length > PACK_BYTES as u64 || seal.byte_length < fixed as u64 {
             self.read_range(seal.pack, 0, 0)?;
@@ -520,14 +558,27 @@ impl<'a> PackHandles<'a> {
         {
             return Err(self.corrupt(seal.pack));
         }
-        Ok(OpenBlob {
+        self.charge(schema.len())?;
+        let blob = OpenBlob {
             seal,
             keys,
             rows,
             page_rows,
             schema: schema.to_vec(),
             pages,
-        })
+        };
+        drop(tail);
+        self.retain_since(
+            checkpoint,
+            query_add(
+                query_add(
+                    blob.schema.capacity(),
+                    query_mul(blob.pages.capacity(), std::mem::size_of::<Page>())?,
+                )?,
+                std::mem::size_of::<OpenBlob>(),
+            )?,
+        )?;
+        Ok(blob)
     }
 
     /// The pages `wanted` of an open blob, decoded in the same order. `wanted`
@@ -539,14 +590,13 @@ impl<'a> PackHandles<'a> {
         wanted: &[usize],
     ) -> Result<Vec<ArrayRef>, GfError> {
         debug_assert!(wanted.windows(2).all(|pair| pair[0] < pair[1]));
-        let (schema, pages) = (&blob.schema, &blob.pages);
-        let pack = blob.seal.pack;
+        let checkpoint = self.checkpoint();
         self.charge(query_add(
             query_mul(blob.schema.len(), 512)?,
             query_add(query_mul(wanted.len(), 256)?, 64 * 1024)?,
         )?)?;
         let mut decoder = StreamDecoder::new();
-        let mut header = Buffer::from_slice_ref(schema);
+        let mut header = Buffer::from_slice_ref(&blob.schema);
         if decoder
             .decode(&mut header)
             .map_err(|e| validation(e.to_string()))?
@@ -555,50 +605,143 @@ impl<'a> PackHandles<'a> {
         {
             return Err(validation("blob schema is malformed"));
         }
+        // A schema message has no body. StreamDecoder may only process that
+        // body on the next nonempty decode, so schema() can still be None here.
         let mut arrays = Vec::with_capacity(wanted.len());
+        let mut retained = query_mul(wanted.len(), std::mem::size_of::<ArrayRef>())?;
         let mut next = 0;
         while next < wanted.len() {
             let mut end = next + 1;
             while end < wanted.len() && wanted[end] == wanted[end - 1] + 1 {
                 end += 1;
             }
-            let (first, last) = (&pages[wanted[next]], &pages[wanted[end - 1]]);
-            let run_end = last.offset + last.length;
-            let bytes = self.read_range(
-                pack,
-                blob.seal.offset + first.offset,
-                run_end - first.offset,
+            retained = query_add(
+                retained,
+                self.read_page_run(blob, &wanted[next..end], &mut decoder, &mut arrays)?,
             )?;
-            let run = Buffer::from_vec(bytes);
-            for &index in &wanted[next..end] {
-                let page = &pages[index];
-                let start = usize::try_from(page.offset - first.offset).expect("run fits memory");
-                let mut message = run.slice_with_length(
-                    start,
-                    usize::try_from(page.length).expect("page fits memory"),
-                );
-                if crate::corruption_checksum::checksum(message.as_slice()) != page.xxh64 {
-                    return Err(self.corrupt(pack));
-                }
-                if self.admission.is_some() {
-                    self.charge(ipc_page_bytes(message.as_slice())?)?;
-                }
-                let batch = decoder
-                    .decode(&mut message)
-                    .map_err(|e| validation(e.to_string()))?
-                    .filter(|_| message.is_empty())
-                    .ok_or_else(|| validation("blob page holds no single batch"))?;
-                if batch.num_columns() != 1 {
-                    return Err(validation("blob shape does not match its manifest"));
-                }
-                let array = Arc::clone(batch.column(0));
-                check_page(blob.keys, &array, blob.rows_in(index), blob.bounds(index))?;
-                arrays.push(array);
-            }
             next = end;
         }
+        if self.is_admitted() {
+            // Every page shares the decoder's nested schema allocations. Their
+            // original construction grant stayed live across all page scopes;
+            // transfer its retained type owner once, without pool growth.
+            if let Some(schema) = decoder.schema() {
+                for field in schema.fields() {
+                    retained = query_add(retained, query_mul(field.data_type().size(), 4)?)?;
+                }
+            }
+        }
+        drop(header);
+        drop(decoder);
+        self.retain_since(checkpoint, retained)?;
         Ok(arrays)
     }
+
+    /// Decode one contiguous read, retaining shared raw backing at most once.
+    fn read_page_run(
+        &mut self,
+        blob: &OpenBlob,
+        wanted: &[usize],
+        decoder: &mut StreamDecoder,
+        arrays: &mut Vec<ArrayRef>,
+    ) -> Result<usize, GfError> {
+        let checkpoint = self.checkpoint();
+        let mut retained = 0;
+        let mut aliases_run = false;
+        let first = &blob.pages[wanted[0]];
+        let last = &blob.pages[*wanted.last().expect("nonempty page run")];
+        let bytes = self.read_range(
+            blob.seal.pack,
+            blob.seal.offset + first.offset,
+            last.offset + last.length - first.offset,
+        )?;
+        let run = Buffer::from_vec(bytes);
+        for &index in wanted {
+            let page = &blob.pages[index];
+            let start = usize::try_from(page.offset - first.offset).expect("run fits memory");
+            let mut message = run.slice_with_length(
+                start,
+                usize::try_from(page.length).expect("page fits memory"),
+            );
+            if crate::corruption_checksum::checksum(message.as_slice()) != page.xxh64 {
+                return Err(self.corrupt(blob.seal.pack));
+            }
+            let page_checkpoint = self.checkpoint();
+            if self.is_admitted() {
+                self.charge(ipc_page_bytes(message.as_slice())?)?;
+            }
+            let batch = decoder
+                .decode(&mut message)
+                .map_err(|e| validation(e.to_string()))?
+                .filter(|_| message.is_empty())
+                .ok_or_else(|| validation("blob page holds no single batch"))?;
+            if batch.num_columns() != 1 {
+                return Err(validation("blob shape does not match its manifest"));
+            }
+            let array = Arc::clone(batch.column(0));
+            check_page(blob.keys, &array, blob.rows_in(index), blob.bounds(index))?;
+            if self.is_admitted() {
+                // The enclosing read_pages schema grant owns nested DataTypes.
+                // Raw IPC buffers instead borrow this run's read grant until
+                // the run ends; transfer that physical backing only once.
+                let mut bytes = retained_array_bytes(array.as_ref())?
+                    .checked_sub(query_mul(array.data_type().size(), 4)?)
+                    .ok_or_else(query_size_error)?;
+                crate::read_memory::visit_buffers(array.as_ref(), &mut |buffer| {
+                    if buffer.capacity() != 0
+                        && buffer.data_ptr() == run.data_ptr()
+                        && buffer.capacity() == run.capacity()
+                    {
+                        bytes = bytes
+                            .checked_sub(buffer.capacity())
+                            .ok_or_else(crate::read_memory::exceeded)?;
+                        aliases_run = true;
+                    }
+                    Ok(())
+                })
+                .map_err(GfError::from_execution_error)?;
+                drop(batch);
+                drop(message);
+                self.retain_since(page_checkpoint, bytes)?;
+                retained = query_add(retained, bytes)?;
+            }
+            arrays.push(array);
+        }
+        if self.is_admitted() {
+            if aliases_run {
+                retained = query_add(retained, run.capacity())?;
+            }
+            drop(run);
+            self.retain_since(checkpoint, retained)?;
+        }
+        Ok(retained)
+    }
+}
+
+/// Concrete retained Arrow allocations, including nested/view containers and
+/// full aliased backing capacities. This only measures after construction;
+/// callers must already hold its preallocation authority before calling it.
+pub(super) fn retained_array_bytes(array: &dyn Array) -> Result<usize, GfError> {
+    let mut bytes = query_add(
+        array.get_array_memory_size(),
+        crate::read_memory::container_bytes(array).map_err(GfError::from_execution_error)?,
+    )?;
+    bytes = query_add(
+        bytes,
+        query_add(query_mul(array.data_type().size(), 4)?, 256)?,
+    )?;
+    crate::read_memory::visit_buffers(array, &mut |buffer| {
+        if buffer.capacity() == 0 && !buffer.is_empty() {
+            return Err(crate::read_memory::exceeded());
+        }
+        if buffer.capacity() != 0 {
+            // Future prepaid buffer token plus the buffer's shared header.
+            bytes = crate::read_memory::add(bytes, crate::read_memory::token_bytes() + 64)?;
+        }
+        Ok(())
+    })
+    .map_err(GfError::from_execution_error)?;
+    Ok(bytes)
 }
 
 /// Inspect authenticated IPC wire descriptors before StreamDecoder can allocate
@@ -683,6 +826,200 @@ mod admission_tests {
             }
             Ok(())
         }
+    }
+
+    #[test]
+    fn decoded_pages_retain_backing_without_accumulating_decoder_scratch() {
+        let root = tempfile::tempdir().unwrap();
+        let rows = 16_384;
+        let values: ArrayRef = Arc::new(UInt64Array::from_iter_values(0..rows as u64));
+        let (encoded, checksum) = encode_paged(
+            "value",
+            values.data_type(),
+            &values,
+            Keys::Values,
+            PAGE_ROWS,
+        )
+        .unwrap();
+        std::fs::write(root.path().join("00000000.epk"), &encoded).unwrap();
+        let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(2 * 1024 * 1024));
+        let admission = Admission {
+            memory: Mutex::new(MemoryConsumer::new("paged decode lifetime").register(&pool)),
+            cancelled: AtomicBool::new(false),
+        };
+        let mut packs = PackHandles::new(root.path().to_owned(), PAGE_ROWS as u32)
+            .with_admission(Some(&admission))
+            .unwrap();
+        let blob = packs
+            .open_blob(
+                BlobSeal {
+                    pack: 0,
+                    offset: 0,
+                    byte_length: encoded.len() as u64,
+                    xxh64: checksum,
+                },
+                rows as u64,
+                Keys::Values,
+            )
+            .unwrap();
+        let before = pool.reserved();
+        let wanted = (0..blob.page_count()).collect::<Vec<_>>();
+        let arrays = packs.read_pages(&blob, &wanted).unwrap();
+        let retained = arrays
+            .iter()
+            .map(|array| retained_array_bytes(array.as_ref()).unwrap())
+            .sum::<usize>()
+            + arrays.capacity() * std::mem::size_of::<ArrayRef>();
+        assert!(pool.reserved() <= before + retained);
+        for (page, array) in arrays.iter().enumerate() {
+            let values = array.as_any().downcast_ref::<UInt64Array>().unwrap();
+            for (offset, value) in values.values().iter().enumerate() {
+                assert_eq!(*value, (page * PAGE_ROWS + offset) as u64);
+            }
+        }
+        // The scoped grant funds every returned page until its caller releases
+        // it; closing pack handles releases their independent metadata grant.
+        assert!(pool.reserved() >= rows * std::mem::size_of::<u64>());
+        drop(arrays);
+        drop(blob);
+        drop(packs);
+        drop(admission);
+        assert_eq!(pool.reserved(), 0);
+    }
+
+    #[test]
+    fn decoded_list_pages_pre_admit_retained_nested_field_metadata() {
+        let root = tempfile::tempdir().unwrap();
+        let child = Arc::new(Field::new("n".repeat(1024 * 1024), DataType::UInt64, false));
+        let values: ArrayRef = Arc::new(
+            arrow::array::ListArray::try_new(
+                child,
+                arrow::buffer::OffsetBuffer::new(vec![0_i32, 1].into()),
+                Arc::new(UInt64Array::from(vec![7])),
+                None,
+            )
+            .unwrap(),
+        );
+        let (encoded, checksum) = encode_paged(
+            "value",
+            values.data_type(),
+            &values,
+            Keys::Values,
+            PAGE_ROWS,
+        )
+        .unwrap();
+        std::fs::write(root.path().join("00000000.epk"), &encoded).unwrap();
+        let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(2 * 1024 * 1024 * 1024));
+        let admission = Admission {
+            memory: Mutex::new(MemoryConsumer::new("nested page metadata").register(&pool)),
+            cancelled: AtomicBool::new(false),
+        };
+        let mut packs = PackHandles::new(root.path().to_owned(), PAGE_ROWS as u32)
+            .with_admission(Some(&admission))
+            .unwrap();
+        let blob = packs
+            .open_blob(
+                BlobSeal {
+                    pack: 0,
+                    offset: 0,
+                    byte_length: encoded.len() as u64,
+                    xxh64: checksum,
+                },
+                1,
+                Keys::Values,
+            )
+            .unwrap();
+        let before = pool.reserved();
+        assert!(packs.read_pages(&blob, &[]).unwrap().is_empty());
+        assert_eq!(pool.reserved(), before);
+        let arrays = packs.read_pages(&blob, &[0]).unwrap();
+        let list = arrays[0]
+            .as_any()
+            .downcast_ref::<arrow::array::ListArray>()
+            .unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list.value_offsets(), &[0, 1]);
+        assert_eq!(list.data_type(), values.data_type());
+        assert_eq!(
+            list.values()
+                .as_any()
+                .downcast_ref::<UInt64Array>()
+                .unwrap()
+                .values()
+                .as_ref(),
+            &[7],
+        );
+        drop(arrays);
+        drop(blob);
+        drop(packs);
+        drop(admission);
+        assert_eq!(pool.reserved(), 0);
+    }
+
+    #[test]
+    fn raw_ipc_pages_share_one_admitted_read_run() {
+        let root = tempfile::tempdir().unwrap();
+        // SplitMix64 gives each page incompressible values, exercising IPC's
+        // raw (-1) blocks whose output slices retain the entire read run.
+        let expected = (0_u64..4096)
+            .map(|i| {
+                let mut z = i.wrapping_add(0x9e37_79b9_7f4a_7c15);
+                z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+                z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+                z ^ (z >> 31)
+            })
+            .collect::<Vec<_>>();
+        let values: ArrayRef = Arc::new(UInt64Array::from(expected.clone()));
+        let (encoded, checksum) = encode_paged(
+            "value",
+            values.data_type(),
+            &values,
+            Keys::Values,
+            PAGE_ROWS,
+        )
+        .unwrap();
+        std::fs::write(root.path().join("00000000.epk"), &encoded).unwrap();
+        let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(512 * 1024));
+        let admission = Admission {
+            memory: Mutex::new(MemoryConsumer::new("raw paged lifetime").register(&pool)),
+            cancelled: AtomicBool::new(false),
+        };
+        let mut packs = PackHandles::new(root.path().to_owned(), PAGE_ROWS as u32)
+            .with_admission(Some(&admission))
+            .unwrap();
+        let blob = packs
+            .open_blob(
+                BlobSeal {
+                    pack: 0,
+                    offset: 0,
+                    byte_length: encoded.len() as u64,
+                    xxh64: checksum,
+                },
+                expected.len() as u64,
+                Keys::Values,
+            )
+            .unwrap();
+        let wanted = (0..blob.page_count()).collect::<Vec<_>>();
+        let arrays = packs.read_pages(&blob, &wanted).unwrap();
+        assert!(arrays[0].get_buffer_memory_size() > PAGE_ROWS * 8);
+        let actual = arrays
+            .iter()
+            .flat_map(|array| {
+                array
+                    .as_any()
+                    .downcast_ref::<UInt64Array>()
+                    .unwrap()
+                    .values()
+                    .iter()
+                    .copied()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected);
+        drop(arrays);
+        drop(blob);
+        drop(packs);
+        drop(admission);
+        assert_eq!(pool.reserved(), 0);
     }
 
     #[test]

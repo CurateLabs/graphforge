@@ -1073,32 +1073,32 @@ fn load_chunk_sources(
 
     // The relation's edge properties for every traversed edge.
     let edge_props = if cfg.edge_list_demanded {
-        let mut source_charge = HopReadCharge::new(&cfg.read_reservation);
-        source_charge.charge(hop_read::checked_add(
-            4096,
-            hop_read::checked_mul(cfg.out_schema.fields().len(), 512)?,
-        )?)?;
+        let source_charge = HopReadCharge::new(&cfg.read_reservation);
         let prop_fields = edge_properties::edge_list_prop_fields(cfg)?;
-        let _targets = graphforge_storage::read_memory::ReadAdmission::reserve(
-            &source_charge,
-            hop_read::checked_mul(traversed.len(), 1024)?,
-        )
-        .map_err(GfError::from_execution_error)?;
-        let mut hop_uuids = std::collections::BTreeSet::new();
-        for id in &traversed {
-            let record = edge_records
-                .get(id)
-                .ok_or_else(|| exec_err(format!("VarLenExpand: no record for edge_id {id}")))?;
-            hop_uuids.insert(record.edge_uuid);
+        if prop_fields.is_empty() {
+            EdgePropSource::empty()
+        } else {
+            let _targets = graphforge_storage::read_memory::ReadAdmission::reserve(
+                &source_charge,
+                hop_read::btree_set_bytes::<[u8; 16]>(traversed.len())?,
+            )
+            .map_err(GfError::from_execution_error)?;
+            let mut hop_uuids = std::collections::BTreeSet::new();
+            for id in &traversed {
+                let record = edge_records
+                    .get(id)
+                    .ok_or_else(|| exec_err(format!("VarLenExpand: no record for edge_id {id}")))?;
+                hop_uuids.insert(record.edge_uuid);
+            }
+            load_edge_prop_source(
+                cfg.provider.admitted_inventory().as_deref(),
+                &cfg.rel_type_name,
+                &cfg.dir,
+                prop_fields,
+                &hop_uuids,
+                &source_charge,
+            )?
         }
-        load_edge_prop_source(
-            cfg.provider.admitted_inventory().as_deref(),
-            &cfg.rel_type_name,
-            &cfg.dir,
-            &prop_fields,
-            &hop_uuids,
-            &source_charge,
-        )?
     } else {
         EdgePropSource::empty()
     };
@@ -1173,7 +1173,7 @@ fn materialise_chunk(
             &mut property_charge,
         )?;
         prepaid_property_bytes = bytes;
-        property_owner = Some(owner);
+        property_owner = owner;
         columns.push(list);
     } else {
         // No operator above reads the list, so no entry of it is ever looked
@@ -1467,7 +1467,7 @@ fn build_edge_list_column_admitted(
     edge_records: &std::collections::HashMap<u64, EdgeRecord>,
     edge_props: &EdgePropSource,
     charge: &mut HopReadCharge,
-) -> Result<(arrow::array::ArrayRef, usize, Arc<HopReadCharge>), GfError> {
+) -> Result<(arrow::array::ArrayRef, usize, Option<Arc<HopReadCharge>>), GfError> {
     use arrow::array::{
         ArrayRef, FixedSizeBinaryArray, ListArray, StringArray, StructArray, new_empty_array,
     };
@@ -1493,13 +1493,18 @@ fn build_edge_list_column_admitted(
     let hops = emissions
         .iter()
         .try_fold(0, |n, (_, _, path)| hop_read::checked_add(n, path.len()))?;
-    charge.charge(hop_read::checked_add(
-        hop_read::checked_mul(hops, 128)?,
-        hop_read::checked_add(
-            hop_read::checked_mul(emissions.len(), 16)?,
-            hop_read::checked_mul(struct_fields.len(), 512)?,
-        )?,
-    )?)?;
+    // Topology-only output keeps the existing VarLenExpand owner. This grant
+    // belongs to the additional property construction and must not sponsor
+    // that same topology a second time when no properties are requested.
+    if struct_fields.len() > 4 {
+        charge.charge(hop_read::checked_add(
+            hop_read::checked_mul(hops, 128)?,
+            hop_read::checked_add(
+                hop_read::checked_mul(emissions.len(), 16)?,
+                hop_read::checked_mul(struct_fields.len(), 512)?,
+            )?,
+        )?)?;
+    }
     let struct_fields = struct_fields.clone();
     // Property fields are everything past the four topology fields, in order.
     let prop_fields: Vec<arrow::datatypes::FieldRef> =
@@ -1553,14 +1558,18 @@ fn build_edge_list_column_admitted(
     // Children in `struct_fields` order: edge_uuid, src_uuid, dst_uuid, rel_type,
     // then one array per property field (#755).
     let mut children: Vec<ArrayRef> = vec![edge_arr, src_arr, dst_arr, rel_arr];
-    let (properties, bytes) = edge_properties::leased_edge_prop_children(
-        edge_props,
-        &prop_fields,
-        &edge_uuids,
-        HopReadCharge::new(&cfg.read_reservation),
-    )?;
-    let property_owner = properties.charge;
-    children.extend(properties.batch.into_parts().1);
+    let (bytes, property_owner) = if prop_fields.is_empty() {
+        (0, None)
+    } else {
+        let (properties, bytes) = edge_properties::leased_edge_prop_children(
+            edge_props,
+            &prop_fields,
+            &edge_uuids,
+            HopReadCharge::new(&cfg.read_reservation),
+        )?;
+        children.extend(properties.batch.into_parts().1);
+        (bytes, Some(properties.charge))
+    };
 
     let struct_arr =
         StructArray::try_new(struct_fields, children, None).map_err(|e| exec_err(e.to_string()))?;

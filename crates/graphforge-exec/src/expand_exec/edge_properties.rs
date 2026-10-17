@@ -105,7 +105,7 @@ fn edge_property_stems(
 /// the relation's persisted edge properties (#755).
 pub(super) fn edge_list_prop_fields(
     cfg: &super::ExpandConfig,
-) -> Result<Vec<arrow::datatypes::FieldRef>, GfError> {
+) -> Result<&[arrow::datatypes::FieldRef], GfError> {
     use arrow::datatypes::DataType;
 
     let exec_err = |m: String| GfError::Execution(m);
@@ -120,27 +120,44 @@ pub(super) fn edge_list_prop_fields(
     let DataType::Struct(struct_fields) = item.data_type() else {
         return Err(exec_err("edge-list item must be a Struct".into()));
     };
-    Ok(struct_fields.iter().skip(4).cloned().collect())
+    Ok(&struct_fields[struct_fields.len().min(4)..])
 }
 
-fn source_memory(
+fn source_memory<K>(
     inventory: &graphforge_storage::AuthenticatedPropertyInventory,
+    rel_type_name: &str,
     fields: &[arrow::datatypes::FieldRef],
     targets: usize,
     admission: &dyn ReadAdmission,
 ) -> Result<ReadGrant, GfError> {
     let routes = inventory.routes(graphforge_storage::PropertyRouteKind::Edge);
     let mut count = 1;
-    let mut names = 0;
+    // A concrete topology type can have properties only in _exploratory,
+    // so its requested name need not occur among the property routes below.
+    let mut names = rel_type_name.len();
     for route in routes {
         count = hop_read::checked_add(count, 1)?;
         names = hop_read::checked_add(names, route.len())?;
     }
-    // BTree target/owner nodes, target location HashMap, source/header vectors,
-    // and property/route strings. Even a singleton BTree node has eleven slots.
-    let entries = hop_read::checked_mul(targets, count)?;
-    let mut bytes = hop_read::checked_mul(entries, 2048)?;
-    bytes = hop_read::checked_add(bytes, hop_read::checked_mul(count, 4096)?)?;
+    // Physical ownership is unique across all routes. The owner tree and the
+    // location map each hold at most `targets` entries, regardless of routes.
+    // Targets themselves have their caller's independent authority.
+    let mut bytes = hop_read::btree_set_bytes::<K>(targets)?;
+    let columns = hop_read::checked_mul(
+        hop_read::checked_add(fields.len(), 1)?,
+        std::mem::size_of::<arrow::array::ArrayRef>(),
+    )?;
+    let route_wrappers = hop_read::checked_add(
+        columns,
+        std::mem::size_of::<RecordBatch>()
+            + std::mem::size_of::<Arc<PrepaidBatch>>()
+            + std::mem::size_of::<String>()
+            + 2 * std::mem::size_of::<usize>(),
+    )?;
+    bytes = hop_read::checked_add(bytes, hop_read::checked_mul(count, route_wrappers)?)?;
+    // One route reader returns its one-element owner vector before those
+    // owners move into the pre-sized cross-route source vectors.
+    bytes = hop_read::checked_add(bytes, std::mem::size_of::<PrepaidBatch>())?;
     bytes = hop_read::checked_add(bytes, hop_read::checked_mul(names, 4)?)?;
     for field in fields {
         bytes = hop_read::checked_add(
@@ -151,6 +168,39 @@ fn source_memory(
     admission
         .reserve(bytes)
         .map_err(GfError::from_execution_error)
+}
+
+/// Temporary owner/route/property-name trees have dropped. Keep only the
+/// source's map, wrapper vectors and cloned RecordBatch column headers; each
+/// prepaid batch already funds its own physical arrays and parsed schema.
+fn retained_source_bytes<K>(
+    map_capacity: usize,
+    batches: &Vec<RecordBatch>,
+    prepaid: &Vec<Arc<PrepaidBatch>>,
+) -> Result<usize, GfError> {
+    let mut bytes = hop_read::checked_add(
+        hop_read::table_bytes::<(K, (usize, u32))>(map_capacity)?,
+        hop_read::checked_add(
+            hop_read::checked_mul(batches.capacity(), std::mem::size_of::<RecordBatch>())?,
+            hop_read::checked_mul(prepaid.capacity(), std::mem::size_of::<Arc<PrepaidBatch>>())?,
+        )?,
+    )?;
+    for batch in batches {
+        bytes = hop_read::checked_add(
+            bytes,
+            hop_read::checked_add(
+                hop_read::checked_mul(
+                    batch.num_columns(),
+                    std::mem::size_of::<arrow::array::ArrayRef>(),
+                )?,
+                2 * std::mem::size_of::<usize>(),
+            )?,
+        )?;
+    }
+    hop_read::checked_add(
+        bytes,
+        hop_read::checked_mul(prepaid.len(), 2 * std::mem::size_of::<usize>())?,
+    )
 }
 
 /// The authenticated property rows of a set of edges, resolved once and
@@ -199,7 +249,13 @@ pub(super) fn load_edge_prop_source(
             "ExpandExec hop read: edge-property source requires authenticated inventory".into(),
         ))
     })?;
-    let memory = source_memory(inventory, prop_fields, targets.len(), admission)?;
+    let mut memory = source_memory::<[u8; 16]>(
+        inventory,
+        rel_type_name,
+        prop_fields,
+        targets.len(),
+        admission,
+    )?;
     let stems = edge_property_stems(Some(inventory), dir, rel_type_name)?;
     let mut owners = std::collections::BTreeSet::new();
     let mut prop_batches_by_rel = Vec::with_capacity(stems.len());
@@ -224,9 +280,28 @@ pub(super) fn load_edge_prop_source(
         }
     }
 
+    // Ownership has been checked across all routes. Drop that temporary tree
+    // and its names before admitting the separate location-map constructor.
+    drop(owners);
+    drop(property_names);
+    drop(stems);
+    memory
+        .shrink_to(retained_source_bytes::<[u8; 16]>(
+            0,
+            &prop_batches_by_rel,
+            &prepaid,
+        )?)
+        .map_err(GfError::from_execution_error)?;
+    memory
+        .grow(
+            admission,
+            hop_read::table_bytes::<([u8; 16], (usize, u32))>(targets.len())?,
+        )
+        .map_err(GfError::from_execution_error)?;
+
     // edge_uuid -> (owning batch, row within it). An edge belongs to exactly
     // one physical owner; duplicate ownership is corruption, not precedence.
-    let mut uuid_to_loc: HashMap<[u8; 16], (usize, u32)> = HashMap::new();
+    let mut uuid_to_loc: HashMap<[u8; 16], (usize, u32)> = HashMap::with_capacity(targets.len());
     for (bi, b) in prop_batches_by_rel.iter().enumerate() {
         let key = b
             .column_by_name("edge_uuid")
@@ -261,6 +336,13 @@ pub(super) fn load_edge_prop_source(
         }
     }
 
+    memory
+        .shrink_to(retained_source_bytes::<[u8; 16]>(
+            uuid_to_loc.capacity(),
+            &prop_batches_by_rel,
+            &prepaid,
+        )?)
+        .map_err(GfError::from_execution_error)?;
     Ok(EdgePropSource {
         batches: prop_batches_by_rel,
         prepaid,
@@ -331,7 +413,13 @@ pub(super) fn load_edge_prop_source_by_id(
             id_to_loc: std::collections::HashMap::new(),
         }));
     }
-    let memory = source_memory(inventory, prop_fields, targets.len(), admission)?;
+    let mut memory = source_memory::<u64>(
+        inventory,
+        rel_type_name,
+        prop_fields,
+        targets.len(),
+        admission,
+    )?;
     let stems = edge_property_stems(Some(inventory), dir, rel_type_name)?;
     let mut owners = std::collections::BTreeSet::new();
     let property_names = prop_fields
@@ -363,9 +451,26 @@ pub(super) fn load_edge_prop_source_by_id(
         }
     }
 
+    drop(owners);
+    drop(property_names);
+    drop(stems);
+    memory
+        .shrink_to(retained_source_bytes::<u64>(
+            0,
+            &batches_by_route,
+            &prepaid,
+        )?)
+        .map_err(GfError::from_execution_error)?;
+    memory
+        .grow(
+            admission,
+            hop_read::table_bytes::<(u64, (usize, u32))>(targets.len())?,
+        )
+        .map_err(GfError::from_execution_error)?;
+
     // edge_id -> (owning batch, row within it). `owners` already refused an
     // edge two routes hold; a repeat inside one batch is refused here.
-    let mut id_to_loc = std::collections::HashMap::new();
+    let mut id_to_loc = std::collections::HashMap::with_capacity(targets.len());
     for (bi, batch) in batches_by_route.iter().enumerate() {
         let ids = batch
             .column_by_name("edge_id")
@@ -384,6 +489,13 @@ pub(super) fn load_edge_prop_source_by_id(
             }
         }
     }
+    memory
+        .shrink_to(retained_source_bytes::<u64>(
+            id_to_loc.capacity(),
+            &batches_by_route,
+            &prepaid,
+        )?)
+        .map_err(GfError::from_execution_error)?;
     Ok(Some(EdgeIdPropSource {
         batches: batches_by_route,
         prepaid,
@@ -423,12 +535,17 @@ pub(super) fn build_edge_prop_children_admitted(
     if prop_fields.is_empty() {
         return Ok(Vec::new());
     }
-    let _targets = charge
-        .reserve(hop_read::checked_mul(hop_edge_uuids.len(), 1024)?)
+    let target_memory = charge
+        .reserve(hop_read::btree_set_bytes::<[u8; 16]>(hop_edge_uuids.len())?)
         .map_err(GfError::from_execution_error)?;
-    let targets = hop_edge_uuids.iter().copied().collect();
+    let mut targets = std::collections::BTreeSet::new();
+    for &uuid in hop_edge_uuids {
+        targets.insert(uuid);
+    }
     let source =
         load_edge_prop_source(inventory, rel_type_name, dir, prop_fields, &targets, charge)?;
+    drop(targets);
+    drop(target_memory);
     edge_prop_children(&source, prop_fields, hop_edge_uuids, charge)
 }
 
@@ -563,6 +680,59 @@ mod admission_tests {
     use arrow::datatypes::{DataType, Field, Schema};
     use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryPool};
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn requested_property_route_name_is_admitted_even_when_inventory_has_no_such_route() {
+        let root = tempfile::tempdir().unwrap();
+        let mut writer = graphforge_storage::GraphWriter::open_at(
+            root.path(),
+            graphforge_core::OntologyMode::Strict,
+            1,
+        )
+        .unwrap();
+        writer.flush().unwrap();
+        drop(writer);
+        let inventory =
+            graphforge_storage::AuthenticatedPropertyInventory::capture(root.path()).unwrap();
+        let requested = "x".repeat(1024 * 1024);
+        let fields = vec![Arc::new(Field::new("value", DataType::Int64, true))];
+        for (budget, fits) in [(64 * 1024, false), (16 * 1024 * 1024, true)] {
+            let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(budget));
+            let reservation = Arc::new(Mutex::new(
+                crate::chunked_reservation::ChunkedReservation::register(
+                    super::super::HOP_READ_CONSUMER,
+                    &pool,
+                ),
+            ));
+            let charge = super::super::HopReadCharge::new(&reservation);
+            let result = load_edge_prop_source(
+                Some(&inventory),
+                &requested,
+                root.path(),
+                &fields,
+                &std::collections::BTreeSet::new(),
+                &charge,
+            );
+            if fits {
+                let source = result.unwrap();
+                assert!(source.batches.is_empty());
+                assert!(source.uuid_to_loc.is_empty());
+                drop(source);
+            } else {
+                let error = result
+                    .err()
+                    .expect("the route-name clone must require query authority")
+                    .to_string();
+                assert!(
+                    error.contains("Resources exhausted") && error.contains("ExpandExec hop read"),
+                    "{error}"
+                );
+            }
+            drop(charge);
+            drop(reservation);
+            assert_eq!(pool.reserved(), 0);
+        }
+    }
 
     #[test]
     fn bufferless_property_children_keep_authority_until_internal_handoff() {
