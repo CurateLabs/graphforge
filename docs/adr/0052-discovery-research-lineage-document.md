@@ -21,7 +21,7 @@ Hub consumers need read-only research lineage: Branch heads, immutable Versions,
 
 ## Decision
 
-Add optional manifest field `lineage { format, lineage_digest, object_digest }` selecting a `graphforge-research-lineage/1` object (`application/vnd.graphforge.research-lineage+json`). The document lists Branches (with `ref_name`, genealogy, and `selection_sha256`), Versions (`complete` or `projection` with optional per-Version package references), Fork origin citations, and published Proposals. Unknown required capabilities fail `unsupported_future` before content is read.
+Add optional manifest field `lineage { format, lineage_digest, object_digest }` selecting a `graphforge-research-lineage/2` object (`application/vnd.graphforge.research-lineage+json`). The document lists Branches (with `ref_name`, genealogy, and `selection_sha256`), Versions (`complete` or `projection` with optional per-Version package references), Fork origin citations, and published Proposals. Unknown required capabilities fail `unsupported_future` before content is read.
 
 `DiscoveryManifest::bind_lineage` requires repository and `immutable_version` agreement, digest match, and every Branch `ref_name` in the refs snapshot with a target equal to the manifest's `immutable_version`: one lineage document describes the Branch heads of exactly one repository snapshot, so a ref that targets another snapshot fails closed. `research_version_object` selects a Version's portable object separately from the Project package object; research packages obey the same byte rules as the Project package.
 
