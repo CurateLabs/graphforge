@@ -21,6 +21,10 @@ const nativeRoot = join(fixture, "native");
 const installRoot = join(fixture, "consumer");
 mkdirSync(nativeRoot);
 mkdirSync(installRoot);
+// Exercise npm's ancestor-project discovery without exposing the user's project.
+const ancestorManifest = join(fixture, "package.json");
+const ancestorContent = `${JSON.stringify({ name: "graphforge-offline-ancestor", private: true })}\n`;
+writeFileSync(ancestorManifest, ancestorContent);
 
 try {
   writeFileSync(
@@ -75,6 +79,8 @@ try {
     "npm",
     [
       "install",
+      "--prefix",
+      installRoot,
       "--offline",
       "--ignore-scripts",
       "--no-audit",
@@ -84,6 +90,7 @@ try {
     ],
     { cwd: installRoot, stdio: "pipe" },
   );
+  assert.equal(readFileSync(ancestorManifest, "utf8"), ancestorContent);
   const installedSkills = join(
     installRoot,
     "node_modules",

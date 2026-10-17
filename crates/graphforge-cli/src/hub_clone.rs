@@ -1586,6 +1586,7 @@ fn portable_code(code: PortableV2ErrorCode) -> &'static str {
         PortableV2ErrorCode::InvalidStructure => "hub.package.invalid_structure",
         PortableV2ErrorCode::InvalidPath => "hub.package.invalid_path",
         PortableV2ErrorCode::DuplicateEntry => "hub.package.duplicate_entry",
+        PortableV2ErrorCode::UnsupportedProjectFormat => "hub.package.unsupported_format",
         PortableV2ErrorCode::UnsupportedFuture => "hub.package.unsupported_future",
         PortableV2ErrorCode::Incompatible => "hub.package.incompatible",
         PortableV2ErrorCode::DigestMismatch => "hub.package.digest_mismatch",

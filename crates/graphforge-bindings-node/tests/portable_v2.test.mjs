@@ -1,5 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, readFileSync } from "node:fs";
+import {
+  mkdtempSync,
+  rmSync,
+  readFileSync,
+  writeFileSync,
+  existsSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -156,5 +162,25 @@ test("shared immutable package has the complete Rust facade verification receipt
       Object.keys(report).length,
       Object.keys(expected[mode]).length,
     );
+  }
+});
+
+test("retired project format is rejected before a binding import touches its destination", async () => {
+  const root = mkdtempSync(join(tmpdir(), "gf-retired-format-"));
+  try {
+    const input = join(root, "unsupported.bin");
+    const target = join(root, "target");
+    writeFileSync(input, Buffer.from("graphforge-exp\0\n"));
+    await assert.rejects(
+      GraphForge.importPortableV2({
+        input,
+        projectRoot: target,
+        operationId: randomUUID(),
+      }),
+      (error) => error.code === "GF_UNSUPPORTED_PROJECT_FORMAT",
+    );
+    assert.equal(existsSync(target), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });
