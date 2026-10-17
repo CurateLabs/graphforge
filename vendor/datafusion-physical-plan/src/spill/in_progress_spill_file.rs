@@ -21,6 +21,7 @@ use datafusion_common::Result;
 use std::sync::Arc;
 
 use arrow::array::RecordBatch;
+use arrow::datatypes::DataType;
 use datafusion_common::exec_datafusion_err;
 use datafusion_execution::disk_manager::RefCountedTempFile;
 
@@ -114,25 +115,48 @@ impl InProgressSpillFile {
 
         let pool = &self.spill_writer.env.memory_pool;
         let schema_bytes = admission::schema_bound(self.spill_writer.schema())?;
+        // Leaf metadata walks end before encoding; the encoding bound already
+        // includes their flat metadata. Recursive GC can retain parent metadata
+        // while rebuilding children, so keep its separate envelope unchanged.
+        let reuse_layout = batch.columns().iter().all(|column| {
+            let data_type = column.data_type();
+            !data_type.is_nested()
+                && !matches!(
+                    data_type,
+                    DataType::Dictionary(_, _) | DataType::RunEndEncoded(_, _)
+                )
+        });
         // Admit metadata before to_data() in the checked data-layout walk.
-        let metadata = admission::reserve_with_credit(
+        let mut metadata = Some(admission::reserve_with_credit(
             pool,
             admission::source_metadata(batch)?,
-            "SpillWriterMetadata",
+            if reuse_layout {
+                "SpillWriterEncode"
+            } else {
+                "SpillWriterMetadata"
+            },
             bank.clone(),
-        )?;
+        )?);
         let bytes = admission::write_bound(
             batch,
             schema_bytes,
             self.spill_writer.compression,
             self.spill_writer.schema(),
         )?;
-        let workspace = admission::reserve_with_credit(
-            pool,
-            bytes.saturating_sub(credit),
-            "SpillWriterEncode",
-            bank,
-        )?;
+        let workspace = if reuse_layout {
+            let workspace = metadata.take().expect("layout grant is present");
+            // Preserve the existing authority while growing to the next phase;
+            // do not release it for a sibling to take between admission calls.
+            workspace.try_resize(bytes.saturating_sub(credit))?;
+            workspace
+        } else {
+            admission::reserve_with_credit(
+                pool,
+                bytes.saturating_sub(credit),
+                "SpillWriterEncode",
+                bank,
+            )?
+        };
         let codec = admission::codec_bound(self.spill_writer.compression, true)?;
         self.codec_authority.try_resize(codec)?;
         let gc_batch = gc_view_arrays(batch)?;
