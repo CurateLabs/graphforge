@@ -2905,6 +2905,20 @@ fn cloned_branch_continues_with_second_committer_and_fast_forwards_without_paylo
     let final_path = destinations.path().join("final");
     clone_into(&hub, "curate/claims", &final_path, Some("main"), None);
     let reopened = GraphForge::new(final_path.to_str()).unwrap();
+    let query = reopened
+        .execute("MATCH (n:Item) RETURN count(n), sum(n.score)")
+        .unwrap();
+    for (column, expected) in [(0, 1), (1, 3)] {
+        assert_eq!(
+            query.batches[0]
+                .column(column)
+                .as_any()
+                .downcast_ref::<arrow::array::Int64Array>()
+                .unwrap()
+                .value(0),
+            expected
+        );
+    }
     for (version, name) in [(alice, "Alice"), (bob_version, "Bob")] {
         let record = reopened.research_version(version).unwrap();
         assert_eq!(record.author.as_ref().unwrap().name, name);
@@ -2927,4 +2941,41 @@ fn cloned_branch_continues_with_second_committer_and_fast_forwards_without_paylo
     assert!(puts(&hub.log()[log..]).is_empty());
     let after = refs_document(&hub, "curate/claims");
     assert_eq!(before, after);
+}
+
+#[test]
+fn unavailable_released_intermediate_metadata_refuses_before_upload() {
+    let mut history = history();
+    edit(&mut history.graph, history.branch, 2);
+    let generation = history
+        .graph
+        .committed_generation_identity()
+        .unwrap()
+        .generation_uuid;
+    history
+        .graph
+        .commit_research_version_operation(
+            graphforge_api::ResearchOperation {
+                operation_uuid: Uuid::now_v7(),
+                expected_generation_uuid: generation,
+                mutation: graphforge_api::ResearchMutation::DeleteVersion {
+                    version_uuid: history.head,
+                },
+            },
+            &CancellationToken::new(),
+        )
+        .unwrap();
+    let state = history.graph.research_version_retention().unwrap();
+    assert!(!state.versions.contains_key(&history.head));
+    assert!(state.identities.contains_key(&history.head));
+    let hub = LoopbackHub::start();
+    let refused = run_publish_with(
+        &hub,
+        &history.graph,
+        &on_ref("curate/claims", "main"),
+        Credential::Token(token(&hub, "curate/claims")),
+    );
+    assert!(refused.result.is_err());
+    assert!(puts(&hub.log()).is_empty());
+    assert_eq!(refs_document(&hub, "curate/claims").status, 404);
 }

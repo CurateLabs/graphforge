@@ -787,6 +787,81 @@ fn corpus() -> Corpus {
     let repository = demo();
     let mut cases = Vec::new();
 
+    // Structural ancestry is checked by the server, independently of clients.
+    for (descends, stale) in [(true, false), (false, false), (false, true)] {
+        let first = research_publication(v1(1010), 2100, 2101, 2102, 'c', None);
+        let mut model = RepoModel::default();
+        let mut steps = vec![token(&repository, "token")];
+        steps.extend(publish(&first, "token", "first", &mut model));
+        let before = model.revision(&repository);
+        let mut next = research_publication(
+            Publication::new(
+                &repository,
+                operation(1011),
+                vec![Object::package("next native snapshot")],
+            ),
+            2100,
+            2101,
+            2103,
+            'd',
+            None,
+        );
+        let read = |publication: &Publication| {
+            ResearchLineage::from_json(
+                &publication
+                    .objects
+                    .iter()
+                    .find(|o| o.media_type == RESEARCH_LINEAGE_MEDIA_TYPE)
+                    .unwrap()
+                    .bytes,
+                DiscoveryLimits::default(),
+            )
+            .unwrap()
+        };
+        let old = read(&first);
+        let mut lineage = read(&next);
+        let head = lineage.branches[0].head_version_uuid.clone();
+        lineage.branches[0] = old.branches[0].clone();
+        lineage.branches[0].head_version_uuid = head;
+        if descends {
+            lineage.versions[0].parents = vec![old.versions[0].version_uuid.clone()];
+        }
+        let mut ancestor = old.versions[0].clone();
+        ancestor.package = None;
+        lineage.versions.push(ancestor);
+        lineage
+            .versions
+            .sort_by(|a, b| a.version_uuid.cmp(&b.version_uuid));
+        next.objects
+            .iter_mut()
+            .find(|o| o.media_type == RESEARCH_LINEAGE_MEDIA_TYPE)
+            .unwrap()
+            .bytes = lineage.to_canonical_json().unwrap();
+        next.objects.sort_by_key(Object::digest);
+        next.expected_revision = Some(if stale {
+            digest_of('f')
+        } else {
+            before.clone()
+        });
+        steps.push(open_new(&next, "token", "next"));
+        steps.extend(upload_all(&next, "next"));
+        let expectation = if stale {
+            error(412, "ref_conflict")
+        } else if descends {
+            model.advance(&next);
+            complete(&next, &model.revision(&repository))
+        } else {
+            error(409, "non_fast_forward")
+        };
+        steps.push(commit(&next, "token", "next", expectation));
+        steps.push(get_refs(&repository, &model));
+        cases.push(case(
+            if stale { "stale-lease-precedes-ancestry-refusal" } else if descends { "structural-fast-forward" } else { "structural-divergence-refused" },
+            "Native ancestry must descend from the published head; stale leases retain their distinct refusal and refs remain atomic.",
+            steps,
+        ));
+    }
+
     // Capabilities.
     cases.push(case(
         "capabilities-document",
@@ -1725,7 +1800,7 @@ fn error_schema() -> Value {
             "required": ["code", "message"],
             "properties": {
                 "code": {"enum": ["auth_denied", "entitlement_denied", "idempotency_conflict", "ref_conflict",
-                    "unsupported_future", "integrity_failure", "invalid_input", "internal"]},
+                    "non_fast_forward", "unsupported_future", "integrity_failure", "invalid_input", "internal"]},
                 "message": {"type": "string", "maxLength": 512}
             }
         }),

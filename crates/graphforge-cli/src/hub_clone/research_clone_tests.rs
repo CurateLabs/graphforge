@@ -827,7 +827,7 @@ fn unknown_required_lineage_capability_fails_before_package_reads_or_project_mut
         "repository":{"owner":"curate","repository":"claims-fork"},
         "immutable_version":format!("sha256:{}", "a".repeat(64)),
         "project_uuid":"01900000-0000-7000-8000-000000000001",
-        "requirements":[{"capability":"research-lineage","major":2}],"capabilities":[],
+        "requirements":[{"capability":"research-lineage","major":3}],"capabilities":[],
         "branches":[],"versions":[],"proposals":[]
     }))
     .unwrap();
@@ -860,7 +860,7 @@ fn unknown_required_manifest_research_capability_fails_before_any_object_read() 
     let (hub, _) = minimal_documents(
         serde_json::json!([
             {"capability":"portable-v2","major":1},
-            {"capability":"research-lineage","major":2}
+            {"capability":"research-lineage","major":3}
         ]),
         None,
     );
@@ -1120,7 +1120,7 @@ fn branchless_hub(
         project_uuid: Uuid::now_v7().to_string(),
         requirements: vec![ProtocolRequirement {
             capability: "research-lineage".into(),
-            major: 1,
+            major: 2,
         }],
         capabilities: vec![],
         fork: None,
@@ -1235,4 +1235,185 @@ fn branchless_lineage_preserves_complete_project_clone_and_corruption_never_down
     assert!(clone_into(&hub, &refused, None, None).is_err());
     assert!(!refused.exists());
     assert!(!hub.requested().contains(&object_url(&project_object)));
+}
+
+#[test]
+fn branch_activation_retries_exact_native_receipt_but_never_resets_advanced_staging() {
+    let published = publish_history();
+    let lineage = published
+        .fork
+        .build_research_lineage_for_discovery(
+            &lineage_request(&published),
+            &CancellationToken::new(),
+        )
+        .unwrap();
+    let hub = serve(&published, &lineage);
+    let fixture = tempfile::tempdir().unwrap();
+    let mut index = BTreeMap::new();
+    for (number, (url, bytes)) in hub.documents.iter().enumerate() {
+        let file = format!("document-{number}");
+        std::fs::write(fixture.path().join(&file), bytes).unwrap();
+        index.insert(url.clone(), file);
+    }
+    std::fs::write(
+        fixture.path().join("index.json"),
+        serde_json::to_vec(&index).unwrap(),
+    )
+    .unwrap();
+    let root = tempfile::tempdir().unwrap();
+    for (name, failpoint, advance) in [
+        ("before", "clone.before_branch_continuation", false),
+        ("after", "clone.after_branch_continuation", false),
+        ("advanced", "clone.after_branch_continuation", true),
+    ] {
+        let destination = root.path().join(name);
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                RESEARCH_HELPER,
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env("GRAPHFORGE_RESEARCH_CLONE_FIXTURE", fixture.path())
+            .env("GRAPHFORGE_RESEARCH_CLONE_DESTINATION", &destination)
+            .env("GRAPHFORGE_CLONE_FAILPOINT", failpoint)
+            .output()
+            .unwrap();
+        assert_eq!(
+            child.status.code(),
+            Some(CLONE_FAILPOINT_EXIT),
+            "{}",
+            String::from_utf8_lossy(&child.stdout)
+        );
+        assert!(!destination.exists());
+        let staging = staging_path(&destination).unwrap();
+        let import_operation =
+            Uuid::parse_str(&std::fs::read_to_string(staging.join("operation")).unwrap()).unwrap();
+        let imported_generation = graphforge_api::portable_v2_import_generation(&import_operation);
+        let staged = staging.join("project");
+        let prior = if advance {
+            let mut graph = GraphForge::new(staged.to_str()).unwrap();
+            edit(&mut graph, published.main_branch, 77);
+            Some(generation(&graph))
+        } else {
+            None
+        };
+        let result = clone_into(&hub, &destination, Some("main"), None);
+        if let Some(prior) = prior {
+            assert!(result.is_err());
+            assert!(!destination.exists());
+            assert_eq!(
+                generation(&GraphForge::new(staged.to_str()).unwrap()),
+                prior
+            );
+        } else {
+            result.unwrap();
+            let graph = GraphForge::new(destination.to_str()).unwrap();
+            let state = graph.research_version_retention().unwrap();
+            assert_eq!(state.heads[&published.main_branch], published.main_head);
+            assert_eq!(state.heads.len(), 1);
+            assert!(!state.branches.contains_key(&published.feature_branch));
+            assert!(
+                state
+                    .remote_branches
+                    .values()
+                    .any(|r| r.branch_uuid == published.feature_branch)
+            );
+            assert_eq!(score(&graph), 1);
+            let prior = generation(&graph);
+            let mut graph = graph;
+            assert!(
+                graph
+                    .execute_research_branch(
+                        &ExecuteResearchBranchRequest {
+                            author: None,
+                            committer: None,
+                            operation_uuid: Uuid::now_v7(),
+                            expected_generation_uuid: prior,
+                            branch_uuid: published.feature_branch,
+                            version_uuid: Uuid::now_v7(),
+                            created_at: 3,
+                            query: "MATCH (n:Item) SET n.score=99".into(),
+                        },
+                        &CancellationToken::new()
+                    )
+                    .is_err()
+            );
+            assert_eq!(generation(&graph), prior);
+            let selected = lineage
+                .branches
+                .iter()
+                .find(|b| b.ref_name == "main")
+                .unwrap();
+            let receipt = graph
+                .continue_imported_research_branch(
+                    selected,
+                    &lineage,
+                    "https://graphforge.sh/curate/claims-fork",
+                    imported_generation,
+                )
+                .unwrap();
+            assert_eq!(receipt.generation_uuid, prior);
+            let mut altered = lineage.clone();
+            altered
+                .branches
+                .iter_mut()
+                .find(|b| b.ref_name == "feature/score")
+                .unwrap()
+                .ref_name = "feature/renamed".into();
+            assert!(
+                graph
+                    .continue_imported_research_branch(
+                        selected,
+                        &altered,
+                        "https://graphforge.sh/curate/claims-fork",
+                        imported_generation,
+                    )
+                    .is_err(),
+                "a changed bound remote snapshot cannot reuse the activation receipt"
+            );
+            assert_eq!(generation(&graph), prior);
+            assert!(
+                graph
+                    .continue_imported_research_branch(
+                        selected,
+                        &lineage,
+                        "https://graphforge.sh/curate/claims-fork",
+                        Uuid::now_v7(),
+                    )
+                    .is_err(),
+                "same operation cannot replay with another import generation"
+            );
+            assert_eq!(generation(&graph), prior);
+        }
+    }
+}
+
+#[test]
+fn forged_project_boundary_anchor_is_not_native_history_authority() {
+    let published = publish_history();
+    let lineage = published
+        .fork
+        .build_research_lineage_for_discovery(
+            &lineage_request(&published),
+            &CancellationToken::new(),
+        )
+        .unwrap();
+    assert!(!lineage.boundary_anchors.is_empty());
+    let root = tempfile::tempdir().unwrap();
+    for variant in ["identity", "origin"] {
+        let mut forged = lineage.clone();
+        let anchor = &mut forged.boundary_anchors[0];
+        if variant == "identity" {
+            anchor.identity_digest = Sha256Digest(format!("sha256:{}", "0".repeat(64)));
+        } else {
+            anchor.origin_branch_uuid = Uuid::now_v7().to_string();
+        }
+        // The transport binds the altered document digest correctly; native
+        // package genealogy, not a self-consistent transport hash, must refuse.
+        let hub = serve(&published, &forged);
+        let destination = root.path().join(variant);
+        assert!(clone_into(&hub, &destination, Some("main"), None).is_err());
+        assert!(!destination.exists());
+    }
 }

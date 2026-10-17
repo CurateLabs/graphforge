@@ -27,8 +27,8 @@ production_source = runpy.run_path(str(Path(__file__).with_name("native_sources.
     "production_source"
 ]
 PYO3_SOURCE = ROOT / "crates/graphforge-bindings-py/src/lib.rs"
-EXPECTED_RUST_DIGEST = "835f0e77d48d063cd8d3d68412d786d11af20807c2dc810d2dcb96d974056940"
-EXPECTED_RELEASE_DIGEST = "78e5030bb26bf1b831f6b656df6bb37c4492915139184f53e2884c812194eb7a"
+EXPECTED_RUST_DIGEST = "eefda0ef0dbc69a1b5ffa22b3954e2167ce6a2c45c570859e59dc49c03ae5f13"
+EXPECTED_RELEASE_DIGEST = "c3b7a8431ddb072949eb31a5035b3f0e165fdd801a908b50d8efd9b7015021d9"
 
 PYTHON_ONLY_METHODS = frozenset(
     {
@@ -289,7 +289,7 @@ def _classification_report() -> dict[str, object]:
         for group in manifest["method_evidence_groups"].values()
         for method_id in group["ids"]
     }
-    assert len(release_methods) == 353
+    assert len(release_methods) == 354
     assert _digest(release_methods) == EXPECTED_RELEASE_DIGEST
     assert set(EVIDENCE) == set(manifest["method_evidence_groups"])
 
@@ -403,6 +403,9 @@ def _classification_report() -> dict[str, object]:
                 "Node and CLI pass JSON for declaration-aware numeric conversion; "
                 "Python passes strictly typed native literals to execute_saved_query"
             )
+        elif rust_id == "GraphForge.continue_imported_research_branch":
+            classification = "not-exposed"
+            reason = "verified discovery activation is owned by the native CLI import boundary"
         elif rust_id == "GraphForge.publication_payload_bytes":
             classification = "not-exposed"
             reason = "native filesystem sizing is a Rust/CLI publication preflight diagnostic"
