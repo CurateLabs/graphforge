@@ -462,6 +462,15 @@ impl Transport for HubTransport {
         self.read.get(url, range, if_range, limit)
     }
 
+    fn get_discovery(
+        &self,
+        url: &Url,
+        headers: &[(&str, ureq::http::HeaderValue)],
+        limit: u64,
+    ) -> Result<HttpResponse, graphforge_api::GfError> {
+        self.read.get_discovery(url, headers, limit)
+    }
+
     fn exchange(
         &self,
         request: &HubRequest,

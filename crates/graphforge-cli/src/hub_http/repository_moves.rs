@@ -45,7 +45,7 @@ impl<'a> RepositoryMoveTransport<'a> {
         self.pending_current.borrow().as_ref() == Some(url)
             && self.rebound.get()
             && self.evidence.borrow().as_ref().is_some_and(|(moved, _)| {
-                ["refs", "manifest"].iter().any(|suffix| {
+                ["refs", "manifest", "publish"].iter().any(|suffix| {
                     let mut expected = self.requested.clone();
                     expected.set_path(&format!(
                         "/{}/.gf/{suffix}",
@@ -56,20 +56,24 @@ impl<'a> RepositoryMoveTransport<'a> {
             })
     }
     fn confirm_metadata_move(&self, url: &Url) -> Result<(), graphforge_api::GfError> {
-        if self.rebound.get() || !matches!(self.endpoint(url).as_deref(), Some("refs" | "manifest"))
+        if self.rebound.get()
+            || !matches!(
+                self.endpoint(url).as_deref(),
+                Some("refs" | "manifest" | "publish")
+            )
         {
             return Ok(());
         }
-        let missing = {
+        for suffix in ["refs", "manifest"] {
             let evidence = self.evidence.borrow();
             let Some((_, seen)) = evidence.as_ref() else {
                 return Ok(());
             };
-            ["refs", "manifest"]
-                .into_iter()
-                .find(|suffix| !seen.contains(*suffix))
-        };
-        if let Some(suffix) = missing {
+            let already_seen = seen.contains(suffix);
+            drop(evidence);
+            if already_seen {
+                continue;
+            }
             let counterpart = endpoint(&self.requested, suffix);
             self.inner.validate(&counterpart)?;
             self.extra_requests.set(self.extra_requests.get() + 1);
@@ -84,6 +88,11 @@ impl<'a> RepositoryMoveTransport<'a> {
             } else {
                 self.inner.get(&counterpart, None, None, 4096)?
             };
+            if transient_status(response.status) {
+                return Err(network(
+                    "repository move confirmation temporarily unavailable",
+                ));
+            }
             if response.status != 308 {
                 return Err(validation(
                     "hub.integrity_failure",
@@ -209,8 +218,23 @@ impl<'a> RepositoryMoveTransport<'a> {
         base.set_path(&format!("/{}", moved.moved_to.canonical_name()));
         Ok((moved.moved_to.clone(), base, Some(moved.clone())))
     }
-    pub(crate) fn has_move(&self) -> bool {
-        self.evidence.borrow().is_some()
+    fn observe_response(
+        &self,
+        url: &Url,
+        status: u16,
+        location: Option<&str>,
+        body: &[u8],
+    ) -> Result<(), graphforge_api::GfError> {
+        self.observe(url, status, location, body)?;
+        self.confirm_metadata_move(url)?;
+        if self.rebound.get()
+            && let Some((moved, _)) = self.evidence.borrow().as_ref()
+            && let Some(location) = location
+            && let Ok(current) = moved.destination(url, location)
+        {
+            self.pending_current.replace(Some(current));
+        }
+        Ok(())
     }
     fn response(
         &self,
@@ -227,15 +251,7 @@ impl<'a> RepositoryMoveTransport<'a> {
             if body.len() > 4096 {
                 return Err(limit_error("repository move marker exceeds bound"));
             }
-            self.observe(url, response.status, response.location.as_deref(), &body)?;
-            self.confirm_metadata_move(url)?;
-            if self.rebound.get()
-                && let Some((moved, _)) = self.evidence.borrow().as_ref()
-                && let Some(location) = response.location.as_deref()
-                && let Ok(current) = moved.destination(url, location)
-            {
-                self.pending_current.replace(Some(current));
-            }
+            self.observe_response(url, response.status, response.location.as_deref(), &body)?;
             response.body = Box::new(Cursor::new(body));
         }
         Ok(response)
@@ -293,11 +309,34 @@ impl Transport for RepositoryMoveTransport<'_> {
         request: &HubRequest,
         limit: usize,
     ) -> Result<HubResponse, graphforge_api::GfError> {
-        let response = self.inner.exchange(request, limit)?;
-        if request.method == HubMethod::Get {
-            let url = Url::parse(&request.url)
-                .map_err(|_| validation("hub.integrity_failure", "repository URL is invalid"))?;
-            self.observe(
+        if request.method != HubMethod::Get {
+            return self.inner.exchange(request, limit);
+        }
+        let url = Url::parse(&request.url)
+            .map_err(|_| validation("hub.integrity_failure", "repository URL is invalid"))?;
+        let mut request = request.clone();
+        if self.current_metadata(&url) {
+            self.pending_current.take();
+            if let Some(credentials) = self.credentials {
+                // A fresh configured-policy request only after old markers agree.
+                // Never restore a bearer or credentials on a generic redirect.
+                for (name, value) in credentials
+                    .headers_for(&url)?
+                    .iter()
+                    .filter(|(name, _)| *name == "x-vercel-protection-bypass")
+                {
+                    request = request.with_header(
+                        name,
+                        value.to_str().map_err(|_| {
+                            validation("hub.auth_denied", "invalid preview credential")
+                        })?,
+                    );
+                }
+            }
+        }
+        let response = self.inner.exchange(&request, limit)?;
+        if self.endpoint(&url).is_some() && matches!(response.status, 301 | 302 | 303 | 307 | 308) {
+            self.observe_response(
                 &url,
                 response.status,
                 response.header("location"),
@@ -330,6 +369,142 @@ mod tests {
             moved_to: RepositoryIdentity::parse(to).unwrap(),
         })
         .unwrap()
+    }
+    #[test]
+    fn unmarked_confirmation_redirect_is_refused_after_one_probe() {
+        struct Unmarked(Cell<u32>);
+        impl Transport for Unmarked {
+            fn get(
+                &self,
+                url: &Url,
+                _: Option<u64>,
+                _: Option<&str>,
+                _: u64,
+            ) -> Result<HttpResponse, graphforge_api::GfError> {
+                self.0.set(self.0.get() + 1);
+                assert_eq!(self.0.get(), 1, "confirmation must stay bounded");
+                assert_eq!(url.path(), "/a/x/.gf/manifest");
+                Ok(HttpResponse {
+                    status: 308,
+                    location: Some(url.to_string()),
+                    etag: None,
+                    content_range: None,
+                    body: Box::new(Cursor::new(Vec::new())),
+                })
+            }
+        }
+        let inner = Unmarked(Cell::new(0));
+        let base = Url::parse("https://hub.example/a/x").unwrap();
+        let tracker =
+            RepositoryMoveTransport::new(&inner, &RepositoryIdentity::parse("a/x").unwrap(), &base);
+        let refs = endpoint(&base, "refs");
+        tracker
+            .observe(
+                &refs,
+                308,
+                Some("https://hub.example/b/y/.gf/refs"),
+                &marker("a/x", "b/y"),
+            )
+            .unwrap();
+        assert!(
+            tracker
+                .confirm_metadata_move(&refs)
+                .unwrap_err()
+                .to_string()
+                .contains("hub.integrity_failure")
+        );
+        assert_eq!(inner.0.get(), 1);
+        assert!(!tracker.rebound.get());
+    }
+    #[test]
+    fn temporary_confirmation_failures_retry_before_current_metadata() {
+        struct TransientConfirmation {
+            status: u16,
+            probes: Cell<u32>,
+            rebound: Cell<bool>,
+        }
+        impl Transport for TransientConfirmation {
+            fn get(
+                &self,
+                url: &Url,
+                _: Option<u64>,
+                _: Option<&str>,
+                _: u64,
+            ) -> Result<HttpResponse, graphforge_api::GfError> {
+                let (status, location, bytes) = match url.path() {
+                    "/a/x/.gf/refs" => (
+                        308,
+                        Some("https://hub.example/b/y/.gf/refs".into()),
+                        marker("a/x", "b/y"),
+                    ),
+                    "/a/x/.gf/manifest" => {
+                        self.probes.set(self.probes.get() + 1);
+                        assert!(!self.rebound.get());
+                        if self.probes.get() == 1 {
+                            (self.status, None, Vec::new())
+                        } else {
+                            (
+                                308,
+                                Some("https://hub.example/b/y/.gf/manifest".into()),
+                                marker("a/x", "b/y"),
+                            )
+                        }
+                    }
+                    "/b/y/.gf/refs" => {
+                        assert!(self.rebound.get());
+                        assert_eq!(self.probes.get(), 2);
+                        (200, None, Vec::new())
+                    }
+                    _ => panic!("unexpected move request"),
+                };
+                Ok(HttpResponse {
+                    status,
+                    location,
+                    etag: None,
+                    content_range: None,
+                    body: Box::new(Cursor::new(bytes)),
+                })
+            }
+            fn repository_moved(
+                &self,
+                _: &RepositoryMoved,
+                _: &Url,
+            ) -> Result<(), graphforge_api::GfError> {
+                assert_eq!(self.probes.get(), 2);
+                assert!(!self.rebound.replace(true));
+                Ok(())
+            }
+        }
+        for status in [408, 429, 500, 503, 599] {
+            let inner = TransientConfirmation {
+                status,
+                probes: Cell::new(0),
+                rebound: Cell::new(false),
+            };
+            let base = Url::parse("https://hub.example/a/x").unwrap();
+            let tracker = RepositoryMoveTransport::new(
+                &inner,
+                &RepositoryIdentity::parse("a/x").unwrap(),
+                &base,
+            );
+            let mut attempts = 0;
+            let response = fetch_with_attempts(
+                &tracker,
+                &endpoint(&base, "refs"),
+                None,
+                None,
+                4096,
+                &mut attempts,
+                &RetryPolicy {
+                    attempts: 2,
+                    initial_backoff: Duration::ZERO,
+                    max_backoff: Duration::ZERO,
+                },
+            )
+            .unwrap();
+            assert_eq!(response.status, 200);
+            assert_eq!(attempts, 3);
+        }
     }
     #[test]
     fn move_requires_agreement_and_refuses_chain_without_target_io() {

@@ -19,6 +19,9 @@
     "slug": {
       "maxLength": 100,
       "minLength": 1,
+      "not": {
+        "pattern": "\\.\\."
+      },
       "pattern": "^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$",
       "type": "string"
     }

@@ -60,6 +60,51 @@
       },
       "name": "unknown-field",
       "valid": false
+    },
+    {
+      "document": {
+        "format": "graphforge-repository-moved/1",
+        "moved_from": {
+          "owner": "curate",
+          "repository": "claims"
+        },
+        "moved_to": {
+          "owner": "a..b",
+          "repository": "renamed"
+        }
+      },
+      "name": "consecutive-dots-owner",
+      "valid": false
+    },
+    {
+      "document": {
+        "format": "graphforge-repository-moved/1",
+        "moved_from": {
+          "owner": "curate",
+          "repository": "claims"
+        },
+        "moved_to": {
+          "owner": "research",
+          "repository": "a..b"
+        }
+      },
+      "name": "consecutive-dots-repository",
+      "valid": false
+    },
+    {
+      "document": {
+        "format": "graphforge-repository-moved/1",
+        "moved_from": {
+          "owner": "curate",
+          "repository": "claims"
+        },
+        "moved_to": {
+          "owner": "research",
+          "repository": "a.b"
+        }
+      },
+      "name": "single-dot",
+      "valid": true
     }
   ],
   "format": "graphforge-repository-moved-conformance/1"

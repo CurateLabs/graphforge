@@ -319,7 +319,8 @@ fn resolve_publication(
     base: &Url,
     bypass: Option<&crate::hub_http::DiscoveryCredentials>,
 ) -> Result<PublicationResolution, GfError> {
-    let tracker = crate::hub_http::RepositoryMoveTransport::new(transport, identity, base);
+    let tracker = crate::hub_http::RepositoryMoveTransport::new(transport, identity, base)
+        .with_credentials(bypass);
     let hub = Hub {
         transport: &tracker,
         base: base.clone(),
@@ -333,21 +334,6 @@ fn resolve_publication(
                 "the Hub does not accept publications for this repository",
             )
         })?;
-    if tracker.has_move() {
-        // Agreement is proved from the old identity's markers, without trying
-        // unauthenticated target private discovery before its new scoped grant.
-        for suffix in ["refs", "manifest"] {
-            let url = endpoint(base, suffix);
-            let request = hub.with_bypass(HubRequest::new(HubMethod::Get, url.as_str()), &url)?;
-            let response = tracker.exchange(&request, 4096)?;
-            if response.status != 308 {
-                return Err(validation(
-                    "hub.integrity_failure",
-                    "repository control documents disagree on the move",
-                ));
-            }
-        }
-    }
     let (current, current_base, moved) = tracker.resolved(true)?;
     let capabilities = PublishCapabilities::from_json(&bytes).map_err(|error| protocol(&error))?;
     if capabilities.repository != current
@@ -887,7 +873,8 @@ fn read_published(
     base: &Url,
     identity: &RepositoryIdentity,
 ) -> Result<Option<Published>, GfError> {
-    let tracker = crate::hub_http::RepositoryMoveTransport::new(hub.transport, identity, base);
+    let tracker = crate::hub_http::RepositoryMoveTransport::new(hub.transport, identity, base)
+        .with_credentials(hub.bypass.filter(|_| base.origin() == hub.base.origin()));
     let read_hub = Hub {
         transport: &tracker,
         base: hub.base.clone(),

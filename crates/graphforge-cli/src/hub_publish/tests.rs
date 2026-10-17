@@ -392,6 +392,16 @@ impl Transport for LoopbackTransport {
             .get(&self.route(url.as_str())?, range, if_range, limit)
     }
 
+    fn get_discovery(
+        &self,
+        url: &Url,
+        headers: &[(&str, ureq::http::HeaderValue)],
+        limit: u64,
+    ) -> Result<HttpResponse, GfError> {
+        self.inner
+            .get_discovery(&self.route(url.as_str())?, headers, limit)
+    }
+
     fn exchange(&self, request: &HubRequest, limit: usize) -> Result<HubResponse, GfError> {
         let mut routed = request.clone();
         routed.url = self.route(&request.url)?.to_string();
@@ -1004,12 +1014,37 @@ fn published_fork_clones_back_with_origin_citation() {
         .unwrap();
     let transport = hub.transport();
     let source_base = Url::parse(&repository_url("curate/claims")).unwrap();
+    let bypass = crate::hub_http::DiscoveryCredentials::load(
+        &Url::parse(HUB).unwrap(),
+        None,
+        Some("PREVIEW_SECRET"),
+        |_| Ok("fork-preview".into()),
+    )
+    .unwrap();
     let reader = Hub {
         transport: &transport,
         base: source_base.clone(),
-        bypass: None,
+        bypass: bypass.as_ref(),
     };
+    let before = hub.log().len();
     verify_fork_origin(&reader, &source_base, &citation).unwrap();
+    let log = hub.log();
+    assert!(
+        log[before..]
+            .iter()
+            .any(|r| r.path == "/research/moved-origin/.gf/refs")
+    );
+    for request in &log[before..] {
+        assert!(request.bearer.is_none());
+        assert_eq!(
+            request.bypass.as_deref(),
+            if request.path.ends_with("/.gf/refs") || request.path.ends_with("/.gf/manifest") {
+                Some("fork-preview")
+            } else {
+                None
+            }
+        );
+    }
     let mut wrong = citation.clone();
     wrong.origin_version_identity = Sha256Digest(sha256_digest(b"another identity"));
     assert!(verify_fork_origin(&reader, &source_base, &wrong).is_err());
@@ -1737,11 +1772,28 @@ fn preview_publish_keeps_bypass_on_control_requests_and_off_upload_retries() {
         bypass.as_ref(),
     );
     run.result.unwrap();
+    let old = RepositoryIdentity::parse("curate/claims").unwrap();
+    let new = RepositoryIdentity::parse("research/renamed").unwrap();
+    hub.hub.move_repository(&old, &new).unwrap();
+    let moved = run_publish_with_bypass(
+        &hub,
+        &history.graph,
+        &on_ref("curate/claims", "main"),
+        Credential::Token(token(&hub, "research/renamed")),
+        bypass.as_ref(),
+    )
+    .result
+    .unwrap();
+    assert_eq!(moved.receipt.repository, new);
+    assert_eq!(moved.moved.unwrap().moved_from, old);
     let log = hub.log();
     assert!(log.iter().any(|entry| entry.method == "HEAD"));
     assert!(log.iter().filter(|entry| entry.method == "PUT").count() >= 2);
     for entry in log {
-        if entry.method == "HEAD" || entry.method == "PUT" {
+        if entry.method == "HEAD"
+            || entry.method == "PUT"
+            || (entry.method == "GET" && entry.path.contains("/.gf/objects/"))
+        {
             assert!(
                 entry.bypass.is_none(),
                 "upload purpose must exclude preview credentials"
