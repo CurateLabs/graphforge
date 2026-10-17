@@ -1507,8 +1507,7 @@ fn build_edge_list_column_admitted(
     }
     let struct_fields = struct_fields.clone();
     // Property fields are everything past the four topology fields, in order.
-    let prop_fields: Vec<arrow::datatypes::FieldRef> =
-        struct_fields.iter().skip(4).cloned().collect();
+    let prop_fields = &struct_fields[struct_fields.len().min(4)..];
 
     // Flatten every hop of every path into the struct children, recording each
     // path's hop count for the list offsets. `edge_uuids` doubles as the lookup
@@ -1563,7 +1562,7 @@ fn build_edge_list_column_admitted(
     } else {
         let (properties, bytes) = edge_properties::leased_edge_prop_children(
             edge_props,
-            &prop_fields,
+            prop_fields,
             &edge_uuids,
             HopReadCharge::new(&cfg.read_reservation),
         )?;
