@@ -239,6 +239,7 @@ pub enum PortableV2ErrorCode {
     InvalidPath,
     DuplicateEntry,
     UnsupportedFuture,
+    UnsupportedProjectFormat,
     Incompatible,
     DigestMismatch,
     ConcurrentMutation,

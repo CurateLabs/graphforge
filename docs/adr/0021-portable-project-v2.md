@@ -10,10 +10,12 @@ revisit_when: "A package needs full-memory buffering, unmanifested files, or cap
 # ADR 0021: Portable project v2 package layout and identity
 
 **Implementation:** Shipped across storage, API, CLI and both bindings
-(#784, #827, #829, #849, #850). Two decided details are not yet
-implemented: the `application/vnd.graphforge.project.manifest.v2+json`
-media type, and the typed `unsupported_legacy` disposition for a v1
-envelope read by a v2 reader.  
+(#784, #827, #829, #849, #850). The legacy fully buffered envelope is
+superseded and deleted (#1932). Primary `gf export`/`gf import` use the streaming
+package and its canonical `/2` result contracts; no legacy reader, converter,
+alias or deprecation path remains. Retired bytes fail with
+`GF_UNSUPPORTED_PROJECT_FORMAT` before destination mutation. The manifest media
+type remains an independently tracked wire-contract concern.
 **Build target:** v0.5.x (M5 portable project v2)  
 **Related:** #783, parent #740; consumers #741, #742, #784–#787, #744
 
@@ -75,8 +77,8 @@ digest and inventory while retaining distinct transport digests.
   allowed, all payload and tag files are manifested, and extra files fail.
 - Authenticity is not inferred from integrity. Signatures and trust policy are
   optional evidence over the package digest and belong to later issues.
-- v1 remains readable only through the legacy v1 reader and is never emitted by
-  a v2 writer. Unsupported future semantics fail before project mutation.
+- The legacy envelope is neither emitted nor readable. Unsupported formats and
+  future semantics fail before project mutation.
 
 ## Required verification
 

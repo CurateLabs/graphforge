@@ -140,41 +140,6 @@ fn reused_parent_participants_are_hard_linked_without_payload_hash_or_write() {
     );
     fs::write(&target, &ledger).unwrap();
 
-    let portable_path = root.path().join("round-trip.gfportable");
-    crate::export_portable_project(
-        &current,
-        &portable_path,
-        crate::PortableProjectLimits::default(),
-    )
-    .unwrap();
-    let portable_target = root.path().join("portable-round-trip");
-    let capabilities = current
-        .capabilities()
-        .into_iter()
-        .map(|capability| ProjectCapability {
-            capability_id: capability.capability_id,
-            capability_version: capability.capability_version,
-        })
-        .collect::<Vec<_>>();
-    crate::import_portable_project_file(
-        &portable_path,
-        &portable_target,
-        Uuid::now_v7(),
-        Uuid::now_v7(),
-        &capabilities,
-        crate::PortableProjectLimits::default(),
-    )
-    .unwrap();
-    assert_eq!(
-        crate::resolve_project_generation(&portable_target)
-            .unwrap()
-            .participant_snapshot("knowledge", "assertions")
-            .unwrap()
-            .unwrap()
-            .bytes,
-        ledger
-    );
-
     let parent_generation_uuid = parent.generation_uuid();
     let held_cleanup = crate::execute_project_cleanup(
         root.path(),

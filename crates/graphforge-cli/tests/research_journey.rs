@@ -503,7 +503,6 @@ fn interchange(
     let operation = Uuid::now_v7().to_string();
     imported.run(&[
         "--json",
-        "portable",
         "import",
         "--input",
         package.to_str().unwrap(),
@@ -572,7 +571,6 @@ fn interchange(
     };
     selected.run(&[
         "--json",
-        "portable",
         "import",
         "--input",
         redacted.to_str().unwrap(),
@@ -622,7 +620,6 @@ fn interchange(
     assert_eq!(fork_ref["version"], citation["version"]);
     let replay = decode(&imported.run(&[
         "--json",
-        "portable",
         "import",
         "--input",
         package.to_str().unwrap(),

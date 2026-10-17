@@ -92,7 +92,7 @@ def assert_git_boundary(project: Path) -> None:
     ignored_payloads = {
         ".graphforge/state/should-never-stage.parquet": b"graph data",
         ".graphforge/imports/source.arrow": b"source data",
-        ".graphforge/exports/archive.gfportable": b"export data",
+        ".graphforge/exports/archive.gfpb": b"export data",
     }
     for relative, payload in ignored_payloads.items():
         target = project / relative
@@ -110,7 +110,7 @@ def assert_git_boundary(project: Path) -> None:
     }
     assert required <= staged, (required - staged, staged)
     assert not (set(ignored_payloads) & staged), set(ignored_payloads) & staged
-    forbidden_suffixes = (".arrow", ".parquet", ".db", ".sqlite", ".gfportable")
+    forbidden_suffixes = (".arrow", ".parquet", ".db", ".sqlite", ".gfpb")
     assert not any(path.endswith(forbidden_suffixes) for path in staged), staged
 
 
@@ -348,22 +348,22 @@ def main() -> None:
 
         exports = source / ".graphforge/exports"
         exports.mkdir(parents=True, exist_ok=True)
-        envelope = exports / "current.gfportable"
+        bundle = exports / "current.gfpb"
         exported = result(
-            ["export", "--current", "--output", str(envelope)],
+            ["export", "--current", "--output", str(bundle)],
             source,
         )
-        assert exported["contract"] == "graphforge-portable-export/1"
+        assert exported["contract"] == "graphforge-portable-export/2"
         assert exported["source"] == "current"
         assert exported["checkpoint"] is None
-        assert envelope.is_file()
-        duplicate = exports / "current-duplicate.gfportable"
+        assert bundle.is_file()
+        duplicate = exports / "current-duplicate.gfpb"
         duplicate_export = result(
             ["export", "--current", "--output", str(duplicate)],
             source,
         )
-        assert duplicate_export["envelope_sha256"] == exported["envelope_sha256"]
-        assert duplicate.read_bytes() == envelope.read_bytes()
+        assert duplicate_export["package_digest"] == exported["package_digest"]
+        assert duplicate.read_bytes() == bundle.read_bytes()
 
         destination = parent / "destination"
         destination.mkdir()
@@ -373,15 +373,14 @@ def main() -> None:
             [
                 "import",
                 "--input",
-                str(envelope),
+                str(bundle),
                 "--idempotency-key",
                 IDENTITIES["importOperation"],
             ],
             destination,
         )
-        assert imported["contract"] == "graphforge-portable-import/1"
-        assert imported["source_generation_uuid"] == exported["generation_uuid"]
-        assert imported["envelope_sha256"] == exported["envelope_sha256"]
+        assert imported["contract"] == "graphforge-portable-import/2"
+        assert imported["package_digest"] == exported["package_digest"]
         assert imported["idempotent_replay"] is False
         destination_current = (destination / ".graphforge/state/CURRENT").read_bytes()
         assert result(["checkpoint", "list"], destination)["contract"] == (
@@ -411,7 +410,7 @@ def main() -> None:
         assert removed == {"removed": True, "target": ".graphforge/state"}
         assert not (source / ".graphforge/state").exists()
         assert (source / ".graphforge/ontology/keep.yaml").is_file()
-        assert envelope.is_file()
+        assert bundle.is_file()
         assert (source / ".graphforge/imports/source.arrow").is_file()
         assert (source / ".agents/skills/.graphforge-managed.json").is_file()
         covered.add("remove_refusal_and_confirmation")

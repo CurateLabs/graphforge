@@ -452,7 +452,6 @@ fn stream(
         return Ok(crate::corruption_checksum::checksum(bytes));
     }
     let (mut input, planned_identity) = open_planned_source(planned)?;
-    let mut buffer = vec![0; size];
     let mut digest = planned.checksum.is_none().then(Sha256::new);
     let mut checksum = crate::corruption_checksum::Checksum::new();
     let mut bytes_read = 0;
@@ -461,30 +460,20 @@ fn stream(
         .checked_add(1)
         .ok_or_else(|| limit("planned source length overflow"))?;
     let mut reader = (&mut input).take(bound);
-    loop {
-        if cancelled() {
-            return Err(err("GF_CANCELLED", "portable export cancelled"));
-        }
-        let count = reader.read(&mut buffer).map_err(storage)?;
-        if count == 0 {
-            break;
-        }
-        observed_write_result(
-            out.write_all(&buffer[..count]).map_err(storage),
-            out,
-            allocation,
-        )?;
+    copy_chunks(&mut reader, size, cancelled, |chunk| {
+        observed_write_result(out.write_all(chunk).map_err(storage), out, allocation)?;
         if allocation.operation.is_some() {
             allocation.observe(out)?;
         }
-        transport.update(&buffer[..count]);
+        transport.update(chunk);
         if let Some(digest) = &mut digest {
-            digest.update(&buffer[..count]);
+            digest.update(chunk);
         }
-        checksum.update(&buffer[..count]);
-        bytes_read += count as u64;
-        tick(count as u64);
-    }
+        checksum.update(chunk);
+        bytes_read += chunk.len() as u64;
+        tick(chunk.len() as u64);
+        Ok(())
+    })?;
     if bytes_read != planned.length
         || digest.is_some_and(|digest| <[u8; 32]>::from(digest.finalize()) != planned.digest)
         || planned
@@ -804,3 +793,68 @@ fn sync_tree(root: &Path) -> Result<(), ExportError> {
 
 #[cfg(test)]
 mod tests;
+
+// The payload copy has one fixed-size buffer, independent of the planned length.
+// The consumer must finish each chunk before the next read reuses that buffer.
+fn copy_chunks(
+    reader: &mut impl Read,
+    size: usize,
+    cancelled: &impl Fn() -> bool,
+    mut consume: impl FnMut(&[u8]) -> Result<(), ExportError>,
+) -> Result<(), ExportError> {
+    if size == 0 {
+        return Err(limit("copy buffer is zero"));
+    }
+    let mut buffer = vec![0; size];
+    loop {
+        if cancelled() {
+            return Err(err("GF_CANCELLED", "portable export cancelled"));
+        }
+        let count = reader.read(&mut buffer).map_err(storage)?;
+        if count == 0 {
+            return Ok(());
+        }
+        consume(&buffer[..count])?;
+    }
+}
+
+#[cfg(test)]
+mod bounded_copy_tests {
+    use super::*;
+    struct GeneratedReader {
+        remaining: u64,
+        largest_requested: usize,
+    }
+    impl Read for GeneratedReader {
+        fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
+            self.largest_requested = self.largest_requested.max(output.len());
+            let n = self.remaining.min(output.len() as u64) as usize;
+            output[..n].fill(0x5a);
+            self.remaining -= n as u64;
+            Ok(n)
+        }
+    }
+    #[test]
+    fn payload_buffer_bound_does_not_scale_with_payload_size() {
+        const BUFFER: usize = 8192;
+        for length in [BUFFER as u64 * 2 + 1, BUFFER as u64 * 1024 + 17] {
+            let mut reader = GeneratedReader {
+                remaining: length,
+                largest_requested: 0,
+            };
+            let mut writer = std::io::sink();
+            let mut largest_written = 0;
+            let mut total = 0;
+            copy_chunks(&mut reader, BUFFER, &|| false, |chunk| {
+                largest_written = largest_written.max(chunk.len());
+                total += chunk.len() as u64;
+                writer.write_all(chunk).map_err(storage)
+            })
+            .unwrap();
+            assert_eq!(total, length);
+            assert_eq!(reader.remaining, 0);
+            assert_eq!(reader.largest_requested, BUFFER);
+            assert_eq!(largest_written, BUFFER);
+        }
+    }
+}

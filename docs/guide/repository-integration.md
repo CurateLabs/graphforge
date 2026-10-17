@@ -167,9 +167,9 @@ copying GraphForge's live project layout. Select the current committed
 generation explicitly, or select the generation pinned by a named checkpoint:
 
 ```bash
-graphforge --project-dir . export --current --output .graphforge/exports/current.gfportable
+graphforge --project-dir . export --current --output .graphforge/exports/current.gfpb
 graphforge --project-dir . export --checkpoint before-change \
-  --output .graphforge/exports/before-change.gfportable
+  --output .graphforge/exports/before-change.gfpb
 ```
 
 `--current` is resolved when export starts. `--checkpoint NAME` resolves that
@@ -186,14 +186,14 @@ checkpoint registries, writer or lease locks, transaction journals, caches,
 temporary files, trash, or another generation discovered beside the selected
 one. It is therefore not a raw archive of `.graphforge/state/`.
 
-Import accepts a portable envelope only into a new, empty, or pristine
+Import accepts a streaming portable package only into a new, empty, or pristine
 initialized project container. The pristine case is what makes import usable
 immediately after `graphforge init`; any graph mutation or extra project artifact makes
 the target ineligible:
 
 ```bash
 graphforge --project-dir . import \
-  --input .graphforge/imports/incoming.gfportable \
+  --input .graphforge/imports/incoming.gfpb \
   --idempotency-key 4f6a9b78-887d-4b8e-872b-a8b59059f777
 ```
 
