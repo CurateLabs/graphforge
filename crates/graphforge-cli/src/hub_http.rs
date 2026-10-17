@@ -108,6 +108,15 @@ pub(crate) struct HttpResponse {
 }
 
 pub(crate) trait Transport {
+    /// Rebind authentication only after the caller verified both old metadata
+    /// move markers. This never authorizes an object or forwards a header.
+    fn repository_moved(
+        &self,
+        _moved: &graphforge_discovery::RepositoryMoved,
+        _current: &Url,
+    ) -> Result<(), graphforge_api::GfError> {
+        Ok(())
+    }
     fn validate(&self, url: &Url) -> Result<(), graphforge_api::GfError> {
         validate_url(url)
     }

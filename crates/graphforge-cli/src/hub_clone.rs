@@ -1706,14 +1706,15 @@ fn run_clone_job(
     if let Some(finished) = finished {
         return Ok(finished);
     }
-    let move_transport = crate::hub_http::RepositoryMoveTransport::new(transport, &identity, &base);
-    let transport = &move_transport as &dyn Transport;
     let credentials = DiscoveryCredentials::load(
         &base,
         args.token_env.as_deref(),
         args.protection_bypass_env.as_deref(),
         env.credential_lookup,
     )?;
+    let move_transport = crate::hub_http::RepositoryMoveTransport::new(transport, &identity, &base)
+        .with_credentials(credentials.as_ref());
+    let transport = &move_transport as &dyn Transport;
     profile.handoff(
         ComponentKind::Cli,
         ComponentKind::NetworkTransport,
@@ -1744,9 +1745,14 @@ fn run_clone_job(
         },
     );
     if let Some(stage) = profile.stages.last_mut() {
-        stage.attempt = refs_attempts.max(1);
+        stage.attempt = refs_attempts
+            .saturating_add(move_transport.extra_metadata_requests())
+            .max(1);
     }
     let refs_bytes = refs_result?;
+    // Both old markers were verified before the first moved read. Start the
+    // manifest request at that explicit current identity, under its policy.
+    let (_, manifest_base, _) = move_transport.resolved(false)?;
     let mut manifest_attempts = 0;
     let manifest_result = profile.stage(
         Stage::ManifestDiscovery,
@@ -1758,7 +1764,7 @@ fn run_clone_job(
             let bytes = read_bounded(
                 fetch_discovery_with_attempts(
                     transport,
-                    &endpoint(&base, "manifest"),
+                    &endpoint(&manifest_base, "manifest"),
                     credentials.as_ref(),
                     MAX_METADATA_BYTES as u64,
                     &mut manifest_attempts,

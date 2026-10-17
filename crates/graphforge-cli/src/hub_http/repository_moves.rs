@@ -1,17 +1,22 @@
 //! Observe one marked repository move without changing generic object redirects.
 use super::*;
 use graphforge_discovery::{DiscoveryLimits, RepositoryMoved};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeSet;
 use std::io::Cursor;
 
-/// Request-local move evidence. The inner transport still owns DNS/HTTPS and
-/// generic redirect credential stripping. This layer never sends a request.
+/// Request-local move evidence and one bounded old-metadata confirmation probe.
+/// The inner transport still owns every DNS/HTTPS exchange; generic redirects
+/// and object requests retain their credential isolation.
 pub(crate) struct RepositoryMoveTransport<'a> {
     inner: &'a dyn Transport,
     requested: Url,
     identity: RepositoryIdentity,
     evidence: RefCell<Option<(RepositoryMoved, BTreeSet<String>)>>,
+    credentials: Option<&'a DiscoveryCredentials>,
+    rebound: Cell<bool>,
+    extra_requests: Cell<u32>,
+    pending_current: RefCell<Option<Url>>,
 }
 impl<'a> RepositoryMoveTransport<'a> {
     pub(crate) fn new(inner: &'a dyn Transport, identity: &RepositoryIdentity, base: &Url) -> Self {
@@ -20,7 +25,92 @@ impl<'a> RepositoryMoveTransport<'a> {
             requested: base.clone(),
             identity: identity.clone(),
             evidence: RefCell::new(None),
+            credentials: None,
+            rebound: Cell::new(false),
+            extra_requests: Cell::new(0),
+            pending_current: RefCell::new(None),
         }
+    }
+    pub(crate) fn with_credentials(
+        mut self,
+        credentials: Option<&'a DiscoveryCredentials>,
+    ) -> Self {
+        self.credentials = credentials;
+        self
+    }
+    pub(crate) fn extra_metadata_requests(&self) -> u32 {
+        self.extra_requests.get()
+    }
+    fn current_metadata(&self, url: &Url) -> bool {
+        self.pending_current.borrow().as_ref() == Some(url)
+            && self.rebound.get()
+            && self.evidence.borrow().as_ref().is_some_and(|(moved, _)| {
+                ["refs", "manifest"].iter().any(|suffix| {
+                    let mut expected = self.requested.clone();
+                    expected.set_path(&format!(
+                        "/{}/.gf/{suffix}",
+                        moved.moved_to.canonical_name()
+                    ));
+                    url == &expected
+                })
+            })
+    }
+    fn confirm_metadata_move(&self, url: &Url) -> Result<(), graphforge_api::GfError> {
+        if self.rebound.get() || !matches!(self.endpoint(url).as_deref(), Some("refs" | "manifest"))
+        {
+            return Ok(());
+        }
+        let missing = {
+            let evidence = self.evidence.borrow();
+            let Some((_, seen)) = evidence.as_ref() else {
+                return Ok(());
+            };
+            ["refs", "manifest"]
+                .into_iter()
+                .find(|suffix| !seen.contains(*suffix))
+        };
+        if let Some(suffix) = missing {
+            let counterpart = endpoint(&self.requested, suffix);
+            self.inner.validate(&counterpart)?;
+            self.extra_requests.set(self.extra_requests.get() + 1);
+            // A new request to the OLD identity, under the configured policy;
+            // no destination from the move has been contacted yet.
+            let response = if let Some(credentials) = self.credentials {
+                self.inner.get_discovery(
+                    &counterpart,
+                    credentials.headers_for(&counterpart)?,
+                    4096,
+                )?
+            } else {
+                self.inner.get(&counterpart, None, None, 4096)?
+            };
+            if response.status != 308 {
+                return Err(validation(
+                    "hub.integrity_failure",
+                    "repository move markers disagree",
+                ));
+            }
+            let mut bytes = Vec::new();
+            response
+                .body
+                .take(4097)
+                .read_to_end(&mut bytes)
+                .map_err(|_| network("move response read failed"))?;
+            if bytes.len() > 4096 {
+                return Err(limit_error("repository move marker exceeds bound"));
+            }
+            self.observe(
+                &counterpart,
+                response.status,
+                response.location.as_deref(),
+                &bytes,
+            )?;
+        }
+        let (_, current, moved) = self.resolved(false)?;
+        self.inner
+            .repository_moved(moved.as_ref().expect("verified move"), &current)?;
+        self.rebound.set(true);
+        Ok(())
     }
     fn endpoint(&self, url: &Url) -> Option<String> {
         if url.origin() != self.requested.origin() {
@@ -138,6 +228,14 @@ impl<'a> RepositoryMoveTransport<'a> {
                 return Err(limit_error("repository move marker exceeds bound"));
             }
             self.observe(url, response.status, response.location.as_deref(), &body)?;
+            self.confirm_metadata_move(url)?;
+            if self.rebound.get()
+                && let Some((moved, _)) = self.evidence.borrow().as_ref()
+                && let Some(location) = response.location.as_deref()
+                && let Ok(current) = moved.destination(url, location)
+            {
+                self.pending_current.replace(Some(current));
+            }
             response.body = Box::new(Cursor::new(body));
         }
         Ok(response)
@@ -154,7 +252,19 @@ impl Transport for RepositoryMoveTransport<'_> {
         if_range: Option<&str>,
         limit: u64,
     ) -> Result<HttpResponse, graphforge_api::GfError> {
-        self.response(url, self.inner.get(url, range, if_range, limit)?)
+        let current_metadata = self.current_metadata(url);
+        if current_metadata {
+            self.pending_current.take();
+        }
+        let response = if current_metadata && let Some(credentials) = self.credentials {
+            // Fresh authenticated metadata request after the two-marker trust
+            // boundary. Generic redirects and object reads never use this.
+            self.inner
+                .get_discovery(url, credentials.headers_for(url)?, limit)?
+        } else {
+            self.inner.get(url, range, if_range, limit)?
+        };
+        self.response(url, response)
     }
     fn get_discovery(
         &self,
@@ -162,6 +272,9 @@ impl Transport for RepositoryMoveTransport<'_> {
         headers: &[(&str, ureq::http::HeaderValue)],
         limit: u64,
     ) -> Result<HttpResponse, graphforge_api::GfError> {
+        if self.current_metadata(url) {
+            self.pending_current.take();
+        }
         self.response(url, self.inner.get_discovery(url, headers, limit)?)
     }
     fn get_authorized(

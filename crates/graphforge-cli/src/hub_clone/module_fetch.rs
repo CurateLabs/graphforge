@@ -177,7 +177,8 @@ fn run_module_fetch_job(
     let move_transport = crate::hub_http::RepositoryMoveTransport::new(transport, &identity, &base);
     let transport = &move_transport as &dyn Transport;
     let refs_bytes = fetch_document(transport, &endpoint(&base, "refs"), retry)?;
-    let manifest_bytes = fetch_document(transport, &endpoint(&base, "manifest"), retry)?;
+    let (_, current_base, _) = move_transport.resolved(false)?;
+    let manifest_bytes = fetch_document(transport, &endpoint(&current_base, "manifest"), retry)?;
     let (identity, _, moved) = move_transport.resolved(false)?;
     let limits = DiscoveryLimits {
         max_response_bytes: MAX_METADATA_BYTES,
@@ -449,8 +450,8 @@ mod tests {
         let transport = RecordingTransport {
             inner: Scripted::new(vec![
                 redirect("refs"),
-                response(200, None, &refs_bytes),
                 redirect("manifest"),
+                response(200, None, &refs_bytes),
                 response(200, None, &manifest_bytes),
                 response(200, None, &package),
             ]),

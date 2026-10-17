@@ -149,6 +149,14 @@ inconsistent identity moves fail closed. CLI JSON adds `moved_from` and
 `moved_to` only after a verified move; human output reports the same transition.
 Ordinary object-location redirects retain their existing credential isolation.
 
+Before a moved clone contacts either new metadata endpoint, it verifies both
+old metadata markers. The read adapter then replaces only its current metadata
+identity and cached repository grant. It retains the same origin-bound user
+session, reapplies configured protection policy only to fresh verified-current
+metadata requests, and acquires a new repository grant through normal auth.
+It never treats an old repository grant as authorization for the new name.
+Object requests retain their separate origin and redirect restrictions.
+
 `rehome_repository` is the Rust derivation authority for a Hub transaction. It
 accepts the current ref set and exactly the bounded closure of stored manifests
 referenced by that set, with their exact advertised summary and lineage bytes.
