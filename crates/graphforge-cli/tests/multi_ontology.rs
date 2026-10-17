@@ -649,7 +649,6 @@ fn unsupported_future_portability() {
         project.path(),
         &[
             "--json",
-            "portable",
             "export",
             "--current",
             "--format",
@@ -759,7 +758,6 @@ fn no_partial_import_or_authority_change() {
         source.path(),
         &[
             "--json",
-            "portable",
             "export",
             "--current",
             "--format",
@@ -780,7 +778,6 @@ fn no_partial_import_or_authority_change() {
         &target,
         &[
             "--json",
-            "portable",
             "import",
             "--input",
             future.to_str().unwrap(),
@@ -1274,7 +1271,6 @@ fn observed_cli_parity_report() -> Value {
         project.path(),
         &[
             "--json",
-            "portable",
             "export",
             "--current",
             "--format",
@@ -1314,7 +1310,6 @@ fn observed_cli_parity_report() -> Value {
         &target,
         &[
             "--json",
-            "portable",
             "import",
             "--input",
             future.to_str().unwrap(),

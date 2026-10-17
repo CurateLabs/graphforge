@@ -112,7 +112,27 @@ def check_shared_verification_receipts() -> None:
         assert gf.GraphForge.verify_portable_v2(str(package), mode=mode) == expected[mode]
 
 
+def check_retired_format_is_rejected_before_target_creation() -> None:
+    import graphforge as gf
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        source = root / "unsupported.bin"
+        source.write_bytes(b"graphforge-exp\0\n")
+        target = root / "target"
+        try:
+            gf.GraphForge.import_portable_v2(
+                project_root=str(target), input=str(source), operation_id=str(uuid.uuid4())
+            )
+        except Exception as error:
+            assert getattr(error, "code", None) == "GF_UNSUPPORTED_PROJECT_FORMAT"
+        else:
+            raise AssertionError("retired format was accepted")
+        assert not target.exists()
+
+
 def main() -> None:
+    check_retired_format_is_rejected_before_target_creation()
     check_portable_v2_parity()
     check_shared_verification_receipts()
 

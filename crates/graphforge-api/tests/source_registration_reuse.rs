@@ -4,9 +4,9 @@ use std::collections::BTreeMap;
 
 use graphforge_api::{
     ArtifactKind, ArtifactPayloadRequest, CapabilityId, DerivationInput, DerivationSubjectKind,
-    EnableCapabilityRequest, GraphForge, OperationId, PortableExportRequest, PortableImportRequest,
-    PortableSelection, RegisterArtifactRequest, RegisterSourceRequest, SetPreferredArtifactRequest,
-    SourceKind, WriteContext,
+    EnableCapabilityRequest, GraphForge, OperationId, PortableSelection, PortableV2ExportRequest,
+    PortableV2ImportRequest, RegisterArtifactRequest, RegisterSourceRequest,
+    SetPreferredArtifactRequest, SourceKind, WriteContext,
 };
 use graphforge_storage::concurrency_attribution::{RegionCapture, RegionSnapshot};
 use tempfile::TempDir;
@@ -273,18 +273,28 @@ fn source_registration_cost(count: usize) {
     assert_eq!(participant_contents(root), after);
     let package = root.join("roundtrip.gfp");
     reopened
-        .export_portable(PortableExportRequest {
-            selection: PortableSelection::Current,
-            output: package.clone(),
-        })
+        .export_portable_v2(
+            &PortableV2ExportRequest {
+                selection: PortableSelection::Current,
+                output_path: package.clone(),
+                representation: graphforge_api::PortableV2Output::Bundle,
+                profile: graphforge_api::PortableV2SelectionProfile::Complete,
+                subset: None,
+                limits: graphforge_api::PortableV2Limits::default(),
+            },
+            None,
+            |_| {},
+        )
         .unwrap();
     let import_root = TempDir::new().unwrap();
-    GraphForge::import_portable(
+    GraphForge::import_portable_v2(
         import_root.path(),
-        &PortableImportRequest {
+        &PortableV2ImportRequest {
             input: package,
             operation_id: OperationId(Uuid::now_v7()),
+            limits: graphforge_api::PortableV2Limits::default(),
         },
+        None,
     )
     .unwrap();
     assert_eq!(participant_contents(import_root.path()), after);

@@ -1692,33 +1692,6 @@
       ]
     },
     {
-      "path": "crates/graphforge-storage/src/project_portable.rs",
-      "function": "encode_portable_project",
-      "role": "portable_authentication",
-      "input_contract": "Portable member bytes are committed to the interchange inventory; complete envelope bytes define its transport receipt. Neither producer establishes a new durable CAS artifact.",
-      "function_bodies_sha256": [
-        "18b2edfc5066156968a0038d01b126ee1ca023d7f3929223bb01a6580a990f7c"
-      ]
-    },
-    {
-      "path": "crates/graphforge-storage/src/project_portable.rs",
-      "function": "validate_envelope",
-      "role": "portable_authentication",
-      "input_contract": "The complete imported envelope is cryptographically identified at its portable trust boundary after participant verification.",
-      "function_bodies_sha256": [
-        "f91f50ffbb5b821a2ed577333fbf18bbc78a540c013ca236f1162b03e83ec41c"
-      ]
-    },
-    {
-      "path": "crates/graphforge-storage/src/project_portable.rs",
-      "function": "validate_participants",
-      "role": "portable_authentication",
-      "input_contract": "Imported complete member bytes must match the declared portable participant SHA before any target is admitted.",
-      "function_bodies_sha256": [
-        "5d2d2bdec9470b8b00682f5bebc573fb9835bbe26c053bfcfe48780e907ed8c3"
-      ]
-    },
-    {
       "path": "crates/graphforge-storage/src/project_portable_v2.rs",
       "function": "admit_manifest",
       "role": "control_authentication",
@@ -1976,7 +1949,7 @@
       "role": "caller_selected",
       "input_contract": "Bounded resident canonical control bytes select explicit ControlSha256; uncaptured regular-file members select genuine Portable SHA and admitted writer sources use actual copy CRC.",
       "function_bodies_sha256": [
-        "d220d64cc1293a029b31b3ea10adf4ef6b7c43c5bc4480c94ab5d3f5921ef2a4"
+        "45d7134aba1c2a988d009f7df00d451a0dc61dc2d59a6c41a8fbb785dc4e9df8"
       ]
     },
     {

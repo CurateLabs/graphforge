@@ -55,8 +55,8 @@ const CLI_SURFACE_PATHS: &[&str] = &[
     "ontology/composition/explain-resolution",
     "portable/verify/inspect",
     "portable/verify/full",
-    "portable/export",
-    "portable/import",
+    "export",
+    "import",
     "portable/staging/inspect",
     "portable/staging/adopt",
 ];

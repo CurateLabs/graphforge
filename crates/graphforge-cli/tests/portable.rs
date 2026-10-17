@@ -55,7 +55,7 @@ fn current_export_and_import_round_trip_with_stable_json() {
     let source = TempDir::new().expect("source project parent");
     let source_project = source.path().join("source");
     fs::create_dir(&source_project).expect("source project directory");
-    let envelope = source.path().join("project.gfportable");
+    let bundle = source.path().join("project.gfpb");
 
     let exported = json(&gf(
         &source_project,
@@ -64,18 +64,18 @@ fn current_export_and_import_round_trip_with_stable_json() {
             "export",
             "--current",
             "--output",
-            envelope.to_str().unwrap(),
+            bundle.to_str().unwrap(),
         ],
     ));
-    assert_eq!(exported["contract"], "graphforge-portable-export/1");
+    assert_eq!(exported["contract"], "graphforge-portable-export/2");
     assert_eq!(exported["source"], "current");
     assert!(exported["checkpoint"].is_null());
     assert!(
         exported.get("output").is_none(),
         "JSON must not expose host paths"
     );
-    assert_eq!(exported["envelope_sha256"].as_str().unwrap().len(), 64);
-    assert!(exported["participant_count"].as_u64().unwrap() > 0);
+    assert_eq!(exported["package_digest"].as_str().unwrap().len(), 71);
+    assert!(exported["entry_count"].as_u64().unwrap() > 0);
 
     let destination_project = source.path().join("destination");
     let imported = json(&gf(
@@ -84,17 +84,13 @@ fn current_export_and_import_round_trip_with_stable_json() {
             "--json",
             "import",
             "--input",
-            envelope.to_str().unwrap(),
+            bundle.to_str().unwrap(),
             "--idempotency-key",
             "00000000-0000-0000-0000-000000000229",
         ],
     ));
-    assert_eq!(imported["contract"], "graphforge-portable-import/1");
-    assert_eq!(
-        imported["source_generation_uuid"],
-        exported["generation_uuid"]
-    );
-    assert_eq!(imported["envelope_sha256"], exported["envelope_sha256"]);
+    assert_eq!(imported["contract"], "graphforge-portable-import/2");
+    assert_eq!(imported["package_digest"], exported["package_digest"]);
     assert_eq!(imported["idempotent_replay"], false);
 
     // Normal runtime access after import proves the published CURRENT is readable.
@@ -123,7 +119,7 @@ fn checkpoint_export_reports_the_selected_checkpoint() {
     );
     assert!(created.status.success());
 
-    let envelope = project.path().join("checkpoint.gfportable");
+    let bundle = project.path().join("checkpoint.gfpb");
     let exported = json(&gf(
         &source_project,
         &[
@@ -132,7 +128,7 @@ fn checkpoint_export_reports_the_selected_checkpoint() {
             "--checkpoint",
             "before-change",
             "--output",
-            envelope.to_str().unwrap(),
+            bundle.to_str().unwrap(),
         ],
     ));
     assert_eq!(exported["source"], "checkpoint");
@@ -148,7 +144,7 @@ fn import_rejects_noncanonical_idempotency_key_as_stable_json() {
             "--json",
             "import",
             "--input",
-            project.path().join("missing.gfportable").to_str().unwrap(),
+            project.path().join("missing.gfpb").to_str().unwrap(),
             "--idempotency-key",
             "NOT-A-UUID",
         ],
@@ -177,17 +173,10 @@ fn initialized_repository_can_import_into_its_pristine_state() {
         "init failed: {}",
         String::from_utf8_lossy(&initialized.stderr)
     );
-    let envelope = repository
-        .path()
-        .join(".graphforge/exports/pristine.gfportable");
+    let bundle = repository.path().join(".graphforge/exports/pristine.gfpb");
     let exported = gf_repo(
         repository.path(),
-        &[
-            "export",
-            "--current",
-            "--output",
-            envelope.to_str().unwrap(),
-        ],
+        &["export", "--current", "--output", bundle.to_str().unwrap()],
     );
     assert!(exported.status.success());
     let imported = gf_repo(
@@ -195,7 +184,7 @@ fn initialized_repository_can_import_into_its_pristine_state() {
         &[
             "import",
             "--input",
-            envelope.to_str().unwrap(),
+            bundle.to_str().unwrap(),
             "--idempotency-key",
             "00000000-0000-0000-0000-000000000230",
         ],
@@ -246,7 +235,6 @@ fn portable_v2_export_verify_and_import_round_trip() {
         &source_project,
         &[
             "--json",
-            "portable",
             "export",
             "--current",
             "--format",
@@ -285,7 +273,6 @@ fn portable_v2_export_verify_and_import_round_trip() {
         &destination,
         &[
             "--json",
-            "portable",
             "import",
             "--input",
             bundle.to_str().unwrap(),
@@ -378,7 +365,7 @@ fn portable_facade_and_same_binary_preserve_complete_receipts() {
             ("expanded", PortableV2Output::Expanded),
         ] {
             let package = root.path().join("package");
-            let mut args = vec!["--json", "--diagnostics", "portable", "export"];
+            let mut args = vec!["--json", "--diagnostics", "export"];
             args.extend(selector.iter().copied());
             args.extend([
                 "--format",
@@ -920,4 +907,91 @@ fn ordinary_json_import_does_not_request_region_diagnostics() {
             .get("application_io")
             .is_none_or(serde_json::Value::is_null)
     );
+}
+
+#[test]
+fn retired_format_and_duplicate_verbs_are_refused_without_destination_writes() {
+    let root = TempDir::new().unwrap();
+    let source = root.path().join("unsupported.bin");
+    fs::write(&source, b"graphforge-exp\0\n").unwrap();
+    let target = root.path().join("untouched");
+    let output = gf(
+        &target,
+        &[
+            "--json",
+            "import",
+            "--input",
+            source.to_str().unwrap(),
+            "--idempotency-key",
+            "00000000-0000-0000-0000-000000000999",
+        ],
+    );
+    assert!(!output.status.success());
+    let error: Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(error["error"]["code"], "GF_UNSUPPORTED_PROJECT_FORMAT");
+    assert!(!target.exists());
+    for verb in ["export", "import"] {
+        let output = gf(&target, &["portable", verb]);
+        assert!(!output.status.success());
+        assert!(!target.exists());
+    }
+}
+
+#[test]
+fn primary_streaming_current_and_checkpoint_reopen_with_exact_query_results() {
+    use arrow::array::Int64Array;
+    use graphforge_api::{CheckpointRequest, GraphForge, OperationId};
+    let root = TempDir::new().unwrap();
+    let project = root.path().join("source");
+    let graph = GraphForge::new(project.to_str()).unwrap();
+    graph.execute("CREATE (:Person {name: 'Ada'})").unwrap();
+    graph
+        .checkpoint(CheckpointRequest {
+            name: "one".into(),
+            description: None,
+            idempotency_key: OperationId(uuid::Uuid::new_v4()),
+            actor_uuid: None,
+        })
+        .unwrap();
+    graph.execute("CREATE (:Person {name: 'Grace'})").unwrap();
+    drop(graph);
+    for (name, selector, expected) in [
+        ("current", vec!["--current"], 2),
+        ("checkpoint", vec!["--checkpoint", "one"], 1),
+    ] {
+        let bundle = root.path().join(format!("{name}.gfpb"));
+        let mut args = vec!["--json", "export"];
+        args.extend(selector);
+        args.extend(["--format", "bundle", "--output", bundle.to_str().unwrap()]);
+        let exported = json(&gf(&project, &args));
+        assert_eq!(exported["contract"], "graphforge-portable-export/2");
+        let target = root.path().join(format!("{name}-imported"));
+        let operation = uuid::Uuid::new_v4().to_string();
+        let imported = json(&gf(
+            &target,
+            &[
+                "--json",
+                "import",
+                "--input",
+                bundle.to_str().unwrap(),
+                "--idempotency-key",
+                &operation,
+            ],
+        ));
+        assert_eq!(imported["package_digest"], exported["package_digest"]);
+        let reopened = GraphForge::new(target.to_str()).unwrap();
+        assert_eq!(reopened.node_count("Person").unwrap(), expected);
+        let result = reopened
+            .execute("MATCH (p:Person) RETURN count(p) AS people")
+            .unwrap();
+        assert_eq!(
+            result.batches[0]
+                .column(0)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap()
+                .value(0),
+            expected as i64
+        );
+    }
 }

@@ -346,7 +346,7 @@ pub(crate) fn cleanup_atomicwrite_temp_with_allocation(
             }
         }
         if let Some(allocation) = allocation {
-            let file = crate::project_portable::open_regular_nofollow(&entry.path())
+            let file = crate::project_import_target::open_regular_nofollow(&entry.path())
                 .map_err(publication_io)?;
             allocation.replace_file_at(&entry.path(), &file)?;
         }

@@ -98,6 +98,10 @@ pub(crate) struct PublishArgs {
     /// Read a Vercel preview bypass secret from this environment variable.
     #[arg(long)]
     pub protection_bypass_env: Option<String>,
+    /// Explicit PNG/SVG image selection for this exact immutable Version.
+    /// Repeat for multiple images; never reads unselected workbench files.
+    #[arg(long = "preview")]
+    pub previews: Vec<std::path::PathBuf>,
 }
 
 /// How the CLI obtains its publish token.
@@ -810,6 +814,62 @@ fn intent_digest(
         "project_content": selection.project_content,
         "fork_of": fork_of.map(RepositoryIdentity::canonical_name),
     })))
+}
+
+struct SelectedPreview {
+    descriptor: graphforge_hub_publish::preview::PreviewDescriptor,
+    bytes: Vec<u8>,
+}
+fn select_previews(
+    args: &PublishArgs,
+    version_uuid: Uuid,
+) -> Result<Vec<SelectedPreview>, GfError> {
+    use graphforge_hub_publish::preview as p;
+    use std::io::Read;
+    if args.previews.len() > p::MAX_PREVIEWS {
+        return Err(derivation("preview.limit"));
+    }
+    let mut selected = Vec::new();
+    let mut total = 0_u64;
+    for path in &args.previews {
+        let file = std::fs::File::open(path).map_err(|_| derivation("preview.content"))?;
+        let mut bytes = Vec::new();
+        file.take(p::MAX_PREVIEW_BYTES as u64 + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|_| derivation("preview.content"))?;
+        total += bytes.len() as u64;
+        if total > p::MAX_TOTAL_PREVIEW_BYTES {
+            return Err(derivation("preview.limit"));
+        }
+        let media_type = if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+            "image/png"
+        } else {
+            "image/svg+xml"
+        };
+        let (width, height) = p::validate_image(media_type, &bytes)
+            .map_err(|error| derivation(&error.to_string()))?;
+        selected.push(SelectedPreview {
+            descriptor: p::PreviewDescriptor {
+                version_uuid: version_uuid.to_string(),
+                digest: p::digest(&bytes),
+                media_type: media_type.into(),
+                length: bytes.len() as u64,
+                width,
+                height,
+                caption: None,
+                alt: None,
+            },
+            bytes,
+        });
+    }
+    p::validate_descriptors(
+        &selected
+            .iter()
+            .map(|p| p.descriptor.clone())
+            .collect::<Vec<_>>(),
+    )
+    .map_err(|error| derivation(&error.to_string()))?;
+    Ok(selected)
 }
 
 // ---------------------------------------------------------- repository side
@@ -1535,21 +1595,51 @@ pub(crate) fn publish(
         ..
     } = resolution;
 
+    let previews = select_previews(args, selection.version_uuid)?;
+    let preview_metadata = previews
+        .iter()
+        .map(|p| p.descriptor.clone())
+        .collect::<Vec<_>>();
+    let operation_content = if previews.is_empty() {
+        selection.project_content.clone()
+    } else {
+        sha256_digest(&canonical_json(
+            &json!({"project_content":selection.project_content,"previews":preview_metadata}),
+        ))
+    };
     let operation_uuid = operation_uuid.unwrap_or_else(|| {
         graphforge_api::hub_publish_operation(
             &identity.canonical_name(),
             selection.git_ref.as_deref(),
             &selection.version_uuid.to_string(),
-            &selection.project_content,
+            &operation_content,
         )
     });
-    let intent_digest = intent_digest(&identity, &selection, fork.as_ref().map(|(id, _)| id));
+    let base_intent = intent_digest(&identity, &selection, fork.as_ref().map(|(id, _)| id));
+    let intent_digest = if previews.is_empty() {
+        base_intent
+    } else {
+        sha256_digest(&canonical_json(
+            &json!({"intent":base_intent,"previews":preview_metadata}),
+        ))
+    };
     let hub = Hub {
         bypass: environment.bypass,
         transport,
         base: base.clone(),
     };
 
+    if !previews.is_empty()
+        && !capabilities
+            .capabilities
+            .iter()
+            .any(|c| c.capability == "version-previews" && c.major == 1)
+    {
+        return Err(publish_error(
+            HubPublishErrorCode::UnsupportedFuture,
+            "Hub does not support the selected preview channel",
+        ));
+    }
     let token = obtain_token(&hub, &capabilities, environment)?;
 
     // A retry is classified before any package is derived.
@@ -1608,7 +1698,7 @@ pub(crate) fn publish(
         (None, None) => None,
     };
     let scratch = tempfile::tempdir().map_err(|error| GfError::Storage(error.to_string()))?;
-    let (snapshot, lineage) = build_snapshot(
+    let (mut snapshot, lineage) = build_snapshot(
         graph,
         &identity,
         &capabilities,
@@ -1617,6 +1707,46 @@ pub(crate) fn publish(
         fork_origin_repository,
         scratch.path(),
     )?;
+    if !previews.is_empty() {
+        use graphforge_hub_publish::preview as p;
+        for item in previews {
+            snapshot.manifest.objects.push(object_descriptor(
+                item.descriptor.digest.clone(),
+                item.descriptor.length,
+                &item.descriptor.media_type,
+                capabilities.object_location(&item.descriptor.digest),
+            ));
+            snapshot
+                .sources
+                .insert(item.descriptor.digest, Source::Bytes(item.bytes));
+        }
+        snapshot
+            .manifest
+            .objects
+            .sort_by(|a, b| a.digest.cmp(&b.digest));
+        snapshot.manifest.extensions.insert(
+            p::PREVIEW_EXTENSION.into(),
+            serde_json::to_value(p::PreviewSet {
+                format: "graphforge-previews/1".into(),
+                previews: preview_metadata,
+            })
+            .map_err(|_| derivation("preview.content"))?,
+        );
+        snapshot
+            .manifest
+            .validate(DiscoveryLimits::default())
+            .map_err(|error| discovery(&error))?;
+        snapshot.objects = snapshot
+            .manifest
+            .objects
+            .iter()
+            .map(|object| ObjectDeclaration {
+                digest: object.digest.0.clone(),
+                length: object.length,
+                media_type: object.media_type.clone(),
+            })
+            .collect();
+    }
     // The packages must come from the generation the intent names.
     if project_content(graph)? != selection.project_content {
         return Err(publish_error(
@@ -1663,6 +1793,10 @@ pub(crate) fn publish(
             .iter()
             .filter(|capability| capability.capability == PUBLISH_NEGOTIATION_CAPABILITY)
             .cloned()
+            .chain(
+                (!args.previews.is_empty())
+                    .then(|| graphforge_hub_publish::Capability::new("version-previews", 1)),
+            )
             .collect(),
     };
     negotiated_chunk_size(&capabilities.limits)?;

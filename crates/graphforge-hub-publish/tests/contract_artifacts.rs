@@ -795,7 +795,7 @@ fn corpus() -> Corpus {
                     {"capability": "publish-session", "major": 1},
                     {"capability": "resumable-upload", "major": 1},
                 ],
-                "capabilities": [{"capability": "device-authorization", "major": 1}],
+                "capabilities": [{"capability": "device-authorization", "major": 1}, {"capability":"version-previews","major":1}],
                 "authorization": {
                     "device_authorization_endpoint": format!("{HUB}/.gf/oauth/device_authorization"),
                     "token_endpoint": format!("{HUB}/.gf/oauth/token"),

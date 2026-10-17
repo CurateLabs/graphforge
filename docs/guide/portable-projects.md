@@ -32,7 +32,7 @@ must use [supported durable storage](installation.md#durable-storage).
 Export the source and fully verify the resulting bundle:
 
 ```bash
-graphforge --project citation-project portable export --current --profile complete \
+graphforge --project citation-project export --current --profile complete \
   --format bundle --output ./citation-transfer.gfpb
 graphforge portable verify --input ./citation-transfer.gfpb --mode full
 ```
@@ -47,7 +47,7 @@ Create a separate empty destination and import the complete package:
 
 ```bash
 mkdir citation-copy
-graphforge --project citation-copy portable import --input ./citation-transfer.gfpb \
+graphforge --project citation-copy import --input ./citation-transfer.gfpb \
   --idempotency-key 018f0f4e-7f4d-7c24-8f8f-8cbab5f47001
 ```
 
@@ -173,7 +173,7 @@ See [research workspace semantics](../book/architecture/research-workspaces.md).
 
 ```text
 graphforge --project ./citation-project portable preview --current --profile complete --strict
-graphforge --project ./citation-project portable export --current --profile complete \
+graphforge --project ./citation-project export --current --profile complete \
   --format bundle --output ./transfer.gfpb
 ```
 
@@ -229,7 +229,7 @@ separate from the completed copy above:
 
 ```text
 mkdir selected-copy
-graphforge --project ./selected-copy portable import --input ./transfer.gfpb \
+graphforge --project ./selected-copy import --input ./transfer.gfpb \
   --idempotency-key 018f0f4e-7f4d-7c24-8f8f-8cbab5f47002
 ```
 
@@ -393,9 +393,9 @@ All surfaces call the same Rust authority:
 | Workflow         | Rust API authority                          | CLI                    |
 | ---------------- | ------------------------------------------- | ---------------------- |
 | Preview          | `GraphForge::preview_portable_v2_selection` | `portable preview`     |
-| Export           | `GraphForge::export_portable_v2`            | `portable export`      |
+| Export           | `GraphForge::export_portable_v2`            | `export`      |
 | Inspect / verify | `verify_portable_v2`                        | `portable verify`      |
-| Complete import  | `GraphForge::import_portable_v2`            | `portable import`      |
+| Complete import  | `GraphForge::import_portable_v2`            | `import`      |
 | OCI publish      | `publish_portable_v2_oci`                   | `portable publish-oci` |
 | OCI pull         | `pull_portable_v2_oci`                      | `portable pull-oci`    |
 
@@ -406,3 +406,8 @@ semantics. Counts and byte sizes remain lossless at the binding boundary.
 For the normative layout, identity, resource, compatibility, and security
 contract, see [Portable project v2 architecture](../book/architecture/portable-project-v2.md)
 and [ADR 0021](../adr/0021-portable-project-v2.md).
+
+Primary `export` and `import` reuse the streaming `graphforge-portable-export/2`
+and `graphforge-portable-import/2` JSON receipts. Package and transport digests
+remain distinct; retired envelope digest/count fields are not compatibility aliases.
+The duplicate `portable export` and `portable import` verbs are removed.

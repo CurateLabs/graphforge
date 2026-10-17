@@ -48,12 +48,8 @@ fn selection_flag(
 pub(crate) enum PortableCommand {
     /// Preview a content-free portable-v2 component selection.
     Preview(PortablePreviewArgs),
-    /// Export an expanded or bundled portable-v2 package.
-    Export(PortableV2ExportArgs),
     /// Inspect or fully verify a portable-v2 package.
     Verify(PortableVerifyArgs),
-    /// Import a complete portable-v2 package into a new/empty project.
-    Import(PortableV2ImportArgs),
     /// Publish a verified package through an OCI Distribution registry.
     PublishOci(PortablePublishOciArgs),
     /// Pull and verify a digest-pinned package from an OCI registry.
@@ -252,48 +248,7 @@ pub(crate) fn run_portable(
                 .map_err(|error| graphforge_api::GfError::Execution(error.to_string()))?;
             }
         }
-        PortableCommand::Export(args) => {
-            let result = graph
-                .export_portable_v2(
-                    &PortableV2ExportRequest {
-                        selection: selection_flag(args.current, args.checkpoint)?,
-                        output_path: args.output,
-                        representation: args.format.into(),
-                        profile: args.profile.into(),
-                        subset: None,
-                        limits: PortableV2Limits::default(),
-                    },
-                    None,
-                    |progress| {
-                        if !json {
-                            let _ = writeln!(
-                                output,
-                                "export progress entries={}/{} bytes={}/{}",
-                                progress.entries_completed,
-                                progress.entries_total,
-                                progress.bytes_completed,
-                                progress.bytes_total
-                            );
-                        }
-                    },
-                )
-                .map_err(map_portable)?;
-            if json {
-                let mut export_receipt = portable_export_receipt(&result);
-                export_receipt["application_io"] = serde_json::to_value(
-                    crate::storage_attribution_cli::lifecycle_application_io()?,
-                )
-                .map_err(|error| graphforge_api::GfError::Execution(error.to_string()))?;
-                write_json(&export_receipt, output)?;
-            } else {
-                writeln!(
-                    output,
-                    "exported {} package_digest={} transport_digest={}",
-                    result.representation, result.package_digest, result.transport_digest
-                )
-                .map_err(|error| graphforge_api::GfError::Execution(error.to_string()))?;
-            }
-        }
+
         PortableCommand::Staging { command } => match command {
             PortableStagingCommand::Inspect => {
                 crate::ontology_cli::run_portable_staging_inspect(graph, json, output)?;
@@ -320,19 +275,19 @@ fn portable_export_receipt(result: &graphforge_api::PortableV2ExportFacadeResult
     reason = "CLI dispatch keeps verify/import/OCI in one project-free portable table"
 )]
 pub(crate) fn run_portable_without_graph(
-    project_root: &std::path::Path,
+    _project_root: &std::path::Path,
     command: PortableCommand,
     json: bool,
     output: &mut dyn Write,
-    allocation: Option<&graphforge_api::StorageAllocationDiagnostics>,
+    _allocation: Option<&graphforge_api::StorageAllocationDiagnostics>,
 ) -> Result<(), crate::CliRuntimeError> {
     match command {
-        PortableCommand::Preview(_)
-        | PortableCommand::Export(_)
-        | PortableCommand::Staging { .. } => Err(graphforge_api::GfError::Validation(
-            "preview/export require an open project handle".into(),
-        )
-        .into()),
+        PortableCommand::Preview(_) | PortableCommand::Staging { .. } => {
+            Err(graphforge_api::GfError::Validation(
+                "preview/export require an open project handle".into(),
+            )
+            .into())
+        }
         PortableCommand::Verify(args) => {
             let report = verify_portable_v2(
                 &PortableVerifyRequest {
@@ -355,41 +310,7 @@ pub(crate) fn run_portable_without_graph(
             }
             Ok(())
         }
-        PortableCommand::Import(args) => {
-            let request = PortableV2ImportRequest {
-                input: args.input,
-                operation_id: OperationId(canonical_uuid(&args.idempotency_key)?),
-                limits: PortableV2Limits::default(),
-            };
-            let result = match allocation {
-                Some(allocation) => allocation.import(project_root, &request, None),
-                None => GraphForge::import_portable_v2(project_root, &request, None),
-            }
-            .map_err(map_portable)?;
-            let transient_peak_allocated_bytes = import_transient_peak(&result)?;
-            if json {
-                write_json(
-                    &serde_json::json!({
-                        "contract": "graphforge-portable-import/2",
-                        "application_io": crate::storage_attribution_cli::lifecycle_application_io()?,
-                        "package_digest": result.package_digest,
-                        "transport_digest": result.transport_digest,
-                        "generation_uuid": result.generation_uuid,
-                        "idempotent_replay": result.idempotent_replay,
-                        "transient_peak_allocated_bytes": transient_peak_allocated_bytes,
-                    }),
-                    output,
-                )?;
-            } else {
-                writeln!(
-                    output,
-                    "imported generation {} package_digest={}",
-                    result.generation_uuid, result.package_digest
-                )
-                .map_err(|error| graphforge_api::GfError::Execution(error.to_string()))?;
-            }
-            Ok(())
-        }
+
         PortableCommand::PublishOci(args) => {
             let reference = publish_portable_v2_oci(
                 &PortableV2OciPublishFacadeRequest {
@@ -941,4 +862,95 @@ mod oci_credential_tests {
     fn the_credential_variable_keeps_its_documented_name() {
         assert_eq!(OCI_CREDENTIAL_ENV, "GRAPHFORGE_OCI_CREDENTIAL");
     }
+}
+
+pub(crate) fn run_export(
+    graph: &GraphForge,
+    args: PortableV2ExportArgs,
+    json: bool,
+    output: &mut dyn Write,
+) -> Result<(), crate::CliRuntimeError> {
+    let result = graph
+        .export_portable_v2(
+            &PortableV2ExportRequest {
+                selection: selection_flag(args.current, args.checkpoint)?,
+                output_path: args.output,
+                representation: args.format.into(),
+                profile: args.profile.into(),
+                subset: None,
+                limits: PortableV2Limits::default(),
+            },
+            None,
+            |progress| {
+                if !json {
+                    let _ = writeln!(
+                        output,
+                        "export progress entries={}/{} bytes={}/{}",
+                        progress.entries_completed,
+                        progress.entries_total,
+                        progress.bytes_completed,
+                        progress.bytes_total
+                    );
+                }
+            },
+        )
+        .map_err(map_portable)?;
+    if json {
+        let mut export_receipt = portable_export_receipt(&result);
+        export_receipt["application_io"] =
+            serde_json::to_value(crate::storage_attribution_cli::lifecycle_application_io()?)
+                .map_err(|error| graphforge_api::GfError::Execution(error.to_string()))?;
+        write_json(&export_receipt, output)?;
+    } else {
+        writeln!(
+            output,
+            "exported {} package_digest={} transport_digest={}",
+            result.representation, result.package_digest, result.transport_digest
+        )
+        .map_err(|error| graphforge_api::GfError::Execution(error.to_string()))?;
+    }
+
+    Ok(())
+}
+
+pub(crate) fn run_import(
+    project_root: &std::path::Path,
+    args: PortableV2ImportArgs,
+    json: bool,
+    output: &mut dyn Write,
+    allocation: Option<&graphforge_api::StorageAllocationDiagnostics>,
+) -> Result<(), crate::CliRuntimeError> {
+    let request = PortableV2ImportRequest {
+        input: args.input,
+        operation_id: OperationId(canonical_uuid(&args.idempotency_key)?),
+        limits: PortableV2Limits::default(),
+    };
+    let result = match allocation {
+        Some(allocation) => allocation.import(project_root, &request, None),
+        None => GraphForge::import_portable_v2(project_root, &request, None),
+    }
+    .map_err(map_portable)?;
+    let transient_peak_allocated_bytes = import_transient_peak(&result)?;
+    if json {
+        write_json(
+            &serde_json::json!({
+                "contract": "graphforge-portable-import/2",
+                "application_io": crate::storage_attribution_cli::lifecycle_application_io()?,
+                "package_digest": result.package_digest,
+                "transport_digest": result.transport_digest,
+                "generation_uuid": result.generation_uuid,
+                "idempotent_replay": result.idempotent_replay,
+                "transient_peak_allocated_bytes": transient_peak_allocated_bytes,
+            }),
+            output,
+        )?;
+    } else {
+        writeln!(
+            output,
+            "imported generation {} package_digest={}",
+            result.generation_uuid, result.package_digest
+        )
+        .map_err(|error| graphforge_api::GfError::Execution(error.to_string()))?;
+    }
+    Ok(())
 }

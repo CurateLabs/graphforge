@@ -208,9 +208,10 @@ rule returns `unsupported_future` before reading component payloads or mutating
 a project. Unknown optional authenticity evidence may be preserved as opaque
 transport data only when it is explicitly outside the closed package.
 
-Portable v1 is recognized and delegated to the existing bounded v1 reader;
-v2 code MUST NOT reinterpret it, silently upgrade it, or emit v1. Importing v1
-and exporting v2 are two explicit operations with a new v2 package digest.
+The legacy envelope is deleted. Its signature returns
+`GF_UNSUPPORTED_PROJECT_FORMAT` before destination admission; there is no reader,
+converter, alias or upgrade path. Primary `gf export` and `gf import` use the
+streaming format and the existing `/2` result contracts.
 
 ## Verification API
 
@@ -347,8 +348,8 @@ replacement or cross-volume copy. Re-running an unchanged plan produces the
 same package digest and bundle bytes; the two representations intentionally
 have distinct transport digests.
 
-Portable v1 remains available through `export_portable_project`. It is a
-separate explicit contract and is never emitted with v2 markers.
+The retired envelope encoder/API is unavailable. Export uses only the streaming
+expanded or bundled representation.
 
 ## Complete-package importer
 
@@ -368,8 +369,7 @@ graph-subset packages require explicit class-specific consumers; complete
 import returns a typed incompatibility without admitting the destination.
 Cancellation and corruption remove the private materialization, while a crash
 inside generation publication is handled by the normal project recovery and
-transaction-idempotency protocol. Portable v1 import remains a separate,
-explicit compatibility API.
+transaction-idempotency protocol. The retired envelope has no compatibility API.
 
 For a fresh destination, the imported generation and its empty bootstrap
 parent use separate versioned UUID domains derived from the import operation.

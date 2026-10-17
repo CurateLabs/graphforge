@@ -2474,9 +2474,9 @@ fn action_matches_phase(command: &PhaseCommand) -> bool {
         Phase::Ingest => contains_command(&args, &["import-session"]),
         Phase::Reopen => contains_command(&args, &["recovery"]),
         Phase::Recount | Phase::Query | Phase::ReopenProof => contains_command(&args, &["query"]),
-        Phase::Export => contains_command(&args, &["portable", "export"]),
+        Phase::Export => contains_command(&args, &["export"]),
         Phase::Verify => contains_command(&args, &["portable", "verify"]),
-        Phase::CleanImport => contains_command(&args, &["portable", "import"]),
+        Phase::CleanImport => contains_command(&args, &["import"]),
     }
 }
 
@@ -3313,7 +3313,6 @@ mod tests {
             Phase::Export => &[
                 "--project",
                 "generated/tiny-source",
-                "portable",
                 "export",
                 "--current",
                 "--output",
@@ -3323,7 +3322,6 @@ mod tests {
             Phase::CleanImport => &[
                 "--project",
                 "generated/tiny-import",
-                "portable",
                 "import",
                 "--input",
                 "generated/tiny-portable",
@@ -3648,6 +3646,23 @@ mod tests {
         for path in paths {
             let profile = read_profile(&path).unwrap();
             assert_eq!(profile.validate(), Ok(()), "{}", path.display());
+            for phase in [Phase::Export, Phase::CleanImport] {
+                let action = &profile
+                    .phases
+                    .iter()
+                    .find(|command| command.phase == phase)
+                    .unwrap()
+                    .action;
+                let PhaseAction::GraphForgeCli { args } = action else {
+                    panic!("{phase} must use the public CLI in {}", path.display());
+                };
+                assert!(
+                    !args.windows(2).any(|pair| pair[0] == "portable"
+                        && matches!(pair[1].as_str(), "export" | "import")),
+                    "retired duplicate verb in {}",
+                    path.display()
+                );
+            }
             let commands = |phase: Phase| match &profile.phases
                 [Phase::ALL.iter().position(|value| *value == phase).unwrap()]
             .action

@@ -14,6 +14,9 @@
 //! module identities. Package identity, module identity, and composition digest
 //! are three distinct fields; none substitutes for another.
 
+/// Closed, bounded images independent of native Project packages.
+pub mod preview;
+
 mod lineage;
 mod rehome;
 mod repository;
@@ -562,10 +565,38 @@ impl DiscoveryManifest {
         )?;
         validate_extensions(&self.extensions, limits)?;
         validate_objects(&self.objects, limits)?;
+        self.preview_descriptors()?;
         self.package_object()?;
         self.validate_summary_reference(limits)?;
         self.validate_ontology(limits)?;
         self.validate_lineage_reference(limits)
+    }
+
+    /// Read typed, bounded presentation metadata without fetching images.
+    pub fn preview_descriptors(&self) -> Result<Vec<preview::PreviewDescriptor>, DiscoveryError> {
+        let Some(value) = self.extensions.get(preview::PREVIEW_EXTENSION) else {
+            return Ok(Vec::new());
+        };
+        let invalid = || {
+            DiscoveryError::new(
+                DiscoveryErrorCode::MalformedResponse,
+                Some("previews"),
+                "preview metadata is invalid",
+            )
+        };
+        let set: preview::PreviewSet =
+            serde_json::from_value(value.clone()).map_err(|_| invalid())?;
+        set.validate().map_err(|_| invalid())?;
+        for item in &set.previews {
+            if !self.objects.iter().any(|object| {
+                object.digest.0 == item.digest
+                    && object.length == item.length
+                    && object.media_type == item.media_type
+            }) {
+                return Err(invalid());
+            }
+        }
+        Ok(set.previews)
     }
 
     fn validate_summary_reference(&self, limits: DiscoveryLimits) -> Result<(), DiscoveryError> {

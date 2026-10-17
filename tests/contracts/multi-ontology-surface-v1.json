@@ -42,8 +42,8 @@
 
     {"id":"portable.inspect","rust":"crate.verify_portable_v2[structure_only]","python":"GraphForge.verify_portable_v2[structure_only]","node":"GraphForge.verifyPortableV2[structureOnly]","cli":"portable/verify/inspect"},
     {"id":"portable.verify","rust":"crate.verify_portable_v2[full]","python":"GraphForge.verify_portable_v2[full]","node":"GraphForge.verifyPortableV2[full]","cli":"portable/verify/full"},
-    {"id":"portable.export","rust":"GraphForge.export_portable_v2","python":"GraphForge.export_portable_v2","node":"GraphForge.exportPortableV2","cli":"portable/export"},
-    {"id":"portable.import","rust":"GraphForge.import_portable_v2","python":"GraphForge.import_portable_v2","node":"GraphForge.importPortableV2","cli":"portable/import"},
+    {"id":"portable.export","rust":"GraphForge.export_portable_v2","python":"GraphForge.export_portable_v2","node":"GraphForge.exportPortableV2","cli":"export"},
+    {"id":"portable.import","rust":"GraphForge.import_portable_v2","python":"GraphForge.import_portable_v2","node":"GraphForge.importPortableV2","cli":"import"},
     {"id":"portable.post_import_inspect","rust":"GraphForge.portable_ontology_staging","python":"GraphForge.portable_ontology_staging","node":"GraphForge.portableOntologyStaging","cli":"portable/staging/inspect"},
     {"id":"portable.post_import_adopt","rust":"GraphForge.adopt_portable_ontology_staging","python":"GraphForge.adopt_portable_ontology_staging","node":"GraphForge.adoptPortableOntologyStaging","cli":"portable/staging/adopt"}
   ],

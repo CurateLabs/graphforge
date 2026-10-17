@@ -14,7 +14,7 @@ fn standalone_verify_is_retired_and_portable_verify_remains_available() {
         "portable",
         "verify",
         "--input",
-        "/tmp/package.gfportable",
+        "/tmp/package.gfpb",
         "--mode",
         "full",
     ])
