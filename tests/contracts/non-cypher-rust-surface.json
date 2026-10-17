@@ -1,7 +1,7 @@
 {
   "contract_version": 1,
   "scope": "Rust non-Cypher public release surface",
-  "public_method_digest": "eefda0ef0dbc69a1b5ffa22b3954e2167ce6a2c45c570859e59dc49c03ae5f13",
+  "public_method_digest": "80f8e2d20fdf78137c87a624e562052154bcac401647a3a751570a9e5b3b38e0",
   "method_policy": {
     "receiver_defaults": {
       "PortableV2ImportResult": "release-tested",
@@ -1096,7 +1096,8 @@
         "crate.repack_verified_expanded_portable_v2",
         "crate.summarize_verified_portable_v2",
         "crate.resolve_discovered_ontology_module",
-        "GraphForge.continue_imported_research_branch"
+        "GraphForge.continue_imported_research_branch",
+        "crate.read_committed_generation_identity"
       ],
       "test_refs": [
         {

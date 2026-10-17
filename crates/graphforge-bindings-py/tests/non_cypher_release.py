@@ -27,8 +27,8 @@ production_source = runpy.run_path(str(Path(__file__).with_name("native_sources.
     "production_source"
 ]
 PYO3_SOURCE = ROOT / "crates/graphforge-bindings-py/src/lib.rs"
-EXPECTED_RUST_DIGEST = "eefda0ef0dbc69a1b5ffa22b3954e2167ce6a2c45c570859e59dc49c03ae5f13"
-EXPECTED_RELEASE_DIGEST = "c3b7a8431ddb072949eb31a5035b3f0e165fdd801a908b50d8efd9b7015021d9"
+EXPECTED_RUST_DIGEST = "80f8e2d20fdf78137c87a624e562052154bcac401647a3a751570a9e5b3b38e0"
+EXPECTED_RELEASE_DIGEST = "ec4910497cba228a981c302aeff5bc46e94cba5c10d4cbb28c0019b6fe381ae4"
 
 PYTHON_ONLY_METHODS = frozenset(
     {
@@ -289,7 +289,7 @@ def _classification_report() -> dict[str, object]:
         for group in manifest["method_evidence_groups"].values()
         for method_id in group["ids"]
     }
-    assert len(release_methods) == 354
+    assert len(release_methods) == 355
     assert _digest(release_methods) == EXPECTED_RELEASE_DIGEST
     assert set(EVIDENCE) == set(manifest["method_evidence_groups"])
 
@@ -403,6 +403,9 @@ def _classification_report() -> dict[str, object]:
                 "Node and CLI pass JSON for declaration-aware numeric conversion; "
                 "Python passes strictly typed native literals to execute_saved_query"
             )
+        elif rust_id == "crate.read_committed_generation_identity":
+            classification = "not-exposed"
+            reason = "read-only native filesystem admission is owned by CLI import preflight"
         elif rust_id == "GraphForge.continue_imported_research_branch":
             classification = "not-exposed"
             reason = "verified discovery activation is owned by the native CLI import boundary"
