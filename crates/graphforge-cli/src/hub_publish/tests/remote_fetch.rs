@@ -93,8 +93,30 @@ fn verified_same_branch_fetch_preserves_local_head_workspace_and_exact_receipt_r
     let workspace = score(bob.execute("MATCH (n:Item) RETURN sum(n.score)").unwrap());
     let expected = generation(&bob);
     let operation = Uuid::now_v7();
-    let result = package
-        .fetch(&mut bob, alice.branch, operation, expected)
+    let repository = RepositoryIdentity::parse("curate/claims").unwrap();
+    let result = bob
+        .fetch_research_branch(
+            &FetchResearchBranchRequest {
+                operation_uuid: operation,
+                expected_generation_uuid: expected,
+                branch_uuid: alice.branch,
+                repository_url: "https://hub.test/curate/claims",
+                discovery: DiscoveryResearchVersionRequest {
+                    manifest_json: &package.manifest,
+                    refs_json: &package.refs,
+                    lineage_json: &package.lineage,
+                    expected_repository: &repository,
+                    version_uuid: &package.head,
+                    package: &package.path,
+                    discovery_limits: DiscoveryLimits::default(),
+                    portable_limits: PortableV2Limits::default(),
+                    mode: PortableV2Mode::Full,
+                    cancelled: None,
+                    scratch: None,
+                },
+            },
+            &CancellationToken::new(),
+        )
         .unwrap();
     let after = bob.research_version_retention().unwrap();
     assert_eq!(after.heads, prior.heads);
