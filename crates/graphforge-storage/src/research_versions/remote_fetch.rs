@@ -71,7 +71,6 @@ impl ResearchRemoteBranchFetch {
             || !registry.heads.contains_key(&reference.branch_uuid)
             || self.archive.genealogy.get(&reference.branch_uuid) != Some(branch)
             || version.context_uuid != reference.branch_uuid
-            || version.content.source_version.is_some()
             || self.archive.identities.get(&reference.head_version_uuid)
                 != Some(&reference.identity_sha256)
         {
