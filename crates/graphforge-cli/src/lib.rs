@@ -1188,9 +1188,7 @@ fn run_with_allocation(
     let path = resolve_project_path(cli.project, cli.project_dir)?;
     let command = match command {
         Command::Import(args) => {
-            return portable_cli::run_import(&path, args, cli.json, output, allocation)
-                .map(|()| 0)
-                .map_err(Into::into);
+            return portable_cli::run_import(&path, args, cli.json, output, allocation).map(|()| 0);
         }
         command => command,
     };
@@ -1203,9 +1201,7 @@ fn run_with_allocation(
     let mut graph = open_cli_graph(Path::new(path_text), allocation)?;
     let command = match command {
         Command::Export(args) => {
-            return portable_cli::run_export(&graph, args, cli.json, output)
-                .map(|()| 0)
-                .map_err(Into::into);
+            return portable_cli::run_export(&graph, args, cli.json, output).map(|()| 0);
         }
         Command::SavedQuery { command } => {
             return saved_queries_cli::run(&mut graph, command, cli.json, output)
