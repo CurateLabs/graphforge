@@ -2475,11 +2475,21 @@ fn moved_repository_clones_both_names_and_publishes_only_with_current_scope() {
 
 #[test]
 fn selected_png_svg_previews_are_version_bound_but_not_native_package_data() {
+    selected_previews_preserve_native_data_and_moves(false);
+}
+
+#[test]
+fn async_selected_previews_preserve_native_data_and_moves() {
+    selected_previews_preserve_native_data_and_moves(true);
+}
+
+fn selected_previews_preserve_native_data_and_moves(large_objects: bool) {
     let history = history();
     let mut config = ReferenceHubConfig {
         base_url: HUB.into(),
         authorization_client_id: Some("client_workos_preview".into()),
         object_location_hex: true,
+        large_objects,
         ..ReferenceHubConfig::default()
     };
     config.limits.preferred_chunk_bytes = Some(8 * 1024 * 1024);
