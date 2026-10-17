@@ -133,7 +133,7 @@ impl ResearchInterchangeManifest {
     }
 }
 
-fn copy_version(
+pub(in crate::research_versions) fn copy_version(
     source: &Path,
     target: &Path,
     version: &super::super::ResearchVersionRecord,

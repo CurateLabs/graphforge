@@ -1502,6 +1502,26 @@ impl StagedProjectGeneration {
         D: FnOnce(&[StagedParticipant]) -> Result<(), GfError>,
         C: FnOnce(&ResolvedProjectGeneration, &[StagedParticipant]) -> Result<(), GfError>,
     {
+        self.validate_with_research_witness(
+            domain_validation,
+            composite_validation,
+            &crate::research_versions::ResearchPublicationWitness {
+                origin: origin_witness,
+                fetch: None,
+            },
+        )
+    }
+
+    pub(crate) fn validate_with_research_witness<D, C>(
+        self,
+        domain_validation: D,
+        composite_validation: C,
+        witness: &crate::research_versions::ResearchPublicationWitness<'_>,
+    ) -> Result<ValidatedProjectGeneration, GfError>
+    where
+        D: FnOnce(&[StagedParticipant]) -> Result<(), GfError>,
+        C: FnOnce(&ResolvedProjectGeneration, &[StagedParticipant]) -> Result<(), GfError>,
+    {
         self.admission.revalidate_identity()?;
         for participant in &self.participants {
             verify_staged_participant_file(
@@ -1526,7 +1546,7 @@ impl StagedProjectGeneration {
                 .iter()
                 .any(|c| c.capability_id == crate::research_versions::RESEARCH_CAPABILITY),
             self.generation_uuid,
-            origin_witness,
+            witness,
         )?;
         domain_validation(&self.participants)?;
         project_failpoint::hit(

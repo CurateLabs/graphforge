@@ -42,7 +42,9 @@ mod remote;
 pub use ancestry::{MAX_PARENTS, ResearchVersionProvenance};
 pub use remote::ResearchRemoteBranch;
 mod remote_fetch;
-pub use remote_fetch::{ResearchRemoteBranchFetch, ResearchRemoteFetchBinding};
+pub use remote_fetch::{
+    ResearchRemoteBranchFetch, ResearchRemoteFetchBinding, stage_remote_branch_fetch,
+};
 mod legacy;
 pub use legacy::{
     RESEARCH_LEGACY_VERSION, current_registry_schema, research_revision_readable,
@@ -330,6 +332,11 @@ pub enum ResearchMutation {
         lineage_sha256: [u8; 32],
         /// Read-only references from the same verified repository snapshot.
         remote_branches: Vec<ResearchRemoteBranch>,
+    },
+    /// Admit an exact fetched remote head without replacing the local Branch/workspace.
+    FetchRemoteBranch {
+        /// Full immutable archive and verified discovery/receipt commitment.
+        fetch: Box<ResearchRemoteBranchFetch>,
     },
     /// Freeze exact selected research and root it without advancing any head.
     SubmitProposal {
@@ -957,6 +964,9 @@ fn apply_mutation(
     registry: &mut ResearchRegistry,
 ) -> Result<Option<Uuid>, GfError> {
     let version_uuid = match mutation {
+        ResearchMutation::FetchRemoteBranch { fetch } => {
+            Some(remote_fetch::apply(registry, fetch)?)
+        }
         ResearchMutation::ActivateImportedBranch {
             branch_uuid,
             head_version_uuid,
@@ -1204,6 +1214,7 @@ pub fn publish_research_operation_with_mode(
     let operation_fingerprint = branches::publication_fingerprint(request);
     proposal_publication::validate_preview_generation(request)?;
     upstream_publication::validate_preview_generation(request)?;
+    remote_fetch::validate_request(request)?;
     let graph_objects = crate::begin_graph_object_publication(root)?;
     let version_uuid = apply_mutation(
         root,
@@ -1260,14 +1271,20 @@ pub fn publish_research_operation_with_mode(
         )?;
     if let ProjectStageOutcome::Staged(staged) = staged {
         staged
-            .validate_with_upstream_origin(
+            .validate_with_research_witness(
                 |_| registry.validate(),
                 |_, _| Ok(()),
-                match &request.mutation {
-                    ResearchMutation::UpdateBranch { source_capture, .. } => {
-                        source_capture.as_deref()
-                    }
-                    _ => None,
+                &ResearchPublicationWitness {
+                    origin: match &request.mutation {
+                        ResearchMutation::UpdateBranch { source_capture, .. } => {
+                            source_capture.as_deref()
+                        }
+                        _ => None,
+                    },
+                    fetch: match &request.mutation {
+                        ResearchMutation::FetchRemoteBranch { fetch } => Some(fetch.as_ref()),
+                        _ => None,
+                    },
                 },
             )?
             .publish_with_graph_objects_cancellable(&graph_objects, &mut || {
@@ -1463,13 +1480,19 @@ fn registry_publication_revision(
 
 /// Every publisher preserves permanent identity and receipt history, including
 /// publishers which do not themselves implement research lifecycle operations.
+#[derive(Default)]
+pub(crate) struct ResearchPublicationWitness<'a> {
+    pub(crate) origin: Option<&'a RegisterResearchVersion>,
+    pub(crate) fetch: Option<&'a ResearchRemoteBranchFetch>,
+}
+
 pub(crate) fn validate_publication_transition(
     parent: &ResolvedProjectGeneration,
     participants: &[crate::StagedParticipant],
     directory: &Path,
     declares_research: bool,
     candidate_generation: Uuid,
-    origin_witness: Option<&RegisterResearchVersion>,
+    witness: &ResearchPublicationWitness<'_>,
 ) -> Result<(), GfError> {
     let (before, parent_revision) = read_registry_revision(parent)?;
     let candidate = participants.iter().find(|p| {
@@ -1503,7 +1526,7 @@ pub(crate) fn validate_publication_transition(
         &after,
         parent,
         candidate_generation,
-        origin_witness,
+        witness.origin,
     )?;
     for (id, branch) in &before.branches {
         if after.branches.get(id) != Some(branch) {
@@ -1527,13 +1550,7 @@ pub(crate) fn validate_publication_transition(
         }
     }
     ancestry::preserve(&before, &after)?;
-    for (key, reference) in &before.remote_branches {
-        if after.remote_branches.get(key) != Some(reference) {
-            return Err(invalid(
-                "publication cannot rewrite remote Branch citations",
-            ));
-        }
-    }
+    remote_fetch::preserve(&before, &after, parent, candidate_generation, witness.fetch)?;
     for (id, root) in &before.roots {
         if root.kind == ResearchRootKind::AcceptedProvenance && after.roots.get(id) != Some(root) {
             return Err(invalid(

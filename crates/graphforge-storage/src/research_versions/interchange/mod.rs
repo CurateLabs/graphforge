@@ -6,6 +6,7 @@ mod registry;
 pub(super) use registry::{preserve, validate_registry};
 
 mod transfer;
+pub(in crate::research_versions) use transfer::copy_version;
 pub use transfer::materialize_research_interchange;
 
 pub(crate) mod portable;

@@ -99,6 +99,12 @@ impl ResearchRemoteBranchFetch {
                 "fetch conflicts with the admitted immutable archive",
             ));
         }
+        let imported = self.archive.registry()?;
+        for (id, root) in &imported.roots {
+            if registry.roots.get(id).is_some_and(|known| known != root) {
+                return Err(invalid("fetch conflicts with a native retention root"));
+            }
+        }
         for (id, branch) in &self.archive.genealogy {
             if registry
                 .historical_branch(*id)
@@ -135,4 +141,170 @@ impl ResearchRemoteBranchFetch {
         }
         Ok(())
     }
+}
+
+impl ResearchRemoteBranchFetch {
+    /// Reconstruct the exact canonical native request, without paths or caller receipts.
+    #[must_use]
+    pub fn operation(&self) -> super::ResearchOperation {
+        super::ResearchOperation {
+            operation_uuid: self.binding.operation_uuid,
+            expected_generation_uuid: self.binding.expected_generation_uuid,
+            mutation: super::ResearchMutation::FetchRemoteBranch {
+                fetch: Box::new(self.clone()),
+            },
+        }
+    }
+
+    /// Authenticate this complete request against the owning native receipt registry.
+    pub fn authenticate_receipt(
+        &self,
+        registry: &ResearchRegistry,
+    ) -> Result<super::ResearchOperationReceipt, GfError> {
+        use sha2::Digest as _;
+        let digest: [u8; 32] = sha2::Sha256::digest(super::json(&self.operation())?).into();
+        let receipt = registry
+            .receipts
+            .get(&self.binding.operation_uuid)
+            .ok_or_else(|| invalid("remote fetch native receipt is unavailable"))?;
+        if receipt.request_sha256 != digest
+            || receipt.version_uuid != Some(self.binding.reference.head_version_uuid)
+        {
+            return Err(invalid(
+                "remote fetch native receipt does not bind this exact request",
+            ));
+        }
+        Ok(receipt.clone())
+    }
+}
+
+impl ResearchRemoteFetchBinding {
+    /// Rebuild an immutable fetch from native archive authority and authenticate its receipt.
+    pub fn authenticate(
+        &self,
+        registry: &ResearchRegistry,
+    ) -> Result<ResearchRemoteBranchFetch, GfError> {
+        let archive = registry
+            .interchange
+            .get(&self.reference.head_version_uuid)
+            .ok_or_else(|| invalid("fetched native archive is unavailable"))?;
+        let fetch = ResearchRemoteBranchFetch {
+            binding: self.clone(),
+            archive: Box::new(archive.clone()),
+        };
+        fetch.validate_identity(registry, self.reference.project_uuid)?;
+        fetch.authenticate_receipt(registry)?;
+        Ok(fetch)
+    }
+}
+
+pub(super) fn validate_request(operation: &super::ResearchOperation) -> Result<(), GfError> {
+    if let super::ResearchMutation::FetchRemoteBranch { fetch } = &operation.mutation
+        && (operation.operation_uuid != fetch.binding.operation_uuid
+            || operation.expected_generation_uuid != fetch.binding.expected_generation_uuid)
+    {
+        return Err(invalid(
+            "fetch binding differs from the native operation owner",
+        ));
+    }
+    Ok(())
+}
+
+pub(super) fn apply(
+    registry: &mut ResearchRegistry,
+    fetch: &ResearchRemoteBranchFetch,
+) -> Result<Uuid, GfError> {
+    let reference = &fetch.binding.reference;
+    fetch.validate_identity(registry, reference.project_uuid)?;
+    let imported = fetch.archive.registry()?;
+    for (id, version) in imported.versions {
+        registry.versions.entry(id).or_insert(version);
+    }
+    registry.identities.extend(imported.identities);
+    registry.ancestry.extend(imported.ancestry);
+    registry.materialized.extend(imported.materialized);
+    registry.roots.extend(imported.roots);
+    registry
+        .interchange
+        .entry(reference.head_version_uuid)
+        .or_insert_with(|| *fetch.archive.clone());
+    registry
+        .remote_branches
+        .insert(reference.key()?, reference.clone());
+    registry.validate()?;
+    Ok(reference.head_version_uuid)
+}
+
+pub(super) fn preserve(
+    before: &ResearchRegistry,
+    after: &ResearchRegistry,
+    parent: &crate::ResolvedProjectGeneration,
+    candidate_generation: Uuid,
+    witness: Option<&ResearchRemoteBranchFetch>,
+) -> Result<(), GfError> {
+    let refreshed = witness
+        .map(|fetch| fetch.binding.reference.key())
+        .transpose()?;
+    for (key, reference) in &before.remote_branches {
+        if Some(key) != refreshed.as_ref() && after.remote_branches.get(key) != Some(reference) {
+            return Err(invalid(
+                "publication cannot rewrite remote Branch citations",
+            ));
+        }
+    }
+    if let Some(fetch) = witness {
+        fetch.validate_identity(before, fetch.binding.reference.project_uuid)?;
+        let receipt = fetch.authenticate_receipt(after)?;
+        if before.receipts.contains_key(&fetch.binding.operation_uuid)
+            || fetch.binding.expected_generation_uuid != parent.generation_uuid()
+            || receipt.generation_uuid != candidate_generation
+            || before.heads != after.heads
+            || before.branches != after.branches
+            || after
+                .interchange
+                .get(&fetch.binding.reference.head_version_uuid)
+                != Some(fetch.archive.as_ref())
+            || after
+                .remote_branches
+                .get(refreshed.as_ref().expect("fetch key"))
+                != Some(&fetch.binding.reference)
+            || after.remote_branches.keys().any(|key| {
+                !before.remote_branches.contains_key(key) && Some(key) != refreshed.as_ref()
+            })
+        {
+            return Err(invalid(
+                "fetch changed local authority or differs from its native receipt",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Copy only authenticated immutable research content while holding its native CAS lease.
+/// The caller performs full native package validation before invoking this preparation.
+pub fn stage_remote_branch_fetch(
+    source: &crate::ResolvedProjectGeneration,
+    target: &std::path::Path,
+    fetch: &ResearchRemoteBranchFetch,
+) -> Result<crate::GraphObjectPublicationLease, GfError> {
+    let source_registry = super::read_research_registry(source)?;
+    if source_registry
+        .interchange
+        .get(&fetch.binding.reference.head_version_uuid)
+        != Some(fetch.archive.as_ref())
+    {
+        return Err(invalid(
+            "fetch source does not own the admitted immutable archive",
+        ));
+    }
+    let lease = crate::begin_graph_object_publication(target)?;
+    for version in fetch.archive.versions.values() {
+        super::interchange::copy_version(
+            source.container_root(),
+            target,
+            version,
+            &source_registry,
+        )?;
+    }
+    Ok(lease)
 }
