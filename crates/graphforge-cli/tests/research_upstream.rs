@@ -57,6 +57,7 @@ fn cli_upstream_review_reopens_and_replays_native_publication() {
     let generation = current(&graph);
     drop(graph);
     let preview = PreviewResearchUpstreamRequest {
+        remote: None,
         branch_uuid: branch,
         scope: ResearchUpstreamScope::Branch,
     };

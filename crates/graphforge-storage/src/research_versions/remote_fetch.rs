@@ -308,3 +308,31 @@ pub fn stage_remote_branch_fetch(
     }
     Ok(lease)
 }
+
+impl ResearchRemoteFetchBinding {
+    /// Authenticate retained native content and require the current exact remote citation.
+    /// Historical review validation uses `authenticate` without retargeting its endpoint.
+    pub fn require_current(
+        &self,
+        registry: &ResearchRegistry,
+        branch: Uuid,
+    ) -> Result<(), GfError> {
+        self.authenticate(registry)?;
+        if self.reference.branch_uuid != branch
+            || !registry
+                .materialized
+                .contains(&self.reference.head_version_uuid)
+        {
+            return Err(invalid(
+                "remote review requires retained same-Branch content",
+            ));
+        }
+        if registry.remote_branches.get(&self.reference.key()?) != Some(&self.reference) {
+            return Err(super::error(
+                super::ProjectErrorCode::WriteConflict,
+                "remote review endpoint changed; review the current fetched head",
+            ));
+        }
+        Ok(())
+    }
+}

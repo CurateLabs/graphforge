@@ -89,6 +89,7 @@ impl GraphForge {
         baseline::install(&command.root, &mut prepared, &baselines, cancel)?;
         let fields = reviewed_fields(&preview, &selected, &current);
         let review = ResearchUpstreamReview {
+            remote: request.preview.remote.clone(),
             sequence: preview.registry.upstream.reviews.len() as u64 + 1,
             operation_uuid: request.operation_uuid,
             branch_uuid: request.preview.branch_uuid,
@@ -207,22 +208,24 @@ fn source_capture(
     preview: &preview::Preview,
     request: &UpdateResearchBranchRequest,
 ) -> Result<Option<Box<RegisterResearchVersion>>, GfError> {
-    Ok(if preview.branch.parent_branch_uuid.is_none() {
-        Some(Box::new(RegisterResearchVersion {
-            author: None,
-            committer: None,
-            version_uuid: preview::identity(request.operation_uuid, "upstream_origin"),
-            context_uuid: preview.branch.project_uuid,
-            source_generation_uuid: preview.current.generation_uuid(),
-            source_version: None,
-            selection: None,
-            required_versions: BTreeSet::new(),
-            label: None,
-            description: None,
-            created_at: request.created_at,
-            evidence: crate::research_versions::complete_evidence(&preview.current)?,
-        }))
-    } else {
-        None
-    })
+    Ok(
+        if request.preview.remote.is_none() && preview.branch.parent_branch_uuid.is_none() {
+            Some(Box::new(RegisterResearchVersion {
+                author: None,
+                committer: None,
+                version_uuid: preview::identity(request.operation_uuid, "upstream_origin"),
+                context_uuid: preview.branch.project_uuid,
+                source_generation_uuid: preview.current.generation_uuid(),
+                source_version: None,
+                selection: None,
+                required_versions: BTreeSet::new(),
+                label: None,
+                description: None,
+                created_at: request.created_at,
+                evidence: crate::research_versions::complete_evidence(&preview.current)?,
+            }))
+        } else {
+            None
+        },
+    )
 }

@@ -175,3 +175,16 @@ unchanged; the first research write relabels the research capability and
 participants to revision 7 inside that same atomic publication, without
 rewriting any record. Revision 6 packages import at revision 7, and exports are
 always revision 7. Revisions before 6 remain refused (ADR 0055).
+
+## Same-Branch remote incorporation (#2123)
+
+A verified remote fetch admits an exact complete same-Project, same-Branch Version
+without changing the local head or workspace. Its existing native operation receipt
+binds the package and transport digests, canonical discovery lineage, immutable
+archive, Branch creation, repository/ref and pre-fetch CURRENT. A caller-created
+binding or a retained Version alone grants no remote incorporation authority.
+
+An explicit remote upstream review authenticates that receipt and retained content,
+then requires the current exact remote citation. Its publication rechecks CURRENT,
+local head and endpoint and records parents in order `[prior_local_head, remote_head]`.
+The original immediate-parent flow remains the default.

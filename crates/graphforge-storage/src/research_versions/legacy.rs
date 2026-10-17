@@ -27,6 +27,7 @@ pub(super) fn registry_schema(version: u32) -> Option<[u8; 32]> {
     match version {
         RESEARCH_LEGACY_VERSION => Some(Sha256::digest(b"graphforge-research-registry/6").into()),
         7 => Some(Sha256::digest(b"graphforge-research-registry/7").into()),
+        8 => Some(Sha256::digest(b"graphforge-research-registry/8").into()),
         RESEARCH_VERSION => Some(Sha256::digest(super::REGISTRY_SCHEMA).into()),
         _ => None,
     }
@@ -45,6 +46,17 @@ impl ResearchRegistry {
         if revision < 8 && !self.remote_branches.is_empty() {
             return Err(invalid(
                 "legacy research registry carries revision 8 remote references",
+            ));
+        }
+        if revision < 9
+            && self
+                .upstream
+                .reviews
+                .values()
+                .any(|review| review.remote.is_some())
+        {
+            return Err(invalid(
+                "legacy research registry carries revision 9 remote reviews",
             ));
         }
         Ok(())

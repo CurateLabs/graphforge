@@ -278,3 +278,75 @@ fn a_crash_during_the_upgrading_write_leaves_a_readable_project() {
         assert_eq!(revision(root), RESEARCH_VERSION);
     }
 }
+
+#[test]
+fn revision_seven_and_eight_registry_bytes_remain_readable_without_identity_rewrite() {
+    for revision in [7, 8] {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        legacy_project(root);
+        let before = state(root);
+        let parent = crate::resolve_project_generation(root).unwrap();
+        let mut capabilities = parent.capabilities();
+        for capability in &mut capabilities {
+            if capability.capability_id == RESEARCH_CAPABILITY {
+                capability.capability_version = revision;
+            }
+        }
+        let participants = parent
+            .participant_snapshots()
+            .unwrap()
+            .into_iter()
+            .map(|snapshot| {
+                let mut participant = ProjectParticipant {
+                    capability_id: snapshot.capability_id,
+                    capability_version: snapshot.capability_version,
+                    record_family_id: snapshot.record_family_id,
+                    record_version: snapshot.record_version,
+                    encoding: match snapshot.encoding.as_str() {
+                        "json" => ProjectParticipantEncoding::Json,
+                        "parquet" => ProjectParticipantEncoding::Parquet,
+                        _ => ProjectParticipantEncoding::Arrow,
+                    },
+                    schema_fingerprint: snapshot.schema_fingerprint,
+                    row_count: snapshot.row_count,
+                    bytes: snapshot.bytes,
+                };
+                if participant.capability_id == RESEARCH_CAPABILITY {
+                    participant.capability_version = revision;
+                    if participant.record_family_id == RESEARCH_REGISTRY {
+                        participant.record_version = revision;
+                        participant.schema_fingerprint = legacy::registry_schema(revision).unwrap();
+                    }
+                }
+                participant
+            })
+            .collect();
+        let request = ProjectGenerationRequest {
+            transaction_uuid: Uuid::now_v7(),
+            generation_uuid: Uuid::now_v7(),
+            capabilities,
+            participants,
+        };
+        let _lease = crate::begin_graph_object_publication(root).unwrap();
+        let ProjectStageOutcome::Staged(staged) =
+            crate::stage_project_generation(root, &request).unwrap()
+        else {
+            panic!("unexpected retry")
+        };
+        staged
+            .validate(|_| Ok(()), |_, _| Ok(()))
+            .unwrap()
+            .publish()
+            .unwrap();
+        assert_eq!(self::revision(root), revision);
+        assert_eq!(state(root), before);
+        for (id, record) in &before.versions {
+            assert_eq!(
+                json(&state(root).versions[id]).unwrap(),
+                json(record).unwrap()
+            );
+            assert_eq!(state(root).identities[id], before.identities[id]);
+        }
+    }
+}

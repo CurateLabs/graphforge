@@ -121,6 +121,7 @@ fn typed_updates_require_reviewed_ontology_and_keep_invalid_retention_unresolved
         })
         .collect();
     let preview_request = PreviewResearchUpstreamRequest {
+        remote: None,
         branch_uuid: seed.preview.branch_uuid,
         scope: ResearchUpstreamScope::Fields { fields },
     };

@@ -35,6 +35,7 @@ fn preview_is_pinned_read_only_and_requires_explicit_conflict_selection() {
         .execute("MATCH (n:Item) SET n.x = 1, n.y = 2")
         .unwrap();
     let request = PreviewResearchUpstreamRequest {
+        remote: None,
         branch_uuid: branch.branch_uuid,
         scope: ResearchUpstreamScope::Branch,
     };
@@ -310,6 +311,7 @@ fn preference_only_source_update_is_visible_without_changing_immutable_source() 
         Some(second)
     );
     let request = PreviewResearchUpstreamRequest {
+        remote: None,
         branch_uuid: branch.branch_uuid,
         scope: ResearchUpstreamScope::Sources,
     };
@@ -436,6 +438,7 @@ fn preference_only_source_update_is_visible_without_changing_immutable_source() 
         receipt
     );
     let child_preview = PreviewResearchUpstreamRequest {
+        remote: None,
         branch_uuid: child.branch_uuid,
         scope: ResearchUpstreamScope::Sources,
     };

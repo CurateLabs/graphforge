@@ -32,29 +32,40 @@ pub(super) fn apply(
             "upstream review does not identify the exact local Branch head and publication",
         ));
     }
-    match (branch.parent_branch_uuid, source_capture) {
-        (Some(parent), None) => {
-            if registry.heads.get(&parent) != Some(&review.upstream_version_uuid) {
-                return Err(invalid(
-                    "upstream review does not identify the exact immediate parent head",
-                ));
-            }
-        }
-        (None, Some(capture)) => {
-            if capture.version_uuid != review.upstream_version_uuid
-                || capture.context_uuid != branch.project_uuid
-                || capture.source_generation_uuid != review.preview_generation_uuid
-            {
-                return Err(invalid(
-                    "upstream Project capture differs from its reviewed authority",
-                ));
-            }
-            super::branches::stage_origin(root, registry, capture)?;
-        }
-        _ => {
+    if let Some(binding) = &review.remote {
+        binding.require_current(registry, review.branch_uuid)?;
+        if source_capture.is_some()
+            || binding.reference.head_version_uuid != review.upstream_version_uuid
+        {
             return Err(invalid(
-                "upstream origin must be its immediate parent Branch or complete Project",
+                "remote review differs from its authenticated endpoint",
             ));
+        }
+    } else {
+        match (branch.parent_branch_uuid, source_capture) {
+            (Some(parent), None) => {
+                if registry.heads.get(&parent) != Some(&review.upstream_version_uuid) {
+                    return Err(invalid(
+                        "upstream review does not identify the exact immediate parent head",
+                    ));
+                }
+            }
+            (None, Some(capture)) => {
+                if capture.version_uuid != review.upstream_version_uuid
+                    || capture.context_uuid != branch.project_uuid
+                    || capture.source_generation_uuid != review.preview_generation_uuid
+                {
+                    return Err(invalid(
+                        "upstream Project capture differs from its reviewed authority",
+                    ));
+                }
+                super::branches::stage_origin(root, registry, capture)?;
+            }
+            _ => {
+                return Err(invalid(
+                    "upstream origin must be its immediate parent Branch or complete Project",
+                ));
+            }
         }
     }
     // An upstream incorporation merges: prior head first, then the upstream Version.

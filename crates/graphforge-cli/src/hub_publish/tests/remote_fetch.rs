@@ -1,4 +1,5 @@
 //! Genuine advertised package fetch into an independently advanced same-Branch owner.
+mod incorporation;
 use super::*;
 use graphforge_api::{
     DiscoveryResearchVersionRequest, FetchResearchBranchRequest, FetchedResearchBranch,

@@ -74,7 +74,7 @@ use crate::{
 /// Required research capability; unsupported readers must refuse it.
 pub const RESEARCH_CAPABILITY: &str = "research";
 /// Frozen research capability and registry record version.
-pub const RESEARCH_VERSION: u32 = 8;
+pub const RESEARCH_VERSION: u32 = 9;
 /// Authenticated registry record family.
 pub const RESEARCH_REGISTRY: &str = "registry";
 /// Maximum canonical registry payload; no unbounded history growth.
@@ -88,7 +88,7 @@ pub const MAX_CONTEXTS: usize = 256;
 /// Maximum explicit dependency roots.
 pub const MAX_ROOTS: usize = 4_096;
 /// Registry participant schema identity for `RESEARCH_VERSION`.
-const REGISTRY_SCHEMA: &[u8] = b"graphforge-research-registry/8";
+const REGISTRY_SCHEMA: &[u8] = b"graphforge-research-registry/9";
 const PRODUCER: &str = concat!(
     "graphforge-storage/",
     env!("CARGO_PKG_VERSION"),

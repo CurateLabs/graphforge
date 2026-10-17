@@ -54,6 +54,9 @@ pub struct ResearchUpstreamFieldReview {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResearchUpstreamReview {
+    /// Receipt-authenticated remote endpoint; absent for the ordinary immediate parent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote: Option<super::ResearchRemoteFetchBinding>,
     /// Contiguous native history order; caller timestamps do not order decisions.
     pub sequence: u64,
     /// Durable replay operation.
@@ -134,6 +137,16 @@ pub(super) fn validate(registry: &super::ResearchRegistry) -> Result<(), super::
                 "invalid upstream review identity, history, receipt or bounds",
             ));
         }
+        if let Some(binding) = &review.remote {
+            binding.authenticate(registry)?;
+            if binding.reference.branch_uuid != review.branch_uuid
+                || binding.reference.head_version_uuid != review.upstream_version_uuid
+            {
+                return Err(super::invalid(
+                    "remote review differs from its authenticated fetched endpoint",
+                ));
+            }
+        }
         let mut units = BTreeSet::new();
         for field in &review.fields {
             if field.unit.object_uuid.is_nil()
@@ -210,34 +223,45 @@ pub(super) fn preserve(
             .branches
             .get(&review.branch_uuid)
             .ok_or_else(|| super::invalid("upstream review requires an existing Branch"))?;
-        match (branch.parent_branch_uuid, origin_witness) {
-            (Some(_), None) => {}
-            (None, Some(origin)) => {
-                if origin.version_uuid != review.upstream_version_uuid
-                    || origin.context_uuid != branch.project_uuid
-                    || origin.source_generation_uuid != parent.generation_uuid()
-                    || origin.selection.is_some()
-                    || origin.source_version.is_some()
-                    || !origin.required_versions.is_empty()
-                    || before.identities.contains_key(&origin.version_uuid)
-                {
-                    return Err(super::invalid(
-                        "upstream review requires a fresh complete parent Project capture",
-                    ));
-                }
-                let captured = super::capture(parent.container_root(), origin, before)?;
-                if after.identities.get(&origin.version_uuid)
-                    != Some(&super::identity_digest(&captured)?)
-                {
-                    return Err(super::invalid(
-                        "upstream Project origin commitment differs from the reviewed parent",
-                    ));
-                }
-            }
-            _ => {
+        if let Some(binding) = &review.remote {
+            binding.require_current(before, review.branch_uuid)?;
+            if origin_witness.is_some()
+                || binding.reference.head_version_uuid != review.upstream_version_uuid
+            {
                 return Err(super::invalid(
-                    "upstream review origin differs from its immediate parent",
+                    "remote review origin differs from its fetched endpoint",
                 ));
+            }
+        } else {
+            match (branch.parent_branch_uuid, origin_witness) {
+                (Some(_), None) => {}
+                (None, Some(origin)) => {
+                    if origin.version_uuid != review.upstream_version_uuid
+                        || origin.context_uuid != branch.project_uuid
+                        || origin.source_generation_uuid != parent.generation_uuid()
+                        || origin.selection.is_some()
+                        || origin.source_version.is_some()
+                        || !origin.required_versions.is_empty()
+                        || before.identities.contains_key(&origin.version_uuid)
+                    {
+                        return Err(super::invalid(
+                            "upstream review requires a fresh complete parent Project capture",
+                        ));
+                    }
+                    let captured = super::capture(parent.container_root(), origin, before)?;
+                    if after.identities.get(&origin.version_uuid)
+                        != Some(&super::identity_digest(&captured)?)
+                    {
+                        return Err(super::invalid(
+                            "upstream Project origin commitment differs from the reviewed parent",
+                        ));
+                    }
+                }
+                _ => {
+                    return Err(super::invalid(
+                        "upstream review origin differs from its immediate parent",
+                    ));
+                }
             }
         }
         if review.preview_generation_uuid != parent.generation_uuid()
@@ -247,9 +271,10 @@ pub(super) fn preserve(
             || receipt.intent_sha256.is_none()
             || before.heads.get(&review.branch_uuid) != Some(&review.prior_version_uuid)
             || after.heads.get(&review.branch_uuid) != Some(&review.version_uuid)
-            || branch.parent_branch_uuid.is_some_and(|parent| {
-                before.heads.get(&parent) != Some(&review.upstream_version_uuid)
-            })
+            || (review.remote.is_none()
+                && branch.parent_branch_uuid.is_some_and(|parent| {
+                    before.heads.get(&parent) != Some(&review.upstream_version_uuid)
+                }))
         {
             return Err(super::invalid(
                 "new upstream review does not describe this publication transition",
