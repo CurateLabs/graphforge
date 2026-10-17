@@ -1313,6 +1313,8 @@ fn branch_activation_retries_exact_native_receipt_but_never_resets_advanced_stag
             assert_eq!(state.heads[&published.main_branch], published.main_head);
             assert_eq!(state.heads.len(), 1);
             assert!(!state.branches.contains_key(&published.feature_branch));
+            assert!(!state.materialized.contains(&published.feature_head));
+            assert!(!state.versions.contains_key(&published.feature_head));
             assert!(
                 state
                     .remote_branches
@@ -1371,6 +1373,26 @@ fn branch_activation_retries_exact_native_receipt_but_never_resets_advanced_stag
                     )
                     .is_err(),
                 "a changed bound remote snapshot cannot reuse the activation receipt"
+            );
+            assert_eq!(generation(&graph), prior);
+            let mut altered_metadata = lineage.clone();
+            altered_metadata
+                .branches
+                .iter_mut()
+                .find(|b| b.ref_name == "feature/score")
+                .unwrap()
+                .label
+                .push_str(" changed");
+            assert!(
+                graph
+                    .continue_imported_research_branch(
+                        selected,
+                        &altered_metadata,
+                        "https://graphforge.sh/curate/claims-fork",
+                        imported_generation,
+                    )
+                    .is_err(),
+                "the entire bound discovery snapshot is committed, including remote metadata"
             );
             assert_eq!(generation(&graph), prior);
             assert!(

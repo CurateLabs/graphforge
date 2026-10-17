@@ -182,6 +182,12 @@ impl GraphForge {
                 branch_uuid,
                 head_version_uuid: head,
                 project_uuid,
+                lineage_sha256: sha2::Sha256::digest(
+                    lineage
+                        .to_canonical_json()
+                        .map_err(|e| GfError::Validation(e.to_string()))?,
+                )
+                .into(),
                 remote_branches,
             },
         };

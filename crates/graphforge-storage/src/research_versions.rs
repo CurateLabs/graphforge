@@ -324,6 +324,8 @@ pub enum ResearchMutation {
         head_version_uuid: Uuid,
         /// Verified importing Project authority.
         project_uuid: Uuid,
+        /// Exact canonical verified discovery snapshot, included in replay commitment.
+        lineage_sha256: [u8; 32],
         /// Read-only references from the same verified repository snapshot.
         remote_branches: Vec<ResearchRemoteBranch>,
     },
@@ -957,6 +959,7 @@ fn apply_mutation(
             branch_uuid,
             head_version_uuid,
             project_uuid,
+            lineage_sha256: _,
             remote_branches,
         } => {
             let archive = registry
