@@ -2128,16 +2128,18 @@ fn clone_into_staging(
                         base.origin().ascii_serialization(),
                         identity.canonical_name()
                     ),
-                    graphforge_api::portable_v2_import_generation(&operation_id.0),
+                    operation_id.0,
                 )?;
-                return Ok((
-                    CloneImported {
-                        package_digest: context.package_digest.clone(),
-                        generation_uuid: receipt.generation_uuid,
-                    },
-                    None,
-                    None,
-                ));
+                if let Some(receipt) = receipt {
+                    return Ok((
+                        CloneImported {
+                            package_digest: context.package_digest.clone(),
+                            generation_uuid: receipt.generation_uuid,
+                        },
+                        None,
+                        None,
+                    ));
+                }
             }
             bind_import_target(staging, &operation_id)?;
             GraphForge::import_portable_v2(
@@ -2153,7 +2155,8 @@ fn clone_into_staging(
                 // An import that did not commit leaves nothing worth
                 // keeping; the rerun starts from an empty target. A committed
                 // one stays, and the rerun replays it.
-                if error.committed_import.is_none()
+                if research_context.is_none()
+                    && error.committed_import.is_none()
                     && let Err(cleanup) = clear_import_target(staging)
                 {
                     return graphforge_api::GfError::Storage(format!(
@@ -2206,8 +2209,14 @@ fn clone_into_staging(
                 base.origin().ascii_serialization(),
                 identity.canonical_name()
             ),
-            graphforge_api::portable_v2_import_generation(&operation_id.0),
-        )?;
+            operation_id.0,
+        )?
+        .ok_or_else(|| {
+            validation(
+                "hub.destination_conflict",
+                "import did not commit its selected Branch",
+            )
+        })?;
         imported.generation_uuid = receipt.generation_uuid;
         clone_failpoint("clone.after_branch_continuation");
     }

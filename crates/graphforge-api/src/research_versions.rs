@@ -91,13 +91,20 @@ impl GraphForge {
 
     /// Continue one verified imported Branch in its original Project.
     /// Historical/archive readers never call this durable transition.
+    /// `None` admits only an unfinished target owned by this exact native import;
+    /// the caller must resume the unchanged importer before continuing the Branch.
     pub fn continue_imported_research_branch(
         project_path: &std::path::Path,
         expected: &graphforge_discovery::LineageBranch,
         lineage: &graphforge_discovery::ResearchLineage,
         repository_url: &str,
-        imported_generation: Uuid,
-    ) -> Result<ResearchOperationReceipt, GfError> {
+        import_operation: Uuid,
+    ) -> Result<Option<ResearchOperationReceipt>, GfError> {
+        let imported_generation =
+            graphforge_core::uuid::portable_v2_import_generation(&import_operation);
+        if graphforge_storage::portable_v2_import_pending(project_path, import_operation)? {
+            return Ok(None);
+        }
         // Admission is read-only: never initialize or repair a staged target as a probe.
         let generation = graphforge_storage::resolve_project_generation(project_path)?;
         let state = read_research_registry(&generation)?;
@@ -122,7 +129,7 @@ impl GraphForge {
                         .into(),
                 ));
             }
-            return Ok(receipt.clone());
+            return Ok(Some(receipt.clone()));
         }
         if current != imported_generation {
             return Err(GfError::Validation(
@@ -146,7 +153,7 @@ impl GraphForge {
                 "activation receipt is not the current native generation".into(),
             ));
         }
-        Ok(receipt)
+        Ok(Some(receipt))
     }
 
     /// Return the authenticated current retention graph and durable receipts.

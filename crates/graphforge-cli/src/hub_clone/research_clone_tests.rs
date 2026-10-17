@@ -1284,6 +1284,8 @@ fn branch_activation_retries_exact_native_receipt_but_never_resets_advanced_stag
         ("advanced", "clone.after_branch_continuation", true),
         ("foreign", "clone.before_branch_continuation", false),
         ("unreadable", "clone.before_branch_continuation", false),
+        ("import-lock", "project.after_writer_lock", false),
+        ("import-manifest", "project.after_manifest_fsync", false),
     ] {
         let destination = root.path().join(name);
         let child = std::process::Command::new(std::env::current_exe().unwrap())
@@ -1296,11 +1298,20 @@ fn branch_activation_retries_exact_native_receipt_but_never_resets_advanced_stag
             .env("GRAPHFORGE_RESEARCH_CLONE_FIXTURE", fixture.path())
             .env("GRAPHFORGE_RESEARCH_CLONE_DESTINATION", &destination)
             .env("GRAPHFORGE_CLONE_FAILPOINT", failpoint)
+            .env(
+                "GRAPHFORGE_PROJECT_FAILPOINTS",
+                "graphforge-internal-subprocess-v1",
+            )
+            .env("GRAPHFORGE_PROJECT_FAILPOINT", failpoint)
             .output()
             .unwrap();
         assert_eq!(
             child.status.code(),
-            Some(CLONE_FAILPOINT_EXIT),
+            Some(if name.starts_with("import-") {
+                86
+            } else {
+                CLONE_FAILPOINT_EXIT
+            }),
             "{}",
             String::from_utf8_lossy(&child.stdout)
         );
@@ -1308,7 +1319,6 @@ fn branch_activation_retries_exact_native_receipt_but_never_resets_advanced_stag
         let staging = staging_path(&destination).unwrap();
         let import_operation =
             Uuid::parse_str(&std::fs::read_to_string(staging.join("operation")).unwrap()).unwrap();
-        let imported_generation = graphforge_api::portable_v2_import_generation(&import_operation);
         let staged = staging.join("project");
         let prior = if advance {
             let mut graph = GraphForge::new(staged.to_str()).unwrap();
@@ -1390,8 +1400,9 @@ fn branch_activation_retries_exact_native_receipt_but_never_resets_advanced_stag
                 selected,
                 &lineage,
                 "https://graphforge.sh/curate/claims-fork",
-                imported_generation,
+                import_operation,
             )
+            .unwrap()
             .unwrap();
             assert_eq!(receipt.generation_uuid, prior);
             let mut altered = lineage.clone();
@@ -1407,7 +1418,7 @@ fn branch_activation_retries_exact_native_receipt_but_never_resets_advanced_stag
                     selected,
                     &altered,
                     "https://graphforge.sh/curate/claims-fork",
-                    imported_generation,
+                    import_operation,
                 )
                 .is_err(),
                 "a changed bound remote snapshot cannot reuse the activation receipt"
@@ -1427,7 +1438,7 @@ fn branch_activation_retries_exact_native_receipt_but_never_resets_advanced_stag
                     selected,
                     &altered_metadata,
                     "https://graphforge.sh/curate/claims-fork",
-                    imported_generation,
+                    import_operation,
                 )
                 .is_err(),
                 "the entire bound discovery snapshot is committed, including remote metadata"
