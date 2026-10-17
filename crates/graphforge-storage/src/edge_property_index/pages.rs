@@ -380,6 +380,23 @@ impl<'a> PackHandles<'a> {
         self.memory.take()
     }
 
+    /// Interleave uniquely selected source rows after admitting recursive
+    /// kernel workspace. Payload and output-slot bounds belong to the caller.
+    pub(super) fn interleave(
+        &mut self,
+        arrays: &[ArrayRef],
+        indices: &[(usize, usize)],
+    ) -> Result<ArrayRef, GfError> {
+        if self.admission.is_some() {
+            let workspace = arrays.iter().try_fold(0, |bytes, array| {
+                query_add(bytes, super::interleave_memory::workspace(array.as_ref())?)
+            })?;
+            self.charge(workspace)?;
+        }
+        let references = arrays.iter().map(AsRef::as_ref).collect::<Vec<_>>();
+        arrow::compute::interleave(&references, indices).map_err(|e| validation(e.to_string()))
+    }
+
     fn corrupt(&self, pack: u32) -> GfError {
         let path = self.open.get(&pack).map_or_else(
             || Path::new("<unopened>").to_path_buf(),

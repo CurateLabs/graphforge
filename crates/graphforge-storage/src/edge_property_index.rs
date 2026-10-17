@@ -94,6 +94,7 @@ use crate::property_overlay::{
 use crate::read_memory::{PrepaidBatch, ReadAdmission, ReadGrant};
 use crate::topology_identity::EdgeIdResolver;
 
+mod interleave_memory;
 mod pages;
 use pages::{Keys, PAGE_ROWS, PackHandles, encode_paged};
 
@@ -1675,9 +1676,7 @@ fn take_columns(
         // Target keys and row locations are unique within a shard, so the
         // selected nested payload cannot exceed all decoded page payloads.
         packs.charge(query_add(query_mul(bytes, 4)?, 4096)?)?;
-        let sources = decoded.iter().map(AsRef::as_ref).collect::<Vec<_>>();
-        let taken = arrow::compute::interleave(&sources, &positions)
-            .map_err(|e| validation(e.to_string()))?;
+        let taken = packs.interleave(&decoded, &positions)?;
         columns.insert(entry.column, taken);
     }
     Ok(columns)
@@ -1701,11 +1700,20 @@ fn gather_columns<K>(
         }) else {
             continue;
         };
-        packs.charge(query_mul(
-            hits.len(),
-            crate::read_memory::null_bytes(&data_type, indices.len())
-                .map_err(GfError::from_execution_error)?,
-        )?)?;
+        // Fund the final gathered slots once. Only shards missing this
+        // property construct NULL sources, each at that shard's own length.
+        let mut construction = crate::read_memory::null_bytes(&data_type, indices.len())
+            .map_err(GfError::from_execution_error)?;
+        for hit in hits {
+            if !hit.columns.contains_key(index) {
+                construction = query_add(
+                    construction,
+                    crate::read_memory::null_bytes(&data_type, hit.keys.len())
+                        .map_err(GfError::from_execution_error)?,
+                )?;
+            }
+        }
+        packs.charge(construction)?;
         let sources: Vec<ArrayRef> = hits
             .iter()
             .map(|hit| {
@@ -1714,9 +1722,7 @@ fn gather_columns<K>(
                     .map_or_else(|| new_null_array(&data_type, hit.keys.len()), Arc::clone)
             })
             .collect();
-        let references = sources.iter().map(AsRef::as_ref).collect::<Vec<_>>();
-        let gathered = arrow::compute::interleave(&references, indices)
-            .map_err(|e| validation(e.to_string()))?;
+        let gathered = packs.interleave(&sources, indices)?;
         columns.push(((*property).clone(), gathered));
     }
     Ok(columns)
