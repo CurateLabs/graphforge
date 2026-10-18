@@ -1061,6 +1061,8 @@ impl ReferenceHub {
             .map_err(|_| invalid("manifest is not a valid discovery manifest"))?;
         let manifest_validator = sha256_digest(&manifest_document);
         let intent = PublishIntent {
+            rewrite: false,
+            prune: false,
             repository: repository.clone(),
             intent_digest: session.request.intent_digest.clone(),
             objects: session.request.objects.clone(),

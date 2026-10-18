@@ -11,6 +11,7 @@
 mod canonical;
 mod error;
 mod exchange;
+mod history;
 #[cfg(not(target_arch = "wasm32"))]
 mod reference;
 mod wire;
@@ -18,18 +19,21 @@ mod wire;
 pub use canonical::{canonical_json, parse_unique_json, sha256_digest, validate_digest};
 pub use error::{GF_IDEMPOTENCY_CONFLICT, HubErrorBody, HubPublishError, HubPublishErrorCode};
 pub use exchange::{HubExchange, HubMethod, HubRequest, HubResponse};
+pub use history::{
+    require_history_capability, require_history_requirement, validate_history_transition,
+};
 #[cfg(not(target_arch = "wasm32"))]
 pub use reference::{ReferenceHub, ReferenceHubConfig};
 pub use wire::{
     Capability, CommitRequest, DEVICE_CODE_GRANT_TYPE, DIGEST_PLACEHOLDER,
-    DeviceAuthorizationResponse, DevicePoll, HEX_PLACEHOLDER, HUB_PUBLISH_FORMAT,
-    LARGE_OBJECT_PUBLISH_CAPABILITY, OAuthErrorBody, ObjectDeclaration, OpenSessionRequest,
-    OperationStatus, PUBLISH_NEGOTIATION_CAPABILITY, PUBLISH_TOKEN_ENV, PublishAuthorization,
-    PublishCapabilities, PublishIntent, PublishLimits, PublishReceipt, PublishSessionId,
-    PublishToken, SUPPORTED_CAPABILITIES, SessionResponse, TokenResponse, UPLOAD_LENGTH_HEADER,
-    UPLOAD_OFFSET_HEADER, UploadStatus, UploadTarget, check_format, check_requirements,
-    content_range, parse_content_range, publish_scope, validate_https_url, validate_inventory,
-    validate_ref_list,
+    DeviceAuthorizationResponse, DevicePoll, HEX_PLACEHOLDER, HISTORY_MUTATION_CAPABILITY,
+    HUB_PUBLISH_FORMAT, LARGE_OBJECT_PUBLISH_CAPABILITY, OAuthErrorBody, ObjectDeclaration,
+    OpenSessionRequest, OperationStatus, PUBLISH_NEGOTIATION_CAPABILITY, PUBLISH_TOKEN_ENV,
+    PublishAuthorization, PublishCapabilities, PublishIntent, PublishLimits, PublishReceipt,
+    PublishSessionId, PublishToken, SUPPORTED_CAPABILITIES, SessionResponse, TokenResponse,
+    UPLOAD_LENGTH_HEADER, UPLOAD_OFFSET_HEADER, UploadStatus, UploadTarget, check_format,
+    check_requirements, content_range, parse_content_range, publish_scope, validate_https_url,
+    validate_inventory, validate_ref_list,
 };
 
 /// Reusable Rust image admission API shared by publisher and Hub.

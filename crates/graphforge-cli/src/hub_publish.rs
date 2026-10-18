@@ -1932,6 +1932,8 @@ pub(crate) fn publish(
         .as_ref()
         .map(|published| published.revision.clone());
     let request_commitment = PublishIntent {
+        rewrite: false,
+        prune: false,
         repository: identity.clone(),
         intent_digest: intent_digest.clone(),
         objects: snapshot.objects.clone(),
@@ -2031,6 +2033,8 @@ pub(crate) fn publish(
         .map_err(|error| GfError::Execution(error.to_string()))?;
     let committed = session_response(&hub.control(
         HubRequest::new(HubMethod::Post, commit_url.as_str()).with_json(&CommitRequest {
+            rewrite: false,
+            prune: false,
             manifest: manifest_value,
             refs: snapshot.refs.clone(),
             expected_revision,

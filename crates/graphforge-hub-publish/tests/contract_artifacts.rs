@@ -325,6 +325,8 @@ impl Publication {
 
     fn commitment(&self) -> String {
         PublishIntent {
+            rewrite: false,
+            prune: false,
             repository: self.repository.clone(),
             intent_digest: self.intent_digest(),
             objects: self.declarations(),
@@ -1748,6 +1750,7 @@ fn commit_request_schema() -> Value {
             "type": "object", "additionalProperties": false,
             "required": ["manifest", "refs", "expected_revision"],
             "properties": {
+                "rewrite": {"type": "boolean"}, "prune": {"type": "boolean"},
                 "manifest": {"$ref": "https://graphforge.sh/schemas/discovery/v1/manifest.schema.json"},
                 "refs": {"type": "array", "minItems": 1, "maxItems": 64, "uniqueItems": true,
                     "items": {"type": "string", "minLength": 1, "maxLength": 4096}},

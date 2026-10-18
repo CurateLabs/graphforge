@@ -40,14 +40,22 @@ pub const LARGE_OBJECT_PUBLISH_CAPABILITY: &str = "large-object-publish";
 /// Negotiated client, chunk and template extension.
 pub const PUBLISH_NEGOTIATION_CAPABILITY: &str = "publish-negotiation";
 
+/// Explicit lease-guarded rewrite and dependency-safe pruning.
+pub const HISTORY_MUTATION_CAPABILITY: &str = "history-mutation";
+
+fn is_false(value: &bool) -> bool {
+    !value
+}
+
 /// Capability names this release understands, with the major it supports.
-pub const SUPPORTED_CAPABILITIES: [(&str, u16); 6] = [
+pub const SUPPORTED_CAPABILITIES: [(&str, u16); 7] = [
     ("version-previews", 1),
     ("device-authorization", 1),
     ("publish-session", 1),
     ("resumable-upload", 1),
     (PUBLISH_NEGOTIATION_CAPABILITY, 1),
     (LARGE_OBJECT_PUBLISH_CAPABILITY, 1),
+    (HISTORY_MUTATION_CAPABILITY, 1),
 ];
 
 const MAX_REQUIREMENTS: usize = 64;
@@ -534,6 +542,12 @@ pub enum SessionResponse {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CommitRequest {
+    /// Explicitly permit structural non-fast-forward publication, never identity changes.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub rewrite: bool,
+    /// Explicitly omit unreferenced history and request reference retention collection.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub prune: bool,
     /// Discovery manifest (`graphforge-discovery/1`) the refs will select.
     pub manifest: Value,
     /// Ref names to advance to the manifest, strictly ascending.
@@ -605,6 +619,10 @@ pub struct PublishReceipt {
 /// changed content can never reuse an operation identity silently.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PublishIntent {
+    /// Explicit structural rewrite intent, bound into the request commitment.
+    pub rewrite: bool,
+    /// Explicit dependency-safe prune intent, bound into the request commitment.
+    pub prune: bool,
     /// Target repository.
     pub repository: RepositoryIdentity,
     /// [`OpenSessionRequest::intent_digest`] of the operation.
@@ -623,7 +641,7 @@ impl PublishIntent {
     /// Canonical commitment bytes: compact JSON with sorted members.
     #[must_use]
     pub fn canonical_bytes(&self) -> Vec<u8> {
-        canonical_json(&json!({
+        let mut value = json!({
             "format": HUB_PUBLISH_FORMAT,
             "repository": {"owner": self.repository.owner, "repository": self.repository.repository},
             "intent_digest": self.intent_digest,
@@ -631,7 +649,14 @@ impl PublishIntent {
             "manifest_validator": self.manifest_validator,
             "refs": self.refs,
             "expected_revision": self.expected_revision,
-        }))
+        });
+        if self.rewrite {
+            value["rewrite"] = Value::Bool(true);
+        }
+        if self.prune {
+            value["prune"] = Value::Bool(true);
+        }
+        canonical_json(&value)
     }
 
     /// `sha256:` digest of [`Self::canonical_bytes`].

@@ -341,3 +341,23 @@ and Branch creation metadata cannot change. `non_fast_forward` is a stable HTTP
 409 refusal. A stale revision lease remains `ref_conflict` (HTTP 412), checked
 before descent. Exact operation replay retains its original receipt. This does not
 implement rewrite, prune or merging divergent heads.
+
+## Explicit history mutation intent
+
+`history-mutation@1` is an optional offered publish capability. A client requesting
+`rewrite` or `prune` must require that exact major in its authenticated upload
+session and refuse a Hub that does not offer it before uploading. Commit carries
+optional boolean `rewrite` and `prune` members. Both are omitted when false, so
+ordinary commit documents and request commitments retain their original bytes.
+Each true flag participates in the canonical request commitment and operation
+intent; it cannot be changed on replay.
+
+`rewrite` permits structural non-fast-forward movement only. Repository/Project
+and Fork authority, native Version identities and parent lists, Branch creation
+records and refs outside the committed set remain unchanged. Pruning requires
+its own explicit intent. Every surviving ref and its ancestry, Branch base/origin,
+Proposal source/payload and projection source remains protected. An identity-only
+anchor cannot substitute for an erased retained commit. These pure admission
+rules carry no access-control fields: the Hub authenticates and authorizes the
+repository operation and applies its revision lease before mutation, including
+at the final asynchronous commit boundary.

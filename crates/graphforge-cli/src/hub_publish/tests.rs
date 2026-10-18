@@ -2739,6 +2739,8 @@ fn reference_hub_revalidates_unsafe_images_even_when_client_admission_is_bypasse
             .collect();
         let expected_revision = Some(sha256_digest(&refs_document(&hub, "curate/claims").body));
         let intent = PublishIntent {
+            rewrite: false,
+            prune: false,
             repository: manifest.repository.clone(),
             intent_digest: sha256_digest(b"untrusted preview caller"),
             objects: objects.clone(),
@@ -2807,6 +2809,8 @@ fn reference_hub_revalidates_unsafe_images_even_when_client_admission_is_bypasse
             )
             .with_header("authorization", token.authorization())
             .with_json(&CommitRequest {
+                rewrite: false,
+                prune: false,
                 manifest: serde_json::to_value(manifest).unwrap(),
                 refs: vec!["main".into()],
                 expected_revision,

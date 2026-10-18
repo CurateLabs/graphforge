@@ -104,6 +104,8 @@ impl<'a> Client<'a> {
         )
         .unwrap();
         PublishIntent {
+            rewrite: false,
+            prune: false,
             repository: self.repository.clone(),
             intent_digest: plan.intent_digest.clone(),
             objects: vec![plan.declaration()],
@@ -173,6 +175,8 @@ impl<'a> Client<'a> {
             )
             .with_header("authorization", self.token.authorization())
             .with_json(&CommitRequest {
+                rewrite: false,
+                prune: false,
                 manifest: self.manifest(plan),
                 refs: vec!["main".into()],
                 expected_revision: plan.expected_revision.clone(),
@@ -955,6 +959,8 @@ fn actual_200_gib_object_publishes_in_uniform_64_mib_parts() {
     )
     .unwrap();
     let intent = PublishIntent {
+        rewrite: false,
+        prune: false,
         repository: demo(),
         intent_digest: plan.intent_digest.clone(),
         objects: vec![object.clone()],
@@ -998,6 +1004,8 @@ fn actual_200_gib_object_publishes_in_uniform_64_mib_parts() {
     )
     .with_header("authorization", client.token.authorization())
     .with_json(&CommitRequest {
+        rewrite: false,
+        prune: false,
         manifest,
         refs: vec!["main".into()],
         expected_revision: None,
