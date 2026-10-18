@@ -1,7 +1,7 @@
 //! Native asynchronous Arrow transport for upstream preview and history.
 use crate::{Buffer, Env, GraphForge, Result, Task, napi};
 enum Read {
-    Preview(graphforge_api::PreviewResearchUpstreamRequest),
+    Preview(Box<graphforge_api::PreviewResearchUpstreamRequest>),
     History(graphforge_api::ResearchUpstreamHistoryRequest),
 }
 #[napi]

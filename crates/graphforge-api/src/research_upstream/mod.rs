@@ -7,6 +7,7 @@ mod model;
 mod preferences;
 mod preview;
 mod projection;
+mod remote_base;
 mod retain_both;
 mod selection;
 #[cfg(test)]
@@ -24,7 +25,7 @@ impl GraphForge {
         cancellation: &CancellationToken,
     ) -> Result<ExecutionResult, GfError> {
         let preview = preview::load(self, request, cancellation)?;
-        let metadata = std::collections::HashMap::from([
+        let mut metadata = std::collections::HashMap::from([
             ("graphforge.upstream.contract".into(), "1".into()),
             (
                 "graphforge.upstream.preview_sha256".into(),
@@ -59,6 +60,12 @@ impl GraphForge {
                 preview.upstream.generation.to_string(),
             ),
         ]);
+        if let Some(base) = preview.remote_base {
+            metadata.insert(
+                "graphforge.upstream.remote_base_version_uuid".into(),
+                base.to_string(),
+            );
+        }
         let batch = crate::research_comparison::output::changes(&preview.rows, metadata)?;
         let mut fields = batch.schema().fields().to_vec();
         let mut columns = batch.columns().to_vec();

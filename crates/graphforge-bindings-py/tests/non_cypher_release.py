@@ -27,8 +27,8 @@ production_source = runpy.run_path(str(Path(__file__).with_name("native_sources.
     "production_source"
 ]
 PYO3_SOURCE = ROOT / "crates/graphforge-bindings-py/src/lib.rs"
-EXPECTED_RUST_DIGEST = "80f8e2d20fdf78137c87a624e562052154bcac401647a3a751570a9e5b3b38e0"
-EXPECTED_RELEASE_DIGEST = "ec4910497cba228a981c302aeff5bc46e94cba5c10d4cbb28c0019b6fe381ae4"
+EXPECTED_RUST_DIGEST = "80538ee0093bd8d9a7f4dbc4a6a8a26a3527cbfc5d5a4398de99b7c9a8400820"
+EXPECTED_RELEASE_DIGEST = "27f4e49f442cc6997dcf71321470ab84e1f79229f6a6eb88511e0455bc218b12"
 
 PYTHON_ONLY_METHODS = frozenset(
     {
@@ -289,7 +289,7 @@ def _classification_report() -> dict[str, object]:
         for group in manifest["method_evidence_groups"].values()
         for method_id in group["ids"]
     }
-    assert len(release_methods) == 355
+    assert len(release_methods) == 356
     assert _digest(release_methods) == EXPECTED_RELEASE_DIGEST
     assert set(EVIDENCE) == set(manifest["method_evidence_groups"])
 
@@ -406,6 +406,9 @@ def _classification_report() -> dict[str, object]:
         elif rust_id == "crate.read_committed_generation_identity":
             classification = "not-exposed"
             reason = "read-only native filesystem admission is owned by CLI import preflight"
+        elif rust_id == "GraphForge.fetch_research_branch":
+            classification = "not-exposed"
+            reason = "verified remote fetch is native filesystem and discovery admission"
         elif rust_id == "GraphForge.continue_imported_research_branch":
             classification = "not-exposed"
             reason = "verified discovery activation is owned by the native CLI import boundary"

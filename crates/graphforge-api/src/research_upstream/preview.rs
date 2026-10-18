@@ -24,6 +24,7 @@ pub(super) struct Preview {
     pub rows: Vec<delta::Row>,
     pub requirements: BTreeMap<fields::Key, super::dependencies::Requirements>,
     pub digest: [u8; 32],
+    pub remote_base: Option<Uuid>,
 }
 
 pub(super) fn load(
@@ -58,11 +59,7 @@ pub(super) fn load(
         .map(|key| (key.0.clone(), key.1))
         .collect();
     include_explicit_objects(&request.scope, &mut objects)?;
-    let endpoint = branch
-        .parent_branch_uuid
-        .map_or(ResearchComparisonEndpoint::Project, |branch_uuid| {
-            ResearchComparisonEndpoint::Branch { branch_uuid }
-        });
+    let endpoint = endpoint(request, &branch, &registry)?;
     let mut upstream = state::load(
         owner,
         &current,
@@ -94,29 +91,18 @@ pub(super) fn load(
             cancel,
         )?;
     }
-    bounds(&local, &upstream)?;
-    let rows = delta::compare(&local, &upstream, &BTreeMap::new(), cancel)?
+    bounds(&local, &upstream, None)?;
+    let shared = super::remote_base::load(
+        owner, &current, &registry, request, &local, &objects, cancel,
+    )?;
+    bounds(&local, &upstream, shared.as_ref())?;
+    let rows = super::remote_base::compare(&local, &upstream, shared.as_ref(), cancel)?
         .into_iter()
         .filter(|row| selected(&request.scope, row))
         .collect::<Vec<_>>();
     let requirements =
         super::dependencies::inspect(&upstream_graph, &local, &upstream, &rows, cancel)?;
-    let mut digest = Sha256::new();
-    digest.update(b"graphforge-upstream-preview/1");
-    digest.update(
-        serde_json::to_vec(&(
-            request,
-            current.generation_uuid(),
-            branch.base_version_uuid,
-            local.version,
-            upstream.version,
-            upstream.generation,
-            &rows,
-            requirements.iter().collect::<Vec<_>>(),
-        ))
-        .map_err(|_| invalid("invalid upstream preview"))?,
-    );
-    Ok(Preview {
+    let mut preview = Preview {
         current,
         registry,
         branch,
@@ -125,8 +111,38 @@ pub(super) fn load(
         upstream_graph,
         rows,
         requirements,
-        digest: digest.finalize().into(),
-    })
+        remote_base: shared.as_ref().and_then(|base| base.version),
+        digest: [0; 32],
+    };
+    preview.digest = binding(request, &preview)?;
+    Ok(preview)
+}
+
+pub(super) fn binding(
+    request: &PreviewResearchUpstreamRequest,
+    preview: &Preview,
+) -> Result<[u8; 32], GfError> {
+    let mut digest = Sha256::new();
+    digest.update(b"graphforge-upstream-preview/1");
+    digest.update(
+        serde_json::to_vec(&(
+            request,
+            preview.current.generation_uuid(),
+            preview.branch.base_version_uuid,
+            preview.local.version,
+            preview.upstream.version,
+            preview.upstream.generation,
+            &preview.rows,
+            preview.requirements.iter().collect::<Vec<_>>(),
+        ))
+        .map_err(|_| invalid("invalid upstream preview"))?,
+    );
+    // Omission leaves the historical immediate-parent tuple and digest unchanged.
+    if let Some(base) = preview.remote_base {
+        digest.update(b"graphforge-remote-upstream-base/1");
+        digest.update(base.as_bytes());
+    }
+    Ok(digest.finalize().into())
 }
 
 fn selected(scope: &ResearchUpstreamScope, row: &delta::Row) -> bool {
@@ -144,7 +160,11 @@ fn selected(scope: &ResearchUpstreamScope, row: &delta::Row) -> bool {
         }),
     }
 }
-fn bounds(local: &state::State, upstream: &state::State) -> Result<(), GfError> {
+fn bounds(
+    local: &state::State,
+    upstream: &state::State,
+    base: Option<&state::State>,
+) -> Result<(), GfError> {
     let mut count = 0usize;
     let mut bytes = 0usize;
     for key in local
@@ -152,6 +172,10 @@ fn bounds(local: &state::State, upstream: &state::State) -> Result<(), GfError> 
         .keys()
         .chain(local.baseline.keys())
         .chain(upstream.fields.keys())
+        .chain(
+            base.into_iter()
+                .flat_map(|state| state.fields.keys().chain(state.baseline.keys())),
+        )
     {
         count = count.saturating_add(1);
         bytes = bytes.saturating_add(1024 + key.0.len() + key.2.len());
@@ -207,4 +231,23 @@ fn include_explicit_objects(
         );
     }
     Ok(())
+}
+
+fn endpoint(
+    request: &PreviewResearchUpstreamRequest,
+    branch: &ResearchBranchRecord,
+    registry: &ResearchRegistry,
+) -> Result<ResearchComparisonEndpoint, GfError> {
+    Ok(if let Some(binding) = &request.remote {
+        binding.require_current(registry, request.branch_uuid)?;
+        ResearchComparisonEndpoint::Version {
+            version_uuid: binding.reference.head_version_uuid,
+        }
+    } else {
+        branch
+            .parent_branch_uuid
+            .map_or(ResearchComparisonEndpoint::Project, |branch_uuid| {
+                ResearchComparisonEndpoint::Branch { branch_uuid }
+            })
+    })
 }

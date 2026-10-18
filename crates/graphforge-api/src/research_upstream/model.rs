@@ -28,6 +28,9 @@ pub struct PreviewResearchUpstreamRequest {
     pub branch_uuid: Uuid,
     /// Explicit review scope.
     pub scope: ResearchUpstreamScope,
+    /// Verified same-Branch remote fetch; omission reviews the immediate parent as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote: Option<graphforge_storage::research_versions::ResearchRemoteFetchBinding>,
 }
 
 /// Explicit treatment of one reviewed upstream field.
@@ -113,4 +116,25 @@ pub struct ResearchUpstreamHistoryRequest {
     pub page_size: usize,
     /// Opaque generation-bound continuation from the previous Arrow page.
     pub after: Option<String>,
+}
+
+#[cfg(test)]
+mod compatibility_tests {
+    use super::*;
+    #[test]
+    fn omitted_remote_preserves_immediate_parent_request_bytes() {
+        let branch_uuid = Uuid::from_u128(1);
+        let request = PreviewResearchUpstreamRequest {
+            branch_uuid,
+            scope: ResearchUpstreamScope::Branch,
+            remote: None,
+        };
+        let old =
+            format!("{{\"branch_uuid\":\"{branch_uuid}\",\"scope\":{{\"kind\":\"branch\"}}}}");
+        assert_eq!(serde_json::to_string(&request).unwrap(), old);
+        assert_eq!(
+            serde_json::from_str::<PreviewResearchUpstreamRequest>(&old).unwrap(),
+            request
+        );
+    }
 }

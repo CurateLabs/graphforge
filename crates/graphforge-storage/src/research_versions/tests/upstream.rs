@@ -82,6 +82,7 @@ fn generic_publication_rejects_forged_upstream_origin_and_receipt_generation() {
     after.upstream.reviews.insert(
         operation,
         ResearchUpstreamReview {
+            remote: None,
             sequence: 1,
             operation_uuid: operation,
             branch_uuid: branch.branch_uuid,
@@ -109,6 +110,7 @@ fn generic_publication_rejects_forged_upstream_origin_and_receipt_generation() {
             explanation: String::new(),
         },
     );
+    assert_remote_review_compatibility(&after, operation);
     super::super::upstream::preserve(&before, &after, &parent, generation, Some(&capture)).unwrap();
     let mut forged = after.clone();
     let review = forged.upstream.reviews.get_mut(&operation).unwrap();
@@ -149,4 +151,44 @@ fn generic_publication_rejects_forged_upstream_origin_and_receipt_generation() {
     );
     assert_eq!(current(root), parent.generation_uuid());
     assert_eq!(state(root), before);
+}
+
+fn assert_remote_review_compatibility(registry: &ResearchRegistry, operation: Uuid) {
+    let review = &registry.upstream.reviews[&operation];
+    let old_bytes = json(review).unwrap();
+    assert!(!String::from_utf8_lossy(&old_bytes).contains("\"remote\""));
+    let decoded: ResearchUpstreamReview = serde_json::from_slice(&old_bytes).unwrap();
+    assert_eq!(json(&decoded).unwrap(), old_bytes);
+    assert_eq!(
+        Sha256::digest(json(&decoded).unwrap()),
+        Sha256::digest(&old_bytes)
+    );
+    for revision in [6, 7, 8] {
+        assert!(research_revision_readable(revision));
+        assert!(legacy::registry_schema(revision).is_some());
+        registry.validate_remote_revision(revision).unwrap();
+    }
+    let mut forged = registry.clone();
+    forged.upstream.reviews.get_mut(&operation).unwrap().remote =
+        Some(ResearchRemoteFetchBinding {
+            operation_uuid: Uuid::now_v7(),
+            expected_generation_uuid: Uuid::now_v7(),
+            reference: ResearchRemoteBranch {
+                repository_url: "https://hub.example/owner/repo".into(),
+                project_uuid: Uuid::now_v7(),
+                ref_name: "main".into(),
+                branch_uuid: review.branch_uuid,
+                head_version_uuid: review.upstream_version_uuid,
+                identity_sha256: [1; 32],
+            },
+            lineage_sha256: [2; 32],
+            package_sha256: [3; 32],
+            object_sha256: [4; 32],
+        });
+    for revision in [6, 7, 8] {
+        assert!(forged.validate_remote_revision(revision).is_err());
+    }
+    forged.validate_remote_revision(9).unwrap();
+    // Correct revision cannot make a caller-created binding authenticate as a native receipt.
+    assert!(forged.validate().is_err());
 }

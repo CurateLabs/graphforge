@@ -94,6 +94,7 @@ fn owner_with_pending_upstream() -> (
         })
         .collect();
     let request = PreviewResearchUpstreamRequest {
+        remote: None,
         branch_uuid,
         scope: ResearchUpstreamScope::Fields { fields },
     };
@@ -250,6 +251,7 @@ fn adopting_a_source_preference_writes_the_private_view_and_no_published_tree() 
     assert_tree_backed_owner(&graph);
 
     let preview_request = PreviewResearchUpstreamRequest {
+        remote: None,
         branch_uuid,
         scope: ResearchUpstreamScope::Sources,
     };

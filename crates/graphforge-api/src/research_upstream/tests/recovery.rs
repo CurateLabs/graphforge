@@ -24,6 +24,7 @@ pub(super) fn prepare(graph: &mut GraphForge) -> UpdateResearchBranchRequest {
         .unwrap();
     graph.execute("MATCH (n:Item) SET n.x=1,n.y=2").unwrap();
     let request = PreviewResearchUpstreamRequest {
+        remote: None,
         branch_uuid: branch.branch_uuid,
         scope: ResearchUpstreamScope::Branch,
     };

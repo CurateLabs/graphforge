@@ -15,6 +15,9 @@ pub(crate) mod validation;
 
 mod accepted;
 
+mod fetch;
+pub use fetch::{FetchResearchBranchRequest, FetchedResearchBranch, ResearchRemoteFetchBinding};
+
 mod manifest;
 
 mod fork;

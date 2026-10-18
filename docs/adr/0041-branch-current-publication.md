@@ -110,3 +110,15 @@ edit, and restoration sets them explicitly on the copied source record, so no
 parent, signature or provenance is inherited. Author and committer come from the
 operation request and are optional until #1772 supplies defaults; the Branch
 record's `creator_uuid` is unchanged in this revision.
+
+## Verified fetch and review replay (#2123)
+
+Fetch publishes through the existing atomic native CURRENT and operation receipt
+owners. Exact retry verifies the source package and reconstructs the full request
+commitment before acknowledging its original receipt; it does not reset a later
+CURRENT or refreshed remote pointer. Shared immutable identities and history are
+collision-checked before admission. Fetch never advances the local Branch.
+
+A pending remote review is generation- and endpoint-bound. A local edit or later
+fetch requires a new preview. A committed review remains pinned to its original
+archive and fetch receipt; later pointer refresh cannot retarget its history.

@@ -228,6 +228,14 @@ impl GraphForge {
     ) -> Result<ResearchOperationReceipt, GfError> {
         if matches!(
             &operation.mutation,
+            ResearchMutation::FetchRemoteBranch { .. }
+        ) {
+            return Err(GfError::Validation(
+                "remote fetch requires its verified native package owner".into(),
+            ));
+        }
+        if matches!(
+            &operation.mutation,
             ResearchMutation::SubmitProposal { .. }
                 | ResearchMutation::ReviewProposal { .. }
                 | ResearchMutation::ReleaseProposal { .. }
@@ -499,19 +507,7 @@ fn imported_branch_operation(
         .genealogy
         .get(&branch_uuid)
         .ok_or_else(not_retained)?;
-    if expected.project_uuid != project_uuid.to_string()
-        || expected.parent_branch_uuid != branch.parent_branch_uuid.map(|id| id.to_string())
-        || expected.origin_version_uuid != branch.origin_version_uuid.to_string()
-        || expected.base_version_uuid != branch.base_version_uuid.to_string()
-        || expected.label != branch.label
-        || expected.selection_sha256
-            != crate::discovery_research_lineage::identity_digest(&branch.selection_sha256)
-                .map_err(|e| GfError::Validation(e.to_string()))?
-    {
-        return Err(GfError::Validation(
-            "discovery Branch differs from imported genealogy".into(),
-        ));
-    }
+    require_discovered_branch(expected, branch, project_uuid)?;
     let mut hash = sha2::Sha256::new();
     hash.update(b"graphforge-clone-branch-continuation/1");
     hash.update(branch_uuid.as_bytes());
@@ -609,4 +605,27 @@ fn imported_remote_branches(
         })
         .collect::<Result<Vec<_>, GfError>>()?;
     Ok(references)
+}
+
+pub(crate) fn require_discovered_branch(
+    expected: &graphforge_discovery::LineageBranch,
+    branch: &graphforge_storage::research_versions::ResearchBranchRecord,
+    project_uuid: Uuid,
+) -> Result<(), GfError> {
+    if expected.branch_uuid != branch.branch_uuid.to_string()
+        || branch.project_uuid != project_uuid
+        || expected.project_uuid != project_uuid.to_string()
+        || expected.parent_branch_uuid != branch.parent_branch_uuid.map(|id| id.to_string())
+        || expected.origin_version_uuid != branch.origin_version_uuid.to_string()
+        || expected.base_version_uuid != branch.base_version_uuid.to_string()
+        || expected.label != branch.label
+        || expected.selection_sha256
+            != crate::discovery_research_lineage::identity_digest(&branch.selection_sha256)
+                .map_err(|e| GfError::Validation(e.to_string()))?
+    {
+        return Err(GfError::Validation(
+            "discovery Branch differs from imported genealogy".into(),
+        ));
+    }
+    Ok(())
 }

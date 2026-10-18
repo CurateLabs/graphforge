@@ -64,6 +64,7 @@ fn individual_assertion_adoption_preserves_unselected_claims_and_graph_values() 
         })
         .collect();
     let request = PreviewResearchUpstreamRequest {
+        remote: None,
         branch_uuid: seed.preview.branch_uuid,
         scope: ResearchUpstreamScope::Fields { fields },
     };
@@ -152,6 +153,7 @@ fn individual_assertion_adoption_preserves_unselected_claims_and_graph_values() 
         })
         .unwrap();
     let scope = PreviewResearchUpstreamRequest {
+        remote: None,
         branch_uuid: seed.preview.branch_uuid,
         scope: ResearchUpstreamScope::Branch,
     };
@@ -213,5 +215,41 @@ fn individual_assertion_adoption_preserves_unselected_claims_and_graph_values() 
             .unwrap()
             .claims()
             .is_empty()
+    );
+}
+
+/// Independently retain the original tuple/hash when the remote binding is absent.
+pub(super) fn historical_preview_digest(
+    request: &PreviewResearchUpstreamRequest,
+    snapshot: &mut preview::Preview,
+) {
+    use sha2::Digest;
+    let mut digest = sha2::Sha256::new();
+    digest.update(b"graphforge-upstream-preview/1");
+    digest.update(
+        serde_json::to_vec(&(
+            request,
+            snapshot.current.generation_uuid(),
+            snapshot.branch.base_version_uuid,
+            snapshot.local.version,
+            snapshot.upstream.version,
+            snapshot.upstream.generation,
+            &snapshot.rows,
+            snapshot.requirements.iter().collect::<Vec<_>>(),
+        ))
+        .unwrap(),
+    );
+    assert_eq!(snapshot.remote_base, None);
+    assert_eq!(snapshot.digest, <[u8; 32]>::from(digest.finalize()));
+    snapshot.remote_base = Some(Uuid::from_u128(1));
+    let first = preview::binding(request, snapshot).unwrap();
+    snapshot.remote_base = Some(Uuid::from_u128(2));
+    let second = preview::binding(request, snapshot).unwrap();
+    assert_ne!(first, snapshot.digest);
+    assert_ne!(first, second);
+    snapshot.remote_base = None;
+    assert_eq!(
+        preview::binding(request, snapshot).unwrap(),
+        snapshot.digest
     );
 }

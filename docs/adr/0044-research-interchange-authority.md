@@ -90,3 +90,18 @@ unsupported readers; no pre-v1 migration promise is introduced. Expanded and
 bundled packages share semantic identity and differ only in transport identity.
 The first implementation must prove complete, disjoint, and redacted round trips,
 selected history without ancestor expansion, and explicit Fork independence.
+
+## Receipt-bound remote fetch (#2123)
+
+`fetch_research_branch` fully verifies the selected discovery package before native
+CAS admission. It preserves the local head/workspace and stores the existing
+immutable interchange archive and native operation receipt. This is a native owner
+API; it adds no fetch porcelain or alternate interchange/history engine.
+
+Research registry revision 9 adds the optional authenticated remote binding to an
+immutable upstream review. Revisions 6, 7 and 8 remain readable; they cannot carry
+this revision-9 review field. Unsupported readers refuse the required revision
+before decoding it. Omission preserves ordinary review serialization and old
+Version digests; no author or commit identity is rewritten. Historical reviews
+authenticate their original archive/receipt, whereas new reviews and commits also
+require the current remote citation and retained endpoint payload.

@@ -84,3 +84,11 @@ acceptance, then dependency, deduplication, restoration and lifecycle regression
 A real two-story/shared-character facade example precedes interchange work #1357.
 This ADR records the design; issue closure still requires its acceptance tests,
 public contract and binding parity, review and the repository merge gate.
+
+## Distinct same-Branch remote incorporation (#2123)
+
+Same-Branch remote fetch/review uses the existing upstream publication owner, not
+cross-owner Proposal acceptance. It requires the original Project and exact Branch
+creation plus an authenticated fetch receipt. The reviewed local and remote heads
+become ordered merge parents; Proposal governance and accepted-contribution authority
+are unchanged. A remote citation alone cannot submit or accept a Proposal.

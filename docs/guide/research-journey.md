@@ -198,3 +198,27 @@ clones stay detached. Publishing divergent work is refused as `non_fast_forward`
 a stale repository revision is still `ref_conflict`. Neither refusal moves a ref.
 Merge and explicit rewrite/prune are separate operations. Production hosted write
 availability is independent of this native protocol behavior.
+
+## Incorporate a divergent head of the same Branch
+
+Use the native `fetch_research_branch` API with the exact discovery manifest, refs,
+lineage and downloaded complete package. The owning Project must already contain
+the original Branch. Fetch returns a receipt-bound `ResearchRemoteFetchBinding`;
+it imports verified content and refreshes the remote citation without replacing
+your local head or workspace.
+
+Pass that binding as `PreviewResearchUpstreamRequest.remote` to inspect the remote
+Version through the ordinary field review. Resolve conflicts explicitly and pass
+the exact preview to `update_research_branch`. The result records your prior head
+first and the fetched remote head second. An intervening local edit or remote
+refresh makes an uncommitted preview stale. Omit `remote` to retain the existing
+immediate-parent review. This API does not add a `gf fetch` command or cross-owner
+Proposal workflow.
+
+Same-Branch remote reviews compare both heads against their unique maximal common
+native Version, including each head in its own ancestry. The base must retain
+verified content; unavailable bases and ambiguous crisscross histories refuse
+explicitly. The preview commitment includes this base. A local revert therefore
+remains a local change relative to the shared history, including after repeated
+remote incorporations. Immediate-parent reviews keep their existing field baseline
+and canonical preview identity.

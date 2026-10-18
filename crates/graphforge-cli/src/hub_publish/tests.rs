@@ -25,6 +25,7 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 mod ancestor_publication;
+mod remote_fetch;
 
 const HUB: &str = "https://hub.test";
 
