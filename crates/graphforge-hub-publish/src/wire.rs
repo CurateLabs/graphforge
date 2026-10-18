@@ -43,10 +43,6 @@ pub const PUBLISH_NEGOTIATION_CAPABILITY: &str = "publish-negotiation";
 /// Explicit lease-guarded rewrite and dependency-safe pruning.
 pub const HISTORY_MUTATION_CAPABILITY: &str = "history-mutation";
 
-fn is_false(value: &bool) -> bool {
-    !value
-}
-
 /// Capability names this release understands, with the major it supports.
 pub const SUPPORTED_CAPABILITIES: [(&str, u16); 7] = [
     ("version-previews", 1),
@@ -543,10 +539,10 @@ pub enum SessionResponse {
 #[serde(deny_unknown_fields)]
 pub struct CommitRequest {
     /// Explicitly permit structural non-fast-forward publication, never identity changes.
-    #[serde(default, skip_serializing_if = "is_false")]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub rewrite: bool,
     /// Explicitly omit unreferenced history and request reference retention collection.
-    #[serde(default, skip_serializing_if = "is_false")]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub prune: bool,
     /// Discovery manifest (`graphforge-discovery/1`) the refs will select.
     pub manifest: Value,
