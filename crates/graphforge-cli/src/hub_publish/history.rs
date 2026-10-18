@@ -1,8 +1,8 @@
 //! Explicit history publication selection and established Fork origin observations.
 use super::{
     GfError, GraphForge, Hub, HubPublishErrorCode, PublishArgs, Published, RepositoryIdentity,
-    ResearchLineage, Write, canonical_json, hex_digest, json, parse_input, publish_error,
-    read_published, sha256_digest,
+    Write, canonical_json, hex_digest, json, parse_input, publish_error, read_published,
+    sha256_digest,
 };
 
 pub(super) struct SnapshotHistory<'a> {
@@ -25,7 +25,7 @@ pub(super) fn verify_established_fork(
     hub: &Hub<'_>,
     graph: &GraphForge,
     published: Option<&Published>,
-    next: &ResearchLineage,
+    project_uuid: uuid::Uuid,
     origin_url: Option<&str>,
     notices: &mut dyn Write,
 ) -> Result<(), GfError> {
@@ -50,24 +50,24 @@ pub(super) fn verify_established_fork(
             "established Fork origin does not match retained native authority",
         )
     };
-    if next.fork.as_ref() != Some(citation) || next.project_uuid != previous.lineage.project_uuid {
+    if project_uuid.to_string() != previous.lineage.project_uuid {
         return Err(refused());
     }
-    // The discovery builder binds this citation to the original imported native
-    // archive. Authenticate its retained identity again before any origin request.
+    // Match the sole retained native Fork creation to the selected Project and
+    // exact published citation, including on receipt-only replay.
     let registry = graph.research_version_retention()?;
-    if !registry.interchange.values().any(|archive| {
-        archive.fork.is_some()
-            && archive
-                .fork_project_uuid
-                .is_some_and(|id| id.to_string() == next.project_uuid)
-            && archive.source_project_uuid.to_string() == citation.origin_project_uuid
-            && archive.selected_version_uuid.to_string() == citation.origin_version_uuid
-            && archive
-                .identities
-                .get(&archive.selected_version_uuid)
-                .is_some_and(|identity| hex_digest(identity) == citation.origin_version_identity)
-    }) {
+    let mut forks = registry.interchange.values().filter(|archive| {
+        archive.fork.is_some() && archive.fork_project_uuid == Some(project_uuid)
+    });
+    let archive = forks.next().ok_or_else(refused)?;
+    if forks.next().is_some()
+        || archive.source_project_uuid.to_string() != citation.origin_project_uuid
+        || archive.selected_version_uuid.to_string() != citation.origin_version_uuid
+        || archive
+            .identities
+            .get(&archive.selected_version_uuid)
+            .is_none_or(|identity| hex_digest(identity) != citation.origin_version_identity)
+    {
         return Err(refused());
     }
     let (identity, base) = parse_input(origin_url)?;

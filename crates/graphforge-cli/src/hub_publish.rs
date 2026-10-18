@@ -1829,6 +1829,16 @@ pub(crate) fn publish(
     }
     let token = obtain_token(&hub, &capabilities, environment)?;
 
+    let read_current = || {
+        if capabilities.capabilities.iter().any(|capability| {
+            capability.capability == "publish-read-context" && capability.major == 1
+        }) {
+            read_private_context(&hub, &identity, &token)
+        } else {
+            read_published(&hub, &base, &identity)
+        }
+    };
+
     // A retry is classified before any package is derived.
     let status_url = endpoint(&base, &format!("publish/operations/{operation_uuid}"));
     let status = hub.control(HubRequest::new(HubMethod::Get, status_url.as_str()), &token)?;
@@ -1850,6 +1860,17 @@ pub(crate) fn publish(
             }
             if let Some(receipt) = status.receipt {
                 check_receipt(&receipt, &identity, operation_uuid)?;
+                if args.check_fork_origin.is_some() {
+                    let published = read_current()?;
+                    history::verify_established_fork(
+                        &hub,
+                        graph,
+                        published.as_ref(),
+                        selection.project_uuid,
+                        args.check_fork_origin.as_deref(),
+                        environment.notices,
+                    )?;
+                }
                 return Ok(PublishOutcome {
                     receipt,
                     replayed: true,
@@ -1861,14 +1882,7 @@ pub(crate) fn publish(
         _ => return Err(hub_failure(&status)),
     }
 
-    let published =
-        if capabilities.capabilities.iter().any(|capability| {
-            capability.capability == "publish-read-context" && capability.major == 1
-        }) {
-            read_private_context(&hub, &identity, &token)?
-        } else {
-            read_published(&hub, &base, &identity)?
-        };
+    let published = read_current()?;
     let fork_origin_repository = match (&fork, &published) {
         (Some(_), Some(_)) => {
             return Err(publish_error(
@@ -1959,7 +1973,7 @@ pub(crate) fn publish(
         &hub,
         graph,
         published.as_ref(),
-        &lineage,
+        selection.project_uuid,
         args.check_fork_origin.as_deref(),
         environment.notices,
     )?;

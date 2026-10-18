@@ -1320,10 +1320,17 @@ impl ReferenceHub {
                                 discovery_limits,
                             )
                             .map_err(|_| invalid("stored lineage is invalid"))?;
-                            crate::validate_history_transition(
+                            let authoritative_heads = stored
+                                .refs
+                                .iter()
+                                .filter(|(_, reference)| reference.validator == old_ref.validator)
+                                .map(|(name, _)| name.clone())
+                                .collect::<Vec<_>>();
+                            crate::history::validate_snapshot_history_transition(
                                 &old,
                                 &next,
                                 &commit.refs,
+                                &authoritative_heads,
                                 commit.rewrite,
                                 commit.prune,
                                 discovery_limits,

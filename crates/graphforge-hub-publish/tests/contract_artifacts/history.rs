@@ -181,3 +181,6 @@ fn retained_open(publication: &Publication, prefix: &str, previous: &[&Publicati
     );
     steps
 }
+
+#[path = "history/current_refs.rs"]
+mod current_refs;

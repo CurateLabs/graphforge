@@ -62,6 +62,26 @@ pub fn validate_history_transition(
     prune: bool,
     limits: DiscoveryLimits,
 ) -> Result<Vec<String>, HubPublishError> {
+    let heads = previous
+        .branches
+        .iter()
+        .map(|branch| branch.ref_name.clone())
+        .collect::<Vec<_>>();
+    validate_snapshot_history_transition(previous, next, refs, &heads, rewrite, prune, limits)
+}
+
+/// Validate a live snapshot's immutable history and dependencies, enforcing head
+/// policy only for refs whose CURRENT validator names that snapshot. Other
+/// Branch entries are historical shadows, not authority to move a current ref.
+pub(crate) fn validate_snapshot_history_transition(
+    previous: &ResearchLineage,
+    next: &ResearchLineage,
+    refs: &[String],
+    authoritative_heads: &[String],
+    rewrite: bool,
+    prune: bool,
+    limits: DiscoveryLimits,
+) -> Result<Vec<String>, HubPublishError> {
     previous
         .validate(limits)
         .map_err(|_| invalid("stored research lineage is invalid"))?;
@@ -81,7 +101,14 @@ pub fn validate_history_transition(
         .iter()
         .map(|v| (v.version_uuid.as_str(), v))
         .collect();
-    validate_branches(previous, next, refs, rewrite, &versions)?;
+    validate_branches(
+        previous,
+        next,
+        refs,
+        authoritative_heads,
+        rewrite,
+        &versions,
+    )?;
     let mut removed = Vec::new();
     for old in &previous.versions {
         if let Some(new) = versions.get(old.version_uuid.as_str()) {
@@ -189,6 +216,7 @@ fn validate_branches(
     previous: &ResearchLineage,
     next: &ResearchLineage,
     refs: &[String],
+    authoritative_heads: &[String],
     rewrite: bool,
     versions: &Versions<'_>,
 ) -> Result<(), HubPublishError> {
@@ -205,6 +233,9 @@ fn validate_branches(
             return Err(invalid(
                 "publication changes immutable Branch creation authority",
             ));
+        }
+        if !authoritative_heads.contains(&old.ref_name) {
+            continue;
         }
         let selected = refs.contains(&old.ref_name);
         if !selected && old.head_version_uuid != new.head_version_uuid {

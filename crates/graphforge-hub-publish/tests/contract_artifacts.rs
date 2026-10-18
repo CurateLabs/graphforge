@@ -1883,7 +1883,11 @@ fn generated() -> Vec<(&'static str, Vec<u8>)> {
         ),
         ("upload-status.schema.json", pretty(&upload_status_schema())),
         ("error.schema.json", pretty(&error_schema())),
-        ("conformance.json", pretty(&corpus())),
+        ("conformance.json", {
+            let mut bytes = serde_json::to_vec(&corpus()).unwrap();
+            bytes.push(b'\n');
+            bytes
+        }),
     ]
 }
 

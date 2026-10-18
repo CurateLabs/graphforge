@@ -142,9 +142,36 @@ fn established_fork_warns_on_verified_erased_origin_and_retains_its_independent_
     publish_ok(&hub, &fork, &initial).result.unwrap();
     let (_, before) = served_lineage(&hub, "curate/claims-fork");
     edit_by(&mut fork, branch, 8, "Fork author");
-    hub.inject(Fault::Serve(tampered_origin(&hub, "curate/claims", cited)));
-    let mut checked = on_ref("curate/claims-fork", "main");
+    let ordinary = on_ref("curate/claims-fork", "main");
+    let updated = publish_ok(&hub, &fork, &ordinary).result.unwrap().receipt;
+    let fork_writes = || {
+        hub.log()
+            .iter()
+            .filter(|r| {
+                r.path.starts_with("/curate/claims-fork/")
+                    && matches!(r.method.as_str(), "POST" | "PUT")
+            })
+            .count()
+    };
+    let writes_before = fork_writes();
+    let replay = publish_ok(&hub, &fork, &ordinary).result.unwrap();
+    assert!(replay.replayed);
+    assert_eq!(replay.receipt, updated);
+    let mut checked = ordinary;
     checked.check_fork_origin = Some(repository_url("curate/claims"));
+    let mut mismatch = on_ref("curate/claims-fork", "main");
+    mismatch.check_fork_origin = Some(repository_url("curate/wrong-origin"));
+    let rejected = run_publish_with(
+        &hub,
+        &fork,
+        &mismatch,
+        Credential::Token(token(&hub, "curate/claims-fork")),
+    );
+    assert_eq!(
+        error_code(&rejected.result.unwrap_err()),
+        "hub.publish.integrity_failure"
+    );
+    hub.inject(Fault::Serve(tampered_origin(&hub, "curate/claims", cited)));
     let rejected = run_publish_with(
         &hub,
         &fork,
@@ -161,7 +188,10 @@ fn established_fork_warns_on_verified_erased_origin_and_retains_its_independent_
     publish_ok(&hub, &replacement, &flags).result.unwrap();
     hub.hub.advance_clock(900);
     let run = publish_ok(&hub, &fork, &checked);
-    run.result.unwrap();
+    let replay = run.result.unwrap();
+    assert!(replay.replayed);
+    assert_eq!(replay.receipt, updated);
+    assert_eq!(fork_writes(), writes_before);
     assert!(
         String::from_utf8(run.stderr)
             .unwrap()
