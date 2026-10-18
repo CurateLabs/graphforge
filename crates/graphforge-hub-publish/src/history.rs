@@ -86,11 +86,15 @@ pub fn validate_history_transition(
     for old in &previous.versions {
         if let Some(new) = versions.get(old.version_uuid.as_str()) {
             let mut immutable = (**new).clone();
-            // A metadata-only published ancestor may acquire its native payload.
-            if old.package.is_none() {
+            // Optional transport references are not native identity. Preserve
+            // the existing ordinary metadata-only ancestor wire behavior; only
+            // explicit prune can retire unreachable repository bytes.
+            let mut prior = old.clone();
+            if old.package.is_none() || immutable.package.is_none() {
                 immutable.package = None;
+                prior.package = None;
             }
-            if immutable != *old {
+            if immutable != prior {
                 return Err(invalid(
                     "publication changes immutable Version history or payload",
                 ));
@@ -136,6 +140,49 @@ pub fn validate_history_transition(
     );
     validate_dependencies(next, &removed_dependencies)?;
     Ok(removed)
+}
+
+/// Remove only history outside the closure of every current Branch and native dependency.
+/// This selects candidates; callers still admit the complete old/new transition.
+pub fn prune_unreferenced_history(lineage: &mut ResearchLineage) {
+    let versions: Versions<'_> = lineage
+        .versions
+        .iter()
+        .map(|v| (v.version_uuid.as_str(), v))
+        .collect();
+    let mut pending: Vec<_> = lineage
+        .branches
+        .iter()
+        .flat_map(|b| {
+            [
+                b.head_version_uuid.as_str(),
+                b.base_version_uuid.as_str(),
+                b.origin_version_uuid.as_str(),
+            ]
+        })
+        .chain(lineage.proposals.iter().flat_map(|p| {
+            [
+                p.source_version_uuid.as_str(),
+                p.payload_version_uuid.as_str(),
+            ]
+        }))
+        .collect();
+    let mut retained = BTreeSet::new();
+    while let Some(id) = pending.pop() {
+        if retained.insert(id.to_owned())
+            && let Some(version) = versions.get(id)
+        {
+            pending.extend(version.parents.iter().map(String::as_str));
+            pending.extend(version.source_version_uuid.as_deref());
+        }
+    }
+    drop(versions);
+    lineage
+        .versions
+        .retain(|v| retained.contains(&v.version_uuid));
+    lineage
+        .boundary_anchors
+        .retain(|a| retained.contains(&a.version_uuid));
 }
 
 fn validate_branches(

@@ -1,6 +1,8 @@
 //! Publish behaviors driven through the typed wire documents against
 //! [`ReferenceHub`], asserting Hub state as well as responses.
 
+mod retention;
+
 use graphforge_discovery::{
     DISCOVERY_FORMAT, DiscoveryLimits, DiscoveryManifest, PORTABLE_V2_MEDIA_TYPE, RefSet,
     RepositoryIdentity,

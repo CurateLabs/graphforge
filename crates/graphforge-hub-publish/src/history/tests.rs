@@ -157,6 +157,9 @@ fn destructive_negotiation_requires_the_exact_offered_capability() {
         "https://hub.example/curate/claims/.gf/publish",
     ));
     let mut capabilities = PublishCapabilities::from_json(&response.body).unwrap();
+    capabilities
+        .capabilities
+        .retain(|c| c.capability != HISTORY_MUTATION_CAPABILITY);
     assert!(require_history_capability(&capabilities, false, false).is_ok());
     assert_eq!(
         require_history_capability(&capabilities, true, false)

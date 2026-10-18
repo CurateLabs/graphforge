@@ -339,8 +339,8 @@ the server independently checks the bound old/new lineage before ref mutation,
 including final asynchronous commit. Existing Version commitments, parent lists
 and Branch creation metadata cannot change. `non_fast_forward` is a stable HTTP
 409 refusal. A stale revision lease remains `ref_conflict` (HTTP 412), checked
-before descent. Exact operation replay retains its original receipt. This does not
-implement rewrite, prune or merging divergent heads.
+before descent. Exact operation replay retains its original receipt. Explicit rewrite and prune
+are separate intents described below; neither merges divergent graph contents.
 
 ## Explicit history mutation intent
 
@@ -361,3 +361,34 @@ anchor cannot substitute for an erased retained commit. These pure admission
 rules carry no access-control fields: the Hub authenticates and authorizes the
 repository operation and applies its revision lease before mutation, including
 at the final asynchronous commit boundary.
+
+
+### Reference retention and independent Forks
+
+`gf publish --rewrite` commits a non-fast-forward head change under the existing
+repository publish authorization and revision lease. `--prune` additionally omits
+unreachable Versions from the proposed lineage. Both flags participate in the
+operation identity and request commitment; changing them on replay refuses.
+Ordinary publication retains the existing operation identity and commits neither
+flag. A stale lease remains `ref_conflict`, including asynchronous final commit.
+
+The reference Hub uses a fixed 900-second grace after explicit prune for
+unreferenced repository objects and obsolete manifests. This is a new reference
+retention rule, not an upload-session or credential lifetime. Every surviving
+ref keeps its complete manifest inventory live, including native lineage controls,
+shared objects, Branch base/origin/head ancestry, Proposal dependencies and
+projection sources. Reintroduced live objects lose their pending retirement.
+Upload sessions retain their own Blob references across repository collection;
+a retained upload does not bypass authentication, structural checks or final CAS.
+This rule does not change native local DeleteVersion retention or rewrite credit.
+
+Independent Forks retain their own native Project bytes and immutable citation.
+Their citation has no origin Hub URL, so ordinary established Fork updates never
+guess or probe a host. `--check-fork-origin <canonical repository URL>` explicitly
+checks an established Fork: the supplied repository identity must match its
+immutable citation and retained local native identity before lookup. A validated
+current origin lineage missing the cited Version produces a warning and permits
+publication of the retained independent copy. An ambiguous repository 404,
+authorization error, transport failure, invalid lineage or identity mismatch
+refuses the requested check. Initial `--fork-of` verification is unchanged.
+No automatic erasure discovery or cross-repository deletion is implied.

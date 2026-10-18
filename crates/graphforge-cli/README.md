@@ -55,3 +55,13 @@ query connected data.
 [Documentation](https://docs.graphforge.sh/) ·
 [Repository](https://github.com/CurateLabs/graphforge) ·
 [Architecture](https://github.com/CurateLabs/graphforge/blob/main/docs/book/architecture/ast-and-planning.md)
+
+
+History replacement is explicit: `gf publish <repository> --ref main --rewrite`
+requests a non-fast-forward replacement under the current revision lease.
+`--prune` separately removes unreachable published history where the Hub offers
+`history-mutation@1`; neither flag merges divergent contents. Other refs and
+native history dependencies remain protected. Established Fork updates retain
+independent bytes; optional `--check-fork-origin <repository URL>` checks the
+immutable citation without guessing its Hub host. See the
+[publish contract](../../docs/adr/0053-hub-publish-wire-contract.md#explicit-history-mutation-intent).

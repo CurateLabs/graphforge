@@ -26,6 +26,9 @@ use std::sync::{Arc, Mutex};
 
 mod ancestor_publication;
 mod remote_fetch;
+mod rewrite_prune;
+mod selection;
+use selection::{args, on_ref};
 
 const HUB: &str = "https://hub.test";
 
@@ -519,26 +522,6 @@ fn history() -> History {
 
 fn repository_url(repository: &str) -> String {
     format!("{HUB}/{repository}")
-}
-
-fn args(repository: &str) -> PublishArgs {
-    PublishArgs {
-        repository: repository_url(repository),
-        git_ref: None,
-        version_uuid: None,
-        fork_of: None,
-        operation_uuid: None,
-        protection_bypass_env: None,
-        staging_directory: None,
-        previews: Vec::new(),
-    }
-}
-
-fn on_ref(repository: &str, name: &str) -> PublishArgs {
-    PublishArgs {
-        git_ref: Some(name.into()),
-        ..args(repository)
-    }
 }
 
 fn token(hub: &LoopbackHub, repository: &str) -> PublishToken {

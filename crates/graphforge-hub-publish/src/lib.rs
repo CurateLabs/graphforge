@@ -20,7 +20,8 @@ pub use canonical::{canonical_json, parse_unique_json, sha256_digest, validate_d
 pub use error::{GF_IDEMPOTENCY_CONFLICT, HubErrorBody, HubPublishError, HubPublishErrorCode};
 pub use exchange::{HubExchange, HubMethod, HubRequest, HubResponse};
 pub use history::{
-    require_history_capability, require_history_requirement, validate_history_transition,
+    prune_unreferenced_history, require_history_capability, require_history_requirement,
+    validate_history_transition,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use reference::{ReferenceHub, ReferenceHubConfig};

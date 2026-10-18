@@ -6,6 +6,8 @@
 //! configurable seed and are predictable. Control state is in memory; object
 //! bytes spill to unlinked temporary files.
 
+mod retention;
+
 use crate::canonical::{sha256_digest, validate_digest};
 use crate::error::{HubPublishError, HubPublishErrorCode, invalid};
 use crate::exchange::{HubExchange, HubMethod, HubRequest, HubResponse};
@@ -260,6 +262,7 @@ struct Repository {
     manifests: BTreeMap<String, Vec<u8>>,
     objects: BTreeMap<String, Blob>,
     history: Vec<String>,
+    retirement: retention::Retirement,
 }
 
 struct Reject {
@@ -449,6 +452,7 @@ impl ReferenceHub {
             capabilities: vec![
                 Capability::new("device-authorization", 1),
                 Capability::new("version-previews", 1),
+                Capability::new(crate::HISTORY_MUTATION_CAPABILITY, 1),
             ],
             authorization: PublishAuthorization {
                 client_id: self.config.authorization_client_id.clone(),
@@ -480,6 +484,7 @@ impl ReferenceHub {
             let error = HubPublishError::new(HubPublishErrorCode::Internal, "hub state poisoned");
             return json_response(500, &error.body());
         };
+        retention::collect(&mut state);
         match self.route(&mut state, request) {
             Ok(response) => response,
             Err(rejected) => {
@@ -1033,7 +1038,6 @@ impl ReferenceHub {
         let commit = CommitRequest::from_json(&request.body)?;
         // Destructive semantics must be offered and required on this exact
         // authenticated session before even a committed receipt can replay.
-        // The reference Hub does not offer them until their behavior is wired.
         crate::require_history_capability(
             &self.capabilities(repository),
             commit.rewrite,
@@ -1295,8 +1299,9 @@ impl ReferenceHub {
                 return Err(invalid("native lineage does not bind this publication").into());
             }
             if let Some(stored) = current {
-                for name in &commit.refs {
-                    if let Some(old_ref) = stored.refs.get(name) {
+                let mut checked = BTreeSet::new();
+                for old_ref in stored.refs.values() {
+                    if checked.insert(old_ref.validator.0.clone()) {
                         let old_manifest = DiscoveryManifest::from_json(
                             &stored.manifests[&old_ref.validator.0],
                             discovery_limits,
@@ -1318,13 +1323,14 @@ impl ReferenceHub {
                                 discovery_limits,
                             )
                             .map_err(|_| invalid("stored lineage is invalid"))?;
-                            if !next.fast_forwards(&old, std::slice::from_ref(name)) {
-                                return Err(HubPublishError::new(
-                                    HubPublishErrorCode::NonFastForward,
-                                    "publication is not a structural fast-forward",
-                                )
-                                .into());
-                            }
+                            crate::validate_history_transition(
+                                &old,
+                                &next,
+                                &commit.refs,
+                                commit.rewrite,
+                                commit.prune,
+                                discovery_limits,
+                            )?;
                         }
                     }
                 }
@@ -1382,6 +1388,15 @@ impl ReferenceHub {
         let refs_document = ref_set
             .to_canonical_json()
             .map_err(|_| invalid("advanced refs are not valid discovery refs"))?;
+        let retirement = retention::schedule(
+            current,
+            &refs,
+            &manifest_validator,
+            &manifest,
+            state.now,
+            commit.prune,
+            discovery_limits,
+        )?;
         let revision = sha256_digest(&refs_document);
         let receipt = PublishReceipt {
             format: HUB_PUBLISH_FORMAT.to_owned(),
@@ -1422,7 +1437,9 @@ impl ReferenceHub {
                 manifests: BTreeMap::new(),
                 objects: BTreeMap::new(),
                 history: Vec::new(),
+                retirement: retention::Retirement::default(),
             });
+        stored.retirement = retirement;
         stored.objects.extend(objects);
         stored
             .manifests
@@ -1566,7 +1583,9 @@ impl ReferenceHub {
 
     /// Advance the Hub clock.
     pub fn advance_clock(&self, seconds: u64) {
-        self.state.lock().expect("hub state").now += seconds;
+        let mut state = self.state.lock().expect("hub state");
+        state.now = state.now.saturating_add(seconds);
+        retention::collect(&mut state);
     }
 
     /// Approve a pending device authorization; `false` if `user_code` is unknown.
