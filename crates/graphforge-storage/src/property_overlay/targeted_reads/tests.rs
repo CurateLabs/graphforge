@@ -515,3 +515,250 @@ fn targeted_reader_n_2n_4n_has_bounded_retention_and_exact_work() {
         "first differences must reject superlinear repeated reads"
     );
 }
+
+#[test]
+fn targeted_query_admission_precedes_authenticated_fragment_snapshot_and_releases_rows() {
+    use crate::read_memory::{ReadAdmission, ReadGrant};
+    use datafusion::execution::memory_pool::{
+        GreedyMemoryPool, MemoryConsumer, MemoryPool, MemoryReservation,
+    };
+    use std::sync::Mutex;
+    struct Admission(Mutex<MemoryReservation>);
+    impl ReadAdmission for Admission {
+        fn reserve(&self, bytes: usize) -> datafusion::error::Result<ReadGrant> {
+            let memory = self.0.lock().unwrap();
+            memory.try_grow(bytes)?;
+            Ok(ReadGrant::from_reserved(memory.split(bytes)))
+        }
+        fn check_cancelled(&self) -> datafusion::error::Result<()> {
+            Ok(())
+        }
+    }
+    let root = write_person_generations(&[(1, vec![[1; 16], [2; 16]])]);
+    let inventory = AuthenticatedPropertyInventory::capture(root.path()).unwrap();
+    // Inventory bootstrap has its existing generation authority. This query
+    // must still fund its own reauthentication snapshot and decoder.
+    inventory
+        .route_schema(PropertyRouteKind::Node, "Person")
+        .unwrap();
+    for limit in [8 * 1024 * 1024, 32 * 1024] {
+        let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(limit));
+        let admission = Admission(Mutex::new(
+            MemoryConsumer::new("targeted property query").register(&pool),
+        ));
+        let _capture = crate::lifecycle_io::CaptureScope::install();
+        let result = read_authenticated_property_target_data_admitted(
+            &inventory,
+            PropertyRouteKind::Node,
+            "Person",
+            &BTreeSet::from([[1; 16]]),
+            &admission,
+        );
+        if limit == 32 * 1024 {
+            let error = result.err().expect("source snapshot must refuse");
+            assert!(
+                error.to_string().contains("targeted property query"),
+                "{error}"
+            );
+            assert_eq!(
+                crate::lifecycle_io::snapshot().unwrap().totals.read_bytes,
+                0
+            );
+        } else {
+            let selected = result.unwrap();
+            assert_eq!(selected.rows.len(), 1);
+            assert_eq!(selected.present, BTreeSet::from([[1; 16]]));
+            assert_eq!(
+                selected.rows[&[1; 16]].values["name"],
+                graphforge_ir::IrLiteral::Str("value".into())
+            );
+            assert!(pool.reserved() > 0);
+            drop(selected);
+        }
+        drop(admission);
+        assert_eq!(pool.reserved(), 0);
+    }
+}
+
+#[test]
+fn targeted_query_retains_each_snapshot_map_without_recharging_older_schema_fields() {
+    use crate::read_memory::{ReadAdmission, ReadGrant};
+    use datafusion::execution::memory_pool::{
+        GreedyMemoryPool, MemoryConsumer, MemoryPool, MemoryReservation,
+    };
+    use std::sync::Mutex;
+    struct Admission(Mutex<MemoryReservation>);
+    impl ReadAdmission for Admission {
+        fn reserve(&self, bytes: usize) -> datafusion::error::Result<ReadGrant> {
+            let memory = self.0.lock().unwrap();
+            memory.try_grow(bytes)?;
+            Ok(ReadGrant::from_reserved(memory.split(bytes)))
+        }
+        fn check_cancelled(&self) -> datafusion::error::Result<()> {
+            Ok(())
+        }
+    }
+    let targets = (1_u128..=257)
+        .map(u128::to_be_bytes)
+        .collect::<BTreeSet<_>>();
+    let root = write_person_generations(&[
+        (1, vec![257_u128.to_be_bytes()]),
+        (2, (1_u128..=256).map(u128::to_be_bytes).collect()),
+    ]);
+    let path = root.path().join("properties/Person").join(
+        PropertyFragmentId {
+            generation: 1,
+            ordinal: 0,
+        }
+        .file_name(),
+    );
+    let builder = ParquetRecordBatchReaderBuilder::try_new(File::open(&path).unwrap()).unwrap();
+    let original = builder.build().unwrap().next().unwrap().unwrap();
+    let mut fields = original.schema().fields().to_vec();
+    let mut columns = original.columns().to_vec();
+    for index in 0..20 {
+        fields.push(Arc::new(Field::new(
+            format!("older_{index}"),
+            DataType::Int64,
+            true,
+        )));
+        columns.push(Arc::new(Int64Array::from(vec![index])));
+    }
+    let schema = Arc::new(Schema::new_with_metadata(
+        fields,
+        HashMap::from([
+            (
+                PROPERTY_OVERLAY_FORMAT_KEY.into(),
+                PROPERTY_OVERLAY_FORMAT.into(),
+            ),
+            (PROPERTY_ROUTE_KEY.into(), "Person".into()),
+            (PROPERTY_KIND_KEY.into(), "node".into()),
+            (PROPERTY_GENERATION_KEY.into(), "1".into()),
+            (PROPERTY_ORDINAL_KEY.into(), "0".into()),
+        ]),
+    ));
+    let batch = RecordBatch::try_new(schema.clone(), columns).unwrap();
+    let mut writer = ArrowWriter::try_new(File::create(path).unwrap(), schema, None).unwrap();
+    writer.write(&batch).unwrap();
+    writer.close().unwrap();
+    let inventory = AuthenticatedPropertyInventory::capture(root.path()).unwrap();
+    let expected = read_authenticated_property_target_data_for_inventory(
+        &inventory,
+        PropertyRouteKind::Node,
+        "Person",
+        &targets,
+    )
+    .unwrap();
+    let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(16 * 1024 * 1024));
+    let admission = Admission(Mutex::new(
+        MemoryConsumer::new("targeted schema evolution query").register(&pool),
+    ));
+    let actual = read_authenticated_property_target_data_admitted(
+        &inventory,
+        PropertyRouteKind::Node,
+        "Person",
+        &targets,
+        &admission,
+    )
+    .unwrap();
+    assert_eq!(actual.rows, expected.rows);
+    assert_eq!(actual.present, expected.present);
+    assert_eq!(actual.rows.len(), 257);
+    assert_eq!(actual.rows[&1_u128.to_be_bytes()].values.len(), 1);
+    assert_eq!(actual.rows[&257_u128.to_be_bytes()].values.len(), 21);
+    drop(actual);
+    drop(admission);
+    assert_eq!(pool.reserved(), 0);
+}
+
+#[test]
+fn targeted_edge_conversion_admits_missing_later_schema_fields_before_construction() {
+    use crate::read_memory::{ReadAdmission, ReadGrant};
+    use datafusion::execution::memory_pool::{
+        GreedyMemoryPool, MemoryConsumer, MemoryPool, MemoryReservation,
+    };
+    use std::sync::Mutex;
+    struct Admission(Mutex<MemoryReservation>);
+    impl ReadAdmission for Admission {
+        fn reserve(&self, bytes: usize) -> datafusion::error::Result<ReadGrant> {
+            let memory = self.0.lock().unwrap();
+            memory.try_grow(bytes)?;
+            Ok(ReadGrant::from_reserved(memory.split(bytes)))
+        }
+        fn check_cancelled(&self) -> datafusion::error::Result<()> {
+            Ok(())
+        }
+    }
+    // Latest schema can be much wider than the older snapshots selected by a
+    // query. Each missing field still constructs one NULL slot per source row.
+    let rows = (1_u128..=65_536)
+        .map(|id| {
+            let uuid = id.to_be_bytes();
+            (
+                uuid,
+                PropertySnapshotRow {
+                    uuid,
+                    tombstone: false,
+                    values: BTreeMap::new(),
+                },
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut fields = vec![Field::new(
+        "edge_uuid",
+        DataType::FixedSizeBinary(16),
+        false,
+    )];
+    fields.extend((0..50).map(|index| Field::new(format!("later_{index}"), DataType::Int64, true)));
+    fields.push(Field::new("later_text", DataType::Utf8, true));
+    fields.push(Field::new(
+        "later_list",
+        DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+        true,
+    ));
+    fields.push(Field::new(
+        "later_duration",
+        DataType::Struct(crate::schemas::duration_struct_fields()),
+        true,
+    ));
+    let schema = Schema::new(fields);
+    let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(256 * 1024 * 1024));
+    let admission = Admission(Mutex::new(
+        MemoryConsumer::new("targeted sparse conversion").register(&pool),
+    ));
+    let source = PrepaidPropertyTargetData {
+        data: PropertyTargetData {
+            present: rows.keys().copied().collect(),
+            rows,
+        },
+        _memory: admission.reserve(40 * 1024 * 1024).unwrap(),
+    };
+    let expected = source.edge_batch(&schema).unwrap();
+    let actual = source.edge_batch_prepaid(&schema, &admission).unwrap();
+    assert_eq!(actual.batch(), &expected);
+    assert_eq!(actual.batch().num_rows(), source.rows.len());
+    assert!(
+        actual
+            .batch()
+            .columns()
+            .iter()
+            .skip(1)
+            .all(|column| column.null_count() == source.rows.len())
+    );
+    drop(actual);
+    let source_credit = pool.reserved();
+    let filler = MemoryConsumer::new("sparse conversion boundary fixture").register(&pool);
+    filler
+        .try_grow(256 * 1024 * 1024 - source_credit - 1024)
+        .unwrap();
+    let error = source.edge_batch_prepaid(&schema, &admission).unwrap_err();
+    assert!(
+        error.to_string().contains("targeted sparse conversion"),
+        "{error}"
+    );
+    drop(filler);
+    assert_eq!(pool.reserved(), source_credit);
+    drop(source);
+    drop(admission);
+    assert_eq!(pool.reserved(), 0);
+}

@@ -131,15 +131,24 @@ impl PhysicalEdgeFilter {
             return Ok((candidates, taken));
         }
 
+        charge(
+            reservation,
+            &mut temporary,
+            super::hop_read::checked_mul(candidates.len(), std::mem::size_of::<u64>())?,
+        )?;
         let ids: Vec<u64> = candidates.iter().copied().collect();
-        charge(reservation, &mut temporary, 8 * ids.capacity())?;
+        let mut property_owner = None;
         let children = if self.fields.is_empty() {
             // The predicate reads no property: nothing to look up.
             Vec::new()
         } else {
-            self.edge_properties(cfg, &candidates, &ids, reservation, &mut temporary)?
+            let properties =
+                self.edge_properties(cfg, &candidates, &ids, reservation, &mut temporary)?;
+            property_owner = Some(properties.charge);
+            properties.batch.into_parts().1
         };
         let verdicts = self.passing(children, ids.len())?;
+        drop(property_owner);
         let crossable: HashSet<u64> = ids
             .iter()
             .zip(verdicts)
@@ -163,28 +172,48 @@ impl PhysicalEdgeFilter {
         ids: &[u64],
         reservation: &mut ChunkedReservation,
         temporary: &mut usize,
-    ) -> Result<Vec<ArrayRef>, GfError> {
-        let targets: BTreeSet<u64> = candidates.iter().copied().collect();
-        let children = if let Some(source) = super::edge_properties::load_edge_prop_source_by_id(
+    ) -> Result<super::hop_read::HopChunk, GfError> {
+        let mut property_charge = super::HopReadCharge::new(&cfg.read_reservation);
+        let target_memory = graphforge_storage::read_memory::ReadAdmission::reserve(
+            &property_charge,
+            super::hop_read::btree_set_bytes::<u64>(candidates.len())?,
+        )
+        .map_err(GfError::from_execution_error)?;
+        let mut targets = BTreeSet::new();
+        for &id in candidates {
+            targets.insert(id);
+        }
+        let source = super::edge_properties::load_edge_prop_source_by_id(
             &*cfg.provider,
             &cfg.rel_type_name,
             &cfg.dir,
             &self.fields,
             &targets,
-        )? {
-            charge(reservation, temporary, source.charged_bytes())?;
-            super::edge_properties::edge_prop_children_by_id(&source, &self.fields, ids)?
+            &property_charge,
+        )?;
+        drop(targets);
+        drop(target_memory);
+        let children = if let Some(source) = source {
+            super::edge_properties::edge_prop_children_by_id_admitted(
+                &source,
+                &self.fields,
+                ids,
+                &mut property_charge,
+            )?
         } else {
             // The route is unavailable by id (the same `None` condition used by
             // one-hop expansion), so resolve public identities.
-            self.edge_properties_by_uuid(cfg, candidates, ids, reservation, temporary)?
+            self.edge_properties_by_uuid(
+                cfg,
+                candidates,
+                ids,
+                reservation,
+                temporary,
+                &mut property_charge,
+            )?
         };
-        charge(
-            reservation,
-            temporary,
-            children.iter().map(Array::get_array_memory_size).sum(),
-        )?;
-        Ok(children)
+        super::edge_properties::lease_children(&self.fields, children, property_charge)
+            .map(|(children, _)| children)
     }
 
     /// [`edge_properties`](Self::edge_properties) through the relationships'
@@ -196,6 +225,7 @@ impl PhysicalEdgeFilter {
         ids: &[u64],
         reservation: &mut ChunkedReservation,
         temporary: &mut usize,
+        property_charge: &mut super::HopReadCharge,
     ) -> Result<Vec<ArrayRef>, GfError> {
         let exec_err = |m: String| GfError::Execution(format!("VarLenExpand edge filter: {m}"));
         let edge_batches = read_traversed_edges(cfg, candidates)?;
@@ -210,6 +240,11 @@ impl PhysicalEdgeFilter {
         let records = build_edge_records(cfg, &edge_batches)?;
         charge(reservation, temporary, edge_record_table_bytes(&records))?;
         drop(edge_batches);
+        let uuid_memory = graphforge_storage::read_memory::ReadAdmission::reserve(
+            property_charge,
+            super::hop_read::checked_mul(ids.len(), std::mem::size_of::<[u8; 16]>())?,
+        )
+        .map_err(GfError::from_execution_error)?;
         let mut uuids = Vec::with_capacity(ids.len());
         for id in ids {
             let record = records
@@ -218,17 +253,29 @@ impl PhysicalEdgeFilter {
             uuids.push(record.edge_uuid);
         }
         drop(records);
-        charge(reservation, temporary, 16 * uuids.capacity())?;
-        let uuid_targets: BTreeSet<[u8; 16]> = uuids.iter().copied().collect();
+        let target_memory = graphforge_storage::read_memory::ReadAdmission::reserve(
+            property_charge,
+            super::hop_read::btree_set_bytes::<[u8; 16]>(uuids.len())?,
+        )
+        .map_err(GfError::from_execution_error)?;
+        let mut uuid_targets = BTreeSet::new();
+        for &uuid in &uuids {
+            uuid_targets.insert(uuid);
+        }
         let source = load_edge_prop_source(
             cfg.provider.admitted_inventory().as_deref(),
             &cfg.rel_type_name,
             &cfg.dir,
             &self.fields,
             &uuid_targets,
+            property_charge,
         )?;
-        charge(reservation, temporary, source.charged_bytes())?;
-        edge_prop_children(&source, &self.fields, &uuids)
+        drop(uuid_targets);
+        drop(target_memory);
+        let children = edge_prop_children(&source, &self.fields, &uuids, property_charge);
+        drop(uuids);
+        drop(uuid_memory);
+        children
     }
 
     /// Evaluate the predicate for `rows` edges whose property values are

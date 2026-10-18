@@ -35,11 +35,36 @@ impl ReadGrant {
         Self(reservation)
     }
 
-    pub(crate) fn size(&self) -> usize {
+    /// Grow this actual reservation before an allocation, preserving its consumer.
+    ///
+    /// # Errors
+    /// Returns cancellation or the query pool's typed refusal.
+    pub fn grow(&mut self, admission: &dyn ReadAdmission, bytes: usize) -> Result<()> {
+        admission.check_cancelled()?;
+        self.0.try_grow(bytes)
+    }
+
+    /// Transfer existing authority to a new owner without pool growth.
+    ///
+    /// # Errors
+    /// Refuses a transfer exceeding the existing grant.
+    pub fn split(&mut self, bytes: usize) -> Result<Self> {
+        if bytes > self.size() {
+            return Err(exceeded());
+        }
+        Ok(Self(self.0.split(bytes)))
+    }
+
+    /// Bytes of existing authority held by this grant.
+    pub fn size(&self) -> usize {
         self.0.size()
     }
 
-    pub(crate) fn shrink_to(&mut self, bytes: usize) -> Result<()> {
+    /// Release unused construction authority without readmitting retained data.
+    ///
+    /// # Errors
+    /// Refuses growth after construction.
+    pub fn shrink_to(&mut self, bytes: usize) -> Result<()> {
         if bytes > self.size() {
             return Err(exceeded());
         }
@@ -65,6 +90,7 @@ pub struct ReadSchemaOwner {
 pub struct PrepaidBatch {
     batch: RecordBatch,
     _headers: ReadGrant,
+    _containers: Option<std::sync::Arc<MemoryReservation>>,
     schema_owner: ReadSchemaOwner,
 }
 impl PrepaidBatch {
@@ -100,9 +126,11 @@ impl PrepaidBatch {
         let Self {
             batch,
             _headers: headers,
+            _containers: containers,
             schema_owner,
         } = self;
         drop(batch);
+        drop(containers);
         drop(headers);
         schema_owner
     }
@@ -155,17 +183,6 @@ impl PrepaidBatch {
         let batch = batch;
         let mut immutable = 0;
         for array in batch.columns() {
-            if matches!(
-                array.data_type(),
-                DataType::List(_)
-                    | DataType::LargeList(_)
-                    | DataType::FixedSizeList(_, _)
-                    | DataType::Struct(_)
-                    | DataType::Utf8View
-                    | DataType::BinaryView
-            ) {
-                return Err(exceeded()); // this first storage caller seals flat topology only
-            }
             visit_buffers(array.as_ref(), &mut |buffer| {
                 if buffer.capacity() == 0 && !buffer.is_empty() {
                     return Err(DataFusionError::ResourcesExhausted(
@@ -191,8 +208,25 @@ impl PrepaidBatch {
                 mul(batch.num_columns(), std::mem::size_of::<ArrayRef>())?,
             )?,
         )?;
-        grant.shrink_to(add(immutable, headers)?)?;
-        let escrow = Escrow(grant.0.split(immutable));
+        let containers = batch.columns().iter().try_fold(0, |bytes, array| {
+            add(bytes, container_bytes(array.as_ref())?)
+        })?;
+        let containers = if containers == 0 {
+            0
+        } else {
+            add(
+                containers,
+                std::mem::size_of::<MemoryReservation>() + 2 * std::mem::size_of::<usize>(),
+            )?
+        };
+        grant.shrink_to(add(add(immutable, headers)?, containers)?)?;
+        // Concrete nested/view wrapper storage can outlive the batch through
+        // aliases. All buffers retain this small shared container authority.
+        let metadata = (containers != 0).then(|| std::sync::Arc::new(grant.0.split(containers)));
+        let escrow = Escrow {
+            credit: grant.0.split(immutable),
+            metadata: metadata.clone(),
+        };
         for array in batch.columns() {
             visit_buffers(array.as_ref(), &mut |buffer| {
                 if buffer.capacity() != 0 {
@@ -205,6 +239,7 @@ impl PrepaidBatch {
         Ok(Self {
             batch,
             _headers: grant,
+            _containers: metadata,
             schema_owner,
         })
     }
@@ -213,6 +248,7 @@ impl PrepaidBatch {
 #[derive(Debug)]
 struct BackingLease {
     _credit: MemoryReservation,
+    _metadata: Option<std::sync::Arc<MemoryReservation>>,
     size: usize,
 }
 impl arrow_buffer::MemoryReservation for BackingLease {
@@ -224,11 +260,15 @@ impl arrow_buffer::MemoryReservation for BackingLease {
     }
 }
 #[derive(Debug)]
-struct Escrow(MemoryReservation);
+struct Escrow {
+    credit: MemoryReservation,
+    metadata: Option<std::sync::Arc<MemoryReservation>>,
+}
 impl arrow_buffer::MemoryPool for Escrow {
     fn reserve(&self, size: usize) -> Box<dyn arrow_buffer::MemoryReservation> {
         Box::new(BackingLease {
-            _credit: self.0.split(size + token_bytes()),
+            _credit: self.credit.split(size + token_bytes()),
+            _metadata: self.metadata.clone(),
             size,
         })
     }
@@ -236,10 +276,10 @@ impl arrow_buffer::MemoryPool for Escrow {
         0
     }
     fn used(&self) -> usize {
-        self.0.size()
+        self.credit.size()
     }
     fn capacity(&self) -> usize {
-        self.0.size()
+        self.credit.size()
     }
 }
 
@@ -308,6 +348,12 @@ pub fn visit_buffers(
             visit_buffers(array.as_list::<i64>().values().as_ref(), visit)?;
         },
         DataType::FixedSizeList(_, _) => visit_buffers(array.as_fixed_size_list().values().as_ref(), visit)?,
+        DataType::Dictionary(_, _) => {
+            let dict = array.as_any_dictionary();
+            visit_buffers(dict.keys(), visit)?;
+            visit_buffers(dict.values().as_ref(), visit)?;
+            return Ok(()); // keys already visited the dictionary validity
+        },
         DataType::Struct(_) => {
             for child in array.as_struct().columns() { visit_buffers(child.as_ref(), visit)?; }
         },
@@ -317,6 +363,69 @@ pub fn visit_buffers(
         visit(nulls.buffer())?;
     }
     Ok(())
+}
+
+/// Wrapper allocations omitted by Arrow's sum-of-buffers getter.
+pub(crate) fn container_bytes(array: &dyn Array) -> Result<usize> {
+    match array.data_type() {
+        DataType::Utf8View => add(
+            mul(
+                array.as_string_view().data_buffers().len(),
+                std::mem::size_of::<Buffer>(),
+            )?,
+            2 * std::mem::size_of::<usize>(),
+        ),
+        DataType::BinaryView => add(
+            mul(
+                array.as_binary_view().data_buffers().len(),
+                std::mem::size_of::<Buffer>(),
+            )?,
+            2 * std::mem::size_of::<usize>(),
+        ),
+        DataType::Struct(_) => array.as_struct().columns().iter().try_fold(
+            mul(
+                array.as_struct().num_columns().max(4),
+                std::mem::size_of::<ArrayRef>(),
+            )?,
+            |bytes, child| add(bytes, container_bytes(child.as_ref())?),
+        ),
+        DataType::List(_) => container_bytes(array.as_list::<i32>().values().as_ref()),
+        DataType::LargeList(_) => container_bytes(array.as_list::<i64>().values().as_ref()),
+        DataType::FixedSizeList(_, _) => {
+            container_bytes(array.as_fixed_size_list().values().as_ref())
+        }
+        DataType::Dictionary(_, _) => container_bytes(array.as_any_dictionary().values().as_ref()),
+        _ => Ok(0),
+    }
+}
+
+/// Checked construction bound for Arrow's null array at a known schema/length.
+pub(crate) fn null_bytes(data_type: &DataType, rows: usize) -> Result<usize> {
+    let payload = match data_type {
+        DataType::Null => 0,
+        DataType::Boolean => rows.div_ceil(8),
+        DataType::Utf8 | DataType::Binary | DataType::List(_) => mul(add(rows, 1)?, 4)?,
+        DataType::LargeUtf8 | DataType::LargeBinary | DataType::LargeList(_) => {
+            mul(add(rows, 1)?, 8)?
+        }
+        DataType::Utf8View | DataType::BinaryView => mul(rows, 16)?,
+        DataType::FixedSizeBinary(width) => {
+            mul(rows, usize::try_from(*width).map_err(|_| exceeded())?)?
+        }
+        DataType::FixedSizeList(field, width) => null_bytes(
+            field.data_type(),
+            mul(rows, usize::try_from(*width).map_err(|_| exceeded())?)?,
+        )?,
+        DataType::Struct(fields) => fields.iter().try_fold(0, |bytes, field| {
+            add(bytes, null_bytes(field.data_type(), rows)?)
+        })?,
+        DataType::Dictionary(key, value) => add(null_bytes(key, rows)?, null_bytes(value, 0)?)?,
+        other => mul(rows, other.primitive_width().ok_or_else(exceeded)?)?,
+    };
+    add(
+        add(mul(payload, 2)?, rows.div_ceil(8))?,
+        add(mul(data_type.size(), 4)?, 4096)?,
+    )
 }
 
 #[cfg(test)]

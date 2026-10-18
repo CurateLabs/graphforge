@@ -231,6 +231,15 @@ async fn wave11_low_level_expand_and_optional_schema_guards_fail_closed() {
         reverse_edge_list: false,
         expansion: graphforge_plan::VarLenMode::Trails,
         edge_filter: None,
+        read_reservation: std::sync::Arc::new(std::sync::Mutex::new(
+            crate::chunked_reservation::ChunkedReservation::register("ExpandExec hop read", &{
+                let pool: std::sync::Arc<dyn datafusion::execution::memory_pool::MemoryPool> =
+                    std::sync::Arc::new(
+                        datafusion::execution::memory_pool::UnboundedMemoryPool::default(),
+                    );
+                pool
+            }),
+        )),
         edge_var: 0,
         edge_list_demanded: true,
         copy_input: None,

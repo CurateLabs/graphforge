@@ -218,7 +218,7 @@ fn decoded_map_bytes(property_fields: usize) -> Result<usize, GfError> {
 /// is exact-sized, so property conversion needs one table and no growth copy.
 /// hashbrown's raw::capacity_to_buckets / TableLayout::calculate_layout_for use
 /// four minimum buckets, a 7/8 load, aligned buckets and trailing control bytes.
-fn hash_map_bytes(entries: usize) -> Result<usize, GfError> {
+pub(crate) fn hash_map_bytes(entries: usize) -> Result<usize, GfError> {
     if entries == 0 {
         return Ok(0);
     }
@@ -476,6 +476,13 @@ fn type_nodes(data_type: &DataType) -> Result<usize, GfError> {
 /// Recursion includes list synthetic rows and their cloned payloads; completed
 /// columns and the active builder overlap.
 pub(crate) fn codec(rows: &[Snapshot], schema: &Schema) -> Result<usize, GfError> {
+    codec_rows(rows.iter().map(|row| &row.row), schema)
+}
+
+pub(crate) fn codec_rows<'a>(
+    rows: impl IntoIterator<Item = &'a crate::PropertySnapshotRow>,
+    schema: &Schema,
+) -> Result<usize, GfError> {
     let mut bytes = 0;
     for field in schema.fields() {
         // Arrow's default primitive/byte builders start at1024 slots. The
@@ -490,11 +497,30 @@ pub(crate) fn codec(rows: &[Snapshot], schema: &Schema) -> Result<usize, GfError
         )?;
         bytes = add(bytes, mul(field.size(), 4)?)?;
     }
+    let mut row_count = 0;
     for snapshot in rows {
+        row_count = add(row_count, 1)?;
         for (key, value) in &snapshot.values {
             bytes = add(bytes, mul(key.capacity(), 8)?)?;
             bytes = add(bytes, literal_codec(value)?)?;
         }
+    }
+    // A row missing a field still appends a NULL slot to that field's typed
+    // builder. Count slots from the complete destination schema, independently
+    // of the literals present in older snapshots; this also funds UUID rows.
+    // Vec/buffer builders double capacity, and offsets have rows + 1 entries.
+    // The null constructor bound at that capacity covers retained slots and
+    // growth copies, recursively including struct children and list offsets.
+    // Empty list-child builders retain the default-node allowance above.
+    let capacity = add(row_count, 1)?
+        .checked_next_power_of_two()
+        .ok_or_else(|| refused("property conversion row capacity overflow"))?;
+    for field in schema.fields() {
+        bytes = add(
+            bytes,
+            crate::read_memory::null_bytes(field.data_type(), capacity)
+                .map_err(GfError::from_execution_error)?,
+        )?;
     }
     Ok(bytes)
 }
