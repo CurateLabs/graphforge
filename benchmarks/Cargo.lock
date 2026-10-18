@@ -279,8 +279,6 @@ dependencies = [
 [[package]]
 name = "arrow-row"
 version = "58.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "514ba0ef0d4c5896202dae736251ce415abb43a950bed570fb7981b8716c0e4c"
 dependencies = [
  "arrow-array",
  "arrow-buffer",
@@ -1384,6 +1382,7 @@ dependencies = [
  "arrow-data",
  "arrow-ipc",
  "arrow-ord",
+ "arrow-row",
  "arrow-schema",
  "async-trait",
  "datafusion-common",

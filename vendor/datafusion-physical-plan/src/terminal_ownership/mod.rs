@@ -987,6 +987,7 @@ impl Life {
     pub(crate) fn gap(&self, bits: u64) {
         self.update(|o| o.coverage |= bits);
     }
+    #[cfg(feature = "test_utils")]
     pub(crate) fn clear_backings(&self) {
         let id = self.id();
         with_generation(self.generation(), |r| {
@@ -1220,19 +1221,23 @@ impl Piece {
         self.transfer_to(owner, 0, f)
     }
     pub(crate) fn transfer_to<R>(
-        mut self,
+        self,
         owner: u64,
         target: u64,
         f: impl FnOnce() -> R,
     ) -> R {
-        let id = self.id();
+        #[cfg(feature = "test_utils")]
+        let mut this = self;
+        #[cfg(not(feature = "test_utils"))]
+        let this = self;
+        let id = this.id();
         if id == 0 {
             return f();
         }
-        let _transition = Transition::begin_generation(self.generation());
+        let _transition = Transition::begin_generation(this.generation());
         #[cfg(feature = "test_utils")]
         {
-            self.id = 0;
+            this.id = 0;
         }
         struct Reset((u64, u64), u64);
         impl Drop for Reset {
@@ -1247,13 +1252,13 @@ impl Piece {
             }
         }
         let _reset = Reset(
-            update_thread_generation(self.generation(), |t| {
+            update_thread_generation(this.generation(), |t| {
                 std::mem::replace(&mut t.moving, (id, target))
             })
             .unwrap_or((0, 0)),
-            self.generation(),
+            this.generation(),
         );
-        scoped_generation(self.generation(), owner, id, f)
+        scoped_generation(this.generation(), owner, id, f)
     }
     fn adopt_generation(id: u64, generation: u64) -> Self {
         #[cfg(feature = "test_utils")]
@@ -1536,10 +1541,12 @@ impl ProducerInput {
 
 /// Original IntoIter owner followed only by numeric sentinels. Yielded batches
 /// leave this ownership occurrence; no batch is cloned or retained by evidence.
+#[cfg(feature = "test_utils")]
 pub(crate) struct Chunks {
     inner: std::vec::IntoIter<arrow::array::RecordBatch>,
     lives: std::vec::IntoIter<Life>,
 }
+#[cfg(feature = "test_utils")]
 impl Iterator for Chunks {
     type Item = arrow::array::RecordBatch;
     fn next(&mut self) -> Option<Self::Item> {
@@ -1586,11 +1593,15 @@ fn publish_handoff_generation(id: u64, generation: u64) {
     }
 }
 impl Life {
-    pub(crate) fn into_id(mut self) -> u64 {
-        let id = self.id();
+    pub(crate) fn into_id(self) -> u64 {
+        #[cfg(feature = "test_utils")]
+        let mut this = self;
+        #[cfg(not(feature = "test_utils"))]
+        let this = self;
+        let id = this.id();
         #[cfg(feature = "test_utils")]
         {
-            self.id = 0;
+            this.id = 0;
         }
         id
     }
@@ -1882,11 +1893,13 @@ pub(crate) fn snapshot_failure(
 }
 
 /// Original input owner followed by its numeric sentinel; no extra Arrow owner.
+#[cfg(feature = "test_utils")]
 pub(crate) struct InputBatch {
     batch: Option<arrow::array::RecordBatch>,
     diagnostic: Life,
     completion: Option<Transition>,
 }
+#[cfg(feature = "test_utils")]
 impl InputBatch {
     pub(crate) fn batch(&self) -> &arrow::array::RecordBatch {
         self.batch.as_ref().expect("live input batch")
@@ -1943,6 +1956,7 @@ impl InputBatch {
         }
     }
 }
+#[cfg(feature = "test_utils")]
 impl Drop for InputBatch {
     fn drop(&mut self) {
         self.diagnostic.begin_drop();
@@ -1995,6 +2009,7 @@ impl BatchLives {
         }
     }
 }
+#[cfg(feature = "test_utils")]
 impl Chunks {
     pub(crate) fn from_observed(
         batches: Vec<arrow::array::RecordBatch>,
