@@ -27,6 +27,7 @@ use std::ptr::NonNull;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+use crate::terminal_ownership as od;
 use arrow::array::{Array, AsArray, BinaryViewArray, RecordBatch, StringViewArray};
 use arrow::array::{downcast_dictionary_array, downcast_run_array};
 use arrow::datatypes::{DataType, Schema, SchemaRef};
@@ -48,36 +49,84 @@ fn nonnegative(value: i64) -> Result<usize> {
     usize::try_from(value).map_err(|_| overflow())
 }
 pub(crate) use super::credit::{Credit, ReaderPermit};
+// Exact pre-observation layout: reservation arithmetic must never charge
+// numeric diagnostic fields, including when this owner is embedded in metadata.
+#[allow(dead_code)]
+struct ChargedBudget {
+    fresh: MemoryReservation,
+    credit: Option<Arc<Credit>>,
+    borrowed: AtomicUsize,
+}
 #[derive(Debug)]
 pub(super) struct Budget {
     fresh: MemoryReservation,
     credit: Option<Arc<Credit>>,
     borrowed: AtomicUsize,
+    diagnostic_piece: od::Piece,
+    diagnostic: od::Life,
 }
 impl Budget {
+    pub(super) fn diagnostic_id(&self) -> u64 {
+        self.diagnostic.id()
+    }
+    fn observe(&self) {
+        let fresh = self.fresh.size();
+        let borrowed = self.borrowed.load(Ordering::Relaxed);
+        let credit = self.credit.as_ref().map_or(0, |c| c.diagnostic_id());
+        let Some(held) = fresh.checked_add(borrowed) else {
+            od::gap(od::GAP_UNKNOWN_SPONSOR);
+            return;
+        };
+        self.diagnostic_piece
+            .refresh(&self.fresh, self.diagnostic.id());
+        self.diagnostic.update(|o| {
+            o.piece = self.diagnostic_piece.id();
+            o.held = held as u64;
+            o.a = fresh as u64;
+            o.b = borrowed as u64;
+            o.c = credit;
+        });
+        if credit != 0 {
+            self.diagnostic.edge(credit, 8, borrowed);
+        }
+    }
     pub(super) fn size(&self) -> usize {
         self.fresh.size() + self.borrowed.load(Ordering::Relaxed)
     }
     pub(super) fn try_grow(&self, bytes: usize) -> Result<()> {
+        let _transition = od::Transition::begin();
         add(self.size(), bytes)?;
         let borrowed = self.credit.as_ref().map_or(0, |credit| credit.take(bytes));
         if let Err(error) = self.fresh.try_grow(bytes - borrowed) {
             if let Some(credit) = &self.credit {
                 credit.give(borrowed);
             }
+            self.observe();
             return Err(error);
         }
         self.borrowed.fetch_add(borrowed, Ordering::Relaxed);
+        self.observe();
         Ok(())
     }
     pub(super) fn split(&mut self, bytes: usize) -> Self {
+        let _transition = od::Transition::begin();
         let borrowed = self.borrowed.load(Ordering::Relaxed).min(bytes);
         self.borrowed.fetch_sub(borrowed, Ordering::Relaxed);
-        Self {
+        let mut next = Self {
             fresh: self.fresh.split(bytes - borrowed),
             credit: self.credit.clone(),
             borrowed: AtomicUsize::new(borrowed),
-        }
+            diagnostic_piece: od::Piece::default(),
+            diagnostic: od::Life::inherited(od::Kind::Budget),
+        };
+        next.diagnostic_piece = self.diagnostic_piece.child(
+            &next.fresh,
+            next.diagnostic.id(),
+            bytes - borrowed,
+        );
+        self.observe();
+        next.observe();
+        next
     }
     pub(super) fn try_resize(&self, bytes: usize) -> Result<()> {
         let size = self.size();
@@ -89,7 +138,7 @@ impl Budget {
     }
     /// Move a fresh nonspilling workspace into its next owned phase without
     /// releasing bytes or changing consumer registration/sponsor eligibility.
-    pub(super) fn take_owned_authority(&mut self) -> Result<MemoryReservation> {
+    fn owned_authority_eligible(&self) -> Result<()> {
         if self.credit.is_some()
             || self.borrowed.load(Ordering::Relaxed) != 0
             || self.fresh.consumer().can_spill()
@@ -98,10 +147,36 @@ impl Budget {
                 "Owned spill authority requires a fresh nonspilling workspace".into(),
             ));
         }
-        Ok(self.fresh.take())
+        Ok(())
+    }
+    #[allow(dead_code)]
+    pub(super) fn take_owned_authority(&mut self) -> Result<MemoryReservation> {
+        let _transition = od::Transition::begin();
+        self.owned_authority_eligible()?;
+        let authority = self.fresh.take();
+        self.observe();
+        // A bare return cannot carry the numeric piece through an arbitrary
+        // future caller. Qualified callers use the synchronous wrapper below.
+        od::gap(od::GAP_UNKNOWN_SPONSOR);
+        Ok(authority)
+    }
+    pub(super) fn with_owned_authority<R>(
+        &mut self,
+        next: impl FnOnce(MemoryReservation) -> Result<R>,
+    ) -> Result<R> {
+        let _transition = od::Transition::begin();
+        self.owned_authority_eligible()?;
+        let authority = self.fresh.take();
+        let moving = std::mem::take(&mut self.diagnostic_piece);
+        self.diagnostic_piece = od::scoped(self.diagnostic.id(), moving.id(), || {
+            od::Piece::new(&self.fresh, self.diagnostic.id())
+        });
+        self.observe();
+        moving.transfer(self.diagnostic.id(), || next(authority))
     }
     /// Return only excess existing authority; never allocate or readmit.
     fn shrink_to(&self, bytes: usize) {
+        let _transition = od::Transition::begin();
         let size = self.size();
         if bytes >= size {
             return;
@@ -114,10 +189,12 @@ impl Budget {
         if let Some(credit) = &self.credit {
             credit.give(borrowed);
         }
+        self.observe();
     }
 }
 impl Drop for Budget {
     fn drop(&mut self) {
+        self.diagnostic.begin_drop();
         if let Some(credit) = &self.credit {
             credit.give(self.borrowed.load(Ordering::Relaxed));
         }
@@ -136,14 +213,22 @@ pub(super) fn reserve_with_credit(
     name: &str,
     credit: Option<Arc<Credit>>,
 ) -> Result<Budget> {
+    let _transition = od::Transition::begin();
     let fresh = MemoryConsumer::new(name).register(pool);
     let borrowed = credit.as_ref().map_or(0, |credit| credit.take(bytes));
+    let diagnostic = od::Life::inherited(od::Kind::Budget);
+    let diagnostic_piece = od::Piece::new(&fresh, diagnostic.id());
     let budget = Budget {
         fresh,
         borrowed: AtomicUsize::new(borrowed),
         credit,
+        diagnostic_piece,
+        diagnostic,
     };
-    budget.fresh.try_grow(bytes - borrowed)?;
+    budget.observe();
+    let result = budget.fresh.try_grow(bytes - borrowed);
+    budget.observe();
+    result?;
     Ok(budget)
 }
 
@@ -447,10 +532,21 @@ pub(super) fn write_bound(
     add(add(add(encoded, layout.gc)?, layout.headers)?, schema)
 }
 
+#[allow(dead_code)]
+struct ChargedClaimedReservation {
+    size: usize,
+    _authority: Arc<Budget>,
+}
 #[derive(Debug)]
 struct ClaimedReservation {
     size: usize,
     _authority: Arc<Budget>,
+    diagnostic: od::Life,
+}
+impl Drop for ClaimedReservation {
+    fn drop(&mut self) {
+        self.diagnostic.begin_drop();
+    }
 }
 impl arrow_buffer::MemoryReservation for ClaimedReservation {
     fn size(&self) -> usize {
@@ -461,16 +557,28 @@ impl arrow_buffer::MemoryReservation for ClaimedReservation {
         // conversion does not expand the fixed authority or pretend to admit
         // a future mutable allocation; that allocation needs its operator's
         // normal fallible admission. In particular there is no resize panic.
+        if self.size != new_size {
+            od::gap(od::GAP_UNSUPPORTED);
+        }
         self.size = new_size;
+        self.diagnostic.update(|o| o.bytes = new_size as u64);
     }
 }
 #[derive(Debug)]
 struct Claims(Arc<Budget>);
 impl arrow_buffer::MemoryPool for Claims {
     fn reserve(&self, size: usize) -> Box<dyn arrow_buffer::MemoryReservation> {
+        let _transition = od::Transition::begin();
+        let diagnostic = od::Life::new(od::Kind::Claim, self.0.diagnostic_id(), 0);
+        diagnostic.update(|o| o.bytes = size as u64);
+        diagnostic.edge(self.0.diagnostic_id(), 10, size);
+        // Arrow's generic callback has no borrowed buffer identity. Never
+        // manufacture a concrete owner certificate from its scalar size.
+        od::gap(od::GAP_UNSUPPORTED);
         Box::new(ClaimedReservation {
             size,
             _authority: Arc::clone(&self.0),
+            diagnostic,
         })
     }
     fn available(&self) -> isize {
@@ -486,6 +594,11 @@ impl arrow_buffer::MemoryPool for Claims {
 
 /// Reader-local roots pin only dictionary VALUES through the next decode and
 /// reconciliation. Neither a ticket nor Credit can own Arrow data (no cycle).
+#[allow(dead_code)]
+struct ChargedDictionarySources {
+    values: Vec<ArrayData>,
+    metadata: Option<ChargedBudget>,
+}
 #[derive(Default)]
 pub(super) struct DictionarySources {
     values: Vec<ArrayData>,
@@ -494,67 +607,139 @@ pub(super) struct DictionarySources {
 /// A private reader parses one schema and clones that exact Arc into each
 /// unprojected batch. Keep its authority through the reader and last body token.
 /// This owner never contains buffers, arrays, or producer permits.
+#[allow(dead_code)]
+struct ChargedSharedSchema {
+    schema: SchemaRef,
+    authority: ChargedBudget,
+}
 #[derive(Debug)]
 pub(super) struct SharedSchema {
     schema: SchemaRef,
     authority: Budget,
+    diagnostic: od::Life,
+}
+impl Drop for SharedSchema {
+    fn drop(&mut self) {
+        self.diagnostic.begin_drop();
+    }
 }
 impl SharedSchema {
+    pub(super) fn charged_layout() -> std::alloc::Layout {
+        std::alloc::Layout::new::<ChargedSharedSchema>()
+    }
     pub(super) fn bound(schema: &Schema) -> Result<usize> {
         add(
             schema_bound(schema)?,
-            add(size_of::<Self>(), 2 * size_of::<usize>())?,
+            add(size_of::<ChargedSharedSchema>(), 2 * size_of::<usize>())?,
         )
     }
     /// Called only for the fresh schema returned by our private unprojected
     /// StreamReader. Conversion temporaries have ended; MessageReader's buffer
     /// and BufReader remain separately funded by the reader's persistent grant.
     pub(super) fn new(schema: SchemaRef, authority: Budget) -> Arc<Self> {
+        let _transition = od::Transition::begin();
         let resident = super::schema_admission::fresh_resident_schema_bound(&schema);
         // Allocate this owner while complete construction authority is live.
         // Its schema drops before authority, including on the final body token.
-        let owner = Arc::new(Self { schema, authority });
+        let diagnostic =
+            od::Life::new(od::Kind::BatchMetadata, authority.diagnostic_id(), 0);
+        diagnostic.update(|o| {
+            o.a = 2;
+            o.flags = 4;
+        });
+        let owner = Arc::new(Self {
+            schema,
+            authority,
+            diagnostic,
+        });
         if let Some(bytes) = resident {
             // Unknown/overflowing representations keep the old grant. A bound
             // above the construction grant cannot trigger post-parse admission.
             owner.authority.shrink_to(bytes);
         }
+        let bytes = owner.authority.size();
+        owner.diagnostic.update(|o| o.bytes = bytes as u64);
+        owner
+            .diagnostic
+            .edge(owner.authority.diagnostic_id(), 10, bytes);
         owner
     }
     fn matches(&self, batch: &RecordBatch) -> bool {
         Arc::ptr_eq(&self.schema, batch.schema_ref())
     }
 }
+#[allow(dead_code)]
+struct ChargedBatchMetadata {
+    _authority: ChargedBudget,
+    _schema: Option<Arc<SharedSchema>>,
+}
 #[derive(Debug)]
 struct BatchMetadata {
     _authority: Budget,
     _schema: Option<Arc<SharedSchema>>,
+    diagnostic: od::Life,
+}
+impl Drop for BatchMetadata {
+    fn drop(&mut self) {
+        self.diagnostic.begin_drop();
+    }
 }
 #[derive(Debug)]
 struct OwnerClaims {
     payload: Arc<Budget>,
     metadata: Arc<BatchMetadata>,
+    base: usize,
+    capacity: usize,
+}
+#[allow(dead_code)]
+struct ChargedOwnerReservation {
+    size: usize,
+    _payload: Arc<Budget>,
+    _metadata: Arc<BatchMetadata>,
 }
 #[derive(Debug)]
 struct OwnerReservation {
     size: usize,
     _payload: Arc<Budget>,
     _metadata: Arc<BatchMetadata>,
+    diagnostic: od::Life,
+}
+impl Drop for OwnerReservation {
+    fn drop(&mut self) {
+        self.diagnostic.begin_drop();
+    }
 }
 impl arrow_buffer::MemoryReservation for OwnerReservation {
     fn size(&self) -> usize {
         self.size
     }
     fn resize(&mut self, size: usize) {
+        if self.size != size {
+            od::gap(od::GAP_UNSUPPORTED);
+        }
         self.size = size;
+        self.diagnostic.update(|o| o.bytes = size as u64);
     }
 }
 impl arrow_buffer::MemoryPool for OwnerClaims {
     fn reserve(&self, size: usize) -> Box<dyn arrow_buffer::MemoryReservation> {
+        let _transition = od::Transition::begin();
+        let diagnostic = od::Life::new(od::Kind::Claim, self.payload.diagnostic_id(), 0);
+        diagnostic.update(|o| {
+            o.bytes = size as u64;
+            o.a = self.capacity as u64;
+        });
+        diagnostic.raw(35, self.base, self.capacity, self.capacity);
+        diagnostic.edge(self.payload.diagnostic_id(), 10, self.payload.size());
+        diagnostic.edge(self.metadata.diagnostic.id(), 7, 0);
+        if size != self.capacity || self.payload.size() != self.capacity {
+            od::gap(od::GAP_UNKNOWN_SPONSOR);
+        }
         Box::new(OwnerReservation {
             size,
             _payload: Arc::clone(&self.payload),
             _metadata: Arc::clone(&self.metadata),
+            diagnostic,
         })
     }
     fn available(&self) -> isize {
@@ -617,6 +802,8 @@ fn claim_owners(
             buffer.claim(&OwnerClaims {
                 payload,
                 metadata: Arc::clone(metadata),
+                base: buffer.data_ptr().as_ptr() as usize,
+                capacity: buffer.capacity(),
             });
         }
     };
@@ -637,8 +824,8 @@ fn claim_owners(
 fn resident_controls_fit() -> Option<()> {
     use std::alloc::Layout;
     let bytes = super::resident_metadata::raw_bytes_arc_bound()?;
-    let payload = super::resident_metadata::arc_bytes(Layout::new::<Budget>())?;
-    let token = size_of::<OwnerReservation>();
+    let payload = super::resident_metadata::arc_bytes(Layout::new::<ChargedBudget>())?;
+    let token = size_of::<ChargedOwnerReservation>();
     // Each split also retains the shared registration and its fixed consumer
     // name. Counting it per occurrence conservatively covers the final split.
     let registration =
@@ -661,8 +848,9 @@ fn resident_batch_metadata(
     }
     resident_controls_fit()?;
     let resident = super::resident_metadata::batch(batch)?;
-    let owner =
-        super::resident_metadata::arc_bytes(std::alloc::Layout::new::<BatchMetadata>())?;
+    let owner = super::resident_metadata::arc_bytes(std::alloc::Layout::new::<
+        ChargedBatchMetadata,
+    >())?;
     let bytes = resident
         .headers
         .checked_add(resident.buffers.checked_mul(256)?)?
@@ -682,6 +870,7 @@ pub(super) fn retain_batch(
     previous: &DictionarySources,
     schema: &Arc<SharedSchema>,
 ) -> Result<DictionarySources> {
+    let _transition = od::Transition::begin();
     let mut layout = LayoutBound::default();
     let mut roots = 0;
     for column in batch.columns() {
@@ -696,7 +885,7 @@ pub(super) fn retain_batch(
     let shared = schema.matches(batch);
     let metadata = add(
         layout.headers,
-        add(size_of::<BatchMetadata>(), 2 * size_of::<usize>())?,
+        add(size_of::<ChargedBatchMetadata>(), 2 * size_of::<usize>())?,
     )?;
     let metadata = if shared {
         metadata
@@ -709,7 +898,7 @@ pub(super) fn retain_batch(
         add(
             layout.headers,
             add(
-                size_of::<DictionarySources>(),
+                size_of::<ChargedDictionarySources>(),
                 mul(roots, size_of::<ArrayData>())?,
             )?,
         )?
@@ -768,9 +957,21 @@ pub(super) fn retain_batch(
         }
     }
     let resident = resident_batch_metadata(batch, shared, metadata).unwrap_or(metadata);
+    let authority = work.split(resident);
+    let diagnostic = od::Life::new(od::Kind::BatchMetadata, authority.diagnostic_id(), 0);
+    diagnostic.update(|o| {
+        o.bytes = resident as u64;
+        o.a = 1;
+        o.flags = 4;
+    });
+    diagnostic.edge(authority.diagnostic_id(), 10, resident);
+    if shared {
+        diagnostic.edge(schema.diagnostic.id(), 7, 0);
+    }
     let metadata = Arc::new(BatchMetadata {
-        _authority: work.split(resident),
+        _authority: authority,
         _schema: shared.then(|| Arc::clone(schema)),
+        diagnostic,
     });
     // Only the resident metadata moves into tokens. The remaining complete
     // preparation grant stays in work through final to_data and table drops.
@@ -1119,7 +1320,7 @@ pub(super) fn retained_bound(
     }
     let metadata = add(
         layout.headers,
-        add(size_of::<BatchMetadata>(), 2 * size_of::<usize>())?,
+        add(size_of::<ChargedBatchMetadata>(), 2 * size_of::<usize>())?,
     )?;
     let metadata = if schema.matches(batch) {
         metadata
@@ -1234,4 +1435,60 @@ pub(super) fn dictionary_bound(batch: &RecordBatch) -> Result<usize> {
         }
     }
     Ok(size)
+}
+
+#[cfg(test)]
+mod ownership_tests {
+    use super::*;
+    use datafusion_execution::memory_pool::GreedyMemoryPool;
+
+    #[test]
+    fn ipc_buffer_ticket_retains_payload_and_metadata_through_final_slice() -> Result<()>
+    {
+        let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(4096));
+        let mut work = reserve(&pool, 4096, "SpillReaderDecode")?;
+        let buffer = arrow_buffer::Buffer::from_vec(vec![7_u64; 8]);
+        let capacity = buffer.capacity();
+        let metadata = Arc::new(BatchMetadata {
+            _authority: work.split(128),
+            _schema: None,
+            diagnostic: od::Life::default(),
+        });
+        let claims = OwnerClaims {
+            payload: Arc::new(work.split(capacity)),
+            metadata,
+            base: buffer.data_ptr().as_ptr() as usize,
+            capacity,
+        };
+        buffer.claim(&claims);
+        drop(claims);
+        let slice = buffer.slice_with_length(8, 8);
+        drop(buffer);
+        drop(work);
+        assert_eq!(pool.reserved(), capacity + 128);
+        assert_eq!(slice.as_slice(), &7_u64.to_ne_bytes());
+        drop(slice);
+        assert_eq!(pool.reserved(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn original_inline_budget_and_claim_layouts_exclude_observer_fields() {
+        assert_eq!(
+            size_of::<ChargedBudget>(),
+            size_of::<MemoryReservation>()
+                + size_of::<Option<Arc<Credit>>>()
+                + size_of::<AtomicUsize>()
+        );
+        assert_eq!(
+            size_of::<ChargedOwnerReservation>(),
+            size_of::<usize>()
+                + size_of::<Arc<Budget>>()
+                + size_of::<Arc<BatchMetadata>>()
+        );
+        assert_eq!(
+            size_of::<ChargedClaimedReservation>(),
+            size_of::<usize>() + size_of::<Arc<Budget>>()
+        );
+    }
 }
