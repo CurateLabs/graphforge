@@ -113,7 +113,7 @@ impl Credit {
             } else {
                 // Legacy credit has no separately qualified control reservation.
                 // Its accounting remains unchanged, but metadata proof is partial.
-                od::gap(od::GAP_UNSUPPORTED);
+                diagnostic.gap(od::GAP_UNSUPPORTED);
                 (od::Piece::default(), od::Life::default())
             };
         diagnostic.update(|o| {
@@ -288,7 +288,15 @@ impl Drop for ReaderPermit {
     }
 }
 
-#[cfg(test)]
+#[cfg(feature = "test_utils")]
+pub(crate) fn verify_ownership_controls() -> Result<()> {
+    ownership_tests::retiring_credit_follows_worker_and_escaped_ticket_lifetimes()?;
+    ownership_tests::failed_fresh_admission_returns_exact_borrowed_credit()?;
+    ownership_tests::original_permit_layout_is_one_arc();
+    Ok(())
+}
+
+#[cfg(any(test, feature = "test_utils"))]
 mod ownership_tests {
     use super::*;
     use crate::spill::admission::reserve_with_credit;
@@ -296,8 +304,9 @@ mod ownership_tests {
         GreedyMemoryPool, MemoryConsumer, MemoryPool,
     };
 
-    #[test]
-    fn retiring_credit_follows_worker_and_escaped_ticket_lifetimes() -> Result<()> {
+    #[cfg_attr(test, test)]
+    pub(super) fn retiring_credit_follows_worker_and_escaped_ticket_lifetimes()
+    -> Result<()> {
         let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(32768));
         let authority = MemoryConsumer::new("IPC sponsor").register(&pool);
         authority.try_grow(32768)?;
@@ -333,8 +342,8 @@ mod ownership_tests {
         Ok(())
     }
 
-    #[test]
-    fn failed_fresh_admission_returns_exact_borrowed_credit() -> Result<()> {
+    #[cfg_attr(test, test)]
+    pub(super) fn failed_fresh_admission_returns_exact_borrowed_credit() -> Result<()> {
         let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(32768));
         let authority = MemoryConsumer::new("IPC sponsor").register(&pool);
         authority.try_grow(32768)?;
@@ -356,8 +365,8 @@ mod ownership_tests {
         Ok(())
     }
 
-    #[test]
-    fn original_permit_layout_is_one_arc() {
+    #[cfg_attr(test, test)]
+    pub(super) fn original_permit_layout_is_one_arc() {
         assert_eq!(size_of::<ChargedReaderPermit>(), size_of::<Arc<Credit>>());
     }
 }

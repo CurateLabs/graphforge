@@ -1437,14 +1437,22 @@ pub(super) fn dictionary_bound(batch: &RecordBatch) -> Result<usize> {
     Ok(size)
 }
 
-#[cfg(test)]
+#[cfg(feature = "test_utils")]
+pub(crate) fn verify_ownership_controls() -> Result<()> {
+    ownership_tests::ipc_buffer_ticket_retains_payload_and_metadata_through_final_slice(
+    )?;
+    ownership_tests::original_inline_budget_and_claim_layouts_exclude_observer_fields();
+    Ok(())
+}
+
+#[cfg(any(test, feature = "test_utils"))]
 mod ownership_tests {
     use super::*;
     use datafusion_execution::memory_pool::GreedyMemoryPool;
 
-    #[test]
-    fn ipc_buffer_ticket_retains_payload_and_metadata_through_final_slice() -> Result<()>
-    {
+    #[cfg_attr(test, test)]
+    pub(super) fn ipc_buffer_ticket_retains_payload_and_metadata_through_final_slice()
+    -> Result<()> {
         let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(4096));
         let mut work = reserve(&pool, 4096, "SpillReaderDecode")?;
         let buffer = arrow_buffer::Buffer::from_vec(vec![7_u64; 8]);
@@ -1472,8 +1480,8 @@ mod ownership_tests {
         Ok(())
     }
 
-    #[test]
-    fn original_inline_budget_and_claim_layouts_exclude_observer_fields() {
+    #[cfg_attr(test, test)]
+    pub(super) fn original_inline_budget_and_claim_layouts_exclude_observer_fields() {
         assert_eq!(
             size_of::<ChargedBudget>(),
             size_of::<MemoryReservation>()
