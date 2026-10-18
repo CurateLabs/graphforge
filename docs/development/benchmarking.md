@@ -119,6 +119,11 @@ Zero-width binary layout controls are in
 assessor tests. A sharing edge alone is never funding: each backing must match a
 live Claim and its independently validated payload/header authority.
 
+| Additional fixture source in `vendor/datafusion-physical-plan/` | SHA-256 |
+| --- | --- |
+| `src/spill/admission.rs` | `2baead4f184f03a98d0e2388ed6087978197ff2496c019e6e045c3320a051535` |
+| `src/terminal_ownership/arrays.rs` | `6f5ac6316ab8f7ef8d9ad65dc86153eb36917d26a400ce50655f9f043c9bce2a` |
+
 These fixtures deliberately include both supported funding closures and explicit
 partial paths. Keep the test log with the captures; a passing Rust test does not
 mean every exported capture has a positive funding verdict.
