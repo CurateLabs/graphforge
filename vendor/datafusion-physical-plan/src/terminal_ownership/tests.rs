@@ -143,15 +143,168 @@ fn sequential_calls_preserve_generation_and_counters_without_reset() {
 }
 
 #[cfg_attr(test, test)]
+fn stale_session_guards_cannot_mutate_reused_identifiers() {
+    use datafusion_execution::memory_pool::{
+        GreedyMemoryPool, MemoryConsumer, MemoryPool,
+    };
+    use std::sync::Arc;
+    let _guard = session_guard();
+    let directory = Directory::new();
+    let limits = Envelope {
+        calls: 1,
+        slots: 4,
+        ..envelope()
+    };
+    let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1024));
+    let reservation = MemoryConsumer::new("ownership generation control").register(&pool);
+    let first = Session::create(&directory.path("first"), limits).unwrap();
+    first.begin_call().unwrap();
+    let mut old_owner = Life::new(Kind::Batch, 0, 0);
+    let old_id = old_owner.id();
+    let old_piece = Piece::new(&reservation, old_id);
+    let old_transition = Transition::begin();
+    let old_queue = QueueRetirement(old_id, old_owner.generation());
+    let old_generation = old_owner.generation();
+    let (second, current, piece) = scoped(old_id, old_piece.id(), || {
+        drop(first);
+        let second = Session::create(&directory.path("second"), limits).unwrap();
+        second.begin_call().unwrap();
+        let current = Life::new(Kind::Batch, 0, 0);
+        assert_eq!(current.id(), old_id);
+        let piece = Piece::new(&reservation, current.id());
+        (second, current, piece)
+    });
+    assert_eq!(origin(), (0, 0));
+    current.update(|o| {
+        o.piece = piece.id();
+        o.bytes = 42;
+    });
+    let before = with(|r| {
+        (
+            r.constructed,
+            r.retired,
+            r.epoch,
+            r.in_flight,
+            r.operations,
+            r.poison,
+        )
+    });
+    old_owner.update(|o| o.bytes = 999);
+    old_owner.raw(35, 123, 64, 64);
+    old_owner.edge(current.id(), 1, 64);
+    old_owner.begin_drop();
+    old_piece.refresh(&reservation, current.id());
+    drop(old_piece.child(&reservation, current.id(), 0));
+    // An old reset scope must not publish a new session's borrowed bridge.
+    assert!(
+        update_thread_generation(old_generation, |t| t.origin = (old_id, 0)).is_none()
+    );
+    drop(old_owner);
+    drop(old_piece);
+    drop(old_transition);
+    drop(old_queue);
+    assert_eq!(
+        before,
+        with(|r| (
+            r.constructed,
+            r.retired,
+            r.epoch,
+            r.in_flight,
+            r.operations,
+            r.poison
+        ))
+    );
+    assert_eq!(
+        with(|r| r.owners.iter().flatten().next().unwrap().bytes),
+        Some(42)
+    );
+    assert_eq!(
+        with(|r| (
+            r.backings.iter().flatten().count(),
+            r.edges.iter().flatten().count(),
+            r.pieces.iter().flatten().count()
+        )),
+        Some((0, 0, 1))
+    );
+    second.snapshot(0);
+    drop(current);
+    drop(piece);
+    second.snapshot(0);
+    second.end_call(0);
+    second.finish().unwrap();
+
+    // Successful finish also permits an escaped original owner. Its later Drop
+    // cannot retire an equal numeric ID in the next committed capture.
+    let third = Session::create(&directory.path("third"), limits).unwrap();
+    third.begin_call().unwrap();
+    let escaped = Life::new(Kind::Output, 0, 0);
+    let escaped_id = escaped.id();
+    third.snapshot(0);
+    third.snapshot(0);
+    third.end_call(0);
+    third.finish().unwrap();
+    let fourth = Session::create(&directory.path("fourth"), limits).unwrap();
+    fourth.begin_call().unwrap();
+    let retained = Life::new(Kind::Output, 0, 0);
+    assert_eq!(retained.id(), escaped_id);
+    drop(escaped);
+    assert_eq!(with(|r| (r.constructed, r.retired)), Some((1, 0)));
+    fourth.snapshot(0);
+    drop(retained);
+    fourth.snapshot(0);
+    fourth.end_call(0);
+    fourth.finish().unwrap();
+}
+
+#[cfg_attr(test, test)]
+fn unsupported_coverage_survives_retained_alias_until_final_retirement() {
+    let _guard = session_guard();
+    let directory = Directory::new();
+    let limits = Envelope {
+        calls: 1,
+        slots: 2,
+        ..envelope()
+    };
+    let session = Session::create(&directory.path("capture"), limits).unwrap();
+    session.begin_call().unwrap();
+    let unsupported = Life::new(Kind::Batch, 0, 0);
+    unsupported.gap(GAP_UNSUPPORTED);
+    let alias = Life::new(Kind::Output, unsupported.id(), 0);
+    alias.edge(unsupported.id(), 3, 0);
+    let transition = Transition::begin();
+    drop(unsupported);
+    drop(transition);
+    assert_eq!(
+        with(|r| r.owners.iter().flatten().next().unwrap().coverage),
+        Some(GAP_UNSUPPORTED)
+    );
+    session.snapshot(0);
+    drop(alias);
+    session.snapshot(0);
+    session.end_call(0);
+    session.finish().unwrap();
+    let cuts: Vec<_> = directory
+        .lines("capture")
+        .into_iter()
+        .filter(|l| kind(l, "snapshot_begin"))
+        .collect();
+    assert_eq!(number(&cuts[0], "gaps"), GAP_UNSUPPORTED);
+    assert_eq!(number(&cuts[1], "gaps"), 0);
+}
+
+#[cfg_attr(test, test)]
 fn retirement_reuses_one_live_slot_across_many_generations() {
     let _guard = session_guard();
     let directory = Directory::new();
     let limits = envelope();
     let session = Session::create(&directory.path("capture"), limits).unwrap();
     let mut previous = 0;
+    const GENERATIONS_PER_CALL: u64 = 65_537;
     for _ in 0..2 {
         session.begin_call().unwrap();
-        for _ in 0..512 {
+        let before = with(|r| (r.records, r.bytes)).unwrap();
+        let file_before = std::fs::metadata(directory.path("capture")).unwrap().len();
+        for _ in 0..GENERATIONS_PER_CALL {
             let owner = Life::new(Kind::Source, 0, 0);
             assert!(owner.id() > previous);
             previous = owner.id();
@@ -159,20 +312,33 @@ fn retirement_reuses_one_live_slot_across_many_generations() {
             drop(owner);
             assert_eq!(with(|r| r.owners.iter().flatten().count()), Some(0));
         }
+        // Construction and retirement churn perform no file I/O. Only cuts
+        // and protocol boundaries can consume the fixed transport allowance.
+        assert_eq!(with(|r| (r.records, r.bytes)), Some(before));
+        assert_eq!(
+            std::fs::metadata(directory.path("capture")).unwrap().len(),
+            file_before
+        );
         session.snapshot(0);
         session.snapshot(0);
         session.end_call(0);
     }
     assert_eq!(
         with(|r| (r.constructed, r.retired, r.poison)),
-        Some((1024, 1024, 0))
+        Some((2 * GENERATIONS_PER_CALL, 2 * GENERATIONS_PER_CALL, 0))
     );
     session.finish().unwrap();
     let lines = directory.lines("capture");
     // Retired generations do not accumulate event records or retained owners.
     assert!(!lines.iter().any(|l| kind(l, "owner")));
     assert_eq!(lines.iter().filter(|l| kind(l, "snapshot_end")).count(), 4);
+    assert_eq!(lines.len(), 12);
     assert!(lines.len() <= limits.bounds().unwrap().records);
+    for line in lines.iter().filter(|l| kind(l, "snapshot_begin")) {
+        let expected = number(line, "call") * GENERATIONS_PER_CALL;
+        assert_eq!(number(line, "constructed"), expected);
+        assert_eq!(number(line, "retired"), expected);
+    }
 }
 
 #[cfg_attr(test, test)]
@@ -260,6 +426,33 @@ fn invalid_zero_and_overflow_envelopes_are_rejected_before_file_creation() {
         },
         Envelope {
             edges: usize::MAX,
+            ..envelope()
+        },
+        Envelope {
+            depth: 17,
+            ..envelope()
+        },
+        Envelope {
+            columns: 9,
+            ..envelope()
+        },
+        Envelope {
+            nodes: 9,
+            ..envelope()
+        },
+        Envelope {
+            buffers: 9,
+            ..envelope()
+        },
+        // Individually valid arena counts still cannot exceed the whole-file
+        // record or byte allowance over the declared number of calls.
+        Envelope {
+            slots: 32_768,
+            ..envelope()
+        },
+        Envelope {
+            calls: 64,
+            slots: 256,
             ..envelope()
         },
     ];
@@ -411,9 +604,269 @@ fn file_write_failure_poison_prevents_commit() {
     assert!(kind(&lines[0], "session"));
 }
 
+#[cfg_attr(test, test)]
+fn descriptor_arena_exact_fill_commits_and_one_more_backing_poisons() {
+    use arrow::array::{ArrayRef, Int64Array, RecordBatch};
+    use std::sync::Arc;
+
+    let _guard = session_guard();
+    let directory = Directory::new();
+    let batch = RecordBatch::try_from_iter([(
+        "number",
+        Arc::new(Int64Array::from(vec![1, 2])) as ArrayRef,
+    )])
+    .unwrap();
+    let extra_storage = vec![0_u8; 8];
+    for excess in [false, true] {
+        let name = if excess { "overfull" } else { "full" };
+        let limits = Envelope {
+            calls: 1,
+            descriptors: 2,
+            nodes: 1,
+            buffers: 1,
+            ..envelope()
+        };
+        let session = Session::create(&directory.path(name), limits).unwrap();
+        session.begin_call().unwrap();
+        let owner = Life::new(Kind::Batch, 0, 0);
+        owner.batch(&batch);
+        assert_eq!(
+            with(|r| (r.backings.iter().flatten().count(), r.poison, r.gaps)),
+            Some((2, 0, 0))
+        );
+        if excess {
+            owner.raw(
+                36,
+                extra_storage.as_ptr() as usize,
+                extra_storage.capacity(),
+                extra_storage.len(),
+            );
+            assert_eq!(with(|r| r.poison & POISON_CAPACITY), Some(POISON_CAPACITY));
+            assert_eq!(with(|r| r.backings.iter().flatten().count()), Some(2));
+        }
+        session.snapshot(0);
+        drop(owner);
+        assert_eq!(with(|r| r.backings.iter().flatten().count()), Some(0));
+        session.snapshot(0);
+        session.end_call(0);
+        assert_eq!(session.finish().is_err(), excess);
+        let lines = directory.lines(name);
+        assert_eq!(lines.iter().filter(|l| kind(l, "backing")).count(), 2);
+        assert!(
+            lines
+                .iter()
+                .filter(|l| kind(l, "snapshot_end"))
+                .all(|l| l.contains(if excess {
+                    "\"complete\":false"
+                } else {
+                    "\"complete\":true"
+                }))
+        );
+    }
+}
+
+#[cfg_attr(test, test)]
+fn edge_arena_updates_existing_edge_and_rejects_one_more_relation() {
+    let _guard = session_guard();
+    let directory = Directory::new();
+    let session = Session::create(
+        &directory.path("capture"),
+        Envelope {
+            calls: 1,
+            slots: 2,
+            edges: 1,
+            ..envelope()
+        },
+    )
+    .unwrap();
+    session.begin_call().unwrap();
+    let from = Life::new(Kind::Merge, 0, 0);
+    let to = Life::new(Kind::Key, 0, 0);
+    from.edge(to.id(), 1, 8);
+    from.edge(to.id(), 1, 16);
+    assert_eq!(
+        with(|r| (r.edges.iter().flatten().count(), r.poison)),
+        Some((1, 0))
+    );
+    assert_eq!(
+        with(|r| r.edges.iter().flatten().next().unwrap().bytes),
+        Some(16)
+    );
+    from.edge(to.id(), 2, 32);
+    assert_eq!(with(|r| r.poison & POISON_CAPACITY), Some(POISON_CAPACITY));
+    assert_eq!(with(|r| r.edges.iter().flatten().count()), Some(1));
+    session.snapshot(0);
+    drop(from);
+    drop(to);
+    assert_eq!(with(|r| r.edges.iter().flatten().count()), Some(0));
+    session.snapshot(0);
+    session.end_call(0);
+    assert!(session.finish().is_err());
+    let lines = directory.lines("capture");
+    let edges: Vec<_> = lines.iter().filter(|l| kind(l, "edge")).collect();
+    assert_eq!(edges.len(), 1);
+    assert_eq!(number(edges[0], "bytes"), 16);
+    assert_eq!(number(edges[0], "relation"), 1);
+}
+
+#[cfg_attr(test, test)]
+fn real_lifetimes_and_transitions_at_counter_limit_cannot_commit() {
+    let _guard = session_guard();
+    let directory = Directory::new();
+    let session = Session::create(
+        &directory.path("capture"),
+        Envelope {
+            calls: 1,
+            ..envelope()
+        },
+    )
+    .unwrap();
+    session.begin_call().unwrap();
+    with(|r| {
+        r.next = u64::MAX - 1;
+        r.constructed = u64::MAX - 1;
+        r.retired = u64::MAX - 1;
+        r.epoch = u64::MAX - 1;
+        r.operations = u64::MAX - 1;
+    })
+    .unwrap();
+    let first = Life::new(Kind::Source, 0, 0);
+    assert_eq!(first.id(), u64::MAX - 1);
+    drop(first);
+    assert_eq!(
+        with(|r| (r.next, r.constructed, r.retired, r.poison)),
+        Some((u64::MAX, u64::MAX, u64::MAX, 0))
+    );
+    let last = Life::new(Kind::Source, 0, 0);
+    assert_eq!(last.id(), u64::MAX);
+    drop(last);
+    drop(Transition::begin());
+    drop(Transition::begin());
+    assert_eq!(
+        with(|r| (
+            r.next,
+            r.constructed,
+            r.retired,
+            r.epoch,
+            r.operations,
+            r.in_flight
+        )),
+        Some((u64::MAX, u64::MAX, u64::MAX, u64::MAX, u64::MAX, 0))
+    );
+    assert_eq!(
+        with(|r| r.poison & POISON_ARITHMETIC),
+        Some(POISON_ARITHMETIC)
+    );
+    session.snapshot(0);
+    session.snapshot(0);
+    session.end_call(0);
+    assert!(session.finish().is_err());
+    assert!(
+        directory
+            .lines("capture")
+            .last()
+            .unwrap()
+            .contains("\"complete\":false")
+    );
+}
+
+#[cfg_attr(test, test)]
+fn full_live_arenas_leave_exactly_one_record_for_commit_footer() {
+    use arrow::array::{ArrayRef, Int64Array, RecordBatch};
+    use datafusion_execution::memory_pool::{
+        GreedyMemoryPool, MemoryConsumer, MemoryPool,
+    };
+    use std::sync::Arc;
+
+    let _guard = session_guard();
+    let directory = Directory::new();
+    let limits = Envelope {
+        slots: 2,
+        descriptors: 2,
+        edges: 1,
+        nodes: 1,
+        buffers: 1,
+        ..envelope()
+    };
+    let bounds = limits.bounds().unwrap();
+    let session = Session::create(&directory.path("capture"), limits).unwrap();
+    let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1024));
+    let reservation = MemoryConsumer::new("ownership footer control").register(&pool);
+    let batch = RecordBatch::try_from_iter([(
+        "number",
+        Arc::new(Int64Array::from(vec![1, 2])) as ArrayRef,
+    )])
+    .unwrap();
+    for _ in 0..2 {
+        session.begin_call().unwrap();
+        let first = Life::new(Kind::Merge, 0, 0);
+        let second = Life::new(Kind::Batch, first.id(), 0);
+        let first_piece = Piece::new(&reservation, first.id());
+        let second_piece = Piece::new(&reservation, second.id());
+        first.update(|o| o.piece = first_piece.id());
+        second.update(|o| o.piece = second_piece.id());
+        second.batch(&batch);
+        first.edge(second.id(), 1, 16);
+        assert_eq!(
+            with(|r| (
+                r.owners.iter().flatten().count(),
+                r.pieces.iter().flatten().count(),
+                r.backings.iter().flatten().count(),
+                r.edges.iter().flatten().count(),
+                r.poison,
+                r.gaps,
+            )),
+            Some((2, 2, 2, 1, 0, 0))
+        );
+        session.snapshot(0);
+        session.snapshot(0);
+        // Both cuts observe full arenas. Retirement after the cuts prevents
+        // retaining old generations while the next call fills the same slots.
+        drop(first);
+        drop(second);
+        drop(first_piece);
+        drop(second_piece);
+        session.end_call(0);
+    }
+    assert_eq!(with(|r| r.records), Some(bounds.records as u64 - 1));
+    let before = std::fs::metadata(directory.path("capture")).unwrap().len();
+    assert!(before <= (bounds.bytes - LINE_BYTES) as u64);
+    session.finish().unwrap();
+    let lines = directory.lines("capture");
+    assert_eq!(lines.len(), bounds.records);
+    let footer = lines.last().unwrap();
+    assert!(kind(footer, "session_end"));
+    assert!(footer.contains("\"complete\":true"));
+    assert_eq!(number(footer, "records"), bounds.records as u64 - 1);
+    assert_eq!(number(footer, "bytes"), before);
+    assert!(
+        std::fs::metadata(directory.path("capture")).unwrap().len()
+            <= bounds.bytes as u64
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[cfg_attr(test, test)]
+fn final_footer_write_failure_never_reports_committed_capture() {
+    let _guard = session_guard();
+    let directory = Directory::new();
+    let session = Session::create(&directory.path("capture"), envelope()).unwrap();
+    complete_empty_call(&session);
+    complete_empty_call(&session);
+    assert_eq!(with(|r| r.poison), Some(0));
+    let full = OpenOptions::new().write(true).open("/dev/full").unwrap();
+    with(|r| r.file = full).unwrap();
+    assert!(session.finish().is_err());
+    let lines = directory.lines("capture");
+    assert_eq!(lines.iter().filter(|l| kind(l, "run_end")).count(), 2);
+    assert!(!lines.iter().any(|l| kind(l, "session_end")));
+}
+
 /// Execute these controls from the existing workspace product test lane.
 pub(super) fn run_controls() {
     sequential_calls_preserve_generation_and_counters_without_reset();
+    stale_session_guards_cannot_mutate_reused_identifiers();
+    unsupported_coverage_survives_retained_alias_until_final_retirement();
     retirement_reuses_one_live_slot_across_many_generations();
     capture_creation_is_exclusive_for_active_session_and_existing_file();
     dropping_session_leaves_no_commit_footer_and_releases_global_capture();
@@ -423,6 +876,13 @@ pub(super) fn run_controls() {
     calls_without_exactly_two_snapshots_cannot_commit();
     finishing_with_missing_or_open_call_cannot_commit();
     arithmetic_counter_overflow_poison_does_not_wrap_generation();
+    descriptor_arena_exact_fill_commits_and_one_more_backing_poisons();
+    edge_arena_updates_existing_edge_and_rejects_one_more_relation();
+    real_lifetimes_and_transitions_at_counter_limit_cannot_commit();
+    full_live_arenas_leave_exactly_one_record_for_commit_footer();
     #[cfg(target_os = "linux")]
-    file_write_failure_poison_prevents_commit();
+    {
+        file_write_failure_poison_prevents_commit();
+        final_footer_write_failure_never_reports_committed_capture();
+    }
 }

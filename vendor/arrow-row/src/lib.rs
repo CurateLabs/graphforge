@@ -1237,17 +1237,29 @@ pub struct Rows {
 #[cfg(feature = "ownership-diagnostics")]
 #[derive(Debug, Clone, Copy)]
 pub struct DiagnosticRowsStorage {
+    /// Address of the row-byte Vec storage.
     pub buffer_ptr: usize,
+    /// Initialized row bytes.
     pub buffer_len: usize,
+    /// Allocated row-byte Vec capacity.
     pub buffer_capacity: usize,
+    /// Address of the offsets Vec storage.
     pub offsets_ptr: usize,
+    /// Initialized offset elements.
     pub offsets_len: usize,
+    /// Allocated offsets Vec capacity in elements.
     pub offsets_capacity: usize,
+    /// Address of the inline Rows configuration.
     pub config_ptr: usize,
+    /// Address of the shared sort-field slice payload.
     pub fields_ptr: usize,
+    /// Number of shared sort fields.
     pub fields_len: usize,
+    /// Byte width of the shared sort-field slice payload.
     pub fields_bytes: usize,
+    /// Observed strong reference count of the shared field slice.
     pub fields_refs: usize,
+    /// Whether each field datatype has no separately allocated metadata.
     pub fields_metadata_complete: bool,
 }
 
@@ -1256,15 +1268,25 @@ pub struct DiagnosticRowsStorage {
 #[cfg(feature = "ownership-diagnostics")]
 #[derive(Debug, Clone, Copy)]
 pub struct DiagnosticConverterStorage {
+    /// Address of the shared sort-field slice payload.
     pub fields_ptr: usize,
+    /// Number of shared sort fields.
     pub fields_len: usize,
+    /// Byte width of the shared sort-field slice payload.
     pub fields_bytes: usize,
+    /// Observed strong reference count of the shared field slice.
     pub fields_refs: usize,
+    /// Address of the converter codec Vec storage.
     pub codecs_ptr: usize,
+    /// Initialized codec elements.
     pub codecs_len: usize,
+    /// Allocated codec Vec capacity in elements.
     pub codecs_capacity: usize,
+    /// Byte width of one codec element.
     pub codec_bytes: usize,
+    /// Whether all codecs have no separately allocated state.
     pub stateless_codecs: bool,
+    /// Whether each field datatype has no separately allocated metadata.
     pub fields_metadata_complete: bool,
 }
 

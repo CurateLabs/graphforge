@@ -411,8 +411,12 @@ impl<F: FnMut(Backing) -> bool> Visitor<F> {
             DataType::Date32 => primitive!(Date32Type),
             DataType::Date64 => primitive!(Date64Type),
             DataType::Time32(TimeUnit::Second) => primitive!(Time32SecondType),
-            DataType::Time32(TimeUnit::Millisecond) => primitive!(Time32MillisecondType),
-            DataType::Time64(TimeUnit::Microsecond) => primitive!(Time64MicrosecondType),
+            DataType::Time32(TimeUnit::Millisecond) => {
+                primitive!(Time32MillisecondType)
+            }
+            DataType::Time64(TimeUnit::Microsecond) => {
+                primitive!(Time64MicrosecondType)
+            }
             DataType::Time64(TimeUnit::Nanosecond) => primitive!(Time64NanosecondType),
             DataType::Timestamp(TimeUnit::Second, None) => {
                 primitive!(TimestampSecondType)
@@ -439,7 +443,9 @@ impl<F: FnMut(Backing) -> bool> Visitor<F> {
             DataType::Interval(IntervalUnit::YearMonth) => {
                 primitive!(IntervalYearMonthType)
             }
-            DataType::Interval(IntervalUnit::DayTime) => primitive!(IntervalDayTimeType),
+            DataType::Interval(IntervalUnit::DayTime) => {
+                primitive!(IntervalDayTimeType)
+            }
             DataType::Interval(IntervalUnit::MonthDayNano) => {
                 primitive!(IntervalMonthDayNanoType)
             }

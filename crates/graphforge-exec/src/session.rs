@@ -1954,3 +1954,6 @@ mod spill_fifo_tests;
 
 #[cfg(test)]
 mod aggregate_input_tests;
+
+#[cfg(test)]
+mod terminal_ownership_tests;

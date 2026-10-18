@@ -278,16 +278,18 @@ impl SpillPoolWriter {
         if !offer {
             return Ok(());
         }
-        let authority = receipt.workspace.take_owned_authority()?;
-        let registration =
-            super::resident_metadata::literal_registration_bytes("SpillWriterEncode")
+        let (credit, mut producers) =
+            receipt.workspace.with_owned_authority(|authority| {
+                let registration = super::resident_metadata::literal_registration_bytes(
+                    "SpillWriterEncode",
+                )
                 .ok_or_else(|| {
                     datafusion_common::DataFusionError::ResourcesExhausted(
                         "FIFO writer registration bound overflow".into(),
                     )
                 })?;
-        let (credit, mut producers) =
-            Credit::with_readers_and_control(authority, 1, registration)?;
+                Credit::with_readers_and_control(authority, 1, registration)
+            })?;
         let producer = producers.pop().expect("one preadmitted FIFO root");
         drop(producers);
         let mut candidate = Some((credit, producer));

@@ -79,9 +79,6 @@ impl CopyAdmission {
     pub(super) fn charged_size() -> usize {
         size_of::<ChargedCopyAdmission>()
     }
-    pub(super) fn diagnostic_id(&self) -> u64 {
-        self.diagnostic.id()
-    }
     fn observe(&self, state: &State) {
         self.diagnostic_piece
             .refresh(&state.authority, self.diagnostic.id());
@@ -127,6 +124,7 @@ impl CopyAdmission {
         let diagnostic_piece = od::Piece::new(&authority, diagnostic.id());
         diagnostic.update(|o| {
             o.piece = diagnostic_piece.id();
+            o.object = envelope as u64;
             o.held = authority.size() as u64;
             o.bytes = Self::control_bytes() as u64;
             o.flags = 4;
@@ -165,9 +163,18 @@ impl CopyAdmission {
         let diagnostic_piece = od::Piece::new(&authority, diagnostic.id());
         diagnostic.update(|o| {
             o.piece = diagnostic_piece.id();
+            o.object = envelope as u64;
             o.held = authority.size() as u64;
             o.bytes = Self::control_bytes() as u64;
             o.flags = 4;
+            o.c = 2;
+            o.d = match capability {
+                CopyCapability::Legacy => 0,
+                CopyCapability::PrimitiveField => 2,
+                CopyCapability::Row { encoded_width } => {
+                    1 | ((encoded_width as u64) << 2)
+                }
+            };
         });
         let state = Mutex::new(State {
             authority,
@@ -245,8 +252,8 @@ impl CopyAdmission {
             state.authority.try_grow(target - state.authority.size())?;
         }
         state.field = FieldLifetime::Live;
-        self.observe(&state);
         state.preparing = true;
+        self.observe(&state);
         Ok(())
     }
     /// The wrapper must destroy inner cursor/GC/failed-phase data first.
@@ -255,13 +262,12 @@ impl CopyAdmission {
         let mut state = self.state.lock().unwrap();
         if state.field == FieldLifetime::Live {
             state.field = FieldLifetime::Retired;
-            self.observe(&state);
             state.preparing = false;
-            self.observe(&state);
             if !state.active {
                 let excess = state.authority.size() - self.retained(&state);
                 state.authority.shrink(excess);
             }
+            self.observe(&state);
         }
     }
     pub(super) fn has_output_bounds(&self) -> bool {
@@ -296,6 +302,7 @@ impl CopyAdmission {
             let target = self.retained(&state);
             let excess = state.authority.size() - target;
             state.authority.shrink(excess);
+            self.observe(&state);
         }
     }
     pub(super) fn begin(self: &Arc<Self>) -> Result<Phase> {
@@ -401,6 +408,7 @@ impl Resident {
 }
 impl Drop for Resident {
     fn drop(&mut self) {
+        self.diagnostic.begin_drop();
         let _transition = od::Transition::begin();
         let mut state = self.admission.state.lock().unwrap();
         let bytes = self.bytes.load(Ordering::Relaxed);
@@ -463,9 +471,12 @@ impl Phase {
     // New bookkeeping is additional to the admitted kernel workspace. Grow
     // before its construction, never in response to an allocated output.
     fn extra(&self, bytes: usize) -> Result<()> {
+        let _transition = od::Transition::begin();
         let state = self.admission.state.lock().unwrap();
         add(state.authority.size(), bytes)?;
-        state.authority.try_grow(bytes)
+        let result = state.authority.try_grow(bytes);
+        self.admission.observe(&state);
+        result
     }
     /// Replace dead operation workspace, preserving every actual resident and
     /// the live Field production floor in the SAME original reservation.
@@ -475,13 +486,16 @@ impl Phase {
         if !state.active || state.preparing {
             return Err(bound_error());
         }
-        state
+        let result = state
             .authority
-            .try_resize(add(self.admission.retained(&state), operation)?)
+            .try_resize(add(self.admission.retained(&state), operation)?);
+        self.admission.observe(&state);
+        result
     }
 }
 impl Drop for Phase {
     fn drop(&mut self) {
+        self.diagnostic.begin_drop();
         let _transition = od::Transition::begin();
         let mut state = self.admission.state.lock().unwrap();
         state.active = false;
@@ -899,6 +913,7 @@ impl ArrowReservation for Claimed {
         // Immutable engine output only: a later mutable allocation needs its
         // operator's normal admission; this fixed lifetime token cannot grow it.
         self.size = size;
+        self.diagnostic.update(|o| o.bytes = size as u64);
     }
 }
 impl MemoryPool for Claims {
@@ -926,5 +941,16 @@ impl MemoryPool for Claims {
     }
     fn capacity(&self) -> usize {
         self.lease.bytes.load(Ordering::Relaxed)
+    }
+}
+
+impl Drop for CopyAdmission {
+    fn drop(&mut self) {
+        self.diagnostic.begin_drop();
+    }
+}
+impl Drop for Claimed {
+    fn drop(&mut self) {
+        self.diagnostic.begin_drop();
     }
 }

@@ -163,9 +163,10 @@ pub struct RowCursorStream {
     copy_resident: Option<Arc<Resident>>,
     // A failed mutation can retain converter/reuse backing until stream drop.
     failed_phase: Option<Phase>,
+    #[cfg(feature = "test_utils")]
+    diagnostic_rows: Vec<[od::Life; 2]>,
     diagnostic_piece: od::Piece,
     diagnostic: od::Life,
-    diagnostic_rows: Vec<[od::Life; 2]>,
 }
 
 impl RowCursorStream {
@@ -271,8 +272,9 @@ impl RowCursorStream {
         if let Some(r) = &resident {
             diagnostic.edge(r.diagnostic_id(), 2, metadata);
         }
-        let mut diagnostic_rows = Vec::new();
+        let mut diagnostic_rows: Vec<[od::Life; 2]> = Vec::new();
         if cfg!(feature = "test_utils")
+            && rows.len().checked_mul(2).is_some_and(od::sidecar_permitted)
             && diagnostic_rows.try_reserve_exact(rows.len()).is_ok()
         {
             for pair in &rows {
@@ -295,6 +297,7 @@ impl RowCursorStream {
             od::gap(od::GAP_ROWS_STORAGE);
         }
         Ok(Self {
+            #[cfg(feature = "test_utils")]
             diagnostic_rows,
             diagnostic,
             diagnostic_piece,
@@ -376,6 +379,7 @@ impl RowCursorStream {
             rows.clear();
 
             self.converter.append(&mut rows, &cols)?;
+            #[cfg(feature = "test_utils")]
             if let Some(pair) = self.diagnostic_rows.get(stream_idx) {
                 pair[1].rows(&rows);
             }
@@ -393,6 +397,7 @@ impl RowCursorStream {
                 .map(|p| p.resident(add(rows.size(), 2 * size_of::<usize>())?))
                 .transpose()?;
             self.rows.save(stream_idx, &rows, resident.clone());
+            #[cfg(feature = "test_utils")]
             if let Some(pair) = self.diagnostic_rows.get_mut(stream_idx) {
                 if let Some(r) = &resident {
                     pair[1].edge(r.diagnostic_id(), 2, rows.size());
@@ -413,6 +418,7 @@ impl RowCursorStream {
             ))
         })();
         if result.is_err() {
+            #[cfg(feature = "test_utils")]
             if let Some(pair) = self.diagnostic_rows.get_mut(stream_idx) {
                 pair[1] = od::Life::default();
             }
@@ -445,6 +451,7 @@ impl PartitionedStream for RowCursorStream {
             // Drop cached Rows before their paired leases; a live previous
             // cursor still retains its own Rows and lease until merge sees EOF.
             self.rows.inner[stream_idx] = [None, None];
+            #[cfg(feature = "test_utils")]
             if let Some(pair) = self.diagnostic_rows.get_mut(stream_idx) {
                 *pair = Default::default();
             }
@@ -771,5 +778,16 @@ mod tests {
 
         assert_eq!(total_rows, original_len);
         Ok(())
+    }
+}
+
+impl Drop for RowCursorStream {
+    fn drop(&mut self) {
+        self.diagnostic.begin_drop();
+    }
+}
+impl<T: CursorArray> Drop for FieldCursorStream<T> {
+    fn drop(&mut self) {
+        self.diagnostic.begin_drop();
     }
 }

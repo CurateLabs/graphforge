@@ -759,19 +759,6 @@ pub(crate) struct ReservationStream {
 }
 
 impl ReservationStream {
-    pub(crate) fn new(
-        schema: SchemaRef,
-        inner: SendableRecordBatchStream,
-        reservation: MemoryReservation,
-    ) -> Self {
-        Self {
-            schema,
-            inner,
-            reservation,
-            diagnostic_piece: Default::default(),
-            diagnostic: Default::default(),
-        }
-    }
     pub(crate) fn new_observed(
         schema: SchemaRef,
         inner: SendableRecordBatchStream,
@@ -1186,5 +1173,11 @@ mod test {
             0,
             "Memory should be freed when stream is dropped"
         );
+    }
+}
+
+impl Drop for ReservationStream {
+    fn drop(&mut self) {
+        self.diagnostic.begin_drop();
     }
 }

@@ -90,6 +90,7 @@ pub trait CursorValues {
 /// depending on the column
 /// types
 #[derive(Debug)]
+#[allow(dead_code)]
 struct ChargedCursor<T> {
     offset: usize,
     values: T,
@@ -196,6 +197,8 @@ pub struct RowValues {
     // Last field: row backing drops before its paired authority.
     copy_resident: Option<Arc<super::copy_admission::Resident>>,
     copy_metadata: Option<Arc<super::copy_admission::Resident>>,
+    // Retirement-only sentinel for the original reservation field above.
+    #[allow(dead_code)]
     diagnostic_piece: od::Piece,
     diagnostic: od::Life,
 }
@@ -461,6 +464,8 @@ pub struct ArrayValues<T: CursorValues> {
     /// Tracks the memory used by the values array,
     /// freed on drop.
     _reservation: MemoryReservation,
+    // Retirement-only sentinel for the original reservation field above.
+    #[allow(dead_code)]
     diagnostic_piece: od::Piece,
     diagnostic: od::Life,
 }
@@ -718,5 +723,16 @@ mod tests {
         // 6 < -3
         b.advance();
         assert_eq!(a.cmp(&b), Ordering::Less);
+    }
+}
+
+impl Drop for RowValues {
+    fn drop(&mut self) {
+        self.diagnostic.begin_drop();
+    }
+}
+impl<T: CursorValues> Drop for ArrayValues<T> {
+    fn drop(&mut self) {
+        self.diagnostic.begin_drop();
     }
 }

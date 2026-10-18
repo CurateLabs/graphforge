@@ -18,6 +18,7 @@
 //! Create a stream that do a multi level merge stream
 
 use crate::metrics::BaselineMetrics;
+use crate::terminal_ownership as od;
 use crate::{EmptyRecordBatchStream, SpillManager};
 use arrow::array::RecordBatch;
 use std::fmt::{Debug, Formatter};
@@ -138,6 +139,8 @@ pub(crate) struct MultiLevelMergeBuilder {
     reservation: MemoryReservation,
     fetch: Option<usize>,
     enable_round_robin_tie_breaker: bool,
+    diagnostic_piece: od::Piece,
+    diagnostic: od::Life,
 }
 
 impl Debug for MultiLevelMergeBuilder {
@@ -160,7 +163,16 @@ impl MultiLevelMergeBuilder {
         fetch: Option<usize>,
         enable_round_robin_tie_breaker: bool,
     ) -> Self {
+        let diagnostic = od::Life::inherited(od::Kind::Source);
+        let diagnostic_piece = od::Piece::new(&reservation, diagnostic.id());
+        diagnostic.update(|o| {
+            o.piece = diagnostic_piece.id();
+            o.held = reservation.size() as u64;
+            o.flags = 4;
+        });
         Self {
+            diagnostic,
+            diagnostic_piece,
             spill_manager,
             schema,
             sorted_spill_files,
@@ -224,6 +236,7 @@ impl MultiLevelMergeBuilder {
     fn merge_sorted_runs_within_mem_limit(
         &mut self,
     ) -> Result<SendableRecordBatchStream> {
+        let _transition = od::Transition::begin();
         match (self.sorted_spill_files.len(), self.sorted_streams.len()) {
             // No data so empty batch
             (0, 0) => Ok(Box::pin(EmptyRecordBatchStream::new(Arc::clone(
@@ -262,6 +275,9 @@ impl MultiLevelMergeBuilder {
                 // bytes cover spill file buffer reservations without additional pool
                 // allocation.
                 let mut memory_reservation = self.reservation.take();
+                let mut memory_piece = mem::take(&mut self.diagnostic_piece);
+                self.diagnostic_piece =
+                    memory_piece.empty_successor(&self.reservation, self.diagnostic.id());
 
                 // Don't account for existing streams memory
                 // as we are not holding the memory for them
@@ -287,6 +303,7 @@ impl MultiLevelMergeBuilder {
                 // stream's BatchBuilder.
                 if is_only_merging_memory_streams {
                     mem::swap(&mut self.reservation, &mut memory_reservation);
+                    mem::swap(&mut self.diagnostic_piece, &mut memory_piece);
                 }
 
                 // Preserve the existing sorted-copy half of the reservation.
@@ -328,16 +345,34 @@ impl MultiLevelMergeBuilder {
                 } else {
                     CopyCapability::Legacy
                 };
+                memory_piece.refresh(&memory_reservation, self.diagnostic.id());
                 let (input_credit, producers) = if retiring {
-                    crate::spill::admission::Credit::with_readers(
-                        memory_reservation.split(input_bytes),
-                        sorted_spill_files.len(),
+                    let input = memory_reservation.split(input_bytes);
+                    let piece = memory_piece.child(&input, 0, input_bytes);
+                    memory_piece.refresh(&memory_reservation, self.diagnostic.id());
+                    piece.transfer_to(
+                        self.diagnostic.id(),
+                        od::Kind::Credit as u64,
+                        || {
+                            crate::spill::admission::Credit::with_readers(
+                                input,
+                                sorted_spill_files.len(),
+                            )
+                        },
                     )?
                 } else {
                     (
-                        crate::spill::admission::Credit::new(
-                            memory_reservation.split(input_bytes),
-                        ),
+                        {
+                            let input = memory_reservation.split(input_bytes);
+                            let piece = memory_piece.child(&input, 0, input_bytes);
+                            memory_piece
+                                .refresh(&memory_reservation, self.diagnostic.id());
+                            piece.transfer_to(
+                                self.diagnostic.id(),
+                                od::Kind::Credit as u64,
+                                || crate::spill::admission::Credit::new(input),
+                            )
+                        },
                         Vec::new(),
                     )
                 };
@@ -348,8 +383,13 @@ impl MultiLevelMergeBuilder {
 
                 let copy = if all_ipc_inputs && !is_only_merging_memory_streams {
                     let authority = memory_reservation.take();
+                    let authority_piece = mem::take(&mut memory_piece);
                     if capability == CopyCapability::Legacy {
-                        Some(CopyAdmission::new(authority)?)
+                        Some(authority_piece.transfer_to(
+                            self.diagnostic.id(),
+                            od::Kind::Copy as u64,
+                            || CopyAdmission::new(authority),
+                        )?)
                     } else {
                         let streams = sorted_spill_files.len();
                         let (cursor, merge) = match capability {
@@ -401,7 +441,11 @@ impl MultiLevelMergeBuilder {
                                 )?,
                             )?,
                         )?;
-                        Some(CopyAdmission::preparing(authority, metadata, capability)?)
+                        Some(authority_piece.transfer_to(
+                            self.diagnostic.id(),
+                            od::Kind::Copy as u64,
+                            || CopyAdmission::preparing(authority, metadata, capability),
+                        )?)
                     }
                 } else {
                     None
@@ -441,11 +485,13 @@ impl MultiLevelMergeBuilder {
                 } else {
                     // Attach the memory reservation to the stream to make sure we have enough memory
                     // throughout the merge process as we bypassed the memory pool for the merge sort stream
-                    Ok(Box::pin(StreamAttachedReservation::new(
-                        merge_sort_stream,
-                        memory_reservation,
-                        copy,
-                    )))
+                    Ok(memory_piece.transfer(self.diagnostic.id(), || {
+                        Box::pin(StreamAttachedReservation::new(
+                            merge_sort_stream,
+                            memory_reservation,
+                            copy,
+                        )) as SendableRecordBatchStream
+                    }))
                 }
             }
         }
@@ -487,7 +533,16 @@ impl MultiLevelMergeBuilder {
             builder = builder.with_reservation(self.reservation.take());
         }
 
-        builder.build()
+        if all_in_memory {
+            let piece = mem::take(&mut self.diagnostic_piece);
+            self.diagnostic_piece =
+                piece.empty_successor(&self.reservation, self.diagnostic.id());
+            piece.transfer_to(self.diagnostic.id(), od::Kind::Builder as u64, || {
+                builder.build()
+            })
+        } else {
+            od::scoped(self.diagnostic.id(), 0, || builder.build())
+        }
     }
 
     /// Return the sorted spill files to use for the next phase, and the buffer size
@@ -565,6 +620,9 @@ struct StreamAttachedReservation {
     schema: SchemaRef,
     reservation: MemoryReservation,
     copy: Option<Arc<CopyAdmission>>,
+    #[allow(dead_code)] // Retirement-only sentinel after original fields.
+    diagnostic_piece: od::Piece,
+    diagnostic: od::Life,
 }
 
 impl StreamAttachedReservation {
@@ -573,8 +631,18 @@ impl StreamAttachedReservation {
         reservation: MemoryReservation,
         copy: Option<Arc<CopyAdmission>>,
     ) -> Self {
+        let diagnostic = od::Life::inherited(od::Kind::Source);
+        let diagnostic_piece = od::Piece::new(&reservation, diagnostic.id());
+        diagnostic.update(|o| {
+            o.piece = diagnostic_piece.id();
+            o.held = reservation.size() as u64;
+            o.flags = 4;
+        });
+
         let schema = stream.schema();
         Self {
+            diagnostic,
+            diagnostic_piece,
             stream: Some(stream),
             schema,
             reservation,
@@ -593,6 +661,7 @@ impl StreamAttachedReservation {
 }
 impl Drop for StreamAttachedReservation {
     fn drop(&mut self) {
+        self.diagnostic.begin_drop();
         self.retire();
     }
 }
@@ -634,5 +703,11 @@ impl Stream for StreamAttachedReservation {
 impl RecordBatchStream for StreamAttachedReservation {
     fn schema(&self) -> SchemaRef {
         Arc::clone(&self.schema)
+    }
+}
+
+impl Drop for MultiLevelMergeBuilder {
+    fn drop(&mut self) {
+        self.diagnostic.begin_drop();
     }
 }

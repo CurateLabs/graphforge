@@ -268,6 +268,11 @@ impl<'a> StreamingMergeBuilder<'a> {
         let reservation =
             reservation.expect("Reservation cannot be empty for streaming merge");
 
+        if copy.is_none() {
+            crate::terminal_ownership::gap(
+                crate::terminal_ownership::GAP_UNKNOWN_SPONSOR,
+            );
+        }
         if let Some(copy) = copy
             .as_ref()
             .filter(|copy| copy.capability() == CopyCapability::PrimitiveField)

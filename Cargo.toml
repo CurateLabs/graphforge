@@ -26,8 +26,6 @@ members = [
   "crates/graphforge-cli",
 ]
 # Vendored third-party crates are path dependencies through [patch.crates-io]
-# Additive borrowed accessors, activated only by development test utilities.
-arrow-row = { path = "vendor/arrow-row" }
 # below. Excluding them keeps them from becoming members, so fmt, clippy and the
 # workspace test run never lint or test code we do not own. Cargo matches each
 # `exclude` entry as a literal path (a `vendor/*` glob is not recognised), so list

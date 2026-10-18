@@ -34,7 +34,7 @@ use datafusion_common::stats::Precision;
 use datafusion_common::{Result, plan_err};
 use datafusion_execution::memory_pool::MemoryReservation;
 
-use futures::{StreamExt, TryStreamExt};
+use futures::TryStreamExt;
 
 /// [`MemoryReservation`] used across query execution streams
 pub(crate) type SharedMemoryReservation = Arc<MemoryReservation>;
@@ -211,6 +211,8 @@ pub fn spawn_buffered(
             let mut observed = crate::terminal_ownership::ProducerInput {
                 input,
                 diagnostic: producer,
+                #[cfg(feature = "test_utils")]
+                polling: None,
             };
 
             let queue_id = queue.id();
@@ -224,6 +226,11 @@ pub fn spawn_buffered(
                         return Ok(());
                     };
                     observed.diagnostic.update(|o| o.a = 2);
+                    #[cfg(feature = "test_utils")]
+                    {
+                        observed.polling =
+                            Some(crate::terminal_ownership::Transition::begin());
+                    }
                     let Some(item) = futures::future::poll_fn(|cx| {
                         crate::terminal_ownership::clear_handoff();
                         observed.input.as_mut().poll_next(cx)
@@ -241,15 +248,13 @@ pub fn spawn_buffered(
                         let handed = if handed.id() != 0 {
                             handed
                         } else {
-                            crate::terminal_ownership::gap(
-                                crate::terminal_ownership::GAP_QUEUE,
-                            );
                             let life = crate::terminal_ownership::Life::new(
                                 crate::terminal_ownership::Kind::Batch,
                                 observed.diagnostic.id(),
                                 0,
                             );
                             life.batch(batch);
+                            life.observe_claim_aliases();
                             life.update(|o| {
                                 o.a = batch.num_rows() as u64;
                                 o.b = batch.num_columns() as u64;
@@ -260,10 +265,14 @@ pub fn spawn_buffered(
                     }
                     permit.send(item);
                     observed.diagnostic.update(|o| o.a = 0);
+                    #[cfg(feature = "test_utils")]
+                    {
+                        observed.polling = None;
+                    }
                 }
             });
 
-            if cfg!(feature = "test_utils") {
+            if queue.id() != 0 {
                 Box::pin(crate::terminal_ownership::QueueStream::new(
                     builder.build(),
                     queue,

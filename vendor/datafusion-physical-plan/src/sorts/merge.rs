@@ -876,3 +876,9 @@ mod tests {
         assert!(matches!(stream.poll_next_inner(&mut cx), Poll::Ready(None)));
     }
 }
+
+impl<C: CursorValues> Drop for SortPreservingMergeStream<C> {
+    fn drop(&mut self) {
+        self.diagnostic.begin_drop();
+    }
+}

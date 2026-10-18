@@ -3,12 +3,12 @@
 //! Addresses are observations scoped to live generation IDs, never funding IDs.
 //! Product operations run outside this recorder's mutex. A snapshot with an open
 //! transition is explicitly incomplete; this is not a query-wide atomic inventory.
-use std::cell::Cell;
 use std::fmt::{self, Write as _};
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write as _};
 use std::path::Path;
-use std::sync::{Mutex, OnceLock};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Condvar, Mutex, OnceLock};
 
 pub mod arrays;
 
@@ -46,6 +46,10 @@ pub enum Kind {
     ReaderPermit = 17,
     BatchMetadata = 18,
 }
+/// Flags: 1 opaque layout; 2 LIVE owner whose construction parent retired
+/// (creation history unavailable; parent is current observed containment);
+/// 4 metadata-only occurrence; 8 Rows raw-storage occurrence. `coverage` is a
+/// live semantic gap mask and is carried through numeric ownership handoffs.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct OwnerRecord {
     pub call: u64,
@@ -61,6 +65,7 @@ pub struct OwnerRecord {
     pub c: u64,
     pub d: u64,
     pub flags: u64,
+    pub coverage: u64,
 }
 #[derive(Clone, Copy, Debug, Default)]
 pub struct PieceRecord {
@@ -112,6 +117,8 @@ pub struct Bounds {
     pub records: usize,
     pub bytes: usize,
     pub observer_bytes: usize,
+    pub metadata_per_slot: usize,
+    pub tls_bytes: usize,
 }
 impl Envelope {
     pub fn bounds(self) -> io::Result<Bounds> {
@@ -132,6 +139,10 @@ impl Envelope {
             || self.nodes == 0
             || self.depth == 0
             || self.buffers == 0
+            || self.depth > 16
+            || self.columns > self.descriptors
+            || self.nodes > self.descriptors
+            || self.buffers > self.descriptors
         {
             return Err(bad());
         }
@@ -149,6 +160,24 @@ impl Envelope {
             .and_then(|v| v.checked_add(2))
             .ok_or_else(bad)?;
         let bytes = records.checked_mul(LINE_BYTES).ok_or_else(bad)?;
+        if records > 100000 || bytes > 64 * 1024 * 1024 {
+            return Err(bad());
+        }
+        // Named sum dominates each owner's added fields, one numeric sidecar
+        // element and the simultaneously live exact-reserve sidecar headers.
+        // No sidecar grows after construction; guard elements consume owner slots.
+        let metadata_per_slot = 4 * size_of::<Life>()
+            + 2 * size_of::<Piece>()
+            + 2 * size_of::<Option<Transition>>()
+            + size_of::<Vec<Life>>()
+            + size_of::<std::vec::IntoIter<Life>>()
+            + size_of::<QueueStream>()
+            + size_of::<QueueRetirement>()
+            + 2 * size_of::<Option<ThreadState>>();
+        // Bridge state is in bounded arena slots, not per-thread TLS. A slot
+        // retires as soon as origin/move/handoff are all empty; thread churn
+        // therefore consumes no cumulative allowance.
+        let tls_bytes = 0;
         let live = self
             .slots
             .checked_mul(
@@ -176,14 +205,24 @@ impl Envelope {
                 v.checked_add(
                     size_of::<Recorder>()
                         + size_of::<Mutex<Option<Recorder>>>()
+                        + size_of::<Condvar>()
+                        + 2 * size_of::<AtomicU64>()
                         + LINE_BYTES,
                 )
             })
+            .and_then(|v| {
+                self.slots
+                    .checked_mul(metadata_per_slot)
+                    .and_then(|m| v.checked_add(m))
+            })
+            .and_then(|v| v.checked_add(tls_bytes))
             .ok_or_else(bad)?;
         Ok(Bounds {
             records,
             bytes,
             observer_bytes,
+            metadata_per_slot,
+            tls_bytes,
         })
     }
 }
@@ -211,8 +250,62 @@ impl fmt::Write for Line {
         Ok(())
     }
 }
+#[derive(Clone, Copy, Default)]
+struct Anchor {
+    attempt: u64,
+    stage: u64,
+    failed_piece: u64,
+    consumer: u64,
+    request: u64,
+    error_ptr: u64,
+    error_len: u64,
+    error_hash: u64,
+    error_truncated: bool,
+}
+fn error_anchor(error: &datafusion_common::DataFusionError) -> Anchor {
+    if let datafusion_common::DataFusionError::ResourcesExhausted(message) =
+        error.find_root()
+    {
+        let mut hash = 0xcbf29ce484222325u64;
+        for b in message.as_bytes().iter().take(65536) {
+            hash = (hash ^ u64::from(*b)).wrapping_mul(0x100000001b3);
+        }
+        Anchor {
+            error_ptr: message.as_ptr() as usize as u64,
+            error_len: message.len() as u64,
+            error_hash: hash,
+            error_truncated: message.len() > 65536,
+            ..Default::default()
+        }
+    } else {
+        Anchor::default()
+    }
+}
+#[derive(Clone, Copy)]
+struct ThreadState {
+    thread: std::thread::ThreadId,
+    origin: (u64, u64),
+    moving: (u64, u64),
+    handoff: u64,
+}
+impl ThreadState {
+    fn empty(thread: std::thread::ThreadId) -> Self {
+        Self {
+            thread,
+            origin: (0, 0),
+            moving: (0, 0),
+            handoff: 0,
+        }
+    }
+    fn vacant(&self) -> bool {
+        self.origin == (0, 0) && self.moving == (0, 0) && self.handoff == 0
+    }
+}
 struct Recorder {
+    generation: u64,
     file: File,
+    anchor: Anchor,
+    threads: Vec<Option<ThreadState>>,
     envelope: Envelope,
     bounds: Bounds,
     owners: Vec<Option<OwnerRecord>>,
@@ -281,6 +374,11 @@ impl Recorder {
             return;
         }
         self.snapshots += 1;
+        let live_gaps = self
+            .owners
+            .iter()
+            .flatten()
+            .fold(self.gaps, |g, o| g | o.coverage);
         let (
             call,
             snapshot,
@@ -297,17 +395,22 @@ impl Recorder {
             self.epoch,
             self.in_flight,
             self.poison,
-            self.gaps,
+            live_gaps,
             self.constructed,
             self.retired,
             self.operations,
         );
-        self.emit(|l| write!(l,"{{\"kind\":\"snapshot_begin\",\"call\":{call},\"snapshot\":{snapshot},\"outcome\":{outcome},\"epoch\":{epoch},\"in_flight\":{in_flight},\"poison\":{poison},\"gaps\":{gaps},\"constructed\":{constructed},\"retired\":{retired},\"operations\":{operations}}}"));
+        let anchor = if snapshot == 1 {
+            self.anchor
+        } else {
+            Anchor::default()
+        };
+        self.emit(|l| write!(l,"{{\"kind\":\"snapshot_begin\",\"call\":{call},\"snapshot\":{snapshot},\"outcome\":{outcome},\"epoch\":{epoch},\"in_flight\":{in_flight},\"poison\":{poison},\"gaps\":{gaps},\"constructed\":{constructed},\"retired\":{retired},\"operations\":{operations},\"attempt\":{},\"stage\":{},\"failed_piece\":{},\"consumer\":{},\"request\":{},\"error_ptr\":{},\"error_len\":{},\"error_hash\":{},\"error_truncated\":{}}}",anchor.attempt,anchor.stage,anchor.failed_piece,anchor.consumer,anchor.request,anchor.error_ptr,anchor.error_len,anchor.error_hash,anchor.error_truncated));
         let mut owners = 0;
         for i in 0..self.owners.len() {
             if let Some(r) = self.owners[i] {
                 owners += 1;
-                self.emit(|l| write!(l,"{{\"kind\":\"owner\",\"call\":{},\"id\":{},\"owner_kind\":{},\"parent\":{},\"piece\":{},\"object\":{},\"bytes\":{},\"held\":{},\"a\":{},\"b\":{},\"c\":{},\"d\":{},\"flags\":{}}}",r.call,r.id,r.owner_kind,r.parent,r.piece,r.object,r.bytes,r.held,r.a,r.b,r.c,r.d,r.flags));
+                self.emit(|l| write!(l,"{{\"kind\":\"owner\",\"call\":{},\"id\":{},\"owner_kind\":{},\"parent\":{},\"piece\":{},\"object\":{},\"bytes\":{},\"held\":{},\"a\":{},\"b\":{},\"c\":{},\"d\":{},\"flags\":{},\"coverage\":{}}}",r.call,r.id,r.owner_kind,r.parent,r.piece,r.object,r.bytes,r.held,r.a,r.b,r.c,r.d,r.flags,r.coverage));
             }
         }
         let mut pieces = 0;
@@ -338,11 +441,21 @@ impl Recorder {
                 self.emit(|l| write!(l,"{{\"kind\":\"edge\",\"call\":{},\"from\":{},\"to\":{},\"relation\":{},\"bytes\":{}}}",r.call,r.from,r.to,r.relation,r.bytes));
             }
         }
-        let complete = self.in_flight == 0 && self.poison == 0 && self.gaps == 0;
+        let complete = self.in_flight == 0 && self.poison == 0 && live_gaps == 0;
         self.emit(|l| write!(l,"{{\"kind\":\"snapshot_end\",\"call\":{call},\"snapshot\":{snapshot},\"owners\":{owners},\"pieces\":{pieces},\"backings\":{backings},\"edges\":{edges},\"complete\":{complete}}}"));
     }
 }
 static RECORDER: OnceLock<Mutex<Option<Recorder>>> = OnceLock::new();
+static RETIREMENT: Condvar = Condvar::new();
+// Never reused, including when an abandoned capture leaves product owners live.
+static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
+static ACTIVE_GENERATION: AtomicU64 = AtomicU64::new(0);
+fn generation() -> u64 {
+    ACTIVE_GENERATION.load(Ordering::Acquire)
+}
+fn with_generation<R>(generation: u64, f: impl FnOnce(&mut Recorder) -> R) -> Option<R> {
+    with(|r| (generation != 0 && r.generation == generation).then(|| f(r))).flatten()
+}
 fn slots<T: Clone>(count: usize) -> io::Result<Vec<Option<T>>> {
     let mut v = Vec::new();
     v.try_reserve_exact(count)
@@ -363,6 +476,7 @@ fn with<R>(f: impl FnOnce(&mut Recorder) -> R) -> Option<R> {
 /// A single process-local capture. File creation is exclusive. Dropping without
 /// `finish` deliberately leaves an uncommitted, incomplete capture.
 pub struct Session {
+    generation: u64,
     finished: bool,
 }
 impl Session {
@@ -370,7 +484,7 @@ impl Session {
         if !cfg!(feature = "test_utils") {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
-                "enable ownership-diagnostics",
+                "enable development test_utils",
             ));
         }
         let bounds = envelope.bounds()?;
@@ -384,9 +498,20 @@ impl Session {
                 "ownership capture active",
             ));
         }
+        let generation = NEXT_GENERATION
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |g| g.checked_add(1))
+            .map_err(|_| io::Error::other("ownership session generation exhausted"))?;
         let file = OpenOptions::new().create_new(true).write(true).open(path)?;
         let mut r = Recorder {
+            generation,
             file,
+            anchor: Anchor::default(),
+            threads: slots(
+                envelope
+                    .slots
+                    .checked_mul(2)
+                    .ok_or_else(|| io::Error::other("thread bridge overflow"))?,
+            )?,
             envelope,
             bounds,
             owners: slots(envelope.slots)?,
@@ -408,37 +533,76 @@ impl Session {
             bytes: 0,
             checksum: 0xcbf29ce484222325,
         };
-        r.emit(|l| write!(l,"{{\"kind\":\"session\",\"protocol\":\"terminal-ownership/1\",\"calls\":{},\"slots\":{},\"descriptors\":{},\"edges\":{},\"columns\":{},\"nodes\":{},\"depth\":{},\"buffers\":{},\"line_bytes\":{LINE_BYTES},\"record_limit\":{},\"byte_limit\":{},\"observer_bytes\":{},\"owner_bytes\":{},\"piece_bytes\":{},\"backing_bytes\":{},\"edge_bytes\":{},\"fixed_bytes\":{}}}",envelope.calls,envelope.slots,envelope.descriptors,envelope.edges,envelope.columns,envelope.nodes,envelope.depth,envelope.buffers,bounds.records,bounds.bytes,bounds.observer_bytes,size_of::<Option<OwnerRecord>>(),size_of::<Option<PieceRecord>>(),size_of::<Option<arrays::Backing>>(),size_of::<Option<EdgeRecord>>(),size_of::<Recorder>()+size_of::<Mutex<Option<Recorder>>>()+LINE_BYTES));
+        r.emit(|l| write!(l,"{{\"kind\":\"session\",\"protocol\":\"terminal-ownership/1\",\"calls\":{},\"slots\":{},\"descriptors\":{},\"edges\":{},\"columns\":{},\"nodes\":{},\"depth\":{},\"buffers\":{},\"line_bytes\":{LINE_BYTES},\"record_limit\":{},\"byte_limit\":{},\"observer_bytes\":{},\"owner_bytes\":{},\"piece_bytes\":{},\"backing_bytes\":{},\"edge_bytes\":{},\"fixed_bytes\":{},\"metadata_per_slot\":{},\"tls_bytes\":{}}}",envelope.calls,envelope.slots,envelope.descriptors,envelope.edges,envelope.columns,envelope.nodes,envelope.depth,envelope.buffers,bounds.records,bounds.bytes,bounds.observer_bytes,size_of::<Option<OwnerRecord>>(),size_of::<Option<PieceRecord>>(),size_of::<Option<arrays::Backing>>(),size_of::<Option<EdgeRecord>>(),size_of::<Recorder>()+size_of::<Mutex<Option<Recorder>>>()+size_of::<Condvar>()+2*size_of::<AtomicU64>()+LINE_BYTES,bounds.metadata_per_slot,bounds.tls_bytes));
         if r.poison != 0 {
             return Err(io::Error::other("ownership header write failed"));
         }
         *global = Some(r);
-        Ok(Self { finished: false })
+        ACTIVE_GENERATION.store(generation, Ordering::Release);
+        Ok(Self {
+            generation,
+            finished: false,
+        })
+    }
+    /// Wait for actual numeric sentinels after original fields have dropped.
+    /// This is a development synchronization primitive, not a timing oracle.
+    pub fn wait_for_retirement(&self, kind: Kind) -> io::Result<()> {
+        let mut guard = RECORDER
+            .get()
+            .ok_or_else(|| io::Error::other("no capture"))?
+            .lock()
+            .map_err(|_| io::Error::other("ownership mutex poisoned"))?;
+        loop {
+            let r = guard
+                .as_ref()
+                .filter(|r| r.generation == self.generation)
+                .ok_or_else(|| io::Error::other("ownership session retired"))?;
+            if !r
+                .owners
+                .iter()
+                .flatten()
+                .any(|o| o.owner_kind == kind as u64)
+            {
+                return Ok(());
+            }
+            guard = RETIREMENT
+                .wait(guard)
+                .map_err(|_| io::Error::other("ownership mutex poisoned"))?;
+        }
     }
     pub fn begin_call(&self) -> io::Result<u64> {
-        with(|r| {
+        with_generation(self.generation, |r| {
             if r.call != 0 || r.completed >= r.envelope.calls as u64 {
                 r.poison |= POISON_PROTOCOL;
                 return Err(io::Error::other("previous call has not ended"));
             }
             r.call = r.completed + 1;
             r.snapshots = 0;
+            r.anchor = Anchor::default();
             Ok(r.call)
         })
         .unwrap_or_else(|| Err(io::Error::other("no ownership capture")))
     }
     pub fn snapshot(&self, outcome: u64) {
-        snapshot(outcome);
+        with_generation(self.generation, |r| r.cut(outcome));
     }
     pub fn end_call(&self, outcome: u64) {
-        with(|r| {
+        self.end_call_key(outcome, Anchor::default());
+    }
+    /// Corroborate the selected refusal with the actual error returned to the
+    /// development caller. Pointer/length/hash alone are not generation IDs.
+    pub fn end_call_error(&self, error: &datafusion_common::DataFusionError) {
+        self.end_call_key(1, error_anchor(error));
+    }
+    fn end_call_key(&self, outcome: u64, key: Anchor) {
+        with_generation(self.generation, |r| {
             let (call, snapshots) = (r.call, r.snapshots);
             if call == 0 || snapshots != 2 {
                 r.poison |= POISON_PROTOCOL;
             }
             let poison = r.poison;
-            r.emit(|l|write!(l,"{{\"kind\":\"run_end\",\"call\":{call},\"outcome\":{outcome},\"snapshots\":{snapshots},\"poison\":{poison}}}"));
-            r.completed += 1;
+            r.emit(|l|write!(l,"{{\"kind\":\"run_end\",\"call\":{call},\"outcome\":{outcome},\"snapshots\":{snapshots},\"poison\":{poison},\"error_ptr\":{},\"error_len\":{},\"error_hash\":{},\"error_truncated\":{}}}",key.error_ptr,key.error_len,key.error_hash,key.error_truncated));
+            Recorder::count(&mut r.completed, &mut r.poison);
             r.call = 0;
         });
     }
@@ -448,7 +612,15 @@ impl Session {
             .ok_or_else(|| io::Error::other("no capture"))?
             .lock()
             .map_err(|_| io::Error::other("ownership mutex poisoned"))?;
+        if !guard
+            .as_ref()
+            .is_some_and(|r| r.generation == self.generation)
+        {
+            return Err(io::Error::other("ownership session retired"));
+        }
         let mut r = guard.take().ok_or_else(|| io::Error::other("no capture"))?;
+        ACTIVE_GENERATION.store(0, Ordering::Release);
+        RETIREMENT.notify_all();
         let complete = r.poison == 0
             && r.in_flight == 0
             && r.call == 0
@@ -469,7 +641,11 @@ impl Drop for Session {
         if !self.finished {
             if let Some(lock) = RECORDER.get() {
                 if let Ok(mut r) = lock.lock() {
-                    *r = None;
+                    if r.as_ref().is_some_and(|r| r.generation == self.generation) {
+                        *r = None;
+                        ACTIVE_GENERATION.store(0, Ordering::Release);
+                        RETIREMENT.notify_all();
+                    }
                 }
             }
         }
@@ -481,18 +657,72 @@ pub fn snapshot(outcome: u64) {
 pub(crate) fn gap(bits: u64) {
     with(|r| r.gaps |= bits);
 }
-thread_local! { static ORIGIN: Cell<(u64,u64)> = const { Cell::new((0,0)) }; }
+fn read_thread() -> ThreadState {
+    let thread = std::thread::current().id();
+    with(|r| {
+        r.threads
+            .iter()
+            .flatten()
+            .find(|t| t.thread == thread)
+            .copied()
+    })
+    .flatten()
+    .unwrap_or_else(|| ThreadState::empty(thread))
+}
+fn update_thread_generation<R>(
+    generation: u64,
+    f: impl FnOnce(&mut ThreadState) -> R,
+) -> Option<R> {
+    let thread = std::thread::current().id();
+    with_generation(generation, |r| {
+        let old = r
+            .threads
+            .iter()
+            .position(|t| t.as_ref().is_some_and(|t| t.thread == thread));
+        let mut state = old
+            .and_then(|i| r.threads[i])
+            .unwrap_or_else(|| ThreadState::empty(thread));
+        let result = f(&mut state);
+        if state.vacant() {
+            if let Some(i) = old {
+                r.threads[i] = None;
+            }
+        } else if let Some(i) = old {
+            r.threads[i] = Some(state);
+        } else if let Some(i) = r.threads.iter().position(Option::is_none) {
+            r.threads[i] = Some(state);
+        } else {
+            r.poison |= POISON_CAPACITY;
+        }
+        result
+    })
+}
 pub(crate) fn origin() -> (u64, u64) {
-    ORIGIN.with(Cell::get)
+    read_thread().origin
 }
 pub(crate) fn scoped<R>(owner: u64, piece: u64, f: impl FnOnce() -> R) -> R {
-    struct Reset((u64, u64));
+    scoped_generation(generation(), owner, piece, f)
+}
+fn scoped_generation<R>(
+    generation: u64,
+    owner: u64,
+    piece: u64,
+    f: impl FnOnce() -> R,
+) -> R {
+    if !cfg!(feature = "test_utils") {
+        return f();
+    }
+    struct Reset((u64, u64), u64);
     impl Drop for Reset {
         fn drop(&mut self) {
-            ORIGIN.with(|o| o.set(self.0));
+            update_thread_generation(self.1, |t| t.origin = self.0);
         }
     }
-    let _reset = Reset(ORIGIN.with(|o| o.replace((owner, piece))));
+    let old = update_thread_generation(generation, |t| {
+        std::mem::replace(&mut t.origin, (owner, piece))
+    })
+    .unwrap_or((0, 0));
+    let _reset = Reset(old, generation);
     f()
 }
 /// Numeric sentinel placed after original fields. Its drop observes retirement
@@ -500,17 +730,31 @@ pub(crate) fn scoped<R>(owner: u64, piece: u64, f: impl FnOnce() -> R) -> R {
 #[derive(Debug, Default)]
 pub(crate) struct Life {
     #[cfg(feature = "test_utils")]
+    generation: u64,
+    #[cfg(feature = "test_utils")]
     id: u64,
+    #[cfg(feature = "test_utils")]
+    dropping: bool,
 }
 impl Life {
+    fn generation(&self) -> u64 {
+        #[cfg(feature = "test_utils")]
+        {
+            self.generation
+        }
+        #[cfg(not(feature = "test_utils"))]
+        {
+            0
+        }
+    }
     pub(crate) fn new(kind: Kind, parent: u64, piece: u64) -> Self {
-        let id = with(|r| {
-            if r.call == 0 {
-                return 0;
+        let (id, generation) = with(|r| {
+            if r.call == 0 || r.poison != 0 {
+                return (0, r.generation);
             }
             let Some(index) = r.owners.iter().position(Option::is_none) else {
                 r.poison |= POISON_CAPACITY;
-                return 0;
+                return (0, r.generation);
             };
             let id = r.id();
             r.owners[index] = Some(OwnerRecord {
@@ -522,16 +766,20 @@ impl Life {
                 ..Default::default()
             });
             Recorder::count(&mut r.constructed, &mut r.poison);
-            id
+            (id, r.generation)
         })
-        .unwrap_or(0);
+        .unwrap_or((0, 0));
         #[cfg(feature = "test_utils")]
         {
-            Self { id }
+            Self {
+                id,
+                generation,
+                dropping: false,
+            }
         }
         #[cfg(not(feature = "test_utils"))]
         {
-            let _ = id;
+            let _ = (id, generation);
             Self {}
         }
     }
@@ -542,7 +790,11 @@ impl Life {
     pub(crate) fn id(&self) -> u64 {
         #[cfg(feature = "test_utils")]
         {
-            self.id
+            if self.generation == generation() {
+                self.id
+            } else {
+                0
+            }
         }
         #[cfg(not(feature = "test_utils"))]
         {
@@ -554,7 +806,7 @@ impl Life {
         if id == 0 {
             return;
         }
-        with(|r| {
+        with_generation(self.generation(), |r| {
             if let Some(o) = r.owners.iter_mut().flatten().find(|o| o.id == id) {
                 f(o);
             } else {
@@ -567,7 +819,7 @@ impl Life {
         if id == 0 {
             return;
         }
-        with(|r| {
+        with_generation(self.generation(), |r| {
             for b in &mut r.backings {
                 if b.as_ref().is_some_and(|b| b.owner == id) {
                     *b = None;
@@ -587,8 +839,13 @@ impl Life {
                     false
                 }
             });
-            if result.is_err() {
-                r.gaps |= GAP_UNSUPPORTED;
+            if let Err(error) = result {
+                if matches!(error, arrays::Error::Quota | arrays::Error::Callback) {
+                    r.poison |= POISON_CAPACITY;
+                } else if let Some(o) = r.owners.iter_mut().flatten().find(|o| o.id == id)
+                {
+                    o.coverage |= GAP_UNSUPPORTED;
+                }
             }
         });
     }
@@ -598,7 +855,7 @@ impl Life {
         if id == 0 {
             return;
         }
-        with(|r| {
+        with_generation(self.generation(), |r| {
             let e = arrays::Envelope {
                 nodes: r.envelope.nodes,
                 depth: r.envelope.depth,
@@ -613,8 +870,13 @@ impl Life {
                     false
                 }
             });
-            if result.is_err() {
-                r.gaps |= GAP_UNSUPPORTED;
+            if let Err(error) = result {
+                if matches!(error, arrays::Error::Quota | arrays::Error::Callback) {
+                    r.poison |= POISON_CAPACITY;
+                } else if let Some(o) = r.owners.iter_mut().flatten().find(|o| o.id == id)
+                {
+                    o.coverage |= GAP_UNSUPPORTED;
+                }
             }
         });
     }
@@ -629,7 +891,7 @@ impl Life {
         if id == 0 {
             return;
         }
-        with(|r| {
+        with_generation(self.generation(), |r| {
             let node = 1 + r
                 .backings
                 .iter()
@@ -659,9 +921,12 @@ impl Life {
             }
         });
     }
+    pub(crate) fn gap(&self, bits: u64) {
+        self.update(|o| o.coverage |= bits);
+    }
     pub(crate) fn clear_backings(&self) {
         let id = self.id();
-        with(|r| {
+        with_generation(self.generation(), |r| {
             for b in &mut r.backings {
                 if b.as_ref().is_some_and(|b| b.owner == id) {
                     *b = None;
@@ -674,7 +939,7 @@ impl Life {
         if from == 0 || to == 0 {
             return;
         }
-        with(|r| {
+        with_generation(self.generation(), |r| {
             if let Some(e) = r
                 .edges
                 .iter_mut()
@@ -704,7 +969,24 @@ impl Drop for Life {
         if id == 0 {
             return;
         }
-        with(|r| {
+        with_generation(self.generation(), |r| {
+            let coverage = r
+                .owners
+                .iter()
+                .flatten()
+                .find(|o| o.id == id)
+                .map_or(0, |o| o.coverage);
+            if coverage != 0 {
+                for edge in r.edges.iter().flatten() {
+                    if edge.to == id && edge.from != id {
+                        if let Some(o) =
+                            r.owners.iter_mut().flatten().find(|o| o.id == edge.from)
+                        {
+                            o.coverage |= coverage;
+                        }
+                    }
+                }
+            }
             for o in &mut r.owners {
                 if let Some(o) = o {
                     if o.parent == id {
@@ -715,6 +997,7 @@ impl Drop for Life {
                 if o.as_ref().is_some_and(|o| o.id == id) {
                     *o = None;
                     Recorder::count(&mut r.retired, &mut r.poison);
+                    RETIREMENT.notify_all();
                 }
             }
             for b in &mut r.backings {
@@ -723,12 +1006,23 @@ impl Drop for Life {
                 }
             }
             for e in &mut r.edges {
-                if e.as_ref().is_some_and(|e| e.to == id && e.from != id) {
+                if r.in_flight == 0
+                    && e.as_ref().is_some_and(|e| e.to == id && e.from != id)
+                {
                     r.gaps |= GAP_UNKNOWN_SPONSOR;
                 }
                 if e.as_ref().is_some_and(|e| e.from == id || e.to == id) {
                     *e = None;
                 }
+            }
+            #[cfg(feature = "test_utils")]
+            if self.dropping {
+                if r.in_flight == 0 {
+                    r.poison |= POISON_PROTOCOL;
+                } else {
+                    r.in_flight -= 1;
+                }
+                Recorder::count(&mut r.epoch, &mut r.poison);
             }
         });
     }
@@ -736,33 +1030,73 @@ impl Drop for Life {
 #[derive(Debug, Default)]
 pub(crate) struct Piece {
     #[cfg(feature = "test_utils")]
+    generation: u64,
+    #[cfg(feature = "test_utils")]
     id: u64,
 }
 impl Piece {
+    fn generation(&self) -> u64 {
+        #[cfg(feature = "test_utils")]
+        {
+            self.generation
+        }
+        #[cfg(not(feature = "test_utils"))]
+        {
+            0
+        }
+    }
     pub(crate) fn new(
         reservation: &datafusion_execution::memory_pool::MemoryReservation,
         holder: u64,
     ) -> Self {
-        let moved = MOVING.with(|m| m.replace(0));
-        let parent = origin().1;
-        let id = with(|r| {
-            if r.call == 0 {
-                return 0;
+        Self::new_generation(reservation, holder, generation())
+    }
+    fn new_generation(
+        reservation: &datafusion_execution::memory_pool::MemoryReservation,
+        holder: u64,
+        generation: u64,
+    ) -> Self {
+        let (id, generation) = with_generation(generation, |r| {
+            let thread = std::thread::current().id();
+            let state = r
+                .threads
+                .iter()
+                .flatten()
+                .find(|t| t.thread == thread)
+                .copied()
+                .unwrap_or_else(|| ThreadState::empty(thread));
+            let (moved, target) = state.moving;
+            let parent = state.origin.1;
+            if r.call == 0 || r.poison != 0 {
+                return (0, r.generation);
             }
             if moved != 0 {
+                let kind = r
+                    .owners
+                    .iter()
+                    .flatten()
+                    .find(|o| o.id == holder)
+                    .map(|o| o.owner_kind)
+                    .unwrap_or(0);
                 if let Some(p) = r.pieces.iter_mut().flatten().find(|p| {
-                    p.id == moved && p.consumer == reservation.consumer().id() as u64
+                    p.id == moved
+                        && p.consumer == reservation.consumer().id() as u64
+                        && p.held == reservation.size() as u64
+                        && (target == 0 || target == kind)
                 }) {
+                    let thread = std::thread::current().id();
+                    if let Some(t) =
+                        r.threads.iter_mut().flatten().find(|t| t.thread == thread)
+                    {
+                        t.moving = (0, 0);
+                    }
                     p.holder = holder;
-                    p.held = reservation.size() as u64;
-                    return moved;
+                    return (moved, r.generation);
                 }
-                r.poison |= POISON_PROTOCOL;
-                return 0;
             }
             let Some(i) = r.pieces.iter().position(Option::is_none) else {
                 r.poison |= POISON_CAPACITY;
-                return 0;
+                return (0, r.generation);
             };
             let ancestor = r
                 .pieces
@@ -785,54 +1119,79 @@ impl Piece {
                 split_bytes: 0,
                 flags: if ancestor.is_some() { 2 } else { 0 },
             });
-            id
+            (id, r.generation)
         })
-        .unwrap_or(0);
+        .unwrap_or((0, 0));
         #[cfg(feature = "test_utils")]
         {
-            Self { id }
+            Self { id, generation }
         }
         #[cfg(not(feature = "test_utils"))]
         {
-            let _ = id;
+            let _ = (id, generation);
             Self {}
         }
     }
     /// Keep the logical piece identity across an actual take/move. The target
     /// constructor consumes MOVING synchronously; no TLS scope spans a future.
-    pub(crate) fn transfer<R>(mut self, owner: u64, f: impl FnOnce() -> R) -> R {
+    pub(crate) fn transfer<R>(self, owner: u64, f: impl FnOnce() -> R) -> R {
+        self.transfer_to(owner, 0, f)
+    }
+    pub(crate) fn transfer_to<R>(
+        mut self,
+        owner: u64,
+        target: u64,
+        f: impl FnOnce() -> R,
+    ) -> R {
         let id = self.id();
+        if id == 0 {
+            return f();
+        }
+        let _transition = Transition::begin_generation(self.generation());
         #[cfg(feature = "test_utils")]
         {
             self.id = 0;
         }
-        struct Reset(u64);
+        struct Reset((u64, u64), u64);
         impl Drop for Reset {
             fn drop(&mut self) {
-                let unclaimed = MOVING.with(|m| m.replace(self.0));
+                let (unclaimed, _) = update_thread_generation(self.1, |t| {
+                    std::mem::replace(&mut t.moving, self.0)
+                })
+                .unwrap_or((0, 0));
                 if unclaimed != 0 {
-                    drop(Piece::adopt(unclaimed));
+                    drop(Piece::adopt_generation(unclaimed, self.1));
                 }
             }
         }
-        let _reset = Reset(MOVING.with(|m| m.replace(id)));
-        scoped(owner, id, f)
+        let _reset = Reset(
+            update_thread_generation(self.generation(), |t| {
+                std::mem::replace(&mut t.moving, (id, target))
+            })
+            .unwrap_or((0, 0)),
+            self.generation(),
+        );
+        scoped_generation(self.generation(), owner, id, f)
     }
-    pub(crate) fn adopt(id: u64) -> Self {
+    fn adopt_generation(id: u64, generation: u64) -> Self {
         #[cfg(feature = "test_utils")]
         {
-            Self { id }
+            Self { id, generation }
         }
         #[cfg(not(feature = "test_utils"))]
         {
-            let _ = id;
+            let _ = (id, generation);
             Self {}
         }
     }
     pub(crate) fn id(&self) -> u64 {
         #[cfg(feature = "test_utils")]
         {
-            self.id
+            if self.generation == generation() {
+                self.id
+            } else {
+                0
+            }
         }
         #[cfg(not(feature = "test_utils"))]
         {
@@ -848,12 +1207,24 @@ impl Piece {
         if id == 0 {
             return;
         }
-        with(|r| {
+        with_generation(self.generation(), |r| {
             if let Some(p) = r.pieces.iter_mut().flatten().find(|p| p.id == id) {
                 p.held = reservation.size() as u64;
                 p.holder = holder;
             }
         });
+    }
+    pub(crate) fn empty_successor(
+        &self,
+        reservation: &datafusion_execution::memory_pool::MemoryReservation,
+        holder: u64,
+    ) -> Self {
+        if self.id() == 0 {
+            return Self::default();
+        }
+        scoped_generation(self.generation(), holder, self.id(), || {
+            Self::new_generation(reservation, holder, self.generation())
+        })
     }
     pub(crate) fn child(
         &self,
@@ -861,9 +1232,12 @@ impl Piece {
         holder: u64,
         bytes: usize,
     ) -> Self {
-        let child = Self::new(reservation, holder);
+        if self.id() == 0 {
+            return Self::default();
+        }
+        let child = Self::new_generation(reservation, holder, self.generation());
         let (id, child_id) = (self.id(), child.id());
-        with(|r| {
+        with_generation(self.generation(), |r| {
             let root = r
                 .pieces
                 .iter()
@@ -887,7 +1261,7 @@ impl Drop for Piece {
         if id == 0 {
             return;
         }
-        with(|r| {
+        with_generation(self.generation(), |r| {
             let root = r
                 .pieces
                 .iter()
@@ -932,23 +1306,37 @@ impl Drop for Piece {
 }
 /// Epoch guard. Never owns the observer lock while product work executes.
 pub(crate) struct Transition {
-    active: bool,
+    #[cfg(feature = "test_utils")]
+    generation: u64,
 }
 impl Transition {
     pub(crate) fn begin() -> Self {
-        let active = with(|r| {
+        Self::begin_generation(generation())
+    }
+    fn begin_generation(generation: u64) -> Self {
+        let generation = with_generation(generation, |r| {
             Recorder::count(&mut r.in_flight, &mut r.poison);
             Recorder::count(&mut r.epoch, &mut r.poison);
             Recorder::count(&mut r.operations, &mut r.poison);
+            r.generation
         })
-        .is_some();
-        Self { active }
+        .unwrap_or(0);
+        #[cfg(feature = "test_utils")]
+        {
+            Self { generation }
+        }
+        #[cfg(not(feature = "test_utils"))]
+        {
+            let _ = generation;
+            Self {}
+        }
     }
 }
 impl Drop for Transition {
     fn drop(&mut self) {
-        if self.active {
-            with(|r| {
+        #[cfg(feature = "test_utils")]
+        if self.generation != 0 {
+            with_generation(self.generation, |r| {
                 if r.in_flight == 0 {
                     r.poison |= POISON_PROTOCOL;
                 } else {
@@ -967,14 +1355,16 @@ mod tests;
 /// capacity, permit acquisition, item type, FIFO order or cancellation behavior.
 pub(crate) struct QueueStream {
     inner: crate::SendableRecordBatchStream,
+    // Read through field drop order, after the original receiver.
+    #[allow(dead_code)]
     retired: QueueRetirement,
     diagnostic: Life,
 }
-struct QueueRetirement(u64);
+struct QueueRetirement(u64, u64);
 impl Drop for QueueRetirement {
     fn drop(&mut self) {
         loop {
-            let id = with(|r| {
+            let id = with_generation(self.1, |r| {
                 r.owners
                     .iter()
                     .flatten()
@@ -987,7 +1377,7 @@ impl Drop for QueueRetirement {
             })
             .flatten();
             if let Some(id) = id {
-                retire_id(id);
+                drop(Life::adopt_generation(id, self.1));
             } else {
                 break;
             }
@@ -998,7 +1388,7 @@ impl QueueStream {
     pub(crate) fn new(inner: crate::SendableRecordBatchStream, diagnostic: Life) -> Self {
         Self {
             inner,
-            retired: QueueRetirement(diagnostic.id()),
+            retired: QueueRetirement(diagnostic.id(), diagnostic.generation()),
             diagnostic,
         }
     }
@@ -1009,11 +1399,11 @@ impl futures::Stream for QueueStream {
         mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Option<Self::Item>> {
-        let _transition = Transition::begin();
+        let _transition = Transition::begin_generation(self.diagnostic.generation());
         let result = self.inner.as_mut().poll_next(cx);
         if matches!(result, std::task::Poll::Ready(Some(_))) {
             let ordinal = self.diagnostic.increment(1);
-            queue_receive(self.diagnostic.id(), ordinal);
+            queue_receive(self.diagnostic.id(), ordinal, self.diagnostic.generation());
         }
         result
     }
@@ -1026,6 +1416,10 @@ impl crate::RecordBatchStream for QueueStream {
 pub(crate) struct ProducerInput {
     pub(crate) input: crate::SendableRecordBatchStream,
     pub(crate) diagnostic: Life,
+    // The decoder may hold intermediate allocations across Pending. Keep the
+    // cut explicitly open until its batch is observed and the original send ends.
+    #[cfg(feature = "test_utils")]
+    pub(crate) polling: Option<Transition>,
 }
 
 /// Original IntoIter owner followed only by numeric sentinels. Yielded batches
@@ -1034,40 +1428,14 @@ pub(crate) struct Chunks {
     inner: std::vec::IntoIter<arrow::array::RecordBatch>,
     lives: std::vec::IntoIter<Life>,
 }
-impl Chunks {
-    pub(crate) fn new(
-        batches: Vec<arrow::array::RecordBatch>,
-        parent: u64,
-        piece: u64,
-    ) -> Self {
-        let mut lives = Vec::new();
-        let limit = with(|r| r.envelope.slots).unwrap_or(0);
-        if batches.len() > limit || lives.try_reserve_exact(batches.len()).is_err() {
-            gap(GAP_UNSUPPORTED);
-        } else {
-            for batch in &batches {
-                let life = Life::new(Kind::Batch, parent, piece);
-                life.update(|o| {
-                    o.a = batch.num_rows() as u64;
-                    o.b = batch.num_columns() as u64;
-                });
-                life.batch(batch);
-                lives.push(life);
-            }
-        }
-        Self {
-            inner: batches.into_iter(),
-            lives: lives.into_iter(),
-        }
-    }
-}
 impl Iterator for Chunks {
     type Item = arrow::array::RecordBatch;
     fn next(&mut self) -> Option<Self::Item> {
         let next = self.inner.next();
         if next.is_some() {
             if let Some(life) = self.lives.next() {
-                publish_handoff(life.into_id());
+                let generation = life.generation();
+                publish_handoff_generation(life.into_id(), generation);
             }
         }
         next
@@ -1077,26 +1445,32 @@ impl Iterator for Chunks {
     }
 }
 
-thread_local! { static MOVING: Cell<u64> = const {Cell::new(0)}; }
-thread_local! { static HANDOFF: Cell<u64> = const {Cell::new(0)}; }
 pub(crate) fn clear_handoff() {
-    HANDOFF.with(|h| {
-        let old = h.replace(0);
-        if old != 0 {
-            gap(GAP_UNKNOWN_SPONSOR);
-            retire_id(old);
-        }
-    });
+    let generation = generation();
+    let old =
+        update_thread_generation(generation, |t| std::mem::replace(&mut t.handoff, 0))
+            .unwrap_or(0);
+    if old != 0 {
+        with_generation(generation, |r| r.gaps |= GAP_UNKNOWN_SPONSOR);
+        drop(Life::adopt_generation(old, generation));
+    }
 }
 pub(crate) fn take_handoff() -> Life {
-    Life::adopt(HANDOFF.with(|h| h.replace(0)))
+    let generation = generation();
+    Life::adopt_generation(
+        update_thread_generation(generation, |t| std::mem::replace(&mut t.handoff, 0))
+            .unwrap_or(0),
+        generation,
+    )
 }
-fn publish_handoff(id: u64) {
-    HANDOFF.with(|h| {
-        if h.replace(id) != 0 {
-            gap(GAP_UNKNOWN_SPONSOR);
-        }
-    });
+fn publish_handoff_generation(id: u64, generation: u64) {
+    let old =
+        update_thread_generation(generation, |t| std::mem::replace(&mut t.handoff, id))
+            .unwrap_or(0);
+    if old != 0 {
+        with_generation(generation, |r| r.gaps |= GAP_UNKNOWN_SPONSOR);
+        drop(Life::adopt_generation(old, generation));
+    }
 }
 impl Life {
     pub(crate) fn into_id(mut self) -> u64 {
@@ -1107,16 +1481,72 @@ impl Life {
         }
         id
     }
-    pub(crate) fn adopt(id: u64) -> Self {
+    fn adopt_generation(id: u64, generation: u64) -> Self {
         #[cfg(feature = "test_utils")]
         {
-            Self { id }
+            Self {
+                id,
+                generation,
+                dropping: false,
+            }
         }
         #[cfg(not(feature = "test_utils"))]
         {
-            let _ = id;
+            let _ = (id, generation);
             Self {}
         }
+    }
+    pub(crate) fn observe_claim_aliases(&self) {
+        let id = self.id();
+        if id == 0 {
+            return;
+        }
+        with_generation(self.generation(), |r| {
+            for i in 0..r.backings.len() {
+                let Some(b) = r.backings[i].filter(|b| {
+                    b.owner == id && b.flags & arrays::ARRAY == 0 && b.capacity != 0
+                }) else {
+                    continue;
+                };
+                let claim = r
+                    .backings
+                    .iter()
+                    .flatten()
+                    .find(|claim| {
+                        claim.data_type == 35
+                            && claim.base == b.base
+                            && claim.capacity == b.capacity
+                            && r.owners.iter().flatten().any(|o| {
+                                o.id == claim.owner && o.owner_kind == Kind::Claim as u64
+                            })
+                    })
+                    .map(|b| b.owner);
+                let Some(claim) = claim else {
+                    if let Some(o) = r.owners.iter_mut().flatten().find(|o| o.id == id) {
+                        o.coverage |= GAP_QUEUE;
+                    }
+                    continue;
+                };
+                if r.edges
+                    .iter()
+                    .flatten()
+                    .any(|e| e.from == id && e.to == claim && e.relation == 3)
+                {
+                    continue;
+                }
+                if let Some(edge) = r.edges.iter_mut().find(|e| e.is_none()) {
+                    *edge = Some(EdgeRecord {
+                        call: r.call,
+                        from: id,
+                        to: claim,
+                        relation: 3,
+                        bytes: b.capacity,
+                    });
+                } else {
+                    r.poison |= POISON_CAPACITY;
+                }
+            }
+        });
     }
     pub(crate) fn queued(self, queue: u64, ordinal: u64) {
         self.update(|o| {
@@ -1128,7 +1558,7 @@ impl Life {
     }
     pub(crate) fn increment(&self, field: u8) -> u64 {
         let id = self.id();
-        with(|r| {
+        with_generation(self.generation(), |r| {
             if let Some(o) = r.owners.iter_mut().flatten().find(|o| o.id == id) {
                 let value = match field {
                     0 => &mut o.a,
@@ -1146,11 +1576,8 @@ impl Life {
         .unwrap_or(0)
     }
 }
-fn retire_id(id: u64) {
-    drop(Life::adopt(id));
-}
-pub(crate) fn queue_receive(queue: u64, ordinal: u64) {
-    let id = with(|r| {
+pub(crate) fn queue_receive(queue: u64, ordinal: u64, generation: u64) {
+    let id = with_generation(generation, |r| {
         r.owners
             .iter_mut()
             .flatten()
@@ -1168,7 +1595,7 @@ pub(crate) fn queue_receive(queue: u64, ordinal: u64) {
     .flatten()
     .unwrap_or(0);
     if id != 0 {
-        publish_handoff(id);
+        publish_handoff_generation(id, generation);
     }
 }
 
@@ -1205,7 +1632,7 @@ impl Life {
                 storage.fields_bytes,
             );
             if !storage.fields_metadata_complete {
-                gap(GAP_ROWS_STORAGE);
+                self.gap(GAP_ROWS_STORAGE);
             }
         }
         #[cfg(not(feature = "test_utils"))]
@@ -1233,7 +1660,11 @@ impl Life {
                 _ => gap(GAP_ROWS_STORAGE),
             }
             if !storage.stateless_codecs || !storage.fields_metadata_complete {
-                gap(GAP_ROWS_STORAGE);
+                self.gap(GAP_ROWS_STORAGE);
+            } else {
+                // Complete borrowed codec and datatype descriptors replace the
+                // constructor's provisional opaque-layout marker.
+                self.update(|o| o.flags &= !1);
             }
         }
         #[cfg(not(feature = "test_utils"))]
@@ -1247,4 +1678,211 @@ impl Life {
 pub fn verify_recorder_controls() {
     tests::run_controls();
     arrays::verify_controls();
+    crate::spill::admission::verify_ownership_controls().expect("IPC budget controls");
+}
+
+impl Life {
+    pub(crate) fn begin_drop(&mut self) {
+        #[cfg(feature = "test_utils")]
+        if self.id != 0 && !self.dropping {
+            self.dropping = true;
+            with_generation(self.generation(), |r| {
+                Recorder::count(&mut r.in_flight, &mut r.poison);
+                Recorder::count(&mut r.epoch, &mut r.poison);
+                Recorder::count(&mut r.operations, &mut r.poison);
+            });
+        }
+    }
+}
+pub(crate) fn sidecar_permitted(count: usize) -> bool {
+    with(|r| {
+        let free = r.owners.iter().filter(|o| o.is_none()).count();
+        let okay = r.poison == 0 && count <= free;
+        if !okay {
+            r.poison |= POISON_CAPACITY;
+        }
+        okay
+    })
+    .unwrap_or(false)
+}
+impl Drop for QueueStream {
+    fn drop(&mut self) {
+        self.diagnostic.begin_drop();
+        let id = self.diagnostic.id();
+        with_generation(self.diagnostic.generation(), |r| {
+            for o in r.owners.iter_mut().flatten() {
+                if o.parent == id && o.owner_kind == Kind::Producer as u64 {
+                    o.c = 1;
+                }
+            }
+        });
+    }
+}
+impl Drop for ProducerInput {
+    fn drop(&mut self) {
+        self.diagnostic.begin_drop();
+    }
+}
+
+pub(crate) fn snapshot_failure(
+    stage: u64,
+    piece: u64,
+    consumer: usize,
+    request: usize,
+    error: &datafusion_common::DataFusionError,
+) {
+    let mut anchor = error_anchor(error);
+    with(|r| {
+        if r.snapshots != 0 {
+            r.poison |= POISON_PROTOCOL;
+            return;
+        }
+        anchor.attempt = r.id();
+        anchor.stage = stage;
+        anchor.failed_piece = piece;
+        anchor.consumer = consumer as u64;
+        anchor.request = request as u64;
+        if anchor.error_ptr == 0 || anchor.error_truncated {
+            r.gaps |= GAP_UNSUPPORTED;
+        }
+        r.anchor = anchor;
+        r.cut(1);
+    });
+}
+
+/// Original input owner followed by its numeric sentinel; no extra Arrow owner.
+pub(crate) struct InputBatch {
+    batch: Option<arrow::array::RecordBatch>,
+    diagnostic: Life,
+    completion: Option<Transition>,
+}
+impl InputBatch {
+    pub(crate) fn batch(&self) -> &arrow::array::RecordBatch {
+        self.batch.as_ref().expect("live input batch")
+    }
+    pub(crate) fn pending(batch: arrow::array::RecordBatch, parent: u64) -> Self {
+        let handed = take_handoff();
+        let diagnostic = if handed.id() != 0 {
+            handed
+        } else {
+            Life::new(Kind::Output, parent, 0)
+        };
+        diagnostic.batch(&batch);
+        diagnostic.update(|o| {
+            o.parent = parent;
+            o.owner_kind = Kind::Output as u64;
+            o.piece = 0;
+            o.flags |= 16;
+            o.a = batch.num_rows() as u64;
+            o.b = batch.num_columns() as u64;
+        });
+        Self {
+            batch: Some(batch),
+            diagnostic,
+            completion: None,
+        }
+    }
+    pub(crate) fn admitted(&self, piece: u64, held: usize) {
+        self.diagnostic.update(|o| {
+            o.piece = piece;
+            o.held = held as u64;
+            o.flags &= !16;
+        });
+    }
+    pub(crate) fn into_parts(mut self) -> (arrow::array::RecordBatch, Life) {
+        let batch = self.batch.take().expect("one live batch");
+        let life = std::mem::take(&mut self.diagnostic);
+        (batch, life)
+    }
+
+    pub(crate) fn complete(&mut self, transition: Transition) {
+        self.completion = Some(transition);
+    }
+    pub(crate) fn new(batch: arrow::array::RecordBatch, parent: u64, piece: u64) -> Self {
+        let diagnostic = Life::new(Kind::Batch, parent, piece);
+        diagnostic.batch(&batch);
+        diagnostic.update(|o| {
+            o.a = batch.num_rows() as u64;
+            o.b = batch.num_columns() as u64;
+        });
+        Self {
+            batch: Some(batch),
+            diagnostic,
+            completion: None,
+        }
+    }
+}
+impl Drop for InputBatch {
+    fn drop(&mut self) {
+        self.diagnostic.begin_drop();
+    }
+}
+/// Declared before the original sorted Vec so failure destroys its Arrow fields
+/// before these numeric records retire. Success moves the same IntoIter onward.
+#[derive(Default)]
+pub(crate) struct BatchLives {
+    #[cfg(feature = "test_utils")]
+    inner: Vec<Life>,
+}
+impl BatchLives {
+    pub(crate) fn capture(&mut self, batches: &[arrow::array::RecordBatch], parent: u64) {
+        #[cfg(feature = "test_utils")]
+        {
+            if !sidecar_permitted(batches.len())
+                || self.inner.try_reserve_exact(batches.len()).is_err()
+            {
+                gap(GAP_UNSUPPORTED);
+                return;
+            }
+            for batch in batches {
+                let life = Life::new(Kind::Batch, parent, 0);
+                life.batch(batch);
+                life.update(|o| {
+                    o.a = batch.num_rows() as u64;
+                    o.b = batch.num_columns() as u64;
+                    o.flags = 16;
+                });
+                self.inner.push(life);
+            }
+        }
+        #[cfg(not(feature = "test_utils"))]
+        {
+            let _ = (batches, parent);
+        }
+    }
+    pub(crate) fn admitted(&self, piece: u64) {
+        #[cfg(feature = "test_utils")]
+        for life in &self.inner {
+            life.update(|o| {
+                o.piece = piece;
+                o.flags &= !16;
+            });
+        }
+        #[cfg(not(feature = "test_utils"))]
+        {
+            let _ = piece;
+        }
+    }
+}
+impl Chunks {
+    pub(crate) fn from_observed(
+        batches: Vec<arrow::array::RecordBatch>,
+        lives: BatchLives,
+    ) -> Self {
+        #[cfg(feature = "test_utils")]
+        {
+            Self {
+                inner: batches.into_iter(),
+                lives: lives.inner.into_iter(),
+            }
+        }
+        #[cfg(not(feature = "test_utils"))]
+        {
+            let _ = lives;
+            Self {
+                inner: batches.into_iter(),
+                lives: Vec::new().into_iter(),
+            }
+        }
+    }
 }

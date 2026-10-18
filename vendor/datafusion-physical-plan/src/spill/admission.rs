@@ -1439,6 +1439,7 @@ pub(super) fn dictionary_bound(batch: &RecordBatch) -> Result<usize> {
 
 #[cfg(feature = "test_utils")]
 pub(crate) fn verify_ownership_controls() -> Result<()> {
+    super::credit::verify_ownership_controls()?;
     ownership_tests::ipc_buffer_ticket_retains_payload_and_metadata_through_final_slice(
     )?;
     ownership_tests::original_inline_budget_and_claim_layouts_exclude_observer_fields();

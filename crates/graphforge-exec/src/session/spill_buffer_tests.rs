@@ -18,6 +18,7 @@ struct Probe {
     completed: usize,
     after_two: Option<oneshot::Sender<usize>>,
     dropped: Option<oneshot::Sender<()>>,
+    drop_release: Option<std::sync::mpsc::Receiver<()>>,
 }
 impl Stream for Probe {
     type Item = Result<RecordBatch>;
@@ -56,6 +57,9 @@ impl Drop for Probe {
         if let Some(tx) = self.dropped.take() {
             tx.send(()).ok();
         }
+        if let Some(release) = self.drop_release.take() {
+            release.recv().unwrap();
+        }
     }
 }
 fn probe(
@@ -75,6 +79,7 @@ fn probe(
             completed: 0,
             after_two: Some(tx),
             dropped: Some(dropped),
+            drop_release: None,
         }),
         ready,
         done,
@@ -224,4 +229,67 @@ fn spill_admission_buffer_bounds_real_ipc_prefetch_and_cleans_up_after_escaped_l
         assert_eq!(pool.reserved(), 0);
         Ok(())
     })
+}
+
+#[test]
+fn terminal_ownership_buffer_cancellation_two_calls_distinguishes_requested_and_retired()
+-> Result<()> {
+    use datafusion_physical_plan::terminal_ownership::{Envelope, Kind, Session};
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("cancellation-two-call.jsonl");
+    let capture = Session::create(&path, Envelope::default())?;
+    runtime().block_on(async {
+        for _ in 0..2 {
+            capture.begin_call()?;
+            let (tx, ready) = oneshot::channel();
+            let (dropped, done) = oneshot::channel();
+            let (release, wait) = std::sync::mpsc::channel();
+            let source = Box::pin(Probe {
+                inner: synthetic(),
+                starts: Arc::new(AtomicUsize::new(0)),
+                active: false,
+                completed: 0,
+                after_two: Some(tx),
+                dropped: Some(dropped),
+                drop_release: Some(wait),
+            });
+            let output = spawn_buffered(source, 2);
+            assert_eq!(ready.await.unwrap(), 2);
+            drop(output);
+            // This signal is the original input's Drop entry. Its real fields
+            // and the producer sentinel are deliberately still live here.
+            done.await.unwrap();
+            capture.snapshot(0);
+            release.send(()).unwrap();
+            capture.wait_for_retirement(Kind::Producer)?;
+            capture.snapshot(0);
+            capture.end_call(0);
+        }
+        Ok::<_, datafusion::common::DataFusionError>(())
+    })?;
+    capture.finish()?;
+    let text = std::fs::read_to_string(&path)?;
+    let cuts: Vec<_> = text
+        .lines()
+        .filter(|line| line.contains("\"kind\":\"snapshot_begin\""))
+        .collect();
+    assert_eq!(cuts.len(), 4);
+    for pair in cuts.chunks_exact(2) {
+        assert!(!pair[0].contains("\"in_flight\":0,"));
+        assert!(pair[1].contains("\"in_flight\":0,"));
+    }
+    let producers: Vec<_> = text
+        .lines()
+        .filter(|line| line.contains("\"kind\":\"owner\"") && line.contains("\"owner_kind\":13,"))
+        .collect();
+    assert_eq!(producers.len(), 2);
+    assert!(producers.iter().all(|owner| owner.contains("\"c\":1,")));
+    if let Some(out) = std::env::var_os("GRAPHFORGE_OWNERSHIP_EVIDENCE_DIR") {
+        std::fs::create_dir_all(&out)?;
+        std::fs::copy(
+            path,
+            std::path::Path::new(&out).join("cancellation-two-call.jsonl"),
+        )?;
+    }
+    Ok(())
 }

@@ -171,7 +171,7 @@ pub(super) fn fresh_resident_schema_bound(schema: &Schema) -> Option<usize> {
     let root = arc_bytes(Layout::new::<Schema>())?;
     let tree = fields_heap(schema.fields(), 0)?;
     let metadata = fresh_metadata_heap(schema.metadata())?;
-    let owner = arc_bytes(Layout::new::<SharedSchema>())?;
+    let owner = arc_bytes(SharedSchema::charged_layout())?;
     // The split Budget can be the last owner of this reader registration and
     // its literal-name String after the persistent reader grant is dropped.
     let registration =

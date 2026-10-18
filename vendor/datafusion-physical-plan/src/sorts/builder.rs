@@ -214,9 +214,6 @@ impl BatchBuilder {
         )
     }
 
-    pub(super) fn diagnostic_id(&self) -> u64 {
-        self.diagnostic.id()
-    }
     pub(super) fn observe(&self) {
         self.diagnostic_piece
             .refresh(&self.reservation, self.diagnostic.id());
@@ -654,5 +651,16 @@ mod tests {
             .unwrap_err();
 
         assert!(is_offset_overflow(&error));
+    }
+}
+
+impl Drop for BatchBuilder {
+    fn drop(&mut self) {
+        self.diagnostic.begin_drop();
+    }
+}
+impl Drop for BufferedBatch {
+    fn drop(&mut self) {
+        self.diagnostic.begin_drop();
     }
 }
