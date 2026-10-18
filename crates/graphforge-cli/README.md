@@ -46,16 +46,13 @@ gf skills status
 ```
 
 `gf init` creates repository-local GraphForge configuration and installs the
-embedded agent skills. Durable projects require an ext4, xfs, or btrfs volume
-at the project root. Follow the
+embedded agent skills. Durable projects require writable local storage: ext4,
+XFS or Btrfs on Linux, non-removable local APFS on macOS, or fixed local NTFS
+on Windows. Native filesystem admission checks still apply. Follow the
 [first graph guide](https://docs.graphforge.sh/guide/quickstart/) to load and
 query connected data.
 
-
-[Documentation](https://docs.graphforge.sh/) ·
-[Repository](https://github.com/CurateLabs/graphforge) ·
-[Architecture](https://github.com/CurateLabs/graphforge/blob/main/docs/book/architecture/ast-and-planning.md)
-
+## Publish research history
 
 History replacement is explicit: `gf publish <repository> --ref main --rewrite`
 requests a non-fast-forward replacement under the current revision lease.
@@ -64,4 +61,10 @@ requests a non-fast-forward replacement under the current revision lease.
 native history dependencies remain protected. Established Fork updates retain
 independent bytes; optional `--check-fork-origin <repository URL>` checks the
 immutable citation without guessing its Hub host. See the
-[publish contract](../../docs/adr/0053-hub-publish-wire-contract.md#explicit-history-mutation-intent).
+[publish contract](https://github.com/CurateLabs/graphforge/blob/main/docs/adr/0053-hub-publish-wire-contract.md#explicit-history-mutation-intent).
+
+
+
+[Documentation](https://docs.graphforge.sh/) ·
+[Repository](https://github.com/CurateLabs/graphforge) ·
+[Architecture](https://github.com/CurateLabs/graphforge/blob/main/docs/book/architecture/ast-and-planning.md)
