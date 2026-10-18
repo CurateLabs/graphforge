@@ -1,6 +1,7 @@
 //! Publish behaviors driven through the typed wire documents against
 //! [`ReferenceHub`], asserting Hub state as well as responses.
 
+#[path = "publish_flow/retention.rs"]
 mod retention;
 
 use graphforge_discovery::{

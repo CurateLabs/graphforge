@@ -71,14 +71,9 @@ fn commit(client: &Client<'_>, session: &str, request: &CommitRequest) -> HubRes
 fn publish(client: &Client<'_>, plan: &Plan, prune: bool, refs: &[&str]) -> PublishReceipt {
     let (session, upload, request) = open(client, plan, prune, refs);
     if upload.received < upload.length {
+        let offset = usize::try_from(upload.received).unwrap();
         assert_eq!(
-            client
-                .put(
-                    &upload,
-                    upload.received as usize,
-                    &plan.bytes[upload.received as usize..]
-                )
-                .status,
+            client.put(&upload, offset, &plan.bytes[offset..]).status,
             200
         );
     }

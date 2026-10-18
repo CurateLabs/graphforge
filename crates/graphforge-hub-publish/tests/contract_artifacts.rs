@@ -11,6 +11,7 @@
     clippy::too_many_lines
 )]
 
+#[path = "contract_artifacts/history.rs"]
 mod history;
 
 use graphforge_discovery::{

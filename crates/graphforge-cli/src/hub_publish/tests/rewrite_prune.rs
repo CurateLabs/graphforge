@@ -1,6 +1,7 @@
 //! Genuine divergent Branch publication, lease refusal, retention and native reopen.
 mod cross_hub;
 use super::*;
+use arrow::array::Int64Array;
 
 #[test]
 fn explicit_rewrite_prune_preserves_lease_and_removes_real_orphan_packages_after_grace() {

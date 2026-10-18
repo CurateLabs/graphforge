@@ -1,5 +1,6 @@
 //! Deterministic destructive history cases through the same public corpus mapping.
 use super::*;
+use std::collections::BTreeSet;
 fn read(publication: &Publication) -> ResearchLineage {
     ResearchLineage::from_json(
         &publication
@@ -56,7 +57,14 @@ pub(super) fn cases() -> Vec<Case> {
         steps.extend(publish(&base, "token", "base", &mut model));
         let mut old = next(&base, 1101, 3103);
         old.expected_revision = Some(model.revision(&base.repository));
-        steps.extend(publish(&old, "token", "old", &mut model));
+        steps.extend(retained_open(&old, "old", &[&base]));
+        model.advance(&old);
+        steps.push(commit(
+            &old,
+            "token",
+            "old",
+            complete(&old, &model.revision(&old.repository)),
+        ));
         let orphan = read(&old)
             .version(&operation(3103).to_string())
             .unwrap()
@@ -82,8 +90,7 @@ pub(super) fn cases() -> Vec<Case> {
         } else {
             model.revision(&base.repository)
         });
-        steps.push(open_new(&replacement, "token", "replacement"));
-        steps.extend(upload_all(&replacement, "replacement"));
+        steps.extend(retained_open(&replacement, "replacement", &[&base, &old]));
         let expect = if stale {
             error(412, "ref_conflict")
         } else if dependent {
@@ -123,7 +130,8 @@ fn inventory_cases() -> Vec<Case> {
         let bytes = base.objects.iter().find(|o| o.digest() == digest).unwrap();
         let mut candidate = next(&base, 1201, 3103);
         let mut lineage = read(&candidate);
-        *lineage.versions.iter_mut().find(|v| v.version_uuid == original.version_uuid).unwrap() = original;
+        let retained_version = lineage.versions.iter_mut().find(|v| v.version_uuid == original.version_uuid).unwrap();
+        *retained_version = original;
         replace(&mut candidate, lineage);
         if retained {
             candidate.objects.push(bytes.clone());
@@ -131,8 +139,7 @@ fn inventory_cases() -> Vec<Case> {
         }
         candidate.prune = true;
         candidate.expected_revision = Some(model.revision(&base.repository));
-        steps.push(open_new(&candidate, "token", "candidate"));
-        steps.extend(upload_all(&candidate, "candidate"));
+        steps.extend(retained_open(&candidate, "candidate", &[&base]));
         let expected = if retained {
             model.advance(&candidate);
             complete(&candidate, &model.revision(&base.repository))
@@ -147,4 +154,30 @@ fn inventory_cases() -> Vec<Case> {
         }
         case(if retained { "retained-native-package-survives-prune" } else { "missing-native-package-inventory-refused" }, "Every advertised Version package must bind the exact authenticated manifest/session inventory before ref mutation or retirement.", steps)
     }).collect()
+}
+
+fn retained_open(publication: &Publication, prefix: &str, previous: &[&Publication]) -> Vec<Step> {
+    let retained: BTreeSet<_> = previous
+        .iter()
+        .flat_map(|p| p.objects.iter().map(Object::digest))
+        .collect();
+    let mut opened = open_new(publication, "token", prefix);
+    let Step::Request { expect, .. } = &mut opened else {
+        unreachable!()
+    };
+    for (index, object) in publication.objects.iter().enumerate() {
+        if retained.contains(&object.digest()) {
+            expect.json.as_mut().unwrap()["uploads"][index]["received"] = json!(object.bytes.len());
+        }
+    }
+    let mut steps = vec![opened];
+    steps.extend(
+        publication
+            .objects
+            .iter()
+            .enumerate()
+            .filter(|(_, object)| !retained.contains(&object.digest()))
+            .map(|(index, object)| put_chunk(publication, prefix, index, 0, object.bytes.len())),
+    );
+    steps
 }
