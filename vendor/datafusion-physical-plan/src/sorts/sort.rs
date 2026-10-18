@@ -498,29 +498,30 @@ impl ExternalSorter {
             self.in_mem_batches.is_empty(),
             "in_mem_batches should be empty after constructing sorted stream"
         );
-        // 'global' here refers to all buffered batches when the memory limit is
-        // reached. This variable will buffer the sorted batches after
-        // sort-preserving merge and incrementally append to spill files.
+        // Keep only the current admitted output while writing the sorted run.
+        // Retaining earlier outputs can exhaust the buffered-sort share before
+        // the remaining stream is drained, even when the pool can serve the
+        // writer. Append/drop each source before polling for another one.
         let mut globally_sorted_batches: Vec<RecordBatch> = vec![];
 
         while let Some(batch) = sorted_stream.next().await {
             let batch = batch?;
             // Sorting has finished: retain actual source backing, while the
             // writer separately admits GC, encoding and codec workspace. If
-            // source admission fails, return before any writer allocation;
-            // the unadmitted batch cannot stay live across an older-row flush.
+            // source admission fails, return before any further writer
+            // allocation; no unadmitted batch can stay live across a write.
             self.reservation
                 .try_grow(get_record_batch_memory_size(&batch))
                 .map_err(Self::err_with_oom_context)?;
             globally_sorted_batches.push(batch);
+            self.consume_and_spill_append(&mut globally_sorted_batches)
+                .await?;
         }
 
         // Drop early to free up memory reserved by the sorted stream, otherwise the
         // upcoming `self.reserve_memory_for_merge()` may fail due to insufficient memory.
         drop(sorted_stream);
 
-        self.consume_and_spill_append(&mut globally_sorted_batches)
-            .await?;
         self.spill_finish().await?;
 
         // Sanity check after spilling
@@ -1800,12 +1801,9 @@ mod tests {
         let spilled_rows = metrics.spilled_rows().unwrap();
         let spilled_bytes = metrics.spilled_bytes().unwrap();
 
-        // This test case is processing 840KB of data using 400KB of memory. Note
-        // that buffered batches can't be dropped until all sorted batches are
-        // generated, so we can only buffer `sort_spill_reservation_bytes` of sorted
-        // batches.
-        // The number of spills is roughly calculated as:
-        //  `number_of_batches / (sort_spill_reservation_bytes / batch_size)`
+        // This test processes 840KB of data using 400KB of memory, forcing
+        // several sorted runs. Each output batch is appended before polling
+        // the next, while all appends of one run share its in-progress file.
 
         // If this assertion fail with large spill count, make sure the following
         // case does not happen:

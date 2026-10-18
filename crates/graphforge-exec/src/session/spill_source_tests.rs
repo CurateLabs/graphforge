@@ -1,4 +1,4 @@
-//! Real sorted-source handoff, including refusal before writing older rows.
+//! Real sorted-source handoff, including refusal before any later write.
 use super::*;
 use datafusion::common::DataFusionError;
 use datafusion::execution::memory_pool::MemoryReservation;
@@ -15,6 +15,7 @@ struct SourceHandoffPool {
     spilling: AtomicBool,
     handoffs: AtomicUsize,
     writer_attempts: AtomicUsize,
+    writer_attempts_at_refusal: AtomicUsize,
     sorter_held: AtomicUsize,
     minimum_writer_source: AtomicUsize,
 }
@@ -62,8 +63,12 @@ impl MemoryPool for SourceHandoffPool {
                 if bytes == self.source {
                     let ordinal = self.handoffs.fetch_add(1, Ordering::Relaxed) + 1;
                     if self.refuse_second && ordinal == 2 {
+                        self.writer_attempts_at_refusal.store(
+                            self.writer_attempts.load(Ordering::Relaxed),
+                            Ordering::Relaxed,
+                        );
                         return Err(DataFusionError::ResourcesExhausted(
-                            "control refuses the second sorted source before writing".into(),
+                            "control refuses the second sorted source before its write".into(),
                         ));
                     }
                 }
@@ -140,6 +145,7 @@ async fn source_handoff(refuse_second: bool) -> Result<()> {
         spilling: AtomicBool::new(false),
         handoffs: AtomicUsize::new(0),
         writer_attempts: AtomicUsize::new(0),
+        writer_attempts_at_refusal: AtomicUsize::new(0),
         sorter_held: AtomicUsize::new(0),
         minimum_writer_source: AtomicUsize::new(usize::MAX),
     });
@@ -167,8 +173,15 @@ async fn source_handoff(refuse_second: bool) -> Result<()> {
             DataFusionError::ResourcesExhausted(_)
         ));
         assert_eq!(observed.handoffs.load(Ordering::Relaxed), 2);
-        assert_eq!(observed.writer_attempts.load(Ordering::Relaxed), 0);
-        assert_eq!(sort.metrics().unwrap().spill_count().unwrap(), 0);
+        // The first source was fully admitted and written before the next
+        // source was polled. A refused source must cause no subsequent write.
+        let written_before_refusal = observed.writer_attempts_at_refusal.load(Ordering::Relaxed);
+        assert!(written_before_refusal > 0);
+        assert_eq!(
+            observed.writer_attempts.load(Ordering::Relaxed),
+            written_before_refusal,
+        );
+        assert_eq!(sort.metrics().unwrap().spill_count().unwrap(), 1);
         assert_eq!(
             context
                 .runtime_env()
@@ -195,8 +208,8 @@ async fn source_handoff(refuse_second: bool) -> Result<()> {
         assert!(observed.handoffs.load(Ordering::Relaxed) >= 2);
         assert!(sort.metrics().unwrap().spill_count().unwrap() > 0);
         assert!(observed.writer_attempts.load(Ordering::Relaxed) > 0);
-        assert!(observed.minimum_writer_source.load(Ordering::Relaxed) >= 2 * source);
     }
+    assert!(observed.minimum_writer_source.load(Ordering::Relaxed) >= source);
     drop(stream);
     drop(sort);
     assert_eq!(pool.reserved(), 0);
@@ -219,7 +232,6 @@ async fn spill_admission_sorted_handoff_keeps_actual_source_authority_through_wr
 }
 
 #[tokio::test]
-async fn spill_admission_refused_sorted_handoff_returns_before_writing_older_admitted_rows()
--> Result<()> {
+async fn spill_admission_refused_sorted_handoff_returns_before_any_later_write() -> Result<()> {
     source_handoff(true).await
 }
