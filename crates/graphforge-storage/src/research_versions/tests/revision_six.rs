@@ -287,7 +287,14 @@ fn revision_seven_and_eight_registry_bytes_remain_readable_without_identity_rewr
         legacy_project(root);
         let before = state(root);
         let parent = crate::resolve_project_generation(root).unwrap();
-        let mut capabilities = parent.capabilities();
+        let mut capabilities = parent
+            .capabilities()
+            .into_iter()
+            .map(|capability| ProjectCapability {
+                capability_id: capability.capability_id,
+                capability_version: capability.capability_version,
+            })
+            .collect::<Vec<_>>();
         for capability in &mut capabilities {
             if capability.capability_id == RESEARCH_CAPABILITY {
                 capability.capability_version = revision;
