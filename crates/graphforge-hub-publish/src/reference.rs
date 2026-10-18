@@ -1289,15 +1289,12 @@ impl ReferenceHub {
                 discovery_limits,
             )
             .map_err(|_| invalid("native lineage is invalid"))?;
-            if next.repository != *repository
-                || next.immutable_version != manifest.immutable_version
-                || next
-                    .canonical_digest()
-                    .map_err(|_| invalid("native lineage is invalid"))?
-                    != reference.lineage_digest
-            {
-                return Err(invalid("native lineage does not bind this publication").into());
-            }
+            // The exact manifest/session inventory was admitted above. Bind all
+            // advertised native packages before transition checks or retirement;
+            // merely retaining their lineage descriptors cannot retain bytes.
+            manifest
+                .bind_lineage_document(&next)
+                .map_err(|_| invalid("native lineage does not bind this publication inventory"))?;
             if let Some(stored) = current {
                 let mut checked = BTreeSet::new();
                 for old_ref in stored.refs.values() {
