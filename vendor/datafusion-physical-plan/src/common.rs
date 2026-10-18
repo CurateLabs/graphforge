@@ -183,7 +183,7 @@ pub fn project_plan_to_schema(
 /// If running in a tokio context spawns the execution of `stream` to a separate task
 /// allowing it to execute in parallel with an intermediate buffer of size `buffer`
 pub fn spawn_buffered(
-    mut input: SendableRecordBatchStream,
+    input: SendableRecordBatchStream,
     buffer: usize,
 ) -> SendableRecordBatchStream {
     // Use tokio only if running from a multi-thread tokio context
@@ -195,24 +195,82 @@ pub fn spawn_buffered(
 
             let sender = builder.tx();
 
+            let queue = crate::terminal_ownership::Life::inherited(
+                crate::terminal_ownership::Kind::Queue,
+            );
+            queue.update(|o| {
+                o.c = buffer as u64;
+                o.flags = 4;
+            });
+            let producer = crate::terminal_ownership::Life::new(
+                crate::terminal_ownership::Kind::Producer,
+                queue.id(),
+                0,
+            );
+            producer.edge(queue.id(), 6, 0);
+            let mut observed = crate::terminal_ownership::ProducerInput {
+                input,
+                diagnostic: producer,
+            };
+
+            let queue_id = queue.id();
             builder.spawn(async move {
                 loop {
                     // Production occupies a configured slot too. Polling first
                     // would retain one extra item while a full queue blocks send.
+                    observed.diagnostic.update(|o| o.a = 1);
                     let Ok(permit) = sender.reserve().await else {
                         // Receiver shutdown also cancels further input polling.
                         return Ok(());
                     };
-                    let Some(item) = input.next().await else {
+                    observed.diagnostic.update(|o| o.a = 2);
+                    let Some(item) = futures::future::poll_fn(|cx| {
+                        crate::terminal_ownership::clear_handoff();
+                        observed.input.as_mut().poll_next(cx)
+                    })
+                    .await
+                    else {
                         // EOF returns the unused slot through Permit::drop.
                         return Ok(());
                     };
                     // Preserve FIFO and continue after an error item, as before.
+                    observed.diagnostic.update(|o| o.a = 3);
+                    let ordinal = observed.diagnostic.increment(1);
+                    let handed = crate::terminal_ownership::take_handoff();
+                    if let Ok(batch) = &item {
+                        let handed = if handed.id() != 0 {
+                            handed
+                        } else {
+                            crate::terminal_ownership::gap(
+                                crate::terminal_ownership::GAP_QUEUE,
+                            );
+                            let life = crate::terminal_ownership::Life::new(
+                                crate::terminal_ownership::Kind::Batch,
+                                observed.diagnostic.id(),
+                                0,
+                            );
+                            life.batch(batch);
+                            life.update(|o| {
+                                o.a = batch.num_rows() as u64;
+                                o.b = batch.num_columns() as u64;
+                            });
+                            life
+                        };
+                        handed.queued(queue_id, ordinal);
+                    }
                     permit.send(item);
+                    observed.diagnostic.update(|o| o.a = 0);
                 }
             });
 
-            builder.build()
+            if cfg!(feature = "test_utils") {
+                Box::pin(crate::terminal_ownership::QueueStream::new(
+                    builder.build(),
+                    queue,
+                ))
+            } else {
+                builder.build()
+            }
         }
         _ => input,
     }

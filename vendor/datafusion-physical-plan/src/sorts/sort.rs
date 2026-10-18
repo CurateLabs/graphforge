@@ -19,6 +19,7 @@
 //! It will do in-memory sorting if it has enough memory budget
 //! but spills to disk if needed.
 
+use crate::terminal_ownership as od;
 use std::fmt;
 use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
@@ -261,6 +262,9 @@ struct ExternalSorter {
     /// How much memory to reserve for performing in-memory sort/merges
     /// prior to spilling.
     sort_spill_reservation_bytes: usize,
+    diagnostic_input: od::Piece,
+    diagnostic_merge: od::Piece,
+    diagnostic: od::Life,
 }
 
 impl ExternalSorter {
@@ -295,7 +299,17 @@ impl ExternalSorter {
         )
         .with_compression_type(spill_compression);
 
+        let diagnostic = od::Life::inherited(od::Kind::Sorter);
+        let diagnostic_input = od::Piece::new(&reservation, diagnostic.id());
+        let diagnostic_merge = od::Piece::new(&merge_reservation, diagnostic.id());
+        diagnostic.update(|o| {
+            o.piece = diagnostic_input.id();
+            o.flags = 4;
+        });
         Ok(Self {
+            diagnostic,
+            diagnostic_input,
+            diagnostic_merge,
             schema,
             in_mem_batches: vec![],
             in_progress_spill_file: None,
@@ -357,6 +371,7 @@ impl ExternalSorter {
             // compete for pool memory. `take()` moves the bytes atomically
             // without releasing them back to the pool, so other partitions
             // cannot race to consume the freed memory.
+            od::gap(od::GAP_DEFERRED_MERGE);
             StreamingMergeBuilder::new()
                 .with_sorted_spill_files(std::mem::take(&mut self.finished_spill_files))
                 .with_spill_manager(self.spill_manager.clone())
@@ -450,6 +465,8 @@ impl ExternalSorter {
         }
 
         self.reservation.free();
+        self.diagnostic_input
+            .refresh(&self.reservation, self.diagnostic.id());
         assert_or_internal_err!(
             globally_sorted_batches.is_empty(),
             "This function consumes globally_sorted_batches, so it should be empty after taking."
@@ -510,9 +527,39 @@ impl ExternalSorter {
             // writer separately admits GC, encoding and codec workspace. If
             // source admission fails, return before any further writer
             // allocation; no unadmitted batch can stay live across a write.
-            self.reservation
-                .try_grow(get_record_batch_memory_size(&batch))
-                .map_err(Self::err_with_oom_context)?;
+            let handed = od::take_handoff();
+            let pending = if handed.id() != 0 {
+                handed
+            } else {
+                od::Life::new(od::Kind::Output, self.diagnostic.id(), 0)
+            };
+            pending.update(|o| {
+                o.owner_kind = od::Kind::Output as u64;
+                o.parent = self.diagnostic.id();
+            });
+            pending.batch(&batch);
+            pending.update(|o| {
+                o.a = batch.num_rows() as u64;
+                o.b = batch.num_columns() as u64;
+            });
+            let transition = od::Transition::begin();
+            let admitted = self
+                .reservation
+                .try_grow(get_record_batch_memory_size(&batch));
+            self.diagnostic_input
+                .refresh(&self.reservation, self.diagnostic.id());
+            drop(transition);
+            if let Err(error) = admitted {
+                // A failed admission is an observed unfunded incoming owner,
+                // never a sponsor inferred from older already-written output.
+                od::gap(od::GAP_UNKNOWN_SPONSOR);
+                od::snapshot(1);
+                return Err(Self::err_with_oom_context(error));
+            }
+            pending.update(|o| {
+                o.piece = self.diagnostic_input.id();
+                o.held = self.reservation.size() as u64;
+            });
             globally_sorted_batches.push(batch);
             self.consume_and_spill_append(&mut globally_sorted_batches)
                 .await?;
@@ -620,7 +667,8 @@ impl ExternalSorter {
         if self.in_mem_batches.len() == 1 {
             let batch = self.in_mem_batches.swap_remove(0);
             let reservation = self.reservation.take();
-            return self.sort_batch_stream(batch, &metrics, reservation);
+            let piece = std::mem::take(&mut self.diagnostic_input);
+            return self.sort_batch_stream(batch, &metrics, reservation, piece);
         }
 
         // If less than sort_in_place_threshold_bytes, concatenate and sort in place
@@ -632,7 +680,8 @@ impl ExternalSorter {
                 .try_resize(get_reserved_bytes_for_record_batch(&batch)?)
                 .map_err(Self::err_with_oom_context)?;
             let reservation = self.reservation.take();
-            return self.sort_batch_stream(batch, &metrics, reservation);
+            let piece = std::mem::take(&mut self.diagnostic_input);
+            return self.sort_batch_stream(batch, &metrics, reservation, piece);
         }
 
         let streams = std::mem::take(&mut self.in_mem_batches)
@@ -642,20 +691,28 @@ impl ExternalSorter {
                 let reservation = self
                     .reservation
                     .split(get_reserved_bytes_for_record_batch(&batch)?);
-                let input = self.sort_batch_stream(batch, &metrics, reservation)?;
+                let piece =
+                    self.diagnostic_input
+                        .child(&reservation, 0, reservation.size());
+                self.diagnostic_input
+                    .refresh(&self.reservation, self.diagnostic.id());
+                let input =
+                    self.sort_batch_stream(batch, &metrics, reservation, piece)?;
                 Ok(spawn_buffered(input, 1))
             })
             .collect::<Result<_>>()?;
 
-        StreamingMergeBuilder::new()
-            .with_streams(streams)
-            .with_schema(Arc::clone(&self.schema))
-            .with_expressions(&self.expr.clone())
-            .with_metrics(metrics)
-            .with_batch_size(self.batch_size)
-            .with_fetch(None)
-            .with_reservation(self.merge_reservation.new_empty())
-            .build()
+        od::scoped(self.diagnostic.id(), self.diagnostic_merge.id(), || {
+            StreamingMergeBuilder::new()
+                .with_streams(streams)
+                .with_schema(Arc::clone(&self.schema))
+                .with_expressions(&self.expr.clone())
+                .with_metrics(metrics)
+                .with_batch_size(self.batch_size)
+                .with_fetch(None)
+                .with_reservation(self.merge_reservation.new_empty())
+                .build()
+        })
     }
 
     /// Sorts a single `RecordBatch` into a single stream.
@@ -672,6 +729,7 @@ impl ExternalSorter {
         batch: RecordBatch,
         metrics: &BaselineMetrics,
         reservation: MemoryReservation,
+        diagnostic_piece: od::Piece,
     ) -> Result<SendableRecordBatchStream> {
         assert_eq!(
             get_reserved_bytes_for_record_batch(&batch)?,
@@ -683,6 +741,17 @@ impl ExternalSorter {
         let batch_size = self.batch_size;
         let output_row_metrics = metrics.output_rows().clone();
 
+        let diagnostic = od::Life::new(
+            od::Kind::Source,
+            self.diagnostic.id(),
+            diagnostic_piece.id(),
+        );
+        diagnostic_piece.refresh(&reservation, diagnostic.id());
+        diagnostic.update(|o| {
+            o.piece = diagnostic_piece.id();
+            o.held = reservation.size() as u64;
+            o.flags = 4;
+        });
         let stream = futures::stream::once(async move {
             let schema = batch.schema();
 
@@ -697,18 +766,35 @@ impl ExternalSorter {
                 .iter()
                 .map(get_record_batch_memory_size)
                 .sum();
-            reservation
-                .try_resize(total_sorted_size)
-                .map_err(Self::err_with_oom_context)?;
+            let transition = od::Transition::begin();
+            let resized = reservation.try_resize(total_sorted_size);
+            diagnostic_piece.refresh(&reservation, diagnostic.id());
+            diagnostic.update(|o| {
+                o.held = reservation.size() as u64;
+                o.a = sorted_batches.len() as u64;
+            });
+            drop(transition);
+            if let Err(error) = resized {
+                od::gap(od::GAP_UNKNOWN_SPONSOR);
+                od::snapshot(1);
+                return Err(Self::err_with_oom_context(error));
+            }
 
+            #[cfg(feature = "test_utils")]
+            let chunks =
+                od::Chunks::new(sorted_batches, diagnostic.id(), diagnostic_piece.id());
+            #[cfg(not(feature = "test_utils"))]
+            let chunks = sorted_batches.into_iter();
             // Wrap in ReservationStream to hold the reservation
-            Result::<_, DataFusionError>::Ok(Box::pin(ReservationStream::new(
+            Result::<_, DataFusionError>::Ok(Box::pin(ReservationStream::new_observed(
                 Arc::clone(&schema),
                 Box::pin(RecordBatchStreamAdapter::new(
                     Arc::clone(&schema),
-                    futures::stream::iter(sorted_batches.into_iter().map(Ok)),
+                    futures::stream::iter(chunks.map(Ok)),
                 )),
                 reservation,
+                diagnostic_piece,
+                diagnostic,
             )) as SendableRecordBatchStream)
         })
         .try_flatten()
@@ -747,7 +833,8 @@ impl ExternalSorter {
         input: &RecordBatch,
     ) -> Result<()> {
         let size = get_reserved_bytes_for_record_batch(input)?;
-
+        self.diagnostic_input
+            .refresh(&self.reservation, self.diagnostic.id());
         match self.reservation.try_grow(size) {
             Ok(_) => Ok(()),
             Err(e) => {
