@@ -1031,6 +1031,19 @@ impl ReferenceHub {
             .filter(|session| &session.request.repository == repository)
             .ok_or_else(|| not_found("publish session is unknown"))?;
         let commit = CommitRequest::from_json(&request.body)?;
+        // Destructive semantics must be offered and required on this exact
+        // authenticated session before even a committed receipt can replay.
+        // The reference Hub does not offer them until their behavior is wired.
+        crate::require_history_capability(
+            &self.capabilities(repository),
+            commit.rewrite,
+            commit.prune,
+        )?;
+        crate::require_history_requirement(
+            &session.request.requirements,
+            commit.rewrite,
+            commit.prune,
+        )?;
 
         // Structural manifest validation is pure; it precedes the replay check
         // only because the commitment binds the manifest's canonical digest.
@@ -1061,8 +1074,8 @@ impl ReferenceHub {
             .map_err(|_| invalid("manifest is not a valid discovery manifest"))?;
         let manifest_validator = sha256_digest(&manifest_document);
         let intent = PublishIntent {
-            rewrite: false,
-            prune: false,
+            rewrite: commit.rewrite,
+            prune: commit.prune,
             repository: repository.clone(),
             intent_digest: session.request.intent_digest.clone(),
             objects: session.request.objects.clone(),
