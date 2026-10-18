@@ -40,7 +40,8 @@ fn preview_is_pinned_read_only_and_requires_explicit_conflict_selection() {
         scope: ResearchUpstreamScope::Branch,
     };
     let before = current(&graph);
-    let snapshot = preview::load(&graph, &request, &cancel).unwrap();
+    let mut snapshot = preview::load(&graph, &request, &cancel).unwrap();
+    assertions::historical_preview_digest(&request, &mut snapshot);
     let properties: Vec<_> = snapshot
         .rows
         .iter()

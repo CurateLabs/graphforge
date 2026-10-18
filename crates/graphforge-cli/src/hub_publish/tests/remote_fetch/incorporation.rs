@@ -1,4 +1,5 @@
 //! Composed Alice/Bob divergence uses real discovery, native fetch/review and FF publication.
+mod shared_base;
 use super::*;
 use graphforge_api::{
     PreviewResearchUpstreamRequest, ResearchFieldIdentity, ResearchUpstreamDecision,

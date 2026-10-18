@@ -214,3 +214,11 @@ first and the fetched remote head second. An intervening local edit or remote
 refresh makes an uncommitted preview stale. Omit `remote` to retain the existing
 immediate-parent review. This API does not add a `gf fetch` command or cross-owner
 Proposal workflow.
+
+Same-Branch remote reviews compare both heads against their unique maximal common
+native Version, including each head in its own ancestry. The base must retain
+verified content; unavailable bases and ambiguous crisscross histories refuse
+explicitly. The preview commitment includes this base. A local revert therefore
+remains a local change relative to the shared history, including after repeated
+remote incorporations. Immediate-parent reviews keep their existing field baseline
+and canonical preview identity.

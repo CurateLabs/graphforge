@@ -1,6 +1,9 @@
 //! Deterministic three-way comparison; incorporated state is distinct from origin.
 use super::{accepted::Accepted, state::State};
-use crate::{CancellationToken, GfError, branches::fields::Key};
+use crate::{
+    CancellationToken, GfError,
+    branches::fields::{Fields, Key},
+};
 use std::collections::{BTreeMap, BTreeSet};
 use uuid::Uuid;
 #[derive(Clone, Debug, serde::Serialize)]
@@ -38,11 +41,32 @@ pub(crate) fn compare(
     accepted: &BTreeMap<Key, Accepted>,
     cancel: &CancellationToken,
 ) -> Result<Vec<Row>, GfError> {
+    compare_inner(left, right, accepted, None, cancel)
+}
+
+/// Use a retained shared Version's actual fields without rewriting Branch provenance.
+pub(crate) fn compare_from_base(
+    left: &State,
+    right: &State,
+    base: &Fields,
+    cancel: &CancellationToken,
+) -> Result<Vec<Row>, GfError> {
+    compare_inner(left, right, &BTreeMap::new(), Some(base), cancel)
+}
+
+fn compare_inner(
+    left: &State,
+    right: &State,
+    accepted: &BTreeMap<Key, Accepted>,
+    base: Option<&Fields>,
+    cancel: &CancellationToken,
+) -> Result<Vec<Row>, GfError> {
     let keys: BTreeSet<_> = left
         .fields
         .keys()
         .chain(right.fields.keys())
         .chain(left.baseline.keys())
+        .chain(base.into_iter().flat_map(|fields| fields.keys()))
         .cloned()
         .collect();
     let mut rows = Vec::new();
@@ -56,7 +80,10 @@ pub(crate) fn compare(
             .transpose()?
             .flatten();
         let prior = accepted.get(&key);
-        let baseline = prior.map_or(persistent, |p| p.value);
+        let baseline = base.map_or_else(
+            || prior.map_or(persistent, |p| p.value),
+            |fields| fields.get(&key).copied(),
+        );
         let already_accepted = prior.is_some_and(|p| p.value == a);
         let disposition = if already_accepted {
             "accepted"
