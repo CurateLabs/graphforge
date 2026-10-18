@@ -292,7 +292,7 @@ def type_width(code):
             raise ValueError("invalid interval unit")
         return low, {1: 4, 2: 8, 3: 16}[high]
     if low == 21:
-        if not 0 < high < (1 << 32):
+        if not 0 <= high < (1 << 31):
             raise ValueError("invalid fixed binary width")
         return low, high
     if low >= 31:
@@ -592,6 +592,17 @@ def validate_credit(owners, pieces, relations, backings):
         edges = relations.get((identity, 10), [])
         if owner["owner_kind"] in {11, 18} and not relations.get((identity, 2), []) and not edges:
             problems.append("IPC retained metadata/payload has no actual Budget")
+        if owner["owner_kind"] == 11 and edges:
+            headers = relations.get((identity, 7), [])
+            if (
+                len(edges) != 1
+                or len(headers) != 1
+                or owners[headers[0]["to"]]["owner_kind"] != 18
+                or owners[headers[0]["to"]]["a"] != 1
+                or not owners[headers[0]["to"]]["bytes"]
+                or headers[0]["bytes"]
+            ):
+                problems.append("IPC Claim lacks its separate funded batch metadata")
         for edge in edges:
             if edge["to"] not in budgets or edge["bytes"] != owner["bytes"]:
                 problems.append("IPC claim amount or Budget identity disagrees")
@@ -809,6 +820,7 @@ def validate_snapshot(begin, records, end, header):
         floor = checked_add(base, outputs)
         if floor > piece["held"] or (not state & 3 and floor != piece["held"]):
             funding_problems.append("Copy retained floor disagrees with actual reservation")
+    claim_backings = {b["owner"]: (b["base"], b["capacity"]) for b in backings if b["type"] == 35}
     used = {}
     for owner, row in owners.items():
         piece = row["piece"]
@@ -873,11 +885,29 @@ def validate_snapshot(begin, records, end, header):
             for b in backings
             if b["owner"] == owner and b["flags"] != 1 and b["capacity"]
         }
-        if owned_backings and not budget_sponsors:
+        # Sharing is not authority. Only an exact live Claim receipt can
+        # account for an alias: the Claim's payload/header funding and charge
+        # conservation are checked independently above and by validate_credit.
+        # Its backing is already charged there, including borrowed IPC Credit.
+        shared = set()
+        for edge in relations.get((owner, 3), []):
+            backing = claim_backings.get(edge["to"])
+            if (
+                row["owner_kind"] not in {5, 8, 14}
+                or owners[edge["to"]]["owner_kind"] != 11
+                or backing not in owned_backings
+                or not edge["bytes"]
+                or edge["bytes"] != backing[1]
+            ):
+                funding_problems.append("sharing edge lacks an exact live Claim backing")
+            else:
+                shared.add(backing)
+        unaccounted = owned_backings - shared
+        if unaccounted and not budget_sponsors:
             if piece not in pieces or pieces[piece]["flags"] & 4:
                 funding_problems.append("retained backing has no live sponsoring authority")
             else:
-                used.setdefault(piece, set()).update(owned_backings)
+                used.setdefault(piece, set()).update(unaccounted)
     for resident_id, resident in residents.items():
         allocated = checked_add(
             *(capacity for _, capacity in resident_allocations.get(resident_id, set()))

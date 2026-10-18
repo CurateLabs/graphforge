@@ -1442,6 +1442,7 @@ pub(crate) fn verify_ownership_controls() -> Result<()> {
     super::credit::verify_ownership_controls()?;
     ownership_tests::ipc_buffer_ticket_retains_payload_and_metadata_through_final_slice(
     )?;
+    ownership_tests::queued_ipc_claims_capture_after_actual_producer_retirement()?;
     ownership_tests::original_inline_budget_and_claim_layouts_exclude_observer_fields();
     Ok(())
 }
@@ -1478,6 +1479,95 @@ mod ownership_tests {
         assert_eq!(slice.as_slice(), &7_u64.to_ne_bytes());
         drop(slice);
         assert_eq!(pool.reserved(), 0);
+        Ok(())
+    }
+
+    #[cfg(feature = "test_utils")]
+    #[cfg_attr(test, test)]
+    pub(super) fn queued_ipc_claims_capture_after_actual_producer_retirement()
+    -> Result<()> {
+        use crate::terminal_ownership::{Envelope, Kind, Session};
+        use arrow::array::{ArrayRef, Int64Array};
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()?;
+        let _entered = runtime.enter();
+        let path = std::env::temp_dir().join(format!(
+            "graphforge-queued-ipc-{}.jsonl",
+            std::process::id()
+        ));
+        let capture = Session::create(&path, Envelope::default())?;
+        for _ in 0..2 {
+            capture.begin_call()?;
+            let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(4096));
+            let mut work = reserve(&pool, 4096, "SpillReaderDecode")?;
+            let buffer = arrow_buffer::Buffer::from_vec(vec![7_i64; 8]);
+            let capacity = buffer.capacity();
+            let authority = work.split(128);
+            let diagnostic =
+                od::Life::new(Kind::BatchMetadata, authority.diagnostic_id(), 0);
+            diagnostic.update(|o| {
+                o.bytes = 128;
+                o.a = 1;
+                o.flags = 4;
+            });
+            diagnostic.edge(authority.diagnostic_id(), 10, 128);
+            let metadata = Arc::new(BatchMetadata {
+                _authority: authority,
+                _schema: None,
+                diagnostic,
+            });
+            buffer.claim(&OwnerClaims {
+                payload: Arc::new(work.split(capacity)),
+                metadata,
+                base: buffer.data_ptr().as_ptr() as usize,
+                capacity,
+            });
+            let array = Int64Array::new(arrow_buffer::ScalarBuffer::from(buffer), None);
+            let batch =
+                RecordBatch::try_from_iter([("value", Arc::new(array) as ArrayRef)])?;
+            let input = Box::pin(crate::stream::RecordBatchStreamAdapter::new(
+                batch.schema(),
+                futures::stream::iter([Ok(batch)]),
+            ));
+            // Two slots let the actual producer reach EOF without the consumer
+            // polling. Retirement is the barrier; no sleep or polling ahead.
+            let queued = crate::common::spawn_buffered(input, 2);
+            drop(work);
+            capture.wait_for_retirement(Kind::Producer)?;
+            assert_eq!(pool.reserved(), capacity + 128);
+            capture.snapshot(0);
+            drop(queued);
+            assert_eq!(pool.reserved(), 0);
+            capture.snapshot(0);
+            capture.end_call(0);
+        }
+        capture.finish()?;
+        let content = std::fs::read_to_string(&path)?;
+        assert_eq!(
+            content
+                .lines()
+                .filter(|l| l.contains("\"relation\":3"))
+                .count(),
+            2
+        );
+        assert_eq!(
+            content
+                .lines()
+                .filter(|l| l.contains("\"kind\":\"snapshot_end\"")
+                    && l.contains("\"complete\":true"))
+                .count(),
+            4
+        );
+        if let Some(out) = std::env::var_os("GRAPHFORGE_OWNERSHIP_EVIDENCE_DIR") {
+            std::fs::create_dir_all(&out)?;
+            std::fs::copy(
+                &path,
+                std::path::PathBuf::from(out).join("queued-ipc-two-call.jsonl"),
+            )?;
+        }
+        std::fs::remove_file(path)?;
         Ok(())
     }
 

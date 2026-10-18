@@ -109,6 +109,16 @@ The source digests identify the exact deterministic input-generating fixtures:
 | `spill_buffer_tests.rs` | `145b7d9adbfabfc85336ff7ecc980c0a806caa3ef3da0006ffc1c3adbec47a01` |
 | `terminal_ownership_tests.rs` | `ab3b1fd3aaf83916007e1499cdcb6a67ef7546bb823ca018285b3ad4b5ef25e8` |
 
+The queued IPC fixture additionally uses the deterministic buffer/metadata claims
+in `vendor/datafusion-physical-plan/src/spill/admission.rs`; it waits for actual
+producer retirement before capturing a still-unconsumed bounded channel. This
+exercises sharing through live Claim certificates, including their separate
+metadata authority, without polling the consumer or waiting by elapsed time.
+Zero-width binary layout controls are in
+`vendor/datafusion-physical-plan/src/terminal_ownership/arrays.rs` and the paired
+assessor tests. A sharing edge alone is never funding: each backing must match a
+live Claim and its independently validated payload/header authority.
+
 These fixtures deliberately include both supported funding closures and explicit
 partial paths. Keep the test log with the captures; a passing Rust test does not
 mean every exported capture has a positive funding verdict.

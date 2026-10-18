@@ -511,8 +511,9 @@ impl<F: FnMut(Backing) -> bool> Visitor<F> {
 mod tests {
     use super::*;
     use arrow::array::{
-        ArrayRef, BooleanArray, DictionaryArray, Int8Array, Int32Array, Int64Array,
-        ListArray, StringArray, StringViewArray, StructArray, TimestampMicrosecondArray,
+        ArrayRef, BooleanArray, DictionaryArray, FixedSizeBinaryArray, Int8Array,
+        Int32Array, Int64Array, ListArray, StringArray, StringViewArray, StructArray,
+        TimestampMicrosecondArray,
     };
     use std::sync::Arc;
 
@@ -693,6 +694,27 @@ mod tests {
     }
 
     #[cfg_attr(test, test)]
+    fn zero_width_binary_keeps_row_and_validity_descriptors() {
+        let batch = RecordBatch::try_from_iter([(
+            "empty_bytes",
+            Arc::new(FixedSizeBinaryArray::new_null(0, 3)) as ArrayRef,
+        )])
+        .unwrap();
+        let descriptors = collect(&batch);
+        assert!(descriptors.iter().all(|d| d.data_type == 21));
+        let node = descriptors.iter().find(|d| d.flags == ARRAY).unwrap();
+        assert_eq!((node.length, node.nulls, node.buffers), (3, 3, 2));
+        let values = descriptors.iter().find(|d| d.flags == VALUES).unwrap();
+        assert_eq!((values.capacity, values.length), (0, 0));
+        let validity = descriptors
+            .iter()
+            .find(|d| d.flags == NULLS | BITS)
+            .unwrap();
+        assert_eq!(validity.length, 3);
+        assert!(validity.capacity > 0);
+    }
+
+    #[cfg_attr(test, test)]
     fn quotas_and_callback_failure_never_report_success() {
         let batch = RecordBatch::try_from_iter([(
             "number",
@@ -731,6 +753,7 @@ mod tests {
         nested_list_and_struct_keep_parent_links();
         views_report_all_dynamic_backings();
         unsupported_types_and_timezone_strings_fail_explicitly();
+        zero_width_binary_keeps_row_and_validity_descriptors();
         quotas_and_callback_failure_never_report_success();
     }
 }

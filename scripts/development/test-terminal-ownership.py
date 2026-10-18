@@ -156,6 +156,30 @@ def batch_fixture(nulls=0, temporal=False):
     return {1: owner}, backings
 
 
+class ZeroWidthBinaryTests(unittest.TestCase):
+    def test_zero_width_binary_keeps_rows_and_validity_without_payload_bytes(self):
+        owners, rows = batch_fixture(nulls=1)
+        owners[1]["a"] = 3
+        for row in rows:
+            row["type"] = 21
+        rows[0].update(length=3, nulls=3)
+        rows[1].update(base=0, capacity=0, length=0)
+        rows[2].update(length=3)
+        try:
+            width = collector.type_width(21)
+            capacities = collector.validate_arrays(rows, owners, header_fixture())
+        except ValueError as error:
+            self.fail(f"valid writer layout rejected: {error}")
+        self.assertEqual(width, (21, 0))
+        self.assertEqual(capacities, {3000: 1})
+
+    def test_fixed_binary_width_cannot_exceed_the_writers_nonnegative_i32(self):
+        self.assertEqual(collector.type_width(21 | (((1 << 31) - 1) << 16)), (21, (1 << 31) - 1))
+        for width in [1 << 31, (1 << 32) - 1, 1 << 32]:
+            with self.subTest(width=width), self.assertRaises(ValueError):
+                collector.type_width(21 | (width << 16))
+
+
 class EnvelopeTests(unittest.TestCase):
     def test_matching_envelope_is_accepted(self):
         collector.validate_header(header_fixture())
@@ -791,6 +815,163 @@ def credit_snapshot():
     header = header_fixture()
     header.update(slots=8, edges=8, record_limit=140, byte_limit=143360, observer_bytes=15744)
     return begin, owners + pieces + edges, end, header
+
+
+def queued_claim_snapshot():
+    begin, records, end, header = credit_snapshot()
+    prototype = batch_fixture()[0][1]
+    claim = {
+        **prototype,
+        "id": 9,
+        "owner_kind": 11,
+        "parent": 3,
+        "piece": 0,
+        "bytes": 8,
+        "held": 0,
+        "a": 8,
+        "b": 0,
+    }
+    batch = {**prototype, "id": 10, "parent": 11, "piece": 0, "c": 1, "d": 1}
+    queue = {
+        **prototype,
+        "id": 11,
+        "owner_kind": 12,
+        "piece": 0,
+        "held": 0,
+        "a": 0,
+        "b": 0,
+        "flags": 4,
+    }
+    _, backing = batch_fixture()
+    backing = [{**row, "owner": 10} for row in backing]
+    raw = {
+        **backing[1],
+        "owner": 9,
+        "node": 1,
+        "type": 35,
+        "object": 0,
+        "offset": 0,
+    }
+    records += [claim, batch, queue, *backing, raw]
+    for source, target, relation, amount in [(9, 3, 10, 8), (9, 8, 7, 0), (10, 9, 3, 8)]:
+        records.append(
+            {
+                "kind": "edge",
+                "call": 1,
+                "from": source,
+                "to": target,
+                "relation": relation,
+                "bytes": amount,
+            }
+        )
+    begin["constructed"] = 8
+    end.update(owners=8, backings=3, edges=7)
+    return begin, records, end, header
+
+
+class QueuedClaimTests(unittest.TestCase):
+    def check(self, snapshot):
+        return collector.validate_snapshot(*snapshot)
+
+    def test_queued_alias_uses_the_validated_claims_borrowed_budget(self):
+        result = self.check(queued_claim_snapshot())
+        self.assertTrue(result["funding_complete"], result)
+
+    def test_shared_claim_can_use_validated_copy_resident_authority(self):
+        begin, records, end = metadata_snapshot()
+        prototype = batch_fixture()[0][1]
+        claim = {
+            **prototype,
+            "id": 5,
+            "owner_kind": 11,
+            "parent": 3,
+            "piece": 0,
+            "bytes": 8,
+            "a": 8,
+            "b": 0,
+        }
+        batch = {**prototype, "id": 6, "piece": 0}
+        _, backings = batch_fixture()
+        backings = [{**row, "owner": 6} for row in backings]
+        raw = {**backings[1], "owner": 5, "type": 35, "object": 0}
+        records.extend([claim, batch, *backings, raw])
+        for source, target, relation, amount in [(5, 3, 2, 8), (5, 3, 7, 0), (6, 5, 3, 8)]:
+            records.append(
+                {
+                    "kind": "edge",
+                    "call": 1,
+                    "from": source,
+                    "to": target,
+                    "relation": relation,
+                    "bytes": amount,
+                }
+            )
+        begin["constructed"] = 5
+        end.update(owners=5, backings=3, edges=4)
+        result = self.check((begin, records, end, credit_snapshot()[3]))
+        self.assertTrue(result["funding_complete"], result)
+
+    def test_slices_share_one_claim_without_spending_it_twice(self):
+        snapshot = queued_claim_snapshot()
+        node, values = [r for r in snapshot[1] if r["kind"] == "backing" and r["owner"] == 10]
+        snapshot[1].extend([{**node, "node": 2, "column": 1}, {**values, "node": 2, "column": 1}])
+        next(r for r in snapshot[1] if r["kind"] == "owner" and r["id"] == 10)["b"] = 2
+        snapshot[2]["backings"] = 5
+        self.assertTrue(self.check(snapshot)["funding_complete"])
+
+    def test_alias_requires_the_claims_separate_funded_ipc_metadata(self):
+        for target in [1, 3, 6, None]:
+            snapshot = queued_claim_snapshot()
+            header_edge = next(
+                r
+                for r in snapshot[1]
+                if r["kind"] == "edge" and r["from"] == 9 and r["relation"] == 7
+            )
+            if target is None:
+                snapshot[1].remove(header_edge)
+                snapshot[2]["edges"] -= 1
+            else:
+                header_edge["to"] = target
+            with self.subTest(target=target):
+                self.assertFalse(self.check(snapshot)["funding_complete"])
+
+    def test_alias_matching_is_per_backing_and_requires_exact_claim_amount(self):
+        for field, value in [("to", 8), ("bytes", 7)]:
+            snapshot = queued_claim_snapshot()
+            snapshot[1][-1][field] = value
+            with self.subTest(field=field):
+                self.assertFalse(self.check(snapshot)["funding_complete"])
+        snapshot = queued_claim_snapshot()
+        raw = next(r for r in snapshot[1] if r["kind"] == "backing" and r["type"] == 35)
+        raw["base"] = 4000
+        self.assertFalse(self.check(snapshot)["funding_complete"])
+
+    def test_valid_alias_does_not_hide_another_unfunded_backing(self):
+        snapshot = queued_claim_snapshot()
+        node, values = [r for r in snapshot[1] if r["kind"] == "backing" and r["owner"] == 10]
+        snapshot[1].extend(
+            [{**node, "node": 2, "column": 1}, {**values, "node": 2, "column": 1, "base": 4000}]
+        )
+        next(r for r in snapshot[1] if r["kind"] == "owner" and r["id"] == 10)["b"] = 2
+        snapshot[2]["backings"] = 5
+        self.assertFalse(self.check(snapshot)["funding_complete"])
+
+    def test_alias_cannot_hide_broken_claim_funding_or_local_admission(self):
+        for kind, identity, field, value in [
+            ("owner", 10, "bytes", 8),
+            ("owner", 10, "flags", 16),
+            ("piece", 2, "held", 0),
+            ("piece", 4, "holder", 5),
+        ]:
+            snapshot = queued_claim_snapshot()
+            next(r for r in snapshot[1] if r["kind"] == kind and r["id"] == identity)[field] = value
+            with self.subTest(kind=kind, identity=identity, field=field):
+                self.assertFalse(self.check(snapshot)["funding_complete"])
+        snapshot = queued_claim_snapshot()
+        next(
+            r for r in snapshot[1] if r["kind"] == "edge" and r["from"] == 9 and r["relation"] == 10
+        )["bytes"] = 7
+        self.assertFalse(self.check(snapshot)["funding_complete"])
 
 
 class AuthorityForgeryTests(unittest.TestCase):
