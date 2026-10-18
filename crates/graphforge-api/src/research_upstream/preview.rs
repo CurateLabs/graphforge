@@ -211,7 +211,7 @@ fn endpoint(
     registry: &ResearchRegistry,
 ) -> Result<ResearchComparisonEndpoint, GfError> {
     Ok(if let Some(binding) = &request.remote {
-        binding.require_current(&registry, request.branch_uuid)?;
+        binding.require_current(registry, request.branch_uuid)?;
         ResearchComparisonEndpoint::Version {
             version_uuid: binding.reference.head_version_uuid,
         }
