@@ -58,18 +58,7 @@ pub(super) fn load(
         .map(|key| (key.0.clone(), key.1))
         .collect();
     include_explicit_objects(&request.scope, &mut objects)?;
-    let endpoint = if let Some(binding) = &request.remote {
-        binding.require_current(&registry, request.branch_uuid)?;
-        ResearchComparisonEndpoint::Version {
-            version_uuid: binding.reference.head_version_uuid,
-        }
-    } else {
-        branch
-            .parent_branch_uuid
-            .map_or(ResearchComparisonEndpoint::Project, |branch_uuid| {
-                ResearchComparisonEndpoint::Branch { branch_uuid }
-            })
-    };
+    let endpoint = endpoint(request, &branch, &registry)?;
     let mut upstream = state::load(
         owner,
         &current,
@@ -214,4 +203,23 @@ fn include_explicit_objects(
         );
     }
     Ok(())
+}
+
+fn endpoint(
+    request: &PreviewResearchUpstreamRequest,
+    branch: &ResearchBranchRecord,
+    registry: &ResearchRegistry,
+) -> Result<ResearchComparisonEndpoint, GfError> {
+    Ok(if let Some(binding) = &request.remote {
+        binding.require_current(&registry, request.branch_uuid)?;
+        ResearchComparisonEndpoint::Version {
+            version_uuid: binding.reference.head_version_uuid,
+        }
+    } else {
+        branch
+            .parent_branch_uuid
+            .map_or(ResearchComparisonEndpoint::Project, |branch_uuid| {
+                ResearchComparisonEndpoint::Branch { branch_uuid }
+            })
+    })
 }
