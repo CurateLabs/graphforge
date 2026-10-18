@@ -331,7 +331,7 @@ fn actual_split_keeps_donor_holder_and_lineage_until_transfer() {
     let session = Session::create(&directory.path("capture"), limits).unwrap();
     session.begin_call().unwrap();
     let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1024));
-    let mut reservation = MemoryConsumer::new("ownership split control").register(&pool);
+    let reservation = MemoryConsumer::new("ownership split control").register(&pool);
     reservation.try_grow(128).unwrap();
     let donor = Life::new(Kind::Merge, 0, 0);
     let root = Piece::new(&reservation, donor.id());
