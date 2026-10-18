@@ -63,7 +63,9 @@ bounded per-thread bridge slots.
 The paired assessor independently checks the same derivation and enforces its
 own finite parser ceiling. Dynamic view-data buffers consume descriptor slots;
 a bounded schema alone does not bound their multiplicity. The envelope proves
-a storage ceiling, not that an arbitrary workload fits inside it.
+a storage ceiling within its declared live scope, not that an arbitrary workload
+fits inside it. Exceeding that scope invalidates the evidence; the observer does
+not stop the product from constructing more owners.
 
 Product operations execute outside the observer lock. Numeric transition guards
 mark mutations before they change product ownership, and a cut with an open
@@ -79,6 +81,29 @@ completeness. The checksum detects transport damage; it authenticates neither
 the producer nor funding history. Preserve separate source/binary/input digests
 using the existing benchmark provenance method.
 
+For `C` calls, `S` owner and piece slots, `D` descriptors and `E` edges, the
+maximum records are `2 + C * (1 + 2 * (2 + 2*S + D + E))`; the file bound is
+that count times 1,024 bytes. The header publishes record widths and a conservative
+observer-memory derivation checked by the assessor. Writer and parser both reject
+envelopes above 100,000 records or 64 MiB, and schema depth above 16. The
+[writer](../../vendor/datafusion-physical-plan/src/terminal_ownership/mod.rs) defines
+numeric owner kinds, relation records and checked counter semantics; the
+[assessor](../../scripts/development/terminal_ownership.py) validates their schemas,
+concrete layout descriptors, actual authority edges and current charge invariants.
+Two cuts are required for every declared call, with no reset between calls.
+
+Generate the deterministic development controls in a fresh output directory:
+
+```sh
+export GRAPHFORGE_OWNERSHIP_EVIDENCE_DIR="$(mktemp -d)"
+CARGO_TARGET_DIR=/tmp/graphforge-ownership-target CARGO_BUILD_JOBS=4 \
+  python3 scripts/test_environment.py -- cargo nextest run --locked \
+  -p graphforge-exec --lib -E 'test(terminal_ownership)' -j1
+```
+
+These fixtures deliberately include both supported funding closures and explicit
+partial paths. Keep the test log with the captures; a passing Rust test does not
+mean every exported capture has a positive funding verdict.
 Assess a retained capture without overwriting existing evidence:
 
 ```sh
@@ -96,7 +121,8 @@ and FNV64 hash; truncated hashes cannot qualify. This is scoped error identity,
 not an atomic pool-decision receipt. Pending output before a refused admission
 can have complete direct descriptors while funding remains explicitly incomplete.
 A live owner whose creation parent retired keeps its own generation and funding
-obligations; the retired-parent flag supplies no historical lineage certificate.
+obligations; its parent can later identify a new containing queue. The
+retired-parent flag supplies no historical lineage certificate.
 
 No verdict establishes query completion, answer correctness, a quiet
 performance baseline, complete process RSS attribution or removal of an OOM.

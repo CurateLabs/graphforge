@@ -622,6 +622,8 @@ def validate_snapshot(begin, records, end, header):
     edges = []
     for row in records:
         kind = row.get("kind")
+        if not isinstance(kind, str):
+            raise ValueError("record kind must be a string")
         if kind not in {"owner", "piece", "backing", "edge"}:
             raise ValueError("unknown snapshot record")
         if kind == "owner":
@@ -685,10 +687,9 @@ def validate_snapshot(begin, records, end, header):
     for owner in owners.values():
         if owner["parent"] and owner["parent"] not in owners:
             funding_problems.append("missing owner origin certificate")
-        # Flag 2 marks a LIVE owner whose creation parent retired. It grants
+        # Flag 2 preserves loss of creation history, even after a later queue
+        # handoff gives this LIVE owner a current containment parent. It grants
         # neither a storage exemption nor a funding relationship.
-        if owner["flags"] & 2 and owner["parent"]:
-            raise ValueError("retired-parent marker contradicts a live parent")
         if owner["flags"] & 4 and owner["owner_kind"] in {5, 8, 14}:
             raise ValueError("data owner cannot be metadata-only")
     for piece in pieces.values():
@@ -904,6 +905,8 @@ def assess_capture(path):
     try:
         for row, raw in read_records(path, MAX_LINE_BYTES, MAX_CAPTURE_BYTES, MAX_RECORDS):
             kind = row.get("kind")
+            if not isinstance(kind, str):
+                raise ValueError("record kind must be a string")
             if footer:
                 raise ValueError("records after final session commit")
             if header is None:
@@ -969,6 +972,7 @@ def assess_capture(path):
                 selected = summaries[-2]
                 anchor = selected["failure_anchor"]
                 refused = row["outcome"] == 1
+                has_refusal = refused or selected["outcome"] == 1
                 attributed = bool(
                     refused
                     and selected["outcome"] == 1
@@ -985,7 +989,8 @@ def assess_capture(path):
                     {
                         "call": row["call"],
                         "outcome": row["outcome"],
-                        "api_error_attributed": attributed if refused else None,
+                        "refusal_recorded": has_refusal,
+                        "api_error_attributed": attributed if has_refusal else None,
                     }
                 )
                 calls += 1
@@ -1026,7 +1031,7 @@ def assess_capture(path):
     direct = bool(summaries) and all(s["direct_complete"] for s in summaries)
     funding = bool(summaries) and all(s["funding_complete"] for s in summaries)
     attribution = transport and all(
-        r["api_error_attributed"] for r in call_results if r["outcome"] == 1
+        r["api_error_attributed"] for r in call_results if r["refusal_recorded"]
     )
     return {
         "schema": "terminal-ownership-assessment/1",

@@ -326,6 +326,15 @@ class SessionAssessmentTests(unittest.TestCase):
         self.assertFalse(result["capture_complete"])
         self.assertIn("missing final", result["transport_errors"][0])
 
+    def test_nonscalar_kind_is_rejected_as_incomplete_without_parser_crash(self):
+        for kind in [[], {}, None, 1, True]:
+            rows = capture_fixture()
+            rows[2]["kind"] = kind
+            with self.subTest(kind=kind):
+                result = self.assess(encode_capture(rows))
+                self.assertFalse(result["transport_complete"])
+                self.assertIn("kind must be a string", result["transport_errors"][0])
+
     def test_checksum_and_postfooter_suffix_are_rejected(self):
         raw = encode_capture(capture_fixture())
         for altered in [raw.replace(b'"consumer":7', b'"consumer":8', 1), raw + b"{}\n"]:
@@ -426,6 +435,14 @@ class RefusalAttributionTests(unittest.TestCase):
             with self.subTest(field=field):
                 self.assertTrue(result["transport_complete"], result)
                 self.assertFalse(result["refusal_attribution_complete"])
+
+    def test_selected_refusal_cannot_be_attributed_to_a_successful_return(self):
+        rows = self.refusal()
+        next(r for r in rows if r["kind"] == "run_end")["outcome"] = 0
+        result = self.assess(encode_capture(rows))
+        self.assertTrue(result["transport_complete"], result)
+        self.assertFalse(result["refusal_attribution_complete"])
+        self.assertFalse(result["capture_complete"])
 
     def test_unanchored_explicit_refusal_does_not_attribute_api_error(self):
         rows = capture_fixture()
