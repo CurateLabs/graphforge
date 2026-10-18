@@ -22,7 +22,7 @@ fn execute(hub: &ReferenceHub, steps: Vec<Step>, variables: &mut BTreeMap<String
             } => {
                 variables.insert(capture, hub.issue_token(&scope, ttl_seconds));
             }
-            _ => panic!("unexpected action"),
+            Step::Action { .. } => panic!("unexpected action"),
         }
     }
 }
