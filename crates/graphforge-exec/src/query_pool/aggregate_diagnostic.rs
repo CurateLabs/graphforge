@@ -7,7 +7,16 @@ use std::sync::atomic::AtomicBool;
 struct Trace {
     sequence: usize,
     events: VecDeque<String>,
-    first_refusal: Option<String>,
+    last_refusal: Option<Refusal>,
+    loan_consumer: Option<usize>,
+}
+
+#[derive(Debug)]
+struct Refusal {
+    consumer: usize,
+    owner: Option<Spiller>,
+    error: String,
+    event_and_stack: String,
 }
 
 #[derive(Debug)]
@@ -41,7 +50,7 @@ impl AggregateDiagnosticPool {
         consumer: &MemoryConsumer,
         reservation: usize,
         bytes: usize,
-        refused: bool,
+        failure: Option<&DataFusionError>,
     ) {
         let state = self.inner.locked();
         let spiller = state.spillers.get(&consumer.id()).copied();
@@ -59,24 +68,32 @@ impl AggregateDiagnosticPool {
         );
         trace.sequence += 1;
         drop(state);
-        // Freeze the last 64 transitions at the first aggregate refusal after
-        // entering the decoder barrier; later teardown cannot erase its cause.
-        if trace.first_refusal.is_none() {
-            if trace.events.len() == 64 {
-                trace.events.pop_front();
-            }
-            trace.events.push_back(event.clone());
-            if refused
-                && self.decoder_held.load(Ordering::Acquire)
+        // Handled refusals can trigger an ordinary spill. Keep advancing the
+        // ring and replace the saved refusal, so a later terminal one wins.
+        if trace.events.len() == 64 {
+            trace.events.pop_front();
+        }
+        trace.events.push_back(event.clone());
+        if let Some(error) = failure.filter(|_| {
+            self.decoder_held.load(Ordering::Acquire)
                 && consumer.name().starts_with(AGGREGATE_CONSUMER_PREFIX)
-            {
-                let stack: String = std::backtrace::Backtrace::force_capture()
-                    .to_string()
-                    .chars()
-                    .take(16_384)
-                    .collect();
-                trace.first_refusal = Some(format!("{event}\n{stack}"));
-            }
+        }) {
+            let stack: String = std::backtrace::Backtrace::force_capture()
+                .to_string()
+                .chars()
+                .take(16_384)
+                .collect();
+            trace.last_refusal = Some(Refusal {
+                consumer: consumer.id(),
+                owner: spiller,
+                // TrackConsumersPool wraps the inner exhaustion payload,
+                // rather than the DataFusionError Display prefix.
+                error: match error {
+                    DataFusionError::ResourcesExhausted(message) => message.clone(),
+                    _ => error.to_string(),
+                },
+                event_and_stack: format!("{event}\n{stack}"),
+            });
         }
     }
 
@@ -88,11 +105,35 @@ impl AggregateDiagnosticPool {
     pub(crate) fn report(&self) -> String {
         let trace = self.trace.lock().unwrap();
         format!(
-            "events={}\n{}\nfirst_refusal={}",
+            "events={} gate_loan_consumer={:?} decoder_sponsor=unknown\n{}\nlast_refusal={:?}",
             trace.sequence,
+            trace.loan_consumer,
             trace.events.iter().cloned().collect::<Vec<_>>().join("\n"),
-            trace.first_refusal.as_deref().unwrap_or("none")
+            trace.last_refusal,
         )
+    }
+
+    pub(crate) fn assert_terminal_refusal(&self, error: &DataFusionError) {
+        let trace = self.trace.lock().unwrap();
+        let refusal = trace
+            .last_refusal
+            .as_ref()
+            .expect("terminal error has no recorded aggregate refusal");
+        assert!(
+            refusal.owner.is_some(),
+            "refusing consumer {} has no registered loan/floor owner: {}",
+            refusal.consumer,
+            refusal.event_and_stack
+        );
+        // TrackConsumersPool adds its top-consumer context around the exact
+        // underlying query-pool error. Keep that error unmodified and require
+        // the returned failure to contain it, including request/reservation.
+        assert!(
+            error.to_string().contains(&refusal.error),
+            "returned error does not match latest consumer {} refusal: {error}\n{}",
+            refusal.consumer,
+            refusal.event_and_stack
+        );
     }
 }
 
@@ -110,13 +151,13 @@ impl MemoryPool for AggregateDiagnosticPool {
     fn register(&self, consumer: &MemoryConsumer) {
         let mut trace = self.trace.lock().unwrap();
         self.inner.register(consumer);
-        self.record(&mut trace, "register", consumer, 0, 0, false);
+        self.record(&mut trace, "register", consumer, 0, 0, None);
     }
 
     fn unregister(&self, consumer: &MemoryConsumer) {
         let mut trace = self.trace.lock().unwrap();
         self.inner.unregister(consumer);
-        self.record(&mut trace, "unregister", consumer, 0, 0, false);
+        self.record(&mut trace, "unregister", consumer, 0, 0, None);
     }
 
     fn grow(&self, reservation: &MemoryReservation, bytes: usize) {
@@ -128,7 +169,7 @@ impl MemoryPool for AggregateDiagnosticPool {
             reservation.consumer(),
             reservation.size(),
             bytes,
-            false,
+            None,
         );
     }
 
@@ -141,7 +182,7 @@ impl MemoryPool for AggregateDiagnosticPool {
             reservation.consumer(),
             reservation.size(),
             bytes,
-            false,
+            None,
         );
     }
 
@@ -161,7 +202,7 @@ impl MemoryPool for AggregateDiagnosticPool {
                 reservation.consumer(),
                 reservation.size(),
                 bytes,
-                result.is_err(),
+                result.as_ref().err(),
             );
             let after = self
                 .inner
@@ -172,7 +213,9 @@ impl MemoryPool for AggregateDiagnosticPool {
             if self.decoder_held.load(Ordering::Acquire)
                 && before == Some(Grant::Armed)
                 && after.is_some_and(|g| matches!(g, Grant::Lent(_)))
+                && trace.loan_consumer.is_none()
             {
+                trace.loan_consumer = Some(reservation.consumer().id());
                 self.loan_started.notify_one();
             }
             result

@@ -326,9 +326,11 @@ async fn an_aggregate_whose_groups_exceed_the_budget_spills_and_matches_the_larg
     aggregate_spills_and_matches_the_large_budget(64 * MIB, 2, &sequential_keys(), false).await;
 }
 
-/// Diagnostic only: hold one genuinely admitted blocking IPC decoder while
+/// Phase probe only: hold one genuinely admitted blocking IPC decoder while
 /// an aggregate reaches a new real loan. All pool decisions are delegated;
 /// no allocation is fabricated and the original fixture/physical plan remains.
+/// The decoder does not expose its sponsor ID: do not infer that the new loan
+/// belongs to a distinct sibling. The trace reports that attribution as unknown.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn aggregate_ipc_decoder_and_new_loan_interleaving_diagnostic() {
     use crate::query_pool::aggregate_diagnostic::{
@@ -389,6 +391,7 @@ async fn aggregate_ipc_decoder_and_new_loan_interleaving_diagnostic() {
         error.to_string().contains("GroupedHashAggregateStream"),
         "{error}"
     );
+    observed.assert_terminal_refusal(&error);
     drop(query);
     drop(plan);
     drop(release);
