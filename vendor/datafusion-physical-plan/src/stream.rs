@@ -759,6 +759,21 @@ pub(crate) struct ReservationStream {
 }
 
 impl ReservationStream {
+    #[cfg(test)]
+    pub(crate) fn new(
+        schema: SchemaRef,
+        inner: SendableRecordBatchStream,
+        reservation: MemoryReservation,
+    ) -> Self {
+        Self::new_observed(
+            schema,
+            inner,
+            reservation,
+            crate::terminal_ownership::Piece::default(),
+            crate::terminal_ownership::Life::default(),
+        )
+    }
+
     pub(crate) fn new_observed(
         schema: SchemaRef,
         inner: SendableRecordBatchStream,
