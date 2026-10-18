@@ -30,7 +30,7 @@ members = [
 # workspace test run never lint or test code we do not own. Cargo matches each
 # `exclude` entry as a literal path (a `vendor/*` glob is not recognised), so list
 # every vendored crate here.
-exclude = ["vendor/datafusion-physical-plan", "vendor/datafusion-optimizer"]
+exclude = ["vendor/datafusion-physical-plan", "vendor/datafusion-optimizer", "vendor/arrow-row"]
 
 [workspace.package]
 version = "0.6.0-rc.5"
@@ -113,6 +113,8 @@ divan = { version = "5", package = "codspeed-divan-compat" }
 # datafusion-optimizer 54.1.0 with that one change applied; see
 # vendor/datafusion-optimizer/GRAPHFORGE.md.
 [patch.crates-io]
+# Additive borrowed accessors, activated only by development test utilities.
+arrow-row = { path = "vendor/arrow-row" }
 datafusion-physical-plan = { path = "vendor/datafusion-physical-plan" }
 datafusion-optimizer = { path = "vendor/datafusion-optimizer" }
 

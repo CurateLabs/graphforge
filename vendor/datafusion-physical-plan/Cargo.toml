@@ -38,7 +38,7 @@ all-features = true
 
 [features]
 force_hash_collisions = []
-test_utils = ["arrow/test_utils"]
+test_utils = ["arrow/test_utils", "arrow-row/ownership-diagnostics"]
 tokio_coop = []
 tokio_coop_fallback = []
 
@@ -85,6 +85,10 @@ features = [
     "pool",
     "chrono-tz",
 ]
+
+[dependencies.arrow-row]
+version = "58.4.0"
+default-features = false
 
 [dependencies.arrow-buffer]
 version = "58.3.0"

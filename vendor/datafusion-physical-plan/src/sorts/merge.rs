@@ -18,6 +18,7 @@
 //! Merge that deals with an arbitrary size of streaming inputs.
 //! This is an order-preserving merge.
 
+use crate::terminal_ownership as od;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll, ready};
@@ -41,6 +42,124 @@ use futures::Stream;
 type CursorStream<C> = Box<dyn PartitionedStream<Output = Result<(C, RecordBatch)>>>;
 
 /// Merges a stream of sorted cursors and record batches into a single sorted stream
+#[derive(Debug)]
+#[allow(dead_code)]
+pub(super) struct ChargedSortPreservingMergeStream<C: CursorValues> {
+    in_progress: super::builder::ChargedBatchBuilder,
+
+    /// The sorted input streams to merge together
+    streams: CursorStream<C>,
+
+    /// used to record execution metrics
+    metrics: BaselineMetrics,
+
+    /// If the stream has encountered an error or reaches the
+    /// `fetch` limit.
+    done: bool,
+
+    /// Whether buffered rows should be drained after `done` is set.
+    ///
+    /// This is enabled when we stop because the `fetch` limit has been
+    /// reached, allowing partial batches left over after overflow handling to
+    /// be emitted on subsequent polls. It remains disabled for terminal
+    /// errors so the stream does not yield data after returning `Err`.
+    drain_in_progress_on_done: bool,
+
+    /// A loser tree that always produces the minimum cursor
+    ///
+    /// Node 0 stores the top winner, Nodes 1..num_streams store
+    /// the loser nodes
+    ///
+    /// This implements a "Tournament Tree" (aka Loser Tree) to keep
+    /// track of the current smallest element at the top. When the top
+    /// record is taken, the tree structure is not modified, and only
+    /// the path from bottom to top is visited, keeping the number of
+    /// comparisons close to the theoretical limit of `log(S)`.
+    ///
+    /// The current implementation uses a vector to store the tree.
+    /// Conceptually, it looks like this (assuming 8 streams):
+    ///
+    /// ```text
+    ///     0 (winner)
+    ///
+    ///     1
+    ///    / \
+    ///   2   3
+    ///  / \ / \
+    /// 4  5 6  7
+    /// ```
+    ///
+    /// Where element at index 0 in the vector is the current winner. Element
+    /// at index 1 is the root of the loser tree, element at index 2 is the
+    /// left child of the root, and element at index 3 is the right child of
+    /// the root and so on.
+    ///
+    /// reference: <https://en.wikipedia.org/wiki/K-way_merge_algorithm#Tournament_Tree>
+    loser_tree: Vec<usize>,
+
+    /// If the most recently yielded overall winner has been replaced
+    /// within the loser tree. A value of `false` indicates that the
+    /// overall winner has been yielded but the loser tree has not
+    /// been updated
+    loser_tree_adjusted: bool,
+
+    /// Target batch size
+    batch_size: usize,
+
+    /// Cursors for each input partition. `None` means the input is exhausted
+    cursors: Vec<Option<Cursor<C>>>,
+
+    /// Configuration parameter to enable round-robin selection of tied winners of loser tree.
+    ///
+    /// This option controls the tie-breaker strategy and attempts to avoid the
+    /// issue of unbalanced polling between partitions
+    ///
+    /// If `true`, when multiple partitions have the same value, the partition
+    /// that has the fewest poll counts is selected. This strategy ensures that
+    /// multiple partitions with the same value are chosen equally, distributing
+    /// the polling load in a round-robin fashion. This approach balances the
+    /// workload more effectively across partitions and avoids excessive buffer
+    /// growth.
+    ///
+    /// if `false`, partitions with smaller indices are consistently chosen as
+    /// the winners, which can lead to an uneven distribution of polling and potentially
+    /// causing upstream operator buffers for the other partitions to grow
+    /// excessively, as they continued receiving data without consuming it.
+    ///
+    /// For example, an upstream operator like `RepartitionExec` execution would
+    /// keep sending data to certain partitions, but those partitions wouldn't
+    /// consume the data if they weren't selected as winners. This resulted in
+    /// inefficient buffer usage.
+    enable_round_robin_tie_breaker: bool,
+
+    /// Flag indicating whether we are in the mode of round-robin
+    /// tie breaker for the loser tree winners.
+    round_robin_tie_breaker_mode: bool,
+
+    /// Total number of polls returning the same value, as per partition.
+    /// We select the one that has less poll counts for tie-breaker in loser tree.
+    num_of_polled_with_same_value: Vec<usize>,
+
+    /// To keep track of reset counts
+    poll_reset_epochs: Vec<usize>,
+
+    /// Current reset count
+    current_reset_epoch: usize,
+
+    /// Stores the previous value of each partitions for tracking the poll counts on the same value.
+    prev_cursors: Vec<Option<Cursor<C>>>,
+
+    /// Optional number of rows to fetch
+    fetch: Option<usize>,
+
+    /// number of rows produced
+    produced: usize,
+
+    /// This vector contains the indices of the partitions that have not started emitting yet.
+    uninitiated_partitions: Vec<usize>,
+    copy_resident: Option<Arc<Resident>>,
+}
+
 #[derive(Debug)]
 pub(crate) struct SortPreservingMergeStream<C: CursorValues> {
     in_progress: BatchBuilder,
@@ -156,16 +275,17 @@ pub(crate) struct SortPreservingMergeStream<C: CursorValues> {
     /// This vector contains the indices of the partitions that have not started emitting yet.
     uninitiated_partitions: Vec<usize>,
     copy_resident: Option<Arc<Resident>>,
+    diagnostic: od::Life,
 }
 
 impl<C: CursorValues> SortPreservingMergeStream<C> {
     pub(super) fn constructor_bound(streams: usize, batch_size: usize) -> Result<usize> {
         add(
-            add(size_of::<Self>(), 512)?,
+            add(size_of::<ChargedSortPreservingMergeStream<C>>(), 512)?,
             add(
                 BatchBuilder::constructor_bound(streams, batch_size)?,
                 add(
-                    mul(mul(streams, 2)?, size_of::<Option<Cursor<C>>>())?,
+                    mul(mul(streams, 2)?, C::charged_cursor_slot())?,
                     mul(mul(streams, 6)?, size_of::<usize>())?,
                 )?,
             )?,
@@ -181,9 +301,17 @@ impl<C: CursorValues> SortPreservingMergeStream<C> {
         enable_round_robin_tie_breaker: bool,
     ) -> Self {
         let stream_count = streams.partitions();
+        let diagnostic = od::Life::inherited(od::Kind::Merge);
+        diagnostic.update(|o| {
+            o.a = stream_count as u64;
+            o.flags = 4;
+        });
 
         Self {
-            in_progress: BatchBuilder::new(schema, stream_count, batch_size, reservation),
+            in_progress: od::scoped(diagnostic.id(), od::origin().1, || {
+                BatchBuilder::new(schema, stream_count, batch_size, reservation)
+            }),
+            diagnostic,
             streams,
             metrics,
             done: false,
@@ -240,13 +368,19 @@ impl<C: CursorValues> SortPreservingMergeStream<C> {
             )?;
             // Includes the loser tree's known future allocation before init.
             let metadata = add(
-                size_of::<Self>(),
+                size_of::<ChargedSortPreservingMergeStream<C>>(),
                 add(
-                    mul(cursors, size_of::<Option<Cursor<C>>>())?,
+                    mul(cursors, C::charged_cursor_slot())?,
                     mul(indices, size_of::<usize>())?,
                 )?,
             )?;
             stream.copy_resident = Some(phase.resident(metadata)?);
+            stream.diagnostic.update(|o| o.bytes = metadata as u64);
+            stream.diagnostic.edge(
+                stream.copy_resident.as_ref().unwrap().diagnostic_id(),
+                2,
+                metadata,
+            );
         }
         Ok(stream)
     }
@@ -280,6 +414,11 @@ impl<C: CursorValues> SortPreservingMergeStream<C> {
             Some(Err(e)) => Poll::Ready(Err(e)),
             Some(Ok((cursor, batch))) => {
                 self.cursors[idx] = Some(Cursor::new(cursor));
+                self.diagnostic.edge(
+                    self.cursors[idx].as_ref().unwrap().diagnostic_id(),
+                    4,
+                    0,
+                );
                 Poll::Ready(self.in_progress.push_batch(idx, batch))
             }
         }
@@ -429,6 +568,9 @@ impl<C: CursorValues> SortPreservingMergeStream<C> {
             let _ = cursor.advance();
             if cursor.is_finished() {
                 // Take the current cursor, leaving `None` in its place
+                if let Some(key) = self.cursors[stream_idx].as_ref() {
+                    self.diagnostic.edge(key.diagnostic_id(), 5, 0);
+                }
                 self.prev_cursors[stream_idx] = self.cursors[stream_idx].take();
             }
             true
@@ -630,7 +772,9 @@ impl<C: CursorValues + Unpin> Stream for SortPreservingMergeStream<C> {
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Option<Self::Item>> {
+        let _transition = od::Transition::begin();
         let poll = self.poll_next_inner(cx);
+        self.in_progress.observe();
         self.metrics.record_poll(poll)
     }
 }
@@ -730,5 +874,11 @@ mod tests {
         }
         assert!(stream.in_progress.is_empty());
         assert!(matches!(stream.poll_next_inner(&mut cx), Poll::Ready(None)));
+    }
+}
+
+impl<C: CursorValues> Drop for SortPreservingMergeStream<C> {
+    fn drop(&mut self) {
+        self.diagnostic.begin_drop();
     }
 }

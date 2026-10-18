@@ -20,6 +20,7 @@ use super::copy_admission::{
 };
 use crate::spill::admission::{add, mul};
 use crate::spill::get_record_batch_memory_size;
+use crate::terminal_ownership as od;
 use arrow::array::ArrayRef;
 use arrow::compute::interleave;
 use arrow::datatypes::SchemaRef;
@@ -39,7 +40,8 @@ struct BatchCursor {
 }
 
 #[derive(Debug)]
-pub(super) struct BufferedBatch {
+#[allow(dead_code)]
+pub(super) struct ChargedBufferedBatch {
     stream_idx: usize,
     pub(super) batch: RecordBatch,
     // Cache the existing admission measurement. Dropping a consumed input must
@@ -49,7 +51,57 @@ pub(super) struct BufferedBatch {
     copy_remap: usize,
 }
 
+#[derive(Debug)]
+pub(super) struct BufferedBatch {
+    stream_idx: usize,
+    pub(super) batch: RecordBatch,
+    // Cache the existing admission measurement. Dropping a consumed input must
+    // not allocate ArrayData trees or a HashSet just to measure it again.
+    memory_size: usize,
+    // Reused while compacting Copy inputs; covered by BufferedBatch capacity.
+    copy_remap: usize,
+    diagnostic: od::Life,
+}
+
 /// Provides an API to incrementally build a [`RecordBatch`] from partitioned [`RecordBatch`]
+#[derive(Debug)]
+#[allow(dead_code)]
+pub(super) struct ChargedBatchBuilder {
+    /// The schema of the RecordBatches yielded by this stream
+    schema: SchemaRef,
+
+    /// Maintain a list of [`RecordBatch`] and their corresponding stream
+    batches: Vec<ChargedBufferedBatch>,
+
+    /// Accounts for memory used by buffered batches.
+    ///
+    /// May include pre-reserved bytes (from `sort_spill_reservation_bytes`)
+    /// that were transferred via [`MemoryReservation::take()`] to prevent
+    /// starvation when concurrent sort partitions compete for pool memory.
+    reservation: MemoryReservation,
+
+    /// Tracks the actual memory used by buffered batches (not including
+    /// pre-reserved bytes). This allows [`Self::push_batch`] to skip pool
+    /// allocation requests when the pre-reserved bytes cover the batch.
+    batches_mem_used: usize,
+
+    /// The initial reservation size at construction time. When the reservation
+    /// is pre-loaded with `sort_spill_reservation_bytes` (via `take()`), this
+    /// records that amount so we never shrink below it, maintaining the
+    /// anti-starvation guarantee throughout the merge.
+    initial_reservation: usize,
+
+    /// The current [`BatchCursor`] for each stream
+    cursors: Vec<BatchCursor>,
+
+    /// The accumulated stream indexes from which to pull rows
+    /// Consists of a tuple of `(batch_idx, row_idx)`
+    indices: Vec<(usize, usize)>,
+    copy: Option<Arc<CopyAdmission>>,
+    copy_resident: Option<Arc<Resident>>,
+    failed_phase: Option<super::copy_admission::ChargedPhase>,
+}
+
 #[derive(Debug)]
 pub struct BatchBuilder {
     /// The schema of the RecordBatches yielded by this stream
@@ -85,14 +137,16 @@ pub struct BatchBuilder {
     copy: Option<Arc<CopyAdmission>>,
     copy_resident: Option<Arc<Resident>>,
     failed_phase: Option<Phase>,
+    diagnostic_piece: od::Piece,
+    diagnostic: od::Life,
 }
 
 impl BatchBuilder {
     pub(super) fn constructor_bound(streams: usize, batch_size: usize) -> Result<usize> {
         add(
-            add(size_of::<Self>(), 512)?,
+            add(size_of::<ChargedBatchBuilder>(), 512)?,
             add(
-                mul(mul(streams, 2)?, size_of::<BufferedBatch>())?,
+                mul(mul(streams, 2)?, size_of::<ChargedBufferedBatch>())?,
                 add(
                     mul(streams, size_of::<BatchCursor>())?,
                     mul(batch_size, size_of::<(usize, usize)>())?,
@@ -108,7 +162,16 @@ impl BatchBuilder {
         reservation: MemoryReservation,
     ) -> Self {
         let initial_reservation = reservation.size();
+        let diagnostic = od::Life::inherited(od::Kind::Builder);
+        let diagnostic_piece = od::Piece::new(&reservation, diagnostic.id());
+        diagnostic.update(|o| {
+            o.piece = diagnostic_piece.id();
+            o.held = initial_reservation as u64;
+            o.flags = 4;
+        });
         Self {
+            diagnostic,
+            diagnostic_piece,
             schema,
             batches: Vec::with_capacity(stream_count * 2),
             cursors: vec![BatchCursor::default(); stream_count],
@@ -128,15 +191,21 @@ impl BatchBuilder {
         phase: &Phase,
     ) -> Result<()> {
         self.copy_resident = Some(phase.resident(self.metadata()?)?);
+        self.diagnostic.edge(
+            self.copy_resident.as_ref().unwrap().diagnostic_id(),
+            2,
+            self.metadata()?,
+        );
+        self.observe();
         self.copy = Some(copy);
         Ok(())
     }
 
     fn metadata(&self) -> Result<usize> {
         add(
-            size_of::<Self>(),
+            size_of::<ChargedBatchBuilder>(),
             add(
-                mul(self.batches.capacity(), size_of::<BufferedBatch>())?,
+                mul(self.batches.capacity(), size_of::<ChargedBufferedBatch>())?,
                 add(
                     mul(self.cursors.capacity(), size_of::<BatchCursor>())?,
                     mul(self.indices.capacity(), size_of::<(usize, usize)>())?,
@@ -145,6 +214,18 @@ impl BatchBuilder {
         )
     }
 
+    pub(super) fn observe(&self) {
+        self.diagnostic_piece
+            .refresh(&self.reservation, self.diagnostic.id());
+        self.diagnostic.update(|o| {
+            o.held = self.reservation.size() as u64;
+            o.bytes = self.metadata().unwrap_or(usize::MAX) as u64;
+            o.a = self.batches.len() as u64;
+            o.b = self.batches.capacity() as u64;
+            o.c = self.indices.len() as u64;
+            o.d = self.indices.capacity() as u64;
+        });
+    }
     /// Append a new batch in `stream_idx`
     pub fn push_batch(&mut self, stream_idx: usize, batch: RecordBatch) -> Result<()> {
         let size = get_record_batch_memory_size(&batch);
@@ -162,13 +243,43 @@ impl BatchBuilder {
                     // Old capacity remains resident while the complete new Vec
                     // allocation can coexist with it during realloc.
                     let capacity = mul(self.batches.capacity(), 2)?.max(4);
-                    copy.begin_operation(Some(mul(capacity, size_of::<BufferedBatch>())?))
+                    copy.begin_operation(Some(mul(
+                        capacity,
+                        size_of::<ChargedBufferedBatch>(),
+                    )?))
                 })
                 .transpose()?
         } else {
             None
         };
+        let handed = od::take_handoff();
+        let diagnostic = if handed.id() != 0 {
+            handed
+        } else {
+            od::Life::new(
+                od::Kind::Batch,
+                self.diagnostic.id(),
+                self.diagnostic_piece.id(),
+            )
+        };
+        diagnostic.update(|o| {
+            o.owner_kind = od::Kind::Batch as u64;
+            o.parent = self.diagnostic.id();
+            o.piece = self.diagnostic_piece.id();
+            o.c = 0;
+            o.d = 0;
+        });
+        diagnostic.batch(&batch);
+        diagnostic.update(|o| {
+            o.a = batch.num_rows() as u64;
+            o.b = batch.num_columns() as u64;
+            o.bytes = size as u64;
+            o.held = self.reservation.size() as u64;
+        });
+        self.diagnostic_piece
+            .refresh(&self.reservation, self.diagnostic.id());
         self.batches.push(BufferedBatch {
+            diagnostic,
             stream_idx,
             batch,
             memory_size: size,
@@ -187,6 +298,7 @@ impl BatchBuilder {
             batch_idx,
             row_idx: 0,
         };
+        self.observe();
         Ok(())
     }
 
@@ -196,6 +308,7 @@ impl BatchBuilder {
         let row_idx = cursor.row_idx;
         cursor.row_idx += 1;
         self.indices.push((cursor.batch_idx, row_idx));
+        self.observe();
     }
 
     /// Returns the number of in-progress rows in this [`BatchBuilder`]
@@ -376,6 +489,7 @@ impl BatchBuilder {
             self.reservation.shrink(self.reservation.size() - target);
         }
 
+        self.observe();
         RecordBatch::try_new(Arc::clone(&self.schema), columns).map_err(Into::into)
     }
 
@@ -537,5 +651,16 @@ mod tests {
             .unwrap_err();
 
         assert!(is_offset_overflow(&error));
+    }
+}
+
+impl Drop for BatchBuilder {
+    fn drop(&mut self) {
+        self.diagnostic.begin_drop();
+    }
+}
+impl Drop for BufferedBatch {
+    fn drop(&mut self) {
+        self.diagnostic.begin_drop();
     }
 }

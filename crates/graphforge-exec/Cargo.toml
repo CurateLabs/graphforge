@@ -41,6 +41,7 @@ tempfile = "3"
 tokio = { workspace = true }
 
 [dev-dependencies]
+datafusion-physical-plan = { version = "54.1.0", features = ["test_utils"] }
 graphforge-cypher = { path = "../graphforge-cypher" }
 divan = { workspace = true }
 insta = { workspace = true, features = ["filters"] }

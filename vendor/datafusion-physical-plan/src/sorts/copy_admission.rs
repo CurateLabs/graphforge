@@ -21,6 +21,7 @@
 //! their existing envelope. This is not a universal kernel estimator.
 use super::builder::BufferedBatch;
 use crate::spill::admission::{add, array_metadata, mul, schema_bound, source_metadata};
+use crate::terminal_ownership as od;
 use arrow::array::ArrayRef;
 use arrow::datatypes::SchemaRef;
 use arrow::record_batch::RecordBatch;
@@ -59,14 +60,55 @@ pub(super) enum CopyCapability {
     PrimitiveField,
 }
 #[derive(Debug)]
-pub(super) struct CopyAdmission {
+#[allow(dead_code)]
+pub(super) struct ChargedCopyAdmission {
     envelope: usize,
     capability: CopyCapability,
     state: Mutex<State>,
 }
+
+#[derive(Debug)]
+pub(super) struct CopyAdmission {
+    envelope: usize,
+    capability: CopyCapability,
+    state: Mutex<State>,
+    diagnostic_piece: od::Piece,
+    diagnostic: od::Life,
+}
 impl CopyAdmission {
+    pub(super) fn charged_size() -> usize {
+        size_of::<ChargedCopyAdmission>()
+    }
+    fn observe(&self, state: &State) {
+        self.diagnostic_piece
+            .refresh(&state.authority, self.diagnostic.id());
+        self.diagnostic.update(|o| {
+            o.piece = self.diagnostic_piece.id();
+            o.object = self.envelope as u64;
+            o.held = state.authority.size() as u64;
+            o.bytes = Self::control_bytes() as u64;
+            o.a = state.rows as u64;
+            o.b = state.outputs as u64;
+            o.c = u64::from(state.active)
+                | (u64::from(state.preparing) << 1)
+                | match state.field {
+                    FieldLifetime::None => 0,
+                    FieldLifetime::Live => 4,
+                    FieldLifetime::Retired => 8,
+                };
+            o.d = match self.capability {
+                CopyCapability::Legacy => 0,
+                CopyCapability::PrimitiveField => 2,
+                CopyCapability::Row { encoded_width } => {
+                    1 | ((encoded_width as u64) << 2)
+                }
+            };
+            o.flags = 4;
+        });
+    }
+
     fn control_bytes() -> usize {
-        size_of::<Self>()
+        size_of::<ChargedCopyAdmission>()
             + 2 * size_of::<usize>()
             + crate::spill::resident_metadata::std_mutex_heap_bound().unwrap_or(0)
     }
@@ -78,6 +120,15 @@ impl CopyAdmission {
         if missing_control > 0 {
             authority.try_grow(missing_control)?;
         }
+        let diagnostic = od::Life::inherited(od::Kind::Copy);
+        let diagnostic_piece = od::Piece::new(&authority, diagnostic.id());
+        diagnostic.update(|o| {
+            o.piece = diagnostic_piece.id();
+            o.object = envelope as u64;
+            o.held = authority.size() as u64;
+            o.bytes = Self::control_bytes() as u64;
+            o.flags = 4;
+        });
         let state = Mutex::new(State {
             authority,
             rows: 0,
@@ -94,6 +145,8 @@ impl CopyAdmission {
             envelope,
             capability: CopyCapability::Legacy,
             state,
+            diagnostic,
+            diagnostic_piece,
         }))
     }
     pub(super) fn preparing(
@@ -106,6 +159,23 @@ impl CopyAdmission {
         // allowance remains earmarked until both row/merge constructors finish.
         let heap = crate::spill::resident_metadata::std_mutex_heap_bound().unwrap_or(0);
         authority.try_resize(add(metadata, heap)?)?;
+        let diagnostic = od::Life::inherited(od::Kind::Copy);
+        let diagnostic_piece = od::Piece::new(&authority, diagnostic.id());
+        diagnostic.update(|o| {
+            o.piece = diagnostic_piece.id();
+            o.object = envelope as u64;
+            o.held = authority.size() as u64;
+            o.bytes = Self::control_bytes() as u64;
+            o.flags = 4;
+            o.c = 2;
+            o.d = match capability {
+                CopyCapability::Legacy => 0,
+                CopyCapability::PrimitiveField => 2,
+                CopyCapability::Row { encoded_width } => {
+                    1 | ((encoded_width as u64) << 2)
+                }
+            };
+        });
         let state = Mutex::new(State {
             authority,
             rows: 0,
@@ -121,6 +191,8 @@ impl CopyAdmission {
             envelope,
             capability,
             state,
+            diagnostic,
+            diagnostic_piece,
         }))
     }
     pub(super) fn encoded_width(&self) -> Option<usize> {
@@ -166,6 +238,7 @@ impl CopyAdmission {
         self.base(state, state.rows) + state.outputs
     }
     pub(super) fn preparing_field(&self, metadata: usize) -> Result<()> {
+        let _transition = od::Transition::begin();
         let mut state = self.state.lock().unwrap();
         if self.capability != CopyCapability::Legacy
             || state.field != FieldLifetime::None
@@ -180,10 +253,12 @@ impl CopyAdmission {
         }
         state.field = FieldLifetime::Live;
         state.preparing = true;
+        self.observe(&state);
         Ok(())
     }
     /// The wrapper must destroy inner cursor/GC/failed-phase data first.
     pub(super) fn retire_field(&self) {
+        let _transition = od::Transition::begin();
         let mut state = self.state.lock().unwrap();
         if state.field == FieldLifetime::Live {
             state.field = FieldLifetime::Retired;
@@ -192,6 +267,7 @@ impl CopyAdmission {
                 let excess = state.authority.size() - self.retained(&state);
                 state.authority.shrink(excess);
             }
+            self.observe(&state);
         }
     }
     pub(super) fn has_output_bounds(&self) -> bool {
@@ -202,6 +278,7 @@ impl CopyAdmission {
         self: &Arc<Self>,
         workspace: Option<usize>,
     ) -> Result<Phase> {
+        let _transition = od::Transition::begin();
         if workspace.is_none() && matches!(self.capability, CopyCapability::Row { .. }) {
             let state = self.state.lock().unwrap();
             return Err(DataFusionError::ResourcesExhausted(format!(
@@ -218,12 +295,14 @@ impl CopyAdmission {
         self.begin_operation(workspace)
     }
     pub(super) fn finish_preparing(&self) {
+        let _transition = od::Transition::begin();
         let mut state = self.state.lock().unwrap();
         if state.preparing {
             state.preparing = false;
             let target = self.retained(&state);
             let excess = state.authority.size() - target;
             state.authority.shrink(excess);
+            self.observe(&state);
         }
     }
     pub(super) fn begin(self: &Arc<Self>) -> Result<Phase> {
@@ -233,6 +312,7 @@ impl CopyAdmission {
         self: &Arc<Self>,
         workspace: Option<usize>,
     ) -> Result<Phase> {
+        let _transition = od::Transition::begin();
         let mut state = self.state.lock().unwrap();
         if state.active {
             return Err(bound_error());
@@ -254,13 +334,23 @@ impl CopyAdmission {
             state.authority.try_grow(target - state.authority.size())?;
         }
         state.active = true;
+        self.observe(&state);
         Ok(Phase {
+            diagnostic: od::Life::new(
+                od::Kind::Copy,
+                self.diagnostic.id(),
+                self.diagnostic_piece.id(),
+            ),
             admission: Arc::clone(self),
         })
     }
     fn resident(self: &Arc<Self>, bytes: usize, output: bool) -> Result<Arc<Resident>> {
+        let _transition = od::Transition::begin();
         let mut state = self.state.lock().unwrap();
-        let bytes = add(bytes, add(size_of::<Resident>(), 2 * size_of::<usize>())?)?;
+        let bytes = add(
+            bytes,
+            add(size_of::<ChargedResident>(), 2 * size_of::<usize>())?,
+        )?;
         let total = if output {
             add(self.retained(&state), bytes)?
         } else {
@@ -277,7 +367,19 @@ impl CopyAdmission {
         } else {
             state.rows = add(state.rows, bytes)?;
         }
+        self.observe(&state);
+        let diagnostic = od::Life::new(
+            od::Kind::Resident,
+            self.diagnostic.id(),
+            self.diagnostic_piece.id(),
+        );
+        diagnostic.update(|o| {
+            o.bytes = bytes as u64;
+            o.held = state.authority.size() as u64;
+            o.a = u64::from(output);
+        });
         Ok(Arc::new(Resident {
+            diagnostic,
             admission: Arc::clone(self),
             bytes: AtomicUsize::new(bytes),
             output,
@@ -285,13 +387,29 @@ impl CopyAdmission {
     }
 }
 #[derive(Debug)]
-pub(super) struct Resident {
+#[allow(dead_code)]
+pub(super) struct ChargedResident {
     admission: Arc<CopyAdmission>,
     bytes: AtomicUsize,
     output: bool,
 }
+
+#[derive(Debug)]
+pub(super) struct Resident {
+    admission: Arc<CopyAdmission>,
+    bytes: AtomicUsize,
+    output: bool,
+    diagnostic: od::Life,
+}
+impl Resident {
+    pub(super) fn diagnostic_id(&self) -> u64 {
+        self.diagnostic.id()
+    }
+}
 impl Drop for Resident {
     fn drop(&mut self) {
+        self.diagnostic.begin_drop();
+        let _transition = od::Transition::begin();
         let mut state = self.admission.state.lock().unwrap();
         let bytes = self.bytes.load(Ordering::Relaxed);
         if self.output {
@@ -304,11 +422,19 @@ impl Drop for Resident {
             let excess = state.authority.size() - target;
             state.authority.shrink(excess);
         }
+        self.admission.observe(&state);
     }
 }
 #[derive(Debug)]
+#[allow(dead_code)]
+pub(super) struct ChargedPhase {
+    admission: Arc<CopyAdmission>,
+}
+
+#[derive(Debug)]
 pub(super) struct Phase {
     admission: Arc<CopyAdmission>,
+    diagnostic: od::Life,
 }
 impl Phase {
     pub(super) fn resident(&self, bytes: usize) -> Result<Arc<Resident>> {
@@ -318,10 +444,14 @@ impl Phase {
         self.admission.resident(bytes, true)
     }
     pub(super) fn resize(&self, resident: &Arc<Resident>, bytes: usize) -> Result<()> {
+        let _transition = od::Transition::begin();
         if !Arc::ptr_eq(&self.admission, &resident.admission) {
             return Err(bound_error());
         }
-        let bytes = add(bytes, add(size_of::<Resident>(), 2 * size_of::<usize>())?)?;
+        let bytes = add(
+            bytes,
+            add(size_of::<ChargedResident>(), 2 * size_of::<usize>())?,
+        )?;
         let mut state = self.admission.state.lock().unwrap();
         let old = resident.bytes.load(Ordering::Relaxed);
         let total = add(
@@ -334,29 +464,39 @@ impl Phase {
         }
         state.rows = add(state.rows - old, bytes)?;
         resident.bytes.store(bytes, Ordering::Relaxed);
+        resident.diagnostic.update(|o| o.bytes = bytes as u64);
+        self.admission.observe(&state);
         Ok(())
     }
     // New bookkeeping is additional to the admitted kernel workspace. Grow
     // before its construction, never in response to an allocated output.
     fn extra(&self, bytes: usize) -> Result<()> {
+        let _transition = od::Transition::begin();
         let state = self.admission.state.lock().unwrap();
         add(state.authority.size(), bytes)?;
-        state.authority.try_grow(bytes)
+        let result = state.authority.try_grow(bytes);
+        self.admission.observe(&state);
+        result
     }
     /// Replace dead operation workspace, preserving every actual resident and
     /// the live Field production floor in the SAME original reservation.
     pub(super) fn transition(&self, operation: usize) -> Result<()> {
+        let _transition = od::Transition::begin();
         let state = self.admission.state.lock().unwrap();
         if !state.active || state.preparing {
             return Err(bound_error());
         }
-        state
+        let result = state
             .authority
-            .try_resize(add(self.admission.retained(&state), operation)?)
+            .try_resize(add(self.admission.retained(&state), operation)?);
+        self.admission.observe(&state);
+        result
     }
 }
 impl Drop for Phase {
     fn drop(&mut self) {
+        self.diagnostic.begin_drop();
+        let _transition = od::Transition::begin();
         let mut state = self.admission.state.lock().unwrap();
         state.active = false;
         if !state.preparing {
@@ -364,6 +504,7 @@ impl Drop for Phase {
             let excess = state.authority.size() - target;
             state.authority.shrink(excess);
         }
+        self.admission.observe(&state);
     }
 }
 
@@ -449,8 +590,11 @@ impl SourceOwners {
         // This unchanged per-owner allowance covers the opaque Bytes Arc and
         // two overlapping claim boxes. Prove the whole control allocation
         // BEFORE choosing this path; other targets keep their existing fees.
-        let control = resident_metadata::raw_bytes_arc_bound()
-            .and_then(|bytes| size_of::<Claimed>().checked_mul(2)?.checked_add(bytes));
+        let control = resident_metadata::raw_bytes_arc_bound().and_then(|bytes| {
+            size_of::<ChargedClaimed>()
+                .checked_mul(2)?
+                .checked_add(bytes)
+        });
         if !control.is_some_and(|bytes| bytes <= 256) {
             return Ok(None);
         }
@@ -504,7 +648,7 @@ impl SourceOwners {
             schema_bound(schema)?,
             schema_bound(first.batch.schema_ref())?,
         )?;
-        let resident_arc = resident_metadata::arc_bytes(Layout::new::<Resident>())
+        let resident_arc = resident_metadata::arc_bytes(Layout::new::<ChargedResident>())
             .ok_or_else(bound_error)?;
         // Interleave preserves the concrete datatype tree, so its array
         // headers fit the first IPC source's constructor bound. A null buffer
@@ -618,7 +762,7 @@ impl SourceOwners {
     ) -> Result<()> {
         use crate::spill::resident_metadata;
         let headers = resident_metadata::columns(columns).ok_or_else(bound_error)?;
-        let resident_arc = resident_metadata::arc_bytes(Layout::new::<Resident>())
+        let resident_arc = resident_metadata::arc_bytes(Layout::new::<ChargedResident>())
             .ok_or_else(bound_error)?;
         // Resident Arc allocation is separately explicit. The preserved opaque
         // Bytes/claim allowance was proved before the kernel in plan().
@@ -680,6 +824,8 @@ impl SourceOwners {
                         .binary_search_by_key(&buffer.data_ptr(), |owner| owner.base)
                         .map_err(|_| bound_error())?;
                     buffer.claim(&Claims {
+                        diagnostic_base: buffer.data_ptr().as_ptr() as usize,
+                        diagnostic_capacity: buffer.capacity(),
                         lease: Arc::clone(fresh[index].lease.as_ref().unwrap()),
                         headers: Arc::clone(&headers),
                     });
@@ -725,6 +871,8 @@ impl SourceOwners {
                         .binary_search_by_key(&buffer.data_ptr(), |o| o.base)
                         .map_err(|_| bound_error())?;
                     buffer.claim(&Claims {
+                        diagnostic_base: buffer.data_ptr().as_ptr() as usize,
+                        diagnostic_capacity: buffer.capacity(),
                         lease: Arc::clone(fresh[i].lease.as_ref().unwrap()),
                         headers: Arc::clone(&headers),
                     });
@@ -737,14 +885,25 @@ impl SourceOwners {
 }
 #[derive(Debug)]
 struct Claims {
+    diagnostic_base: usize,
+    diagnostic_capacity: usize,
     lease: Arc<Resident>,
     headers: Arc<Resident>,
 }
+#[derive(Debug)]
+#[allow(dead_code)]
+pub(super) struct ChargedClaimed {
+    _lease: Arc<Resident>,
+    _headers: Arc<Resident>,
+    size: usize,
+}
+
 #[derive(Debug)]
 struct Claimed {
     _lease: Arc<Resident>,
     _headers: Arc<Resident>,
     size: usize,
+    diagnostic: od::Life,
 }
 impl ArrowReservation for Claimed {
     fn size(&self) -> usize {
@@ -754,11 +913,21 @@ impl ArrowReservation for Claimed {
         // Immutable engine output only: a later mutable allocation needs its
         // operator's normal admission; this fixed lifetime token cannot grow it.
         self.size = size;
+        self.diagnostic.update(|o| o.bytes = size as u64);
     }
 }
 impl MemoryPool for Claims {
     fn reserve(&self, size: usize) -> Box<dyn ArrowReservation> {
+        let diagnostic = od::Life::new(od::Kind::Claim, self.lease.diagnostic_id(), 0);
+        diagnostic.update(|o| {
+            o.bytes = size as u64;
+            o.held = self.lease.bytes.load(Ordering::Relaxed) as u64;
+        });
+        diagnostic.raw(35, self.diagnostic_base, self.diagnostic_capacity, size);
+        diagnostic.edge(self.lease.diagnostic_id(), 2, size);
+        diagnostic.edge(self.headers.diagnostic_id(), 7, 0);
         Box::new(Claimed {
+            diagnostic,
             _lease: Arc::clone(&self.lease),
             _headers: Arc::clone(&self.headers),
             size,
@@ -772,5 +941,16 @@ impl MemoryPool for Claims {
     }
     fn capacity(&self) -> usize {
         self.lease.bytes.load(Ordering::Relaxed)
+    }
+}
+
+impl Drop for CopyAdmission {
+    fn drop(&mut self) {
+        self.diagnostic.begin_drop();
+    }
+}
+impl Drop for Claimed {
+    fn drop(&mut self) {
+        self.diagnostic.begin_drop();
     }
 }

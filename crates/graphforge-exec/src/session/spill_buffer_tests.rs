@@ -17,7 +17,9 @@ struct Probe {
     active: bool,
     completed: usize,
     after_two: Option<oneshot::Sender<usize>>,
+    after_four: Option<oneshot::Sender<()>>,
     dropped: Option<oneshot::Sender<()>>,
+    drop_release: Option<std::sync::mpsc::Receiver<()>>,
 }
 impl Stream for Probe {
     type Item = Result<RecordBatch>;
@@ -30,6 +32,15 @@ impl Stream for Probe {
         if let Poll::Ready(Some(_)) = &result {
             self.active = false;
             self.completed += 1;
+            if self.completed == 4 {
+                if let Some(tx) = self.after_four.take() {
+                    // The sole worker runs this only after the producer has
+                    // completed its original send and awaits the next permit.
+                    tokio::spawn(async move {
+                        tx.send(()).ok();
+                    });
+                }
+            }
             if self.completed == 2 {
                 let tx = self.after_two.take().unwrap();
                 let starts = Arc::clone(&self.starts);
@@ -56,6 +67,9 @@ impl Drop for Probe {
         if let Some(tx) = self.dropped.take() {
             tx.send(()).ok();
         }
+        if let Some(release) = self.drop_release.take() {
+            release.recv().unwrap();
+        }
     }
 }
 fn probe(
@@ -74,7 +88,9 @@ fn probe(
             active: false,
             completed: 0,
             after_two: Some(tx),
+            after_four: None,
             dropped: Some(dropped),
+            drop_release: None,
         }),
         ready,
         done,
@@ -224,4 +240,137 @@ fn spill_admission_buffer_bounds_real_ipc_prefetch_and_cleans_up_after_escaped_l
         assert_eq!(pool.reserved(), 0);
         Ok(())
     })
+}
+
+#[test]
+fn terminal_ownership_buffer_cancellation_two_calls_distinguishes_requested_and_retired()
+-> Result<()> {
+    use datafusion_physical_plan::terminal_ownership::{Envelope, Kind, Session};
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("cancellation-two-call.jsonl");
+    let capture = Session::create(&path, Envelope::default())?;
+    runtime().block_on(async {
+        for _ in 0..2 {
+            capture.begin_call()?;
+            let (tx, ready) = oneshot::channel();
+            let (dropped, done) = oneshot::channel();
+            let (release, wait) = std::sync::mpsc::channel();
+            let source = Box::pin(Probe {
+                inner: synthetic(),
+                starts: Arc::new(AtomicUsize::new(0)),
+                active: false,
+                completed: 0,
+                after_two: Some(tx),
+                after_four: None,
+                dropped: Some(dropped),
+                drop_release: Some(wait),
+            });
+            let output = spawn_buffered(source, 2);
+            assert_eq!(ready.await.unwrap(), 2);
+            drop(output);
+            // This signal is the original input's Drop entry. Its real fields
+            // and the producer sentinel are deliberately still live here.
+            done.await.unwrap();
+            capture.snapshot(0);
+            release.send(()).unwrap();
+            capture.wait_for_retirement(Kind::Producer)?;
+            capture.snapshot(0);
+            capture.end_call(0);
+        }
+        Ok::<_, datafusion::common::DataFusionError>(())
+    })?;
+    capture.finish()?;
+    let text = std::fs::read_to_string(&path)?;
+    let cuts: Vec<_> = text
+        .lines()
+        .filter(|line| line.contains("\"kind\":\"snapshot_begin\""))
+        .collect();
+    assert_eq!(cuts.len(), 4);
+    for pair in cuts.chunks_exact(2) {
+        assert!(!pair[0].contains("\"in_flight\":0,"));
+        assert!(pair[1].contains("\"in_flight\":0,"));
+    }
+    let producers: Vec<_> = text
+        .lines()
+        .filter(|line| line.contains("\"kind\":\"owner\"") && line.contains("\"owner_kind\":13,"))
+        .collect();
+    assert_eq!(producers.len(), 2);
+    assert!(producers.iter().all(|owner| owner.contains("\"c\":1,")));
+    if let Some(out) = std::env::var_os("GRAPHFORGE_OWNERSHIP_EVIDENCE_DIR") {
+        std::fs::create_dir_all(&out)?;
+        std::fs::copy(
+            path,
+            std::path::Path::new(&out).join("cancellation-two-call.jsonl"),
+        )?;
+    }
+    Ok(())
+}
+
+#[test]
+fn terminal_ownership_old_producer_cannot_publish_into_a_later_session() -> Result<()> {
+    use datafusion_physical_plan::terminal_ownership::{Envelope, Session};
+    let directory = tempfile::tempdir()?;
+    let first_path = directory.path().join("first.jsonl");
+    let second_path = directory.path().join("second.jsonl");
+    runtime().block_on(async {
+        let first = Session::create(
+            &first_path,
+            Envelope {
+                calls: 1,
+                ..Envelope::default()
+            },
+        )?;
+        first.begin_call()?;
+        let (tx, ready) = oneshot::channel();
+        let (after_four, advanced) = oneshot::channel();
+        let (dropped, done) = oneshot::channel();
+        let source = Box::pin(Probe {
+            inner: synthetic(),
+            starts: Arc::new(AtomicUsize::new(0)),
+            active: false,
+            completed: 0,
+            after_two: Some(tx),
+            after_four: Some(after_four),
+            dropped: Some(dropped),
+            drop_release: None,
+        });
+        let mut output = spawn_buffered(source, 2);
+        assert_eq!(ready.await.unwrap(), 2);
+        first.snapshot(0);
+        first.snapshot(0);
+        first.end_call(0);
+        first.finish()?;
+        let second = Session::create(
+            &second_path,
+            Envelope {
+                calls: 1,
+                ..Envelope::default()
+            },
+        )?;
+        second.begin_call()?;
+        // Both reads free an existing old-session slot. The same old producer
+        // then resumes polling and sends a fresh fourth batch after rotation.
+        output.next().await.unwrap()?;
+        output.next().await.unwrap()?;
+        advanced.await.unwrap();
+        second.snapshot(0);
+        drop(output);
+        done.await.unwrap();
+        second.snapshot(0);
+        second.end_call(0);
+        second.finish()?;
+        Ok::<_, datafusion::common::DataFusionError>(())
+    })?;
+    let text = std::fs::read_to_string(second_path)?;
+    assert!(!text.lines().any(|line| line.contains("\"kind\":\"owner\"")));
+    let cuts: Vec<_> = text
+        .lines()
+        .filter(|line| line.contains("\"kind\":\"snapshot_begin\""))
+        .collect();
+    assert_eq!(cuts.len(), 2);
+    assert!(
+        cuts.iter()
+            .all(|line| line.contains("\"constructed\":0,") && line.contains("\"in_flight\":0,"))
+    );
+    Ok(())
 }
