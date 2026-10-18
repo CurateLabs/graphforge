@@ -413,3 +413,6 @@ impl Display for QueryMemoryPool {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+pub(crate) mod aggregate_diagnostic;
