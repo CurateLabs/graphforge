@@ -116,11 +116,22 @@ impl Credit {
                 diagnostic.gap(od::GAP_UNSUPPORTED);
                 (od::Piece::default(), od::Life::default())
             };
+        let control_floor =
+            super::resident_metadata::std_mutex_heap_bound().and_then(|heap| {
+                size_of::<ChargedCredit>()
+                    .checked_add(2 * size_of::<usize>())
+                    .and_then(|bytes| bytes.checked_add(heap))
+            });
+        if control_floor.is_none() {
+            diagnostic.gap(od::GAP_UNSUPPORTED);
+        }
         diagnostic.update(|o| {
             o.piece = diagnostic_piece.id();
+            o.bytes = control_floor.unwrap_or(0) as u64;
             o.held = authority.size() as u64;
             o.a = authority.size() as u64;
             o.c = producers as u64;
+            o.flags |= 4;
         });
         let state = Mutex::new(State {
             available: authority.size(),
