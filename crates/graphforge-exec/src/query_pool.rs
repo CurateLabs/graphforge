@@ -364,6 +364,35 @@ impl MemoryPool for QueryMemoryPool {
                     .get(&id)
                     .is_some_and(|spiller| spiller.grant == Grant::Armed);
             if !lend {
+                // Temporary test-only diagnosis: the original lean aggregate
+                // failed here on Linux with reserved bytes above the limit.
+                // Observe the actual refusal without changing its decision.
+                #[cfg(test)]
+                if Self::is_spilling_aggregate(reservation.consumer())
+                    && state.reserved >= self.pool_size
+                {
+                    static EVENTS: AtomicUsize = AtomicUsize::new(0);
+                    let event = EVENTS.fetch_add(1, Ordering::Relaxed);
+                    if event < 64 {
+                        let mut stack = std::backtrace::Backtrace::force_capture().to_string();
+                        let mut end = stack.len().min(16_384);
+                        while !stack.is_char_boundary(end) {
+                            end -= 1;
+                        }
+                        stack.truncate(end);
+                        eprintln!(
+                            "AGG_POOL_REFUSAL event={event} consumer={id} name={} request={additional} reservation={} pool_total={} nonspill={} floor={} other_floors={} admission_reserved={reserved} admission_others={others} total_lent={} owner={:?}\n{stack}",
+                            reservation.consumer().name(),
+                            reservation.size(),
+                            state.reserved,
+                            state.non_spilling_reserved,
+                            self.floor(state.spillers.len()),
+                            self.unfilled_floors_except(&state, id),
+                            Self::lent(&state),
+                            state.spillers.get(&id),
+                        );
+                    }
+                }
                 let available = self
                     .pool_size
                     .saturating_sub(reserved)
@@ -413,6 +442,3 @@ impl Display for QueryMemoryPool {
 
 #[cfg(test)]
 mod tests;
-
-#[cfg(test)]
-pub(crate) mod aggregate_diagnostic;
