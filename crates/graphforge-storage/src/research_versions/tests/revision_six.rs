@@ -335,7 +335,7 @@ fn revision_seven_and_eight_registry_bytes_remain_readable_without_identity_rewr
             capabilities,
             participants,
         };
-        let _lease = crate::begin_graph_object_publication(root).unwrap();
+        let lease = crate::begin_graph_object_publication(root).unwrap();
         let ProjectStageOutcome::Staged(staged) =
             crate::stage_project_generation(root, &request).unwrap()
         else {
@@ -344,7 +344,7 @@ fn revision_seven_and_eight_registry_bytes_remain_readable_without_identity_rewr
         staged
             .validate(|_| Ok(()), |_, _| Ok(()))
             .unwrap()
-            .publish()
+            .publish_with_graph_objects(&lease)
             .unwrap();
         assert_eq!(self::revision(root), revision);
         assert_eq!(state(root), before);
