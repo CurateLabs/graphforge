@@ -844,7 +844,7 @@ class AuthorityForgeryTests(unittest.TestCase):
             with self.subTest(piece=piece):
                 self.assertFalse(self.funded((begin, records, end, header)))
 
-    def test_untyped_budget_edge_cannot_fund_batch_with_zero_authority(self):
+    def budgeted_data_snapshot(self, owner_kind=5):
         rows = capture_fixture()
         stop = next(i for i, r in enumerate(rows) if r["kind"] == "snapshot_end")
         begin, records, end = rows[1], rows[2:stop], rows[stop]
@@ -858,7 +858,14 @@ class AuthorityForgeryTests(unittest.TestCase):
         ]
         begin["constructed"] = 2
         end.update(owners=2, edges=1)
-        self.assertFalse(self.funded((begin, records, end, rows[0])))
+        owner.update(owner_kind=owner_kind, flags=4 if owner_kind == 18 else 0)
+        return begin, records, end, rows[0]
+
+    def test_untyped_budget_edge_cannot_fund_batch_with_zero_authority(self):
+        self.assertFalse(self.funded(self.budgeted_data_snapshot()))
+
+    def test_metadata_cannot_hide_unfunded_data_backings_under_valid_budget_edge(self):
+        self.assertFalse(self.funded(self.budgeted_data_snapshot(18)))
 
 
 class RawRowsEvidenceTests(unittest.TestCase):

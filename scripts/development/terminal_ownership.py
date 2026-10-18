@@ -345,6 +345,8 @@ def validate_arrays(backings, owners, header):
                     raise ValueError("conflicting raw backing capacity")
             raw_backings.setdefault(owner, []).append(row)
             continue
+        if owners[owner]["owner_kind"] not in {5, 8, 14} or owners[owner]["flags"] & 8:
+            raise ValueError("concrete array backing has unsupported owner kind/layout")
         type_width(row["type"])
         if row["flags"] == 1:
             key = owner, node
