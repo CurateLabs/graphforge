@@ -2015,20 +2015,9 @@ impl Chunks {
         batches: Vec<arrow::array::RecordBatch>,
         lives: BatchLives,
     ) -> Self {
-        #[cfg(feature = "test_utils")]
-        {
-            Self {
-                inner: batches.into_iter(),
-                lives: lives.inner.into_iter(),
-            }
-        }
-        #[cfg(not(feature = "test_utils"))]
-        {
-            let _ = lives;
-            Self {
-                inner: batches.into_iter(),
-                lives: Vec::new().into_iter(),
-            }
+        Self {
+            inner: batches.into_iter(),
+            lives: lives.inner.into_iter(),
         }
     }
 }
