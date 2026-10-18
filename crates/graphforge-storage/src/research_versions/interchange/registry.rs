@@ -43,6 +43,18 @@ pub(in crate::research_versions) fn validate_registry(
                 ));
             }
         }
+        for (id, record) in &archive.history {
+            if registry.versions.get(id).is_some_and(|active| {
+                active.identity_sha256().ok() != record.identity_sha256().ok()
+            }) || registry.interchange.values().any(|other| {
+                other
+                    .history
+                    .get(id)
+                    .is_some_and(|old| old.identity_sha256().ok() != record.identity_sha256().ok())
+            }) {
+                return Err(invalid("conflicting imported Version history"));
+            }
+        }
         for (id, record) in &archive.genealogy {
             if branches
                 .insert(*id, record)
@@ -74,6 +86,16 @@ pub(in crate::research_versions) fn preserve(
 }
 
 impl ResearchRegistry {
+    /// Find an identity-verified record without granting retained payload access.
+    #[must_use]
+    pub fn historical_version(&self, id: Uuid) -> Option<&super::super::ResearchVersionRecord> {
+        self.versions.get(&id).or_else(|| {
+            self.interchange
+                .values()
+                .find_map(|archive| archive.history.get(&id))
+        })
+    }
+
     /// Find creation metadata in active or imported history without creating a head.
     #[must_use]
     pub fn historical_branch(&self, branch_uuid: Uuid) -> Option<&ResearchBranchRecord> {

@@ -178,6 +178,14 @@
             }
           ]
         },
+        "parents": {
+          "items": {
+            "$ref": "#/$defs/uuid"
+          },
+          "maxItems": 8,
+          "type": "array",
+          "uniqueItems": true
+        },
         "source_version_uuid": {
           "anyOf": [
             {
@@ -194,6 +202,7 @@
       },
       "required": [
         "version_uuid",
+        "parents",
         "identity_digest",
         "kind",
         "branch_uuid"
@@ -257,6 +266,30 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "properties": {
+    "boundary_anchors": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "identity_digest": {
+            "$ref": "#/$defs/digest"
+          },
+          "origin_branch_uuid": {
+            "$ref": "#/$defs/uuid"
+          },
+          "version_uuid": {
+            "$ref": "#/$defs/uuid"
+          }
+        },
+        "required": [
+          "version_uuid",
+          "identity_digest",
+          "origin_branch_uuid"
+        ],
+        "type": "object"
+      },
+      "maxItems": 10000,
+      "type": "array"
+    },
     "branches": {
       "items": {
         "$ref": "#/$defs/branch"
@@ -285,7 +318,7 @@
       ]
     },
     "format": {
-      "const": "graphforge-research-lineage/1"
+      "const": "graphforge-research-lineage/2"
     },
     "immutable_version": {
       "$ref": "#/$defs/digest"
@@ -311,7 +344,7 @@
             "const": "research-lineage"
           },
           "major": {
-            "const": 1
+            "const": 2
           }
         },
         "required": [
@@ -340,6 +373,7 @@
     "repository",
     "immutable_version",
     "project_uuid",
+    "boundary_anchors",
     "requirements",
     "capabilities",
     "branches",

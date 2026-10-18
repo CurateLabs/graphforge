@@ -299,7 +299,7 @@ pub use project_portable_v2_import::{
     PortableV2StagedCompositionReceipt, consume_selective_portable_v2, import_complete_portable_v2,
     import_complete_portable_v2_with_allocation,
     import_complete_portable_v2_with_native_validation, import_complete_portable_v2_with_progress,
-    load_portable_ontology_staging, validate_research_package,
+    load_portable_ontology_staging, portable_v2_import_pending, validate_research_package,
 };
 
 pub mod project_portable_v2;

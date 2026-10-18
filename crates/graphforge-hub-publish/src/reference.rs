@@ -1257,6 +1257,80 @@ impl ReferenceHub {
                 .into());
             }
         }
+        if let Some(reference) = &manifest.lineage {
+            let upload = session
+                .request
+                .objects
+                .iter()
+                .zip(&session.uploads)
+                .find(|(object, _)| object.digest == reference.object_digest.0)
+                .ok_or_else(|| invalid("native lineage object is absent"))?;
+            let next = graphforge_discovery::ResearchLineage::from_json(
+                &bounded_blob_read(&upload.1.bytes, discovery_limits.max_lineage_bytes)?,
+                discovery_limits,
+            )
+            .map_err(|_| invalid("native lineage is invalid"))?;
+            if next.repository != *repository
+                || next.immutable_version != manifest.immutable_version
+                || next
+                    .canonical_digest()
+                    .map_err(|_| invalid("native lineage is invalid"))?
+                    != reference.lineage_digest
+            {
+                return Err(invalid("native lineage does not bind this publication").into());
+            }
+            if let Some(stored) = current {
+                for name in &commit.refs {
+                    if let Some(old_ref) = stored.refs.get(name) {
+                        let old_manifest = DiscoveryManifest::from_json(
+                            &stored.manifests[&old_ref.validator.0],
+                            discovery_limits,
+                        )
+                        .map_err(|_| invalid("stored manifest is invalid"))?;
+                        if old_manifest.lineage.is_some() {
+                            let object = old_manifest
+                                .lineage_object()
+                                .map_err(|_| invalid("stored lineage is absent"))?;
+                            let old = graphforge_discovery::ResearchLineage::from_json(
+                                &bounded_blob_read(
+                                    stored_control(
+                                        stored,
+                                        object,
+                                        discovery_limits.max_lineage_bytes,
+                                    )?,
+                                    discovery_limits.max_lineage_bytes,
+                                )?,
+                                discovery_limits,
+                            )
+                            .map_err(|_| invalid("stored lineage is invalid"))?;
+                            if !next.fast_forwards(&old, std::slice::from_ref(name)) {
+                                return Err(HubPublishError::new(
+                                    HubPublishErrorCode::NonFastForward,
+                                    "publication is not a structural fast-forward",
+                                )
+                                .into());
+                            }
+                        }
+                    }
+                }
+            }
+        } else if current.is_some_and(|stored| {
+            commit.refs.iter().any(|name| {
+                stored.refs.get(name).is_some_and(|r| {
+                    DiscoveryManifest::from_json(
+                        &stored.manifests[&r.validator.0],
+                        discovery_limits,
+                    )
+                    .is_ok_and(|m| m.lineage.is_some())
+                })
+            })
+        }) {
+            return Err(HubPublishError::new(
+                HubPublishErrorCode::NonFastForward,
+                "publication cannot erase native Branch history",
+            )
+            .into());
+        }
         let default_ref = match current {
             Some(stored) if stored.default_ref != manifest.default_ref => {
                 return Err(invalid("manifest default ref does not match the repository").into());

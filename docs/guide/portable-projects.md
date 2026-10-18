@@ -411,3 +411,18 @@ Primary `export` and `import` reuse the streaming `graphforge-portable-export/2`
 and `graphforge-portable-import/2` JSON receipts. Package and transport digests
 remain distinct; retired envelope digest/count fields are not compatibility aliases.
 The duplicate `portable export` and `portable import` verbs are removed.
+
+## Continue a published Branch
+
+Against a conforming publish-capable Hub, clone a named Branch, edit it through
+the native research Branch API, then publish that same ref back. The clone keeps
+the original Project and Branch UUID, creation record and selected head; the next
+commit records that head as its first parent. Authors and committers remain exact
+native record metadata. Reopen and inspect historical records with
+`research_version`; a metadata-only ancestor is not a retained payload.
+
+The other advertised refs remain read-only remote citations. Immutable-Version
+clones stay detached. Publishing divergent work is refused as `non_fast_forward`;
+a stale repository revision is still `ref_conflict`. Neither refusal moves a ref.
+Merge and explicit rewrite/prune are separate operations. Production hosted write
+availability is independent of this native protocol behavior.

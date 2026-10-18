@@ -2585,6 +2585,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
+ "url",
  "uuid",
  "zstd-safe 8.1.0",
 ]
@@ -2920,6 +2921,7 @@ dependencies = [
  "thrift",
  "tokio",
  "unicode-normalization",
+ "url",
  "uuid",
  "wait-timeout",
  "zstd 0.14.2",
