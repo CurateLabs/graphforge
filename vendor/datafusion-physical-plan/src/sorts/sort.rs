@@ -706,9 +706,11 @@ impl ExternalSorter {
                 let reservation = self
                     .reservation
                     .split(get_reserved_bytes_for_record_batch(&batch)?);
-                let piece =
-                    self.diagnostic_input
-                        .child(&reservation, 0, reservation.size());
+                let piece = self.diagnostic_input.child(
+                    &reservation,
+                    self.diagnostic.id(),
+                    reservation.size(),
+                );
                 self.diagnostic_input
                     .refresh(&self.reservation, self.diagnostic.id());
                 let input =

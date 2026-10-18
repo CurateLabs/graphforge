@@ -327,6 +327,15 @@ async fn ownership_spill_calls(compound: bool) -> Result<()> {
     capture.end_call(0);
     capture.finish()?;
     let content = std::fs::read_to_string(&path)?;
+    let cuts: Vec<_> = content
+        .lines()
+        .filter(|line| line.contains("\"kind\":\"snapshot_end\""))
+        .collect();
+    assert_eq!(cuts.len(), 4, "two committed cuts per call");
+    assert!(
+        cuts.iter().all(|line| line.contains("\"complete\":true")),
+        "supported IPC captures must commit complete ownership: {cuts:?}"
+    );
     assert!(content.contains("\"owner_kind\":9"));
     assert!(content.contains("\"owner_kind\":10"));
     assert!(content.contains("\"owner_kind\":11"));

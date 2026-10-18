@@ -348,7 +348,8 @@ impl MultiLevelMergeBuilder {
                 memory_piece.refresh(&memory_reservation, self.diagnostic.id());
                 let (input_credit, producers) = if retiring {
                     let input = memory_reservation.split(input_bytes);
-                    let piece = memory_piece.child(&input, 0, input_bytes);
+                    let piece =
+                        memory_piece.child(&input, self.diagnostic.id(), input_bytes);
                     memory_piece.refresh(&memory_reservation, self.diagnostic.id());
                     piece.transfer_to(
                         self.diagnostic.id(),
@@ -364,7 +365,11 @@ impl MultiLevelMergeBuilder {
                     (
                         {
                             let input = memory_reservation.split(input_bytes);
-                            let piece = memory_piece.child(&input, 0, input_bytes);
+                            let piece = memory_piece.child(
+                                &input,
+                                self.diagnostic.id(),
+                                input_bytes,
+                            );
                             memory_piece
                                 .refresh(&memory_reservation, self.diagnostic.id());
                             piece.transfer_to(

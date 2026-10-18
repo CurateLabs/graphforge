@@ -317,6 +317,70 @@ fn foreign_constructor_and_queue_endpoints_fail_closed_without_id_reuse() {
 }
 
 #[cfg_attr(test, test)]
+fn actual_split_keeps_donor_holder_and_lineage_until_transfer() {
+    use datafusion_execution::memory_pool::{
+        GreedyMemoryPool, MemoryConsumer, MemoryPool,
+    };
+    use std::sync::Arc;
+    let _guard = session_guard();
+    let directory = Directory::new();
+    let limits = Envelope {
+        slots: 4,
+        ..envelope()
+    };
+    let session = Session::create(&directory.path("capture"), limits).unwrap();
+    session.begin_call().unwrap();
+    let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1024));
+    let mut reservation = MemoryConsumer::new("ownership split control").register(&pool);
+    reservation.try_grow(128).unwrap();
+    let donor = Life::new(Kind::Merge, 0, 0);
+    let root = Piece::new(&reservation, donor.id());
+    let split = reservation.split(64);
+    let child = root.child(&split, donor.id(), 64);
+    root.refresh(&reservation, donor.id());
+    let child_id = child.id();
+    assert_ne!(child_id, 0);
+    let (credit, moved) = child.transfer_to(donor.id(), Kind::Credit as u64, || {
+        let credit = Life::inherited(Kind::Credit);
+        let moved = Piece::new(&split, credit.id());
+        (credit, moved)
+    });
+    assert_eq!(moved.id(), child_id);
+    assert_eq!(
+        with(|r| {
+            let piece = r
+                .pieces
+                .iter()
+                .flatten()
+                .find(|p| p.id == child_id)
+                .unwrap();
+            (
+                piece.holder,
+                piece.root,
+                piece.split_from,
+                piece.split_bytes,
+                r.gaps,
+            )
+        }),
+        Some((credit.id(), root.id(), root.id(), 64, 0))
+    );
+    session.snapshot(0);
+    drop((moved, credit, split, root, donor, reservation));
+    assert_eq!(pool.reserved(), 0);
+    session.snapshot(0);
+    session.end_call(0);
+    complete_empty_call(&session);
+    session.finish().unwrap();
+    assert!(
+        directory
+            .lines("capture")
+            .iter()
+            .filter(|line| kind(line, "snapshot_end"))
+            .all(|line| line.contains("\"complete\":true"))
+    );
+}
+
+#[cfg_attr(test, test)]
 fn construction_between_declared_calls_poison_capture_but_updates_and_drops_remain_legal()
 {
     use datafusion_execution::memory_pool::{
@@ -979,6 +1043,7 @@ fn final_footer_write_failure_never_reports_committed_capture() {
 /// Execute these controls from the existing workspace product test lane.
 pub(super) fn run_controls() {
     sequential_calls_preserve_generation_and_counters_without_reset();
+    actual_split_keeps_donor_holder_and_lineage_until_transfer();
     stale_session_guards_cannot_mutate_later_capture();
     foreign_constructor_and_queue_endpoints_fail_closed_without_id_reuse();
     construction_between_declared_calls_poison_capture_but_updates_and_drops_remain_legal(

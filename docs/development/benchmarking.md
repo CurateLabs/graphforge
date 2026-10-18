@@ -105,7 +105,7 @@ The source digests identify the exact deterministic input-generating fixtures:
 
 | Fixture source in `crates/graphforge-exec/src/session/` | SHA-256 |
 | --- | --- |
-| `spill_source_tests.rs` | `d5cf48a127a6872bfbd85de3362d50868d3f3a04fe5063c7a5a5579296578bde` |
+| `spill_source_tests.rs` | `0d29df09db625f899c68aae9174a9c66c7c11484fbc360257be80326cf61b50d` |
 | `spill_buffer_tests.rs` | `145b7d9adbfabfc85336ff7ecc980c0a806caa3ef3da0006ffc1c3adbec47a01` |
 | `terminal_ownership_tests.rs` | `ab3b1fd3aaf83916007e1499cdcb6a67ef7546bb823ca018285b3ad4b5ef25e8` |
 
