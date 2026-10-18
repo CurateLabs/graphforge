@@ -935,6 +935,47 @@ class QueuedClaimTests(unittest.TestCase):
             with self.subTest(target=target):
                 self.assertFalse(self.check(snapshot)["funding_complete"])
 
+    def test_ipc_metadata_cannot_replace_its_budget_with_a_tiny_resident(self):
+        snapshot = queued_claim_snapshot()
+        prototype = batch_fixture()[0][1]
+        copy_owner = {
+            **prototype,
+            "id": 12,
+            "owner_kind": 9,
+            "piece": 14,
+            "object": 0,
+            "bytes": 16,
+            "a": 1,
+            "b": 0,
+            "d": 2,
+            "flags": 4,
+        }
+        resident = {
+            **prototype,
+            "id": 13,
+            "owner_kind": 10,
+            "piece": 14,
+            "parent": 12,
+            "bytes": 1,
+            "a": 0,
+            "b": 0,
+        }
+        piece = {
+            **next(r for r in snapshot[1] if r["kind"] == "piece"),
+            "id": 14,
+            "root": 14,
+            "holder": 12,
+            "held": 17,
+        }
+        snapshot[1].extend([copy_owner, resident, piece])
+        header_edge = next(r for r in snapshot[1] if r["kind"] == "edge" and r["from"] == 8)
+        header_edge.update(to=13, relation=2, bytes=0)
+        snapshot[0]["constructed"] = 10
+        snapshot[2].update(owners=10, pieces=4)
+        snapshot[3].update(slots=12, record_limit=172, byte_limit=176128, observer_bytes=19840)
+        collector.validate_header(snapshot[3])
+        self.assertFalse(self.check(snapshot)["funding_complete"])
+
     def test_alias_matching_is_per_backing_and_requires_exact_claim_amount(self):
         for field, value in [("to", 8), ("bytes", 7)]:
             snapshot = queued_claim_snapshot()

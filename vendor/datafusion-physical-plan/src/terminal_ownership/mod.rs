@@ -1502,11 +1502,13 @@ impl crate::RecordBatchStream for QueueStream {
 }
 pub(crate) struct ProducerInput {
     pub(crate) input: crate::SendableRecordBatchStream,
-    pub(crate) diagnostic: Life,
     // The decoder may hold intermediate allocations across Pending. Keep the
     // cut explicitly open until its batch is observed and the original send ends.
     #[cfg(feature = "test_utils")]
     pub(crate) polling: Option<Transition>,
+    // Retire after both the original input and its numeric polling guard.
+    // Owner absence must not wake a capture while this poll is still open.
+    pub(crate) diagnostic: Life,
 }
 
 impl ProducerInput {

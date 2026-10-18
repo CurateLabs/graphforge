@@ -590,7 +590,13 @@ def validate_credit(owners, pieces, relations, backings):
                     problems.append("Credit control metadata lacks its actual reservation")
                 continue
         edges = relations.get((identity, 10), [])
-        if owner["owner_kind"] in {11, 18} and not relations.get((identity, 2), []) and not edges:
+        if owner["owner_kind"] == 18:
+            # Batch/schema metadata own a Budget in the writer. An unrelated
+            # Resident cannot stand in for that literal authority, even at zero
+            # delegated bytes. The separate Credit-control subtype returned above.
+            if len(edges) != 1 or relations.get((identity, 2), []):
+                problems.append("IPC metadata lacks its unique actual Budget")
+        elif owner["owner_kind"] == 11 and not relations.get((identity, 2), []) and not edges:
             problems.append("IPC retained metadata/payload has no actual Budget")
         if owner["owner_kind"] == 11 and edges:
             headers = relations.get((identity, 7), [])
