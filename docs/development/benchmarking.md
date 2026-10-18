@@ -28,6 +28,86 @@ measurements.
 Ordinary deadlines, cancellation tests, and approved shared diagnostics remain
 allowed. `Instant` / `Duration` in product control paths are not banned globally.
 
+## Bounded terminal sort ownership capture
+
+The vendored physical plan has an opt-in development collector for selected
+sort/merge ownership boundaries. It records numeric observations, not query
+values, and changes no query admission policy. This is neither production
+telemetry nor a query-wide memory inventory. The implementation is activated
+by the dependency's existing `test_utils` feature; GraphForge executor tests
+exercise it through their development dependency. A caller must explicitly
+create a `terminal_ownership::Session`; enabling the feature alone opens no
+files and starts no capture.
+
+Create a session before its declared calls. Supply an `Envelope` for the maximum
+simultaneously retained owners, reservation pieces, relationships and backing
+descriptors, plus concrete column/node/depth/buffer traversal limits. Source
+chunks, current/previous keys, queued batches and escaped output claims require
+distinct live generations. Reservation moves preserve a piece identity; splits
+and borrowed IPC credit record their actual authority relationships. Pointer or
+consumer equality and aggregate Arrow sizes do not prove funding.
+
+The session reserves two closure slots per call: the selected ownership boundary
+and its retirement observation. Retiring an observed generation recycles its
+numeric storage. Repeated spills, refills and EOF polls increment checked
+counters rather than append cumulative history. A required live descriptor is
+never evicted to make room. Capacity exhaustion, allocation/format/I/O failure,
+unknown sponsorship, unsupported backing and an ambiguous transition remain
+explicit failures of the affected evidence. Unsupported owners cannot disappear
+from coverage while a relevant retained alias survives.
+
+Every capture starts with a `terminal-ownership/1` JSONL header. Its arithmetic
+derives maximum records and file bytes from the live arena and reserved cuts;
+observer memory also includes inline observer fields, numeric sidecars and
+bounded per-thread bridge slots.
+The paired assessor independently checks the same derivation and enforces its
+own finite parser ceiling. Dynamic view-data buffers consume descriptor slots;
+a bounded schema alone does not bound their multiplicity. The envelope proves
+a storage ceiling, not that an arbitrary workload fits inside it.
+
+Product operations execute outside the observer lock. Numeric transition guards
+mark mutations before they change product ownership, and a cut with an open
+transition is incomplete. These observations do not make the whole query or its
+pool an atomic snapshot. Original fields and reservation authority retire in
+their original order; numeric retirement records describe reference release,
+not allocator release or other surviving aliases.
+
+Finalization writes an explicit session footer with the declared call coverage,
+prior byte/record counts and FNV64 transport checksum. Missing finalization,
+partial lines, an external kill or a checksum/count mismatch deny capture
+completeness. The checksum detects transport damage; it authenticates neither
+the producer nor funding history. Preserve separate source/binary/input digests
+using the existing benchmark provenance method.
+
+Assess a retained capture without overwriting existing evidence:
+
+```sh
+python3 scripts/development/assess-terminal-ownership.py capture.jsonl --output assessment.json
+python3 scripts/development/test-terminal-ownership.py
+```
+
+The assessor reports transport, direct ownership and funding separately. A
+positive selected-cut verdict applies only to the explicitly supported,
+instrumented closure. API error attribution requires its own matching failure
+anchor. A refusal cut identifies the failed reservation piece, consumer,
+requested bytes and monotonic attempt generation. `end_call_error` corroborates
+the actual returned resource-error root with its borrowed pointer, full length
+and FNV64 hash; truncated hashes cannot qualify. This is scoped error identity,
+not an atomic pool-decision receipt. Pending output before a refused admission
+can have complete direct descriptors while funding remains explicitly incomplete.
+A live owner whose creation parent retired keeps its own generation and funding
+obligations; the retired-parent flag supplies no historical lineage certificate.
+
+No verdict establishes query completion, answer correctness, a quiet
+performance baseline, complete process RSS attribution or removal of an OOM.
+
+Before any native capture, verify current-path applicability, supported runtime
+layouts, maximum live width for the selected call protocol, observer cost and
+unchanged reservation/poll/drop behavior. Run the focused Rust controls through
+the existing test environment and nextest lane. Keep raw captures, exact
+commands, results and verification receipts on the producing issue or PR.
+Collector tests alone do not authorize a benchmark retry.
+
 ## GDC per-operation query latency
 
 Maintainer decision on #952, implemented by #1877. This amends the 2026-09-19

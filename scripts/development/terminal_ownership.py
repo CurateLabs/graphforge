@@ -150,6 +150,8 @@ HEADER_FIELDS = {
     "backing_bytes",
     "edge_bytes",
     "fixed_bytes",
+    "metadata_per_slot",
+    "tls_bytes",
 }
 
 
@@ -160,7 +162,7 @@ def validate_header(header):
         raise ValueError("unsupported ownership protocol")
     for name in HEADER_FIELDS - {"kind", "protocol"}:
         uint(header[name], name)
-        if name != "edges" and header[name] == 0:
+        if name not in {"edges", "tls_bytes"} and header[name] == 0:
             raise ValueError("zero session bound: " + name)
     if header["line_bytes"] != 1024 or header["calls"] > 64:
         raise ValueError("unsupported session line or call bound")
@@ -175,7 +177,10 @@ def validate_header(header):
         checked_mul(header["edges"], header["edge_bytes"]),
     )
     observer = checked_add(
-        checked_mul(checked_add(1, checked_mul(2, header["calls"])), arena), header["fixed_bytes"]
+        checked_mul(checked_add(1, checked_mul(2, header["calls"])), arena),
+        header["fixed_bytes"],
+        checked_mul(header["slots"], header["metadata_per_slot"]),
+        header["tls_bytes"],
     )
     if (header["record_limit"], header["byte_limit"], header["observer_bytes"]) != (
         records,
@@ -185,6 +190,8 @@ def validate_header(header):
         raise ValueError("writer/parser budget derivation disagrees")
     if records > MAX_RECORDS or byte_limit > MAX_CAPTURE_BYTES:
         raise ValueError("capture envelope exceeds parser ceiling")
+    if any(header[key] > header["descriptors"] for key in ("columns", "nodes", "buffers")):
+        raise ValueError("traversal dimensions exceed retained descriptor capacity")
     if header["depth"] > MAX_DEPTH:
         raise ValueError("capture traversal depth exceeds parser ceiling")
     return header
@@ -205,6 +212,7 @@ OWNER_FIELDS = {
     "c",
     "d",
     "flags",
+    "coverage",
 }
 PIECE_FIELDS = {
     "kind",
@@ -237,6 +245,8 @@ BACKING_FIELDS = {
     "buffers",
 }
 EDGE_FIELDS = {"kind", "call", "from", "to", "relation", "bytes"}
+ERROR_FIELDS = {"error_ptr", "error_len", "error_hash", "error_truncated"}
+ANCHOR_FIELDS = ERROR_FIELDS | {"attempt", "stage", "failed_piece", "consumer", "request"}
 BEGIN_FIELDS = {
     "kind",
     "call",
@@ -250,8 +260,9 @@ BEGIN_FIELDS = {
     "retired",
     "operations",
 }
+BEGIN_FIELDS |= ANCHOR_FIELDS
 END_FIELDS = {"kind", "call", "snapshot", "owners", "pieces", "backings", "edges", "complete"}
-RUN_FIELDS = {"kind", "call", "outcome", "snapshots", "poison"}
+RUN_FIELDS = {"kind", "call", "outcome", "snapshots", "poison"} | ERROR_FIELDS
 FOOTER_FIELDS = {"kind", "calls", "records", "bytes", "checksum", "complete"}
 
 
@@ -300,11 +311,40 @@ def validate_arrays(backings, owners, header):
     children = {}
     roots = {}
     capacities = {}
+    raw_backings = {}
     for row in backings:
         numeric_record(row, BACKING_FIELDS)
         owner, node = row["owner"], row["node"]
         if owner not in owners or not node or row["column"] >= header["columns"]:
             raise ValueError("backing has no live owner/node or exceeds columns")
+        if 35 <= row["type"] <= 39:
+            raw_kind = row["type"]
+            owner_kind = owners[owner]["owner_kind"]
+            allowed = (
+                (raw_kind == 35 and owner_kind == 11)
+                or (raw_kind in {36, 37, 38} and owner_kind == 8 and owners[owner]["flags"] & 8)
+                or (raw_kind in {38, 39} and owner_kind == 7)
+            )
+            if (
+                not allowed
+                or row["flags"] != 4
+                or row["parent_node"]
+                or row["children"]
+                or row["buffers"]
+                or row["nulls"]
+                or row["column"] != row["node"] - 1
+            ):
+                raise ValueError("unsupported raw backing owner/layout")
+            if checked_add(row["offset"], row["length"]) > row["capacity"]:
+                raise ValueError("raw backing span exceeds capacity")
+            if row["capacity"] and not row["base"]:
+                raise ValueError("raw backing lacks allocation identity")
+            if row["capacity"]:
+                previous = capacities.setdefault(row["base"], row["capacity"])
+                if previous != row["capacity"]:
+                    raise ValueError("conflicting raw backing capacity")
+            raw_backings.setdefault(owner, []).append(row)
+            continue
         type_width(row["type"])
         if row["flags"] == 1:
             key = owner, node
@@ -321,6 +361,8 @@ def validate_arrays(backings, owners, header):
                 raise ValueError("unknown backing role/flags")
             if flags & 32 and role not in {2, 4}:
                 raise ValueError("invalid bit-span role")
+            if row["children"] or row["buffers"]:
+                raise ValueError("buffer descriptor carries array multiplicities")
             extent = checked_mul(row["capacity"], 8) if flags & 32 else row["capacity"]
             if checked_add(row["offset"], row["length"]) > extent:
                 raise ValueError("buffer span exceeds backing capacity")
@@ -331,8 +373,12 @@ def validate_arrays(backings, owners, header):
                 if previous != row["capacity"]:
                     raise ValueError("conflicting simultaneously live backing capacity")
             buffers.setdefault((owner, node), []).append(row)
-    if len(nodes) > checked_mul(header["slots"], header["nodes"]):
-        raise ValueError("array node envelope exceeded")
+    for owner in owners:
+        node_count = sum(key[0] == owner for key in nodes)
+        buffer_count = sum(len(value) for key, value in buffers.items() if key[0] == owner)
+        buffer_count += len(raw_backings.get(owner, []))
+        if node_count > header["nodes"] or buffer_count > header["buffers"]:
+            raise ValueError("per-owner node/buffer traversal envelope exceeded")
     for key in buffers:
         if key not in nodes:
             raise ValueError("buffer lacks its array node")
@@ -360,6 +406,8 @@ def validate_arrays(backings, owners, header):
         if any(row["column"] != node["column"] for row in child_nodes + storage):
             raise ValueError("array child/buffer column mismatch")
         low, width = type_width(node["type"])
+        if low not in {28, 29, 30} and child_nodes:
+            raise ValueError("primitive array cannot have child nodes")
         roles = [row["flags"] & ~32 for row in storage]
         validity = [row for row in storage if row["flags"] & ~32 == 2]
         if len(validity) > 1 or (node["nulls"] and low != 1 and not validity):
@@ -412,13 +460,38 @@ def validate_arrays(backings, owners, header):
             if row["length"] < minimum:
                 raise ValueError("backing does not cover logical array, including all-null values")
     for owner, row in owners.items():
-        if row["owner_kind"] not in {5, 14} or row["flags"] & 1:
+        if row["flags"] & 8:
+            raw = raw_backings.get(owner, [])
+            if (
+                row["owner_kind"] != 8
+                or sorted(r["type"] for r in raw) != [36, 37, 38]
+                or row["b"] != 3
+            ):
+                raise ValueError("Rows key storage incomplete")
             continue
+        if row["owner_kind"] == 7 and row["b"] == 2:
+            raw = raw_backings.get(owner, [])
+            if sorted(r["type"] for r in raw) != [38, 39] or row["b"] != 2:
+                raise ValueError("RowConverter metadata incomplete")
+        if row["owner_kind"] == 11:
+            raw = raw_backings.get(owner, [])
+            if (
+                len(raw) != 1
+                or raw[0]["type"] != 35
+                or raw[0]["node"] != 1
+                or raw[0]["offset"]
+                or raw[0]["length"] != raw[0]["capacity"]
+            ):
+                raise ValueError("claimed output backing incomplete")
+        if row["owner_kind"] not in {5, 8, 14} or row["flags"] & 1:
+            continue
+        if row["owner_kind"] == 8 and row["b"] != 1:
+            raise ValueError("primitive evaluated key needs one array root")
         arrays = roots.get(owner, [])
         if (
             row["b"] > header["columns"]
-            or {n["column"] for n in arrays} != set(range(row["b"]))
             or len(arrays) != row["b"]
+            or sorted(n["column"] for n in arrays) != list(range(len(arrays)))
         ):
             raise ValueError("batch root column coverage incomplete")
         if any(n["length"] != row["a"] for n in arrays):
@@ -426,8 +499,104 @@ def validate_arrays(backings, owners, header):
     return capacities
 
 
+def validate_credit(owners, pieces, relations, backings):
+    """Validate fresh and borrowed IPC authority without counting a bank twice."""
+    problems = []
+    budgets = {identity: o for identity, o in owners.items() if o["owner_kind"] == 15}
+    credits = {identity: o for identity, o in owners.items() if o["owner_kind"] == 16}
+    borrowed = dict.fromkeys(credits, 0)
+    for identity, budget in budgets.items():
+        piece = pieces.get(budget["piece"])
+        if budget["d"] or budget["held"] != checked_add(budget["a"], budget["b"]):
+            raise ValueError("IPC Budget fresh/borrowed totals disagree")
+        if piece is None or piece["flags"] & 4 or piece["held"] != budget["a"]:
+            problems.append("Budget lacks its actual fresh reservation")
+        edges = relations.get((identity, 8), [])
+        if budget["b"]:
+            if (
+                budget["c"] not in credits
+                or len(edges) != 1
+                or edges[0]["to"] != budget["c"]
+                or edges[0]["bytes"] != budget["b"]
+            ):
+                problems.append("Budget lacks its actual borrowed Credit relationship")
+            else:
+                borrowed[budget["c"]] = checked_add(borrowed[budget["c"]], budget["b"])
+        elif edges and any(edge["bytes"] for edge in edges):
+            raise ValueError("zero borrowed Budget has positive Credit delegation")
+    for identity, credit in credits.items():
+        piece = pieces.get(credit["piece"])
+        if credit["d"] > 2 or credit["held"] != checked_add(credit["a"], credit["b"]):
+            raise ValueError("Credit bank invariant disagrees")
+        if piece is None or piece["held"] != credit["held"]:
+            problems.append("Credit bank lacks its actual reservation")
+        if borrowed[identity] != credit["b"]:
+            problems.append("Credit outstanding tickets do not reconcile")
+        permits = sum(o["owner_kind"] == 17 and o["parent"] == identity for o in owners.values())
+        if permits != credit["c"]:
+            problems.append("Credit producer roots do not reconcile")
+        if credit["d"] and (credit["a"] or credit["c"]):
+            raise ValueError("retiring Credit still exposes available authority or producers")
+        if credit["d"] == 2 and credit["b"]:
+            raise ValueError("closed Credit retains outstanding tickets")
+        control = relations.get((identity, 7), [])
+        if credit["bytes"] and not control:
+            problems.append("Credit control allocation has no separate authority")
+        for edge in control:
+            owner = owners[edge["to"]]
+            if owner["owner_kind"] != 18 or owner["a"] != 3 or owner["bytes"] < credit["bytes"]:
+                problems.append("Credit control certificate does not cover its metadata")
+    spend = {}
+    for identity, owner in owners.items():
+        if owner["owner_kind"] == 17:
+            edges = relations.get((identity, 9), [])
+            if (
+                owner["parent"] not in credits
+                or len(edges) != 1
+                or edges[0]["to"] != owner["parent"]
+            ):
+                problems.append("ReaderPermit lacks actual Credit registration")
+        if owner["owner_kind"] == 18:
+            if owner["a"] not in {1, 2, 3}:
+                raise ValueError("unknown IPC metadata subtype")
+            if owner["a"] == 3:
+                piece = pieces.get(owner["piece"])
+                if (
+                    piece is None
+                    or piece["held"] < owner["bytes"]
+                    or owner["parent"] not in credits
+                ):
+                    problems.append("Credit control metadata lacks its actual reservation")
+                continue
+        edges = relations.get((identity, 10), [])
+        if owner["owner_kind"] in {11, 18} and not relations.get((identity, 2), []) and not edges:
+            problems.append("IPC retained metadata/payload has no actual Budget")
+        for edge in edges:
+            if edge["to"] not in budgets or edge["bytes"] != owner["bytes"]:
+                problems.append("IPC claim amount or Budget identity disagrees")
+                continue
+            if owner["owner_kind"] == 11:
+                raw = {
+                    (b["base"], b["capacity"])
+                    for b in backings
+                    if b["owner"] == identity and b["type"] == 35
+                }
+                for base, capacity in raw:
+                    key = edge["to"], base
+                    spend[key] = max(spend.get(key, 0), capacity)
+                    if capacity > owner["bytes"]:
+                        problems.append("IPC claim does not cover its actual backing")
+            elif owner["owner_kind"] == 18:
+                spend[edge["to"], -identity] = owner["bytes"]
+    for identity, budget in budgets.items():
+        used = checked_add(*(value for (sponsor, _), value in spend.items() if sponsor == identity))
+        if used > budget["held"]:
+            problems.append("IPC Budget authority is spent more than once")
+    return problems
+
+
 def validate_snapshot(begin, records, end, header):
-    numeric_record(begin, BEGIN_FIELDS)
+    numeric_record(begin, BEGIN_FIELDS, {"error_truncated"})
     numeric_record(end, END_FIELDS, {"complete"})
     if begin["call"] != end["call"] or begin["snapshot"] != end["snapshot"]:
         raise ValueError("snapshot boundary mismatch")
@@ -439,6 +608,14 @@ def validate_snapshot(begin, records, end, header):
         checked_mul(2, begin["operations"] - begin["in_flight"]), begin["in_flight"]
     ):
         raise ValueError("transition epoch disagrees with open operations")
+    anchor = {key: begin[key] for key in ANCHOR_FIELDS}
+    if anchor["stage"] not in {0, 1, 2}:
+        raise ValueError("unknown refusal stage")
+    if not anchor["stage"]:
+        if any(anchor.values()):
+            raise ValueError("partial refusal anchor")
+    elif begin["snapshot"] != 1 or begin["outcome"] != 1 or not anchor["attempt"]:
+        raise ValueError("refusal anchor outside selected refusal cut")
     owners = {}
     pieces = {}
     backings = []
@@ -452,8 +629,8 @@ def validate_snapshot(begin, records, end, header):
             if (
                 not row["id"]
                 or row["id"] in owners
-                or not 1 <= row["owner_kind"] <= 14
-                or row["flags"] & ~7
+                or not 1 <= row["owner_kind"] <= 18
+                or row["flags"] & ~31
             ):
                 raise ValueError("duplicate or unsupported owner identity/kind/flags")
             owners[row["id"]] = row
@@ -466,7 +643,7 @@ def validate_snapshot(begin, records, end, header):
             backings.append(row)
         else:
             numeric_record(row, EDGE_FIELDS)
-            if not 1 <= row["relation"] <= 7:
+            if not 1 <= row["relation"] <= 10:
                 raise ValueError("unknown ownership relation")
             edges.append(row)
         if not 1 <= row["call"] <= begin["call"]:
@@ -498,9 +675,25 @@ def validate_snapshot(begin, records, end, header):
         direct_problems.append("explicit instrumented-scope coverage gap")
     if any(o["flags"] & 1 for o in owners.values()):
         direct_problems.append("opaque owner")
+    coverage = 0
+    for owner in owners.values():
+        if owner["coverage"] & ~31:
+            raise ValueError("unknown owner coverage gap")
+        coverage |= owner["coverage"]
+    if coverage & ~begin["gaps"]:
+        raise ValueError("snapshot omits a still-live owner coverage gap")
+    for owner in owners.values():
+        if owner["parent"] and owner["parent"] not in owners:
+            funding_problems.append("missing owner origin certificate")
+        # Flag 2 marks a LIVE owner whose creation parent retired. It grants
+        # neither a storage exemption nor a funding relationship.
+        if owner["flags"] & 2 and owner["parent"]:
+            raise ValueError("retired-parent marker contradicts a live parent")
+        if owner["flags"] & 4 and owner["owner_kind"] in {5, 8, 14}:
+            raise ValueError("data owner cannot be metadata-only")
     for piece in pieces.values():
-        if not piece["root"] or not piece["consumer"]:
-            raise ValueError("reservation lacks root/consumer generation")
+        if not piece["root"]:
+            raise ValueError("reservation lacks root generation")
         if piece["flags"] & 4:
             if piece["holder"] or piece["held"] or piece["root"] != piece["id"]:
                 raise ValueError("invalid retired-root certificate")
@@ -510,12 +703,22 @@ def validate_snapshot(begin, records, end, header):
             funding_problems.append("missing reservation origin certificate")
         elif pieces[piece["root"]]["consumer"] != piece["consumer"]:
             raise ValueError("split reservation changed consumer")
-        if piece["split_from"] and (piece["split_from"] != piece["root"] or not piece["flags"] & 1):
+        if piece["id"] == piece["root"]:
+            if piece["flags"] & 3 or piece["split_from"] or piece["split_bytes"]:
+                raise ValueError("root reservation contradicts split origin")
+        elif not piece["flags"] & 3 or piece["split_from"] != piece["root"]:
             raise ValueError("unknown split ancestry")
+        if piece["flags"] & 2 and piece["split_bytes"]:
+            raise ValueError("empty-child certificate has a nonempty origin")
     relations = {}
     graph = {owner: [] for owner in owners}
     indegree = dict.fromkeys(owners, 0)
     seen_edges = set()
+    for owner, record in owners.items():
+        parent = record["parent"]
+        if parent in owners:
+            graph[owner].append(parent)
+            indegree[parent] += 1
     for edge in edges:
         source, target, relation = edge["from"], edge["to"], edge["relation"]
         key = source, target, relation
@@ -539,10 +742,89 @@ def validate_snapshot(begin, records, end, header):
                 pending.append(target)
     if count != len(owners):
         raise ValueError("cyclic retention/funding graph")
+    funding_problems.extend(validate_credit(owners, pieces, relations, backings))
+    # CopyAdmission supplies tested, current reservation certificates. Residents
+    # partition its actual rows/output charges; metadata and aliased Claims spend
+    # those partitions rather than being added a second time to piece holdings.
+    copies = {
+        identity: o for identity, o in owners.items() if o["owner_kind"] == 9 and o["flags"] & 4
+    }
+    residents = {identity: o for identity, o in owners.items() if o["owner_kind"] == 10}
+    resident_requests = {}
+    resident_allocations = {}
+    for resident in residents.values():
+        parent = copies.get(resident["parent"])
+        if (
+            parent is None
+            or not resident["bytes"]
+            or resident["a"] not in {0, 1}
+            or resident["piece"] != parent["piece"]
+        ):
+            funding_problems.append("Resident lacks actual Copy authority and charge class")
+    for identity, copy in copies.items():
+        piece = pieces.get(copy["piece"])
+        if piece is None or piece["flags"] & 4:
+            funding_problems.append("Copy control has no live reservation")
+            continue
+        state, capability = copy["c"], copy["d"]
+        if state & ~15 or state & 12 == 12 or (capability not in {0, 2} and capability & 3 != 1):
+            raise ValueError("unknown Copy lifetime/capability encoding")
+        owned = [resident for resident in residents.values() if resident["parent"] == identity]
+        rows = checked_add(*(r["bytes"] for r in owned if r["a"] == 0))
+        outputs = checked_add(*(r["bytes"] for r in owned if r["a"] == 1))
+        if (rows, outputs) != (copy["a"], copy["b"]):
+            funding_problems.append("Copy Resident subtotals do not reconcile")
+        control = copy["bytes"] if capability or state & 12 else 0
+        base = checked_add(control, rows)
+        if state & 4:
+            base = max(base, copy["object"])
+        floor = checked_add(base, outputs)
+        if floor > piece["held"] or (not state & 3 and floor != piece["held"]):
+            funding_problems.append("Copy retained floor disagrees with actual reservation")
     used = {}
     for owner, row in owners.items():
         piece = row["piece"]
+        if row["flags"] & 16:
+            if row["owner_kind"] not in {5, 8, 14} or piece:
+                raise ValueError("pending unadmitted marker contradicts owner/authority")
+            funding_problems.append("known pending owner is not admitted by a reservation")
         sponsors = relations.get((owner, 2), [])
+        budget_sponsors = relations.get((owner, 10), [])
+        if row["bytes"] and not piece and not sponsors and not budget_sponsors:
+            funding_problems.append("retained owner has no observed funding relationship")
+        if row["parent"] and row["parent"] == owner:
+            raise ValueError("owner cannot be its own origin")
+        for edge in sponsors:
+            resident = residents[edge["to"]]
+            if edge["bytes"] > resident["bytes"]:
+                funding_problems.append("delegated claim exceeds its Resident")
+            if row["owner_kind"] in {3, 4, 6, 7} and row["bytes"]:
+                if edge["bytes"] != row["bytes"]:
+                    funding_problems.append(
+                        "metadata delegation does not match recorded baseline layout"
+                    )
+                resident_requests[edge["to"]] = checked_add(
+                    resident_requests.get(edge["to"], 0), edge["bytes"]
+                )
+        if row["owner_kind"] in {3, 4, 6, 7} and row["flags"] & 4 and not sponsors:
+            funding_problems.append("metadata has no actual Resident sponsorship")
+        if row["owner_kind"] == 11 and not budget_sponsors:
+            headers = relations.get((owner, 7), [])
+            if (
+                len(sponsors) != 1
+                or len(headers) != 1
+                or owners[headers[0]["to"]]["owner_kind"] != 10
+            ):
+                funding_problems.append("Claim lacks separate payload and header Residents")
+            elif sponsors[0]["bytes"] != row["bytes"]:
+                funding_problems.append("Claim amount differs from actual pool claim")
+            for backing in backings:
+                if backing["owner"] == owner and backing["type"] == 35 and sponsors:
+                    resident_allocations.setdefault(sponsors[0]["to"], set()).add(
+                        (backing["base"], backing["capacity"])
+                    )
+                    if backing["capacity"] > row["bytes"]:
+                        funding_problems.append("Claim does not cover its physical backing")
         if piece and piece not in pieces:
             funding_problems.append("owner lacks its actual reservation piece")
         if sponsors:
@@ -556,11 +838,18 @@ def validate_snapshot(begin, records, end, header):
             for b in backings
             if b["owner"] == owner and b["flags"] != 1 and b["capacity"]
         }
-        if owned_backings:
+        if owned_backings and not budget_sponsors:
             if piece not in pieces or pieces[piece]["flags"] & 4:
                 funding_problems.append("retained backing has no live sponsoring authority")
             else:
                 used.setdefault(piece, set()).update(owned_backings)
+    for resident_id, resident in residents.items():
+        allocated = checked_add(
+            *(capacity for _, capacity in resident_allocations.get(resident_id, set()))
+        )
+        minimum = checked_add(resident_requests.get(resident_id, 0), allocated)
+        if minimum > resident["bytes"]:
+            funding_problems.append("Resident authority is spent more than once")
     for piece, allocations in used.items():
         if checked_add(*(capacity for _, capacity in allocations)) > pieces[piece]["held"]:
             funding_problems.append("live backing capacity exceeds its sponsoring authority")
@@ -575,6 +864,12 @@ def validate_snapshot(begin, records, end, header):
         "call": begin["call"],
         "snapshot": begin["snapshot"],
         "outcome": begin["outcome"],
+        "failure_anchor": anchor,
+        "failed_authority_observed": bool(
+            anchor["failed_piece"] in pieces
+            and pieces[anchor["failed_piece"]]["consumer"] == anchor["consumer"]
+            and not pieces[anchor["failed_piece"]]["flags"] & 4
+        ),
         "direct_complete": direct,
         "funding_complete": funding,
         "direct_problems": direct_problems,
@@ -601,7 +896,8 @@ def assess_capture(path):
     generations = {}
     active_ids = set()
     retired_ids = set()
-    prior_constructed = prior_retired = prior_operations = 0
+    prior_constructed = prior_retired = prior_operations = prior_attempt = 0
+    call_results = []
     calls = cuts = count = total = 0
     digest = FNV_OFFSET
     footer = False
@@ -613,7 +909,7 @@ def assess_capture(path):
             if header is None:
                 header = validate_header(row)
             elif kind == "snapshot_begin":
-                numeric_record(row, BEGIN_FIELDS)
+                numeric_record(row, BEGIN_FIELDS, {"error_truncated"})
                 if (
                     begin is not None
                     or row["call"] != calls + 1
@@ -640,6 +936,13 @@ def assess_capture(path):
                     raise ValueError("snapshot end without beginning")
                 summary = validate_snapshot(begin, records, row, header)
                 current = summary.pop("generations")
+                attempt = summary["failure_anchor"]["attempt"]
+                if attempt:
+                    if attempt <= prior_attempt or attempt in current:
+                        raise ValueError("refusal attempt generation reused or regressed")
+                    prior_attempt = attempt
+                    current[attempt] = ("attempt", row["call"])
+
                 if retired_ids & current.keys():
                     raise ValueError("retired generation reused")
                 for identity, origin in current.items():
@@ -653,7 +956,7 @@ def assess_capture(path):
                 begin = None
                 records = []
             elif kind == "run_end":
-                numeric_record(row, RUN_FIELDS)
+                numeric_record(row, RUN_FIELDS, {"error_truncated"})
                 if (
                     begin is not None
                     or row["call"] != calls + 1
@@ -663,6 +966,28 @@ def assess_capture(path):
                     or row["poison"]
                 ):
                     raise ValueError("call incomplete or recorder poisoned")
+                selected = summaries[-2]
+                anchor = selected["failure_anchor"]
+                refused = row["outcome"] == 1
+                attributed = bool(
+                    refused
+                    and selected["outcome"] == 1
+                    and anchor["attempt"]
+                    and selected["failed_authority_observed"]
+                    and anchor["error_ptr"]
+                    and anchor["error_len"]
+                    and not anchor["error_truncated"]
+                    and not row["error_truncated"]
+                    and anchor["error_len"] <= 65536
+                    and all(anchor[key] == row[key] for key in ERROR_FIELDS)
+                )
+                call_results.append(
+                    {
+                        "call": row["call"],
+                        "outcome": row["outcome"],
+                        "api_error_attributed": attributed if refused else None,
+                    }
+                )
                 calls += 1
                 cuts = 0
             elif kind == "session_end":
@@ -700,6 +1025,9 @@ def assess_capture(path):
     transport = footer and not errors
     direct = bool(summaries) and all(s["direct_complete"] for s in summaries)
     funding = bool(summaries) and all(s["funding_complete"] for s in summaries)
+    attribution = transport and all(
+        r["api_error_attributed"] for r in call_results if r["outcome"] == 1
+    )
     return {
         "schema": "terminal-ownership-assessment/1",
         "capture": str(Path(path)),
@@ -707,12 +1035,16 @@ def assess_capture(path):
         "transport_errors": errors,
         "direct_ownership_complete": direct,
         "funding_complete": funding,
-        "capture_complete": transport and direct and funding,
+        "refusal_attribution_complete": attribution,
+        "capture_complete": transport and direct and funding and attribution,
+        "calls": call_results,
         "completed_calls": calls,
         "snapshots": summaries,
         "qualification": (
             "Selected instrumented sort ownership only; checksum is transport integrity, "
             "not authenticity or historical funding replay. No query completion, "
-            "query-wide ownership, RSS or native workload-fit claim."
+            "query-wide ownership, RSS or native workload-fit claim. Refusal attribution "
+            "matches an instrumented failed request to the borrowed returned resource-error "
+            "root within one call; no coherent pool-decision snapshot is recorded."
         ),
     }

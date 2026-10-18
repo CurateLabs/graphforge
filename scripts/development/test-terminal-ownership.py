@@ -9,6 +9,16 @@ import unittest
 
 import terminal_ownership as collector
 
+EMPTY_ERROR = {"error_ptr": 0, "error_len": 0, "error_hash": 0, "error_truncated": False}
+EMPTY_ANCHOR = {
+    **EMPTY_ERROR,
+    "attempt": 0,
+    "stage": 0,
+    "failed_piece": 0,
+    "consumer": 0,
+    "request": 0,
+}
+
 
 class BoundedInputTests(unittest.TestCase):
     def test_json_strings_do_not_consume_container_depth(self):
@@ -81,12 +91,14 @@ def header_fixture():
         "line_bytes": 1024,
         "record_limit": 92,
         "byte_limit": 94208,
-        "observer_bytes": 10304,
+        "observer_bytes": 10688,
         "owner_bytes": 112,
         "piece_bytes": 80,
         "backing_bytes": 112,
         "edge_bytes": 48,
         "fixed_bytes": 1024,
+        "metadata_per_slot": 64,
+        "tls_bytes": 128,
     }
 
 
@@ -106,6 +118,7 @@ def batch_fixture(nulls=0, temporal=False):
         "c": 0,
         "d": 0,
         "flags": 0,
+        "coverage": 0,
     }
     array = {
         "kind": "backing",
@@ -230,6 +243,7 @@ def capture_fixture():
             backing.update(call=call, owner=identity)
         begin = {
             "kind": "snapshot_begin",
+            **EMPTY_ANCHOR,
             "call": call,
             "snapshot": 1,
             "outcome": 0,
@@ -267,7 +281,14 @@ def capture_fixture():
         rows += [
             {**begin, "snapshot": 2, "retired": call},
             {**end, "snapshot": 2, "owners": 0, "pieces": 0, "backings": 0},
-            {"kind": "run_end", "call": call, "outcome": 0, "snapshots": 2, "poison": 0},
+            {
+                "kind": "run_end",
+                **EMPTY_ERROR,
+                "call": call,
+                "outcome": 0,
+                "snapshots": 2,
+                "poison": 0,
+            },
         ]
     return rows
 
@@ -367,6 +388,460 @@ class SessionAssessmentTests(unittest.TestCase):
         rows = [row for i, row in enumerate(rows) if i != 5]
         result = self.assess(encode_capture(rows))
         self.assertFalse(result["capture_complete"])
+
+
+class RefusalAttributionTests(unittest.TestCase):
+    assess = SessionAssessmentTests.assess
+
+    def refusal(self):
+        rows = capture_fixture()
+        error = {**EMPTY_ERROR, "error_ptr": 4000, "error_len": 19, "error_hash": 123}
+        rows[1].update(
+            **error, outcome=1, attempt=20, stage=1, failed_piece=2, consumer=7, request=99
+        )
+        next(r for r in rows if r["kind"] == "run_end").update(**error, outcome=1)
+        return rows
+
+    def test_exact_returned_root_matches_scoped_failed_attempt(self):
+        result = self.assess(encode_capture(self.refusal()))
+        self.assertTrue(result["refusal_attribution_complete"], result)
+        self.assertTrue(result["calls"][0]["api_error_attributed"])
+        self.assertTrue(result["capture_complete"])
+
+    def test_pointer_alone_or_truncated_hash_cannot_attribute_api_error(self):
+        for field, value in [("error_len", 20), ("error_hash", 124), ("error_truncated", True)]:
+            rows = self.refusal()
+            next(r for r in rows if r["kind"] == "run_end")[field] = value
+            result = self.assess(encode_capture(rows))
+            with self.subTest(field=field):
+                self.assertTrue(result["transport_complete"], result)
+                self.assertFalse(result["refusal_attribution_complete"])
+                self.assertFalse(result["capture_complete"])
+
+    def test_missing_failed_piece_or_consumer_disagrees_with_actual_authority(self):
+        for field, value in [("failed_piece", 90), ("consumer", 8)]:
+            rows = self.refusal()
+            rows[1][field] = value
+            result = self.assess(encode_capture(rows))
+            with self.subTest(field=field):
+                self.assertTrue(result["transport_complete"], result)
+                self.assertFalse(result["refusal_attribution_complete"])
+
+    def test_unanchored_explicit_refusal_does_not_attribute_api_error(self):
+        rows = capture_fixture()
+        next(r for r in rows if r["kind"] == "run_end")["outcome"] = 1
+        result = self.assess(encode_capture(rows))
+        self.assertTrue(result["transport_complete"], result)
+        self.assertFalse(result["refusal_attribution_complete"])
+
+    def test_partial_anchor_or_reused_attempt_fails_closed(self):
+        rows = self.refusal()
+        rows[1]["stage"] = 0
+        self.assertFalse(self.assess(encode_capture(rows))["transport_complete"])
+        rows = self.refusal()
+        rows[1]["attempt"] = 2
+        self.assertFalse(self.assess(encode_capture(rows))["transport_complete"])
+        rows = self.refusal()
+        begin2 = next(r for r in rows if r["kind"] == "snapshot_begin" and r["call"] == 2)
+        begin2.update(**{key: rows[1][key] for key in collector.ANCHOR_FIELDS}, outcome=1)
+        self.assertFalse(self.assess(encode_capture(rows))["transport_complete"])
+
+    def test_pending_unadmitted_owner_cannot_claim_funding(self):
+        rows = capture_fixture()
+        next(r for r in rows if r["kind"] == "owner").update(flags=16, piece=0)
+        result = self.assess(encode_capture(rows))
+        self.assertTrue(result["transport_complete"], result)
+        self.assertTrue(result["direct_ownership_complete"], result)
+        self.assertFalse(result["funding_complete"])
+        self.assertIn("not admitted", result["snapshots"][0]["funding_problems"][0])
+
+    def test_retired_creation_parent_does_not_retire_live_owner_or_funding_need(self):
+        rows = capture_fixture()
+        owner = next(r for r in rows if r["kind"] == "owner")
+        owner.update(flags=2, bytes=8)
+        piece = next(r for r in rows if r["kind"] == "piece")
+        piece["consumer"] = 0
+        self.assertTrue(self.assess(encode_capture(rows))["capture_complete"])
+        owner.update(piece=0)
+        result = self.assess(encode_capture(rows))
+        self.assertTrue(result["transport_complete"], result)
+        self.assertFalse(result["funding_complete"])
+
+
+class FundingRegressionTests(unittest.TestCase):
+    def selected(self, mutate):
+        rows = capture_fixture()
+        stop = next(i for i, row in enumerate(rows) if row["kind"] == "snapshot_end")
+        begin, records, end = rows[1], rows[2:stop], rows[stop]
+        mutate(begin, records, end)
+        try:
+            return collector.validate_snapshot(begin, records, end, rows[0])["funding_complete"]
+        except ValueError:
+            return False
+
+    def test_metadata_cannot_spend_unreserved_authority(self):
+        def mutate(_begin, records, _end):
+            owner = next(r for r in records if r["kind"] == "owner")
+            owner.update(bytes=1024, flags=4)
+
+        self.assertFalse(self.selected(mutate))
+
+    def test_dangling_parent_is_not_a_complete_origin(self):
+        def mutate(_begin, records, _end):
+            next(r for r in records if r["kind"] == "owner")["parent"] = 999
+
+        self.assertFalse(self.selected(mutate))
+
+    def test_missing_evaluated_key_storage_blocks_funding(self):
+        def mutate(_begin, records, end):
+            next(r for r in records if r["kind"] == "owner")["owner_kind"] = 8
+            records[:] = [r for r in records if r["kind"] != "backing"]
+            end["backings"] = 0
+
+        self.assertFalse(self.selected(mutate))
+
+    def test_claim_cannot_exceed_its_resident(self):
+        def mutate(begin, records, end):
+            prototype = next(r for r in records if r["kind"] == "owner")
+            resident = {**prototype, "id": 3, "owner_kind": 10, "a": 0, "b": 0, "bytes": 1}
+            claim = {**prototype, "id": 4, "owner_kind": 11, "piece": 0, "a": 0, "b": 0}
+            records += [
+                resident,
+                claim,
+                {"kind": "edge", "call": 1, "from": 4, "to": 3, "relation": 2, "bytes": 1024},
+            ]
+            begin["constructed"] = 3
+            end.update(owners=3, edges=1)
+
+        self.assertFalse(self.selected(mutate))
+
+
+def metadata_snapshot():
+    prototype = batch_fixture()[0][1]
+    copy_owner = {
+        **prototype,
+        "id": 1,
+        "owner_kind": 9,
+        "object": 0,
+        "bytes": 16,
+        "a": 32,
+        "b": 0,
+        "c": 0,
+        "d": 2,
+        "flags": 4,
+    }
+    resident = {
+        **prototype,
+        "id": 3,
+        "owner_kind": 10,
+        "parent": 1,
+        "bytes": 32,
+        "a": 0,
+        "b": 0,
+        "c": 0,
+        "d": 0,
+    }
+    field = {
+        **prototype,
+        "id": 4,
+        "owner_kind": 6,
+        "parent": 1,
+        "piece": 0,
+        "bytes": 24,
+        "a": 0,
+        "b": 0,
+        "c": 0,
+        "d": 0,
+        "flags": 4,
+    }
+    piece = {
+        "kind": "piece",
+        "call": 1,
+        "id": 2,
+        "root": 2,
+        "holder": 1,
+        "consumer": 7,
+        "held": 48,
+        "split_from": 0,
+        "split_bytes": 0,
+        "flags": 0,
+    }
+    edge = {"kind": "edge", "call": 1, "from": 4, "to": 3, "relation": 2, "bytes": 24}
+    begin = {
+        "kind": "snapshot_begin",
+        **EMPTY_ANCHOR,
+        "call": 1,
+        "snapshot": 1,
+        "outcome": 0,
+        "epoch": 0,
+        "in_flight": 0,
+        "poison": 0,
+        "gaps": 0,
+        "constructed": 3,
+        "retired": 0,
+        "operations": 0,
+    }
+    end = {
+        "kind": "snapshot_end",
+        "call": 1,
+        "snapshot": 1,
+        "owners": 3,
+        "pieces": 1,
+        "backings": 0,
+        "edges": 1,
+        "complete": True,
+    }
+    return begin, [copy_owner, resident, field, piece, edge], end
+
+
+class ResidentConservationTests(unittest.TestCase):
+    def test_metadata_delegation_has_a_positive_supported_proof(self):
+        result = collector.validate_snapshot(*metadata_snapshot(), header_fixture())
+        self.assertTrue(result["funding_complete"], result)
+
+    def test_metadata_delegation_cannot_exceed_resident_budget(self):
+        begin, records, end = metadata_snapshot()
+        records[2]["bytes"] = 64
+        records[-1]["bytes"] = 64
+        result = collector.validate_snapshot(begin, records, end, header_fixture())
+        self.assertFalse(result["funding_complete"])
+        self.assertIn("delegated claim exceeds its Resident", result["funding_problems"])
+
+    def test_copy_subtotals_and_idle_floor_must_equal_actual_authority(self):
+        for index, field, value in [(0, "a", 33), (3, "held", 49)]:
+            begin, records, end = metadata_snapshot()
+            records[index][field] = value
+            with self.subTest(field=field):
+                self.assertFalse(
+                    collector.validate_snapshot(begin, records, end, header_fixture())[
+                        "funding_complete"
+                    ]
+                )
+
+    def test_parent_cycles_and_contradictory_split_flags_are_rejected(self):
+        for index, field, value in [(0, "parent", 4), (3, "flags", 1)]:
+            begin, records, end = metadata_snapshot()
+            records[index][field] = value
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                collector.validate_snapshot(begin, records, end, header_fixture())
+
+    def test_declared_dimensions_cannot_expand_tiny_input_into_an_unbounded_set(self):
+        header = header_fixture()
+        header["columns"] = 10**12
+        with self.assertRaisesRegex(ValueError, "dimensions"):
+            collector.validate_header(header)
+
+    def test_traversal_limit_is_per_owner_and_primitives_cannot_have_children(self):
+        owners, rows = batch_fixture()
+        owners[1]["b"] = 2
+        alias = [{**r, "node": 2, "column": 1} for r in rows]
+        header = header_fixture()
+        header.update(nodes=1, buffers=1)
+        with self.assertRaisesRegex(ValueError, "per-owner"):
+            collector.validate_arrays(rows + alias, owners, header)
+        header = header_fixture()
+        rows[0]["children"] = 1
+        alias[0].update(parent_node=1, column=0)
+        alias[1].update(parent_node=1, column=0)
+        with self.assertRaisesRegex(ValueError, "primitive"):
+            collector.validate_arrays(rows + alias, owners, header)
+
+
+def credit_snapshot():
+    base = batch_fixture()[0][1]
+    credit = {
+        **base,
+        "id": 1,
+        "owner_kind": 16,
+        "piece": 2,
+        "bytes": 16,
+        "held": 32,
+        "a": 0,
+        "b": 32,
+        "c": 1,
+        "d": 0,
+        "flags": 4,
+    }
+    budget = {
+        **base,
+        "id": 3,
+        "owner_kind": 15,
+        "piece": 4,
+        "bytes": 0,
+        "held": 32,
+        "a": 0,
+        "b": 32,
+        "c": 1,
+        "d": 0,
+    }
+    permit = {
+        **base,
+        "id": 5,
+        "owner_kind": 17,
+        "parent": 1,
+        "piece": 0,
+        "bytes": 0,
+        "held": 0,
+        "a": 0,
+        "b": 0,
+        "c": 0,
+        "d": 0,
+    }
+    control = {
+        **base,
+        "id": 6,
+        "owner_kind": 18,
+        "parent": 1,
+        "piece": 7,
+        "bytes": 16,
+        "held": 16,
+        "a": 3,
+        "b": 0,
+        "c": 0,
+        "d": 0,
+        "flags": 4,
+    }
+    metadata = {
+        **base,
+        "id": 8,
+        "owner_kind": 18,
+        "parent": 3,
+        "piece": 0,
+        "bytes": 24,
+        "held": 0,
+        "a": 1,
+        "b": 0,
+        "c": 0,
+        "d": 0,
+        "flags": 4,
+    }
+    owners = [credit, budget, permit, control, metadata]
+    pieces = [
+        {
+            "kind": "piece",
+            "call": 1,
+            "id": identity,
+            "root": identity,
+            "holder": holder,
+            "consumer": 7,
+            "held": held,
+            "split_from": 0,
+            "split_bytes": 0,
+            "flags": 0,
+        }
+        for identity, holder, held in [(2, 1, 32), (4, 3, 0), (7, 6, 16)]
+    ]
+    edges = [
+        {
+            "kind": "edge",
+            "call": 1,
+            "from": source,
+            "to": target,
+            "relation": relation,
+            "bytes": amount,
+        }
+        for source, target, relation, amount in [
+            (3, 1, 8, 32),
+            (5, 1, 9, 0),
+            (1, 6, 7, 16),
+            (8, 3, 10, 24),
+        ]
+    ]
+    begin = {
+        "kind": "snapshot_begin",
+        **EMPTY_ANCHOR,
+        "call": 1,
+        "snapshot": 1,
+        "outcome": 0,
+        "epoch": 0,
+        "in_flight": 0,
+        "poison": 0,
+        "gaps": 0,
+        "constructed": 5,
+        "retired": 0,
+        "operations": 0,
+    }
+    end = {
+        "kind": "snapshot_end",
+        "call": 1,
+        "snapshot": 1,
+        "owners": 5,
+        "pieces": 3,
+        "backings": 0,
+        "edges": 4,
+        "complete": True,
+    }
+    header = header_fixture()
+    header.update(slots=8, edges=8, record_limit=140, byte_limit=143360, observer_bytes=15744)
+    return begin, owners + pieces + edges, end, header
+
+
+class RawRowsEvidenceTests(unittest.TestCase):
+    def test_raw_rows_are_complete_only_with_all_concrete_components(self):
+        rows = capture_fixture()
+        stop = next(i for i, r in enumerate(rows) if r["kind"] == "snapshot_end")
+        begin, owner, piece = rows[1:4]
+        owner.update(owner_kind=8, flags=8, bytes=32, a=1, b=3)
+        piece["held"] = 32
+        prototype = rows[5]
+        backings = [
+            {
+                **prototype,
+                "node": node,
+                "column": node - 1,
+                "type": kind,
+                "base": 1000 + node,
+                "object": 1000 + node,
+                "capacity": size,
+                "length": size,
+            }
+            for node, kind, size in [(1, 36, 8), (2, 37, 16), (3, 38, 8)]
+        ]
+        end = {**rows[stop], "backings": 3}
+        result = collector.validate_snapshot(begin, [owner, piece, *backings], end, rows[0])
+        self.assertTrue(result["funding_complete"], result)
+        with self.assertRaisesRegex(ValueError, "Rows key storage"):
+            collector.validate_snapshot(
+                begin, [owner, piece, *backings[:2]], {**end, "backings": 2}, rows[0]
+            )
+
+    def test_row_converter_cannot_omit_its_published_components(self):
+        begin, records, end = metadata_snapshot()
+        records[2].update(owner_kind=7, b=2)
+        with self.assertRaisesRegex(ValueError, "RowConverter metadata"):
+            collector.validate_snapshot(begin, records, end, header_fixture())
+
+
+class IpcCreditTests(unittest.TestCase):
+    def test_borrowed_budget_has_actual_bank_and_separate_control_authority(self):
+        snapshot = credit_snapshot()
+        collector.validate_header(snapshot[3])
+        result = collector.validate_snapshot(*snapshot)
+        self.assertTrue(result["funding_complete"], result)
+
+    def test_consumer_equality_cannot_replace_the_actual_credit_edge(self):
+        begin, records, end, header = credit_snapshot()
+        records[-4]["bytes"] = 31
+        result = collector.validate_snapshot(begin, records, end, header)
+        self.assertFalse(result["funding_complete"])
+
+    def test_credit_outstanding_and_permit_retirement_must_reconcile(self):
+        for field, value in [("b", 33), ("c", 0), ("d", 2)]:
+            begin, records, end, header = credit_snapshot()
+            records[0][field] = value
+            try:
+                result = collector.validate_snapshot(begin, records, end, header)
+                self.assertFalse(result["funding_complete"], field)
+            except ValueError:
+                pass
+
+    def test_batch_metadata_cannot_spend_beyond_borrowed_budget(self):
+        begin, records, end, header = credit_snapshot()
+        records[4]["bytes"] = 64
+        records[-1]["bytes"] = 64
+        result = collector.validate_snapshot(begin, records, end, header)
+        self.assertFalse(result["funding_complete"])
+        self.assertIn("IPC Budget authority is spent more than once", result["funding_problems"])
 
 
 if __name__ == "__main__":
