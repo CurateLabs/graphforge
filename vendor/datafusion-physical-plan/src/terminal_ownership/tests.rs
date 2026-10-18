@@ -143,7 +143,7 @@ fn sequential_calls_preserve_generation_and_counters_without_reset() {
 }
 
 #[cfg_attr(test, test)]
-fn stale_session_guards_cannot_mutate_reused_identifiers() {
+fn stale_session_guards_cannot_mutate_later_capture() {
     use datafusion_execution::memory_pool::{
         GreedyMemoryPool, MemoryConsumer, MemoryPool,
     };
@@ -170,7 +170,7 @@ fn stale_session_guards_cannot_mutate_reused_identifiers() {
         let second = Session::create(&directory.path("second"), limits).unwrap();
         second.begin_call().unwrap();
         let current = Life::new(Kind::Batch, 0, 0);
-        assert_eq!(current.id(), old_id);
+        assert!(current.id() > old_id);
         let piece = Piece::new(&reservation, current.id());
         (second, current, piece)
     });
@@ -234,7 +234,7 @@ fn stale_session_guards_cannot_mutate_reused_identifiers() {
     second.finish().unwrap();
 
     // Successful finish also permits an escaped original owner. Its later Drop
-    // cannot retire an equal numeric ID in the next committed capture.
+    // cannot mutate the next committed capture's live owner.
     let third = Session::create(&directory.path("third"), limits).unwrap();
     third.begin_call().unwrap();
     let escaped = Life::new(Kind::Output, 0, 0);
@@ -246,7 +246,7 @@ fn stale_session_guards_cannot_mutate_reused_identifiers() {
     let fourth = Session::create(&directory.path("fourth"), limits).unwrap();
     fourth.begin_call().unwrap();
     let retained = Life::new(Kind::Output, 0, 0);
-    assert_eq!(retained.id(), escaped_id);
+    assert!(retained.id() > escaped_id);
     drop(escaped);
     assert_eq!(with(|r| (r.constructed, r.retired)), Some((1, 0)));
     fourth.snapshot(0);
@@ -254,6 +254,119 @@ fn stale_session_guards_cannot_mutate_reused_identifiers() {
     fourth.snapshot(0);
     fourth.end_call(0);
     fourth.finish().unwrap();
+}
+
+#[cfg_attr(test, test)]
+fn foreign_constructor_and_queue_endpoints_fail_closed_without_id_reuse() {
+    use datafusion_execution::memory_pool::{
+        GreedyMemoryPool, MemoryConsumer, MemoryPool,
+    };
+    use std::sync::Arc;
+    let _guard = session_guard();
+    let directory = Directory::new();
+    let limits = Envelope {
+        calls: 1,
+        slots: 4,
+        edges: 4,
+        ..envelope()
+    };
+    let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1024));
+    let reservation =
+        MemoryConsumer::new("ownership foreign endpoint control").register(&pool);
+    let first = Session::create(&directory.path("first"), limits).unwrap();
+    first.begin_call().unwrap();
+    let old_owner = Life::new(Kind::Queue, 0, 0);
+    let old_id = old_owner.id();
+    let old_piece = Piece::new(&reservation, old_id);
+    let old_piece_id = old_piece.id();
+    drop(first);
+    let second = Session::create(&directory.path("second"), limits).unwrap();
+    second.begin_call().unwrap();
+    let current = Life::new(Kind::Queue, 0, 0);
+    assert!(current.id() > old_piece_id);
+    let piece = Piece::new(&reservation, current.id());
+    assert_eq!(Life::new(Kind::Batch, old_id, 0).id(), 0);
+    assert_eq!(Life::new(Kind::Batch, current.id(), old_piece_id).id(), 0);
+    assert_eq!(Piece::new(&reservation, old_id).id(), 0);
+    assert_eq!(
+        scoped(old_id, old_piece_id, || Life::inherited(Kind::Batch)).id(),
+        0
+    );
+    current.edge(old_id, 1, 16);
+    Life::new(Kind::Batch, current.id(), 0).queued(old_id, 0);
+    assert_eq!(
+        with(|r| (
+            r.owners.iter().flatten().count(),
+            r.pieces.iter().flatten().count(),
+            r.edges.iter().flatten().count()
+        )),
+        Some((1, 1, 0))
+    );
+    assert_eq!(with(|r| r.gaps), Some(GAP_UNKNOWN_SPONSOR));
+    let exhausted = AtomicU64::new(u64::MAX);
+    assert_eq!(next_identifier(&exhausted), None);
+    assert_eq!(exhausted.load(Ordering::Relaxed), u64::MAX);
+    second.snapshot(0);
+    drop(current);
+    drop(piece);
+    drop(old_owner);
+    drop(old_piece);
+    second.snapshot(0);
+    second.end_call(0);
+    second.finish().unwrap();
+}
+
+#[cfg_attr(test, test)]
+fn construction_between_declared_calls_poison_capture_but_updates_and_drops_remain_legal()
+{
+    use datafusion_execution::memory_pool::{
+        GreedyMemoryPool, MemoryConsumer, MemoryPool,
+    };
+    use std::sync::Arc;
+    let _guard = session_guard();
+    let directory = Directory::new();
+    let session = Session::create(
+        &directory.path("capture"),
+        Envelope {
+            slots: 2,
+            ..envelope()
+        },
+    )
+    .unwrap();
+    let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1024));
+    let reservation =
+        MemoryConsumer::new("ownership between-call control").register(&pool);
+    session.begin_call().unwrap();
+    let owner = Life::new(Kind::Queue, 0, 0);
+    session.snapshot(0);
+    session.snapshot(0);
+    session.end_call(0);
+    owner.update(|o| o.bytes = 7);
+    assert_eq!(with(|r| r.poison), Some(0));
+    assert_eq!(Life::new(Kind::Batch, owner.id(), 0).id(), 0);
+    assert_eq!(Piece::new(&reservation, owner.id()).id(), 0);
+    assert_eq!(
+        with(|r| (r.poison, r.constructed)),
+        Some((POISON_PROTOCOL, 1))
+    );
+    owner.update(|o| o.bytes = 9);
+    drop(owner);
+    assert_eq!(with(|r| r.retired), Some(1));
+    session.begin_call().unwrap();
+    session.snapshot(0);
+    session.snapshot(0);
+    session.end_call(0);
+    assert!(session.finish().is_err());
+    let cuts: Vec<_> = directory
+        .lines("capture")
+        .into_iter()
+        .filter(|line| kind(line, "snapshot_begin"))
+        .collect();
+    assert!(
+        cuts[2..]
+            .iter()
+            .all(|line| number(line, "poison") & POISON_PROTOCOL != 0)
+    );
 }
 
 #[cfg_attr(test, test)]
@@ -731,14 +844,15 @@ fn real_lifetimes_and_transitions_at_counter_limit_cannot_commit() {
     })
     .unwrap();
     let first = Life::new(Kind::Source, 0, 0);
-    assert_eq!(first.id(), u64::MAX - 1);
+    let first_id = first.id();
+    assert_ne!(first_id, 0);
     drop(first);
     assert_eq!(
         with(|r| (r.next, r.constructed, r.retired, r.poison)),
         Some((u64::MAX, u64::MAX, u64::MAX, 0))
     );
     let last = Life::new(Kind::Source, 0, 0);
-    assert_eq!(last.id(), u64::MAX);
+    assert!(last.id() > first_id);
     drop(last);
     drop(Transition::begin());
     drop(Transition::begin());
@@ -865,7 +979,10 @@ fn final_footer_write_failure_never_reports_committed_capture() {
 /// Execute these controls from the existing workspace product test lane.
 pub(super) fn run_controls() {
     sequential_calls_preserve_generation_and_counters_without_reset();
-    stale_session_guards_cannot_mutate_reused_identifiers();
+    stale_session_guards_cannot_mutate_later_capture();
+    foreign_constructor_and_queue_endpoints_fail_closed_without_id_reuse();
+    construction_between_declared_calls_poison_capture_but_updates_and_drops_remain_legal(
+    );
     unsupported_coverage_survives_retained_alias_until_final_retirement();
     retirement_reuses_one_live_slot_across_many_generations();
     capture_creation_is_exclusive_for_active_session_and_existing_file();

@@ -226,13 +226,9 @@ pub fn spawn_buffered(
                         return Ok(());
                     };
                     observed.diagnostic.update(|o| o.a = 2);
-                    #[cfg(feature = "test_utils")]
-                    {
-                        observed.polling =
-                            Some(crate::terminal_ownership::Transition::begin());
-                    }
+                    observed.begin_poll();
                     let Some(item) = futures::future::poll_fn(|cx| {
-                        crate::terminal_ownership::clear_handoff();
+                        observed.clear_handoff();
                         observed.input.as_mut().poll_next(cx)
                     })
                     .await
@@ -243,16 +239,12 @@ pub fn spawn_buffered(
                     // Preserve FIFO and continue after an error item, as before.
                     observed.diagnostic.update(|o| o.a = 3);
                     let ordinal = observed.diagnostic.increment(1);
-                    let handed = crate::terminal_ownership::take_handoff();
+                    let handed = observed.take_handoff();
                     if let Ok(batch) = &item {
                         let handed = if handed.id() != 0 {
                             handed
                         } else {
-                            let life = crate::terminal_ownership::Life::new(
-                                crate::terminal_ownership::Kind::Batch,
-                                observed.diagnostic.id(),
-                                0,
-                            );
+                            let life = observed.batch();
                             life.batch(batch);
                             life.observe_claim_aliases();
                             life.update(|o| {
@@ -265,10 +257,7 @@ pub fn spawn_buffered(
                     }
                     permit.send(item);
                     observed.diagnostic.update(|o| o.a = 0);
-                    #[cfg(feature = "test_utils")]
-                    {
-                        observed.polling = None;
-                    }
+                    observed.finish_poll();
                 }
             });
 

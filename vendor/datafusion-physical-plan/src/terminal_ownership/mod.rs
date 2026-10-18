@@ -206,7 +206,7 @@ impl Envelope {
                     size_of::<Recorder>()
                         + size_of::<Mutex<Option<Recorder>>>()
                         + size_of::<Condvar>()
-                        + 2 * size_of::<AtomicU64>()
+                        + 3 * size_of::<AtomicU64>()
                         + LINE_BYTES,
                 )
             })
@@ -336,7 +336,10 @@ impl Recorder {
         }
     }
     fn id(&mut self) -> u64 {
-        let id = self.next;
+        let id = next_identifier(&NEXT_IDENTIFIER).unwrap_or_else(|| {
+            self.poison |= POISON_ARITHMETIC;
+            0
+        });
         Self::count(&mut self.next, &mut self.poison);
         id
     }
@@ -449,12 +452,30 @@ static RECORDER: OnceLock<Mutex<Option<Recorder>>> = OnceLock::new();
 static RETIREMENT: Condvar = Condvar::new();
 // Never reused, including when an abandoned capture leaves product owners live.
 static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
+// Raw IDs cross a few existing numeric hook boundaries. They never alias a
+// later Session, even if that Session starts between the caller and insertion.
+static NEXT_IDENTIFIER: AtomicU64 = AtomicU64::new(1);
+fn next_identifier(counter: &AtomicU64) -> Option<u64> {
+    counter
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+        .ok()
+}
 static ACTIVE_GENERATION: AtomicU64 = AtomicU64::new(0);
 fn generation() -> u64 {
-    ACTIVE_GENERATION.load(Ordering::Acquire)
+    #[cfg(feature = "test_utils")]
+    {
+        ACTIVE_GENERATION.load(Ordering::Acquire)
+    }
+    #[cfg(not(feature = "test_utils"))]
+    {
+        0
+    }
 }
 fn with_generation<R>(generation: u64, f: impl FnOnce(&mut Recorder) -> R) -> Option<R> {
-    with(|r| (generation != 0 && r.generation == generation).then(|| f(r))).flatten()
+    if generation == 0 {
+        return None;
+    }
+    with(|r| (r.generation == generation).then(|| f(r))).flatten()
 }
 fn slots<T: Clone>(count: usize) -> io::Result<Vec<Option<T>>> {
     let mut v = Vec::new();
@@ -533,7 +554,7 @@ impl Session {
             bytes: 0,
             checksum: 0xcbf29ce484222325,
         };
-        r.emit(|l| write!(l,"{{\"kind\":\"session\",\"protocol\":\"terminal-ownership/1\",\"calls\":{},\"slots\":{},\"descriptors\":{},\"edges\":{},\"columns\":{},\"nodes\":{},\"depth\":{},\"buffers\":{},\"line_bytes\":{LINE_BYTES},\"record_limit\":{},\"byte_limit\":{},\"observer_bytes\":{},\"owner_bytes\":{},\"piece_bytes\":{},\"backing_bytes\":{},\"edge_bytes\":{},\"fixed_bytes\":{},\"metadata_per_slot\":{},\"tls_bytes\":{}}}",envelope.calls,envelope.slots,envelope.descriptors,envelope.edges,envelope.columns,envelope.nodes,envelope.depth,envelope.buffers,bounds.records,bounds.bytes,bounds.observer_bytes,size_of::<Option<OwnerRecord>>(),size_of::<Option<PieceRecord>>(),size_of::<Option<arrays::Backing>>(),size_of::<Option<EdgeRecord>>(),size_of::<Recorder>()+size_of::<Mutex<Option<Recorder>>>()+size_of::<Condvar>()+2*size_of::<AtomicU64>()+LINE_BYTES,bounds.metadata_per_slot,bounds.tls_bytes));
+        r.emit(|l| write!(l,"{{\"kind\":\"session\",\"protocol\":\"terminal-ownership/1\",\"calls\":{},\"slots\":{},\"descriptors\":{},\"edges\":{},\"columns\":{},\"nodes\":{},\"depth\":{},\"buffers\":{},\"line_bytes\":{LINE_BYTES},\"record_limit\":{},\"byte_limit\":{},\"observer_bytes\":{},\"owner_bytes\":{},\"piece_bytes\":{},\"backing_bytes\":{},\"edge_bytes\":{},\"fixed_bytes\":{},\"metadata_per_slot\":{},\"tls_bytes\":{}}}",envelope.calls,envelope.slots,envelope.descriptors,envelope.edges,envelope.columns,envelope.nodes,envelope.depth,envelope.buffers,bounds.records,bounds.bytes,bounds.observer_bytes,size_of::<Option<OwnerRecord>>(),size_of::<Option<PieceRecord>>(),size_of::<Option<arrays::Backing>>(),size_of::<Option<EdgeRecord>>(),size_of::<Recorder>()+size_of::<Mutex<Option<Recorder>>>()+size_of::<Condvar>()+3*size_of::<AtomicU64>()+LINE_BYTES,bounds.metadata_per_slot,bounds.tls_bytes));
         if r.poison != 0 {
             return Err(io::Error::other("ownership header write failed"));
         }
@@ -673,6 +694,9 @@ fn update_thread_generation<R>(
     generation: u64,
     f: impl FnOnce(&mut ThreadState) -> R,
 ) -> Option<R> {
+    if generation == 0 {
+        return None;
+    }
     let thread = std::thread::current().id();
     with_generation(generation, |r| {
         let old = r
@@ -698,6 +722,9 @@ fn update_thread_generation<R>(
     })
 }
 pub(crate) fn origin() -> (u64, u64) {
+    if generation() == 0 {
+        return (0, 0);
+    }
     read_thread().origin
 }
 pub(crate) fn scoped<R>(owner: u64, piece: u64, f: impl FnOnce() -> R) -> R {
@@ -709,7 +736,7 @@ fn scoped_generation<R>(
     piece: u64,
     f: impl FnOnce() -> R,
 ) -> R {
-    if !cfg!(feature = "test_utils") {
+    if generation == 0 {
         return f();
     }
     struct Reset((u64, u64), u64);
@@ -747,28 +774,40 @@ impl Life {
             0
         }
     }
-    pub(crate) fn new(kind: Kind, parent: u64, piece: u64) -> Self {
-        let (id, generation) = with(|r| {
-            if r.call == 0 || r.poison != 0 {
-                return (0, r.generation);
-            }
-            let Some(index) = r.owners.iter().position(Option::is_none) else {
-                r.poison |= POISON_CAPACITY;
-                return (0, r.generation);
-            };
-            let id = r.id();
-            r.owners[index] = Some(OwnerRecord {
-                call: r.call,
-                id,
-                owner_kind: kind as u64,
-                parent,
-                piece,
-                ..Default::default()
-            });
-            Recorder::count(&mut r.constructed, &mut r.poison);
-            (id, r.generation)
-        })
-        .unwrap_or((0, 0));
+    fn insert(r: &mut Recorder, kind: Kind, parent: u64, piece: u64) -> (u64, u64) {
+        if r.call == 0 {
+            r.poison |= POISON_PROTOCOL;
+            return (0, r.generation);
+        }
+        if r.poison != 0 {
+            return (0, r.generation);
+        }
+        if (parent != 0 && !r.owners.iter().flatten().any(|o| o.id == parent))
+            || (piece != 0 && !r.pieces.iter().flatten().any(|p| p.id == piece))
+        {
+            r.gaps |= GAP_UNKNOWN_SPONSOR;
+            return (0, r.generation);
+        }
+        let Some(index) = r.owners.iter().position(Option::is_none) else {
+            r.poison |= POISON_CAPACITY;
+            return (0, r.generation);
+        };
+        let id = r.id();
+        if id == 0 {
+            return (0, r.generation);
+        }
+        r.owners[index] = Some(OwnerRecord {
+            call: r.call,
+            id,
+            owner_kind: kind as u64,
+            parent,
+            piece,
+            ..Default::default()
+        });
+        Recorder::count(&mut r.constructed, &mut r.poison);
+        (id, r.generation)
+    }
+    fn from_record((id, generation): (u64, u64)) -> Self {
         #[cfg(feature = "test_utils")]
         {
             Self {
@@ -783,9 +822,33 @@ impl Life {
             Self {}
         }
     }
+    pub(crate) fn new(kind: Kind, parent: u64, piece: u64) -> Self {
+        Self::new_generation(kind, parent, piece, generation())
+    }
+    fn new_generation(kind: Kind, parent: u64, piece: u64, generation: u64) -> Self {
+        Self::from_record(
+            with_generation(generation, |r| Self::insert(r, kind, parent, piece))
+                .unwrap_or((0, 0)),
+        )
+    }
     pub(crate) fn inherited(kind: Kind) -> Self {
-        let (parent, piece) = origin();
-        Self::new(kind, parent, piece)
+        if generation() == 0 {
+            return Self::default();
+        }
+        // The thread bridge and owner insertion belong to the same capture.
+        Self::from_record(
+            with(|r| {
+                let thread = std::thread::current().id();
+                let (parent, piece) = r
+                    .threads
+                    .iter()
+                    .flatten()
+                    .find(|t| t.thread == thread)
+                    .map_or((0, 0), |t| t.origin);
+                Self::insert(r, kind, parent, piece)
+            })
+            .unwrap_or((0, 0)),
+        )
     }
     pub(crate) fn id(&self) -> u64 {
         #[cfg(feature = "test_utils")]
@@ -940,6 +1003,10 @@ impl Life {
             return;
         }
         with_generation(self.generation(), |r| {
+            if !r.owners.iter().flatten().any(|o| o.id == to) {
+                r.gaps |= GAP_UNKNOWN_SPONSOR;
+                return;
+            }
             if let Some(e) = r
                 .edges
                 .iter_mut()
@@ -1049,7 +1116,11 @@ impl Piece {
         reservation: &datafusion_execution::memory_pool::MemoryReservation,
         holder: u64,
     ) -> Self {
-        Self::new_generation(reservation, holder, generation())
+        let generation = generation();
+        if generation == 0 {
+            return Self::default();
+        }
+        Self::new_generation(reservation, holder, generation)
     }
     fn new_generation(
         reservation: &datafusion_execution::memory_pool::MemoryReservation,
@@ -1067,7 +1138,18 @@ impl Piece {
                 .unwrap_or_else(|| ThreadState::empty(thread));
             let (moved, target) = state.moving;
             let parent = state.origin.1;
-            if r.call == 0 || r.poison != 0 {
+            if r.call == 0 {
+                r.poison |= POISON_PROTOCOL;
+                return (0, r.generation);
+            }
+            if r.poison != 0 {
+                return (0, r.generation);
+            }
+            if holder == 0
+                || !r.owners.iter().flatten().any(|o| o.id == holder)
+                || (parent != 0 && !r.pieces.iter().flatten().any(|p| p.id == parent))
+            {
+                r.gaps |= GAP_UNKNOWN_SPONSOR;
                 return (0, r.generation);
             }
             if moved != 0 {
@@ -1422,6 +1504,36 @@ pub(crate) struct ProducerInput {
     pub(crate) polling: Option<Transition>,
 }
 
+impl ProducerInput {
+    pub(crate) fn begin_poll(&mut self) {
+        #[cfg(feature = "test_utils")]
+        {
+            self.polling =
+                Some(Transition::begin_generation(self.diagnostic.generation()));
+        }
+    }
+    pub(crate) fn finish_poll(&mut self) {
+        #[cfg(feature = "test_utils")]
+        {
+            self.polling = None;
+        }
+    }
+    pub(crate) fn clear_handoff(&self) {
+        clear_handoff_generation(self.diagnostic.generation());
+    }
+    pub(crate) fn take_handoff(&self) -> Life {
+        take_handoff_generation(self.diagnostic.generation())
+    }
+    pub(crate) fn batch(&self) -> Life {
+        Life::new_generation(
+            Kind::Batch,
+            self.diagnostic.id(),
+            0,
+            self.diagnostic.generation(),
+        )
+    }
+}
+
 /// Original IntoIter owner followed only by numeric sentinels. Yielded batches
 /// leave this ownership occurrence; no batch is cloned or retained by evidence.
 pub(crate) struct Chunks {
@@ -1445,8 +1557,7 @@ impl Iterator for Chunks {
     }
 }
 
-pub(crate) fn clear_handoff() {
-    let generation = generation();
+fn clear_handoff_generation(generation: u64) {
     let old =
         update_thread_generation(generation, |t| std::mem::replace(&mut t.handoff, 0))
             .unwrap_or(0);
@@ -1456,7 +1567,9 @@ pub(crate) fn clear_handoff() {
     }
 }
 pub(crate) fn take_handoff() -> Life {
-    let generation = generation();
+    take_handoff_generation(generation())
+}
+fn take_handoff_generation(generation: u64) -> Life {
     Life::adopt_generation(
         update_thread_generation(generation, |t| std::mem::replace(&mut t.handoff, 0))
             .unwrap_or(0),
@@ -1549,12 +1662,30 @@ impl Life {
         });
     }
     pub(crate) fn queued(self, queue: u64, ordinal: u64) {
-        self.update(|o| {
-            o.parent = queue;
-            o.c = ordinal;
-            o.d = 1;
-        });
-        let _ = self.into_id();
+        let id = self.id();
+        let queued = with_generation(self.generation(), |r| {
+            if !r
+                .owners
+                .iter()
+                .flatten()
+                .any(|o| o.id == queue && o.owner_kind == Kind::Queue as u64)
+            {
+                r.gaps |= GAP_UNKNOWN_SPONSOR;
+                return false;
+            }
+            if let Some(o) = r.owners.iter_mut().flatten().find(|o| o.id == id) {
+                o.parent = queue;
+                o.c = ordinal;
+                o.d = 1;
+                true
+            } else {
+                false
+            }
+        })
+        .unwrap_or(false);
+        if queued {
+            let _ = self.into_id();
+        }
     }
     pub(crate) fn increment(&self, field: u8) -> u64 {
         let id = self.id();
