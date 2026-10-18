@@ -793,6 +793,74 @@ def credit_snapshot():
     return begin, owners + pieces + edges, end, header
 
 
+class AuthorityForgeryTests(unittest.TestCase):
+    def funded(self, snapshot):
+        try:
+            return collector.validate_snapshot(*snapshot)["funding_complete"]
+        except ValueError:
+            return False
+
+    def test_batch_admission_cannot_exceed_its_actual_piece(self):
+        rows = capture_fixture()
+        stop = next(i for i, r in enumerate(rows) if r["kind"] == "snapshot_end")
+        rows[2]["bytes"] = 1024
+        self.assertFalse(self.funded((rows[1], rows[2:stop], rows[stop], rows[0])))
+
+    def test_row_cannot_erase_required_converter_layout_by_zeroing_count(self):
+        begin, records, end = metadata_snapshot()
+        records[2].update(owner_kind=7, b=0)
+        self.assertFalse(self.funded((begin, records, end, header_fixture())))
+
+    def test_credit_cannot_erase_control_floor_and_control_piece(self):
+        begin, records, end, header = credit_snapshot()
+        records[0]["bytes"] = 0
+        records = [
+            r
+            for r in records
+            if not (
+                (r["kind"] == "owner" and r["id"] == 6)
+                or (r["kind"] == "piece" and r["id"] == 7)
+                or (r["kind"] == "edge" and r["from"] == 1)
+            )
+        ]
+        begin["constructed"] = 4
+        end.update(owners=4, pieces=2, edges=3)
+        self.assertFalse(self.funded((begin, records, end, header)))
+
+    def test_credit_control_cannot_reuse_the_bank_piece(self):
+        begin, records, end, header = credit_snapshot()
+        next(r for r in records if r["kind"] == "owner" and r["id"] == 6)["piece"] = 2
+        records = [r for r in records if r["kind"] != "piece" or r["id"] != 7]
+        end["pieces"] = 2
+        self.assertFalse(self.funded((begin, records, end, header)))
+
+    def test_actual_authority_kinds_must_hold_their_own_piece(self):
+        begin, records, end = metadata_snapshot()
+        next(r for r in records if r["kind"] == "piece")["holder"] = 4
+        self.assertFalse(self.funded((begin, records, end, header_fixture())))
+        for piece in (2, 4, 7):
+            begin, records, end, header = credit_snapshot()
+            next(r for r in records if r["kind"] == "piece" and r["id"] == piece)["holder"] = 5
+            with self.subTest(piece=piece):
+                self.assertFalse(self.funded((begin, records, end, header)))
+
+    def test_untyped_budget_edge_cannot_fund_batch_with_zero_authority(self):
+        rows = capture_fixture()
+        stop = next(i for i, r in enumerate(rows) if r["kind"] == "snapshot_end")
+        begin, records, end = rows[1], rows[2:stop], rows[stop]
+        owner, piece = records[:2]
+        owner["piece"] = 0
+        budget = {**owner, "id": 3, "owner_kind": 15, "piece": 2, "held": 0, "a": 0, "b": 0}
+        piece.update(holder=3, held=0)
+        records += [
+            budget,
+            {"kind": "edge", "call": 1, "from": 1, "to": 3, "relation": 10, "bytes": 0},
+        ]
+        begin["constructed"] = 2
+        end.update(owners=2, edges=1)
+        self.assertFalse(self.funded((begin, records, end, rows[0])))
+
+
 class RawRowsEvidenceTests(unittest.TestCase):
     def test_raw_rows_are_complete_only_with_all_concrete_components(self):
         rows = capture_fixture()

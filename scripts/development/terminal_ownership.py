@@ -469,7 +469,7 @@ def validate_arrays(backings, owners, header):
             ):
                 raise ValueError("Rows key storage incomplete")
             continue
-        if row["owner_kind"] == 7 and row["b"] == 2:
+        if row["owner_kind"] == 7 and not row["flags"] & 1:
             raw = raw_backings.get(owner, [])
             if sorted(r["type"] for r in raw) != [38, 39] or row["b"] != 2:
                 raise ValueError("RowConverter metadata incomplete")
@@ -509,7 +509,12 @@ def validate_credit(owners, pieces, relations, backings):
         piece = pieces.get(budget["piece"])
         if budget["d"] or budget["held"] != checked_add(budget["a"], budget["b"]):
             raise ValueError("IPC Budget fresh/borrowed totals disagree")
-        if piece is None or piece["flags"] & 4 or piece["held"] != budget["a"]:
+        if (
+            piece is None
+            or piece["flags"] & 4
+            or piece["held"] != budget["a"]
+            or piece["holder"] != identity
+        ):
             problems.append("Budget lacks its actual fresh reservation")
         edges = relations.get((identity, 8), [])
         if budget["b"]:
@@ -528,7 +533,12 @@ def validate_credit(owners, pieces, relations, backings):
         piece = pieces.get(credit["piece"])
         if credit["d"] > 2 or credit["held"] != checked_add(credit["a"], credit["b"]):
             raise ValueError("Credit bank invariant disagrees")
-        if piece is None or piece["held"] != credit["held"]:
+        if (
+            piece is None
+            or piece["held"] != credit["held"]
+            or piece["holder"] != identity
+            or piece["flags"] & 4
+        ):
             problems.append("Credit bank lacks its actual reservation")
         if borrowed[identity] != credit["b"]:
             problems.append("Credit outstanding tickets do not reconcile")
@@ -540,11 +550,17 @@ def validate_credit(owners, pieces, relations, backings):
         if credit["d"] == 2 and credit["b"]:
             raise ValueError("closed Credit retains outstanding tickets")
         control = relations.get((identity, 7), [])
-        if credit["bytes"] and not control:
-            problems.append("Credit control allocation has no separate authority")
+        if not credit["bytes"] or len(control) != 1:
+            problems.append("Credit control allocation has no separate positive authority")
         for edge in control:
             owner = owners[edge["to"]]
-            if owner["owner_kind"] != 18 or owner["a"] != 3 or owner["bytes"] < credit["bytes"]:
+            if (
+                owner["owner_kind"] != 18
+                or owner["a"] != 3
+                or owner["bytes"] < credit["bytes"]
+                or owner["parent"] != identity
+                or owner["piece"] == credit["piece"]
+            ):
                 problems.append("Credit control certificate does not cover its metadata")
     spend = {}
     for identity, owner in owners.items():
@@ -565,6 +581,9 @@ def validate_credit(owners, pieces, relations, backings):
                     piece is None
                     or piece["held"] < owner["bytes"]
                     or owner["parent"] not in credits
+                    or not owner["bytes"]
+                    or piece["holder"] != identity
+                    or piece["flags"] & 4
                 ):
                     problems.append("Credit control metadata lacks its actual reservation")
                 continue
@@ -732,6 +751,12 @@ def validate_snapshot(begin, records, end, header):
             indegree[target] += 1
         if relation == 2 and owners[target]["owner_kind"] != 10:
             raise ValueError("funding edge does not identify a Resident")
+        if relation == 10 and (
+            owners[source]["owner_kind"] not in {11, 18}
+            or owners[target]["owner_kind"] != 15
+            or (owners[source]["owner_kind"] == 18 and owners[source]["a"] == 3)
+        ):
+            raise ValueError("Budget funding edge has unsupported source/target kind")
     pending = [owner for owner, degree in indegree.items() if degree == 0]
     count = 0
     while pending:
@@ -764,8 +789,8 @@ def validate_snapshot(begin, records, end, header):
             funding_problems.append("Resident lacks actual Copy authority and charge class")
     for identity, copy in copies.items():
         piece = pieces.get(copy["piece"])
-        if piece is None or piece["flags"] & 4:
-            funding_problems.append("Copy control has no live reservation")
+        if piece is None or piece["flags"] & 4 or piece["holder"] != identity:
+            funding_problems.append("Copy control has no live held reservation")
             continue
         state, capability = copy["c"], copy["d"]
         if state & ~15 or state & 12 == 12 or (capability not in {0, 2} and capability & 3 != 1):
@@ -807,7 +832,11 @@ def validate_snapshot(begin, records, end, header):
                 resident_requests[edge["to"]] = checked_add(
                     resident_requests.get(edge["to"], 0), edge["bytes"]
                 )
-        if row["owner_kind"] in {3, 4, 6, 7} and row["flags"] & 4 and not sponsors:
+        if (
+            row["owner_kind"] in {3, 4, 6, 7}
+            and (row["flags"] & 4 or row["bytes"])
+            and not sponsors
+        ):
             funding_problems.append("metadata has no actual Resident sponsorship")
         if row["owner_kind"] == 11 and not budget_sponsors:
             headers = relations.get((owner, 7), [])
@@ -834,6 +863,9 @@ def validate_snapshot(begin, records, end, header):
                 funding_problems.append("ambiguous Resident sponsor")
             else:
                 piece = targets.pop()
+        if row["owner_kind"] in {5, 8, 14} and row["bytes"]:
+            if piece not in pieces or row["bytes"] > pieces[piece]["held"]:
+                funding_problems.append("recorded data admission exceeds its actual authority")
         owned_backings = {
             (b["base"], b["capacity"])
             for b in backings
