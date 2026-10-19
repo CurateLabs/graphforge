@@ -540,21 +540,23 @@ def _native_authority() -> Mapping[str, Any]:
 
 
 def require_bulk_ingest_capability(receipt: Mapping[str, Any]) -> Mapping[str, Any]:
-    """Derive capability only from the ordinary commit receipt produced by this run."""
+    """Derive capability only from the ordinary commit receipt produced by this run.
+
+    Every initial build runs on the bulk builder (#1966), so the receipt's
+    `bulk_build` report is the proof; the staged-chunk counters stay zero.
+    """
     construction = receipt.get("construction")
+    bulk_build = construction.get("bulk_build") if isinstance(construction, Mapping) else None
     if (
         receipt.get("contract") != "graphforge-import-session/1"
         or receipt.get("outcome") != "committed"
         or not isinstance(construction, Mapping)
-        or not _is_int(construction.get("configured_batch_rows"))
-        or construction["configured_batch_rows"] < 65_536
-        or not _is_int(construction.get("accepted_chunks"))
-        or construction["accepted_chunks"] < 1
         or construction.get("publication_committed") is not True
-        or not _is_int(construction.get("input_rows"))
-        or construction["input_rows"] < construction["accepted_chunks"]
-        or not _is_int(construction.get("input_batches"))
-        or construction.get("input_batches") != construction["accepted_chunks"]
+        or not isinstance(bulk_build, Mapping)
+        or not _is_int(bulk_build.get("nodes"))
+        or bulk_build["nodes"] < 1
+        or not _is_int(bulk_build.get("edges"))
+        or bulk_build["edges"] < 1
     ):
         raise ControllerError("bulk_ingest_capability_unproven")
     return receipt

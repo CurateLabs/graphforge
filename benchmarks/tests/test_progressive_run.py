@@ -211,6 +211,7 @@ def authoritative_receipts(scale: int) -> dict[str, list[dict]]:
                 "publication_committed": True,
                 "input_rows": 65_536 * 64,
                 "input_batches": 64,
+                "bulk_build": {"nodes": 2**scale, "edges": 16 * 2**scale},
                 "transient_peak_allocated_bytes": 300,
                 "construction_staging": {
                     "logical_references": 3,
@@ -702,27 +703,26 @@ class ProgressiveRunControllerTests(unittest.TestCase):
             "outcome": "committed",
             "construction": {
                 "configured_batch_rows": 65_536,
-                "accepted_chunks": 2,
+                "accepted_chunks": 0,
                 "publication_committed": True,
-                "input_rows": 131_072,
-                "input_batches": 2,
+                "input_rows": 0,
+                "input_batches": 0,
+                "bulk_build": {"nodes": 262_144, "edges": 4_194_304},
             },
         }
         self.assertIs(require_bulk_ingest_capability(receipt), receipt)
-        invalid = json.loads(json.dumps(receipt))
-        invalid["construction"]["configured_batch_rows"] = 8192
-        with self.assertRaisesRegex(ControllerError, "bulk_ingest_capability_unproven"):
-            require_bulk_ingest_capability(invalid)
-        for field in (
-            "configured_batch_rows",
-            "accepted_chunks",
-            "input_rows",
-            "input_batches",
-        ):
-            for invalid_value in (True, None, "2"):
+        unpublished = json.loads(json.dumps(receipt))
+        unpublished["construction"]["publication_committed"] = False
+        missing = json.loads(json.dumps(receipt))
+        del missing["construction"]["bulk_build"]
+        for invalid in (unpublished, missing):
+            with self.assertRaisesRegex(ControllerError, "bulk_ingest_capability_unproven"):
+                require_bulk_ingest_capability(invalid)
+        for field in ("nodes", "edges"):
+            for invalid_value in (0, True, None, "2"):
                 with self.subTest(field=field, invalid_value=invalid_value):
                     invalid = json.loads(json.dumps(receipt))
-                    invalid["construction"][field] = invalid_value
+                    invalid["construction"]["bulk_build"][field] = invalid_value
                     with self.assertRaisesRegex(ControllerError, "bulk_ingest_capability_unproven"):
                         require_bulk_ingest_capability(invalid)
 
