@@ -1,6 +1,6 @@
 # OpenCypher Compatibility Status
 
-**Last Updated:** 2026-07-27
+**Last Updated:** 2026-10-19
 **GraphForge Version:** v0.5.0
 
 ---
@@ -22,7 +22,10 @@ GraphForge prioritizes:
 - ✅ **Arrow-first results** — `forge.execute()` and analyst verbs return Apache Arrow Tables
 - ✅ Hybrid text/vector search via `forge.find()` / `forge.index()`
 - ❌ Multi-database / distributed features (single-node embedded design)
-- ❌ High-concurrency multi-writer workloads (one writer per project)
+- ❌ Serializable or high-concurrency multi-writer workloads (`single_writer` is
+  the default; opt-in `queued_writer` and `optimistic_multi_writer` modes do not
+  claim serializable isolation — see
+  [write modes](../book/architecture/concurrency-recovery.md#write-modes-and-isolation))
 
 ---
 
@@ -94,7 +97,7 @@ These remain outside GraphForge's embedded design:
 | **Persistence** | ✅ Parquet project directory | ✅ Native store |
 | **Results** | ✅ Apache Arrow Tables | Driver rows |
 | **Scale** | Research / notebook | Billions of nodes |
-| **Multi-user** | ❌ Single writer per project | ✅ Auth / RBAC |
+| **Multi-user** | ⚠️ Embedded write modes: `single_writer` (default), opt-in `queued_writer` / `optimistic_multi_writer`; no auth / RBAC | ✅ Auth / RBAC |
 
 **Summary:** GraphForge is a lightweight, embedded alternative for single-user
 analytical workflows — not a production multi-tenant database replacement.
@@ -114,7 +117,9 @@ analytical workflows — not a production multi-tenant database replacement.
 
 - Production multi-tenant web applications
 - Distributed queries or HA clusters
-- Workloads that need concurrent writers on one project
+- Workloads that need serializable concurrent writes on one project
+  (`optimistic_multi_writer` is not SSI and admits write-skew; see
+  [concurrency and recovery](../book/architecture/concurrency-recovery.md#write-modes-and-isolation))
 
 ---
 
