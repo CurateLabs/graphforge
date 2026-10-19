@@ -1,0 +1,1218 @@
+{
+  "assembly_contract": "graphforge-progressive-rung-assembly/3",
+  "correctness": true,
+  "failure": null,
+  "live_edges": 536870912,
+  "metric_sources": {
+    "benchexec": [
+      "wall_seconds",
+      "physical_read_bytes",
+      "physical_write_bytes"
+    ],
+    "graphforge_process": [
+      "peak_rss_bytes"
+    ],
+    "query_qualification": [
+      "live_edges",
+      "correctness"
+    ],
+    "storage_attribution": [
+      "retained_storage_bytes",
+      "transient_peak_storage_bytes",
+      "logical_read_bytes",
+      "logical_write_bytes",
+      "reader_calls",
+      "publication_work_units"
+    ]
+  },
+  "metrics": {
+    "logical_read_bytes": 36910076714,
+    "logical_write_bytes": 28862638231,
+    "peak_rss_bytes": 16490848256,
+    "physical_read_bytes": 572654804992,
+    "physical_write_bytes": 402136100864,
+    "publication_work_units": 363746,
+    "reader_calls": 606956,
+    "retained_storage_bytes": 105134235648,
+    "transient_peak_storage_bytes": 133975441408,
+    "wall_seconds": 1815
+  },
+  "phases": [
+    "admission",
+    "generate",
+    "ingest",
+    "reopen",
+    "recount",
+    "query",
+    "export",
+    "verify",
+    "clean_import",
+    "reopen_proof"
+  ],
+  "profile_id": "graph500-s25-provider",
+  "scale": 25,
+  "source": "canonical_ladder",
+  "status": "passed",
+  "storage_attribution": {
+    "construction": {
+      "application_io": {
+        "phases": {
+          "append_merge": {
+            "block_count": 0,
+            "fsync_calls": 0,
+            "object_count": 0,
+            "read_bytes": 0,
+            "read_calls": 0,
+            "write_bytes": 0,
+            "write_calls": 0
+          },
+          "cas_install_read_write": {
+            "block_count": 0,
+            "fsync_calls": 138818,
+            "object_count": 0,
+            "read_bytes": 8087408586,
+            "read_calls": 161719,
+            "write_bytes": 47975044,
+            "write_calls": 42598
+          },
+          "encode_write_postwrite_authentication": {
+            "block_count": 0,
+            "fsync_calls": 27,
+            "object_count": 0,
+            "read_bytes": 323,
+            "read_calls": 6,
+            "write_bytes": 28814162937,
+            "write_calls": 20487
+          },
+          "fsync_synchronization": {
+            "block_count": 0,
+            "fsync_calls": 38,
+            "object_count": 0,
+            "read_bytes": 0,
+            "read_calls": 0,
+            "write_bytes": 0,
+            "write_calls": 0
+          },
+          "hydration_verification": {
+            "block_count": 0,
+            "fsync_calls": 10,
+            "object_count": 0,
+            "read_bytes": 998751,
+            "read_calls": 21,
+            "write_bytes": 499287,
+            "write_calls": 10
+          },
+          "publication_preauthentication": {
+            "block_count": 0,
+            "fsync_calls": 0,
+            "object_count": 0,
+            "read_bytes": 3325608,
+            "read_calls": 12,
+            "write_bytes": 0,
+            "write_calls": 0
+          },
+          "recovery_reauthentication": {
+            "block_count": 0,
+            "fsync_calls": 0,
+            "object_count": 0,
+            "read_bytes": 28818343012,
+            "read_calls": 445196,
+            "write_bytes": 0,
+            "write_calls": 0
+          },
+          "seal_authentication": {
+            "block_count": 0,
+            "fsync_calls": 0,
+            "object_count": 0,
+            "read_bytes": 0,
+            "read_calls": 0,
+            "write_bytes": 0,
+            "write_calls": 0
+          },
+          "shape_consume_reauthentication": {
+            "block_count": 1,
+            "fsync_calls": 0,
+            "object_count": 0,
+            "read_bytes": 434,
+            "read_calls": 2,
+            "write_bytes": 963,
+            "write_calls": 1
+          }
+        },
+        "totals": {
+          "block_count": 1,
+          "fsync_calls": 138893,
+          "object_count": 0,
+          "read_bytes": 36910076714,
+          "read_calls": 606956,
+          "write_bytes": 28862638231,
+          "write_calls": 63096
+        }
+      },
+      "staging": {
+        "allocated_bytes": 28841226240,
+        "logical_bytes": 28814162937,
+        "logical_references": 10768,
+        "physical_logical_bytes": 28814162937,
+        "physical_objects": 10768
+      },
+      "staging_transient_peak_allocated_bytes": 28841230336,
+      "transient_peak_allocated_bytes": 28841230336
+    },
+    "counts": {
+      "imported_edges": 536870912,
+      "imported_nodes": 33554432,
+      "source_edges": 536870912,
+      "source_nodes": 33554432
+    },
+    "imported": {
+      "allocated_physical_bytes": 20812378112,
+      "categories": {
+        "adjacency": {
+          "allocated_bytes": 8046428160,
+          "logical_bytes": 16087892783,
+          "logical_references": 2053,
+          "physical_logical_bytes": 8044279343,
+          "physical_objects": 1029
+        },
+        "catalog_and_manifests": {
+          "allocated_bytes": 16920576,
+          "logical_bytes": 4185782,
+          "logical_references": 4131,
+          "physical_logical_bytes": 4185782,
+          "physical_objects": 4131
+        },
+        "clean_imported_project": {
+          "allocated_bytes": 0,
+          "logical_bytes": 0,
+          "logical_references": 0,
+          "physical_logical_bytes": 0,
+          "physical_objects": 0
+        },
+        "construction_staging": {
+          "allocated_bytes": 0,
+          "logical_bytes": 0,
+          "logical_references": 0,
+          "physical_logical_bytes": 0,
+          "physical_objects": 0
+        },
+        "other": {
+          "allocated_bytes": 0,
+          "logical_bytes": 0,
+          "logical_references": 0,
+          "physical_logical_bytes": 0,
+          "physical_objects": 0
+        },
+        "portable_package": {
+          "allocated_bytes": 0,
+          "logical_bytes": 0,
+          "logical_references": 0,
+          "physical_logical_bytes": 0,
+          "physical_objects": 0
+        },
+        "properties": {
+          "allocated_bytes": 0,
+          "logical_bytes": 0,
+          "logical_references": 0,
+          "physical_logical_bytes": 0,
+          "physical_objects": 0
+        },
+        "topology_edges": {
+          "allocated_bytes": 11274215424,
+          "logical_bytes": 11252939002,
+          "logical_references": 8192,
+          "physical_logical_bytes": 11252939002,
+          "physical_objects": 8192
+        },
+        "topology_nodes": {
+          "allocated_bytes": 132120576,
+          "logical_bytes": 130651240,
+          "logical_references": 512,
+          "physical_logical_bytes": 130651240,
+          "physical_objects": 512
+        },
+        "uuid_and_surrogates": {
+          "allocated_bytes": 1342693376,
+          "logical_bytes": 1342677207,
+          "logical_references": 7,
+          "physical_logical_bytes": 1342677207,
+          "physical_objects": 6
+        }
+      },
+      "contract": "graphforge-storage-attribution/1",
+      "logical_bytes": 28818346014,
+      "logical_references": 14895,
+      "physical_objects": 13870,
+      "retained_logical_eof_bytes": 20774732574
+    },
+    "lifecycle": {
+      "contract": "graphforge-lifecycle-storage/2",
+      "retained_owners": {
+        "generated-inputs": {
+          "totals": {
+            "allocated_bytes": 26314878976,
+            "logical_bytes": 26314838064,
+            "logical_references": 2,
+            "physical_logical_bytes": 26314838064,
+            "physical_objects": 2
+          }
+        },
+        "imported-project-admission_lock": {
+          "totals": {
+            "allocated_bytes": 0,
+            "logical_bytes": 0,
+            "logical_references": 1,
+            "physical_logical_bytes": 0,
+            "physical_objects": 1
+          }
+        },
+        "imported-project-construction": {
+          "totals": {
+            "allocated_bytes": 0,
+            "logical_bytes": 0,
+            "logical_references": 0,
+            "physical_logical_bytes": 0,
+            "physical_objects": 0
+          }
+        },
+        "imported-project-import": {
+          "totals": {
+            "allocated_bytes": 0,
+            "logical_bytes": 0,
+            "logical_references": 0,
+            "physical_logical_bytes": 0,
+            "physical_objects": 0
+          }
+        },
+        "imported-project-locks": {
+          "totals": {
+            "allocated_bytes": 0,
+            "logical_bytes": 0,
+            "logical_references": 3,
+            "physical_logical_bytes": 0,
+            "physical_objects": 3
+          }
+        },
+        "imported-project-published": {
+          "totals": {
+            "allocated_bytes": 20970000384,
+            "logical_bytes": 20818530493,
+            "logical_references": 52353,
+            "physical_logical_bytes": 20818530493,
+            "physical_objects": 52353
+          }
+        },
+        "imported-project-transactions": {
+          "totals": {
+            "allocated_bytes": 4096,
+            "logical_bytes": 663,
+            "logical_references": 1,
+            "physical_logical_bytes": 663,
+            "physical_objects": 1
+          }
+        },
+        "portable-package": {
+          "totals": {
+            "allocated_bytes": 28830605312,
+            "logical_bytes": 28830558720,
+            "logical_references": 1,
+            "physical_logical_bytes": 28830558720,
+            "physical_objects": 1
+          }
+        },
+        "query-results": {
+          "totals": {
+            "allocated_bytes": 98304,
+            "logical_bytes": 71228,
+            "logical_references": 8,
+            "physical_logical_bytes": 71228,
+            "physical_objects": 8
+          }
+        },
+        "source-project-admission_lock": {
+          "totals": {
+            "allocated_bytes": 0,
+            "logical_bytes": 0,
+            "logical_references": 1,
+            "physical_logical_bytes": 0,
+            "physical_objects": 1
+          }
+        },
+        "source-project-construction": {
+          "totals": {
+            "allocated_bytes": 28844105728,
+            "logical_bytes": 28817017160,
+            "logical_references": 10776,
+            "physical_logical_bytes": 28817017160,
+            "physical_objects": 10776
+          }
+        },
+        "source-project-import": {
+          "totals": {
+            "allocated_bytes": 12288,
+            "logical_bytes": 8690,
+            "logical_references": 2,
+            "physical_logical_bytes": 8690,
+            "physical_objects": 2
+          }
+        },
+        "source-project-locks": {
+          "totals": {
+            "allocated_bytes": 0,
+            "logical_bytes": 0,
+            "logical_references": 3,
+            "physical_logical_bytes": 0,
+            "physical_objects": 3
+          }
+        },
+        "source-project-published": {
+          "totals": {
+            "allocated_bytes": 20970000384,
+            "logical_bytes": 20818530493,
+            "logical_references": 52353,
+            "physical_logical_bytes": 20818530493,
+            "physical_objects": 52353
+          }
+        },
+        "source-project-transactions": {
+          "totals": {
+            "allocated_bytes": 4096,
+            "logical_bytes": 663,
+            "logical_references": 1,
+            "physical_logical_bytes": 663,
+            "physical_objects": 1
+          }
+        }
+      },
+      "retained_storage_bytes": 105134235648,
+      "source_project_current_allocated_bytes": 20970000384,
+      "transient_peak_storage_bytes": 133975441408
+    },
+    "lifecycle_application_io": {
+      "clean_import": {
+        "phases": {
+          "append_merge": {
+            "block_count": 0,
+            "fsync_calls": 0,
+            "object_count": 0,
+            "read_bytes": 0,
+            "read_calls": 0,
+            "write_bytes": 0,
+            "write_calls": 0
+          },
+          "cas_install_read_write": {
+            "block_count": 0,
+            "fsync_calls": 0,
+            "object_count": 0,
+            "read_bytes": 0,
+            "read_calls": 0,
+            "write_bytes": 0,
+            "write_calls": 0
+          },
+          "encode_write_postwrite_authentication": {
+            "block_count": 0,
+            "fsync_calls": 0,
+            "object_count": 0,
+            "read_bytes": 0,
+            "read_calls": 0,
+            "write_bytes": 0,
+            "write_calls": 0
+          },
+          "fsync_synchronization": {
+            "block_count": 0,
+            "fsync_calls": 0,
+            "object_count": 0,
+            "read_bytes": 0,
+            "read_calls": 0,
+            "write_bytes": 0,
+            "write_calls": 0
+          },
+          "hydration_verification": {
+            "block_count": 0,
+            "fsync_calls": 0,
+            "object_count": 77543,
+            "read_bytes": 65733965667,
+            "read_calls": 1060398,
+            "write_bytes": 0,
+            "write_calls": 0
+          },
+          "property_mutation_inventory": {
+            "block_count": 0,
+            "fsync_calls": 0,
+            "object_count": 0,
+            "read_bytes": 0,
+            "read_calls": 0,
+            "write_bytes": 0,
+            "write_calls": 0
+          },
+          "property_mutation_route_authority": {
+            "block_count": 0,
+            "fsync_calls": 0,
+            "object_count": 0,
+            "read_bytes": 0,
+            "read_calls": 0,
+            "write_bytes": 0,
+            "write_calls": 0
+          },
+          "publication_preauthentication": {
+            "block_count": 0,
+            "fsync_calls": 0,
+            "object_count": 0,
+            "read_bytes": 26670,
+            "read_calls": 50,
+            "write_bytes": 0,
+            "write_calls": 0
+          },
+          "read_path_scan": {
+            "block_count": 0,
+            "fsync_calls": 0,
+            "object_count": 4,
+            "read_bytes": 127432617,
+            "read_calls": 1992429,
+            "write_bytes": 0,
+            "write_calls": 0
+          },
+          "recovery_reauthentication": {
+            "block_count": 0,
+            "fsync_calls": 0,
+            "object_count": 0,
+            "read_bytes": 0,
+            "read_calls": 0,
+            "write_bytes": 0,
+            "write_calls": 0
+          },
+          "seal_authentication": {
+            "block_count": 0,
+            "fsync_calls": 0,
+            "object_count": 0,
+            "read_bytes": 0,
+            "read_calls": 0,
+            "write_bytes": 0,
+            "write_calls": 0
+          },
+          "shape_consume_reauthentication": {
+            "block_count": 0,
+            "fsync_calls": 0,
+            "object_count": 0,
+            "read_bytes": 0,
+            "read_calls": 0,
+            "write_bytes": 0,
+            "write_calls": 0
+          }
+        },
+        "totals": {
+          "block_count": 0,
+          "fsync_calls": 0,
+          "object_count": 77547,
+          "read_bytes": 65861424954,
+          "read_calls": 3052877,
+          "write_bytes": 0,
+          "write_calls": 0
+        }
+      },
+      "export": {
+        "phases": {
+          "append_merge": {
+            "block_count": 0,
+            "fsync_calls": 0,
+            "object_count": 0,
+            "read_bytes": 0,
+            "read_calls": 0,
+            "write_bytes": 0,
+            "write_calls": 0
+          },
+          "cas_install_read_write": {
+            "block_count": 0,
+            "fsync_calls": 0,
+            "object_count": 0,
+            "read_bytes": 0,
+            "read_calls": 0,
+            "write_bytes": 0,
+            "write_calls": 0
+          },
+          "encode_write_postwrite_authentication": {
+            "block_count": 0,
+            "fsync_calls": 0,
+            "object_count": 0,
+            "read_bytes": 0,
+            "read_calls": 0,
+            "write_bytes": 0,
+            "write_calls": 0
+          },
+          "fsync_synchronization": {
+            "block_count": 0,
+            "fsync_calls": 0,
+            "object_count": 0,
+            "read_bytes": 0,
+            "read_calls": 0,
+            "write_bytes": 0,
+            "write_calls": 0
+          },
+          "hydration_verification": {
+            "block_count": 0,
+            "fsync_calls": 0,
+            "object_count": 18004,
+            "read_bytes": 20780420731,
+            "read_calls": 326118,
+            "write_bytes": 0,
+            "write_calls": 0
+          },
+          "property_mutation_inventory": {
+            "block_count": 0,
+            "fsync_calls": 0,
+            "object_count": 0,
+            "read_bytes": 0,
+            "read_calls": 0,
+            "write_bytes": 0,
+            "write_calls": 0
+          },
+          "property_mutation_route_authority": {
+            "block_count": 0,
+            "fsync_calls": 0,
+            "object_count": 0,
+            "read_bytes": 0,
+            "read_calls": 0,
+            "write_bytes": 0,
+            "write_calls": 0
+          },
+          "publication_preauthentication": {
+            "block_count": 0,
+            "fsync_calls": 0,
+            "object_count": 0,
+            "read_bytes": 9348,
+            "read_calls": 23,
+            "write_bytes": 0,
+            "write_calls": 0
+          },
+          "read_path_scan": {
+            "block_count": 0,
+            "fsync_calls": 0,
+            "object_count": 4,
+            "read_bytes": 3345,
+            "read_calls": 4,
+            "write_bytes": 0,
+            "write_calls": 0
+          },
+          "recovery_reauthentication": {
+            "block_count": 0,
+            "fsync_calls": 0,
+            "object_count": 0,
+            "read_bytes": 0,
+            "read_calls": 0,
+            "write_bytes": 0,
+            "write_calls": 0
+          },
+          "seal_authentication": {
+            "block_count": 0,
+            "fsync_calls": 0,
+            "object_count": 0,
+            "read_bytes": 0,
+            "read_calls": 0,
+            "write_bytes": 0,
+            "write_calls": 0
+          },
+          "shape_consume_reauthentication": {
+            "block_count": 0,
+            "fsync_calls": 0,
+            "object_count": 0,
+            "read_bytes": 0,
+            "read_calls": 0,
+            "write_bytes": 0,
+            "write_calls": 0
+          }
+        },
+        "totals": {
+          "block_count": 0,
+          "fsync_calls": 0,
+          "object_count": 18008,
+          "read_bytes": 20780433424,
+          "read_calls": 326145,
+          "write_bytes": 0,
+          "write_calls": 0
+        }
+      },
+      "query": {
+        "phases": {
+          "append_merge": {
+            "block_count": 0,
+            "fsync_calls": 0,
+            "object_count": 0,
+            "read_bytes": 0,
+            "read_calls": 0,
+            "write_bytes": 0,
+            "write_calls": 0
+          },
+          "cas_install_read_write": {
+            "block_count": 0,
+            "fsync_calls": 0,
+            "object_count": 0,
+            "read_bytes": 0,
+            "read_calls": 0,
+            "write_bytes": 0,
+            "write_calls": 0
+          },
+          "encode_write_postwrite_authentication": {
+            "block_count": 0,
+            "fsync_calls": 0,
+            "object_count": 0,
+            "read_bytes": 0,
+            "read_calls": 0,
+            "write_bytes": 0,
+            "write_calls": 0
+          },
+          "fsync_synchronization": {
+            "block_count": 0,
+            "fsync_calls": 0,
+            "object_count": 0,
+            "read_bytes": 0,
+            "read_calls": 0,
+            "write_bytes": 0,
+            "write_calls": 0
+          },
+          "hydration_verification": {
+            "block_count": 0,
+            "fsync_calls": 0,
+            "object_count": 4138,
+            "read_bytes": 5691159,
+            "read_calls": 4165,
+            "write_bytes": 0,
+            "write_calls": 0
+          },
+          "property_mutation_inventory": {
+            "block_count": 0,
+            "fsync_calls": 0,
+            "object_count": 0,
+            "read_bytes": 0,
+            "read_calls": 0,
+            "write_bytes": 0,
+            "write_calls": 0
+          },
+          "property_mutation_route_authority": {
+            "block_count": 0,
+            "fsync_calls": 0,
+            "object_count": 0,
+            "read_bytes": 0,
+            "read_calls": 0,
+            "write_bytes": 0,
+            "write_calls": 0
+          },
+          "publication_preauthentication": {
+            "block_count": 0,
+            "fsync_calls": 0,
+            "object_count": 0,
+            "read_bytes": 6306,
+            "read_calls": 16,
+            "write_bytes": 0,
+            "write_calls": 0
+          },
+          "read_path_scan": {
+            "block_count": 0,
+            "fsync_calls": 0,
+            "object_count": 7,
+            "read_bytes": 16488155,
+            "read_calls": 218,
+            "write_bytes": 0,
+            "write_calls": 0
+          },
+          "recovery_reauthentication": {
+            "block_count": 0,
+            "fsync_calls": 0,
+            "object_count": 0,
+            "read_bytes": 0,
+            "read_calls": 0,
+            "write_bytes": 0,
+            "write_calls": 0
+          },
+          "seal_authentication": {
+            "block_count": 0,
+            "fsync_calls": 0,
+            "object_count": 0,
+            "read_bytes": 0,
+            "read_calls": 0,
+            "write_bytes": 0,
+            "write_calls": 0
+          },
+          "shape_consume_reauthentication": {
+            "block_count": 0,
+            "fsync_calls": 0,
+            "object_count": 0,
+            "read_bytes": 0,
+            "read_calls": 0,
+            "write_bytes": 0,
+            "write_calls": 0
+          }
+        },
+        "totals": {
+          "block_count": 0,
+          "fsync_calls": 0,
+          "object_count": 4145,
+          "read_bytes": 22185620,
+          "read_calls": 4399,
+          "write_bytes": 0,
+          "write_calls": 0
+        }
+      },
+      "recount": {
+        "phases": {
+          "append_merge": {
+            "block_count": 0,
+            "fsync_calls": 0,
+            "object_count": 0,
+            "read_bytes": 0,
+            "read_calls": 0,
+            "write_bytes": 0,
+            "write_calls": 0
+          },
+          "cas_install_read_write": {
+            "block_count": 0,
+            "fsync_calls": 0,
+            "object_count": 0,
+            "read_bytes": 0,
+            "read_calls": 0,
+            "write_bytes": 0,
+            "write_calls": 0
+          },
+          "encode_write_postwrite_authentication": {
+            "block_count": 0,
+            "fsync_calls": 0,
+            "object_count": 0,
+            "read_bytes": 0,
+            "read_calls": 0,
+            "write_bytes": 0,
+            "write_calls": 0
+          },
+          "fsync_synchronization": {
+            "block_count": 0,
+            "fsync_calls": 0,
+            "object_count": 0,
+            "read_bytes": 0,
+            "read_calls": 0,
+            "write_bytes": 0,
+            "write_calls": 0
+          },
+          "hydration_verification": {
+            "block_count": 0,
+            "fsync_calls": 0,
+            "object_count": 4138,
+            "read_bytes": 5691159,
+            "read_calls": 4165,
+            "write_bytes": 0,
+            "write_calls": 0
+          },
+          "property_mutation_inventory": {
+            "block_count": 0,
+            "fsync_calls": 0,
+            "object_count": 0,
+            "read_bytes": 0,
+            "read_calls": 0,
+            "write_bytes": 0,
+            "write_calls": 0
+          },
+          "property_mutation_route_authority": {
+            "block_count": 0,
+            "fsync_calls": 0,
+            "object_count": 0,
+            "read_bytes": 0,
+            "read_calls": 0,
+            "write_bytes": 0,
+            "write_calls": 0
+          },
+          "publication_preauthentication": {
+            "block_count": 0,
+            "fsync_calls": 0,
+            "object_count": 0,
+            "read_bytes": 6306,
+            "read_calls": 16,
+            "write_bytes": 0,
+            "write_calls": 0
+          },
+          "read_path_scan": {
+            "block_count": 0,
+            "fsync_calls": 0,
+            "object_count": 6,
+            "read_bytes": 339117,
+            "read_calls": 209,
+            "write_bytes": 0,
+            "write_calls": 0
+          },
+          "recovery_reauthentication": {
+            "block_count": 0,
+            "fsync_calls": 0,
+            "object_count": 0,
+            "read_bytes": 0,
+            "read_calls": 0,
+            "write_bytes": 0,
+            "write_calls": 0
+          },
+          "seal_authentication": {
+            "block_count": 0,
+            "fsync_calls": 0,
+            "object_count": 0,
+            "read_bytes": 0,
+            "read_calls": 0,
+            "write_bytes": 0,
+            "write_calls": 0
+          },
+          "shape_consume_reauthentication": {
+            "block_count": 0,
+            "fsync_calls": 0,
+            "object_count": 0,
+            "read_bytes": 0,
+            "read_calls": 0,
+            "write_bytes": 0,
+            "write_calls": 0
+          }
+        },
+        "totals": {
+          "block_count": 0,
+          "fsync_calls": 0,
+          "object_count": 4144,
+          "read_bytes": 6036582,
+          "read_calls": 4390,
+          "write_bytes": 0,
+          "write_calls": 0
+        }
+      },
+      "reopen": {
+        "phases": {
+          "append_merge": {
+            "block_count": 0,
+            "fsync_calls": 0,
+            "object_count": 0,
+            "read_bytes": 0,
+            "read_calls": 0,
+            "write_bytes": 0,
+            "write_calls": 0
+          },
+          "cas_install_read_write": {
+            "block_count": 0,
+            "fsync_calls": 0,
+            "object_count": 0,
+            "read_bytes": 0,
+            "read_calls": 0,
+            "write_bytes": 0,
+            "write_calls": 0
+          },
+          "encode_write_postwrite_authentication": {
+            "block_count": 0,
+            "fsync_calls": 0,
+            "object_count": 0,
+            "read_bytes": 0,
+            "read_calls": 0,
+            "write_bytes": 0,
+            "write_calls": 0
+          },
+          "fsync_synchronization": {
+            "block_count": 0,
+            "fsync_calls": 0,
+            "object_count": 0,
+            "read_bytes": 0,
+            "read_calls": 0,
+            "write_bytes": 0,
+            "write_calls": 0
+          },
+          "hydration_verification": {
+            "block_count": 0,
+            "fsync_calls": 0,
+            "object_count": 16520,
+            "read_bytes": 19742114,
+            "read_calls": 16574,
+            "write_bytes": 0,
+            "write_calls": 0
+          },
+          "property_mutation_inventory": {
+            "block_count": 0,
+            "fsync_calls": 0,
+            "object_count": 0,
+            "read_bytes": 0,
+            "read_calls": 0,
+            "write_bytes": 0,
+            "write_calls": 0
+          },
+          "property_mutation_route_authority": {
+            "block_count": 0,
+            "fsync_calls": 0,
+            "object_count": 0,
+            "read_bytes": 0,
+            "read_calls": 0,
+            "write_bytes": 0,
+            "write_calls": 0
+          },
+          "publication_preauthentication": {
+            "block_count": 0,
+            "fsync_calls": 0,
+            "object_count": 0,
+            "read_bytes": 20244,
+            "read_calls": 50,
+            "write_bytes": 0,
+            "write_calls": 0
+          },
+          "read_path_scan": {
+            "block_count": 0,
+            "fsync_calls": 0,
+            "object_count": 8,
+            "read_bytes": 6690,
+            "read_calls": 8,
+            "write_bytes": 0,
+            "write_calls": 0
+          },
+          "recovery_reauthentication": {
+            "block_count": 0,
+            "fsync_calls": 0,
+            "object_count": 0,
+            "read_bytes": 0,
+            "read_calls": 0,
+            "write_bytes": 0,
+            "write_calls": 0
+          },
+          "seal_authentication": {
+            "block_count": 0,
+            "fsync_calls": 0,
+            "object_count": 0,
+            "read_bytes": 0,
+            "read_calls": 0,
+            "write_bytes": 0,
+            "write_calls": 0
+          },
+          "shape_consume_reauthentication": {
+            "block_count": 0,
+            "fsync_calls": 0,
+            "object_count": 0,
+            "read_bytes": 0,
+            "read_calls": 0,
+            "write_bytes": 0,
+            "write_calls": 0
+          }
+        },
+        "totals": {
+          "block_count": 0,
+          "fsync_calls": 0,
+          "object_count": 16528,
+          "read_bytes": 19769048,
+          "read_calls": 16632,
+          "write_bytes": 0,
+          "write_calls": 0
+        }
+      },
+      "reopen_proof": {
+        "phases": {
+          "append_merge": {
+            "block_count": 0,
+            "fsync_calls": 0,
+            "object_count": 0,
+            "read_bytes": 0,
+            "read_calls": 0,
+            "write_bytes": 0,
+            "write_calls": 0
+          },
+          "cas_install_read_write": {
+            "block_count": 0,
+            "fsync_calls": 0,
+            "object_count": 0,
+            "read_bytes": 0,
+            "read_calls": 0,
+            "write_bytes": 0,
+            "write_calls": 0
+          },
+          "encode_write_postwrite_authentication": {
+            "block_count": 0,
+            "fsync_calls": 0,
+            "object_count": 0,
+            "read_bytes": 0,
+            "read_calls": 0,
+            "write_bytes": 0,
+            "write_calls": 0
+          },
+          "fsync_synchronization": {
+            "block_count": 0,
+            "fsync_calls": 0,
+            "object_count": 0,
+            "read_bytes": 0,
+            "read_calls": 0,
+            "write_bytes": 0,
+            "write_calls": 0
+          },
+          "hydration_verification": {
+            "block_count": 0,
+            "fsync_calls": 0,
+            "object_count": 20658,
+            "read_bytes": 25433273,
+            "read_calls": 20739,
+            "write_bytes": 0,
+            "write_calls": 0
+          },
+          "property_mutation_inventory": {
+            "block_count": 0,
+            "fsync_calls": 0,
+            "object_count": 0,
+            "read_bytes": 0,
+            "read_calls": 0,
+            "write_bytes": 0,
+            "write_calls": 0
+          },
+          "property_mutation_route_authority": {
+            "block_count": 0,
+            "fsync_calls": 0,
+            "object_count": 0,
+            "read_bytes": 0,
+            "read_calls": 0,
+            "write_bytes": 0,
+            "write_calls": 0
+          },
+          "publication_preauthentication": {
+            "block_count": 0,
+            "fsync_calls": 0,
+            "object_count": 0,
+            "read_bytes": 26550,
+            "read_calls": 66,
+            "write_bytes": 0,
+            "write_calls": 0
+          },
+          "read_path_scan": {
+            "block_count": 0,
+            "fsync_calls": 0,
+            "object_count": 15,
+            "read_bytes": 16660811,
+            "read_calls": 227,
+            "write_bytes": 0,
+            "write_calls": 0
+          },
+          "recovery_reauthentication": {
+            "block_count": 0,
+            "fsync_calls": 0,
+            "object_count": 0,
+            "read_bytes": 0,
+            "read_calls": 0,
+            "write_bytes": 0,
+            "write_calls": 0
+          },
+          "seal_authentication": {
+            "block_count": 0,
+            "fsync_calls": 0,
+            "object_count": 0,
+            "read_bytes": 0,
+            "read_calls": 0,
+            "write_bytes": 0,
+            "write_calls": 0
+          },
+          "shape_consume_reauthentication": {
+            "block_count": 0,
+            "fsync_calls": 0,
+            "object_count": 0,
+            "read_bytes": 0,
+            "read_calls": 0,
+            "write_bytes": 0,
+            "write_calls": 0
+          }
+        },
+        "totals": {
+          "block_count": 0,
+          "fsync_calls": 0,
+          "object_count": 20673,
+          "read_bytes": 42120634,
+          "read_calls": 21032,
+          "write_bytes": 0,
+          "write_calls": 0
+        }
+      }
+    },
+    "portable_package": {
+      "allocation_allocated_bytes": 28830605312,
+      "allocation_logical_bytes": 28830558720,
+      "allocation_physical_objects": 1,
+      "contract": "graphforge-portable-export/2"
+    },
+    "source": {
+      "allocated_physical_bytes": 20812378112,
+      "categories": {
+        "adjacency": {
+          "allocated_bytes": 8046428160,
+          "logical_bytes": 16087892783,
+          "logical_references": 2053,
+          "physical_logical_bytes": 8044279343,
+          "physical_objects": 1029
+        },
+        "catalog_and_manifests": {
+          "allocated_bytes": 16920576,
+          "logical_bytes": 4185782,
+          "logical_references": 4131,
+          "physical_logical_bytes": 4185782,
+          "physical_objects": 4131
+        },
+        "clean_imported_project": {
+          "allocated_bytes": 0,
+          "logical_bytes": 0,
+          "logical_references": 0,
+          "physical_logical_bytes": 0,
+          "physical_objects": 0
+        },
+        "construction_staging": {
+          "allocated_bytes": 0,
+          "logical_bytes": 0,
+          "logical_references": 0,
+          "physical_logical_bytes": 0,
+          "physical_objects": 0
+        },
+        "other": {
+          "allocated_bytes": 0,
+          "logical_bytes": 0,
+          "logical_references": 0,
+          "physical_logical_bytes": 0,
+          "physical_objects": 0
+        },
+        "portable_package": {
+          "allocated_bytes": 0,
+          "logical_bytes": 0,
+          "logical_references": 0,
+          "physical_logical_bytes": 0,
+          "physical_objects": 0
+        },
+        "properties": {
+          "allocated_bytes": 0,
+          "logical_bytes": 0,
+          "logical_references": 0,
+          "physical_logical_bytes": 0,
+          "physical_objects": 0
+        },
+        "topology_edges": {
+          "allocated_bytes": 11274215424,
+          "logical_bytes": 11252939002,
+          "logical_references": 8192,
+          "physical_logical_bytes": 11252939002,
+          "physical_objects": 8192
+        },
+        "topology_nodes": {
+          "allocated_bytes": 132120576,
+          "logical_bytes": 130651240,
+          "logical_references": 512,
+          "physical_logical_bytes": 130651240,
+          "physical_objects": 512
+        },
+        "uuid_and_surrogates": {
+          "allocated_bytes": 1342693376,
+          "logical_bytes": 1342677207,
+          "logical_references": 7,
+          "physical_logical_bytes": 1342677207,
+          "physical_objects": 6
+        }
+      },
+      "contract": "graphforge-storage-attribution/1",
+      "logical_bytes": 28818346014,
+      "logical_references": 14895,
+      "physical_objects": 13870,
+      "retained_logical_eof_bytes": 20774732574
+    }
+  },
+  "storage_components": {
+    "imported_allocated_physical_bytes": 20812378112,
+    "imported_retained_logical_eof_bytes": 20774732574,
+    "logical_read_bytes": 36910076714,
+    "logical_write_bytes": 28862638231,
+    "publication_work_units": 363746,
+    "reader_calls": 606956,
+    "source_allocated_physical_bytes": 20812378112,
+    "source_project_current_allocated_bytes": 20970000384,
+    "source_retained_logical_eof_bytes": 20774732574,
+    "transient_peak_allocated_bytes": 28841230336
+  }
+}
