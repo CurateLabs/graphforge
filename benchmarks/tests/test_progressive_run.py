@@ -726,6 +726,36 @@ class ProgressiveRunControllerTests(unittest.TestCase):
                     with self.assertRaisesRegex(ControllerError, "bulk_ingest_capability_unproven"):
                         require_bulk_ingest_capability(invalid)
 
+    def test_bulk_capability_accepts_preserved_staged_chunk_receipts(self) -> None:
+        receipt = {
+            "contract": "graphforge-import-session/1",
+            "outcome": "committed",
+            "construction": {
+                "configured_batch_rows": 65_536,
+                "accepted_chunks": 2,
+                "publication_committed": True,
+                "input_rows": 131_072,
+                "input_batches": 2,
+            },
+        }
+        self.assertIs(require_bulk_ingest_capability(receipt), receipt)
+        invalid = json.loads(json.dumps(receipt))
+        invalid["construction"]["configured_batch_rows"] = 8192
+        with self.assertRaisesRegex(ControllerError, "bulk_ingest_capability_unproven"):
+            require_bulk_ingest_capability(invalid)
+        for field in (
+            "configured_batch_rows",
+            "accepted_chunks",
+            "input_rows",
+            "input_batches",
+        ):
+            for invalid_value in (True, None, "2"):
+                with self.subTest(field=field, invalid_value=invalid_value):
+                    invalid = json.loads(json.dumps(receipt))
+                    invalid["construction"][field] = invalid_value
+                    with self.assertRaisesRegex(ControllerError, "bulk_ingest_capability_unproven"):
+                        require_bulk_ingest_capability(invalid)
+
     def test_rung_peak_rss_uses_process_vmhwm_not_cgroup_memory_peak(self) -> None:
         receipts = authoritative_receipts(18)
         gf = graphforge(18, receipts)
