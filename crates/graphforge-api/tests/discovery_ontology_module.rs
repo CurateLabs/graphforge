@@ -163,6 +163,7 @@ fn discovery(
         package: PortablePackageReference {
             format: PORTABLE_FORMAT.into(),
             package_digest: marker('1'),
+            producing_core_version: graphforge_core::manifest::GRAPHFORGE_VERSION.into(),
             object_digest: project_object.clone(),
         },
         summary: None,
@@ -176,6 +177,7 @@ fn discovery(
                 package: Some(PortablePackageReference {
                     format: PORTABLE_FORMAT.into(),
                     package_digest: Sha256Digest(advertised_package_digest.into()),
+                    producing_core_version: graphforge_core::manifest::GRAPHFORGE_VERSION.into(),
                     object_digest: package_object.clone(),
                 }),
             }],

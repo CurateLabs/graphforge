@@ -1,10 +1,10 @@
 {
   "contract": "graphforge-portable-v2-positive/1",
   "vectors": [
-    {"package_class":"complete","package_digest":"sha256:090ec2cb738ff59527884b6b543f0875acee46b7ea319ac5ad5bd5dac4a164e5","representations":["expanded","bundle"]},
-    {"package_class":"ontology-only","package_digest":"sha256:869da25f99c90864c321bf8c42aa3f1f3642c877b92bc34255c900d3083a525d","representations":["expanded","bundle"]},
-    {"package_class":"component-selective","package_digest":"sha256:ba7ecd179de6116d2935a5a3ec3e83f67167bd128313f57dd1d822914eaa4c7c","representations":["expanded","bundle"]},
-    {"package_class":"graph-data-subset","package_digest":"sha256:11e8618107f9dd236fb6b96eabb9bb9e3f5375c11596e054f5146cd1d2bf6138","representations":["expanded","bundle"]}
+    {"package_class":"complete","package_digest":"sha256:2b7302274b38b35d645eb6742b9c5e012c3f84a406cb1c62a6647d913df0773c","representations":["expanded","bundle"]},
+    {"package_class":"ontology-only","package_digest":"sha256:c20ff8c5533161824e2e7b7c296b166151e4fb2688636031cdae20b1c39c58b3","representations":["expanded","bundle"]},
+    {"package_class":"component-selective","package_digest":"sha256:d009ddab356c106497f9f9c7eab370f18716bf8bd0aee91090bf96c22dfbbebf","representations":["expanded","bundle"]},
+    {"package_class":"graph-data-subset","package_digest":"sha256:6fc6bf3f9750dd4869de9ddd52e9cf3493926f2826139d9942245d0cfdc28f11","representations":["expanded","bundle"]}
   ],
   "manifest_template": "ontology-only.manifest.json",
   "derivation": "replace package_class; for graph-data-subset add selection.graph_subset={closure:induced-edges,selector:nodes:all}; remove package_digest; canonicalize with RFC8785; hash graphforge-project/2 NUL plus canonical bytes"

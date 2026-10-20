@@ -162,6 +162,7 @@ fn publish() -> Published {
                 PortablePackageReference {
                     format: PORTABLE_FORMAT.into(),
                     package_digest: Sha256Digest(exported.package_digest),
+                    producing_core_version: graphforge_core::manifest::GRAPHFORGE_VERSION.into(),
                     object_digest: digest(marker),
                 },
                 output,
@@ -248,6 +249,7 @@ fn documents(lineage: &ResearchLineage) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
         package: PortablePackageReference {
             format: PORTABLE_FORMAT.into(),
             package_digest: digest('9'),
+            producing_core_version: graphforge_core::manifest::GRAPHFORGE_VERSION.into(),
             object_digest: digest('e'),
         },
         summary: None,

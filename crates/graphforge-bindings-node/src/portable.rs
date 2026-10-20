@@ -278,6 +278,7 @@ fn verify_report_output(report: graphforge_api::PortableVerifyResult) -> Portabl
             graphforge_api::PortableRepresentation::Bundle => "bundle".into(),
         },
         package_digest: report.package_digest,
+        producing_core_version: report.producing_core_version,
         package_class: match report.package_class {
             graphforge_api::PortablePackageClass::Complete => "complete".into(),
             graphforge_api::PortablePackageClass::OntologyOnly => "ontology_only".into(),
@@ -481,6 +482,8 @@ pub struct PortableVerifyOutput {
     pub representation: String,
     pub package_digest: String,
     pub package_class: String,
+    /// Exact GraphForge Core version the package manifest declares as producer.
+    pub producing_core_version: String,
     pub component_count: BigInt,
     pub entry_count: BigInt,
     pub payload_bytes: BigInt,

@@ -4,11 +4,12 @@
   "title": "GraphForge portable project v2 semantic manifest",
   "type": "object",
   "additionalProperties": false,
-  "required": ["format", "package_digest", "package_class", "source_generation", "selection", "components", "requirements", "states"],
+  "required": ["format", "package_digest", "package_class", "producing_core_version", "source_generation", "selection", "components", "requirements", "states"],
   "properties": {
     "format": { "const": "graphforge-project/2" },
     "package_digest": { "$ref": "#/$defs/digest" },
     "package_class": { "enum": ["complete", "ontology-only", "component-selective", "graph-data-subset"] },
+    "producing_core_version": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$" },
     "source_generation": {
       "type": "object", "additionalProperties": false,
       "required": ["generation_uuid", "manifest_sha256"],

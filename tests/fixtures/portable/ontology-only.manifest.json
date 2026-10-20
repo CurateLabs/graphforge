@@ -16,7 +16,8 @@
   ],
   "format": "graphforge-project/2",
   "package_class": "ontology-only",
-  "package_digest": "sha256:869da25f99c90864c321bf8c42aa3f1f3642c877b92bc34255c900d3083a525d",
+  "package_digest": "sha256:c20ff8c5533161824e2e7b7c296b166151e4fb2688636031cdae20b1c39c58b3",
+  "producing_core_version": "0.6.0",
   "requirements": {
     "capabilities": ["ontology@1"],
     "dependency_rule": "required-transitive-closure/1"

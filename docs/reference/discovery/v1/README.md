@@ -67,8 +67,16 @@ carries neither field is still valid, and clone consumers need neither.
   and must be at most `max_module_package_bytes` (default 64 MiB). Bridge sets
   are listed by identity only.
 
+Every package reference (`package` in the manifest, module packages, lineage
+Versions and Proposals, and the summary) declares `producing_core_version`: the
+exact GraphForge Core version that wrote the package. It is an opaque exact
+label (non-empty, bounded, no control characters) that readers compare for
+equality and never order or parse. A Hub reads it from the manifest, or from the
+summary, without downloading the package; the verifier requires the package's
+own manifest to declare the same value.
+
 The summary document embeds `repository`, `immutable_version`, and the package
-reference (`format`, `package_digest`, `package_class`). It carries its own
+reference (`format`, `package_digest`, `producing_core_version`, `package_class`). It carries its own
 closed `requirements`: only `project-summary@1` is understood. An unknown
 required capability or an unknown format major fails `unsupported_future` during
 parsing, before any other content is read. Unknown optional `capabilities` are

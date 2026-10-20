@@ -361,6 +361,7 @@ fn summary_binds_to_a_manifest_built_with_discovery_types() {
         package: PortablePackageReference {
             format: PORTABLE_FORMAT.into(),
             package_digest: summary.package.package_digest.clone(),
+            producing_core_version: summary.package.producing_core_version.clone(),
             object_digest: marker('c'),
         },
         summary: Some(ProjectSummaryReference {

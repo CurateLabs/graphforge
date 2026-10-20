@@ -104,6 +104,7 @@ fn schema(title: &str, required: &[&str], properties: Value, defs: Value) -> Val
 fn common_defs() -> Value {
     json!({
         "digest": {"type":"string","pattern":"^sha256:[0-9a-f]{64}$"},
+        "coreVersion": {"type":"string","minLength":1,"maxLength":4096,"pattern":"^[^\\u0000-\\u001f\\u007f-\\u009f]+$"},
         "identity": {"type":"object","additionalProperties":false,"required":["owner","repository"],"properties":{
             "owner":{"$ref":"#/$defs/slug"},"repository":{"$ref":"#/$defs/slug"}}},
         "slug": {"type":"string","minLength":1,"maxLength":100,"pattern":"^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$"},
@@ -132,7 +133,7 @@ fn manifest_schema() -> Value {
             "format":{"const":"graphforge-discovery/1"}, "version":{"$ref":"#/$defs/version"},
             "repository":{"$ref":"#/$defs/identity"}, "default_ref":{"type":"string","minLength":1,"maxLength":4096},
             "resolved_ref":{"type":"string","minLength":1,"maxLength":4096}, "immutable_version":{"$ref":"#/$defs/digest"},
-            "package":{"type":"object","additionalProperties":false,"required":["format","package_digest","object_digest"],"properties":{"format":{"const":"graphforge-project/2"},"package_digest":{"$ref":"#/$defs/digest"},"object_digest":{"$ref":"#/$defs/digest"}}},
+            "package":{"type":"object","additionalProperties":false,"required":["format","package_digest","producing_core_version","object_digest"],"properties":{"format":{"const":"graphforge-project/2"},"package_digest":{"$ref":"#/$defs/digest"},"producing_core_version":{"$ref":"#/$defs/coreVersion"},"object_digest":{"$ref":"#/$defs/digest"}}},
             "requirements":{"type":"array","maxItems":256,"items":{"$ref":"#/$defs/semantic"}},
             "capabilities":{"type":"array","maxItems":256,"items":{"$ref":"#/$defs/semantic"}},
             "objects":{"type":"array","minItems":1,"maxItems":1_000_000,"items":{"$ref":"#/$defs/object"}},
@@ -145,7 +146,7 @@ fn manifest_schema() -> Value {
             let map = defs.as_object_mut().unwrap();
             map.insert("semantic".into(), json!({"type":"object","additionalProperties":false,"required":["capability","major"],"properties":{"capability":{"type":"string","minLength":1,"maxLength":128},"major":{"type":"integer","minimum":0,"maximum":65535}}}));
             map.insert("object".into(), json!({"type":"object","additionalProperties":false,"required":["digest","length","media_type","locations"],"properties":{"digest":{"$ref":"#/$defs/digest"},"length":{"type":"integer","minimum":0},"media_type":{"type":"string","minLength":1,"maxLength":4096},"locations":{"type":"array","minItems":1,"maxItems":8,"items":{"type":"string","format":"uri","pattern":"^https://"}}}}));
-            map.insert("package_reference".into(), json!({"type":"object","additionalProperties":false,"required":["format","package_digest","object_digest"],"properties":{"format":{"const":"graphforge-project/2"},"package_digest":{"$ref":"#/$defs/digest"},"object_digest":{"$ref":"#/$defs/digest"}}}));
+            map.insert("package_reference".into(), json!({"type":"object","additionalProperties":false,"required":["format","package_digest","producing_core_version","object_digest"],"properties":{"format":{"const":"graphforge-project/2"},"package_digest":{"$ref":"#/$defs/digest"},"producing_core_version":{"$ref":"#/$defs/coreVersion"},"object_digest":{"$ref":"#/$defs/digest"}}}));
             map.insert(
                 "identity_text".into(),
                 json!({"type":"string","minLength":1,"maxLength":4096}),
@@ -196,7 +197,7 @@ fn lineage_schema() -> Value {
             let map = defs.as_object_mut().unwrap();
             map.insert("semantic".into(), json!({"type":"object","additionalProperties":false,"required":["capability","major"],"properties":{"capability":{"type":"string","minLength":1,"maxLength":128},"major":{"type":"integer","minimum":0,"maximum":65535}}}));
             map.insert("uuid".into(), json!({"type":"string","minLength":36,"maxLength":36,"pattern":"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"}));
-            map.insert("package_reference".into(), json!({"type":"object","additionalProperties":false,"required":["format","package_digest","object_digest"],"properties":{"format":{"const":"graphforge-project/2"},"package_digest":{"$ref":"#/$defs/digest"},"object_digest":{"$ref":"#/$defs/digest"}}}));
+            map.insert("package_reference".into(), json!({"type":"object","additionalProperties":false,"required":["format","package_digest","producing_core_version","object_digest"],"properties":{"format":{"const":"graphforge-project/2"},"package_digest":{"$ref":"#/$defs/digest"},"producing_core_version":{"$ref":"#/$defs/coreVersion"},"object_digest":{"$ref":"#/$defs/digest"}}}));
             map.insert("fork_origin".into(), json!({"type":"object","additionalProperties":false,"required":["origin_repository","origin_project_uuid","origin_version_uuid","origin_version_identity"],"properties":{"origin_repository":{"$ref":"#/$defs/identity"},"origin_project_uuid":{"$ref":"#/$defs/uuid"},"origin_version_uuid":{"$ref":"#/$defs/uuid"},"origin_version_identity":{"$ref":"#/$defs/digest"}}}));
             map.insert("branch".into(), json!({"type":"object","additionalProperties":false,"required":["branch_uuid","ref_name","project_uuid","head_version_uuid","origin_version_uuid","base_version_uuid","selection_sha256","label"],"properties":{"branch_uuid":{"$ref":"#/$defs/uuid"},"ref_name":{"type":"string","minLength":1,"maxLength":4096},"project_uuid":{"$ref":"#/$defs/uuid"},"head_version_uuid":{"$ref":"#/$defs/uuid"},"parent_branch_uuid":{"anyOf":[{"$ref":"#/$defs/uuid"},{"type":"null"}]},"origin_version_uuid":{"$ref":"#/$defs/uuid"},"base_version_uuid":{"$ref":"#/$defs/uuid"},"selection_sha256":{"$ref":"#/$defs/digest"},"label":{"type":"string","minLength":1,"maxLength":4096}}}));
             map.insert("research_version".into(), json!({"type":"object","additionalProperties":false,"required":["version_uuid","parents","identity_digest","kind","branch_uuid"],"properties":{"parents":{"type":"array","maxItems":8,"uniqueItems":true,"items":{"$ref":"#/$defs/uuid"}},"version_uuid":{"$ref":"#/$defs/uuid"},"identity_digest":{"$ref":"#/$defs/digest"},"kind":{"enum":["complete","projection"]},"branch_uuid":{"$ref":"#/$defs/uuid"},"source_version_uuid":{"anyOf":[{"$ref":"#/$defs/uuid"},{"type":"null"}]},"package":{"anyOf":[{"$ref":"#/$defs/package_reference"},{"type":"null"}]}}}));
@@ -240,7 +241,7 @@ fn summary_schema() -> Value {
         json!({
             "format":{"const":"graphforge-project-summary/1"}, "version":{"$ref":"#/$defs/version"},
             "repository":{"$ref":"#/$defs/identity"}, "immutable_version":{"$ref":"#/$defs/digest"},
-            "package":{"type":"object","additionalProperties":false,"required":["format","package_digest","package_class"],"properties":{"format":{"const":"graphforge-project/2"},"package_digest":{"$ref":"#/$defs/digest"},"package_class":{"enum":["complete","ontology-only","component-selective","graph-data-subset"]}}},
+            "package":{"type":"object","additionalProperties":false,"required":["format","package_digest","producing_core_version","package_class"],"properties":{"format":{"const":"graphforge-project/2"},"package_digest":{"$ref":"#/$defs/digest"},"producing_core_version":{"$ref":"#/$defs/coreVersion"},"package_class":{"enum":["complete","ontology-only","component-selective","graph-data-subset"]}}},
             "requirements":{"type":"array","maxItems":1,"items":{"type":"object","additionalProperties":false,"required":["capability","major"],"properties":{"capability":{"const":"project-summary"},"major":{"const":1}}}},
             "capabilities":{"type":"array","maxItems":256,"items":{"$ref":"#/$defs/semantic"}},
             "metadata":{"$ref":"#/$defs/metadata"}, "facts":{"$ref":"#/$defs/facts"},
@@ -322,7 +323,7 @@ fn base_manifest() -> Value {
     json!({
         "format":"graphforge-discovery/1","version":{"major":1,"minor":0},"repository":{"owner":"openalex","repository":"openalex"},
         "default_ref":"main","resolved_ref":"main","immutable_version":digest('a'),
-        "package":{"format":"graphforge-project/2","package_digest":digest('b'),"object_digest":digest('c')},
+        "package":{"format":"graphforge-project/2","package_digest":digest('b'),"producing_core_version":"0.6.0","object_digest":digest('c')},
         "requirements":[{"capability":"portable-v2","major":1}],"capabilities":[{"capability":"range-requests","major":1}],
         "objects":[{"digest":digest('c'),"length":42,"media_type":"application/vnd.graphforge.project","locations":["https://data.graphforge.sh/objects/c"]}],
         "extensions":{"x-example":{"z":1,"a":true}}
@@ -344,7 +345,7 @@ fn base_summary() -> Value {
         "format":"graphforge-project-summary/1","version":{"major":1,"minor":1},
         "repository":{"owner":"openalex","repository":"openalex"},
         "immutable_version":digest('a'),
-        "package":{"format":"graphforge-project/2","package_digest":digest('b'),"package_class":"complete"},
+        "package":{"format":"graphforge-project/2","package_digest":digest('b'),"producing_core_version":"0.6.0","package_class":"complete"},
         "requirements":[{"capability":"project-summary","major":1}],"capabilities":[],
         "metadata":{
             "title":"OpenAlex","description":null,
@@ -403,13 +404,13 @@ fn base_lineage() -> Value {
             {"branch_uuid":LINEAGE_BRANCH_FEATURE,"ref_name":"feature/claims","project_uuid":LINEAGE_PROJECT,"head_version_uuid":LINEAGE_VERSION_FEATURE,"parent_branch_uuid":LINEAGE_BRANCH_MAIN,"origin_version_uuid":LINEAGE_VERSION_MAIN,"base_version_uuid":LINEAGE_VERSION_FEATURE,"selection_sha256":digest('2'),"label":"claims"}
         ],
         "versions":[
-            {"version_uuid":LINEAGE_VERSION_ORIGIN,"parents":[],"identity_digest":digest('3'),"kind":"complete","branch_uuid":LINEAGE_BRANCH_MAIN,"source_version_uuid":null,"package":{"format":"graphforge-project/2","package_digest":digest('4'),"object_digest":digest('5')}},
-            {"version_uuid":LINEAGE_VERSION_MAIN,"parents":[],"identity_digest":digest('6'),"kind":"complete","branch_uuid":LINEAGE_BRANCH_MAIN,"source_version_uuid":null,"package":{"format":"graphforge-project/2","package_digest":digest('7'),"object_digest":digest('8')}},
-            {"version_uuid":LINEAGE_VERSION_FEATURE,"parents":[],"identity_digest":digest('9'),"kind":"complete","branch_uuid":LINEAGE_BRANCH_FEATURE,"source_version_uuid":null,"package":{"format":"graphforge-project/2","package_digest":digest('a'),"object_digest":digest('b')}},
-            {"version_uuid":LINEAGE_VERSION_PROJECTION,"parents":[],"identity_digest":digest('c'),"kind":"projection","branch_uuid":LINEAGE_BRANCH_FEATURE,"source_version_uuid":LINEAGE_VERSION_FEATURE,"package":{"format":"graphforge-project/2","package_digest":digest('d'),"object_digest":digest('e')}}
+            {"version_uuid":LINEAGE_VERSION_ORIGIN,"parents":[],"identity_digest":digest('3'),"kind":"complete","branch_uuid":LINEAGE_BRANCH_MAIN,"source_version_uuid":null,"package":{"format":"graphforge-project/2","package_digest":digest('4'),"producing_core_version":"0.6.0","object_digest":digest('5')}},
+            {"version_uuid":LINEAGE_VERSION_MAIN,"parents":[],"identity_digest":digest('6'),"kind":"complete","branch_uuid":LINEAGE_BRANCH_MAIN,"source_version_uuid":null,"package":{"format":"graphforge-project/2","package_digest":digest('7'),"producing_core_version":"0.6.0","object_digest":digest('8')}},
+            {"version_uuid":LINEAGE_VERSION_FEATURE,"parents":[],"identity_digest":digest('9'),"kind":"complete","branch_uuid":LINEAGE_BRANCH_FEATURE,"source_version_uuid":null,"package":{"format":"graphforge-project/2","package_digest":digest('a'),"producing_core_version":"0.6.0","object_digest":digest('b')}},
+            {"version_uuid":LINEAGE_VERSION_PROJECTION,"parents":[],"identity_digest":digest('c'),"kind":"projection","branch_uuid":LINEAGE_BRANCH_FEATURE,"source_version_uuid":LINEAGE_VERSION_FEATURE,"package":{"format":"graphforge-project/2","package_digest":digest('d'),"producing_core_version":"0.6.0","object_digest":digest('e')}}
         ],
         "proposals":[
-            {"proposal_uuid":LINEAGE_PROPOSAL,"source_branch_uuid":LINEAGE_BRANCH_FEATURE,"source_version_uuid":LINEAGE_VERSION_FEATURE,"payload_version_uuid":LINEAGE_VERSION_PROJECTION,"package":{"format":"graphforge-project/2","package_digest":digest('d'),"object_digest":digest('e')}}
+            {"proposal_uuid":LINEAGE_PROPOSAL,"source_branch_uuid":LINEAGE_BRANCH_FEATURE,"source_version_uuid":LINEAGE_VERSION_FEATURE,"payload_version_uuid":LINEAGE_VERSION_PROJECTION,"package":{"format":"graphforge-project/2","package_digest":digest('d'),"producing_core_version":"0.6.0","object_digest":digest('e')}}
         ],
         "extensions":{"x-example":true}
     })
@@ -459,7 +460,7 @@ fn manifest_with_summary_and_ontology_for(summary: &Value) -> Value {
     v["ontology"] = json!({
         "composition_digest":digest('e'),
         "modules":[{"id":MODULE_ID,"version":"2026.01","content_digest":digest('f'),
-            "package":{"format":"graphforge-project/2","package_digest":digest('1'),"object_digest":digest('2')}}],
+            "package":{"format":"graphforge-project/2","package_digest":digest('1'),"producing_core_version":"0.6.0","object_digest":digest('2')}}],
         "bridge_sets":[{"id":BRIDGE_ID,"version":"1","content_digest":digest('9')}]
     });
     v["objects"] = json!([
@@ -1132,6 +1133,46 @@ fn summary_cases() -> Vec<Case> {
             |v| v["summary"]["url"] = json!("https://data.graphforge.sh/summary"),
         ),
         (
+            "manifest-package-missing-producing-core-version",
+            Document::Manifest,
+            "malformed_response",
+            None,
+            |v| {
+                v["package"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("producing_core_version");
+            },
+        ),
+        (
+            "manifest-package-empty-producing-core-version",
+            Document::Manifest,
+            "limit_exceeded",
+            Some("package.producing_core_version"),
+            |v| v["package"]["producing_core_version"] = json!(""),
+        ),
+        (
+            "manifest-package-control-producing-core-version",
+            Document::Manifest,
+            "malformed_response",
+            Some("package.producing_core_version"),
+            |v| v["package"]["producing_core_version"] = json!("0.6.0\n"),
+        ),
+        (
+            "manifest-module-package-empty-producing-core-version",
+            Document::Manifest,
+            "limit_exceeded",
+            Some("ontology.modules.package.producing_core_version"),
+            |v| v["ontology"]["modules"][0]["package"]["producing_core_version"] = json!(""),
+        ),
+        (
+            "summary-package-empty-producing-core-version",
+            Document::Summary,
+            "limit_exceeded",
+            Some("package.producing_core_version"),
+            |v| v["package"]["producing_core_version"] = json!(""),
+        ),
+        (
             "manifest-module-package-missing-object",
             Document::Manifest,
             "missing_object",
@@ -1587,6 +1628,17 @@ fn bind_summary_rejects_each_identity_mismatch() {
             &parse_summary(&other)
         ),
         (integrity, Some("summary.package.package_digest"))
+    );
+
+    // The summary must declare the producer the manifest declares.
+    let mut other = base_summary();
+    other["package"]["producing_core_version"] = json!("0.7.0");
+    assert_eq!(
+        bind_error(
+            &manifest_with_summary_and_ontology_for(&other),
+            &parse_summary(&other)
+        ),
+        (integrity, Some("summary.package.producing_core_version"))
     );
 
     // Same identity fields, different bytes: the manifest's summary_digest no

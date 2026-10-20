@@ -81,6 +81,8 @@ pub struct VerifiedBundle {
     pub path: PathBuf,
     /// Semantic package identity.
     pub package_digest: String,
+    /// Exact Core version the verified manifest declares as producer.
+    pub producing_core_version: String,
     /// Transport object digest: SHA-256 of the bundle bytes.
     pub object_digest: String,
     /// Bundle length in bytes.
@@ -94,6 +96,7 @@ impl VerifiedBundle {
         PortablePackageReference {
             format: PORTABLE_FORMAT.into(),
             package_digest: Sha256Digest(self.package_digest.clone()),
+            producing_core_version: self.producing_core_version.clone(),
             object_digest: Sha256Digest(self.object_digest.clone()),
         }
     }
@@ -124,6 +127,7 @@ pub fn verify_exported_bundle(
     Ok(VerifiedBundle {
         path: path.to_path_buf(),
         package_digest: package_digest.to_owned(),
+        producing_core_version: report.producing_core_version,
         object_digest,
         length,
     })

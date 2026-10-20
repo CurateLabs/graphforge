@@ -277,6 +277,7 @@ impl Publication {
             "package": {
                 "format": "graphforge-project/2",
                 "package_digest": self.package_digest,
+                "producing_core_version": "0.6.0",
                 "object_digest": self.package_object().digest(),
             },
             "requirements": [{"capability": "portable-v2", "major": 1}],
@@ -741,6 +742,7 @@ fn research_publication(
             package: Some(PortablePackageReference {
                 format: PORTABLE_FORMAT.into(),
                 package_digest: Sha256Digest(digest_of('e')),
+                producing_core_version: "0.6.0".into(),
                 object_digest: Sha256Digest(research_package.digest()),
             }),
         }],

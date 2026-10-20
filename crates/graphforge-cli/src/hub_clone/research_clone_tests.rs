@@ -335,6 +335,7 @@ fn publish_history() -> Published {
                 PortablePackageReference {
                     format: PORTABLE_FORMAT.into(),
                     package_digest: Sha256Digest(exported.package_digest),
+                    producing_core_version: graphforge_api::GRAPHFORGE_VERSION.into(),
                     object_digest: sha256(&bytes),
                 },
                 bytes,
@@ -365,6 +366,7 @@ fn publish_history() -> Published {
         PortablePackageReference {
             format: PORTABLE_FORMAT.into(),
             package_digest: Sha256Digest(exported.package_digest),
+            producing_core_version: graphforge_api::GRAPHFORGE_VERSION.into(),
             object_digest: sha256(&bytes),
         },
         bytes,
@@ -774,6 +776,7 @@ fn minimal_documents(
         "package":{
             "format":"graphforge-project/2",
             "package_digest":format!("sha256:{}", "b".repeat(64)),
+            "producing_core_version":"0.6.0",
             "object_digest":package_object
         },
         "requirements":manifest_requirements,"capabilities":[],
@@ -1142,6 +1145,7 @@ fn branchless_hub(
         package: PortablePackageReference {
             format: PORTABLE_FORMAT.into(),
             package_digest,
+            producing_core_version: graphforge_api::GRAPHFORGE_VERSION.into(),
             object_digest: project_object.clone(),
         },
         summary: None,

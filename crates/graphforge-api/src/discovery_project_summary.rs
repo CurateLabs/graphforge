@@ -98,6 +98,7 @@ pub fn summarize_verified_portable(
         package: SummaryPackageReference {
             format: PORTABLE_FORMAT.into(),
             package_digest: Sha256Digest(report.package_digest),
+            producing_core_version: report.producing_core_version,
             package_class: package_class_label(report.package_class).into(),
         },
         requirements: vec![ProtocolRequirement {

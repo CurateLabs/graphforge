@@ -711,6 +711,96 @@ mod tests {
     }
 
     #[test]
+    fn exported_package_declares_and_verification_reports_the_producing_core_version() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source");
+        std::fs::create_dir(&source).unwrap();
+        let graph = GraphForge::new(source.to_str()).unwrap();
+        let limits = graphforge_core::portable::PortableLimits::default();
+        let export = |name: &str, representation| {
+            let output_path = root.path().join(name);
+            graph
+                .export_portable(
+                    &PortableExportRequest {
+                        selection: PortableSelection::Current,
+                        output_path: output_path.clone(),
+                        representation,
+                        profile: graphforge_core::portable::PortableSelectionProfile::Complete,
+                        subset: None,
+                        limits,
+                    },
+                    None,
+                    |_| {},
+                )
+                .unwrap();
+            output_path
+        };
+        let expanded = export(
+            "expanded",
+            graphforge_core::portable::PortableOutput::Expanded,
+        );
+        let bundle = export(
+            "complete.gfpb",
+            graphforge_core::portable::PortableOutput::Bundle,
+        );
+
+        // The package manifest itself states the producer.
+        let manifest_path = expanded.join("data/graphforge-project.json");
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+        assert_eq!(
+            manifest["producing_core_version"],
+            graphforge_core::manifest::GRAPHFORGE_VERSION
+        );
+
+        // Full verification and inspection both report it, for both forms.
+        for (input, mode) in [
+            (&bundle, graphforge_core::portable::PortableMode::Full),
+            (&expanded, graphforge_core::portable::PortableMode::Full),
+            (
+                &bundle,
+                graphforge_core::portable::PortableMode::StructureOnly,
+            ),
+            (
+                &expanded,
+                graphforge_core::portable::PortableMode::StructureOnly,
+            ),
+        ] {
+            let report = verify_portable(
+                &PortableVerifyRequest {
+                    input: input.clone(),
+                    mode,
+                    limits,
+                },
+                None,
+            )
+            .unwrap();
+            assert_eq!(
+                report.producing_core_version,
+                graphforge_core::manifest::GRAPHFORGE_VERSION
+            );
+        }
+
+        // The declaration is authenticated: relabeling the producer is refused.
+        let mut forged = manifest;
+        forged["producing_core_version"] = serde_json::json!("0.0.1");
+        std::fs::write(&manifest_path, serde_json::to_vec(&forged).unwrap()).unwrap();
+        let error = verify_portable(
+            &PortableVerifyRequest {
+                input: expanded,
+                mode: graphforge_core::portable::PortableMode::StructureOnly,
+                limits,
+            },
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.code,
+            graphforge_core::portable::PortableErrorCode::DigestMismatch
+        );
+    }
+
+    #[test]
     fn public_v2_export_preview_and_verify_agree_on_package_digest() {
         let root = tempfile::tempdir().unwrap();
         let source = root.path().join("source");

@@ -2433,6 +2433,9 @@ fn research_version_error(error: DiscoveryResearchVersionError) -> graphforge_ap
                     "hub.package.immutable_version_mismatch"
                 }
                 DiscoveryPortableMismatch::PackageDigest => "hub.package.package_digest_mismatch",
+                DiscoveryPortableMismatch::ProducingCoreVersion => {
+                    "hub.package.producing_core_version_mismatch"
+                }
                 DiscoveryPortableMismatch::ModuleIdentity => "hub.module.identity_mismatch",
                 DiscoveryPortableMismatch::ModuleContentDigest => {
                     "hub.module.content_digest_mismatch"
@@ -2460,6 +2463,9 @@ fn portable_error(error: DiscoveryPortableError) -> graphforge_api::GfError {
                     "hub.package.immutable_version_mismatch"
                 }
                 DiscoveryPortableMismatch::PackageDigest => "hub.package.package_digest_mismatch",
+                DiscoveryPortableMismatch::ProducingCoreVersion => {
+                    "hub.package.producing_core_version_mismatch"
+                }
                 DiscoveryPortableMismatch::ModuleIdentity => "hub.module.identity_mismatch",
                 DiscoveryPortableMismatch::ModuleContentDigest => {
                     "hub.module.content_digest_mismatch"

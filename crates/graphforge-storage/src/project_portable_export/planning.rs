@@ -14,6 +14,7 @@ use crate::{
     ResolvedProjectGeneration, preview_portable_selection, project_portable::canonical_json,
 };
 use graphforge_core::hash_observation::{ContractSha256, ControlSha256 as Sha256, PortableSha256};
+use graphforge_core::manifest::GRAPHFORGE_VERSION;
 use serde::Serialize;
 use sha2::Digest;
 use std::io::Read;
@@ -212,6 +213,7 @@ impl PortableExportPlan {
             format: "graphforge-project/2",
             package_digest: String::new(),
             package_class: "graph-data-subset",
+            producing_core_version: GRAPHFORGE_VERSION,
             source_generation: Source {
                 generation_uuid: generation_uuid.clone(),
                 manifest_sha256: source_manifest.clone(),
@@ -244,6 +246,7 @@ impl PortableExportPlan {
             format: "graphforge-project/2",
             package_digest: format!("sha256:{}", hex(self.package_digest)),
             package_class: "graph-data-subset",
+            producing_core_version: GRAPHFORGE_VERSION,
             source_generation: Source {
                 generation_uuid,
                 manifest_sha256: source_manifest,
@@ -285,6 +288,7 @@ struct Manifest<'a> {
     format: &'static str,
     package_digest: String,
     package_class: &'a str,
+    producing_core_version: &'static str,
     source_generation: Source,
     selection: Selection<'a>,
     components: &'a [Component],
@@ -999,6 +1003,7 @@ pub fn plan_selected_portable(
         format: "graphforge-project/2",
         package_digest: String::new(),
         package_class: &selection.package_class,
+        producing_core_version: GRAPHFORGE_VERSION,
         source_generation: source(),
         selection: Selection {
             roots: &roots,
@@ -1037,6 +1042,7 @@ pub fn plan_selected_portable(
         format: "graphforge-project/2",
         package_digest: format!("sha256:{}", hex(package_digest)),
         package_class: &selection.package_class,
+        producing_core_version: GRAPHFORGE_VERSION,
         source_generation: source(),
         selection: Selection {
             roots: &roots,

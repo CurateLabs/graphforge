@@ -89,6 +89,7 @@ fn discovery(package_digest: String) -> (DiscoveryManifest, RefSet, RepositoryId
         package: PortablePackageReference {
             format: PORTABLE_FORMAT.into(),
             package_digest: Sha256Digest(package_digest),
+            producing_core_version: "0.6.0".into(),
             object_digest: digest('c'),
         },
         summary: None,

@@ -303,6 +303,7 @@ mod tests {
         PortablePackageReference {
             format: PORTABLE_FORMAT.into(),
             package_digest: Sha256Digest(package_digest.into()),
+            producing_core_version: "0.6.0".into(),
             object_digest: Sha256Digest(object_digest.into()),
         }
     }
