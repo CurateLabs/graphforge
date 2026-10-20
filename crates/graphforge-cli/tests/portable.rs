@@ -67,7 +67,7 @@ fn current_export_and_import_round_trip_with_stable_json() {
             bundle.to_str().unwrap(),
         ],
     ));
-    assert_eq!(exported["contract"], "graphforge-portable-export/2");
+    assert_eq!(exported["contract"], "graphforge-portable-export/1");
     assert_eq!(exported["source"], "current");
     assert!(exported["checkpoint"].is_null());
     assert!(
@@ -89,7 +89,7 @@ fn current_export_and_import_round_trip_with_stable_json() {
             "00000000-0000-0000-0000-000000000229",
         ],
     ));
-    assert_eq!(imported["contract"], "graphforge-portable-import/2");
+    assert_eq!(imported["contract"], "graphforge-portable-import/1");
     assert_eq!(imported["package_digest"], exported["package_digest"]);
     assert_eq!(imported["idempotent_replay"], false);
 
@@ -245,7 +245,7 @@ fn portable_export_verify_and_import_round_trip() {
             bundle.to_str().unwrap(),
         ],
     ));
-    assert_eq!(exported["contract"], "graphforge-portable-export/2");
+    assert_eq!(exported["contract"], "graphforge-portable-export/1");
     assert_eq!(exported["representation"], "bundle");
     assert!(
         exported.get("output").is_none(),
@@ -280,7 +280,7 @@ fn portable_export_verify_and_import_round_trip() {
             "00000000-0000-0000-0000-000000000744",
         ],
     ));
-    assert_eq!(imported["contract"], "graphforge-portable-import/2");
+    assert_eq!(imported["contract"], "graphforge-portable-import/1");
     assert_eq!(imported["package_digest"], package_digest);
     assert_eq!(imported["idempotent_replay"], false);
 
@@ -961,7 +961,7 @@ fn primary_streaming_current_and_checkpoint_reopen_with_exact_query_results() {
         args.extend(selector);
         args.extend(["--format", "bundle", "--output", bundle.to_str().unwrap()]);
         let exported = json(&gf(&project, &args));
-        assert_eq!(exported["contract"], "graphforge-portable-export/2");
+        assert_eq!(exported["contract"], "graphforge-portable-export/1");
         let target = root.path().join(format!("{name}-imported"));
         let operation = uuid::Uuid::new_v4().to_string();
         let imported = json(&gf(

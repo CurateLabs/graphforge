@@ -3754,7 +3754,7 @@ fn run_integrated_certification_config(
     )
     .expect("full portable verification");
     assert_eq!(verified.package_digest, exported.package_digest);
-    assert_eq!(verified.contract, "graphforge-portable-verify/2");
+    assert_eq!(verified.contract, "graphforge-portable-verify/1");
     journal.pass("verify", phase, Some(verified.package_digest.clone()));
 
     let phase = Instant::now();

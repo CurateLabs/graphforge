@@ -38,20 +38,20 @@ pub fn new_v5(namespace: &Uuid, name: &[u8]) -> Uuid {
 /// The versioned name is a persisted compatibility contract.
 #[must_use]
 pub fn portable_import_generation(operation: &Uuid) -> Uuid {
-    new_v5(operation, b"graphforge-portable-v2-import-generation/1")
+    new_v5(operation, b"graphforge-portable-import-generation/1")
 }
 
 /// Derive the empty parent generation used by a fresh portable import.
 /// The versioned name is a persisted compatibility contract.
 #[must_use]
 pub fn portable_bootstrap_generation(operation: &Uuid) -> Uuid {
-    new_v5(operation, b"graphforge-portable-v2-bootstrap-generation/1")
+    new_v5(operation, b"graphforge-portable-bootstrap-generation/1")
 }
 
 /// Derive the empty parent's transaction in a separate versioned domain.
 #[must_use]
 pub fn portable_bootstrap_transaction(operation: &Uuid) -> Uuid {
-    new_v5(operation, b"graphforge-portable-v2-bootstrap-transaction/1")
+    new_v5(operation, b"graphforge-portable-bootstrap-transaction/1")
 }
 
 /// Derive one composite delta operation using its original mutation index.
@@ -198,7 +198,7 @@ mod tests {
 
     #[test]
     fn persisted_derivation_golden_vectors() {
-        // Frozen from the original namespace/name pairs, independently calculated
+        // Frozen namespace/name pairs, independently calculated
         // with Python uuid.uuid5. Compare bytes to protect persisted identities.
         let operation = Uuid::parse_str("00112233-4455-6677-8899-aabbccddeeff").unwrap();
         let version_a = format!("sha256:{}", "a".repeat(64));
@@ -210,15 +210,15 @@ mod tests {
             ),
             (
                 portable_import_generation(&operation),
-                "167a58d3-52f2-533e-b3c4-01d743d7537d",
+                "02abd337-e93c-56a3-bf8f-dadbb5b1e8d5",
             ),
             (
                 portable_bootstrap_generation(&operation),
-                "d633da3b-0a2e-543e-bcdd-d383b3c52794",
+                "0fd178fc-3bb1-538d-a806-18da85f18eec",
             ),
             (
                 portable_bootstrap_transaction(&operation),
-                "7f6e6309-9103-5c77-837a-0efffec19b70",
+                "225a8651-92b1-5dc3-aec8-251cff727cba",
             ),
             (
                 composite_delta_operation(&operation, 0),

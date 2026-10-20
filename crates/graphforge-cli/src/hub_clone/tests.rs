@@ -470,7 +470,7 @@ fn research_ref_without_lineage_stops_before_project_download() {
             "package_digest":format!("sha256:{}", "b".repeat(64)),
             "object_digest":format!("sha256:{}", "c".repeat(64))
         },
-        "requirements":[{"capability":"portable-v2","major":1}],"capabilities":[],
+        "requirements":[{"capability":"portable","major":1}],"capabilities":[],
         "objects":[{
             "digest":format!("sha256:{}", "c".repeat(64)),"length":1,
             "media_type":graphforge_discovery::PORTABLE_MEDIA_TYPE,
@@ -604,7 +604,7 @@ pub(super) fn clone_documents(
         "repository":repository,"default_ref":"main","resolved_ref":"main",
         "immutable_version":immutable,
         "package":{"format":"graphforge-project/2","package_digest":package_digest,"object_digest":object_digest},
-        "requirements":[{"capability":"portable-v2","major":1}],"capabilities":[{"capability":"range-requests","major":1}],
+        "requirements":[{"capability":"portable","major":1}],"capabilities":[{"capability":"range-requests","major":1}],
         "objects":objects
     })).unwrap();
     (refs, manifest)

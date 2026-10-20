@@ -258,7 +258,7 @@ fn documents(lineage: &ResearchLineage) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
             object_digest: digest('f'),
         }),
         requirements: vec![ProtocolRequirement {
-            capability: "portable-v2".into(),
+            capability: "portable".into(),
             major: 1,
         }],
         capabilities: vec![],

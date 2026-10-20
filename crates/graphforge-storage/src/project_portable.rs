@@ -1066,7 +1066,7 @@ fn validate_package(
             .components
             .iter()
             .any(|component| component.kind == "research"),
-        contract: "graphforge-portable-verify/2",
+        contract: "graphforge-portable-verify/1",
         representation,
         package_digest: manifest.package_digest.clone(),
         package_class: package_class(&manifest.package_class)?,

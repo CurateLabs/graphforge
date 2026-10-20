@@ -95,7 +95,7 @@ fn discovery(package_digest: String) -> (DiscoveryManifest, RefSet, RepositoryId
         ontology: None,
         lineage: None,
         requirements: vec![ProtocolRequirement {
-            capability: "portable-v2".into(),
+            capability: "portable".into(),
             major: 1,
         }],
         capabilities: vec![],

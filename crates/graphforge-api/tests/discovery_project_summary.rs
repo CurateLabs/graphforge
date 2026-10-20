@@ -384,7 +384,7 @@ fn summary_binds_to_a_manifest_built_with_discovery_types() {
             bridge_sets: composition.bridge_sets.clone(),
         }),
         requirements: vec![ProtocolRequirement {
-            capability: "portable-v2".into(),
+            capability: "portable".into(),
             major: 1,
         }],
         capabilities: vec![],
