@@ -717,6 +717,16 @@ fn clone_succeeds_against_the_checked_in_hub_fixture() {
     let result: serde_json::Value = serde_json::from_slice(&output).unwrap();
     assert_eq!(result["contract"], "graphforge-hub-clone/1");
     assert_eq!(result["package_digest"], manifest.package.package_digest.0);
+    // Without lineage the default ref selects the Project package itself.
+    assert!(manifest.lineage.is_none());
+    for field in [
+        "resolved_ref",
+        "research_branch_uuid",
+        "research_version_uuid",
+        "research_version_identity",
+    ] {
+        assert!(result.get(field).is_none(), "{field}: {result}");
+    }
     let cloned = GraphForge::new(destination.to_str()).expect("clone reopens");
     let metadata = cloned.research_project_metadata().unwrap();
     assert_eq!(metadata.title.as_deref(), Some("OpenAlex"));

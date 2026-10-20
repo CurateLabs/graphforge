@@ -88,7 +88,9 @@ impl<'a> RepositoryMoveTransport<'a> {
             } else {
                 self.inner.get(&counterpart, None, None, 4096)?
             };
-            if StatusClass::of(response.status).transient() {
+            // Any server-side or throttling status leaves the confirmation open to
+            // a retry; the stable status classes of the read path do not apply.
+            if matches!(response.status, 408 | 429 | 500..=599) {
                 return Err(network(
                     "repository move confirmation temporarily unavailable",
                 ));
@@ -389,6 +391,7 @@ mod tests {
                     location: Some(url.to_string()),
                     etag: None,
                     content_range: None,
+                    retry_after: None,
                     body: Box::new(Cursor::new(Vec::new())),
                 })
             }
@@ -462,6 +465,7 @@ mod tests {
                     location,
                     etag: None,
                     content_range: None,
+                    retry_after: None,
                     body: Box::new(Cursor::new(bytes)),
                 })
             }
