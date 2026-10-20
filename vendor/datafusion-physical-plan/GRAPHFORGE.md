@@ -256,6 +256,23 @@ python3 scripts/test_environment.py -- cargo nextest run --locked --no-fail-fast
 These commands describe reproduction, not a claim that a particular candidate
 has passed. Test results and native workload receipts belong on the issue/PR.
 
+## Spill merge working-set patch
+
+GraphForge #2173 changes `src/sorts/copy_admission.rs`,
+`src/sorts/copy_bounds.rs` and `src/sorts/multi_level_merge.rs`. A spill merge
+that copies with a Row, Primitive Field or Field cursor used to ask the pool
+for the interleave workspace of every merged batch again, on the consumer that
+owns the merge; a refusal fails an aggregate that cannot spill any further. The
+merge now admits, with the loop that chooses its spill files, the working set
+of its copies (one interleave workspace and one live output, twice
+`get_reserved_bytes_for_record_batch_size(max, max)` of the largest file) and,
+for a Row or Primitive Field cursor, the metadata of its constructors. The
+copy authority keeps them as a floor until the stream ends; a copy asks the pool
+only for what passes it. The product controls are
+`query_pool::tests::*_merge_of_the_spill_files_asks_the_pool_for_nothing_after_its_first_batch`
+in `crates/graphforge-exec/src/query_pool/tests.rs` and
+`session::query_memory_tests`.
+
 ## Updating and removal
 
 Compare each named patch file against registry `datafusion-physical-plan`

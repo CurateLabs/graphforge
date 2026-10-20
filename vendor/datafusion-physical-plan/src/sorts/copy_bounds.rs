@@ -75,17 +75,7 @@ pub(super) fn qualified_columns(
         let Some(field) = schema.fields().get(column.index()) else {
             return Ok(None);
         };
-        if expressions.len() == 1
-            && (field.data_type().primitive_width().is_some()
-                || matches!(
-                    field.data_type(),
-                    DataType::Utf8
-                        | DataType::LargeUtf8
-                        | DataType::Binary
-                        | DataType::LargeBinary
-                        | DataType::Utf8View
-                ))
-        {
+        if expressions.len() == 1 && field_cursor_type(field.data_type()) {
             return Ok(None);
         }
         if variable(field.data_type()) {
@@ -97,6 +87,27 @@ pub(super) fn qualified_columns(
         width = add(width, encoded)?;
     }
     Ok(Some(width))
+}
+/// The key types the merge reads with the single-column FieldCursor.
+fn field_cursor_type(data_type: &DataType) -> bool {
+    data_type.primitive_width().is_some()
+        || matches!(
+            data_type,
+            DataType::Utf8
+                | DataType::LargeUtf8
+                | DataType::Binary
+                | DataType::LargeBinary
+                | DataType::Utf8View
+        )
+}
+/// Whether the merge of these expressions reads with the FieldCursor, as
+/// `streaming_merge` dispatches: one expression of a Field key type.
+pub(super) fn single_column_field(
+    schema: &Schema,
+    expressions: &LexOrdering,
+) -> Result<bool> {
+    Ok(expressions.len() == 1
+        && field_cursor_type(&expressions[0].expr.data_type(schema)?))
 }
 /// This Field proof is deliberately narrower than Arrow's dispatch table.
 /// Direct Int64 values shallow-clone their ScalarBuffer. Only the already

@@ -51,6 +51,10 @@ struct State {
     active: bool,
     preparing: bool,
     field: FieldLifetime,
+    /// What the authority never falls below once preparing has finished: the
+    /// resident bytes of the constructors and the working set above them.
+    /// Resident bytes that arrive later draw on it.
+    floor: usize,
 }
 /// The allocation proof used by this merge, separate from its original envelope.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -63,6 +67,7 @@ pub(super) enum CopyCapability {
 #[allow(dead_code)]
 pub(super) struct ChargedCopyAdmission {
     envelope: usize,
+    working_set: usize,
     capability: CopyCapability,
     state: Mutex<State>,
 }
@@ -70,6 +75,10 @@ pub(super) struct ChargedCopyAdmission {
 #[derive(Debug)]
 pub(super) struct CopyAdmission {
     envelope: usize,
+    /// Bytes of kernel workspace plus one live output, admitted before the
+    /// first operation and held until the last: an operation that fits within
+    /// them draws on them, and only an output past them asks the pool again.
+    working_set: usize,
     capability: CopyCapability,
     state: Mutex<State>,
     diagnostic_piece: od::Piece,
@@ -112,8 +121,13 @@ impl CopyAdmission {
             + 2 * size_of::<usize>()
             + crate::spill::resident_metadata::std_mutex_heap_bound().unwrap_or(0)
     }
-    pub(super) fn new(authority: MemoryReservation) -> Result<Arc<Self>> {
-        let envelope = authority.size();
+    /// `working_set` is held in `authority` above the envelope, for a merge
+    /// that reads with a Field cursor (zero for any other).
+    pub(super) fn new(
+        authority: MemoryReservation,
+        working_set: usize,
+    ) -> Result<Arc<Self>> {
+        let envelope = authority.size().saturating_sub(working_set);
         // Preserve sufficient original authority. Admit any missing known
         // control bytes BEFORE the first Mutex lock or Arc allocation.
         let missing_control = Self::control_bytes().saturating_sub(envelope);
@@ -136,6 +150,7 @@ impl CopyAdmission {
             active: false,
             preparing: false,
             field: FieldLifetime::None,
+            floor: 0,
         });
         // On macOS, the first lock allocates one pthread mutex Box. Initialize
         // while uniquely owned, so no OnceBox initializer can allocate a loser
@@ -143,6 +158,7 @@ impl CopyAdmission {
         drop(state.lock().unwrap());
         Ok(Arc::new(Self {
             envelope,
+            working_set,
             capability: CopyCapability::Legacy,
             state,
             diagnostic,
@@ -153,12 +169,14 @@ impl CopyAdmission {
         authority: MemoryReservation,
         metadata: usize,
         capability: CopyCapability,
+        working_set: usize,
     ) -> Result<Arc<Self>> {
         let envelope = authority.size();
         // This occurs before starting any prefetched reader. Constructor
         // allowance remains earmarked until both row/merge constructors finish.
+        // The working set was admitted at file selection and stays held.
         let heap = crate::spill::resident_metadata::std_mutex_heap_bound().unwrap_or(0);
-        authority.try_resize(add(metadata, heap)?)?;
+        authority.try_resize(add(add(metadata, heap)?, working_set)?)?;
         let diagnostic = od::Life::inherited(od::Kind::Copy);
         let diagnostic_piece = od::Piece::new(&authority, diagnostic.id());
         diagnostic.update(|o| {
@@ -183,12 +201,14 @@ impl CopyAdmission {
             active: false,
             preparing: true,
             field: FieldLifetime::None,
+            floor: 0,
         });
         // Full constructor grant remains live through this unique-owner first
         // lock and the later Arc allocation. No public Arc exists yet.
         drop(state.lock().unwrap());
         Ok(Arc::new(Self {
             envelope,
+            working_set,
             capability,
             state,
             diagnostic,
@@ -234,8 +254,19 @@ impl CopyAdmission {
             resident
         })
     }
-    fn retained(&self, state: &State) -> usize {
+    /// What is live: the resident bytes and the outputs still held.
+    fn live(&self, state: &State) -> usize {
         self.base(state, state.rows) + state.outputs
+    }
+    /// What the authority keeps between operations: the live bytes, and never
+    /// less than the floor.
+    fn retained(&self, state: &State) -> usize {
+        self.live(state).max(state.floor)
+    }
+    /// What an operation needs: its workspace beside the live bytes, within
+    /// the floor when they fit it, so that only the excess asks the pool.
+    fn operating(&self, state: &State, workspace: usize) -> Result<usize> {
+        Ok(state.floor.max(add(self.live(state), workspace)?))
     }
     pub(super) fn preparing_field(&self, metadata: usize) -> Result<()> {
         let _transition = od::Transition::begin();
@@ -247,7 +278,7 @@ impl CopyAdmission {
             return Err(bound_error());
         }
         let control = Self::control_bytes();
-        let target = self.envelope.max(add(control, metadata)?);
+        let target = add(self.envelope.max(add(control, metadata)?), self.working_set)?;
         if target > state.authority.size() {
             state.authority.try_grow(target - state.authority.size())?;
         }
@@ -256,19 +287,21 @@ impl CopyAdmission {
         self.observe(&state);
         Ok(())
     }
-    /// The wrapper must destroy inner cursor/GC/failed-phase data first.
-    pub(super) fn retire_field(&self) {
+    /// The wrapper must destroy inner cursor/GC/failed-phase data first. The
+    /// merge is over: the escaped outputs keep only their own bytes.
+    pub(super) fn retire(&self) {
         let _transition = od::Transition::begin();
         let mut state = self.state.lock().unwrap();
+        state.floor = 0;
         if state.field == FieldLifetime::Live {
             state.field = FieldLifetime::Retired;
             state.preparing = false;
-            if !state.active {
-                let excess = state.authority.size() - self.retained(&state);
-                state.authority.shrink(excess);
-            }
-            self.observe(&state);
         }
+        if !state.active && !state.preparing {
+            let excess = state.authority.size().saturating_sub(self.retained(&state));
+            state.authority.shrink(excess);
+        }
+        self.observe(&state);
     }
     pub(super) fn has_output_bounds(&self) -> bool {
         self.bounded_operations()
@@ -299,8 +332,11 @@ impl CopyAdmission {
         let mut state = self.state.lock().unwrap();
         if state.preparing {
             state.preparing = false;
+            if self.working_set > 0 {
+                state.floor = self.live(&state) + self.working_set;
+            }
             let target = self.retained(&state);
-            let excess = state.authority.size() - target;
+            let excess = state.authority.size().saturating_sub(target);
             state.authority.shrink(excess);
             self.observe(&state);
         }
@@ -321,9 +357,9 @@ impl CopyAdmission {
         let target = if state.preparing {
             state.authority.size()
         } else if state.field != FieldLifetime::None {
-            add(self.retained(&state), workspace.unwrap_or(0))?
+            self.operating(&state, workspace.unwrap_or(0))?
         } else if let Some(workspace) = workspace.filter(|_| self.bounded_operations()) {
-            add(self.retained(&state), workspace)?
+            self.operating(&state, workspace)?
         } else {
             add(
                 self.envelope.max(add(self.control(&state), state.rows)?),
@@ -352,7 +388,7 @@ impl CopyAdmission {
             add(size_of::<ChargedResident>(), 2 * size_of::<usize>())?,
         )?;
         let total = if output {
-            add(self.retained(&state), bytes)?
+            add(self.live(&state), bytes)?
         } else {
             add(
                 self.checked_base(&state, add(state.rows, bytes)?)?,
@@ -419,7 +455,7 @@ impl Drop for Resident {
         }
         if !state.active && !state.preparing {
             let target = self.admission.retained(&state);
-            let excess = state.authority.size() - target;
+            let excess = state.authority.size().saturating_sub(target);
             state.authority.shrink(excess);
         }
         self.admission.observe(&state);
@@ -488,7 +524,7 @@ impl Phase {
         }
         let result = state
             .authority
-            .try_resize(add(self.admission.retained(&state), operation)?);
+            .try_resize(self.admission.operating(&state, operation)?);
         self.admission.observe(&state);
         result
     }
@@ -501,7 +537,7 @@ impl Drop for Phase {
         state.active = false;
         if !state.preparing {
             let target = self.admission.retained(&state);
-            let excess = state.authority.size() - target;
+            let excess = state.authority.size().saturating_sub(target);
             state.authority.shrink(excess);
         }
         self.admission.observe(&state);

@@ -286,11 +286,44 @@ impl MultiLevelMergeBuilder {
                 // inputs continue using the existing fixed-copy reservation.
                 let all_ipc_inputs = sorted_streams.is_empty();
 
-                let (sorted_spill_files, buffer_size) = self
+                // Decide eligibility before moving any authority. Stock split
+                // preserves consumer identity: spilling aggregate sponsors must
+                // keep their existing loan/floor and reservation lifecycle.
+                let retiring = all_ipc_inputs
+                    && !memory_reservation.consumer().can_spill()
+                    && crate::spill::resident_metadata::std_mutex_heap_bound().is_some()
+                    && crate::spill::admission::ticket_schema(&self.schema);
+                // Qualification precedes all authority moves and prefetch.
+                let capability = if all_ipc_inputs {
+                    if let Some(encoded_width) =
+                        super::copy_bounds::qualified_columns(&self.schema, &self.expr)?
+                    {
+                        CopyCapability::Row { encoded_width }
+                    } else if retiring
+                        && super::copy_bounds::primitive_field(&self.schema, &self.expr)
+                    {
+                        CopyCapability::PrimitiveField
+                    } else {
+                        CopyCapability::Legacy
+                    }
+                } else {
+                    CopyCapability::Legacy
+                };
+                // A merge that reads with a Field cursor keeps the whole
+                // envelope of its copies; its working set lies beside it.
+                let field = all_ipc_inputs
+                    && capability == CopyCapability::Legacy
+                    && super::copy_bounds::single_column_field(&self.schema, &self.expr)?;
+                // Streams that are all spill files select at least two of them,
+                // so a merge with a copy capability always reads spill files.
+                let (sorted_spill_files, buffer_size, working_set) = self
                     .get_sorted_spill_files_to_merge(
                         2,
                         // we must have at least 2 streams to merge
                         2_usize.saturating_sub(sorted_streams.len()),
+                        capability,
+                        field,
+                        sorted_streams.capacity(),
                         &mut memory_reservation,
                     )?;
 
@@ -321,30 +354,6 @@ impl MultiLevelMergeBuilder {
                                 )?,
                             )
                         })?;
-                // Decide eligibility before moving any authority. Stock split
-                // preserves consumer identity: spilling aggregate sponsors must
-                // keep their existing loan/floor and reservation lifecycle.
-                let retiring = all_ipc_inputs
-                    && !is_only_merging_memory_streams
-                    && !memory_reservation.consumer().can_spill()
-                    && crate::spill::resident_metadata::std_mutex_heap_bound().is_some()
-                    && crate::spill::admission::ticket_schema(&self.schema);
-                // Qualification precedes all authority moves and prefetch.
-                let capability = if all_ipc_inputs && !is_only_merging_memory_streams {
-                    if let Some(encoded_width) =
-                        super::copy_bounds::qualified_columns(&self.schema, &self.expr)?
-                    {
-                        CopyCapability::Row { encoded_width }
-                    } else if retiring
-                        && super::copy_bounds::primitive_field(&self.schema, &self.expr)
-                    {
-                        CopyCapability::PrimitiveField
-                    } else {
-                        CopyCapability::Legacy
-                    }
-                } else {
-                    CopyCapability::Legacy
-                };
                 memory_piece.refresh(&memory_reservation, self.diagnostic.id());
                 let (input_credit, producers) = if retiring {
                     let input = memory_reservation.split(input_bytes);
@@ -393,63 +402,19 @@ impl MultiLevelMergeBuilder {
                         Some(authority_piece.transfer_to(
                             self.diagnostic.id(),
                             od::Kind::Copy as u64,
-                            || CopyAdmission::new(authority),
+                            || CopyAdmission::new(authority, working_set),
                         )?)
                     } else {
-                        let streams = sorted_spill_files.len();
-                        let (cursor, merge) = match capability {
-                            CopyCapability::Row { .. } => (
-                                super::stream::RowCursorStream::constructor_bound(
-                                    streams,
-                                    self.expr.len(),
-                                )?,
-                                super::merge::SortPreservingMergeStream::<
-                                    super::cursor::RowValues,
-                                >::constructor_bound(
-                                    streams, self.batch_size
-                                )?,
-                            ),
-                            CopyCapability::PrimitiveField => {
-                                // An empty supplied Vec can retain capacity.
-                                // Fund that backing and possible push growth;
-                                // Field separately allocates N Fuse slots.
-                                let capacity = sorted_streams.capacity().max(
-                                    crate::spill::admission::mul(streams, 2)?.max(4),
-                                );
-                                (
-                                    super::stream::FieldCursorStream::<
-                                        arrow::array::Int64Array,
-                                    >::constructor_bound(
-                                        streams, capacity
-                                    )?,
-                                    super::merge::SortPreservingMergeStream::<
-                                        super::cursor::ArrayValues<
-                                            super::cursor::PrimitiveValues<i64>,
-                                        >,
-                                    >::constructor_bound(
-                                        streams, self.batch_size
-                                    )?,
-                                )
-                            }
-                            CopyCapability::Legacy => unreachable!(),
-                        };
-                        let metadata = crate::spill::admission::add(
-                            cursor,
-                            crate::spill::admission::add(
-                                merge,
-                                crate::spill::admission::add(
-                                    crate::spill::admission::schema_bound(&self.schema)?,
-                                    crate::spill::admission::mul(
-                                        sorted_spill_files.capacity(),
-                                        size_of::<SortedSpillFile>(),
-                                    )?,
-                                )?,
-                            )?,
+                        let metadata = self.copy_metadata(
+                            capability,
+                            sorted_spill_files.len(),
+                            sorted_spill_files.capacity(),
+                            sorted_streams.capacity(),
                         )?;
                         Some(authority_piece.transfer_to(
                             self.diagnostic.id(),
                             od::Kind::Copy as u64,
-                            || CopyAdmission::preparing(authority, metadata, capability),
+                            || CopyAdmission::preparing(authority, metadata, capability, working_set),
                         )?)
                     }
                 } else {
@@ -554,12 +519,23 @@ impl MultiLevelMergeBuilder {
     /// This will try to get as many spill files as possible to merge, and if we don't have enough streams
     /// it will try to reduce the buffer size until we have enough streams to merge
     /// otherwise it will return an error
+    ///
+    /// A merge with a copy capability also admits, with the same loop, what
+    /// building its copies and merging with them takes beyond the buffers of
+    /// the files it chose: their metadata and their working set (see
+    /// [`copy_working_set`]); a merge with a Field cursor, which keeps the
+    /// envelope of its copies, admits the working set beside it. The breadth of
+    /// the merge adapts to it, and no batch merged later asks the pool for its
+    /// workspace. The working set is returned (zero for any other merge).
     fn get_sorted_spill_files_to_merge(
         &mut self,
         buffer_len: usize,
         minimum_number_of_required_streams: usize,
+        capability: CopyCapability,
+        field: bool,
+        backing: usize,
         reservation: &mut MemoryReservation,
-    ) -> Result<(Vec<SortedSpillFile>, usize)> {
+    ) -> Result<(Vec<SortedSpillFile>, usize, usize)> {
         assert_ne!(buffer_len, 0, "Buffer length must be greater than 0");
         let mut number_of_spills_to_read_for_current_phase = 0;
         // Track total memory needed for spill file buffers. When the
@@ -567,6 +543,11 @@ impl MultiLevelMergeBuilder {
         // those bytes cover the first N spill files without additional pool
         // allocation, preventing starvation under memory pressure.
         let mut total_needed: usize = 0;
+        // The buffers the readers take from the reservation; the copies keep
+        // what remains of it.
+        let mut input_bytes: usize = 0;
+        let mut largest: usize = 0;
+        let heap = crate::spill::resident_metadata::std_mutex_heap_bound().unwrap_or(0);
 
         for spill in &self.sorted_spill_files {
             let per_spill = get_reserved_bytes_for_record_batch_size(
@@ -575,13 +556,32 @@ impl MultiLevelMergeBuilder {
                 spill.max_record_batch_memory,
             ) * buffer_len;
             total_needed += per_spill;
+            let mut needed = total_needed;
+            if capability != CopyCapability::Legacy {
+                input_bytes += spill.max_record_batch_memory * buffer_len;
+                let streams = number_of_spills_to_read_for_current_phase + 1;
+                let copies = crate::spill::admission::add(
+                    copy_working_set(largest.max(spill.max_record_batch_memory))?,
+                    crate::spill::admission::add(
+                        self.copy_metadata(capability, streams, streams, backing)?,
+                        heap,
+                    )?,
+                )?;
+                needed = needed.max(crate::spill::admission::add(input_bytes, copies)?);
+            } else if field {
+                needed = crate::spill::admission::add(
+                    needed,
+                    copy_working_set(largest.max(spill.max_record_batch_memory))?,
+                )?;
+            }
 
             // For memory pools that are not shared this is good, for other
             // this is not and there should be some upper limit to memory
             // reservation so we won't starve the system.
-            match try_grow_reservation_to_at_least(reservation, total_needed) {
+            match try_grow_reservation_to_at_least(reservation, needed) {
                 Ok(_) => {
                     number_of_spills_to_read_for_current_phase += 1;
+                    largest = largest.max(spill.max_record_batch_memory);
                 }
                 // If we can't grow the reservation, we need to stop
                 Err(err) => {
@@ -597,6 +597,9 @@ impl MultiLevelMergeBuilder {
                             return self.get_sorted_spill_files_to_merge(
                                 buffer_len - 1,
                                 minimum_number_of_required_streams,
+                                capability,
+                                field,
+                                backing,
                                 reservation,
                             );
                         }
@@ -616,8 +619,76 @@ impl MultiLevelMergeBuilder {
             .drain(..number_of_spills_to_read_for_current_phase)
             .collect::<Vec<_>>();
 
-        Ok((spills, buffer_len))
+        let working_set = if capability == CopyCapability::Legacy && !field {
+            0
+        } else {
+            copy_working_set(largest)?
+        };
+        Ok((spills, buffer_len, working_set))
     }
+
+    /// The bytes the cursor and merge constructors, the schema and the list of
+    /// the files of a merge of `streams` spill files take, which the merge
+    /// admits before it builds them. `files` is the capacity of that list and
+    /// `backing` that of the stream list a Field cursor may reuse.
+    fn copy_metadata(
+        &self,
+        capability: CopyCapability,
+        streams: usize,
+        files: usize,
+        backing: usize,
+    ) -> Result<usize> {
+        let (cursor, merge) = match capability {
+            CopyCapability::Row { .. } => (
+                super::stream::RowCursorStream::constructor_bound(
+                    streams,
+                    self.expr.len(),
+                )?,
+                super::merge::SortPreservingMergeStream::<super::cursor::RowValues>::constructor_bound(
+                    streams,
+                    self.batch_size,
+                )?,
+            ),
+            CopyCapability::PrimitiveField => {
+                // An empty supplied Vec can retain capacity.
+                // Fund that backing and possible push growth;
+                // Field separately allocates N Fuse slots.
+                let capacity = backing
+                    .max(crate::spill::admission::mul(streams, 2)?.max(4));
+                (
+                    super::stream::FieldCursorStream::<arrow::array::Int64Array>::constructor_bound(
+                        streams, capacity,
+                    )?,
+                    super::merge::SortPreservingMergeStream::<
+                        super::cursor::ArrayValues<super::cursor::PrimitiveValues<i64>>,
+                    >::constructor_bound(streams, self.batch_size)?,
+                )
+            }
+            CopyCapability::Legacy => return Ok(0),
+        };
+        crate::spill::admission::add(
+            cursor,
+            crate::spill::admission::add(
+                merge,
+                crate::spill::admission::add(
+                    crate::spill::admission::schema_bound(&self.schema)?,
+                    crate::spill::admission::mul(files, size_of::<SortedSpillFile>())?,
+                )?,
+            )?,
+        )
+    }
+}
+
+/// The memory the copies of a spill merge keep for as long as it runs, so that
+/// no merged batch asks the pool for its workspace: one interleave workspace
+/// and one live output, each sized as the sort sizes a copy of a batch as large
+/// as the largest spill file's. The merge of a Row or Field capability checks
+/// every copy against it, and asks the pool only for an output that exceeds it.
+fn copy_working_set(largest: usize) -> Result<usize> {
+    crate::spill::admission::mul(
+        2,
+        get_reserved_bytes_for_record_batch_size(largest, largest),
+    )
 }
 
 struct StreamAttachedReservation {
@@ -659,7 +730,7 @@ impl StreamAttachedReservation {
         // original production floor is still held. No Arrow drop under its lock.
         self.stream.take();
         if let Some(copy) = self.copy.take() {
-            copy.retire_field();
+            copy.retire();
         }
         self.reservation.free();
     }
