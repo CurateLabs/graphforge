@@ -78,13 +78,13 @@ fn project_page_facts_come_from_the_checked_in_artifacts_alone() {
     assert_eq!(size.relationship_count, Some(2_500));
     assert_eq!(size.source_count, Some(1));
     assert_eq!(size.artifact_count, Some(0));
-    assert_eq!(
-        summary.metadata.access.visibility.as_deref(),
-        Some("public")
-    );
-    assert_eq!(
-        summary.metadata.access.access_policy.as_deref(),
-        Some("open")
+    // The fixture publishes no research lineage and the summary carries no access
+    // fields, so it lists no people.
+    assert!(summary.people.is_empty());
+    assert!(
+        !String::from_utf8(summary_bytes.clone())
+            .unwrap()
+            .contains("access")
     );
     assert_eq!(summary.facts.ontology_mode, "advisory");
 

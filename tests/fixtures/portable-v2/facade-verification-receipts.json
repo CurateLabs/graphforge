@@ -1,16 +1,18 @@
 {
   "full": {
+    "research_interchange": false,
+    "research_entries": [],
     "contract": "graphforge-portable-verify/2",
     "representation": "bundle",
-    "package_digest": "sha256:492188fb9c3ac96b06b5373f571b47b6c6fc703c12800da1d02585001203fb35",
+    "package_digest": "sha256:f3d9289fe1ac448401ff4e496039bed69dda40aadd652000051524da05094509",
     "package_class": "complete",
     "component_count": 7,
     "entry_count": 12,
-    "payload_bytes": 10235,
+    "payload_bytes": 10159,
     "integrity": "verified",
     "compatibility": "supported",
     "authenticity": "unsigned",
-    "transport_digest": "sha256:52cbffc43ab2bd081aefa297970a4f060fb52b8a8ab601b77e2bca9ca6dda54d",
+    "transport_digest": "sha256:96aa71bc3c3e17f24ddaa26d246f68d4d9ebfccf8531f39412d6d308ed8a17c7",
     "ontology_composition": {
       "contract": "graphforge-ontology-composition/1",
       "activation_profile": {
@@ -48,22 +50,22 @@
         "sha256": "7d0c5018d4bd4abca09e268900412020317100af4ecdc11f81ad29b0296d6a94",
         "required_dependencies": []
       }
-    ],
-    "research_interchange": false,
-    "research_entries": []
+    ]
   },
   "structure_only": {
+    "research_interchange": false,
+    "research_entries": [],
     "contract": "graphforge-portable-verify/2",
     "representation": "bundle",
-    "package_digest": "sha256:492188fb9c3ac96b06b5373f571b47b6c6fc703c12800da1d02585001203fb35",
+    "package_digest": "sha256:f3d9289fe1ac448401ff4e496039bed69dda40aadd652000051524da05094509",
     "package_class": "complete",
     "component_count": 7,
     "entry_count": 12,
-    "payload_bytes": 10235,
+    "payload_bytes": 10159,
     "integrity": "not_checked",
     "compatibility": "supported",
     "authenticity": "unsigned",
-    "transport_digest": "sha256:52cbffc43ab2bd081aefa297970a4f060fb52b8a8ab601b77e2bca9ca6dda54d",
+    "transport_digest": "sha256:96aa71bc3c3e17f24ddaa26d246f68d4d9ebfccf8531f39412d6d308ed8a17c7",
     "ontology_composition": {
       "contract": "graphforge-ontology-composition/1",
       "activation_profile": {
@@ -101,8 +103,6 @@
         "sha256": "7d0c5018d4bd4abca09e268900412020317100af4ecdc11f81ad29b0296d6a94",
         "required_dependencies": []
       }
-    ],
-    "research_interchange": false,
-    "research_entries": []
+    ]
   }
 }
