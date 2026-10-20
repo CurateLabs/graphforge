@@ -7,21 +7,42 @@ use graphforge_core::portable::{
     PortableV2OciSignatureState, PortableV2Representation,
 };
 use graphforge_portable_oci::{
-    CONFIG_CONTRACT, OCI_ARTIFACT_TYPE, OCI_CONFIG_MEDIA_TYPE, OCI_LAYER_MEDIA_TYPE,
-    OCI_MANIFEST_MEDIA_TYPE, OciConfig, OciDescriptor, OciManifest, PortableV2OciRegistry,
-    attach_signature_referrer, authenticity_error, check_cancelled, digest_sha256,
-    evaluate_signature_state, package_class_str, validate_digest, validate_reference,
-    validate_repository,
+    CONFIG_CONTRACT, DigestingReader, OCI_ARTIFACT_TYPE, OCI_CONFIG_MEDIA_TYPE,
+    OCI_LAYER_MEDIA_TYPE, OCI_MANIFEST_MEDIA_TYPE, OciConfig, OciDescriptor, OciManifest,
+    PortableV2OciRegistry, attach_signature_referrer, authenticity_error, check_cancelled,
+    digest_reader, digest_sha256, evaluate_signature_state, package_class_str, validate_digest,
+    validate_reference, validate_repository,
 };
 use graphforge_storage::{
-    portable_bytes::{PortablePackageStage, portable_bundle_byte_limit, read_package_bytes},
+    portable_bytes::{PortablePackageStage, open_package_file, portable_bundle_byte_limit},
     verify_portable_v2,
 };
 use std::fs;
+use std::io::Read;
 use std::path::Path;
 #[cfg(test)]
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Fails reads once the operation is cancelled, so a long transfer stops
+/// promptly. Callers re-check the flag to report `Cancelled` rather than `Io`.
+struct CancellableReader<'a, R> {
+    inner: R,
+    cancelled: Option<&'a AtomicBool>,
+}
+
+impl<R: Read> Read for CancellableReader<'_, R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if self
+            .cancelled
+            .is_some_and(|flag| flag.load(Ordering::Relaxed))
+        {
+            return Err(std::io::Error::other("portable OCI operation cancelled"));
+        }
+        self.inner.read(buf)
+    }
+}
+
 /// Publish request for a locally verified portable-v2 bundle.
 #[derive(Clone)]
 pub struct PortableV2OciPublishRequest<'a> {
@@ -106,13 +127,24 @@ pub(crate) fn publish_portable_v2_oci_with_progress(
         ));
     }
 
-    let layer_bytes = read_package_bytes(
-        request.package_path,
-        &report,
-        portable_bundle_byte_limit(request.limits)?,
-    )?;
-    check_cancelled(cancelled)?;
-    let layer_digest = digest_sha256(&layer_bytes);
+    let max_layer_bytes = portable_bundle_byte_limit(request.limits)?;
+    let (layer_digest, layer_size) = {
+        let mut source = CancellableReader {
+            inner: open_package_file(request.package_path, &report)?
+                .take(max_layer_bytes.saturating_add(1)),
+            cancelled,
+        };
+        let identity = digest_reader(&mut source, request.limits.copy_buffer_bytes);
+        check_cancelled(cancelled)?;
+        identity
+            .map_err(|_| PortableV2Error::new(PortableV2ErrorCode::Io, "failed to read package"))?
+    };
+    if layer_size > max_layer_bytes {
+        return Err(PortableV2Error::new(
+            PortableV2ErrorCode::LimitExceeded,
+            "package exceeds byte limit",
+        ));
+    }
     let config = OciConfig {
         contract: CONFIG_CONTRACT.to_owned(),
         package_digest: report.package_digest.clone(),
@@ -141,8 +173,17 @@ pub(crate) fn publish_portable_v2_oci_with_progress(
     }
     check_cancelled(cancelled)?;
     if !registry.blob_exists(request.repository, &layer_digest)? {
-        registry.put_blob(request.repository, &layer_digest, &layer_bytes)?;
-        bytes_transferred += layer_bytes.len() as u64;
+        // Reopen and bound to the measured size: growth or mutation after the
+        // digest pass fails the upload instead of publishing different bytes.
+        let mut source = CancellableReader {
+            inner: open_package_file(request.package_path, &report)?.take(layer_size),
+            cancelled,
+        };
+        let uploaded =
+            registry.put_blob_stream(request.repository, &layer_digest, layer_size, &mut source);
+        check_cancelled(cancelled)?;
+        uploaded?;
+        bytes_transferred += layer_size;
         progress(PortableV2OciProgress {
             phase: PortableV2OciPhase::UploadBlob,
             bytes_transferred,
@@ -163,7 +204,7 @@ pub(crate) fn publish_portable_v2_oci_with_progress(
         layers: vec![OciDescriptor {
             media_type: OCI_LAYER_MEDIA_TYPE.to_owned(),
             digest: layer_digest,
-            size: layer_bytes.len() as u64,
+            size: layer_size,
         }],
         subject: None,
     };
@@ -360,14 +401,16 @@ pub(crate) fn pull_portable_v2_oci_with_progress(
         bytes_transferred,
         digest: Some(manifest.layers[0].digest.clone()),
     });
-    let layer_bytes = registry.get_blob(request.repository, &manifest.layers[0].digest)?;
-    bytes_transferred += layer_bytes.len() as u64;
-    if digest_sha256(&layer_bytes) != manifest.layers[0].digest {
+    let layer = &manifest.layers[0];
+    let max_layer_bytes = portable_bundle_byte_limit(request.limits)?;
+    if layer.size > max_layer_bytes {
         return Err(PortableV2Error::new(
-            PortableV2ErrorCode::DigestMismatch,
-            "layer blob digest mismatch",
+            PortableV2ErrorCode::LimitExceeded,
+            "layer exceeds byte limit",
         ));
     }
+    let layer_stream = registry.get_blob_stream(request.repository, &layer.digest, layer.size)?;
+    bytes_transferred += layer.size;
 
     let parent = request.destination.parent().ok_or_else(|| {
         PortableV2Error::new(
@@ -389,11 +432,19 @@ pub(crate) fn pull_portable_v2_oci_with_progress(
             .and_then(|n| n.to_str())
             .unwrap_or("package")
     ));
-    let stage = PortablePackageStage::create(
-        &stage,
-        &mut layer_bytes.as_slice(),
-        portable_bundle_byte_limit(request.limits)?,
-    )?;
+    let mut layer_source = DigestingReader::new(CancellableReader {
+        inner: layer_stream.take(layer.size.saturating_add(1)),
+        cancelled,
+    });
+    let stage = PortablePackageStage::create(&stage, &mut layer_source, max_layer_bytes);
+    check_cancelled(cancelled)?;
+    let stage = stage?;
+    if layer_source.finish() != (layer.digest.clone(), layer.size) {
+        return Err(PortableV2Error::new(
+            PortableV2ErrorCode::DigestMismatch,
+            "layer blob digest mismatch",
+        ));
+    }
     if check_cancelled(cancelled).is_err() {
         return Err(PortableV2Error::new(
             PortableV2ErrorCode::Cancelled,
@@ -606,7 +657,9 @@ mod tests {
         let registry = FaultyDownload {
             registry,
             corrupt: false,
+            corrupt_config: false,
             referrer_error: true,
+            cancel: None,
         };
         let error = pull_portable_v2_oci(
             &registry,
@@ -976,8 +1029,10 @@ mod tests {
                 .unwrap();
         let registry2 = FaultyDownload {
             registry: registry2,
-            corrupt: true,
+            corrupt: false,
+            corrupt_config: true,
             referrer_error: false,
+            cancel: None,
         };
         let destination = out_dir.path().join("corrupt.gfpb");
         let error = pull_portable_v2_oci(
@@ -993,6 +1048,125 @@ mod tests {
         .unwrap_err();
         assert_eq!(error.code, PortableV2ErrorCode::DigestMismatch);
         assert!(!destination.exists());
+    }
+
+    #[test]
+    fn streamed_publication_is_byte_identical_to_whole_file_publication() {
+        let (_dir, bundle, report) = export_bundle();
+        let registry = MemoryOciRegistry::default();
+        let published =
+            publish_portable_v2_oci(&registry, &publish_req(&bundle, None, None, None), None)
+                .unwrap();
+        // Rebuild what whole-buffer publication produced, from the file bytes alone.
+        let whole = fs::read(&bundle).unwrap();
+        let layer_digest = digest_sha256(&whole);
+        let config_bytes = serde_json::to_vec(&OciConfig {
+            contract: CONFIG_CONTRACT.to_owned(),
+            package_digest: report.package_digest.clone(),
+            package_class: package_class_str(report.package_class).to_owned(),
+            representation: "bundle".to_owned(),
+            transport_digest: report.transport_digest.clone(),
+            layer_media_type: OCI_LAYER_MEDIA_TYPE.to_owned(),
+        })
+        .unwrap();
+        let manifest_bytes = serde_json::to_vec(&OciManifest {
+            schema_version: 2,
+            media_type: OCI_MANIFEST_MEDIA_TYPE.to_owned(),
+            artifact_type: OCI_ARTIFACT_TYPE.to_owned(),
+            config: OciDescriptor {
+                media_type: OCI_CONFIG_MEDIA_TYPE.to_owned(),
+                digest: digest_sha256(&config_bytes),
+                size: config_bytes.len() as u64,
+            },
+            layers: vec![OciDescriptor {
+                media_type: OCI_LAYER_MEDIA_TYPE.to_owned(),
+                digest: layer_digest.clone(),
+                size: whole.len() as u64,
+            }],
+            subject: None,
+        })
+        .unwrap();
+        assert_eq!(
+            published.oci_manifest_digest,
+            digest_sha256(&manifest_bytes)
+        );
+        let (_, stored) = registry
+            .get_manifest("tests/portable", &published.oci_manifest_digest)
+            .unwrap();
+        assert_eq!(stored, manifest_bytes);
+        assert_eq!(
+            registry.get_blob("tests/portable", &layer_digest).unwrap(),
+            whole
+        );
+        assert_eq!(
+            published.bytes_transferred,
+            (config_bytes.len() + whole.len() + manifest_bytes.len()) as u64
+        );
+
+        let out = tempdir().unwrap();
+        let destination = out.path().join("pulled.gfpb");
+        let pulled = pull_portable_v2_oci(
+            &registry,
+            &pull_req(
+                &published.oci_manifest_digest,
+                &destination,
+                None,
+                Default::default(),
+            ),
+            None,
+        )
+        .unwrap();
+        assert_eq!(fs::read(&destination).unwrap(), whole);
+        assert_eq!(pulled.report.package_digest, report.package_digest);
+    }
+
+    #[test]
+    fn a_corrupt_or_cancelled_layer_stream_admits_no_package_and_leaves_no_stage() {
+        let (_dir, bundle, _) = export_bundle();
+        let out = tempdir().unwrap();
+        let destination = out.path().join("pull.gfpb");
+        let stage = out.path().join(".pull.gfpb.oci.partial");
+        for (corrupt, cancel) in [
+            (true, None),
+            (false, Some(std::sync::Arc::new(AtomicBool::new(false)))),
+        ] {
+            let registry = MemoryOciRegistry::default();
+            let reference =
+                publish_portable_v2_oci(&registry, &publish_req(&bundle, None, None, None), None)
+                    .unwrap();
+            let registry = FaultyDownload {
+                registry,
+                corrupt,
+                corrupt_config: false,
+                referrer_error: false,
+                cancel: cancel.clone(),
+            };
+            let error = pull_portable_v2_oci(
+                &registry,
+                &pull_req(
+                    &reference.oci_manifest_digest,
+                    &destination,
+                    None,
+                    Default::default(),
+                ),
+                cancel.as_deref(),
+            )
+            .unwrap_err();
+            assert_eq!(
+                error.code,
+                if corrupt {
+                    PortableV2ErrorCode::DigestMismatch
+                } else {
+                    PortableV2ErrorCode::Cancelled
+                }
+            );
+            if corrupt {
+                // The layer's own digest refuses it before verification could.
+                assert!(error.to_string().contains("layer blob digest mismatch"));
+            }
+            assert!(!destination.exists());
+            assert!(!stage.exists());
+        }
     }
 
     #[test]
@@ -1197,8 +1371,25 @@ impl std::fmt::Debug for PortableV2OciPullRequest<'_> {
 #[cfg(test)]
 struct FaultyDownload {
     registry: MemoryOciRegistry,
+    /// Flips the first byte of the layer stream.
     corrupt: bool,
+    /// Flips the first byte of the config blob.
+    corrupt_config: bool,
     referrer_error: bool,
+    /// Raised by the first read of the layer stream.
+    cancel: Option<std::sync::Arc<AtomicBool>>,
+}
+#[cfg(test)]
+struct CancelOnRead {
+    inner: std::io::Cursor<Vec<u8>>,
+    flag: std::sync::Arc<AtomicBool>,
+}
+#[cfg(test)]
+impl Read for CancelOnRead {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.flag.store(true, Ordering::Relaxed);
+        self.inner.read(buf)
+    }
 }
 #[cfg(test)]
 impl PortableV2OciRegistry for FaultyDownload {
@@ -1216,9 +1407,43 @@ impl PortableV2OciRegistry for FaultyDownload {
     fn put_blob(&self, r: &str, d: &str, b: &[u8]) -> Result<(), PortableV2Error> {
         self.registry.put_blob(r, d, b)
     }
+    fn put_blob_stream(
+        &self,
+        r: &str,
+        d: &str,
+        size: u64,
+        source: &mut dyn Read,
+    ) -> Result<(), PortableV2Error> {
+        self.registry.put_blob_stream(r, d, size, source)
+    }
+    fn get_blob_stream<'a>(
+        &'a self,
+        r: &str,
+        d: &str,
+        size: u64,
+    ) -> Result<Box<dyn Read + 'a>, PortableV2Error> {
+        let mut bytes = Vec::new();
+        self.registry
+            .get_blob_stream(r, d, size)?
+            .read_to_end(&mut bytes)
+            .unwrap();
+        if self.corrupt
+            && let Some(first) = bytes.first_mut()
+        {
+            *first ^= 0xff;
+        }
+        let inner = std::io::Cursor::new(bytes);
+        Ok(match &self.cancel {
+            Some(flag) => Box::new(CancelOnRead {
+                inner,
+                flag: std::sync::Arc::clone(flag),
+            }),
+            None => Box::new(inner),
+        })
+    }
     fn get_blob(&self, r: &str, d: &str) -> Result<Vec<u8>, PortableV2Error> {
         let mut b = self.registry.get_blob(r, d)?;
-        if self.corrupt
+        if self.corrupt_config
             && let Some(first) = b.first_mut()
         {
             *first ^= 0xff;

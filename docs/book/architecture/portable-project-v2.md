@@ -417,6 +417,30 @@ separately from integrity, and only then publishes the destination. Cancellation
 missing blobs, digest mismatch, incompatible media types, and auth/transport
 failures never leave a successful receipt or a claimed local package.
 
+The layer is never held in memory. Publish digests the bundle in one pass and
+streams it in a second; pull streams the layer into the exclusively created
+staging file while hashing, and only a layer whose length and digest match the
+manifest descriptor reaches verification and admission. Bundle size therefore
+does not change peak memory (a fixed copy buffer, `copy_buffer_bytes`). Config
+and manifest documents stay buffered under the 10 MiB response bound.
+
+Over HTTP a layer moves as a sequence of requests: OCI chunked upload sessions
+(`PATCH` with `Content-Range`, then a digest-verified `PUT`) and ranged `GET`s,
+8 MiB each by default (`HttpOciTransfer`). There is no deadline on a request or
+a transfer. Connecting, waiting for response headers, and every socket read or
+write must each make progress within the idle timeout (60 seconds by default),
+so a long transfer completes while bytes keep moving and a stalled one fails.
+Response headers are different: they keep a phase budget of the same length
+that does not restart when headers arrive in pieces, so a registry that answers
+slowly byte by byte is cut off at that budget even though the body window would
+have restarted. The in-process `MemoryOciRegistry` refuses streamed blobs over
+256 MiB (`MEMORY_REGISTRY_MAX_BLOB_BYTES`) before reserving anything for them.
+Pull uses `Range`; a registry that ignores it and answers 200 is streamed whole,
+bounded by the manifest's declared size, and a `Content-Range` that contradicts
+that size is refused. An interrupted push or pull is not resumed: the registry
+admits a blob only on the final digest-verified `PUT`, and a pull removes its
+staging file, so a rerun starts clean and no partial package is admitted.
+
 Credentials stay caller-owned (secure providers/stdin). They are never
 persisted or emitted in receipts, errors, or progress events. HTTPS is the
 default; plain HTTP is an explicit `insecure_http` opt-in for disposable local
