@@ -1,5 +1,5 @@
-//! A package written by another GraphForge producer revision is incompatible, not tampered.
-use super::{BTreeMap, Entry, PortableError, PortableErrorCode};
+//! The authenticated BagIt tags; another GraphForge producer revision is incompatible, not tampered.
+use super::{BTreeMap, ControlSha256, Digest, Entry, PortableError, PortableErrorCode};
 
 /// The `Bag-Software-Agent` value of a `bag-info.txt`: the remainder of its first line.
 fn bag_agent(bytes: &[u8]) -> Option<&[u8]> {
@@ -35,6 +35,34 @@ pub(super) fn refuse_other_producer_revision(
             PortableErrorCode::Incompatible,
             path,
             "package was written by a different GraphForge producer revision",
+        ));
+    }
+    Ok(())
+}
+
+pub(super) fn require_bag_tags(
+    map: &BTreeMap<&str, &Entry>,
+    bagit: &[u8],
+    bag_info: &[u8],
+) -> Result<(), PortableError> {
+    require_exact(map, "bagit.txt", bagit)?;
+    refuse_other_producer_revision(map, "bag-info.txt", bag_info)?;
+    require_exact(map, "bag-info.txt", bag_info)
+}
+
+fn require_exact(
+    map: &BTreeMap<&str, &Entry>,
+    path: &str,
+    expected: &[u8],
+) -> Result<(), PortableError> {
+    let e = map.get(path).ok_or_else(|| {
+        PortableError::at(PortableErrorCode::InvalidStructure, path, "missing tag")
+    })?;
+    if e.length != expected.len() as u64 || e.digest != ControlSha256::digest(expected)[..] {
+        return Err(PortableError::at(
+            PortableErrorCode::DigestMismatch,
+            path,
+            "tag bytes",
         ));
     }
     Ok(())

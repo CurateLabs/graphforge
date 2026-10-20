@@ -14,9 +14,8 @@ pub(crate) use materialization::{
 mod authenticated_entries;
 mod inventory;
 use authenticated_entries::{ParquetWalk, Reopen, StreamHash};
+mod bag_tags;
 mod participant_files;
-mod producer_revision;
-use producer_revision::refuse_other_producer_revision;
 pub(crate) mod pax;
 pub use participant_files::{PortableFileRef, PortablePackageIndex};
 mod import_footprint;
@@ -1202,9 +1201,7 @@ fn validate_package(
     inventory: Option<inventory::InventoryVerdict>,
 ) -> Result<PortableReport, PortableError> {
     let map: BTreeMap<_, _> = entries.iter().map(|e| (e.path.as_str(), e)).collect();
-    require_exact(&map, "bagit.txt", BAGIT)?;
-    refuse_other_producer_revision(&map, "bag-info.txt", BAG_INFO)?;
-    require_exact(&map, "bag-info.txt", BAG_INFO)?;
+    bag_tags::require_bag_tags(&map, BAGIT, BAG_INFO)?;
     let manifest_entry = map.get(MANIFEST_PATH).ok_or_else(|| {
         PortableError::at(
             PortableErrorCode::InvalidStructure,
@@ -1558,23 +1555,6 @@ fn expanded_transport(entries: &[Entry]) -> Result<String, PortableError> {
     Ok(hex(&hash.finalize()))
 }
 
-fn require_exact(
-    map: &BTreeMap<&str, &Entry>,
-    path: &str,
-    expected: &[u8],
-) -> Result<(), PortableError> {
-    let e = map.get(path).ok_or_else(|| {
-        PortableError::at(PortableErrorCode::InvalidStructure, path, "missing tag")
-    })?;
-    if e.length != expected.len() as u64 || e.digest != ControlSha256::digest(expected)[..] {
-        return Err(PortableError::at(
-            PortableErrorCode::DigestMismatch,
-            path,
-            "tag bytes",
-        ));
-    }
-    Ok(())
-}
 fn check_cancel(c: Option<&AtomicBool>) -> Result<(), PortableError> {
     if c.is_some_and(|x| x.load(Ordering::Relaxed)) {
         Err(PortableError::new(
