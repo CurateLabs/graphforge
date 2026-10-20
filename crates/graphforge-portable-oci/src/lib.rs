@@ -168,6 +168,12 @@ impl PortableV2OciRegistry for MemoryOciRegistry {
     ) -> Result<(), PortableV2Error> {
         validate_repository(repository)?;
         validate_digest(digest)?;
+        if size > MEMORY_REGISTRY_MAX_BLOB_BYTES {
+            return Err(PortableV2Error::new(
+                PortableV2ErrorCode::LimitExceeded,
+                "blob exceeds the memory registry limit",
+            ));
+        }
         let io = |detail| PortableV2Error::new(PortableV2ErrorCode::Io, detail);
         // Reserve the declared length once (fallibly, so a lying size cannot
         // abort the process) and move the bytes into storage without a copy.
@@ -379,6 +385,10 @@ impl MemoryOciRegistry {
             })
     }
 }
+
+/// Largest blob the in-process [`MemoryOciRegistry`] accepts from a stream. It
+/// bounds what a declared size may make the registry reserve up front.
+pub const MEMORY_REGISTRY_MAX_BLOB_BYTES: u64 = 256 * 1024 * 1024;
 
 /// Maximum response bytes for small JSON documents (manifests, config blobs).
 /// Layer blobs are streamed and never bounded by this.
@@ -938,11 +948,21 @@ impl RangedBlobReader<'_> {
             return Err(RangeFailure::Transport);
         }
         let length = if whole { self.size } else { length };
+        let declared = resp
+            .headers()
+            .get("Content-Length")
+            .and_then(|value| value.to_str().ok())
+            .map(str::parse::<u64>);
+        if declared.is_some_and(|declared| declared != Ok(length)) {
+            return Err(RangeFailure::Transport);
+        }
+        // One byte past the expected length, so a body that does not end
+        // there is seen rather than silently cut off.
         let body = resp
             .into_parts()
             .1
             .into_with_config()
-            .limit(length)
+            .limit(length.saturating_add(1))
             .reader();
         self.range = Some((body, length));
         Ok(())
@@ -966,6 +986,13 @@ impl Read for RangedBlobReader<'_> {
                 *remaining -= read as u64;
                 self.offset += read as u64;
                 if *remaining == 0 {
+                    // The body must end exactly here.
+                    if body.read(&mut [0_u8])? != 0 {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "blob body is longer than declared",
+                        ));
+                    }
                     self.range = None;
                 }
                 return Ok(read);

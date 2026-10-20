@@ -202,6 +202,9 @@ struct Faults {
     drop_range: usize,
     /// Answer ranged GETs with a chunked body that ends cleanly at half length.
     short_range: bool,
+    /// Answer blob GETs with the blob plus five extra bytes: 1 frames them in
+    /// the `Content-Length`, 2 in chunked transfer coding.
+    oversize: u8,
     /// Answer ranged GETs with the whole blob and 200.
     ignore_range: bool,
     /// Send each ranged GET body in eight pieces with this pause before each.
@@ -210,6 +213,41 @@ struct Faults {
     stall: Duration,
     /// Sleep before answering every PATCH and ranged GET.
     delay: Duration,
+}
+
+/// Respond with `body`, plus `EXTRA` framed as `oversize` says (0: none).
+fn respond_oversize(stream: &mut TcpStream, status: &str, extra: &str, body: &[u8], oversize: u8) {
+    let head =
+        |framing: String| format!("HTTP/1.1 {status}\r\n{extra}{framing}Connection: close\r\n\r\n");
+    let _ = match oversize {
+        0 => {
+            let _ = write!(
+                stream,
+                "{}",
+                head(format!("Content-Length: {}\r\n", body.len()))
+            );
+            stream.write_all(body)
+        }
+        1 => {
+            let _ = write!(
+                stream,
+                "{}",
+                head(format!("Content-Length: {}\r\n", body.len() + 5))
+            );
+            let _ = stream.write_all(body);
+            stream.write_all(b"EXTRA")
+        }
+        _ => {
+            let _ = write!(
+                stream,
+                "{}",
+                head("Transfer-Encoding: chunked\r\n".to_owned())
+            );
+            let _ = write!(stream, "{:x}\r\n", body.len() + 5);
+            let _ = stream.write_all(body);
+            stream.write_all(b"EXTRA\r\n0\r\n\r\n")
+        }
+    };
 }
 
 #[derive(Default)]
@@ -283,7 +321,7 @@ impl LoopbackRegistry {
                     } else if let Some(blob) = state.blobs.get(digest).cloned() {
                         let range = header("range");
                         let Some(range) = range.filter(|_| !faults.ignore_range) else {
-                            respond(&mut stream, "200 OK", "", &blob);
+                            respond_oversize(&mut stream, "200 OK", "", &blob, faults.oversize);
                             continue;
                         };
                         range_count += 1;
@@ -335,7 +373,13 @@ impl LoopbackRegistry {
                             let _ = stream.write_all(&part[..part.len() / 2]);
                             continue;
                         }
-                        respond(&mut stream, "206 Partial Content", &extra, part);
+                        respond_oversize(
+                            &mut stream,
+                            "206 Partial Content",
+                            &extra,
+                            part,
+                            faults.oversize,
+                        );
                     } else {
                         respond(&mut stream, "404 Not Found", "", &[]);
                     }
@@ -622,6 +666,36 @@ fn a_registry_that_ignores_range_streams_the_whole_layer() {
 }
 
 #[test]
+fn a_body_longer_than_the_descriptor_is_refused_not_truncated() {
+    // The registry serves the stored blob with five extra bytes appended.
+    let layer = pattern(3 * 64 * 1024 + 11);
+    let digest = digest_sha256(&layer);
+    let size = layer.len() as u64;
+    for (ignore_range, oversize) in [(true, 1), (true, 2), (false, 1), (false, 2)] {
+        let server = LoopbackRegistry::start(Faults {
+            ignore_range,
+            oversize,
+            ..Faults::default()
+        });
+        server
+            .state
+            .lock()
+            .unwrap()
+            .blobs
+            .insert(digest.clone(), layer.clone());
+        let client = server.client(SMALL_CHUNKS);
+        let outcome = client
+            .get_blob_stream("repo", &digest, size)
+            .map_err(|_| ())
+            .and_then(|mut stream| drain(&mut stream).map_err(|_| ()));
+        assert!(
+            outcome.is_err(),
+            "ignore_range={ignore_range} oversize={oversize} returned {outcome:?}"
+        );
+    }
+}
+
+#[test]
 fn a_content_range_total_that_contradicts_the_descriptor_is_refused() {
     let layer = pattern(3 * 64 * 1024);
     let digest = digest_sha256(&layer);
@@ -724,6 +798,20 @@ fn a_body_that_stalls_for_longer_than_the_idle_window_fails() {
     assert!(drain(&mut stream).is_err());
     // It gave up on the stall; it did not wait the 3 s for the rest.
     assert!(started.elapsed() < Duration::from_millis(2900));
+}
+
+#[test]
+fn the_memory_registry_refuses_a_declared_size_over_its_limit() {
+    let registry = MemoryOciRegistry::default();
+    let error = registry
+        .put_blob_stream(
+            "repo",
+            &digest_sha256(b""),
+            MEMORY_REGISTRY_MAX_BLOB_BYTES + 1,
+            &mut std::io::empty(),
+        )
+        .unwrap_err();
+    assert_eq!(error.code, PortableV2ErrorCode::LimitExceeded);
 }
 
 #[test]
