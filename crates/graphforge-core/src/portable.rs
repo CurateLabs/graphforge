@@ -244,6 +244,23 @@ impl PortableImportFootprint {
             .saturating_add(self.research_bytes.saturating_mul(2))
     }
 
+    /// The most bytes validating a research package holds beside the place it
+    /// is validated in, before any import begins: the package is extracted
+    /// (one copy), its research files are installed into a validation store,
+    /// and each archived Version is rebuilt into another store. Nothing is
+    /// published and no composition control is generated. A package without
+    /// research content is verified without extracting anything.
+    #[must_use]
+    pub fn verification_peak_bytes(&self) -> u64 {
+        if self.research_bytes == 0 {
+            return 0;
+        }
+        self.rounding(3)
+            .saturating_add(Self::FIXED_BYTES)
+            .saturating_add(self.payload_bytes)
+            .saturating_add(self.research_bytes.saturating_mul(2))
+    }
+
     fn stage_bytes(&self) -> u64 {
         self.payload_bytes.saturating_add(self.generated_bytes)
     }

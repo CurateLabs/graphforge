@@ -1327,6 +1327,9 @@ fn human_bytes(bytes: u64) -> String {
 /// The credit is the import's own (`portable_import_held_bytes`): what
 /// removing the stage an interrupted attempt of this operation left would
 /// actually free. Nothing else an earlier run staged is credited.
+/// It is credited to the import alone: research verification runs before the
+/// import reclaims that stage, so it must fit without the credit, and the
+/// budget is the larger of the two phases.
 ///
 /// An import that already committed only replays: it extracts and validates
 /// the package again and publishes nothing, so it needs
@@ -1344,8 +1347,16 @@ fn required_space(
     } else {
         footprint.peak_bytes()
     };
+    // The phases run in this order, and each must fit when it starts.
+    // Verification runs first and reclaims nothing, so an interrupted stage
+    // still occupies its space then and earns no credit; the import removes
+    // that stage before it extracts, so only the import is credited. A failed
+    // verification therefore never destroys a resumable stage.
+    let verification = footprint.verification_peak_bytes();
     let import = import_peak.saturating_sub(staged_import);
-    length.saturating_sub(downloaded).saturating_add(import)
+    length
+        .saturating_sub(downloaded)
+        .saturating_add(verification.max(import))
 }
 
 fn check_free_space(

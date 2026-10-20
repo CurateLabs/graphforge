@@ -1010,3 +1010,78 @@ fn a_refused_replay_keeps_the_project_an_earlier_run_committed() {
     let fresh = acquire_staging(&root.path().join("fresh")).unwrap();
     assert!(discards_failed_import(&fresh, &operation, &refusal));
 }
+
+/// A research retry's interrupted stage is still on disk while the package is
+/// verified (verification extracts it again and builds two stores), and the
+/// import removes it only afterwards. The retry is therefore admitted against
+/// the larger of the verification and the credited import, not the import
+/// alone.
+#[cfg(unix)]
+#[test]
+fn a_research_retry_is_not_credited_for_space_verification_needs_first() {
+    let (bundle, _) = real_bundle();
+    let length = bundle.len() as u64;
+    let operation = OperationId(uuid::Uuid::from_u128(0x1771));
+    let root = tempfile::tempdir().unwrap();
+    let destination = root.path().join("openalex");
+    let staging = acquire_staging(&destination).unwrap();
+    let name = staging
+        .project
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let id = operation.0.hyphenated();
+    let stage = staging.root.join(format!(".{name}.portable-v2-{id}"));
+    std::fs::create_dir_all(stage.join("data")).unwrap();
+    std::fs::write(
+        staging.root.join(format!(".{name}.portable-v2-{id}.owner")),
+        id.to_string(),
+    )
+    .unwrap();
+    // An allocated interrupted stage, larger than the controls the import
+    // would generate, so crediting it drops the import below verification.
+    std::fs::write(stage.join("data/payload"), vec![3_u8; 4 << 20]).unwrap();
+    let held = graphforge_api::portable_import_held_bytes(
+        &staging.project,
+        &operation,
+        PortableLimits::default(),
+    );
+    assert!(held >= 4 << 20, "{held}");
+
+    // Both phases written out from the footprint, not from `required_space`.
+    let footprint = PortableImportFootprint::of_package_length(length, true);
+    let verification = length + footprint.verification_peak_bytes();
+    let import = length + footprint.peak_bytes().saturating_sub(held);
+    assert!(
+        import < verification,
+        "the fixture must credit the import below verification: {import} {verification}"
+    );
+
+    static AVAILABLE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let probe: fn(&Path) -> std::io::Result<u64> = |_| Ok(AVAILABLE.load(Ordering::SeqCst));
+    let admitted = |available: u64| {
+        AVAILABLE.store(available, Ordering::SeqCst);
+        check_free_space(&staging, length, false, true, &operation, probe)
+    };
+    // Enough for the credited import, not for verification: refused before
+    // anything is downloaded or verified.
+    for available in [import, verification - 1] {
+        let error = admitted(available).unwrap_err();
+        assert!(
+            error.to_string().contains("hub.insufficient_space"),
+            "{error}"
+        );
+    }
+    // At the larger requirement it is admitted.
+    admitted(verification).unwrap();
+    // A project package has no research verification: the credit applies.
+    AVAILABLE.store(
+        length
+            + PortableImportFootprint::of_package_length(length, false)
+                .peak_bytes()
+                .saturating_sub(held),
+        Ordering::SeqCst,
+    );
+    check_free_space(&staging, length, false, false, &operation, probe).unwrap();
+}
