@@ -19,7 +19,13 @@ use crate::{
 /// Canonical research-metadata record family.
 pub const WORKSPACE_RESEARCH_METADATA_FAMILY: &str = "research_metadata";
 /// Frozen research-metadata contract version.
-pub const WORKSPACE_RESEARCH_METADATA_VERSION: u32 = 1;
+///
+/// Version 2 removed the `access` member (ADR 0055): access belongs to the host
+/// and never appears in Project data. Version 1 records are still read; see
+/// [`WorkspaceResearchMetadata::from_canonical_json`].
+pub const WORKSPACE_RESEARCH_METADATA_VERSION: u32 = 2;
+/// The contract version that carried `access`, read once and never written again.
+const LEGACY_ACCESS_CONTRACT_VERSION: u32 = 1;
 /// Maximum canonical research-metadata participant size.
 pub const MAX_WORKSPACE_RESEARCH_METADATA_BYTES: usize = 256 * 1024;
 /// Maximum UTF-8 bytes for one bounded metadata string.
@@ -236,7 +242,12 @@ impl WorkspaceResearchMetadata {
         canonical_json(self, "workspace research metadata")
     }
 
-    /// Parse exact canonical JSON plus LF.
+    /// Parse canonical JSON plus LF.
+    ///
+    /// A stored version 1 record, written before `access` was removed, is read
+    /// with that member dropped and re-labelled version 2, so existing Projects
+    /// keep opening (ADR 0055). The migration only discards; nothing reads or
+    /// publishes the dropped value, and the next write stores version 2.
     ///
     /// # Errors
     /// Returns `GF_PROJECT_CORRUPT` for future, malformed, or noncanonical data.
@@ -244,11 +255,27 @@ impl WorkspaceResearchMetadata {
         if bytes.len() > MAX_WORKSPACE_RESEARCH_METADATA_BYTES {
             return Err(corrupt("workspace research metadata exceeds size limit"));
         }
-        parse_canonical_json(
-            bytes,
-            "workspace research metadata",
-            validate_research_metadata,
-        )
+        if !bytes.ends_with(b"\n") {
+            return Err(corrupt(
+                "workspace research metadata is not canonical JSON plus LF",
+            ));
+        }
+        let mut value: serde_json::Value = serde_json::from_slice(bytes)
+            .map_err(|_| corrupt("workspace research metadata is malformed"))?;
+        if let Some(record) = value.as_object_mut()
+            && record.get("contract_version")
+                == Some(&serde_json::Value::from(LEGACY_ACCESS_CONTRACT_VERSION))
+        {
+            record.remove("access");
+            record.insert(
+                "contract_version".into(),
+                WORKSPACE_RESEARCH_METADATA_VERSION.into(),
+            );
+        }
+        let record: Self = serde_json::from_value(value)
+            .map_err(|_| corrupt("workspace research metadata is malformed"))?;
+        validate_research_metadata(&record)?;
+        Ok(record)
     }
 
     /// Encode this record as one registered workspace participant.
@@ -579,6 +606,53 @@ fn project_error(code: ProjectErrorCode, message: impl Into<String>) -> GfError 
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    fn record_json(version: u32, access: bool) -> Vec<u8> {
+        let mut value: serde_json::Value = serde_json::from_slice(
+            &WorkspaceResearchMetadata::empty()
+                .to_canonical_json()
+                .unwrap(),
+        )
+        .unwrap();
+        value["contract_version"] = version.into();
+        value["title"] = "Legacy".into();
+        if access {
+            value["access"] = serde_json::json!({
+                "visibility": "private",
+                "access_policy": "Local team only",
+                "collaborators": ["someone@example.org"],
+            });
+        }
+        let mut bytes = serde_json::to_vec(&value).unwrap();
+        bytes.push(b'\n');
+        bytes
+    }
+
+    #[test]
+    fn a_stored_version_one_record_is_read_without_access_and_never_rewritten_with_it() {
+        let record = WorkspaceResearchMetadata::from_canonical_json(&record_json(1, true)).unwrap();
+        assert_eq!(record.contract_version, WORKSPACE_RESEARCH_METADATA_VERSION);
+        assert_eq!(record.title.as_deref(), Some("Legacy"));
+        let rewritten = String::from_utf8(record.to_canonical_json().unwrap()).unwrap();
+        for removed in [
+            "access",
+            "collaborators",
+            "someone@example.org",
+            "Local team",
+        ] {
+            assert!(!rewritten.contains(removed), "{removed} survived migration");
+        }
+        assert_eq!(
+            WorkspaceResearchMetadata::from_canonical_json(rewritten.as_bytes()).unwrap(),
+            record
+        );
+    }
+
+    #[test]
+    fn a_current_record_carrying_access_is_refused() {
+        assert!(WorkspaceResearchMetadata::from_canonical_json(&record_json(2, true)).is_err());
+        assert!(WorkspaceResearchMetadata::from_canonical_json(&record_json(3, false)).is_err());
+    }
 
     #[test]
     fn discovery_query_matches_structured_filters_in_memory() {

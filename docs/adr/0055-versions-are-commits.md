@@ -123,7 +123,10 @@ Permission to see or change anything belongs to the Hub or other host and never
 appears in project, package, lineage or summary formats. The former
 `access.collaborators`, `access.visibility` and `access.access_policy` Project
 metadata fields are removed in place from the Project metadata record and from
-every format; there is no compatibility reader (pre-v1).
+every format. No format publishes or accepts them. Project metadata contract
+version 2 omits `access`; a stored version 1 record is read once with that member
+dropped (and the next write stores version 2), so existing Projects, including
+revision 6 Projects, keep opening. The dropped value is never read or published.
 
 ### Format and compatibility
 
