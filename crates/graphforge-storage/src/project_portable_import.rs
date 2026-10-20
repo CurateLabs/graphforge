@@ -479,7 +479,7 @@ fn materialize_owned_import(
         .parent()
         .unwrap_or_else(|| Path::new("."))
         .join(format!(
-            ".{target_name}.portable-{}",
+            ".{target_name}.portable-v2-{}",
             transaction_uuid.hyphenated()
         ));
     let (owner, owned_retry) = claim_stage(
@@ -796,7 +796,7 @@ fn claim_stage(
     allocation: Option<&crate::StorageAllocationOperation>,
 ) -> Result<(PathBuf, bool), PortableError> {
     let owner = stage.with_file_name(format!(
-        ".{target_name}.portable-{}.owner",
+        ".{target_name}.portable-v2-{}.owner",
         transaction_uuid.hyphenated()
     ));
     let expected = transaction_uuid.hyphenated().to_string();
@@ -2676,10 +2676,10 @@ mod tests {
             assert!(!failed.exists(), "{name} published a target");
             let residue = parent
                 .path()
-                .join(format!(".{name}.portable-{}", transaction.hyphenated()));
+                .join(format!(".{name}.portable-v2-{}", transaction.hyphenated()));
             assert!(!residue.exists(), "{name} retained private staging");
             let owner = residue.with_file_name(format!(
-                ".{name}.portable-{}.owner",
+                ".{name}.portable-v2-{}.owner",
                 transaction.hyphenated()
             ));
             assert!(!owner.exists(), "{name} retained its ownership marker");
@@ -2838,7 +2838,7 @@ mod tests {
             let residue = target
                 .parent()
                 .unwrap()
-                .join(format!(".project.portable-{}", transaction.hyphenated()));
+                .join(format!(".project.portable-v2-{}", transaction.hyphenated()));
             assert!(!residue.exists(), "owned residue survived {failpoint}");
             let owner_residue = residue.with_file_name(format!(
                 "{}.owner",
@@ -2898,7 +2898,7 @@ mod tests {
         assert!(!error.allocation_identity_allocated_bytes.is_empty());
         let stage = target_parent
             .path()
-            .join(format!(".project.portable-{}", transaction.hyphenated()));
+            .join(format!(".project.portable-v2-{}", transaction.hyphenated()));
         assert!(
             stage.exists(),
             "failed cleanup residue must remain attributable"

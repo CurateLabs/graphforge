@@ -338,7 +338,7 @@ fn a_staged_import_for_another_operation_is_replaced() {
     std::fs::create_dir(&staging).unwrap();
     std::fs::create_dir(staging.join("project")).unwrap();
     std::fs::write(staging.join("project/foreign"), b"older version").unwrap();
-    std::fs::write(staging.join(".project.portable-older"), b"residue").unwrap();
+    std::fs::write(staging.join(".project.portable-v2-older"), b"residue").unwrap();
     std::fs::write(
         staging.join("operation"),
         uuid::Uuid::from_u128(7).hyphenated().to_string(),

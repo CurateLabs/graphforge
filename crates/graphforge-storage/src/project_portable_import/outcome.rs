@@ -10,7 +10,7 @@ pub fn portable_import_pending(target: &Path, transaction: Uuid) -> Result<bool,
         .file_name()
         .and_then(|s| s.to_str())
         .ok_or_else(|| GfError::Validation("invalid import target".into()))?;
-    let owner = target.with_file_name(format!(".{name}.portable-{transaction}.owner"));
+    let owner = target.with_file_name(format!(".{name}.portable-v2-{transaction}.owner"));
     let expected = transaction.hyphenated().to_string();
     let Ok(bytes) = read_bounded_payload(&owner, 36, "import ownership") else {
         return Ok(false);
