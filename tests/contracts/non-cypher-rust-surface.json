@@ -1,7 +1,7 @@
 {
   "contract_version": 1,
   "scope": "Rust non-Cypher public release surface",
-  "public_method_digest": "042ffd2ba95cb00c46aa891af9c9b4689ff8aa99c429cf75bf6d2ffe692fd636",
+  "public_method_digest": "3b0eea2b0622c5c833ac4c200a74bc023c8c798a7794ec31f8de7cf1d9ffb82b",
   "method_policy": {
     "receiver_defaults": {
       "PortableImportResult": "release-tested",
@@ -51,6 +51,7 @@
       "crate.grade_gsi": "introspection",
       "crate.hold_writer": "internal-helper",
       "crate.verify_portable": "designed-only",
+      "crate.verify_portable_stream": "designed-only",
       "GraphForge.new": "introspection",
       "GraphForge.new_with_options": "introspection",
       "GraphForge.path": "introspection",
