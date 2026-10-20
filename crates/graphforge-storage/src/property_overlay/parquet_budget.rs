@@ -9,6 +9,8 @@ use super::{
     PropertyRouteKind, Read, RecordBatch, TSerializable, corrupt, io_error, parquet_error,
 };
 
+use crate::parquet_encoding_profile::{level_encoding_is_funded, value_encoding_is_funded};
+
 #[derive(Debug, Default)]
 struct ReadCounterState {
     bytes: AtomicU64,
@@ -406,6 +408,12 @@ pub(super) fn replay_decoder_limit(message: &str) -> GfError {
     }
 }
 
+/// An actual page uses an encoding whose decoder allocation no budget funds.
+/// This is a profile limit, not corruption, on every admission path.
+fn unfunded_encoding() -> GfError {
+    replay_decoder_limit("parquet page encoding is outside the funded decoder profile")
+}
+
 /// Reserve authenticated page, codec and batch exposure before replay decoding.
 /// Reuses the same bounded raw-page parser as property admission.
 pub(crate) fn replay_parquet_reader_reservation(
@@ -564,6 +572,14 @@ pub(super) fn parquet_resource_admission(
                         ));
                     }
                     if header.type_ == parquet::format::PageType::DICTIONARY_PAGE {
+                        if let Some(dictionary) = header.dictionary_page_header.as_ref()
+                            && !value_encoding_is_funded(
+                                dictionary.encoding,
+                                column.column_descr().physical_type(),
+                            )
+                        {
+                            return Err(unfunded_encoding());
+                        }
                         if column.column_descr().physical_type() == parquet::basic::Type::BYTE_ARRAY
                         {
                             let dictionary =
@@ -601,6 +617,26 @@ pub(super) fn parquet_resource_admission(
                                 .map(|page| page.encoding),
                             _ => None,
                         };
+                        // Version 2 pages fix their levels to RLE and carry no
+                        // level encodings; version 1 pages declare both.
+                        let levels_funded = match header.type_ {
+                            parquet::format::PageType::DATA_PAGE => {
+                                header.data_page_header.as_ref().is_none_or(|page| {
+                                    level_encoding_is_funded(page.definition_level_encoding)
+                                        && level_encoding_is_funded(page.repetition_level_encoding)
+                                })
+                            }
+                            _ => true,
+                        };
+                        let values_funded = encoding.is_none_or(|encoding| {
+                            value_encoding_is_funded(
+                                encoding,
+                                column.column_descr().physical_type(),
+                            )
+                        });
+                        if !(values_funded && levels_funded) {
+                            return Err(unfunded_encoding());
+                        }
                         plain_byte_pages &= matches!(
                             encoding,
                             Some(
