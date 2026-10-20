@@ -857,23 +857,27 @@ pub fn plan_selected_portable(
         });
     }
     if selection.includes("research", "registry") {
-        let objects = crate::research_versions::interchange::portable::object_inventory(g)?;
+        let inventory = crate::research_versions::interchange::portable::object_inventory(g)?;
         let lease = crate::graph_object_store::begin_graph_object_read(g.container_root())?;
         let mut owned = Vec::new();
-        for digest in objects {
-            let length = std::fs::metadata(crate::graph_object_path(g.container_root(), &digest)?)
-                .map_err(storage)?
-                .len();
-            let path = format!("data/components/research/research-content/{digest}");
-            let file = inspect_cas(&lease, &digest, length, &path, limits, &mut total)?;
-            owned.push(ComponentFile {
-                media_type: "application/octet-stream".into(),
-                path,
-                length,
-                sha256: digest,
-            });
-            files.push(file);
+        for (version, objects) in inventory {
+            for digest in objects {
+                let length =
+                    std::fs::metadata(crate::graph_object_path(g.container_root(), &digest)?)
+                        .map_err(storage)?
+                        .len();
+                let path = format!("data/components/research/research-retained/{version}/{digest}");
+                let file = inspect_cas(&lease, &digest, length, &path, limits, &mut total)?;
+                owned.push(ComponentFile {
+                    media_type: "application/octet-stream".into(),
+                    path,
+                    length,
+                    sha256: digest,
+                });
+                files.push(file);
+            }
         }
+        owned.sort_by(|a, b| a.path.as_bytes().cmp(b.path.as_bytes()));
         roots.push("research-content".into());
         components.push(Component {
             kind: "research".into(),

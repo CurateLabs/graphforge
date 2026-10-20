@@ -435,11 +435,12 @@ fn research_captured_cas_counts_real_bytes_reuses_authority_and_refuses_corrupti
     let (owner, path, capture) = captured_ontology();
     let stage = owner.path().join("materialized");
     let digest = hex(&capture.digest);
-    let relative = format!("data/components/research/research-content/{digest}");
+    let version = uuid::Uuid::from_u128(7);
+    let relative = format!("data/components/research/research-retained/{version}/{digest}");
     let research_path = stage.join(&relative);
     fs::create_dir_all(research_path.parent().unwrap()).unwrap();
     fs::rename(path, &research_path).unwrap();
-    let objects = BTreeMap::from([(digest.clone(), 2)]);
+    let objects = BTreeMap::from([((version, digest.clone()), 2)]);
     let captures = BTreeMap::from([(relative, capture)]);
     let target = tempfile::tempdir().unwrap();
     crate::open_or_initialize_project(target.path()).unwrap();
