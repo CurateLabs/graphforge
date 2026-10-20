@@ -501,7 +501,7 @@ Versions need is carried once per Version; the duplication is deliberate, so
 each directory is a self-contained unit. Import installs each distinct object
 once. Verification requires every directory to be a registry Version, to hold
 exactly that Version's closure with the registry's lengths, and refuses any
-other path, including the former `research-retained/<digest>` shape, as
+other path, including the former `research-content/<digest>` shape, as
 `Incompatible`.
 
 The registry sorts before every retained object in canonical byte order

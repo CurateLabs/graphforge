@@ -47,7 +47,11 @@ pub(super) fn validate_with_reader(
         .iter()
         .filter(|entry| entry.component_id == registry_id)
         .collect();
-    if descriptors.len() != 1 {
+    // The registry's place is fixed so that it precedes every retained object in
+    // canonical order, whatever else the package holds.
+    if descriptors.len() != 1
+        || descriptors[0].path != format!("data/components/research/{registry_id}/participant.json")
+    {
         return Err(invalid());
     }
     let descriptor = descriptors[0];

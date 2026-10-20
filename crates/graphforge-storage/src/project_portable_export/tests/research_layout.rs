@@ -2,6 +2,7 @@
 
 use super::historical_saved_queries::{publish_archive, version};
 use super::large_entries::{bundle_entries, verify};
+use super::payload_inventory::{bundle_members, reassemble};
 use super::*;
 use crate::research_versions::{ResearchParticipantCommitment, ResearchParticipantKey};
 use serde_json::Value;
@@ -238,4 +239,81 @@ fn producer_emits_the_pinned_registry_first_layout() {
         seen += 1;
     }
     assert!(seen >= 2 * fixture.shared.len());
+}
+
+#[test]
+fn a_relocated_registry_is_incompatible() {
+    let fixture = two_versions_sharing_one_graph();
+    let mut plan =
+        plan_complete_portable(&fixture.generation, PortableExportLimits::default()).unwrap();
+    let registry = plan
+        .files
+        .iter()
+        .find(|file| file.path.starts_with(REGISTRY_PREFIX))
+        .unwrap()
+        .path
+        .clone();
+    // Manifest, checksums and canonical order are all consistent; only the place is wrong, and
+    // every retained object now precedes the registry.
+    rename_entry(
+        &mut plan,
+        &registry,
+        "data/components/research/zzz/participant.json",
+    );
+    let (_output, bundle) = export_bundle(&plan);
+    let paths: Vec<_> = bundle_entries(&fs::read(&bundle).unwrap())
+        .into_iter()
+        .map(|entry| entry.path)
+        .collect();
+    let moved = paths
+        .iter()
+        .position(|path| path.ends_with("/zzz/participant.json"))
+        .unwrap();
+    assert!(
+        paths
+            .iter()
+            .enumerate()
+            .filter(|(_, path)| path.starts_with(RETAINED))
+            .all(|(index, _)| index < moved)
+    );
+    let error = verify(&bundle).unwrap_err();
+    assert_eq!(error.code, PortableErrorCode::Incompatible);
+    assert!(
+        error.to_string().contains(
+            "research component identity, schema, provenance or selected closure is invalid"
+        ),
+        "{error}"
+    );
+}
+
+#[test]
+fn research_entries_out_of_canonical_order_are_refused() {
+    let fixture = two_versions_sharing_one_graph();
+    let plan =
+        plan_complete_portable(&fixture.generation, PortableExportLimits::default()).unwrap();
+    let (output, bundle) = export_bundle(&plan);
+    let bytes = fs::read(&bundle).unwrap();
+    let members = bundle_members(&bytes);
+    let mut order: Vec<_> = members.iter().collect();
+    let registry = order
+        .iter()
+        .position(|(path, _, _)| path.starts_with(REGISTRY_PREFIX))
+        .unwrap();
+    // The valid layout, with the registry moved after the first retained object.
+    let moved = order.remove(registry);
+    let retained = order
+        .iter()
+        .position(|(path, _, _)| path.starts_with(RETAINED))
+        .unwrap();
+    order.insert(retained + 1, moved);
+    let reordered = output.path().join("reordered.gfpb");
+    fs::write(&reordered, reassemble(&bytes, &order)).unwrap();
+    let error = verify(&reordered).unwrap_err();
+    assert_eq!(error.code, PortableErrorCode::InvalidStructure);
+    assert!(
+        error
+            .to_string()
+            .ends_with("bundle entries are not canonical order"),
+        "{error}"
+    );
 }
