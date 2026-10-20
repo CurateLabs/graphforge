@@ -52,7 +52,7 @@ Missing intermediate Branch commit records are not boundary anchors.
 A Branch clone installs the selected Branch as live through the native publication
 owner, preserving its record and head. Other advertised refs persist as read-only
 remote citations. An immutable-Version clone does not activate a Branch. Neither
-path changes archive read-only authority or imports destination access policy.
+path changes archive read-only authority.
 
 ## Published credit
 

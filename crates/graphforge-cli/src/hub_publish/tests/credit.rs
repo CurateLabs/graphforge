@@ -240,3 +240,112 @@ fn fork_citation_carries_the_origin_versions_credit() {
             .all(|p| p.name != "Alice" && p.name != "Carol")
     );
 }
+
+fn full_lineage(history: &History, head: Uuid) -> ResearchLineage {
+    let digest = |marker: char| Sha256Digest(format!("sha256:{}", marker.to_string().repeat(64)));
+    let package = |marker: char| graphforge_discovery::PortablePackageReference {
+        format: graphforge_discovery::PORTABLE_V2_FORMAT.into(),
+        package_digest: digest(marker),
+        object_digest: digest(marker),
+    };
+    history
+        .graph
+        .build_research_lineage_for_discovery(
+            &BuildResearchLineageRequest {
+                repository: RepositoryIdentity::parse("curate/claims").unwrap(),
+                immutable_version: digest('a'),
+                project_uuid: reference(&history.graph, history.head).project_uuid,
+                branch_ref_names: BTreeMap::from([(history.branch, "main".to_owned())]),
+                version_packages: BTreeMap::from([(head, package('b'))]),
+                fork_origin_repository: None,
+                published_proposals: BTreeSet::new(),
+            },
+            &CancellationToken::new(),
+        )
+        .unwrap()
+}
+
+#[test]
+fn republishing_a_pre_credit_lineage_adopts_the_verified_credit_and_keeps_every_identity() {
+    let mut history = history();
+    let alice = edit_credited(
+        &mut history.graph,
+        history.branch,
+        2,
+        signature("Alice"),
+        signature("Carol"),
+    );
+    let local = full_lineage(&history, alice);
+    assert_eq!(
+        local
+            .version(&alice.to_string())
+            .unwrap()
+            .author
+            .as_ref()
+            .unwrap()
+            .name,
+        "Alice"
+    );
+    // The lineage as a publisher that predates credit display wrote it: same
+    // identities and parents, no author/committer on any entry.
+    let mut published = local.clone();
+    for version in &mut published.versions {
+        version.author = None;
+        version.committer = None;
+    }
+    assert!(published.people().is_empty());
+
+    let merged = merge_lineage(Some(&published), local.clone(), false, false).unwrap();
+    assert_eq!(merged, local);
+    assert_eq!(
+        merged
+            .versions
+            .iter()
+            .map(|v| &v.identity_digest)
+            .collect::<Vec<_>>(),
+        published
+            .versions
+            .iter()
+            .map(|v| &v.identity_digest)
+            .collect::<Vec<_>>()
+    );
+    // The summary's people are derived from the complete merged lineage.
+    let people = merged.people();
+    assert_eq!(people.len(), 2);
+    assert_eq!(people[0].name, "Alice");
+    assert_eq!(people[0].roles, ["author"]);
+    assert_eq!(people[1].name, "Carol");
+    assert_eq!(people[1].roles, ["committer"]);
+}
+
+#[test]
+fn a_published_credit_that_contradicts_the_local_record_is_refused() {
+    let mut history = history();
+    let alice = edit_credited(
+        &mut history.graph,
+        history.branch,
+        2,
+        signature("Alice"),
+        signature("Carol"),
+    );
+    let local = full_lineage(&history, alice);
+    for tamper in [
+        |v: &mut graphforge_discovery::LineageVersion| {
+            v.author.as_mut().unwrap().name = "Mallory".into();
+        },
+        |v: &mut graphforge_discovery::LineageVersion| {
+            v.committer.as_mut().unwrap().name = "Mallory".into();
+        },
+    ] {
+        let mut published = local.clone();
+        tamper(
+            published
+                .versions
+                .iter_mut()
+                .find(|v| v.version_uuid == alice.to_string())
+                .unwrap(),
+        );
+        let error = merge_lineage(Some(&published), local.clone(), false, false).unwrap_err();
+        assert_eq!(error_code(&error), "hub.publish.integrity_failure");
+    }
+}

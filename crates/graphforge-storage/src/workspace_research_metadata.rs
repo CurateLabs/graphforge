@@ -21,11 +21,8 @@ pub const WORKSPACE_RESEARCH_METADATA_FAMILY: &str = "research_metadata";
 /// Frozen research-metadata contract version.
 ///
 /// Version 2 removed the `access` member (ADR 0055): access belongs to the host
-/// and never appears in Project data. Version 1 records are still read; see
-/// [`WorkspaceResearchMetadata::from_canonical_json`].
+/// and never appears in Project data. Version 1 records are refused.
 pub const WORKSPACE_RESEARCH_METADATA_VERSION: u32 = 2;
-/// The contract version that carried `access`, read once and never written again.
-const LEGACY_ACCESS_CONTRACT_VERSION: u32 = 1;
 /// Maximum canonical research-metadata participant size.
 pub const MAX_WORKSPACE_RESEARCH_METADATA_BYTES: usize = 256 * 1024;
 /// Maximum UTF-8 bytes for one bounded metadata string.
@@ -242,40 +239,41 @@ impl WorkspaceResearchMetadata {
         canonical_json(self, "workspace research metadata")
     }
 
-    /// Parse canonical JSON plus LF.
+    /// Parse exact canonical JSON plus LF.
     ///
-    /// A stored version 1 record, written before `access` was removed, is read
-    /// with that member dropped and re-labelled version 2, so existing Projects
-    /// keep opening (ADR 0055). The migration only discards; nothing reads or
-    /// publishes the dropped value, and the next write stores version 2.
+    /// A record of any other contract version, including version 1 which carried
+    /// the removed `access` member, is refused as `GF_UNSUPPORTED_PROJECT_FORMAT`;
+    /// no reader migrates it (ADR 0055).
     ///
     /// # Errors
-    /// Returns `GF_PROJECT_CORRUPT` for future, malformed, or noncanonical data.
+    /// Returns `GF_UNSUPPORTED_PROJECT_FORMAT` for another contract version and
+    /// `GF_PROJECT_CORRUPT` for malformed or noncanonical data.
     pub fn from_canonical_json(bytes: &[u8]) -> Result<Self, GfError> {
         if bytes.len() > MAX_WORKSPACE_RESEARCH_METADATA_BYTES {
             return Err(corrupt("workspace research metadata exceeds size limit"));
         }
-        if !bytes.ends_with(b"\n") {
-            return Err(corrupt(
-                "workspace research metadata is not canonical JSON plus LF",
+        // The contract version is read first, so a record of another version is
+        // refused as unsupported rather than as malformed against this shape.
+        #[derive(Deserialize)]
+        struct Header {
+            contract_version: u32,
+        }
+        if let Ok(header) = serde_json::from_slice::<Header>(bytes)
+            && header.contract_version != WORKSPACE_RESEARCH_METADATA_VERSION
+        {
+            return Err(project_error(
+                ProjectErrorCode::UnsupportedProjectFormat,
+                format!(
+                    "workspace research metadata contract version {} is unsupported",
+                    header.contract_version
+                ),
             ));
         }
-        let mut value: serde_json::Value = serde_json::from_slice(bytes)
-            .map_err(|_| corrupt("workspace research metadata is malformed"))?;
-        if let Some(record) = value.as_object_mut()
-            && record.get("contract_version")
-                == Some(&serde_json::Value::from(LEGACY_ACCESS_CONTRACT_VERSION))
-        {
-            record.remove("access");
-            record.insert(
-                "contract_version".into(),
-                WORKSPACE_RESEARCH_METADATA_VERSION.into(),
-            );
-        }
-        let record: Self = serde_json::from_value(value)
-            .map_err(|_| corrupt("workspace research metadata is malformed"))?;
-        validate_research_metadata(&record)?;
-        Ok(record)
+        parse_canonical_json(
+            bytes,
+            "workspace research metadata",
+            validate_research_metadata,
+        )
     }
 
     /// Encode this record as one registered workspace participant.
@@ -570,6 +568,20 @@ fn canonical_json<T: Serialize>(value: &T, label: &str) -> Result<Vec<u8>, GfErr
     Ok(bytes)
 }
 
+fn parse_canonical_json<T: for<'de> Deserialize<'de>>(
+    bytes: &[u8],
+    label: &str,
+    validate: impl Fn(&T) -> Result<(), GfError>,
+) -> Result<T, GfError> {
+    if !bytes.ends_with(b"\n") {
+        return Err(corrupt(format!("{label} is not canonical JSON plus LF")));
+    }
+    let value =
+        serde_json::from_slice(bytes).map_err(|_| corrupt(format!("{label} is malformed")))?;
+    validate(&value)?;
+    Ok(value)
+}
+
 fn corrupt(message: impl Into<String>) -> GfError {
     GfError::Project {
         code: ProjectErrorCode::ProjectCorrupt,
@@ -614,30 +626,35 @@ mod tests {
         bytes
     }
 
-    #[test]
-    fn a_stored_version_one_record_is_read_without_access_and_never_rewritten_with_it() {
-        let record = WorkspaceResearchMetadata::from_canonical_json(&record_json(1, true)).unwrap();
-        assert_eq!(record.contract_version, WORKSPACE_RESEARCH_METADATA_VERSION);
-        assert_eq!(record.title.as_deref(), Some("Legacy"));
-        let rewritten = String::from_utf8(record.to_canonical_json().unwrap()).unwrap();
-        for removed in [
-            "access",
-            "collaborators",
-            "someone@example.org",
-            "Local team",
-        ] {
-            assert!(!rewritten.contains(removed), "{removed} survived migration");
+    fn code(error: &GfError) -> ProjectErrorCode {
+        match error {
+            GfError::Project { code, .. } => *code,
+            other => panic!("not a project error: {other:?}"),
         }
-        assert_eq!(
-            WorkspaceResearchMetadata::from_canonical_json(rewritten.as_bytes()).unwrap(),
-            record
-        );
     }
 
     #[test]
-    fn a_current_record_carrying_access_is_refused() {
-        assert!(WorkspaceResearchMetadata::from_canonical_json(&record_json(2, true)).is_err());
-        assert!(WorkspaceResearchMetadata::from_canonical_json(&record_json(3, false)).is_err());
+    fn a_stored_version_one_record_carrying_access_is_refused_as_unsupported() {
+        let error = WorkspaceResearchMetadata::from_canonical_json(&record_json(1, true))
+            .expect_err("version 1 metadata is not read");
+        assert_eq!(code(&error), ProjectErrorCode::UnsupportedProjectFormat);
+        // Not even without the member: the contract version itself is retired.
+        let error = WorkspaceResearchMetadata::from_canonical_json(&record_json(1, false))
+            .expect_err("version 1 metadata is not read");
+        assert_eq!(code(&error), ProjectErrorCode::UnsupportedProjectFormat);
+    }
+
+    #[test]
+    fn a_current_record_carrying_access_is_malformed_and_a_future_version_unsupported() {
+        let error = WorkspaceResearchMetadata::from_canonical_json(&record_json(2, true))
+            .expect_err("access is not a member of the current contract");
+        assert_eq!(code(&error), ProjectErrorCode::ProjectCorrupt);
+        let error = WorkspaceResearchMetadata::from_canonical_json(&record_json(3, false))
+            .expect_err("future version");
+        assert_eq!(code(&error), ProjectErrorCode::UnsupportedProjectFormat);
+        let current = WorkspaceResearchMetadata::from_canonical_json(&record_json(2, false))
+            .expect("current contract");
+        assert_eq!(current.title.as_deref(), Some("Legacy"));
     }
 
     #[test]

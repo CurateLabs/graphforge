@@ -29,7 +29,7 @@ mod credit;
 mod remote_fetch;
 mod rewrite_prune;
 mod selection;
-use credit::{edit_by, served_summary};
+use credit::edit_by;
 use selection::{args, on_ref};
 
 const HUB: &str = "https://hub.test";

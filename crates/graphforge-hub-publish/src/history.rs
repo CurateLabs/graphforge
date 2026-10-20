@@ -121,6 +121,15 @@ pub(crate) fn validate_snapshot_history_transition(
                 immutable.package = None;
                 prior.package = None;
             }
+            // An entry published before credit was displayed carries none. The
+            // identity commits to credit (ADR 0055), so adding it changes no
+            // commitment; changing or removing published credit still does.
+            if old.author.is_none() {
+                immutable.author = None;
+            }
+            if old.committer.is_none() {
+                immutable.committer = None;
+            }
             if immutable != prior {
                 return Err(invalid(
                     "publication changes immutable Version history or payload",

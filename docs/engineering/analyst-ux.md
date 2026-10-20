@@ -18,8 +18,8 @@ M11 delivers Rust-owned capabilities through the public facade and thin Python,
 Node, and CLI surfaces, plus a consumer UX contract. Associated projects such as
 XYG and graphforge-nextjs, applications, and peer extensions own their interfaces,
 rendering, hosting, authentication, and access enforcement. Core exposes
-provenance, policy metadata, and reviewable state; recording an access policy
-does not itself enforce access. These consumers are not required dependencies
+provenance, governance metadata, and reviewable state; access policy and its
+enforcement belong to the host and are recorded in no Core format. These consumers are not required dependencies
 of Core, and their application implementation is not an M11 Core close gate.
 
 GraphForge is an analytical environment for exploring, structuring, deriving,
@@ -55,13 +55,13 @@ requiring a vocabulary lesson during setup.
 
 | Concept   | Required meaning                                                                                                                                                                                       |
 | --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Project   | A durable research universe containing or referencing evidence, knowledge, metadata, ontologies, research Branches, Versions, collaborators, and access policies. A Project is not one graph snapshot. |
+| Project   | A durable research universe containing or referencing evidence, knowledge, metadata, ontologies, research Branches, Versions, and credited authors and committers. A Project is not one graph snapshot. |
 | Source    | An original unit of evidence with stable identity: an edition, manuscript, EPUB, PDF, web resource, photograph, recording, or database export.                                                         |
 | Artifact  | One representation or processing derivative of a Source, with its own identity and derivation history. Improving a representation does not replace Source identity.                                    |
 | Slice     | A selection obtained through search, filtering, traversal, query, or direct selection. It focuses attention without creating independent research.                                                     |
 | Branch    | Persistent, independently evolving research derived from a Project, Slice, or Branch, with an immutable starting context and navigable origin.                                                         |
 | Version   | An immutable state of a Project or Branch, usable for inspection, comparison, citation, reproducibility, and continued research.                                                                       |
-| Fork      | A new Project with independent identity, metadata, governance, access policy, branches, ontology decisions, and history; derivation from its origin remains provenance.                                |
+| Fork      | A new Project with independent identity, metadata, governance, branches, ontology decisions, and history; derivation from its origin remains provenance.                                |
 | Assertion | A claim whose authorship, evidence, provenance, and status can be inspected.                                                                                                                           |
 | Canonical | Currently accepted in a specified Project/community context; it does not mean objectively true.                                                                                                        |
 | Lineage   | Derivation, processing, authorship, Version, acceptance, and dependency relationships.                                                                                                                 |
@@ -272,7 +272,7 @@ linguistic properties, traversal, structured queries, and existing Branches.
 
 Structured metadata supports title, description, authors/maintainers, subjects,
 languages, geographic and temporal coverage, source types, corpus size,
-ontologies and knowledge standards, license, visibility and access policy,
+ontologies and knowledge standards, license,
 tags, originating and related Projects, canonical and external identifiers,
 and creation/update dates. Communities can add fields without changing the core
 schema. Discovery supports free text and structured filters without loading

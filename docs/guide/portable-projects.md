@@ -166,7 +166,7 @@ verification and import reject unsupported readers and incomplete closure before
 destination admission. There is no pre-v1 migration promise.
 
 Fork requires an independent Project UUID, author, governance declaration,
-complete workspace metadata (including access policy), and explicit adoption of
+complete workspace metadata, and explicit adoption of
 the selected ontology. This metadata does not enforce remote access. A Fork
 records its origin while keeping destination metadata and subsequent history
 independent. Its operation UUID supports exact replay after source Version

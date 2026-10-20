@@ -11,6 +11,20 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
+/// Legacy Project metadata (contract version 1) is refused, never migrated; writing
+/// current metadata is the explicit recovery before such a Project can be exported.
+fn rewrite_legacy_metadata(graph: &mut GraphForge) {
+    graph
+        .update_research_metadata(UpdateResearchMetadataRequest {
+            context: WriteContext {
+                operation_uuid: OperationId(Uuid::now_v7()),
+                actor_uuid: None,
+            },
+            metadata: WorkspaceResearchMetadata::empty(),
+        })
+        .unwrap();
+}
+
 const FIXTURE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../tests/fixtures/research-v6"
@@ -75,9 +89,8 @@ fn revision(project: &Path) -> u32 {
 
 fn current(graph: &GraphForge) -> Uuid {
     graph
-        .research_project_summary()
+        .committed_generation_identity()
         .unwrap()
-        .identity
         .generation_uuid
 }
 
@@ -337,13 +350,16 @@ fn research_v6_package_from_old_producer_is_rejected_without_publication() {
     );
 }
 
+/// A revision 6 Version freezes the Project metadata of its time, which was contract
+/// version 1 and carried the removed `access` member. Its frozen content cannot be
+/// rewritten, so exporting it is refused rather than copying that participant.
 #[test]
-fn research_v6_project_exports_research_as_current() {
+fn research_v6_versions_freezing_retired_metadata_are_not_exported() {
     let (directory, project, ids) = fixture();
     let graph = GraphForge::new(project.to_str()).unwrap();
     let head = ids.uuid("branch_head_version_uuid");
     let package = directory.path().join("export.gfpb");
-    graph
+    let error = graph
         .export_research(
             &ExportResearchRequest {
                 version_uuid: head,
@@ -353,97 +369,16 @@ fn research_v6_project_exports_research_as_current() {
             },
             &CancellationToken::new(),
         )
-        .unwrap();
+        .expect_err("retired metadata must not reach a research package");
+    assert_eq!(
+        error.code,
+        graphforge_core::portable::PortableV2ErrorCode::UnsupportedProjectFormat
+    );
+    assert!(!package.exists());
     assert_eq!(
         revision(&project),
         RESEARCH_LEGACY_VERSION,
-        "export is read-only"
-    );
-    let target = directory.path().join("imported");
-    GraphForge::import_portable_v2(
-        &target,
-        &PortableV2ImportRequest {
-            input: package,
-            operation_id: OperationId(Uuid::now_v7()),
-            limits: Default::default(),
-        },
-        None,
-    )
-    .unwrap();
-    assert_eq!(revision(&target), RESEARCH_VERSION);
-    let imported = GraphForge::new(target.to_str()).unwrap();
-    let registry = imported.research_version_retention().unwrap();
-    assert_legacy_roots(&registry, &ids);
-    let archive = &registry.interchange[&head];
-    assert_eq!(archive.research_capability_version, RESEARCH_VERSION);
-    assert_eq!(
-        archive.producer,
-        concat!(
-            "graphforge-storage/",
-            env!("CARGO_PKG_VERSION"),
-            ";research-interchange/2"
-        )
-    );
-    // The producer-version contract and research-revision contract are separate.
-    // Current-producer revision 6 archives admit unchanged legacy roots, but
-    // cannot carry revision 7 commit data even with a recomputed identity.
-    let mut forged = archive.clone();
-    forged.research_capability_version = RESEARCH_LEGACY_VERSION;
-    forged.validate().unwrap();
-    let record = forged.versions.get_mut(&head).unwrap();
-    record.author = Some(signature("Forged"));
-    let identity = record.identity_sha256().unwrap();
-    forged.identities.insert(head, identity);
-    let error = forged.validate().unwrap_err();
-    assert!(error.to_string().contains("revision 6"), "{error}");
-    forged.research_capability_version = RESEARCH_VERSION;
-    forged.validate().unwrap();
-
-    // Imported legacy records also survive whole-Project export and reimport
-    // when the interchange archive has the current producer contract.
-    let whole = directory.path().join("whole.gfpb");
-    imported
-        .export_portable_v2(
-            &PortableV2ExportRequest {
-                selection: PortableSelection::Current,
-                output_path: whole.clone(),
-                representation: PortableV2Output::Bundle,
-                profile: PortableV2SelectionProfile::Complete,
-                subset: None,
-                limits: PortableV2Limits::default(),
-            },
-            None,
-            |_| {},
-        )
-        .unwrap();
-    let report = verify_portable_v2(
-        &PortableVerifyRequest {
-            input: whole.clone(),
-            mode: graphforge_core::portable::PortableV2Mode::Full,
-            limits: PortableV2Limits::default(),
-        },
-        None,
-    )
-    .unwrap();
-    assert!(report.research_interchange);
-    let reimported = directory.path().join("reimported");
-    GraphForge::import_portable_v2(
-        &reimported,
-        &PortableV2ImportRequest {
-            input: whole,
-            operation_id: OperationId(Uuid::now_v7()),
-            limits: Default::default(),
-        },
-        None,
-    )
-    .unwrap();
-    assert_eq!(revision(&reimported), RESEARCH_VERSION);
-    assert_legacy_roots(
-        &GraphForge::new(reimported.to_str())
-            .unwrap()
-            .research_version_retention()
-            .unwrap(),
-        &ids,
+        "a refused export is read-only"
     );
 }
 
@@ -467,186 +402,95 @@ fn research_v6_imported_history_from_old_producer_is_rejected_without_publicatio
     assert_eq!(revision(&source), RESEARCH_LEGACY_VERSION);
 }
 
-/// Synthesize a current-producer revision 6 package from a native expanded
-/// export. This is a test-only layout variant, not an original historical
-/// export: committed fixture bytes and Version identities remain untouched.
-fn synthesize_current_producer_revision_six(package: &Path) {
-    let manifest_path = package.join("data/graphforge-project.json");
-    let mut manifest: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
-    let components = manifest["components"].as_array().unwrap();
-    let registry_path = components
-        .iter()
-        .find(|component| {
-            component["participant_id"]
-                .as_str()
-                .unwrap()
-                .starts_with("research-registry-")
-        })
-        .unwrap()["files"][0]["path"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    let runtime_path = components
-        .iter()
-        .find(|component| component["participant_id"] == "graphforge-runtime-map")
-        .unwrap()["files"][0]["path"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    let mut registry: ResearchRegistry =
-        serde_json::from_slice(&std::fs::read(package.join(&registry_path)).unwrap()).unwrap();
-    let identities = registry.identities.clone();
-    for archive in registry.interchange.values_mut() {
-        assert_eq!(archive.research_capability_version, RESEARCH_VERSION);
-        assert_eq!(
-            archive.producer,
-            concat!(
-                "graphforge-storage/",
-                env!("CARGO_PKG_VERSION"),
-                ";research-interchange/2"
+/// The fixture's Project metadata is contract version 1, which carried the removed
+/// `access` member. It is refused, never migrated, and never copied into a package.
+#[test]
+fn legacy_research_metadata_is_refused_on_read_and_can_never_reach_an_export() {
+    use graphforge_core::portable::{
+        PortableV2ErrorCode, PortableV2Output, PortableV2SelectionProfile,
+    };
+    let (directory, project, _) = fixture();
+    let graph = GraphForge::new(project.to_str()).unwrap();
+    match graph.research_project_metadata().unwrap_err() {
+        GfError::Project { code, .. } => {
+            assert_eq!(code, ProjectErrorCode::UnsupportedProjectFormat);
+        }
+        other => panic!("unexpected error {other:?}"),
+    }
+    for (name, profile) in [
+        ("settings", PortableV2SelectionProfile::Settings),
+        ("complete", PortableV2SelectionProfile::Complete),
+    ] {
+        let output = directory.path().join(format!("export-{name}"));
+        let error = graph
+            .export_portable_v2(
+                &PortableV2ExportRequest {
+                    selection: PortableSelection::Current,
+                    output_path: output.clone(),
+                    representation: PortableV2Output::Expanded,
+                    profile,
+                    subset: None,
+                    limits: graphforge_core::portable::PortableV2Limits::default(),
+                },
+                None,
+                |_| {},
             )
-        );
-        archive.research_capability_version = RESEARCH_LEGACY_VERSION;
-    }
-    registry.validate().unwrap();
-    assert_eq!(registry.identities, identities);
-    std::fs::write(
-        package.join(&registry_path),
-        serde_json::to_vec(&registry).unwrap(),
-    )
-    .unwrap();
-
-    let mut runtime: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(package.join(&runtime_path)).unwrap()).unwrap();
-    for capability in runtime["capabilities"].as_array_mut().unwrap() {
-        if capability["capability_id"] == "research" {
-            capability["capability_version"] = RESEARCH_LEGACY_VERSION.into();
-        }
-    }
-    for participant in runtime["participants"].as_array_mut().unwrap() {
-        if participant["capability_id"] == "research" {
-            assert_eq!(participant["record_family_id"], "registry");
-            participant["capability_version"] = RESEARCH_LEGACY_VERSION.into();
-            participant["record_version"] = RESEARCH_LEGACY_VERSION.into();
-            participant["schema_fingerprint"] =
-                hex(&Sha256::digest(b"graphforge-research-registry/6").into()).into();
-        }
-    }
-    std::fs::write(
-        package.join(runtime_path),
-        serde_json::to_vec(&runtime).unwrap(),
-    )
-    .unwrap();
-
-    // Reseal the synthetic package's descriptors and semantic/BagIt hashes.
-    for component in manifest["components"].as_array_mut().unwrap() {
-        for file in component["files"].as_array_mut().unwrap() {
-            let bytes = std::fs::read(package.join(file["path"].as_str().unwrap())).unwrap();
-            file["length"] = (bytes.len() as u64).into();
-            file["sha256"] = hex(&Sha256::digest(&bytes).into()).into();
-        }
-    }
-    manifest.as_object_mut().unwrap().remove("package_digest");
-    let semantic = serde_json::to_vec(&manifest).unwrap();
-    let digest = Sha256::digest([b"graphforge-project/2\0".as_slice(), &semantic].concat());
-    manifest["package_digest"] = format!("sha256:{}", hex(&digest.into())).into();
-    std::fs::write(manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
-    for name in ["manifest-sha256.txt", "tagmanifest-sha256.txt"] {
-        let old = std::fs::read_to_string(package.join(name)).unwrap();
-        let mut resealed = String::new();
-        for line in old.lines() {
-            let (_, path) = line.split_once("  ").unwrap();
-            let bytes = std::fs::read(package.join(path)).unwrap();
-            resealed.push_str(&format!("{}  {path}\n", hex(&Sha256::digest(bytes).into())));
-        }
-        std::fs::write(package.join(name), resealed).unwrap();
+            .expect_err("a legacy metadata participant must not be exported");
+        assert_eq!(error.code, PortableV2ErrorCode::UnsupportedProjectFormat);
+        assert!(!output.exists(), "{name} export left a package behind");
     }
 }
 
+/// Recovery is explicit: writing current metadata replaces the retired participant.
 #[test]
-fn current_producer_revision_six_package_imports_reopens_and_reexports() {
-    let (directory, project, ids) = fixture();
-    let graph = GraphForge::new(project.to_str()).unwrap();
-    let head = ids.uuid("branch_head_version_uuid");
-    let package = directory
-        .path()
-        .join("synthetic-current-producer-revision-six");
+fn rewriting_legacy_research_metadata_makes_the_project_exportable_without_access() {
+    use graphforge_core::portable::{PortableV2Output, PortableV2SelectionProfile};
+    let (directory, project, _) = fixture();
+    let mut graph = GraphForge::new(project.to_str()).unwrap();
+    let mut metadata = WorkspaceResearchMetadata::empty();
+    metadata.title = Some("Rewritten".into());
     graph
-        .export_research(
-            &ExportResearchRequest {
-                version_uuid: head,
-                output: package.clone(),
-                bundled: false,
-                projection: None,
+        .update_research_metadata(UpdateResearchMetadataRequest {
+            context: WriteContext {
+                operation_uuid: OperationId(Uuid::now_v7()),
+                actor_uuid: None,
             },
-            &CancellationToken::new(),
+            metadata,
+        })
+        .unwrap();
+    assert_eq!(
+        graph.research_project_metadata().unwrap().title.as_deref(),
+        Some("Rewritten")
+    );
+    let output = directory.path().join("export");
+    graph
+        .export_portable_v2(
+            &PortableV2ExportRequest {
+                selection: PortableSelection::Current,
+                output_path: output.clone(),
+                representation: PortableV2Output::Expanded,
+                profile: PortableV2SelectionProfile::Settings,
+                subset: None,
+                limits: graphforge_core::portable::PortableV2Limits::default(),
+            },
+            None,
+            |_| {},
         )
         .unwrap();
-    synthesize_current_producer_revision_six(&package);
-    let report = verify_portable_v2(
-        &PortableVerifyRequest {
-            input: package.clone(),
-            mode: graphforge_core::portable::PortableV2Mode::Full,
-            limits: Default::default(),
-        },
-        None,
-    )
-    .unwrap();
-    assert!(report.research_interchange);
-    let target = directory.path().join("imported-revision-six");
-    GraphForge::import_portable_v2(
-        &target,
-        &PortableV2ImportRequest {
-            input: package,
-            operation_id: OperationId(Uuid::now_v7()),
-            limits: Default::default(),
-        },
-        None,
-    )
-    .unwrap();
-    assert_eq!(revision(&target), RESEARCH_VERSION);
-    let imported = GraphForge::new(target.to_str()).unwrap();
-    let registry = imported.research_version_retention().unwrap();
-    assert_legacy_roots(&registry, &ids);
-    assert_eq!(
-        registry.interchange[&head].research_capability_version,
-        RESEARCH_LEGACY_VERSION
-    );
-    drop(imported);
-    let reopened = GraphForge::new(target.to_str()).unwrap();
-    assert_eq!(reopened.research_version_retention().unwrap(), registry);
-    let current_package = directory.path().join("reexported-current.gfpb");
-    reopened
-        .export_research(
-            &ExportResearchRequest {
-                version_uuid: head,
-                output: current_package.clone(),
-                bundled: true,
-                projection: None,
-            },
-            &CancellationToken::new(),
-        )
-        .unwrap();
-    let again = directory.path().join("reimported-current");
-    GraphForge::import_portable_v2(
-        &again,
-        &PortableV2ImportRequest {
-            input: current_package,
-            operation_id: OperationId(Uuid::now_v7()),
-            limits: Default::default(),
-        },
-        None,
-    )
-    .unwrap();
-    assert_eq!(revision(&again), RESEARCH_VERSION);
-    let registry = GraphForge::new(again.to_str())
-        .unwrap()
-        .research_version_retention()
-        .unwrap();
-    assert_legacy_roots(&registry, &ids);
-    assert_eq!(
-        registry.interchange[&head].research_capability_version,
-        RESEARCH_VERSION
-    );
+    let mut exported = String::new();
+    let mut stack = vec![output];
+    while let Some(path) = stack.pop() {
+        for entry in std::fs::read_dir(path).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if let Ok(text) = std::fs::read_to_string(&path) {
+                exported.push_str(&text);
+            }
+        }
+    }
+    assert!(exported.contains("Rewritten"));
+    for retired in ["access_policy", "collaborators", "\"access\""] {
+        assert!(!exported.contains(retired), "{retired} reached an export");
+    }
 }

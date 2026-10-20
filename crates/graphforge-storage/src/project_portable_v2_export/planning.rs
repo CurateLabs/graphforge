@@ -14,6 +14,7 @@ use crate::{
     ResolvedProjectGeneration, preview_portable_v2_selection, project_portable_v2::canonical_json,
 };
 use graphforge_core::hash_observation::{ContractSha256, ControlSha256 as Sha256, PortableSha256};
+use graphforge_core::portable::{PortableV2Error, PortableV2ErrorCode};
 use serde::Serialize;
 use sha2::Digest;
 use std::io::Read;
@@ -699,6 +700,36 @@ pub fn plan_complete_portable_v2(
     plan_selected_portable_v2(g, &selection, limits)
 }
 
+/// Refuse to export research metadata the current contract cannot read. The
+/// participant is copied byte for byte, so a retired version (one that carried the
+/// removed `access` member) must never reach a package.
+fn validate_research_metadata_participant(source: &Path) -> Result<(), ExportError> {
+    let mut bytes = Vec::new();
+    std::fs::File::open(source)
+        .map_err(storage)?
+        .take(crate::MAX_WORKSPACE_RESEARCH_METADATA_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(storage)?;
+    crate::WorkspaceResearchMetadata::from_canonical_json(&bytes).map_err(|error| {
+        let unsupported = matches!(
+            error,
+            graphforge_core::GfError::Project {
+                code: graphforge_core::ProjectErrorCode::UnsupportedProjectFormat,
+                ..
+            }
+        );
+        PortableV2Error::new(
+            if unsupported {
+                PortableV2ErrorCode::UnsupportedProjectFormat
+            } else {
+                PortableV2ErrorCode::Incompatible
+            },
+            "workspace research metadata is unsupported or invalid",
+        )
+    })?;
+    Ok(())
+}
+
 /// Materialize one immutable selection preview into a representation-independent export plan.
 #[expect(
     clippy::too_many_lines,
@@ -735,6 +766,11 @@ pub fn plan_selected_portable_v2(
             &d.record_family_id,
         );
         let source = g.participant_path(&d.capability_id, &d.record_family_id)?;
+        if d.capability_id == crate::WORKSPACE_CAPABILITY_ID
+            && d.record_family_id == crate::WORKSPACE_RESEARCH_METADATA_FAMILY
+        {
+            validate_research_metadata_participant(&source)?;
+        }
         let path = format!(
             "data/components/{kind}/{id}/participant.{}",
             extension(&d.encoding)

@@ -123,10 +123,14 @@ Permission to see or change anything belongs to the Hub or other host and never
 appears in project, package, lineage or summary formats. The former
 `access.collaborators`, `access.visibility` and `access.access_policy` Project
 metadata fields are removed in place from the Project metadata record and from
-every format. No format publishes or accepts them. Project metadata contract
-version 2 omits `access`; a stored version 1 record is read once with that member
-dropped (and the next write stores version 2), so existing Projects, including
-revision 6 Projects, keep opening. The dropped value is never read or published.
+every format. No format publishes or accepts them, and there is no migration
+(pre-v1): Project metadata contract version 2 omits `access`, and a stored version
+1 record, including one in a revision 6 Project, is refused on read as
+`GF_UNSUPPORTED_PROJECT_FORMAT`. The portable export planner reads the metadata
+participant before copying it, so a raw legacy participant can never reach a
+package. The revision 6 research layout itself remains readable (see Format and
+compatibility); a Project whose metadata is version 1 must have that participant
+rewritten with the current contract before its metadata is read or exported.
 
 ### Format and compatibility
 
@@ -164,7 +168,10 @@ decode, validate and digest identically.
   6 in the archive. Every export is written at revision 7, including a
   whole-Project export of an admissible Project imported at revision 6. This
   does not promise import or re-export of archives from a different pre-v1
-  package version.
+  package version. A Version
+  freezes the Project metadata of its time, so a Version captured with the retired
+  metadata contract (version 1, which carried `access`) cannot be exported at all
+  (`GF_UNSUPPORTED_PROJECT_FORMAT`); this includes the revision 6 fixtures.
 - **Readers of research participants.** Canonical decisions written at
   revision 6 read unchanged. Checkpoint summary diffs span the upgrade;
   record-level checkpoint diff still has no research registry adapter at any

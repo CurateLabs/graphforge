@@ -81,6 +81,30 @@ fn rewrite_is_explicit_and_never_weakens_immutable_authority() {
     assert!(validate_history_transition(&old, &next, &refs, true, true, limits).is_err());
 }
 #[test]
+fn credit_may_be_added_to_a_pre_credit_entry_but_never_changed_or_removed() {
+    let credit = |name: &str| graphforge_discovery::CreditSignature {
+        name: name.into(),
+        email: None,
+        orcid: None,
+    };
+    let old = lineage();
+    let refs = vec!["main".into()];
+    let limits = DiscoveryLimits::default();
+    // A repository published before credit was displayed gains it: identity,
+    // parents and payload are unchanged, so nothing committed has moved.
+    let mut credited = old.clone();
+    credited.versions[1].author = Some(credit("Alice"));
+    credited.versions[1].committer = Some(credit("Alice"));
+    assert!(validate_history_transition(&old, &credited, &refs, false, false, limits).is_ok());
+    // Once published, credit is permanent: it can be neither changed nor removed.
+    let mut changed = credited.clone();
+    changed.versions[1].author = Some(credit("Mallory"));
+    assert!(validate_history_transition(&credited, &changed, &refs, true, true, limits).is_err());
+    let mut removed = credited.clone();
+    removed.versions[1].committer = None;
+    assert!(validate_history_transition(&credited, &removed, &refs, true, true, limits).is_err());
+}
+#[test]
 fn pruning_is_explicit_and_preserves_surviving_parent_and_origin_dependencies() {
     let old = lineage();
     let mut next = old.clone();

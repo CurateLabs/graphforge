@@ -1108,6 +1108,31 @@ struct Snapshot {
 ///
 /// Earlier Versions, Branches, and Proposals stay exactly as published; the
 /// new Branch entry replaces only its own earlier entry.
+/// The Version identity commits to author and committer (ADR 0055), so a matching
+/// identity proves the local record's credit equals the published record's. An
+/// entry published before credit was displayed lacks the fields and takes the
+/// verified local credit; the identity is unchanged. A published credit that
+/// differs from the local record contradicts the identity and is refused.
+fn adopt_verified_credit(
+    published: &mut graphforge_discovery::LineageVersion,
+    local: &graphforge_discovery::LineageVersion,
+) -> Result<(), GfError> {
+    for (old, new) in [
+        (&mut published.author, &local.author),
+        (&mut published.committer, &local.committer),
+    ] {
+        if old.is_none() {
+            old.clone_from(new);
+        } else if old != new {
+            return Err(publish_error(
+                HubPublishErrorCode::IntegrityFailure,
+                "a published Version's credit differs from its identity-verified local record",
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn merge_lineage(
     previous: Option<&ResearchLineage>,
     mut next: ResearchLineage,
@@ -1140,6 +1165,7 @@ fn merge_lineage(
                 ));
             }
             Some(published) => {
+                adopt_verified_credit(published, &version)?;
                 // Metadata history does not imply a retained payload. Explicit
                 // publication may supply it later without replacing identity/history.
                 if published.package.is_none() {
