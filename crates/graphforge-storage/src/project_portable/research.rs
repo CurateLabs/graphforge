@@ -20,6 +20,12 @@ const RETAINED: &str = "data/components/research/research-retained/";
 /// (`-` < `/`), so the registry is still the first research entry.
 const EVIDENCE: &str = "data/components/research/research-retained-evidence/";
 
+/// True for a path whose bytes only evidence needs. No decoder reads them, so
+/// nothing walks their Parquet pages.
+pub(super) fn is_evidence_only(path: &str) -> bool {
+    path.starts_with(EVIDENCE)
+}
+
 /// One retained object of a Version.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct Held {

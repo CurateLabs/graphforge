@@ -427,6 +427,170 @@ fn local_evidence_is_authenticated_in_the_stream_and_never_staged() {
     }
 }
 
+/// A Parquet file whose pages use an encoding outside the funded decoder profile.
+fn unfunded_parquet() -> Vec<u8> {
+    use arrow::array::{ArrayRef, RecordBatch, StringArray};
+    use arrow::datatypes::{Field, Schema};
+    use parquet::{
+        arrow::ArrowWriter,
+        basic::{Compression, Encoding},
+        file::properties::{WriterProperties, WriterVersion},
+    };
+    let values: ArrayRef = std::sync::Arc::new(StringArray::from_iter_values(
+        (0..64).map(|row| format!("value-{row}")),
+    ));
+    let schema = std::sync::Arc::new(Schema::new(vec![Field::new(
+        "value",
+        values.data_type().clone(),
+        false,
+    )]));
+    let batch = RecordBatch::try_new(schema.clone(), vec![values]).unwrap();
+    let properties = WriterProperties::builder()
+        .set_writer_version(WriterVersion::PARQUET_1_0)
+        .set_compression(Compression::UNCOMPRESSED)
+        .set_dictionary_enabled(false)
+        .set_encoding(Encoding::DELTA_BYTE_ARRAY)
+        .build();
+    let mut output = Vec::new();
+    let mut writer = ArrowWriter::try_new(&mut output, schema, Some(properties)).unwrap();
+    writer.write(&batch).unwrap();
+    writer.close().unwrap();
+    output
+}
+
+/// Evidence bytes reach no decoder, so an evidence-only Parquet file with an
+/// unfunded encoding verifies alike from a file and a stream.
+#[test]
+fn evidence_only_parquet_with_an_unfunded_encoding_is_never_decoded() {
+    use graphforge_core::portable::{PortableLimits, PortableMode};
+    let owner = tempfile::tempdir().unwrap();
+    let blob = unfunded_parquet();
+    let (package, bytes) = evidence_bundle(owner.path(), |_| blob.clone());
+    let limits = PortableLimits::default();
+    let file = crate::verify_portable(
+        &crate::PortableVerifyRequest {
+            input: package,
+            mode: PortableMode::Full,
+            limits,
+        },
+        None,
+    )
+    .unwrap();
+    assert!(
+        file.research_entries
+            .iter()
+            .any(|entry| entry.path.contains("/research-retained-evidence/")
+                && entry.length == blob.len() as u64)
+    );
+    let scratch = tempfile::tempdir().unwrap();
+    let stream = crate::verify_portable_stream(
+        &mut std::io::Cursor::new(&bytes),
+        Some(scratch.path()),
+        limits,
+        None,
+    )
+    .unwrap();
+    assert_eq!(stream.package_digest, file.package_digest);
+}
+
+/// Bytes allocated under `scratch` right now: named files, and the unnamed
+/// files this process holds open there (which no directory listing shows).
+#[cfg(target_os = "linux")]
+fn allocated_under(scratch: &std::path::Path) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    let mut total = 0;
+    let mut pending = vec![scratch.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(&directory)
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
+            let Ok(metadata) = entry.metadata() else {
+                continue;
+            };
+            if metadata.is_dir() {
+                pending.push(entry.path());
+            } else {
+                total += metadata.blocks() * 512;
+            }
+        }
+    }
+    let prefix = scratch.to_string_lossy().into_owned();
+    for descriptor in std::fs::read_dir("/proc/self/fd").unwrap().flatten() {
+        let Ok(target) = std::fs::read_link(descriptor.path()) else {
+            continue;
+        };
+        let target = target.to_string_lossy();
+        if target.starts_with(&prefix) && target.ends_with("(deleted)") {
+            if let Ok(metadata) = std::fs::metadata(descriptor.path()) {
+                total += metadata.blocks() * 512;
+            }
+        }
+    }
+    total
+}
+
+/// Reads in small steps with a pause, so a sampling thread sees the transient
+/// scratch an entry causes while it streams past.
+struct Paced<R>(R);
+
+impl<R: std::io::Read> std::io::Read for Paced<R> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        std::thread::sleep(std::time::Duration::from_micros(500));
+        let step = buffer.len().min(64 * 1024);
+        self.0.read(&mut buffer[..step])
+    }
+}
+
+/// The page walk keeps a copy of a streamed entry that exceeds its in-memory
+/// threshold, in an unnamed file. Evidence bytes reach no decoder, so no copy of
+/// them is kept anywhere: allocated scratch stays below the evidence size.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_streamed_evidence_blob_is_not_copied_into_scratch() {
+    use graphforge_core::portable::PortableLimits;
+    let owner = tempfile::tempdir().unwrap();
+    let payload = vec![0x5a_u8; 9 * 1024 * 1024];
+    let (_, bytes) = evidence_bundle(owner.path(), |_| payload.clone());
+    let scratch = tempfile::tempdir().unwrap();
+    // The meter sees unnamed files: one that is written and never named.
+    {
+        let mut probe = tempfile::tempfile_in(scratch.path()).unwrap();
+        std::io::Write::write_all(&mut probe, &vec![1_u8; 1024 * 1024]).unwrap();
+        assert!(allocated_under(scratch.path()) >= 1024 * 1024);
+    }
+    assert_eq!(allocated_under(scratch.path()), 0);
+    let limits = PortableLimits {
+        max_parquet_walk_bytes: 1024 * 1024,
+        ..PortableLimits::default()
+    };
+    let done = std::sync::atomic::AtomicBool::new(false);
+    let peak = std::thread::scope(|scope| {
+        let sampler = scope.spawn(|| {
+            let mut peak = 0;
+            while !done.load(std::sync::atomic::Ordering::Acquire) {
+                peak = peak.max(allocated_under(scratch.path()));
+            }
+            peak
+        });
+        crate::verify_portable_stream(
+            &mut Paced(std::io::Cursor::new(&bytes)),
+            Some(scratch.path()),
+            limits,
+            None,
+        )
+        .unwrap();
+        done.store(true, std::sync::atomic::Ordering::Release);
+        sampler.join().unwrap()
+    });
+    assert!(
+        peak < payload.len() as u64,
+        "{peak} bytes were allocated in scratch for a {} byte evidence blob",
+        payload.len()
+    );
+}
+
 /// The smallest Parquet file under a project: one of its graph files.
 fn graph_file_bytes(root: &std::path::Path) -> Vec<u8> {
     let mut pending = vec![root.to_path_buf()];

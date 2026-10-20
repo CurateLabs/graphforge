@@ -15,6 +15,7 @@ use crate::project_portable::{
     PortableError, PortableErrorCode, PortableLimits, PortableMode, PortableReport, PortableSource,
     authenticated_entries,
     authenticated_entries::Reopen,
+    authenticated_entries::walk_staged,
     check_cancel, finish_bundle,
     materialization::{CopySink, EntrySink},
     preflight, read_bounded_file, read_bundle, scan_entries,
@@ -54,6 +55,11 @@ pub(crate) struct Driver<'a, 'v> {
     /// Every retained object seen so far, staged or not, with its length.
     seen: Objects,
     finished: BTreeSet<Uuid>,
+    /// The first refusal of a Version (its closure, a native owner, a limit). The
+    /// scan goes on to authenticate the rest of the package without staging or
+    /// validating anything more, and a failed authentication outranks this
+    /// refusal, whichever way the bytes arrive.
+    refusal: Option<PortableError>,
 }
 
 enum Slot {
@@ -81,6 +87,7 @@ impl<'a, 'v> Driver<'a, 'v> {
             current: None,
             seen: Objects::new(),
             finished: BTreeSet::new(),
+            refusal: None,
         }
     }
 
@@ -103,6 +110,33 @@ impl<'a, 'v> Driver<'a, 'v> {
         let Some(stage) = self.current.take() else {
             return Ok(());
         };
+        if self.refusal.is_some() {
+            return Ok(());
+        }
+        match self.validate_stage(&stage) {
+            Ok(()) => {
+                self.finished.insert(stage.id);
+                Ok(())
+            }
+            Err(refusal) => self.defer(refusal),
+        }
+    }
+
+    /// A refusal of a Version's content waits for the end of the scan; any other
+    /// failure, authentication included, ends it now.
+    fn defer(&mut self, error: PortableError) -> Result<(), PortableError> {
+        if matches!(
+            error.code,
+            PortableErrorCode::Incompatible | PortableErrorCode::LimitExceeded
+        ) {
+            self.refusal.get_or_insert(error);
+            Ok(())
+        } else {
+            Err(error)
+        }
+    }
+
+    fn validate_stage(&mut self, stage: &VersionStage) -> Result<(), PortableError> {
         check_cancel(self.cancelled)?;
         let registry = self.registry.as_ref().ok_or_else(invalid)?;
         let version = registry.versions.get(&stage.id).ok_or_else(invalid)?;
@@ -130,7 +164,6 @@ impl<'a, 'v> Driver<'a, 'v> {
                 validator,
             )?;
         }
-        self.finished.insert(stage.id);
         Ok(())
     }
 
@@ -141,6 +174,9 @@ impl<'a, 'v> Driver<'a, 'v> {
         report: &graphforge_core::portable::PortableReport,
     ) -> Result<(), PortableError> {
         self.finish_version()?;
+        if let Some(refusal) = self.refusal.take() {
+            return Err(refusal);
+        }
         if !report.research_interchange {
             return if self.registry.is_none() && self.seen.is_empty() {
                 Ok(())
@@ -187,6 +223,39 @@ impl<'a, 'v> Driver<'a, 'v> {
             staged: Objects::new(),
         });
         Ok(())
+    }
+
+    /// Open the staged file for a retained object of Version `id`.
+    fn stage_entry(
+        &mut self,
+        id: Uuid,
+        relative: &str,
+        length: u64,
+    ) -> Result<Option<File>, PortableError> {
+        if self.registry.is_none() {
+            return Err(PortableError::at(
+                PortableErrorCode::InvalidStructure,
+                relative,
+                "research content precedes the registry",
+            ));
+        }
+        self.version(&id)?;
+        self.start_version(id)?;
+        if self.refusal.is_some() {
+            self.current = None;
+            return Ok(None);
+        }
+        let limit = self.limits.max_research_version_bytes;
+        let stage = self.current.as_mut().expect("Version stage was started");
+        stage.bytes = stage.bytes.saturating_add(length);
+        if stage.bytes > limit {
+            return Err(PortableError::at(
+                PortableErrorCode::LimitExceeded,
+                relative,
+                "research version bytes",
+            ));
+        }
+        stage.sink.open(relative)
     }
 
     /// Remember an object; the same Version and digest in both directories is refused.
@@ -269,6 +338,10 @@ impl EntrySink for Driver<'_, '_> {
         true
     }
 
+    fn walks_staged(&self) -> bool {
+        true
+    }
+
     fn open(&mut self, relative: &str, length: u64) -> Result<Option<File>, PortableError> {
         check_cancel(self.cancelled)?;
         match Self::slot(relative) {
@@ -291,26 +364,13 @@ impl EntrySink for Driver<'_, '_> {
             }
             Slot::Evidence(..) => Ok(None),
             Slot::Retained(id, _) => {
-                if self.registry.is_none() {
-                    return Err(PortableError::at(
-                        PortableErrorCode::InvalidStructure,
-                        relative,
-                        "research content precedes the registry",
-                    ));
+                if self.refusal.is_some() {
+                    return Ok(None);
                 }
-                self.version(&id)?;
-                self.start_version(id)?;
-                let limit = self.limits.max_research_version_bytes;
-                let stage = self.current.as_mut().expect("Version stage was started");
-                stage.bytes = stage.bytes.saturating_add(length);
-                if stage.bytes > limit {
-                    return Err(PortableError::at(
-                        PortableErrorCode::LimitExceeded,
-                        relative,
-                        "research version bytes",
-                    ));
+                match self.stage_entry(id, relative, length) {
+                    Ok(file) => Ok(file),
+                    Err(refusal) => self.defer(refusal).map(|()| None),
                 }
-                stage.sink.open(relative)
             }
             Slot::Other => {
                 // The research run ended; validate its last Version before the scan goes on.
@@ -356,6 +416,11 @@ impl EntrySink for Driver<'_, '_> {
                     evidence_only: false,
                 };
                 stage.staged.insert((id, hex.clone()), held);
+                // The scan does not spill a second copy for the page walk: the
+                // staged copy is the one walked, like a file's entry in place.
+                if let Some(dir) = stage.sink.staged() {
+                    walk_staged(&dir.join(relative), length, relative)?;
+                }
                 self.record(id, hex, held)
             }
             Slot::Evidence(..) | Slot::Other => Ok(()),
@@ -368,15 +433,26 @@ impl EntrySink for Driver<'_, '_> {
         length: u64,
         digest: [u8; 32],
     ) -> Result<(), PortableError> {
-        if let Slot::Evidence(id, hex) = Self::slot(relative) {
-            authenticate(relative, &hex, digest)?;
-            let held = Held {
-                length,
-                evidence_only: true,
-            };
-            return self.record(id, hex, held);
+        match Self::slot(relative) {
+            Slot::Evidence(id, hex) => {
+                authenticate(relative, &hex, digest)?;
+                let held = Held {
+                    length,
+                    evidence_only: true,
+                };
+                self.record(id, hex, held)
+            }
+            // Not staged because an earlier Version was refused.
+            Slot::Retained(id, hex) => {
+                authenticate(relative, &hex, digest)?;
+                let held = Held {
+                    length,
+                    evidence_only: false,
+                };
+                self.record(id, hex, held)
+            }
+            Slot::Registry | Slot::Other => Ok(()),
         }
-        Ok(())
     }
 }
 

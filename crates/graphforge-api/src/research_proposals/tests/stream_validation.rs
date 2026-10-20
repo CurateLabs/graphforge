@@ -273,3 +273,126 @@ fn an_expanded_package_gets_the_verdict_of_its_bundle() {
     assert!(report.research_interchange);
     assert!(version_bytes(&report).len() >= 2);
 }
+
+/// Authentication outranks native validation on every path: the first Version
+/// is refused natively, but the scan goes on to authenticate the rest of the
+/// package, so a changed byte in a later Version is what is reported, from a
+/// bundle file, an expanded directory and a stream alike.
+#[test]
+fn a_changed_byte_after_a_refused_version_is_reported_first_on_every_path() {
+    use graphforge_core::GfError;
+    let directory = tempfile::tempdir().unwrap();
+    let limits = PortableLimits::default();
+    let scratch = tempfile::tempdir().unwrap();
+    std::fs::create_dir(directory.path().join("bundled")).unwrap();
+    let (package, bytes) = bundle(&directory.path().join("bundled"));
+    let (graph, proposal) = fixture(&directory.path().join("expanded-source"));
+    let expanded = directory.path().join("expanded");
+    export_selected(
+        &graph,
+        &proposal,
+        proposal.fields[0].object_uuid,
+        Uuid::now_v7(),
+        &expanded,
+    );
+    let versions_of = |path: &Path| -> Vec<String> {
+        version_bytes(&by_file(path, limits).unwrap())
+            .into_keys()
+            .collect()
+    };
+    let (bundled_versions, expanded_versions) = (versions_of(&package), versions_of(&expanded));
+    assert!(bundled_versions.len() >= 2 && expanded_versions.len() >= 2);
+    // The first Version of each package is refused by its native owner.
+    let validate = |refused: String| {
+        move |generation: &graphforge_storage::ResolvedProjectGeneration,
+              version: &ResearchVersionRecord,
+              registry: &ResearchRegistry| {
+            if version.version_uuid.to_string() == refused {
+                Err(GfError::Validation("refused".into()))
+            } else {
+                crate::research_interchange::validation::validate(generation, version, registry)
+            }
+        }
+    };
+    // One byte of the second Version's first object changes.
+    let needle = format!("research-retained/{}", bundled_versions[1]);
+    let at = bytes
+        .windows(needle.len())
+        .position(|window| window == needle.as_bytes())
+        .unwrap();
+    let mut changed = bytes.clone();
+    changed[at - at % 512 + 512] ^= 1;
+    let changed_package = directory.path().join("changed.gfpb");
+    std::fs::write(&changed_package, &changed).unwrap();
+    let object_directory = expanded.join(format!(
+        "data/components/research/research-retained/{}",
+        expanded_versions[1]
+    ));
+    let object = std::fs::read_dir(&object_directory)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let original = std::fs::read(&object).unwrap();
+    let run_file = |path: &Path, refused: &str| {
+        graphforge_storage::validate_research_package(
+            path,
+            Some(scratch.path()),
+            limits,
+            None,
+            &mut validate(refused.to_owned()),
+        )
+    };
+    let run_stream = |bytes: &[u8]| {
+        graphforge_storage::validate_research_package_stream(
+            &mut std::io::Cursor::new(bytes),
+            Some(scratch.path()),
+            limits,
+            None,
+            &mut validate(bundled_versions[0].clone()),
+        )
+    };
+    // Only the first Version is damaged: the same refusal on every path.
+    let only = [
+        run_file(&package, &bundled_versions[0]),
+        run_file(&expanded, &expanded_versions[0]),
+        run_stream(&bytes),
+    ];
+    for result in &only {
+        assert_eq!(
+            result.as_ref().unwrap_err().code,
+            PortableErrorCode::Incompatible
+        );
+    }
+    assert_eq!(
+        only[0].as_ref().unwrap_err().entry,
+        only[2].as_ref().unwrap_err().entry
+    );
+    // A changed byte in the second Version is authentication, and it wins.
+    let mut flipped = original.clone();
+    flipped[0] ^= 1;
+    std::fs::set_permissions(&object, {
+        let mut permissions = std::fs::metadata(&object).unwrap().permissions();
+        permissions.set_readonly(false);
+        permissions
+    })
+    .unwrap();
+    std::fs::write(&object, &flipped).unwrap();
+    let combined = [
+        run_file(&changed_package, &bundled_versions[0]),
+        run_file(&expanded, &expanded_versions[0]),
+        run_stream(&changed),
+        // The facade checks authenticity first, with the real native owner.
+        by_file(&changed_package, limits),
+    ];
+    for result in &combined {
+        let error = result.as_ref().unwrap_err();
+        assert_eq!(error.code, PortableErrorCode::DigestMismatch, "{error:?}");
+    }
+    assert_eq!(
+        combined[0].as_ref().unwrap_err().entry,
+        combined[2].as_ref().unwrap_err().entry
+    );
+    assert_eq!(std::fs::read_dir(scratch.path()).unwrap().count(), 0);
+}

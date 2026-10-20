@@ -181,35 +181,43 @@ A bundle file, an expanded directory and a stream run the same code and give
 the same verdict; only the report's `source` differs. Memory is bounded by the
 scan's own limits and the owners' existing bounds, one Version at a time.
 
-`max_research_version_bytes` (default 1 GiB) bounds the retained objects of
-one Version that verification stages: the participants, graph files and
-manifest nodes, counted from the entry sizes before any byte is written. A
+`max_research_version_bytes` bounds the retained objects of one Version that
+verification stages: the participants, graph files and manifest nodes under
+`research-retained/`, counted from the entry sizes before any byte is written.
+The default is no limit, so verification accepts every package it accepted
+before; disk is then bounded by the largest Version rather than by the whole
+package. An operator who sets a limit bounds the scratch space as well: a
 Version over it is refused with `LimitExceeded`, from a file and from a stream
-alike. Local evidence objects that nothing else in the Version needs are
-authenticated as they stream (their digest must equal their path and their
-length the registry's) and are never staged, so they do not count and need no
-disk; the producer carries them under `research-retained-evidence/`. An evidence
-blob that is also a participant, graph file or manifest node of the Version is
-one object under `research-retained/` and is staged and counted like the rest. While a Version is validated its staged
-objects exist once in the stage and again in each copy the validation makes (an
-ephemeral object store, the expanded graph tree built for a graph without a
-file manifest, and the private project that tree is copied into; the copy count
-is `PortableImportFootprint::VALIDATION_RESEARCH_COPIES`). Budget the stage and
-those copies, each up to `max_research_version_bytes`, as free space in `scratch`
-(the system temporary directory when none is given), and pass the destination's filesystem as
-`scratch` when you know it. The limit is a ceiling for adversarial packages:
-a Version whose graph exceeds about 64 MiB of projected memory is already
-refused by the commitment check, so a genuine Version stays far below it.
+alike. Objects that only local evidence needs are carried under
+`research-retained-evidence/`; they are authenticated as they stream (their
+digest must equal their path and their length the registry's) and are never
+staged or decoded, so they do not count and need no disk. An evidence blob that
+is also a participant, graph file or manifest node of the Version is one object
+under `research-retained/` and is staged and counted like the rest. While a
+Version is validated its staged objects exist once in the stage and again in
+each copy the validation makes (an ephemeral object store, the expanded graph
+tree built for a graph without a file manifest, and the private project that
+tree is copied into; the copy count is
+`PortableImportFootprint::VALIDATION_RESEARCH_COPIES`). With a limit set, budget
+the stage and those copies, each up to `max_research_version_bytes`, as free
+space in `scratch` (the system temporary directory when none is given), and pass
+the destination's filesystem as `scratch` when you know it.
 
-Compared with whole-package materialization, three outcomes differ, and all
-are refusals, never a false `verified`:
+Compared with whole-package materialization, two outcomes differ:
 
 - a package that still uses the earlier layout, `research-content/<digest>`,
-  is refused as incompatible;
-- a Version over `max_research_version_bytes` is refused with `LimitExceeded`;
-- when a package has two independent defects, such as a digest mismatch in
-  a later entry and an invalid commitment in an earlier Version, the native
-  refusal of the earlier Version is reported first.
+  is refused as incompatible, and a Version over a configured
+  `max_research_version_bytes` is refused with `LimitExceeded`; both are
+  refusals, never a false `verified`;
+- an evidence-only object that happens to be a Parquet file with an encoding
+  outside the funded decoder profile is accepted, because no decoder reads
+  evidence bytes. Earlier verification of a file refused it.
+
+When a package has two independent defects, authentication outranks native
+validation on every path: after a Version is refused, the scan keeps
+authenticating the rest of the package without validating more Versions, so a
+digest mismatch in a later entry is reported before an invalid commitment in an
+earlier Version.
 
 ```text
 graphforge --project ./citation-project portable preview --current --profile complete --strict

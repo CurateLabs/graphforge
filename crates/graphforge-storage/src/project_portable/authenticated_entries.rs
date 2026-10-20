@@ -274,6 +274,7 @@ impl parquet::file::reader::ChunkReader for EntryWindow {
 /// the verdict does not depend on the source or on the entry's size. The
 /// scratch file has no name and is gone when the walk is dropped.
 pub(super) struct ParquetWalk<'a> {
+    skipped: bool,
     path: &'a str,
     threshold: u64,
     scratch: &'a Path,
@@ -286,6 +287,7 @@ impl<'a> ParquetWalk<'a> {
     pub(super) fn new(path: &'a str, size: u64, threshold: u64, scratch: &'a Path) -> Self {
         let capacity = usize::try_from(size.min(threshold)).unwrap_or(0);
         Self {
+            skipped: false,
             path,
             threshold,
             scratch,
@@ -294,7 +296,15 @@ impl<'a> ParquetWalk<'a> {
             tail: [0; 4],
         }
     }
+    /// The entry is kept by the sink and walked there: keep nothing here.
+    pub(super) fn skip(&mut self) {
+        self.skipped = true;
+        self.kept = Vec::new();
+    }
     pub(super) fn update(&mut self, chunk: &[u8]) -> Result<(), PortableError> {
+        if self.skipped {
+            return Ok(());
+        }
         let stage = |_: std::io::Error| {
             PortableError::at(
                 PortableErrorCode::Io,
@@ -326,7 +336,7 @@ impl<'a> ParquetWalk<'a> {
         Ok(())
     }
     pub(super) fn finish(self) -> Result<(), PortableError> {
-        if &self.tail != b"PAR1" {
+        if self.skipped || &self.tail != b"PAR1" {
             return Ok(());
         }
         match self.spill {
@@ -350,6 +360,24 @@ fn walk_entry(file: &fs::File, base: u64, length: u64, path: &str) -> Result<(),
     };
     crate::parquet_encoding_profile::admit_pages(&window)
         .map_err(|error| refuse_profile(path, error))
+}
+
+/// Walk the pages of an entry a sink kept as the file at `path`.
+pub(super) fn walk_staged(path: &Path, length: u64, entry: &str) -> Result<(), PortableError> {
+    if length < 12 {
+        return Ok(());
+    }
+    let unreadable =
+        |_| PortableError::at(PortableErrorCode::Io, entry, "cannot read the staged entry");
+    let mut file = fs::File::open(path).map_err(unreadable)?;
+    let mut tail = [0_u8; 4];
+    file.seek(SeekFrom::Start(length - 4))
+        .and_then(|_| file.read_exact(&mut tail))
+        .map_err(unreadable)?;
+    if &tail == b"PAR1" {
+        walk_entry(&file, 0, length, entry)?;
+    }
+    Ok(())
 }
 
 /// The refusal for a Parquet entry the funded decoder profile does not admit.
@@ -383,10 +411,11 @@ pub(super) fn validate_parquet_profile(
 ) -> Result<(), PortableError> {
     use crate::parquet_encoding_profile::admit_pages;
 
-    for entry in entries
-        .iter()
-        .filter(|entry| entry.path.starts_with("data/components/") && entry.length >= 12)
-    {
+    for entry in entries.iter().filter(|entry| {
+        entry.path.starts_with("data/components/")
+            && entry.length >= 12
+            && !research::is_evidence_only(&entry.path)
+    }) {
         check_cancel(cancelled)?;
         if let Some(bytes) = &entry.bytes {
             if bytes.ends_with(b"PAR1") {

@@ -1112,7 +1112,11 @@ fn read_bundle<R: Read + ?Sized>(
                 })
             });
         let mut walk = walk_parquet
-            .filter(|_| entry_path.starts_with("data/components/") && size >= 12)
+            .filter(|_| {
+                entry_path.starts_with("data/components/")
+                    && size >= 12
+                    && !research::is_evidence_only(&entry_path)
+            })
             .map(|scratch| {
                 ParquetWalk::new(&entry_path, size, limits.max_parquet_walk_bytes, scratch)
             });
@@ -2033,6 +2037,14 @@ fn hash_payload(
         .map(|sink| sink.open(entry, size))
         .transpose()?
         .flatten();
+    if output.is_some()
+        && sink
+            .as_deref()
+            .is_some_and(materialization::EntrySink::walks_staged)
+        && let Some(walk) = walk.as_deref_mut()
+    {
+        walk.skip();
+    }
     let mut checksum = output
         .as_ref()
         .map(|_| crate::corruption_checksum::Checksum::new());
