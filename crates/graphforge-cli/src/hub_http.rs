@@ -1131,22 +1131,46 @@ pub(crate) fn limit_error(message: &str) -> graphforge_api::GfError {
 pub(crate) fn storage(error: impl std::fmt::Display) -> graphforge_api::GfError {
     graphforge_api::GfError::Storage(error.to_string())
 }
-pub(crate) fn hash_reader(reader: &mut impl Read) -> Result<String, graphforge_api::GfError> {
-    let mut hash = Sha256::new();
-    let mut buffer = vec![0_u8; 64 * 1024].into_boxed_slice();
-    loop {
-        let read = reader.read(&mut buffer).map_err(storage)?;
-        if read == 0 {
-            break;
-        }
-        hash.update(&buffer[..read]);
+/// An incremental SHA-256 rendered as `sha256:<hex>`, the form every Hub
+/// object digest and portable transport digest uses.
+pub(crate) struct RunningDigest(Sha256);
+
+impl RunningDigest {
+    pub(crate) fn new() -> Self {
+        Self(Sha256::new())
     }
-    let digest = hash.finalize();
-    let hex = digest
-        .iter()
-        .fold(String::with_capacity(64), |mut hex, byte| {
-            write!(hex, "{byte:02x}").expect("writing to a string cannot fail");
-            hex
-        });
-    Ok(format!("sha256:{hex}"))
+
+    pub(crate) fn update(&mut self, bytes: &[u8]) {
+        self.0.update(bytes);
+    }
+
+    /// Hash everything `reader` still yields.
+    pub(crate) fn absorb(&mut self, reader: &mut impl Read) -> Result<(), graphforge_api::GfError> {
+        let mut buffer = vec![0_u8; 64 * 1024].into_boxed_slice();
+        loop {
+            let read = reader.read(&mut buffer).map_err(storage)?;
+            if read == 0 {
+                return Ok(());
+            }
+            self.0.update(&buffer[..read]);
+        }
+    }
+
+    pub(crate) fn finish(self) -> String {
+        let hex = self
+            .0
+            .finalize()
+            .iter()
+            .fold(String::with_capacity(64), |mut hex, byte| {
+                write!(hex, "{byte:02x}").expect("writing to a string cannot fail");
+                hex
+            });
+        format!("sha256:{hex}")
+    }
+}
+
+pub(crate) fn hash_reader(reader: &mut impl Read) -> Result<String, graphforge_api::GfError> {
+    let mut digest = RunningDigest::new();
+    digest.absorb(reader)?;
+    Ok(digest.finish())
 }

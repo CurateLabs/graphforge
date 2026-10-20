@@ -208,5 +208,6 @@ pub fn import_complete_portable_with_native_validation(
         progress,
         allocation,
         Some(validator),
+        super::space::filesystem_available_space,
     )
 }

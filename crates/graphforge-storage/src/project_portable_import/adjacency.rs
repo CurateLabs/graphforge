@@ -193,7 +193,7 @@ fn import_edge_files(graph_tree: &Path) -> Result<Vec<(String, PathBuf)>, Portab
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use std::fs;
     use std::path::Path;
     use std::sync::atomic::AtomicBool;
@@ -216,36 +216,18 @@ mod tests {
     /// An initial construction of 8 nodes and 24 `KNOWS` edges, published as
     /// the project's current generation.
     fn construction_published_project() -> tempfile::TempDir {
-        let node_ids = (0..8_u128)
+        construction_published_project_sized(8, 24)
+    }
+
+    /// An initial construction of `nodes` nodes and `edges` `KNOWS` edges,
+    /// published as the project's current generation.
+    pub(in crate::project_portable_import) fn construction_published_project_sized(
+        nodes: u128,
+        edges: u128,
+    ) -> tempfile::TempDir {
+        let node_ids = (0..nodes)
             .map(|index| Uuid::from_u128(0x1000 + index))
             .collect::<Vec<_>>();
-        let edge_ids = (0..24_u128)
-            .map(|index| Uuid::from_u128(0x2000 + index))
-            .collect::<Vec<_>>();
-        let nodes = RecordBatch::try_new(
-            crate::CONSTRUCTION_NODE_SCHEMA.clone(),
-            vec![
-                Arc::new(fixed(&node_ids)) as ArrayRef,
-                Arc::new(StringArray::from(vec!["Person"; node_ids.len()])) as ArrayRef,
-            ],
-        )
-        .unwrap();
-        let sources = (0..edge_ids.len())
-            .map(|index| node_ids[index % node_ids.len()])
-            .collect::<Vec<_>>();
-        let targets = (0..edge_ids.len())
-            .map(|index| node_ids[(index + 3) % node_ids.len()])
-            .collect::<Vec<_>>();
-        let edges = RecordBatch::try_new(
-            crate::CONSTRUCTION_EDGE_SCHEMA.clone(),
-            vec![
-                Arc::new(fixed(&edge_ids)) as ArrayRef,
-                Arc::new(StringArray::from(vec!["KNOWS"; edge_ids.len()])) as ArrayRef,
-                Arc::new(fixed(&sources)) as ArrayRef,
-                Arc::new(fixed(&targets)) as ArrayRef,
-            ],
-        )
-        .unwrap();
         let source = tempfile::tempdir().unwrap();
         crate::open_or_initialize_project(source.path()).unwrap();
         let mut session = crate::GraphConstructionSession::open_with_mode(
@@ -259,12 +241,55 @@ mod tests {
         // An initial build: the chunks are spooled and the bulk builder
         // publishes the CSR with the generation.
         session.spool_chunks();
-        session
-            .append(crate::ConstructionChunkKind::Node, "nodes", &nodes)
+        const CHUNK: usize = 1_000;
+        // Edge identities start above every node identity (0x2000 for the default 8).
+        let edge_base = 0x1000 + nodes.max(0x1000);
+        for (chunk, ids) in node_ids.chunks(CHUNK).enumerate() {
+            let batch = RecordBatch::try_new(
+                crate::CONSTRUCTION_NODE_SCHEMA.clone(),
+                vec![
+                    Arc::new(fixed(ids)) as ArrayRef,
+                    Arc::new(StringArray::from(vec!["Person"; ids.len()])) as ArrayRef,
+                ],
+            )
             .unwrap();
-        session
-            .append(crate::ConstructionChunkKind::Edge, "edges", &edges)
+            session
+                .append(
+                    crate::ConstructionChunkKind::Node,
+                    &format!("nodes-{chunk}"),
+                    &batch,
+                )
+                .unwrap();
+        }
+        for first in (0..edges as usize).step_by(CHUNK) {
+            let last = (first + CHUNK).min(edges as usize);
+            let edge_ids = (first..last)
+                .map(|index| Uuid::from_u128(edge_base + index as u128))
+                .collect::<Vec<_>>();
+            let sources = (first..last)
+                .map(|index| node_ids[index % node_ids.len()])
+                .collect::<Vec<_>>();
+            let targets = (first..last)
+                .map(|index| node_ids[(index + 3) % node_ids.len()])
+                .collect::<Vec<_>>();
+            let batch = RecordBatch::try_new(
+                crate::CONSTRUCTION_EDGE_SCHEMA.clone(),
+                vec![
+                    Arc::new(fixed(&edge_ids)) as ArrayRef,
+                    Arc::new(StringArray::from(vec!["KNOWS"; edge_ids.len()])) as ArrayRef,
+                    Arc::new(fixed(&sources)) as ArrayRef,
+                    Arc::new(fixed(&targets)) as ArrayRef,
+                ],
+            )
             .unwrap();
+            session
+                .append(
+                    crate::ConstructionChunkKind::Edge,
+                    &format!("edges-{}", first / CHUNK),
+                    &batch,
+                )
+                .unwrap();
+        }
         session.record_seal_route(crate::SealRoute::Bulk).unwrap();
         let encoding = session
             .prepare_spooled_bulk_encoding(1, u64::MAX, || false)
@@ -301,7 +326,9 @@ mod tests {
         );
     }
 
-    fn export_complete(source: &Path) -> (tempfile::TempDir, std::path::PathBuf) {
+    pub(in crate::project_portable_import) fn export_complete(
+        source: &Path,
+    ) -> (tempfile::TempDir, std::path::PathBuf) {
         let generation = crate::resolve_project_generation(source).unwrap();
         let package_parent = tempfile::tempdir().unwrap();
         let package = package_parent.path().join("adjacency.gfproject");
@@ -456,7 +483,16 @@ mod tests {
         assert_eq!(crate::capture_graph_files(&tree).unwrap().0, first);
     }
     fn indexless_package() -> (tempfile::TempDir, PathBuf) {
-        let source = construction_published_project();
+        indexless_package_sized(8, 24)
+    }
+
+    /// A complete package of `nodes` nodes and `edges` edges whose generation
+    /// carries no adjacency index, so an import has to derive one.
+    pub(in crate::project_portable_import) fn indexless_package_sized(
+        nodes: u128,
+        edges: u128,
+    ) -> (tempfile::TempDir, PathBuf) {
+        let source = construction_published_project_sized(nodes, edges);
         let generation = crate::resolve_project_generation(source.path()).unwrap();
         let stage = tempfile::tempdir().unwrap();
         let tree = stage.path().join("graph-tree");

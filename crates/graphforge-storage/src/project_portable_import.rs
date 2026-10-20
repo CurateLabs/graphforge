@@ -36,7 +36,9 @@ mod allocation;
 use allocation::{capture_import_tree, record_import_file_identity};
 mod outcome;
 pub use outcome::portable_import_pending;
+mod space;
 use outcome::{storage, storage_or_cancel};
+pub use space::portable_import_held_bytes;
 
 use crate::project_publication::{
     ProjectCapability, ProjectFileParticipant, ProjectGenerationRequest, ProjectParticipant,
@@ -288,6 +290,7 @@ pub fn import_complete_portable_with_allocation(
         progress,
         allocation,
         None,
+        space::filesystem_available_space,
     )
 }
 
@@ -303,6 +306,7 @@ fn import_complete_portable_native(
     mut progress: impl FnMut(PortableImportProgress),
     allocation: Option<&crate::StorageAllocationOperation>,
     validator: Option<&mut NativeResearchValidator<'_>>,
+    available_space: space::AvailableSpace,
 ) -> Result<PortableImportReceipt, PortableError> {
     let source = source.as_ref();
     let project_paths = crate::StorageAllocationOperation::project_paths(target.as_ref())
@@ -335,6 +339,7 @@ fn import_complete_portable_native(
         limits,
         cancelled,
         allocation,
+        available_space,
     )?;
     progress(PortableImportProgress {
         phase: PortableImportPhase::Materialized,
@@ -461,6 +466,7 @@ struct OwnedMaterialization {
     entry_count: usize,
 }
 
+#[expect(clippy::too_many_arguments, reason = "import authority is explicit")]
 fn materialize_owned_import(
     source: &Path,
     target: &Path,
@@ -469,26 +475,32 @@ fn materialize_owned_import(
     limits: PortableLimits,
     cancelled: Option<&AtomicBool>,
     allocation: Option<&crate::StorageAllocationOperation>,
+    available_space: space::AvailableSpace,
 ) -> Result<OwnedMaterialization, PortableError> {
+    // Nothing is claimed or written until the package, the target's
+    // filesystem and the free space have all been admitted.
+    let credit = space::admit(
+        source,
+        target,
+        transaction_uuid,
+        limits,
+        cancelled,
+        available_space,
+    )?;
     let target_name = target
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or_else(|| {
             PortableError::new(PortableErrorCode::InvalidPath, "invalid import target")
         })?;
-    let stage = target
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join(format!(
-            ".{target_name}.portable-v2-{}",
-            transaction_uuid.hyphenated()
-        ));
+    let (stage, _) = space::stage_paths(target, transaction_uuid)?;
     let (owner, owned_retry) = claim_stage(
         &stage,
         target_name,
         transaction_uuid,
         generation_uuid,
         allocation,
+        (&credit, limits),
     )?;
     let mut identities = std::collections::BTreeMap::new();
     let owner_file = fs::File::open(&owner)
@@ -795,6 +807,7 @@ fn claim_stage(
     transaction_uuid: Uuid,
     generation_uuid: Uuid,
     allocation: Option<&crate::StorageAllocationOperation>,
+    (credit, limits): (&space::StageCredit, PortableLimits),
 ) -> Result<(PathBuf, bool), PortableError> {
     let owner = stage.with_file_name(format!(
         ".{target_name}.portable-v2-{}.owner",
@@ -815,6 +828,9 @@ fn claim_stage(
                 "import staging identity already exists",
             ));
         }
+        // Admission credited what removing this stage frees; remove it only
+        // if it still frees that much.
+        credit.confirm_at_reclaim(stage, limits)?;
         if let Some(allocation) = allocation {
             allocation
                 .observe_paths(&[stage.to_path_buf(), owner.clone()])
@@ -1933,6 +1949,7 @@ mod tests {
     use super::*;
     mod crash_into_fresh_target;
     mod returned_errors;
+    mod space_preflight;
 
     #[test]
     fn property_validation_preserves_cancelled_before_inventory_capture() {
@@ -2487,12 +2504,24 @@ mod tests {
     }
 
     fn composition_package() -> (tempfile::TempDir, PathBuf) {
+        composition_package_with_entity_types(0)
+    }
+
+    /// A complete package whose one authored ontology declares `entity_types`
+    /// entity types, so its composition documents grow with the count.
+    fn composition_package_with_entity_types(entity_types: usize) -> (tempfile::TempDir, PathBuf) {
         let source = tempfile::tempdir().unwrap();
         let parent = crate::open_or_initialize_project(source.path()).unwrap();
         let document = graphforge_ontology::OntologyDoc {
             ontology_id: "https://graphforge.dev/ontology/portable-import".into(),
             version: "release-2026.08".into(),
-            entity_types: Vec::new(),
+            entity_types: (0..entity_types)
+                .map(|index| graphforge_ontology::EntityTypeDef {
+                    name: format!("EntityTypeNumber{index:08}"),
+                    r#abstract: false,
+                    parent: None,
+                })
+                .collect(),
             relation_types: Vec::new(),
             properties: Vec::new(),
             constraints: Vec::new(),
@@ -2508,6 +2537,14 @@ mod tests {
         let composition = crate::WorkspaceOntologyComposition::virtual_legacy(&legacy)
             .unwrap()
             .unwrap();
+        publish_composition_package(source, parent, composition)
+    }
+
+    pub(super) fn publish_composition_package(
+        source: tempfile::TempDir,
+        parent: crate::ResolvedProjectGeneration,
+        composition: crate::WorkspaceOntologyComposition,
+    ) -> (tempfile::TempDir, PathBuf) {
         let mut participants = crate::empty_workspace_participants().unwrap();
         participants.push(
             crate::SemanticStorageBindings::new(
@@ -2753,11 +2790,25 @@ mod tests {
             )
             .unwrap_err();
             assert_eq!(error.code, PortableErrorCode::LimitExceeded, "{name}");
-            assert!(
-                !error.allocation_identity_allocated_bytes.is_empty(),
-                "{name} must report its durable ownership allocation"
-            );
             assert!(!target.exists(), "{name}");
+            let staged = fs::read_dir(package_parent.path()).unwrap().any(|entry| {
+                entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .contains(&format!("target-{name}"))
+            });
+            assert!(!staged, "{name} left staging beside the target");
+            // The controls' admission refuses before the stage is claimed, so
+            // those imports allocate nothing. An expanded package's total and
+            // the runtime-map bound are only measured by the extraction, which
+            // refuses after it and reports the ownership it created.
+            let before_claim = !matches!(name, "total" | "manifest");
+            assert_eq!(
+                error.allocation_identity_allocated_bytes.is_empty(),
+                before_claim,
+                "{name} must report exactly the allocation it made"
+            );
         }
     }
 
