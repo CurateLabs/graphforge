@@ -1,11 +1,10 @@
 //! Research components lay out one self-contained closure per Version, registry first.
 
-use super::historical_saved_queries::{identity, publish_archive, version};
+use super::historical_saved_queries::{publish_archive, version};
 use super::large_entries::{bundle_entries, verify};
 use super::*;
-use crate::research_versions::{
-    ResearchParticipantCommitment, ResearchParticipantKey, ResearchVersionRecord,
-};
+use crate::research_versions::{ResearchParticipantCommitment, ResearchParticipantKey};
+use serde_json::Value;
 
 const REGISTRY_PREFIX: &str = "data/components/research/research-registry-";
 const RETAINED: &str = "data/components/research/research-retained/";
@@ -80,14 +79,22 @@ fn rename_entry(plan: &mut PortableExportPlan, old: &str, new: &str) {
         .find(|file| file.path == old)
         .unwrap()
         .path = new.into();
+    plan.files
+        .sort_by(|a, b| a.path.as_bytes().cmp(b.path.as_bytes()));
     let mut manifest: Value = serde_json::from_slice(&plan.manifest).unwrap();
-    manifest["components"]
-        .as_array_mut()
-        .unwrap()
-        .iter_mut()
-        .flat_map(|component| component["files"].as_array_mut().unwrap())
-        .find(|file| file["path"] == old)
-        .unwrap()["path"] = new.into();
+    for component in manifest["components"].as_array_mut().unwrap() {
+        let files = component["files"].as_array_mut().unwrap();
+        if let Some(file) = files.iter_mut().find(|file| file["path"] == old) {
+            file["path"] = new.into();
+            files.sort_by(|a, b| {
+                a["path"]
+                    .as_str()
+                    .unwrap()
+                    .as_bytes()
+                    .cmp(b["path"].as_str().unwrap().as_bytes())
+            });
+        }
+    }
     plan.manifest = canonical_json(&manifest).unwrap();
     resign_test_manifest(plan);
 }
@@ -181,4 +188,54 @@ fn retained_objects_outside_the_per_version_layout_are_incompatible() {
             "{name}: {error}"
         );
     }
+}
+
+/// `tests/fixtures/portable/cases.json` pins the layout; the producer must emit it.
+#[test]
+fn producer_emits_the_pinned_registry_first_layout() {
+    let vector: Value = serde_json::from_str(include_str!(
+        "../../../../../tests/fixtures/portable/cases.json"
+    ))
+    .unwrap();
+    let layout = &vector["research_layout"];
+    let registry = layout["registry"].as_str().unwrap();
+    let retained = layout["retained"].as_str().unwrap();
+    let former = layout["former_retained"].as_str().unwrap();
+    let fixture = two_versions_sharing_one_graph();
+    let plan =
+        plan_complete_portable(&fixture.generation, PortableExportLimits::default()).unwrap();
+    let mut paths: Vec<_> = plan.files.iter().map(|file| file.path.as_str()).collect();
+    paths.sort_by_key(|path| path.as_bytes());
+    let first = paths
+        .iter()
+        .position(|path| path.starts_with("data/components/research/"))
+        .unwrap();
+    assert_eq!(
+        paths[first], registry,
+        "the registry is the first research entry"
+    );
+    let rest = &paths[first + 1..];
+    let mut seen = 0;
+    for path in rest
+        .iter()
+        .filter(|path| path.starts_with("data/components/research/"))
+    {
+        let (version, digest) = path
+            .strip_prefix(RETAINED)
+            .and_then(|tail| tail.split_once('/'))
+            .unwrap();
+        assert_eq!(
+            *path,
+            retained
+                .replace("{version_uuid}", version)
+                .replace("{sha256}", digest)
+        );
+        assert!(fixture.versions.iter().any(|id| id.to_string() == version));
+        assert!(
+            former.replace("{sha256}", digest).as_bytes() < registry.as_bytes(),
+            "the former layout sorted before the registry"
+        );
+        seen += 1;
+    }
+    assert!(seen >= 2 * fixture.shared.len());
 }
