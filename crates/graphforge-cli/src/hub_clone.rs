@@ -42,9 +42,9 @@ use crate::hub_http::{
 use crate::hub_http::{fetch, parse_input};
 
 mod module_fetch;
-mod repository_listing;
+pub(crate) mod repository_listing;
 pub(crate) use module_fetch::{ModuleFetchArgs, run_module_fetch};
-pub(crate) use repository_listing::{HubArgs, ListArgs, run_hub, run_list_with};
+pub(crate) use repository_listing::{HubArgs, run_hub};
 
 /// Largest single object a clone downloads: the cumulative object bound
 /// `gf publish` admits ([`DiscoveryLimits::default`]), so any object a

@@ -1,5 +1,6 @@
+use super::TEST_RETRY_POLICY;
+use super::repository_listing::{ListArgs, run_list_with};
 use super::tests::{RecordingTransport, Scripted, response};
-use super::{ListArgs, TEST_RETRY_POLICY, run_list_with};
 use graphforge_discovery::{DiscoveryLimits, DiscoveryManifest};
 use std::sync::Mutex;
 
