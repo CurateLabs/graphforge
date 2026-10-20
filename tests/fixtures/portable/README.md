@@ -16,6 +16,13 @@ not a committed payload. A streaming implementation supplies deterministic
 zero/read generators, verifies 64-bit accounting, and asserts peak resident
 format state is bounded by the configured manifest/entry/copy buffers.
 
+`impostor-manifest` and `non-json-manifest` are archives that are valid tar with a
+semantic manifest that does not describe them. `padded-evidence` is a valid
+package plus one 3 GiB opaque `evidence` entry; a streaming implementation
+generates it, never stores it, and reports the entry under `bytes_by_kind` with a
+graph-data share below 1% of the payload. The Rust coverage is
+`project_portable::plausibility_tests`.
+
 Fixture updates are format changes: review them with ADR 0021 and regenerate
 canonical bytes/digests in every supported language before acceptance.
 

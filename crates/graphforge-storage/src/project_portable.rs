@@ -14,8 +14,10 @@ pub(crate) use materialization::{
 mod authenticated_entries;
 mod inventory;
 use authenticated_entries::{ParquetWalk, Reopen, StreamHash};
+use plausibility::ParquetSignals;
 mod participant_files;
 pub(crate) mod pax;
+mod plausibility;
 pub use participant_files::{PortableFileRef, PortablePackageIndex};
 pub(crate) mod research;
 mod semantic_validation;
@@ -198,7 +200,7 @@ pub(crate) fn scan_stream(
     check_cancel(cancelled)?;
     let scratch = scratch.map_or_else(std::env::temp_dir, Path::to_path_buf);
     let mut spill = research::Spill::new(&scratch);
-    let scan = read_bundle(
+    let mut scan = read_bundle(
         source,
         limits,
         cancelled,
@@ -207,8 +209,10 @@ pub(crate) fn scan_stream(
         Some(&scratch),
         || PortableError::new(PortableErrorCode::InvalidStructure, "trailing bytes"),
     )?;
-    let (report, entries) =
+    let parquet = scan.parquet.take();
+    let (mut report, entries) =
         finish_bundle(scan, PortableMode::Full, limits, PortableSource::Stream)?;
+    report.plausibility.parquet = parquet.map(ParquetSignals::finish);
     authenticated_entries::validate_semantics(
         Reopen::Bundle(spill.stage()),
         &entries,
@@ -306,7 +310,7 @@ fn scan_entries(
     // The research files that validation reads back by digest come from the
     // importer's own stage when it copies them, and from the file otherwise.
     let import_stage = sink.as_ref().map(|sink| sink.destination().to_path_buf());
-    let (report, entries) = if metadata.is_dir() {
+    let (mut report, entries) = if metadata.is_dir() {
         verify_expanded(source, mode, limits, cancelled, sink, written)
     } else if metadata.is_file() {
         verify_bundle(source, mode, limits, cancelled, sink, written)
@@ -330,7 +334,9 @@ fn scan_entries(
         } else {
             Reopen::BundleFile(source)
         };
-        authenticated_entries::validate_parquet_profile(source, &entries, cancelled)?;
+        report.plausibility.parquet = Some(
+            authenticated_entries::validate_parquet_profile(source, &entries, cancelled)?.finish(),
+        );
         authenticated_entries::validate_semantics(reopen, &entries, &report, limits, cancelled)?;
     }
     let after = fs::symlink_metadata(source).map_err(|_| {
@@ -952,6 +958,9 @@ struct BundleScan {
     entries: Vec<Entry>,
     transport_digest: String,
     inventory: Option<inventory::InventoryVerdict>,
+    /// The graph Parquet footers, when the scan walked the pages as they
+    /// streamed past; a file is walked in place after the scan instead.
+    parquet: Option<ParquetSignals>,
 }
 
 fn finish_bundle(
@@ -1002,6 +1011,7 @@ fn read_bundle<R: Read + ?Sized>(
     let mut census = Census::default();
     let mut path_set = PathSet::default();
     let mut inventory_verdict = None;
+    let mut parquet = walk_parquet.map(|_| ParquetSignals::default());
     let mut pending_pax: Option<(pax::PaxHeader, String)> = None;
     let mut retained_pool = limits.max_retained_control_bytes;
     // Bytes consumed so far; payload offsets are counted, never asked of the reader.
@@ -1159,8 +1169,9 @@ fn read_bundle<R: Read + ?Sized>(
             expected_entry(written, &entry_path, size)?,
             walk.as_mut(),
         )?;
-        if let Some(walk) = walk {
-            walk.finish()?;
+        let shape = walk.map(ParquetWalk::finish).transpose()?.flatten();
+        if let Some(signals) = &mut parquet {
+            signals.observe(&entry_path, shape);
         }
         if let Some(check) = check {
             inventory_verdict = Some(check.finish());
@@ -1184,6 +1195,7 @@ fn read_bundle<R: Read + ?Sized>(
         entries,
         transport_digest: hex(&transport.finish()?),
         inventory: inventory_verdict,
+        parquet,
     })
 }
 
@@ -1235,6 +1247,8 @@ fn validate_package(
     let (ontology_composition, ontology_composition_entries) =
         validate_ontology_composition(&map, &manifest, limits)?;
     let full = mode == PortableMode::Full;
+    let payload_bytes: u64 = entries.iter().map(|e| e.length).sum();
+    let bytes_by_kind = plausibility::bytes_by_kind(entries, &manifest.components);
     Ok(PortableReport {
         research_entries: manifest
             .components
@@ -1262,7 +1276,9 @@ fn validate_package(
         package_class: package_class(&manifest.package_class)?,
         component_count: manifest.components.len() as u64,
         entry_count: entries.len() as u64,
-        payload_bytes: entries.iter().map(|e| e.length).sum(),
+        payload_bytes,
+        plausibility: plausibility::plausibility(&bytes_by_kind, payload_bytes),
+        bytes_by_kind,
         integrity: if full {
             PortableIntegrity::Verified
         } else {
@@ -2232,9 +2248,15 @@ impl<'de> Visitor<'de> for UniqueVisitor {
 }
 
 #[cfg(test)]
+mod plausibility_tests;
+#[cfg(test)]
 pub(crate) mod stream_tests;
 #[cfg(test)]
+mod tar_fixtures;
+#[cfg(test)]
 mod tests {
+    pub(super) use super::tar_fixtures::{append_entry, tar_entry, tar_header};
+    use super::tar_fixtures::{padded, raw_header};
     use super::*;
     use std::sync::atomic::AtomicBool;
     use uuid::Uuid;
@@ -2407,34 +2429,6 @@ mod tests {
         );
     }
 
-    fn octal(field: &mut [u8], value: u64) {
-        field.fill(0);
-        let digits = format!("{:0width$o}", value, width = field.len() - 1);
-        field[..digits.len()].copy_from_slice(digits.as_bytes());
-    }
-    pub(super) fn tar_entry(path: &str, payload: &[u8]) -> Vec<u8> {
-        let mut h = [0u8; 512];
-        let (prefix, name) = canonical_ustar_split(path).unwrap();
-        h[..name.len()].copy_from_slice(name.as_bytes());
-        h[345..345 + prefix.len()].copy_from_slice(prefix.as_bytes());
-        octal(&mut h[100..108], 0o644);
-        octal(&mut h[108..116], 0);
-        octal(&mut h[116..124], 0);
-        octal(&mut h[124..136], payload.len() as u64);
-        octal(&mut h[136..148], 0);
-        h[148..156].fill(b' ');
-        h[156] = b'0';
-        h[257..263].copy_from_slice(b"ustar\0");
-        h[263..265].copy_from_slice(b"00");
-        let sum: u64 = h.iter().map(|b| *b as u64).sum();
-        let checksum = format!("{:06o}\0 ", sum);
-        h[148..156].copy_from_slice(checksum.as_bytes());
-        let mut out = h.to_vec();
-        out.extend_from_slice(payload);
-        out.resize(out.len() + ((512 - payload.len() % 512) % 512), 0);
-        out
-    }
-
     #[test]
     fn bundle_preflight_bounds_header_scan_before_admission() {
         let parent = tempfile::tempdir().unwrap();
@@ -2515,29 +2509,6 @@ mod tests {
         assert_ne!(expanded.transport_digest, bundled.transport_digest);
     }
 
-    /// One raw header with an explicit name, typeflag and `size` field.
-    fn raw_header(name: &str, kind: u8, size_field: u64) -> Vec<u8> {
-        let mut h = [0u8; 512];
-        h[..name.len()].copy_from_slice(name.as_bytes());
-        octal(&mut h[100..108], 0o644);
-        octal(&mut h[108..116], 0);
-        octal(&mut h[116..124], 0);
-        octal(&mut h[124..136], size_field);
-        octal(&mut h[136..148], 0);
-        h[148..156].fill(b' ');
-        h[156] = kind;
-        h[257..263].copy_from_slice(b"ustar\0");
-        h[263..265].copy_from_slice(b"00");
-        let sum: u64 = h.iter().map(|b| u64::from(*b)).sum();
-        h[148..156].copy_from_slice(format!("{sum:06o}\0 ").as_bytes());
-        h.to_vec()
-    }
-
-    fn padded(mut bytes: Vec<u8>) -> Vec<u8> {
-        bytes.resize(bytes.len().div_ceil(512) * 512, 0);
-        bytes
-    }
-
     /// The fixture package as a bundle whose ontology payload is carried by
     /// a local PAX header with `records` and the given ustar `size` field.
     pub(super) fn bundle_with_pax_entry(records: &str, size_field: u64) -> tempfile::NamedTempFile {
@@ -2616,24 +2587,7 @@ mod tests {
         entries.sort();
         let mut bundle = Vec::new();
         for (path, payload) in entries {
-            if canonical_ustar_split(&path).is_some() {
-                bundle.extend(tar_entry(&path, &payload));
-                continue;
-            }
-            let records = pax::record("path", &path);
-            let suffix = &hex(&ContractSha256::digest(path.as_bytes()))[..16];
-            bundle.extend(raw_header(
-                &format!("PaxHeaders/{suffix}"),
-                b'x',
-                records.len() as u64,
-            ));
-            bundle.extend(padded(records.into_bytes()));
-            bundle.extend(raw_header(
-                &format!("PaxFiles/{suffix}"),
-                b'0',
-                payload.len() as u64,
-            ));
-            bundle.extend(padded(payload));
+            append_entry(&mut bundle, &path, payload);
         }
         bundle.extend([0u8; 1024]);
         let file = tempfile::NamedTempFile::new().unwrap();

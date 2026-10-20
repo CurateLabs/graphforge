@@ -15,10 +15,21 @@ const GRAPH_FILE: &str = "data/components/graph-data/graph-tree/a.parquet";
 
 /// A committed generation whose graph tree holds `a.parquet` with `bytes`.
 fn generation_with_graph_file(bytes: &[u8]) -> (tempfile::TempDir, ResolvedProjectGeneration) {
+    generation_with_graph_files(&[("a.parquet", bytes)])
+}
+
+/// A committed generation whose graph tree holds each `(relative path, bytes)`.
+pub(super) fn generation_with_graph_files(
+    files: &[(&str, &[u8])],
+) -> (tempfile::TempDir, ResolvedProjectGeneration) {
     let project = tempfile::tempdir().unwrap();
     let parent = open_or_initialize_project(project.path()).unwrap();
     let tree = tempfile::tempdir().unwrap();
-    fs::write(tree.path().join("a.parquet"), bytes).unwrap();
+    for (relative, bytes) in files {
+        let path = tree.path().join(relative);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, bytes).unwrap();
+    }
     let (_, inventory) = crate::capture_graph_files(tree.path()).unwrap();
     let mut participants = crate::empty_workspace_participants().unwrap();
     participants.insert(0, inventory);

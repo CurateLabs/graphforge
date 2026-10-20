@@ -3,8 +3,10 @@
 use super::{
     AtomicBool, ControlSha256, Digest, Entry, Path, PortableError, PortableErrorCode,
     PortableLimits, PortableReport, Read, Seek, SeekFrom, Sha256, canonical_json, check_cancel, fs,
-    has_multiple_links, hex, modified, research, same_identity, semantic_validation,
+    has_multiple_links, hex, modified, plausibility::ParquetSignals, research, same_identity,
+    semantic_validation,
 };
+use crate::parquet_encoding_profile::ParquetShape;
 use std::io::Write;
 
 /// Where a semantic read finds an entry whose bytes the scan did not retain.
@@ -320,22 +322,30 @@ impl<'a> ParquetWalk<'a> {
         }
         Ok(())
     }
-    pub(super) fn finish(self) -> Result<(), PortableError> {
+    /// The footer shape of the walked entry, or `None` for an entry that does
+    /// not end in the footer magic and so was not walked.
+    pub(super) fn finish(self) -> Result<Option<ParquetShape>, PortableError> {
         if &self.tail != b"PAR1" {
-            return Ok(());
+            return Ok(None);
         }
         match self.spill {
             Some((file, length)) => walk_entry(&file, 0, length, self.path),
             None => crate::parquet_encoding_profile::admit_pages(&bytes::Bytes::from(self.kept))
                 .map_err(|error| refuse_profile(self.path, error)),
         }
+        .map(Some)
     }
 }
 
 /// Walk the pages of the Parquet entry at `base..base + length` of `file`.
 /// The one page-walk call for entries that are read in place: a file's
 /// bundle or directory entry, and a streamed entry staged in scratch.
-fn walk_entry(file: &fs::File, base: u64, length: u64, path: &str) -> Result<(), PortableError> {
+fn walk_entry(
+    file: &fs::File,
+    base: u64,
+    length: u64,
+    path: &str,
+) -> Result<ParquetShape, PortableError> {
     let window = EntryWindow {
         file: file
             .try_clone()
@@ -371,23 +381,34 @@ pub(super) fn refuse_profile(
 ///
 /// An entry is Parquet when it ends in the `PAR1` footer magic, which is all the
 /// Parquet reader requires; paths and declared encodings are not trusted.
+///
+/// Returns the footer facts of the graph Parquet entries, which a stream
+/// collects from the same walk as each entry passes ([`ParquetWalk`]).
 pub(super) fn validate_parquet_profile(
     source: &Path,
     entries: &[Entry],
     cancelled: Option<&AtomicBool>,
-) -> Result<(), PortableError> {
+) -> Result<ParquetSignals, PortableError> {
     use crate::parquet_encoding_profile::admit_pages;
 
+    let mut signals = ParquetSignals::default();
     for entry in entries
         .iter()
-        .filter(|entry| entry.path.starts_with("data/components/") && entry.length >= 12)
+        .filter(|entry| entry.path.starts_with("data/components/"))
     {
         check_cancel(cancelled)?;
+        if entry.length < 12 {
+            signals.observe(&entry.path, None);
+            continue;
+        }
         if let Some(bytes) = &entry.bytes {
-            if bytes.ends_with(b"PAR1") {
+            let shape = if bytes.ends_with(b"PAR1") {
                 let bytes = bytes::Bytes::copy_from_slice(bytes);
-                admit_pages(&bytes).map_err(|error| refuse_profile(&entry.path, error))?;
-            }
+                Some(admit_pages(&bytes).map_err(|error| refuse_profile(&entry.path, error))?)
+            } else {
+                None
+            };
+            signals.observe(&entry.path, shape);
             continue;
         }
         let input_path = if entry.offset.is_some() {
@@ -424,9 +445,11 @@ pub(super) fn validate_parquet_profile(
                     "entry truncated",
                 )
             })?;
-        if &tail == b"PAR1" {
-            walk_entry(&file, base, entry.length, &entry.path)?;
-        }
+        let shape = if &tail == b"PAR1" {
+            Some(walk_entry(&file, base, entry.length, &entry.path)?)
+        } else {
+            None
+        };
         let after = file.metadata().map_err(|_| {
             PortableError::at(PortableErrorCode::Io, &entry.path, "cannot inspect entry")
         })?;
@@ -440,8 +463,9 @@ pub(super) fn validate_parquet_profile(
                 "authenticated entry changed",
             ));
         }
+        signals.observe(&entry.path, shape);
     }
-    Ok(())
+    Ok(signals)
 }
 
 /// Native admission uses authenticated runtime identities rather than payload paths.

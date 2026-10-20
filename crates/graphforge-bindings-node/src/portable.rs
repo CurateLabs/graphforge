@@ -301,6 +301,29 @@ fn verify_report_output(report: graphforge_api::PortableVerifyResult) -> Portabl
         component_count: BigInt::from(report.component_count),
         entry_count: BigInt::from(report.entry_count),
         payload_bytes: BigInt::from(report.payload_bytes),
+        bytes_by_kind: report
+            .bytes_by_kind
+            .into_iter()
+            .map(|(kind, bytes)| PortableKindBytesOutput {
+                kind,
+                bytes: BigInt::from(bytes),
+            })
+            .collect(),
+        plausibility: PortablePlausibilityOutput {
+            graph_data_bytes: BigInt::from(report.plausibility.graph_data_bytes),
+            graph_data_ratio_ppm: BigInt::from(report.plausibility.graph_data_ratio_ppm),
+            parquet: report
+                .plausibility
+                .parquet
+                .map(|parquet| PortableParquetSignalsOutput {
+                    files: BigInt::from(parquet.files),
+                    files_with_footer: BigInt::from(parquet.files_with_footer),
+                    row_groups: BigInt::from(parquet.row_groups),
+                    node_rows: BigInt::from(parquet.node_rows),
+                    edge_rows: BigInt::from(parquet.edge_rows),
+                    property_rows: BigInt::from(parquet.property_rows),
+                }),
+        },
         integrity: integrity_token(report.integrity),
         compatibility: compatibility_token(report.compatibility),
         authenticity: authenticity_token(report.authenticity),
@@ -503,6 +526,9 @@ pub struct PortableVerifyOutput {
     pub component_count: BigInt,
     pub entry_count: BigInt,
     pub payload_bytes: BigInt,
+    /// Verified entry bytes per component kind, plus `package-control`.
+    pub bytes_by_kind: Vec<PortableKindBytesOutput>,
+    pub plausibility: PortablePlausibilityOutput,
     pub integrity: String,
     pub compatibility: String,
     pub authenticity: String,
@@ -511,6 +537,30 @@ pub struct PortableVerifyOutput {
     pub ontology_composition: serde_json::Value,
     /// Authenticated entries; lengths preserve the binding's bigint contract.
     pub ontology_composition_entries: Vec<PortableCompositionEntryOutput>,
+}
+
+#[napi(object)]
+pub struct PortableKindBytesOutput {
+    pub kind: String,
+    pub bytes: BigInt,
+}
+
+#[napi(object)]
+pub struct PortablePlausibilityOutput {
+    pub graph_data_bytes: BigInt,
+    pub graph_data_ratio_ppm: BigInt,
+    /// Present only when the verification read the Parquet entries.
+    pub parquet: Option<PortableParquetSignalsOutput>,
+}
+
+#[napi(object)]
+pub struct PortableParquetSignalsOutput {
+    pub files: BigInt,
+    pub files_with_footer: BigInt,
+    pub row_groups: BigInt,
+    pub node_rows: BigInt,
+    pub edge_rows: BigInt,
+    pub property_rows: BigInt,
 }
 
 #[napi(object)]

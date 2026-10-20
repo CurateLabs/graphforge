@@ -44,7 +44,9 @@
     ["manifest-size-overflow", "GF_LIMIT_EXCEEDED"],
     ["path-size-overflow", "GF_LIMIT_EXCEEDED"],
     ["cancelled", "GF_CANCELLED"],
-    ["source-mutated", "GF_SOURCE_CHANGED"]
+    ["source-mutated", "GF_SOURCE_CHANGED"],
+    ["impostor-manifest", "GF_INTEGRITY_FAILED"],
+    ["non-json-manifest", "GF_INVALID_SEMANTIC_MANIFEST"]
   ],
   "research_layout": {
     "registry": "data/components/research/research-registry-6fc2f9a45fb9/participant.json",
@@ -53,5 +55,5 @@
     "order": "the registry precedes every retained object; each Version's objects are contiguous; a shared object is carried once per Version",
     "former_layout_result": "GF_INCOMPATIBLE"
   },
-  "structural_cases": [{"name":"billion-edge-structural","logical_edges":1000000000,"payload_bytes":17179869184,"requires_incremental_io":true,"max_copy_buffer_bytes":8388608}]
+  "structural_cases": [{"name":"billion-edge-structural","logical_edges":1000000000,"payload_bytes":17179869184,"requires_incremental_io":true,"max_copy_buffer_bytes":8388608},{"name":"padded-evidence","evidence_bytes":3221225472,"requires_incremental_io":true,"graph_data_ratio_ppm_below":10000}]
 }

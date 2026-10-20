@@ -739,6 +739,7 @@ fn storage(e: impl std::fmt::Display) -> ExportError {
 
 #[cfg(test)]
 mod tests {
+    mod graph_signals;
     mod historical_saved_queries;
     mod large_entries;
     mod parquet_profile;

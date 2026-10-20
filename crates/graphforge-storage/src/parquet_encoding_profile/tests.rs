@@ -20,7 +20,7 @@ use hostile::{
 };
 
 fn admit(file: Vec<u8>) -> Result<(), PageAdmissionError> {
-    admit_pages(&Bytes::from(file))
+    admit_pages(&Bytes::from(file)).map(drop)
 }
 
 #[test]
@@ -74,6 +74,23 @@ fn the_funded_profile_is_admitted() {
         parquet::file::properties::WriterProperties::builder().build(),
     );
     assert_eq!(admit(file), Ok(()));
+}
+
+#[test]
+fn a_footer_declaring_an_unfunded_encoding_is_refused_over_funded_pages() {
+    let funded = string_file(Encoding::PLAIN, WriterVersion::PARQUET_1_0, 64);
+    admit(funded.clone()).unwrap();
+    let lying = declaring(&funded, &[Encoding::DELTA_LENGTH_BYTE_ARRAY]);
+    assert_eq!(admit(lying), Err(PageAdmissionError::Unfunded));
+}
+
+#[test]
+fn an_admitted_object_reports_the_rows_and_row_groups_of_its_footer() {
+    let file = string_file(Encoding::PLAIN, WriterVersion::PARQUET_1_0, 64);
+    let footer = metadata(&file);
+    let shape = admit_pages(&Bytes::from(file)).unwrap();
+    assert_eq!(shape.rows, 64);
+    assert_eq!(shape.row_groups, footer.num_row_groups() as u64);
 }
 
 #[test]

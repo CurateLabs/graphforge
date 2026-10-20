@@ -280,6 +280,8 @@ EXPECTED_ERRORS = {
     "path-size-overflow": "GF_LIMIT_EXCEEDED",
     "cancelled": "GF_CANCELLED",
     "source-mutated": "GF_SOURCE_CHANGED",
+    "impostor-manifest": "GF_INTEGRITY_FAILED",
+    "non-json-manifest": "GF_INVALID_SEMANTIC_MANIFEST",
 }
 
 
