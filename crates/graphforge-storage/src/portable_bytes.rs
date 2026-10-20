@@ -38,31 +38,17 @@ pub fn portable_bundle_byte_limit(limits: PortableV2Limits) -> Result<u64, Porta
         .ok_or_else(overflow)
 }
 
-/// Read a verified bundle with a finite byte bound, including concurrent growth.
-pub fn read_package_bytes(
-    path: &Path,
-    report: &PortableV2Report,
-    max_bytes: u64,
-) -> Result<Vec<u8>, PortableV2Error> {
+/// Open a verified bundle for streaming; the caller bounds how much it reads,
+/// including concurrent growth.
+pub fn open_package_file(path: &Path, report: &PortableV2Report) -> Result<File, PortableV2Error> {
     if report.representation != PortableV2Representation::Bundle {
         return Err(PortableV2Error::new(
             PortableV2ErrorCode::Incompatible,
             "OCI publish currently requires a portable-v2 bundle representation",
         ));
     }
-    let file = File::open(path)
-        .map_err(|_| PortableV2Error::new(PortableV2ErrorCode::Io, "failed to open package"))?;
-    let mut bytes = Vec::new();
-    file.take(max_bytes.saturating_add(1))
-        .read_to_end(&mut bytes)
-        .map_err(|_| PortableV2Error::new(PortableV2ErrorCode::Io, "failed to read package"))?;
-    if bytes.len() as u64 > max_bytes {
-        return Err(PortableV2Error::new(
-            PortableV2ErrorCode::LimitExceeded,
-            "package exceeds byte limit",
-        ));
-    }
-    Ok(bytes)
+    File::open(path)
+        .map_err(|_| PortableV2Error::new(PortableV2ErrorCode::Io, "failed to open package"))
 }
 
 /// Owns only the exclusively created local staging file. Dropping removes it.
