@@ -413,9 +413,9 @@ fn exported_research_carries_the_walkable_descent_of_released_versions() {
         )
         .unwrap();
     let target = directory.path().join("imported");
-    GraphForge::import_portable_v2(
+    GraphForge::import_portable(
         &target,
-        &PortableV2ImportRequest {
+        &PortableImportRequest {
             input: package,
             operation_id: OperationId(Uuid::now_v7()),
             limits: Default::default(),
@@ -491,9 +491,9 @@ fn exported_bring_preserves_provenance_outside_its_ancestry() {
         )
         .unwrap();
     let target = directory.path().join("imported");
-    GraphForge::import_portable_v2(
+    GraphForge::import_portable(
         &target,
-        &PortableV2ImportRequest {
+        &PortableImportRequest {
             input: package,
             operation_id: OperationId(Uuid::now_v7()),
             limits: Default::default(),

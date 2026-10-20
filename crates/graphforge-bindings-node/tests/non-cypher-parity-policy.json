@@ -2,7 +2,7 @@
   "contractVersion": 1,
   "rustManifest": "../../../tests/contracts/non-cypher-rust-surface.json",
   "releaseSurfaceCount": 356,
-  "releaseSurfaceDigest": "27f4e49f442cc6997dcf71321470ab84e1f79229f6a6eb88511e0455bc218b12",
+  "releaseSurfaceDigest": "6aaea1fb842909a607554ddf9241bc76ae6f5be2a4aa8a924c9a6dfa228eaf61",
   "requiredEquivalent": [
     "GraphForge.adopt_ontology",
     "GraphForge.clear_ontology",
@@ -38,7 +38,7 @@
     "resumable-import": "importSession",
     "resumable-construction": "resumableConstruction",
     "semantic-generation-diff": "semanticGenerationDiff",
-    "portable-v2-facade": "portableV2",
+    "portable-facade": "portable",
     "research-versions": "researchVersions",
     "slices": "slices",
     "branches": "branches",
@@ -134,7 +134,7 @@
       "GraphForge.execute_project_cleanup",
       "GraphForge.explain",
       "GraphForge.export_ontology",
-      "GraphForge.export_portable_v2",
+      "GraphForge.export_portable",
       "GraphForge.find",
       "GraphForge.graph_delta_compaction_status",
       "GraphForge.graph_directedness",
@@ -180,8 +180,8 @@
       "GraphForge.prepare_rank_invocation",
       "GraphForge.prepare_similar_invocation",
       "GraphForge.preview_graph_delta_compaction",
-      "GraphForge.preview_portable_v2_graph_subset",
-      "GraphForge.preview_portable_v2_selection",
+      "GraphForge.preview_portable_graph_subset",
+      "GraphForge.preview_portable_selection",
       "GraphForge.preview_project_cleanup",
       "GraphForge.profile_gsi",
       "GraphForge.project_capabilities",
@@ -489,10 +489,10 @@
       "GraphForge.path": "Node project-path getter corresponding to Rust introspection.",
       "GraphForge.plan": "Node asynchronous execution adapter classified above.",
       "GraphForge.discoverResearchProjects": "Static Node adapter for GraphForge.discover_research_projects.",
-      "GraphForge.verifyPortableV2": "Static Node adapter for crate.verify_portable_v2.",
-      "GraphForge.importPortableV2": "Static Node adapter for GraphForge.import_portable_v2.",
-      "GraphForge.publishPortableV2Oci": "Static Node adapter for crate.publish_portable_v2_oci.",
-      "GraphForge.pullPortableV2Oci": "Static Node adapter for crate.pull_portable_v2_oci.",
+      "GraphForge.verifyPortable": "Static Node adapter for crate.verify_portable.",
+      "GraphForge.importPortable": "Static Node adapter for GraphForge.import_portable.",
+      "GraphForge.publishPortableOci": "Static Node adapter for crate.publish_portable_oci.",
+      "GraphForge.pullPortableOci": "Static Node adapter for crate.pull_portable_oci.",
       "PlanHandle.collectIpc": "Promise-delivered Arrow IPC adapter classified above.",
       "PlanHandle.explain": "Node-only plan introspection for the asynchronous execution adapter.",
       "PlanHandle.sinkParquet": "Asynchronous Parquet sink adapter classified above.",
@@ -510,8 +510,8 @@
     },
     "notExposedDefaults": {
       "crate": "Rust discovery/repack orchestration remains a CLI/facade workflow; existing Node portable operations use their explicit adapters.",
-      "PortableV2ImportResult": "Exact native-allocation qualification is a Rust/CLI control receipt, not a new Node workflow.",
-      "PortableV2ExportFacadeResult": "The CLI identity-free receipt view preserves its existing contract; Node retains its established export result adapter.",
+      "PortableImportResult": "Exact native-allocation qualification is a Rust/CLI control receipt, not a new Node workflow.",
+      "PortableExportFacadeResult": "The CLI identity-free receipt view preserves its existing contract; Node retains its established export result adapter.",
       "CheckpointView": "Node checkpoint views expose the bounded pinned read surface; unsupported Rust checkpoint operations require an explicit parity decision.",
       "GraphConstructionSession": "Resumable graph construction is not yet shipped through the Node product facade; all session operations remain explicitly Rust-only.",
       "GraphForge": "No shipped Node member exists for this Rust facade entry; adding one requires an explicit parity decision.",
@@ -685,9 +685,9 @@
         "maintenance preview and execution reconcile candidate identities"
       ]
     },
-    "portableV2": {
-      "portable_v2.test.mjs": [
-        "portable-v2 export verify and import preserve package digest"
+    "portable": {
+      "portable.test.mjs": [
+        "portable export verify and import preserve package digest"
       ]
     },
     "importSession": {

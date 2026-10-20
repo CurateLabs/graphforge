@@ -13,7 +13,7 @@ use super::{
 };
 use clap::Args;
 use graphforge_api::{
-    DiscoveryOntologyModuleRequest, OntologyModuleId, PortableV2Limits,
+    DiscoveryOntologyModuleRequest, OntologyModuleId, PortableLimits,
     resolve_discovered_ontology_module,
 };
 use graphforge_discovery::{
@@ -248,7 +248,7 @@ fn fetch_and_publish_module(
         module,
         package: &staging.partial,
         discovery_limits: limits,
-        portable_limits: PortableV2Limits::default(),
+        portable_limits: PortableLimits::default(),
         cancelled: None,
     })
     .map_err(portable_error)?;
@@ -547,7 +547,7 @@ mod tests {
             module: &identity,
             package: &package_path,
             discovery_limits: DiscoveryLimits::default(),
-            portable_limits: PortableV2Limits::default(),
+            portable_limits: PortableLimits::default(),
             cancelled: None,
         })
         .unwrap();

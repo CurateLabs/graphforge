@@ -28,13 +28,13 @@ fn publication_staging_counts_graph_and_retained_research_before_materialization
     let history = history();
     let preview = history
         .graph
-        .preview_portable_v2_selection(&PortableV2SelectionPreviewRequest {
+        .preview_portable_selection(&PortableSelectionPreviewRequest {
             selection: PortableSelection::Current,
-            request: PortableV2SelectionRequest {
-                profile: PortableV2SelectionProfile::Complete,
+            request: PortableSelectionRequest {
+                profile: PortableSelectionProfile::Complete,
                 strict: true,
             },
-            limits: PortableV2Limits::default(),
+            limits: PortableLimits::default(),
         })
         .unwrap();
     let payload = history.graph.publication_payload_bytes().unwrap();
@@ -55,13 +55,13 @@ fn publication_staging_counts_graph_and_retained_research_before_materialization
     assert_eq!(scratch.path().parent(), Some(stage.as_path()));
     let after = history
         .graph
-        .preview_portable_v2_selection(&PortableV2SelectionPreviewRequest {
+        .preview_portable_selection(&PortableSelectionPreviewRequest {
             selection: PortableSelection::Current,
-            request: PortableV2SelectionRequest {
-                profile: PortableV2SelectionProfile::Complete,
+            request: PortableSelectionRequest {
+                profile: PortableSelectionProfile::Complete,
                 strict: true,
             },
-            limits: PortableV2Limits::default(),
+            limits: PortableLimits::default(),
         })
         .unwrap();
     assert_eq!(
@@ -117,13 +117,13 @@ fn publication_staging_counts_current_graph_files_without_research() {
             .is_empty()
     );
     let metadata = graph
-        .preview_portable_v2_selection(&PortableV2SelectionPreviewRequest {
+        .preview_portable_selection(&PortableSelectionPreviewRequest {
             selection: PortableSelection::Current,
-            request: PortableV2SelectionRequest {
-                profile: PortableV2SelectionProfile::Complete,
+            request: PortableSelectionRequest {
+                profile: PortableSelectionProfile::Complete,
                 strict: true,
             },
-            limits: PortableV2Limits::default(),
+            limits: PortableLimits::default(),
         })
         .unwrap();
     assert!(

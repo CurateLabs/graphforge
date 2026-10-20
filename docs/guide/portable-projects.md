@@ -1,10 +1,10 @@
-# Move projects with portable project v2
+# Move projects with portable projects
 
 **Advanced · Assumes basic Python, database, and terminal skills.**
 Start with the [Advanced introduction](advanced.md) for GraphForge terminology,
 or [Basic](overview.md#basic) for a guided first graph.
 
-Portable project v2 is GraphForge's primary workflow for moving a project
+Portable projects are GraphForge's primary workflow for moving a project
 between workspaces, machines, and registries. It packages one immutable project
 generation with a canonical semantic identity. Use it for local copies,
 air-gapped transfer, selective sharing, and OCI promotion.
@@ -14,7 +14,7 @@ air-gapped transfer, selective sharing, and OCI promotion.
 > other runtime state that are not an interchange contract. Do not commit graph
 > or source data, `.gfpb` bundles, `.gfproject/` packages, imports, exports, or
 > materialized project state to Git. Keep those paths ignored and move them with
-> portable-v2 instead.
+> portable instead.
 
 The Rust engine owns selection, packaging, verification, import, and OCI
 behavior. Python, Node, and the CLI are thin projections of the same operations
@@ -214,7 +214,7 @@ Package identity (`package_digest`) describes selected logical content;
 transport identity describes exact bundle bytes or an OCI manifest. Neither is
 the source generation or the imported project's new generation.
 
-Older portable-v2 readers must reject an M9 package as
+Older portable readers must reject an M9 package as
 `unsupported_future` when they encounter the required
 `ontology-composition@1` capability. An M9-aware reader additionally rejects a
 malformed control document, unsupported required feature, missing closure, or
@@ -402,20 +402,20 @@ All surfaces call the same Rust authority:
 
 | Workflow         | Rust API authority                          | CLI                    |
 | ---------------- | ------------------------------------------- | ---------------------- |
-| Preview          | `GraphForge::preview_portable_v2_selection` | `portable preview`     |
-| Export           | `GraphForge::export_portable_v2`            | `export`      |
-| Inspect / verify | `verify_portable_v2`                        | `portable verify`      |
-| Complete import  | `GraphForge::import_portable_v2`            | `import`      |
-| OCI publish      | `publish_portable_v2_oci`                   | `portable publish-oci` |
-| OCI pull         | `pull_portable_v2_oci`                      | `portable pull-oci`    |
+| Preview          | `GraphForge::preview_portable_selection` | `portable preview`     |
+| Export           | `GraphForge::export_portable`            | `export`      |
+| Inspect / verify | `verify_portable`                        | `portable verify`      |
+| Complete import  | `GraphForge::import_portable`            | `import`      |
+| OCI publish      | `publish_portable_oci`                   | `portable publish-oci` |
+| OCI pull         | `pull_portable_oci`                      | `portable pull-oci`    |
 
 Python and Node expose equivalent preview, export, verify, import, publish, and
 pull methods without wrapper-owned archive, selection, registry, or fallback
 semantics. Counts and byte sizes remain lossless at the binding boundary.
 
 For the normative layout, identity, resource, compatibility, and security
-contract, see [Portable project v2 architecture](../book/architecture/portable-project-v2.md)
-and [ADR 0021](../adr/0021-portable-project-v2.md).
+contract, see [Portable project architecture](../book/architecture/portable-project.md)
+and [ADR 0021](../adr/0021-portable-project.md).
 
 Primary `export` and `import` reuse the streaming `graphforge-portable-export/2`
 and `graphforge-portable-import/2` JSON receipts. Package and transport digests

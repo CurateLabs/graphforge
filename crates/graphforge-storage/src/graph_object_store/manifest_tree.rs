@@ -38,7 +38,7 @@ use graphforge_core::hash_observation::ControlSha256 as Sha256;
 #[derive(Clone, Copy)]
 enum CapturedGraphInventory<'a, 'b> {
     Encoded(&'a crate::graph_construction::CapturedEncodedInventory<'b>),
-    Portable(&'a BTreeMap<PathBuf, &'b crate::project_portable_v2::MaterializedCapture>),
+    Portable(&'a BTreeMap<PathBuf, &'b crate::project_portable::MaterializedCapture>),
     Workspace(&'a BTreeMap<String, crate::graph_files::CapturedWorkspaceFile>),
 }
 
@@ -49,7 +49,7 @@ pub(crate) fn append_captured_portable_graph_files(
     state: &mut GraphManifestState,
     files: &[AuthenticatedGraphFile],
     routes: Option<&crate::route_component::RouteTable>,
-    captures: &BTreeMap<PathBuf, &crate::project_portable_v2::MaterializedCapture>,
+    captures: &BTreeMap<PathBuf, &crate::project_portable::MaterializedCapture>,
 ) -> Result<(GraphFilesRootV2, GraphFilesAppendEvidence), GfError> {
     let paths = files
         .iter()

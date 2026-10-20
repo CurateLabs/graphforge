@@ -2561,7 +2561,7 @@ mod crash_oracle_tests {
         // GFDR replay (`write_replay_overlay_streaming`) requires the mapped
         // route-table layout, so the genesis v2 root must be sealed as
         // mapped too — mirroring how a mapped portable import promotes an
-        // owned tree into the object store (`project_portable_v2_import.rs`).
+        // owned tree into the object store (`project_portable_import.rs`).
         let paths = mapped_inventory
             .files
             .iter()

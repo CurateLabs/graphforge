@@ -1,11 +1,11 @@
 {
   "contract_version": 1,
   "scope": "Rust non-Cypher public release surface",
-  "public_method_digest": "80538ee0093bd8d9a7f4dbc4a6a8a26a3527cbfc5d5a4398de99b7c9a8400820",
+  "public_method_digest": "042ffd2ba95cb00c46aa891af9c9b4689ff8aa99c429cf75bf6d2ffe692fd636",
   "method_policy": {
     "receiver_defaults": {
-      "PortableV2ImportResult": "release-tested",
-      "PortableV2ExportFacadeResult": "release-tested",
+      "PortableImportResult": "release-tested",
+      "PortableExportFacadeResult": "release-tested",
       "GraphForge": "release-tested",
       "GraphImportSession": "release-tested",
       "GraphConstructionSession": "release-tested",
@@ -50,14 +50,14 @@
       "crate.composite_receipt_schema": "introspection",
       "crate.grade_gsi": "introspection",
       "crate.hold_writer": "internal-helper",
-      "crate.verify_portable_v2": "designed-only",
+      "crate.verify_portable": "designed-only",
       "GraphForge.new": "introspection",
       "GraphForge.new_with_options": "introspection",
       "GraphForge.path": "introspection",
       "GraphForge.graph_open_evidence": "introspection",
       "GraphForge.resource_diagnostics": "introspection",
       "GraphForge.resource_policy": "introspection",
-      "GraphForge.import_portable_v2": "designed-only",
+      "GraphForge.import_portable": "designed-only",
       "GraphForge.preview_revert_to_checkpoint": "designed-only",
       "GraphForge.show_checkpoint": "designed-only",
       "RepositoryContext.discover": "introspection",
@@ -95,10 +95,10 @@
       "CheckpointView.set_default_embedding_space": "designed-only",
       "CheckpointView.supersede_assertion": "designed-only",
       "CancellationToken.flag": "introspection",
-      "crate.publish_portable_v2_oci": "designed-only",
-      "crate.pull_portable_v2_oci": "designed-only",
-      "crate.publish_portable_v2_oci_with_registry": "designed-only",
-      "crate.pull_portable_v2_oci_with_registry": "designed-only"
+      "crate.publish_portable_oci": "designed-only",
+      "crate.pull_portable_oci": "designed-only",
+      "crate.publish_portable_oci_with_registry": "designed-only",
+      "crate.pull_portable_oci_with_registry": "designed-only"
     },
     "reasons": {
       "internal-helper": "exported execution plumbing, not a persisted product facade",
@@ -1082,19 +1082,19 @@
         }
       ]
     },
-    "portable-v2-facade": {
+    "portable-facade": {
       "ids": [
-        "GraphForge.export_portable_v2",
-        "GraphForge.preview_portable_v2_graph_subset",
-        "GraphForge.preview_portable_v2_selection",
-        "PortableV2ImportResult.transient_peak_allocated_bytes",
-        "PortableV2ExportFacadeResult.receipt",
-        "crate.verify_discovered_portable_v2",
+        "GraphForge.export_portable",
+        "GraphForge.preview_portable_graph_subset",
+        "GraphForge.preview_portable_selection",
+        "PortableImportResult.transient_peak_allocated_bytes",
+        "PortableExportFacadeResult.receipt",
+        "crate.verify_discovered_portable",
         "crate.verify_discovered_research_version",
         "crate.build_research_lineage_from_registry",
         "GraphForge.build_research_lineage_for_discovery",
-        "crate.repack_verified_expanded_portable_v2",
-        "crate.summarize_verified_portable_v2",
+        "crate.repack_verified_expanded_portable",
+        "crate.summarize_verified_portable",
         "crate.resolve_discovered_ontology_module",
         "GraphForge.continue_imported_research_branch",
         "crate.read_committed_generation_identity",
@@ -1122,7 +1122,7 @@
           "symbol": "portable_facade_and_same_binary_preserve_complete_receipts"
         },
         {
-          "path": "crates/graphforge-api/tests/discovery_portable_v2.rs",
+          "path": "crates/graphforge-api/tests/discovery_portable.rs",
           "symbol": "valid_discovery_maps_to_the_storage_verified_package"
         },
         {

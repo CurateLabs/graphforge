@@ -32,8 +32,8 @@ use std::path::Path;
 
 use arrow::array::{Array, StringArray};
 use graphforge_api::{
-    GraphForge, PortableSelection, PortableV2ExportRequest, PortableV2Limits, PortableV2Output,
-    PortableV2SelectionProfile,
+    GraphForge, PortableExportRequest, PortableLimits, PortableOutput, PortableSelection,
+    PortableSelectionProfile,
 };
 use graphforge_storage::resolve_project_generation;
 
@@ -155,14 +155,14 @@ fn measure(root: &Path, nodes: usize) -> Size {
     let package = root.join(format!("export-{nodes}.gfpb"));
     let started = rchar();
     let receipt = forge
-        .export_portable_v2(
-            &PortableV2ExportRequest {
+        .export_portable(
+            &PortableExportRequest {
                 selection: PortableSelection::Current,
                 output_path: package,
-                representation: PortableV2Output::Bundle,
-                profile: PortableV2SelectionProfile::Complete,
+                representation: PortableOutput::Bundle,
+                profile: PortableSelectionProfile::Complete,
                 subset: None,
-                limits: PortableV2Limits::default(),
+                limits: PortableLimits::default(),
             },
             None,
             |_| {},

@@ -250,26 +250,26 @@ fn portable_roundtrip_preserves_definitions_without_execution_or_parameter_value
     assert_eq!(run(&graph, &original, &SavedQuerySource::Current), 1);
     let package = directory.path().join("analysis-package");
     graph
-        .export_portable_v2(
-            &PortableV2ExportRequest {
+        .export_portable(
+            &PortableExportRequest {
                 selection: PortableSelection::Current,
                 output_path: package.clone(),
-                representation: PortableV2Output::Expanded,
-                profile: PortableV2SelectionProfile::Complete,
+                representation: PortableOutput::Expanded,
+                profile: PortableSelectionProfile::Complete,
                 subset: None,
-                limits: PortableV2Limits::default(),
+                limits: PortableLimits::default(),
             },
             None,
             |_| {},
         )
         .unwrap();
     let imported = directory.path().join("imported");
-    GraphForge::import_portable_v2(
+    GraphForge::import_portable(
         &imported,
-        &PortableV2ImportRequest {
+        &PortableImportRequest {
             input: package,
             operation_id: OperationId(Uuid::now_v7()),
-            limits: PortableV2Limits::default(),
+            limits: PortableLimits::default(),
         },
         None,
     )

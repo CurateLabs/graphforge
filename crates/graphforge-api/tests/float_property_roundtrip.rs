@@ -16,8 +16,8 @@ use graphforge_api::{
 };
 #[cfg(feature = "portable")]
 use graphforge_api::{
-    PortableSelection, PortableV2ExportRequest, PortableV2ImportRequest, PortableV2Limits,
-    PortableV2Output, PortableV2SelectionProfile,
+    PortableExportRequest, PortableImportRequest, PortableLimits, PortableOutput,
+    PortableSelection, PortableSelectionProfile,
 };
 use parquet::arrow::ArrowWriter;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
@@ -202,26 +202,26 @@ fn verify_reads(forge: &GraphForge, values: &[f64], outputs: &Path) {
 fn verify_portable_roundtrip(forge: &GraphForge, values: &[f64], root: &Path) {
     let package = root.join("graph.gfpb");
     forge
-        .export_portable_v2(
-            &PortableV2ExportRequest {
+        .export_portable(
+            &PortableExportRequest {
                 selection: PortableSelection::Current,
                 output_path: package.clone(),
-                representation: PortableV2Output::Bundle,
-                profile: PortableV2SelectionProfile::Complete,
+                representation: PortableOutput::Bundle,
+                profile: PortableSelectionProfile::Complete,
                 subset: None,
-                limits: PortableV2Limits::default(),
+                limits: PortableLimits::default(),
             },
             None,
             |_| {},
         )
         .unwrap();
     let imported = root.join("imported");
-    GraphForge::import_portable_v2(
+    GraphForge::import_portable(
         &imported,
-        &PortableV2ImportRequest {
+        &PortableImportRequest {
             input: package,
             operation_id: OperationId(uuid::Uuid::now_v7()),
-            limits: PortableV2Limits::default(),
+            limits: PortableLimits::default(),
         },
         None,
     )

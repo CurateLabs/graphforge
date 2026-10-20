@@ -6,7 +6,7 @@
 
 use crate::{
     DiscoveryError, DiscoveryErrorCode, DiscoveryLimits, DiscoveryVersionDetails,
-    DiscoveryVersionSubject, PORTABLE_V2_FORMAT, PortablePackageReference, ProtocolCapability,
+    DiscoveryVersionSubject, PORTABLE_FORMAT, PortablePackageReference, ProtocolCapability,
     ProtocolRequirement, ProtocolVersion, RepositoryIdentity, Sha256Digest, canonical_json,
     check_string, format_major, limit, parse_unique_json, sha256_digest, validate_extensions,
     validate_ref_name, validate_semantics,
@@ -585,7 +585,7 @@ pub(super) fn validate_package_reference(
     field: &'static str,
     limits: DiscoveryLimits,
 ) -> Result<(), DiscoveryError> {
-    if package.format != PORTABLE_V2_FORMAT {
+    if package.format != PORTABLE_FORMAT {
         let error = DiscoveryError::new(
             DiscoveryErrorCode::UnsupportedFuture,
             Some(field),

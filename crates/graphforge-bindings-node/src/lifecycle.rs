@@ -762,9 +762,9 @@ impl GraphForge {
         }))
     }
 
-    /// Preview one content-free portable-v2 component selection.
+    /// Preview one content-free portable component selection.
     #[napi]
-    pub fn preview_portable_v2_selection(
+    pub fn preview_portable_selection(
         &self,
         request: portable::PortableSelectionPreviewInput,
     ) -> Result<serde_json::Value> {
@@ -772,9 +772,9 @@ impl GraphForge {
         portable::preview_selection(&graph, request)
     }
 
-    /// Preview one content-free portable-v2 graph-data subset.
+    /// Preview one content-free portable graph-data subset.
     #[napi]
-    pub fn preview_portable_v2_graph_subset(
+    pub fn preview_portable_graph_subset(
         &self,
         request: portable::PortableSubsetPreviewInput,
     ) -> Result<serde_json::Value> {
@@ -782,9 +782,9 @@ impl GraphForge {
         portable::preview_subset(&graph, request)
     }
 
-    /// Export one pinned generation as an expanded or bundled portable-v2 package.
+    /// Export one pinned generation as an expanded or bundled portable package.
     #[napi]
-    pub fn export_portable_v2(
+    pub fn export_portable(
         &self,
         request: portable::PortableExportInput,
     ) -> Result<AsyncTask<portable::ExportPortableTask>> {
@@ -792,33 +792,33 @@ impl GraphForge {
         portable::build_export_task(Arc::clone(&self.inner), request)
     }
 
-    /// Verify portable-v2 content without opening or mutating a project.
+    /// Verify portable content without opening or mutating a project.
     #[napi]
-    pub fn verify_portable_v2(
+    pub fn verify_portable(
         request: portable::PortableVerifyInput,
     ) -> Result<AsyncTask<portable::VerifyPortableTask>> {
         portable::build_verify_task(request)
     }
 
-    /// Verify and atomically import a complete portable-v2 package.
+    /// Verify and atomically import a complete portable package.
     #[napi]
-    pub fn import_portable_v2(
+    pub fn import_portable(
         request: portable::PortableImportInput,
     ) -> Result<AsyncTask<portable::ImportPortableTask>> {
         portable::build_import_task(request)
     }
 
-    /// Publish a verified portable-v2 package to an OCI Distribution registry.
+    /// Publish a verified portable package to an OCI Distribution registry.
     #[napi]
-    pub fn publish_portable_v2_oci(
+    pub fn publish_portable_oci(
         request: portable::PortableOciPublishInput,
     ) -> Result<AsyncTask<portable::PublishOciTask>> {
         portable::build_publish_task(request)
     }
 
-    /// Pull and verify a portable-v2 package from an OCI Distribution registry.
+    /// Pull and verify a portable package from an OCI Distribution registry.
     #[napi]
-    pub fn pull_portable_v2_oci(
+    pub fn pull_portable_oci(
         request: portable::PortableOciPullInput,
     ) -> Result<AsyncTask<portable::PullOciTask>> {
         portable::build_pull_task(request)

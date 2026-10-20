@@ -2,15 +2,15 @@
 
 use arrow::array::{Array, FixedSizeBinaryArray, Int64Array, ListArray, StringArray, StructArray};
 use graphforge_core::portable::{
-    PortableV2GraphSelector, PortableV2Limits, PortableV2Mode, PortableV2Output,
-    PortableV2PropertyProjection, PortableV2SelectionProfile, PortableV2SubsetClosure,
-    PortableV2SubsetRequest,
+    PortableGraphSelector, PortableLimits, PortableMode, PortableOutput,
+    PortablePropertyProjection, PortableSelectionProfile, PortableSubsetClosure,
+    PortableSubsetRequest,
 };
 use uuid::Uuid;
 
 use crate::{
-    GraphForge, OperationId, PortableSelection, PortableV2ExportRequest, PortableV2ImportRequest,
-    PortableVerifyRequest, verify_portable_v2,
+    GraphForge, OperationId, PortableExportRequest, PortableImportRequest, PortableSelection,
+    PortableVerifyRequest, verify_portable,
 };
 
 type NodeRow = (Uuid, Vec<String>, String, i64);
@@ -117,22 +117,22 @@ fn rows(graph: &GraphForge) -> (Vec<NodeRow>, Vec<EdgeRow>) {
 
 #[test]
 fn reserved_routes_full_expanded_verify_import_reopen() {
-    round_trip(false, PortableV2Output::Expanded);
+    round_trip(false, PortableOutput::Expanded);
 }
 #[test]
 fn reserved_routes_full_bundle_verify_import_reopen() {
-    round_trip(false, PortableV2Output::Bundle);
+    round_trip(false, PortableOutput::Bundle);
 }
 #[test]
 fn reserved_routes_projected_expanded_export_verify() {
-    round_trip(true, PortableV2Output::Expanded);
+    round_trip(true, PortableOutput::Expanded);
 }
 #[test]
 fn reserved_routes_projected_bundle_export_verify() {
-    round_trip(true, PortableV2Output::Bundle);
+    round_trip(true, PortableOutput::Bundle);
 }
 
-fn round_trip(projected: bool, representation: PortableV2Output) {
+fn round_trip(projected: bool, representation: PortableOutput) {
     let root = tempfile::tempdir().unwrap();
     let source = root.path().join("source");
     let graph = GraphForge::new(source.to_str()).unwrap();
@@ -159,25 +159,25 @@ fn round_trip(projected: bool, representation: PortableV2Output) {
         .property_inventory_for_session()
         .generation_uuid()
         .unwrap();
-    let limits = PortableV2Limits::default();
+    let limits = PortableLimits::default();
     let package = root.path().join("package");
-    let subset = projected.then(|| PortableV2SubsetRequest {
-        selector: PortableV2GraphSelector {
+    let subset = projected.then(|| PortableSubsetRequest {
+        selector: PortableGraphSelector {
             node_uuids: Vec::new(),
             edge_uuids: vec![selected_edge.0.to_string()],
         },
-        closure: PortableV2SubsetClosure::Referential,
-        projection: PortableV2PropertyProjection {
+        closure: PortableSubsetClosure::Referential,
+        projection: PortablePropertyProjection {
             exclude: vec!["secret".to_owned()],
         },
     });
     let exported = graph
-        .export_portable_v2(
-            &PortableV2ExportRequest {
+        .export_portable(
+            &PortableExportRequest {
                 selection: PortableSelection::Current,
                 output_path: package.clone(),
                 representation,
-                profile: PortableV2SelectionProfile::Complete,
+                profile: PortableSelectionProfile::Complete,
                 subset,
                 limits,
             },
@@ -185,10 +185,10 @@ fn round_trip(projected: bool, representation: PortableV2Output) {
             |_| {},
         )
         .unwrap();
-    let verified = verify_portable_v2(
+    let verified = verify_portable(
         &PortableVerifyRequest {
             input: package.clone(),
-            mode: PortableV2Mode::Full,
+            mode: PortableMode::Full,
             limits,
         },
         None,
@@ -197,9 +197,9 @@ fn round_trip(projected: bool, representation: PortableV2Output) {
     assert_eq!(verified.package_digest, exported.package_digest);
     let target = root.path().join("imported");
     assert!(!target.exists());
-    let import = GraphForge::import_portable_v2(
+    let import = GraphForge::import_portable(
         &target,
-        &PortableV2ImportRequest {
+        &PortableImportRequest {
             input: package,
             operation_id: OperationId(Uuid::new_v4()),
             limits,
@@ -210,7 +210,7 @@ fn round_trip(projected: bool, representation: PortableV2Output) {
         let error = import.unwrap_err();
         assert_eq!(
             error.code,
-            graphforge_core::portable::PortableV2ErrorCode::Incompatible
+            graphforge_core::portable::PortableErrorCode::Incompatible
         );
         assert!(
             error

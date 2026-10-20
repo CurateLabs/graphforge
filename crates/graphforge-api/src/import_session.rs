@@ -2340,26 +2340,26 @@ mod tests {
         let appended = reopened;
         let package = directory.path().join("marked.gfpb");
         appended
-            .export_portable_v2(
-                &crate::PortableV2ExportRequest {
+            .export_portable(
+                &crate::PortableExportRequest {
                     selection: crate::PortableSelection::Current,
                     output_path: package.clone(),
-                    representation: graphforge_storage::PortableV2Output::Bundle,
-                    profile: graphforge_storage::PortableV2SelectionProfile::Complete,
+                    representation: graphforge_storage::PortableOutput::Bundle,
+                    profile: graphforge_storage::PortableSelectionProfile::Complete,
                     subset: None,
-                    limits: graphforge_storage::PortableV2Limits::default(),
+                    limits: graphforge_storage::PortableLimits::default(),
                 },
                 None,
                 |_| {},
             )
             .unwrap();
         let imported = directory.path().join("imported");
-        GraphForge::import_portable_v2(
+        GraphForge::import_portable(
             &imported,
-            &crate::PortableV2ImportRequest {
+            &crate::PortableImportRequest {
                 input: package,
                 operation_id: OperationId(Uuid::now_v7()),
-                limits: graphforge_storage::PortableV2Limits::default(),
+                limits: graphforge_storage::PortableLimits::default(),
             },
             None,
         )

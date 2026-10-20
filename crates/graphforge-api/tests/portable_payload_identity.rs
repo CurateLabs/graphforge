@@ -11,9 +11,9 @@ use std::sync::Arc;
 use arrow::array::{FixedSizeBinaryBuilder, Int64Array, StringArray};
 use arrow::record_batch::RecordBatch;
 use graphforge_api::{
-    BulkInputKind, GraphForge, ImportSessionLimits, OperationId, PortableSelection,
-    PortableV2ExportRequest, PortableV2ImportRequest, PortableV2Limits, PortableV2Output,
-    PortableV2SelectionProfile, bulk_edge_input_schema, bulk_node_input_schema,
+    BulkInputKind, GraphForge, ImportSessionLimits, OperationId, PortableExportRequest,
+    PortableImportRequest, PortableLimits, PortableOutput, PortableSelection,
+    PortableSelectionProfile, bulk_edge_input_schema, bulk_node_input_schema,
 };
 use graphforge_storage::payload_digest::{PayloadDigestCapture, PayloadDigestSnapshot};
 
@@ -201,15 +201,15 @@ fn portable_export_and_import_hash_and_copy_the_package_a_bounded_number_of_time
     let graph = GraphForge::new(source.to_str()).unwrap();
     bulk_load(&graph, NODES);
     let package = root.path().join("package.gfpb");
-    let limits = PortableV2Limits::default();
+    let limits = PortableLimits::default();
     let (exported, export) = measure(|| {
         graph
-            .export_portable_v2(
-                &PortableV2ExportRequest {
+            .export_portable(
+                &PortableExportRequest {
                     selection: PortableSelection::Current,
                     output_path: package.clone(),
-                    representation: PortableV2Output::Bundle,
-                    profile: PortableV2SelectionProfile::Complete,
+                    representation: PortableOutput::Bundle,
+                    profile: PortableSelectionProfile::Complete,
                     subset: None,
                     limits,
                 },
@@ -224,9 +224,9 @@ fn portable_export_and_import_hash_and_copy_the_package_a_bounded_number_of_time
 
     let target = root.path().join("target");
     let (_, import) = measure(|| {
-        GraphForge::import_portable_v2(
+        GraphForge::import_portable(
             &target,
-            &PortableV2ImportRequest {
+            &PortableImportRequest {
                 input: package.clone(),
                 operation_id: OperationId(uuid::Uuid::now_v7()),
                 limits,

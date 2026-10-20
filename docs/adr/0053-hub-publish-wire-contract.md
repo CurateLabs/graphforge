@@ -176,7 +176,7 @@ whole next snapshot locally:
   participant of the exported generation except the `research` capability: a
   `Custom` selection built from the `Complete` selection preview with research
   participants removed, so participants added later are published without a
-  change here. `export_portable_v2` with `Complete` refuses a Project with
+  change here. `export_portable` with `Complete` refuses a Project with
   research Branches, because its research registry carries operational heads
   and is not a single interchange archive (`portable_registry`). Research
   travels only through the research interchange packages. Plain `gf clone`

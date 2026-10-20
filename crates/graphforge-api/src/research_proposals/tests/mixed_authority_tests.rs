@@ -79,9 +79,9 @@ fn fork_local_branch_exports_mixed_project_acceptance_genealogy() {
     )
     .unwrap();
     let imported_root = dir.path().join("reimport");
-    GraphForge::import_portable_v2(
+    GraphForge::import_portable(
         &imported_root,
-        &PortableV2ImportRequest {
+        &PortableImportRequest {
             input: output,
             operation_id: OperationId(Uuid::now_v7()),
             limits: Default::default(),

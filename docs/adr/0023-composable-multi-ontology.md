@@ -43,8 +43,8 @@ behavior without reimplementing it.
 
 The normative types, state transitions, errors, limits, and examples are in the
 [multi-ontology contract](../book/architecture/composable-multi-ontology.md).
-Portable representation is frozen by [ADR 0022](0022-portable-v2-multi-ontology-compatibility.md)
-(#835 closed): M9 uses the existing authenticated portable-v2 compatibility
+Portable representation is frozen by [ADR 0022](0022-multi-ontology-compatibility.md)
+(#835 closed): M9 uses the existing authenticated portable compatibility
 component `graphforge-ontology-composition` and does not invent an ad hoc kind
 or require portable v3.
 

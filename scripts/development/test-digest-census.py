@@ -356,16 +356,16 @@ fn portable_domain() { ObservedSha256::for_domain(HashDomain::PortableAuthentica
     digest_producer = "fn digest() { Transport::new(); }"
     p.write_text(source + digest_producer + "\n")
     fixtures = {
-        "project_portable_v2_export.rs": "fn export() { written.digest(); }\n",
-        "project_portable_v2_export/transport.rs": (
+        "project_portable_export.rs": "fn export() { written.digest(); }\n",
+        "project_portable_export/transport.rs": (
             "use graphforge_core::hash_observation::{ControlSha256, PortableSha256 as Sha256};\n"
             "fn digest(&self) -> [u8; 32] { self.digest }\n"
             'fn copy() { ControlSha256::digest(b"control"); Sha256::new(); }\n'
         ),
-        "project_portable_v2.rs": (
+        "project_portable.rs": (
             "fn hash_file() { StreamHash::new(); }\nfn scan() { hash_file(); }\n"
         ),
-        "project_portable_v2/authenticated_entries.rs": (
+        "project_portable/authenticated_entries.rs": (
             "use graphforge_core::hash_observation::PortableSha256 as Transport;\n"
             "fn new() { Transport::new(); }\n"
         ),
@@ -385,9 +385,9 @@ fn portable_domain() { ObservedSha256::for_domain(HashDomain::PortableAuthentica
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text)
         name = {
-            "project_portable_v2.rs": "hash_file",
-            "project_portable_v2_export/transport.rs": "digest",
-            "project_portable_v2/authenticated_entries.rs": "new",
+            "project_portable.rs": "hash_file",
+            "project_portable_export/transport.rs": "digest",
+            "project_portable/authenticated_entries.rs": "new",
         }.get(relative)
         if name:
             body = re.search(rf"fn {name}\b[^\n]*", text).group()
@@ -402,11 +402,11 @@ fn portable_domain() { ObservedSha256::for_domain(HashDomain::PortableAuthentica
             )
     overrides.write_text(json.dumps(decision))
     mixed_body = re.search(
-        r"fn copy\b[^\n]*", fixtures["project_portable_v2_export/transport.rs"]
+        r"fn copy\b[^\n]*", fixtures["project_portable_export/transport.rs"]
     ).group()
     decision["function_overrides"].append(
         {
-            "path": str((storage / "project_portable_v2_export/transport.rs").relative_to(root)),
+            "path": str((storage / "project_portable_export/transport.rs").relative_to(root)),
             "function": "copy",
             "function_bodies_sha256": [hashlib.sha256(mixed_body.encode()).hexdigest()],
             "role": "caller_selected",
@@ -445,7 +445,7 @@ fn portable_domain() { ObservedSha256::for_domain(HashDomain::PortableAuthentica
         "control_authentication",
         "portable_authentication",
     }, mixed
-    getter = storage / "project_portable_v2_export/transport.rs"
+    getter = storage / "project_portable_export/transport.rs"
     getter.write_text(
         getter.read_text().replace("self.digest", 'Transport::digest(b"new producer")')
     )
@@ -455,8 +455,8 @@ fn portable_domain() { ObservedSha256::for_domain(HashDomain::PortableAuthentica
     assert any(g["kind"] == "reviewed_input_changed" and g["function"] == "digest" for g in gaps), (
         gaps
     )
-    getter.write_text(fixtures["project_portable_v2_export/transport.rs"])
-    caller = storage / "project_portable_v2_export.rs"
+    getter.write_text(fixtures["project_portable_export/transport.rs"])
+    caller = storage / "project_portable_export.rs"
     caller.write_text(caller.read_text().replace("written.digest()", "untrusted.digest()"))
     run = probe_private_getter()
     assert run.returncode == 1, (run.stdout, run.stderr)

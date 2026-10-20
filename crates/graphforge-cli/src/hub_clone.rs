@@ -1,4 +1,4 @@
-//! Secure Hub discovery, download, and atomic portable-v2 import.
+//! Secure Hub discovery, download, and atomic portable import.
 
 use clap::Args;
 use fs4::{FileExt, TryLockError};
@@ -8,12 +8,12 @@ use graphforge_api::telemetry::{
     WaitReason,
 };
 use graphforge_api::{
-    DiscoveryPortableV2Error, DiscoveryPortableV2Mismatch, DiscoveryPortableV2Request,
-    DiscoveryResearchVersionError, DiscoveryResearchVersionRequest, PortableV2ErrorCode,
-    verify_discovered_portable_v2, verify_discovered_research_version,
+    DiscoveryPortableError, DiscoveryPortableMismatch, DiscoveryPortableRequest,
+    DiscoveryResearchVersionError, DiscoveryResearchVersionRequest, PortableErrorCode,
+    verify_discovered_portable, verify_discovered_research_version,
 };
 use graphforge_api::{
-    GraphForge, OperationId, PortableV2ImportRequest, PortableV2Limits, PortableV2Mode,
+    GraphForge, OperationId, PortableImportRequest, PortableLimits, PortableMode,
 };
 use graphforge_discovery::{
     DiscoveryError, DiscoveryErrorCode, DiscoveryLimits, DiscoveryManifest, ObjectDescriptor,
@@ -1369,7 +1369,7 @@ fn import_committed(staging: &CloneStaging, operation: &OperationId) -> bool {
     if std::fs::symlink_metadata(&staging.project).is_err() {
         return false;
     }
-    let expected = graphforge_api::portable_v2_import_generation(&operation.0);
+    let expected = graphforge_api::portable_import_generation(&operation.0);
     graphforge_api::read_committed_generation_identity(&staging.project)
         .is_ok_and(|identity| identity.generation_uuid == expected)
 }
@@ -1653,7 +1653,7 @@ fn install_destination(
     Ok(())
 }
 
-fn import_error(error: &graphforge_api::PortableV2Error) -> graphforge_api::GfError {
+fn import_error(error: &graphforge_api::PortableError) -> graphforge_api::GfError {
     let code = portable_code(error.code);
     let mut message = format!("{code}: portable project import failed: {error}");
     if let Some(cause) = &error.cause {
@@ -1661,26 +1661,26 @@ fn import_error(error: &graphforge_api::PortableV2Error) -> graphforge_api::GfEr
         let _ = write!(message, " (cause: {cause})");
     }
     match error.code {
-        PortableV2ErrorCode::Io | PortableV2ErrorCode::Cancelled => {
+        PortableErrorCode::Io | PortableErrorCode::Cancelled => {
             graphforge_api::GfError::Storage(message)
         }
         _ => graphforge_api::GfError::Validation(message),
     }
 }
 
-fn portable_code(code: PortableV2ErrorCode) -> &'static str {
+fn portable_code(code: PortableErrorCode) -> &'static str {
     match code {
-        PortableV2ErrorCode::Cancelled => "hub.package.cancelled",
-        PortableV2ErrorCode::LimitExceeded => "hub.package.limit_exceeded",
-        PortableV2ErrorCode::Io => "hub.package.io",
-        PortableV2ErrorCode::InvalidStructure => "hub.package.invalid_structure",
-        PortableV2ErrorCode::InvalidPath => "hub.package.invalid_path",
-        PortableV2ErrorCode::DuplicateEntry => "hub.package.duplicate_entry",
-        PortableV2ErrorCode::UnsupportedProjectFormat => "hub.package.unsupported_format",
-        PortableV2ErrorCode::UnsupportedFuture => "hub.package.unsupported_future",
-        PortableV2ErrorCode::Incompatible => "hub.package.incompatible",
-        PortableV2ErrorCode::DigestMismatch => "hub.package.digest_mismatch",
-        PortableV2ErrorCode::ConcurrentMutation => "hub.package.concurrent_mutation",
+        PortableErrorCode::Cancelled => "hub.package.cancelled",
+        PortableErrorCode::LimitExceeded => "hub.package.limit_exceeded",
+        PortableErrorCode::Io => "hub.package.io",
+        PortableErrorCode::InvalidStructure => "hub.package.invalid_structure",
+        PortableErrorCode::InvalidPath => "hub.package.invalid_path",
+        PortableErrorCode::DuplicateEntry => "hub.package.duplicate_entry",
+        PortableErrorCode::UnsupportedProjectFormat => "hub.package.unsupported_format",
+        PortableErrorCode::UnsupportedFuture => "hub.package.unsupported_future",
+        PortableErrorCode::Incompatible => "hub.package.incompatible",
+        PortableErrorCode::DigestMismatch => "hub.package.digest_mismatch",
+        PortableErrorCode::ConcurrentMutation => "hub.package.concurrent_mutation",
     }
 }
 
@@ -2087,7 +2087,7 @@ fn clone_into_staging(
     }
     let download = download_result?;
     clone_failpoint("clone.after_download");
-    let portable_limits = PortableV2Limits::default();
+    let portable_limits = PortableLimits::default();
     profile.handoff(
         ComponentKind::NetworkTransport,
         ComponentKind::PortableVerify,
@@ -2114,7 +2114,7 @@ fn clone_into_staging(
                     package: &partial,
                     discovery_limits: limits,
                     portable_limits,
-                    mode: PortableV2Mode::Full,
+                    mode: PortableMode::Full,
                     cancelled: Some(cancelled),
                     scratch: Some(&staging.root),
                 })
@@ -2125,14 +2125,14 @@ fn clone_into_staging(
                     Some(context.version_kind.clone()),
                 )
             } else {
-                let accepted = verify_discovered_portable_v2(&DiscoveryPortableV2Request {
+                let accepted = verify_discovered_portable(&DiscoveryPortableRequest {
                     manifest_json: manifest_bytes,
                     refs_json: refs_bytes,
                     expected_repository: identity,
                     package: &partial,
                     discovery_limits: limits,
                     portable_limits,
-                    mode: PortableV2Mode::Full,
+                    mode: PortableMode::Full,
                     cancelled: Some(cancelled),
                 })
                 .map_err(portable_error)?;
@@ -2215,9 +2215,9 @@ fn clone_into_staging(
                 }
             }
             bind_import_target(staging, &operation_id)?;
-            GraphForge::import_portable_v2(
+            GraphForge::import_portable(
                 &staging.project,
-                &PortableV2ImportRequest {
+                &PortableImportRequest {
                     input: partial.clone(),
                     operation_id,
                     limits: portable_limits,
@@ -2317,9 +2317,9 @@ fn clone_into_staging(
         HandoffKind::Return,
         None,
     );
-    // `import_portable_v2` already reopened the imported project through the
+    // `import_portable` already reopened the imported project through the
     // public facade and verified the reopened generation UUID matches the
-    // published receipt (see `import_portable_v2_with_allocation`), including
+    // published receipt (see `import_portable_with_allocation`), including
     // its own UTF-8 path check — success there already proves normal runtime
     // readability. The stage itself is kept (with its test-only injected
     // delay) so clone job telemetry keeps reporting a distinct
@@ -2428,16 +2428,16 @@ fn research_version_error(error: DiscoveryResearchVersionError) -> graphforge_ap
         DiscoveryResearchVersionError::Discovery(error) => protocol_error(&error),
         DiscoveryResearchVersionError::ReferenceMismatch(mismatch) => validation(
             match mismatch {
-                DiscoveryPortableV2Mismatch::Repository => "hub.package.repository_mismatch",
-                DiscoveryPortableV2Mismatch::ImmutableVersion => {
+                DiscoveryPortableMismatch::Repository => "hub.package.repository_mismatch",
+                DiscoveryPortableMismatch::ImmutableVersion => {
                     "hub.package.immutable_version_mismatch"
                 }
-                DiscoveryPortableV2Mismatch::PackageDigest => "hub.package.package_digest_mismatch",
-                DiscoveryPortableV2Mismatch::ModuleIdentity => "hub.module.identity_mismatch",
-                DiscoveryPortableV2Mismatch::ModuleContentDigest => {
+                DiscoveryPortableMismatch::PackageDigest => "hub.package.package_digest_mismatch",
+                DiscoveryPortableMismatch::ModuleIdentity => "hub.module.identity_mismatch",
+                DiscoveryPortableMismatch::ModuleContentDigest => {
                     "hub.module.content_digest_mismatch"
                 }
-                DiscoveryPortableV2Mismatch::ResearchVersionIdentity => {
+                DiscoveryPortableMismatch::ResearchVersionIdentity => {
                     "hub.package.research_version_mismatch"
                 }
             },
@@ -2450,31 +2450,31 @@ fn research_version_error(error: DiscoveryResearchVersionError) -> graphforge_ap
     }
 }
 
-fn portable_error(error: DiscoveryPortableV2Error) -> graphforge_api::GfError {
+fn portable_error(error: DiscoveryPortableError) -> graphforge_api::GfError {
     match error {
-        DiscoveryPortableV2Error::Discovery(error) => protocol_error(&error),
-        DiscoveryPortableV2Error::ReferenceMismatch(mismatch) => validation(
+        DiscoveryPortableError::Discovery(error) => protocol_error(&error),
+        DiscoveryPortableError::ReferenceMismatch(mismatch) => validation(
             match mismatch {
-                DiscoveryPortableV2Mismatch::Repository => "hub.package.repository_mismatch",
-                DiscoveryPortableV2Mismatch::ImmutableVersion => {
+                DiscoveryPortableMismatch::Repository => "hub.package.repository_mismatch",
+                DiscoveryPortableMismatch::ImmutableVersion => {
                     "hub.package.immutable_version_mismatch"
                 }
-                DiscoveryPortableV2Mismatch::PackageDigest => "hub.package.package_digest_mismatch",
-                DiscoveryPortableV2Mismatch::ModuleIdentity => "hub.module.identity_mismatch",
-                DiscoveryPortableV2Mismatch::ModuleContentDigest => {
+                DiscoveryPortableMismatch::PackageDigest => "hub.package.package_digest_mismatch",
+                DiscoveryPortableMismatch::ModuleIdentity => "hub.module.identity_mismatch",
+                DiscoveryPortableMismatch::ModuleContentDigest => {
                     "hub.module.content_digest_mismatch"
                 }
-                DiscoveryPortableV2Mismatch::ResearchVersionIdentity => {
+                DiscoveryPortableMismatch::ResearchVersionIdentity => {
                     "hub.package.research_version_mismatch"
                 }
             },
             "portable discovery reference mismatch",
         ),
-        DiscoveryPortableV2Error::Participant { .. } => validation(
+        DiscoveryPortableError::Participant { .. } => validation(
             "hub.package.invalid_participant",
             "portable project participant is invalid",
         ),
-        DiscoveryPortableV2Error::Portable(error) => validation(
+        DiscoveryPortableError::Portable(error) => validation(
             portable_code(error.code),
             "portable project verification failed",
         ),

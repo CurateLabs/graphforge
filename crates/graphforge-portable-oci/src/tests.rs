@@ -68,7 +68,7 @@ fn foreign_upload_location_never_receives_credentials() {
     let error = client
         .put_blob("repo", &digest_sha256(b"data"), b"data")
         .unwrap_err();
-    assert_eq!(error.code, PortableV2ErrorCode::InvalidPath);
+    assert_eq!(error.code, PortableErrorCode::InvalidPath);
     assert!(!error.to_string().contains("private-token"));
     assert!(
         origin
@@ -102,7 +102,7 @@ fn bounded_manifest_and_blob_responses_keep_typed_errors() {
         } else {
             client.get_blob("repo", &digest_sha256(b"data"))
         };
-        assert_eq!(result.unwrap_err().code, PortableV2ErrorCode::Io);
+        assert_eq!(result.unwrap_err().code, PortableErrorCode::Io);
         server.join().unwrap();
     }
 }
@@ -113,7 +113,7 @@ fn redirects_and_error_bodies_are_not_returned_or_followed() {
         let (host, server) = response_server(format!("HTTP/1.1 {status} Rejected\r\nLocation: http://invalid.example/secret\r\nContent-Length: 19\r\nConnection: close\r\n\r\nsecret server body!").into_bytes());
         let client = HttpOciRegistry::new(&host, Some("user:secret"), true).unwrap();
         let error = client.get_manifest("repo", "latest").unwrap_err();
-        assert_eq!(error.code, PortableV2ErrorCode::InvalidStructure);
+        assert_eq!(error.code, PortableErrorCode::InvalidStructure);
         assert!(!format!("{error:?}").contains("secret"));
         server.join().unwrap();
     }
@@ -122,8 +122,8 @@ fn redirects_and_error_bodies_are_not_returned_or_followed() {
 #[test]
 fn malformed_truncated_and_digest_mismatched_downloads_are_typed() {
     for (body, length, expected) in [
-        (b"bad".as_slice(), 3, PortableV2ErrorCode::DigestMismatch),
-        (b"bad".as_slice(), 10, PortableV2ErrorCode::Io),
+        (b"bad".as_slice(), 3, PortableErrorCode::DigestMismatch),
+        (b"bad".as_slice(), 10, PortableErrorCode::Io),
     ] {
         let mut response =
             format!("HTTP/1.1 200 OK\r\nContent-Length: {length}\r\nConnection: close\r\n\r\n")
@@ -187,7 +187,7 @@ fn control_character_credentials_are_refused_by_the_message_they_report() {
         let Err(error) = HttpOciRegistry::new("registry.invalid", Some(credential), true) else {
             panic!("a control character must be refused");
         };
-        assert_eq!(error.code, PortableV2ErrorCode::InvalidPath);
+        assert_eq!(error.code, PortableErrorCode::InvalidPath);
         assert!(error.to_string().contains("control characters"));
     }
     assert!(HttpOciRegistry::new("registry.invalid", Some("token-second"), true).is_ok());
@@ -493,7 +493,7 @@ fn a_layer_larger_than_the_response_bound_streams_through_http() {
     // The whole-document bound still guards small JSON documents.
     assert_eq!(
         client.get_blob("repo", &digest).unwrap_err().code,
-        PortableV2ErrorCode::Io
+        PortableErrorCode::Io
     );
 }
 
@@ -540,7 +540,7 @@ fn a_single_request_slower_than_the_timeout_still_fails() {
             .put_blob_stream("repo", &digest, layer.len() as u64, &mut layer.as_slice())
             .unwrap_err()
             .code,
-        PortableV2ErrorCode::Io
+        PortableErrorCode::Io
     );
     assert!(!server.state.lock().unwrap().blobs.contains_key(&digest));
 }
@@ -560,7 +560,7 @@ fn an_interrupted_push_admits_no_blob_and_a_rerun_completes() {
             .put_blob_stream("repo", &digest, size, &mut layer.as_slice())
             .unwrap_err()
             .code,
-        PortableV2ErrorCode::Io
+        PortableErrorCode::Io
     );
     assert!(!client.blob_exists("repo", &digest).unwrap());
     assert_eq!(server.state.lock().unwrap().finalized, 0);
@@ -619,7 +619,7 @@ fn a_stream_that_does_not_match_its_digest_or_size_is_never_finalized() {
             .put_blob_stream("repo", &digest, other.len() as u64, &mut other.as_slice())
             .unwrap_err()
             .code,
-        PortableV2ErrorCode::DigestMismatch
+        PortableErrorCode::DigestMismatch
     );
     assert_eq!(
         client
@@ -631,7 +631,7 @@ fn a_stream_that_does_not_match_its_digest_or_size_is_never_finalized() {
             )
             .unwrap_err()
             .code,
-        PortableV2ErrorCode::Io
+        PortableErrorCode::Io
     );
     assert_eq!(
         client
@@ -643,7 +643,7 @@ fn a_stream_that_does_not_match_its_digest_or_size_is_never_finalized() {
             )
             .unwrap_err()
             .code,
-        PortableV2ErrorCode::Io
+        PortableErrorCode::Io
     );
     assert_eq!(server.state.lock().unwrap().finalized, 0);
 }
@@ -718,7 +718,7 @@ fn a_content_range_total_that_contradicts_the_descriptor_is_refused() {
                 .get_blob_stream("repo", &digest, declared)
                 .err()
                 .map(|error| error.code),
-            Some(PortableV2ErrorCode::Io)
+            Some(PortableErrorCode::Io)
         );
     }
     assert!(content_range_matches("bytes 0-9/100", 0, 9, 100));
@@ -818,7 +818,7 @@ fn the_memory_registry_refuses_a_declared_size_over_its_limit() {
             &mut std::io::empty(),
         )
         .unwrap_err();
-    assert_eq!(error.code, PortableV2ErrorCode::LimitExceeded);
+    assert_eq!(error.code, PortableErrorCode::LimitExceeded);
 }
 
 #[test]
@@ -837,13 +837,13 @@ fn the_memory_registry_streams_layers_and_checks_size_and_digest() {
             .put_blob_stream("repo", &digest, size - 1, &mut layer.as_slice())
             .unwrap_err()
             .code,
-        PortableV2ErrorCode::Io
+        PortableErrorCode::Io
     );
     assert_eq!(
         registry
             .put_blob_stream("repo", &digest_sha256(b"x"), size, &mut layer.as_slice())
             .unwrap_err()
             .code,
-        PortableV2ErrorCode::DigestMismatch
+        PortableErrorCode::DigestMismatch
     );
 }

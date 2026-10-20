@@ -288,10 +288,10 @@ enum Command {
     /// Restore the complete workspace from a checkpoint.
     Revert(RevertArgs),
     /// Export one immutable generation as a streaming portable package.
-    Export(portable_cli::PortableV2ExportArgs),
+    Export(portable_cli::PortableExportArgs),
     /// Import a streaming portable package into a new or empty project.
-    Import(portable_cli::PortableV2ImportArgs),
-    /// Portable-v2 selection preview, verification, staging, and OCI promotion.
+    Import(portable_cli::PortableImportArgs),
+    /// Portable selection preview, verification, staging, and OCI promotion.
     Portable {
         #[command(subcommand)]
         command: portable_cli::PortableCommand,

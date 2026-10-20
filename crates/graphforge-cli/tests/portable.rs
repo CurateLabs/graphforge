@@ -225,7 +225,7 @@ fn portable_verify_skips_repository_discovery() {
 }
 
 #[test]
-fn portable_v2_export_verify_and_import_round_trip() {
+fn portable_export_verify_and_import_round_trip() {
     let root = TempDir::new().expect("temp root");
     let source_project = root.path().join("source");
     fs::create_dir(&source_project).expect("source project");
@@ -311,9 +311,9 @@ fn portable_v2_export_verify_and_import_round_trip() {
 #[test]
 fn portable_facade_and_same_binary_preserve_complete_receipts() {
     use graphforge_api::{
-        GraphForge, PortableSelection, PortableV2ExportRequest, PortableV2Limits, PortableV2Mode,
-        PortableV2Output, PortableV2SelectionPreviewRequest, PortableV2SelectionProfile,
-        PortableV2SelectionRequest, PortableVerifyRequest,
+        GraphForge, PortableExportRequest, PortableLimits, PortableMode, PortableOutput,
+        PortableSelection, PortableSelectionPreviewRequest, PortableSelectionProfile,
+        PortableSelectionRequest, PortableVerifyRequest,
     };
     let root = TempDir::new().unwrap();
     let project = root.path().join("source");
@@ -348,21 +348,21 @@ fn portable_facade_and_same_binary_preserve_complete_receipts() {
         let cli_preview = json(&gf(&project, &args));
         let graph = GraphForge::new(project.to_str()).unwrap();
         let preview = graph
-            .preview_portable_v2_selection(&PortableV2SelectionPreviewRequest {
+            .preview_portable_selection(&PortableSelectionPreviewRequest {
                 selection: selection.clone(),
-                request: PortableV2SelectionRequest {
-                    profile: PortableV2SelectionProfile::Complete,
+                request: PortableSelectionRequest {
+                    profile: PortableSelectionProfile::Complete,
                     strict: false,
                 },
-                limits: PortableV2Limits::default(),
+                limits: PortableLimits::default(),
             })
             .unwrap();
         assert_eq!(cli_preview, serde_json::to_value(&preview).unwrap());
         assert_eq!(cli_preview["include_graph_tree"], true);
         drop(graph);
         for (format, representation) in [
-            ("bundle", PortableV2Output::Bundle),
-            ("expanded", PortableV2Output::Expanded),
+            ("bundle", PortableOutput::Bundle),
+            ("expanded", PortableOutput::Expanded),
         ] {
             let package = root.path().join("package");
             let mut args = vec!["--json", "--diagnostics", "export"];
@@ -377,8 +377,8 @@ fn portable_facade_and_same_binary_preserve_complete_receipts() {
             ]);
             let cli_export = json(&gf(&project, &args));
             for (mode_flag, mode) in [
-                ("full", PortableV2Mode::Full),
-                ("inspect", PortableV2Mode::StructureOnly),
+                ("full", PortableMode::Full),
+                ("inspect", PortableMode::StructureOnly),
             ] {
                 let cli_verify = json(&gf(
                     &project,
@@ -392,11 +392,11 @@ fn portable_facade_and_same_binary_preserve_complete_receipts() {
                         package.to_str().unwrap(),
                     ],
                 ));
-                let report = graphforge_api::verify_portable_v2(
+                let report = graphforge_api::verify_portable(
                     &PortableVerifyRequest {
                         input: package.clone(),
                         mode,
-                        limits: PortableV2Limits::default(),
+                        limits: PortableLimits::default(),
                     },
                     None,
                 )
@@ -409,15 +409,15 @@ fn portable_facade_and_same_binary_preserve_complete_receipts() {
                 fs::remove_file(&package).unwrap();
             }
             let graph = GraphForge::new(project.to_str()).unwrap();
-            let request = PortableV2ExportRequest {
+            let request = PortableExportRequest {
                 selection: selection.clone(),
                 output_path: package.clone(),
                 representation,
-                profile: PortableV2SelectionProfile::Complete,
+                profile: PortableSelectionProfile::Complete,
                 subset: None,
-                limits: PortableV2Limits::default(),
+                limits: PortableLimits::default(),
             };
-            let exported = graph.export_portable_v2(&request, None, |_| {}).unwrap();
+            let exported = graph.export_portable(&request, None, |_| {}).unwrap();
             // #1389 adds process-scoped per-phase I/O attribution to the CLI
             // receipt. It is observability the package receipt does not model,
             // so it is asserted separately and the package contract below stays
@@ -437,10 +437,8 @@ fn portable_facade_and_same_binary_preserve_complete_receipts() {
                 cli_package,
                 serde_json::to_value(exported.receipt()).unwrap()
             );
-            let denied = graph
-                .export_portable_v2(&request, None, |_| {})
-                .unwrap_err();
-            assert_eq!(denied.code, graphforge_api::PortableV2ErrorCode::Io);
+            let denied = graph.export_portable(&request, None, |_| {}).unwrap_err();
+            assert_eq!(denied.code, graphforge_api::PortableErrorCode::Io);
             drop(graph);
             if package.is_dir() {
                 fs::remove_dir_all(&package).unwrap();
@@ -461,23 +459,22 @@ fn shared_verification_golden_matches_real_facade_and_cli() {
     fs::copy(&fixture, &package).unwrap();
     assert_eq!(fs::read(&package).unwrap(), fs::read(&fixture).unwrap());
     let expected: Value = serde_json::from_slice(
-        &fs::read(root.join("tests/fixtures/portable-v2/facade-verification-receipts.json"))
-            .unwrap(),
+        &fs::read(root.join("tests/fixtures/portable/facade-verification-receipts.json")).unwrap(),
     )
     .unwrap();
     for (key, flag, mode) in [
-        ("full", "full", graphforge_api::PortableV2Mode::Full),
+        ("full", "full", graphforge_api::PortableMode::Full),
         (
             "structure_only",
             "inspect",
-            graphforge_api::PortableV2Mode::StructureOnly,
+            graphforge_api::PortableMode::StructureOnly,
         ),
     ] {
-        let report = graphforge_api::verify_portable_v2(
+        let report = graphforge_api::verify_portable(
             &graphforge_api::PortableVerifyRequest {
                 input: package.clone(),
                 mode,
-                limits: graphforge_api::PortableV2Limits::default(),
+                limits: graphforge_api::PortableLimits::default(),
             },
             None,
         )

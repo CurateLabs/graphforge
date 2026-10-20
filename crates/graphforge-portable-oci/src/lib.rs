@@ -2,9 +2,9 @@
 #![allow(missing_docs)]
 use graphforge_core::hash_observation::ArtifactSha256 as Sha256;
 use graphforge_core::portable::{
-    PortableV2Error, PortableV2ErrorCode, PortableV2OciAuthenticityPolicy, PortableV2OciPhase,
-    PortableV2OciProgress, PortableV2OciSignatureMaterial, PortableV2OciSignatureState,
-    PortableV2PackageClass,
+    PortableError, PortableErrorCode, PortableOciAuthenticityPolicy, PortableOciPhase,
+    PortableOciProgress, PortableOciSignatureMaterial, PortableOciSignatureState,
+    PortablePackageClass,
 };
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
@@ -18,7 +18,7 @@ use ureq::unversioned::transport::{
     Buffers, ConnectionDetails, Connector, DefaultConnector, NextTimeout, Transport,
     time::Duration as WaitDuration,
 };
-/// Artifact type for a GraphForge portable-v2 package in an OCI registry.
+/// Artifact type for a GraphForge portable package in an OCI registry.
 pub const OCI_ARTIFACT_TYPE: &str = "application/vnd.graphforge.project.v2";
 /// Config media type carrying GraphForge semantic identity.
 pub const OCI_CONFIG_MEDIA_TYPE: &str = "application/vnd.graphforge.project.v2.config+json";
@@ -78,10 +78,9 @@ struct OciSignaturePayload {
 }
 
 /// Backend used by publish/pull. Production uses HTTP; tests use memory.
-pub trait PortableV2OciRegistry: Send + Sync {
-    fn put_blob(&self, repository: &str, digest: &str, bytes: &[u8])
-    -> Result<(), PortableV2Error>;
-    fn get_blob(&self, repository: &str, digest: &str) -> Result<Vec<u8>, PortableV2Error>;
+pub trait PortableOciRegistry: Send + Sync {
+    fn put_blob(&self, repository: &str, digest: &str, bytes: &[u8]) -> Result<(), PortableError>;
+    fn get_blob(&self, repository: &str, digest: &str) -> Result<Vec<u8>, PortableError>;
     /// Upload a layer without buffering it. `source` must yield exactly `size`
     /// bytes whose sha256 is `digest`; otherwise the blob is not admitted.
     fn put_blob_stream(
@@ -90,7 +89,7 @@ pub trait PortableV2OciRegistry: Send + Sync {
         digest: &str,
         size: u64,
         source: &mut dyn Read,
-    ) -> Result<(), PortableV2Error>;
+    ) -> Result<(), PortableError>;
     /// Stream `size` bytes of a layer. The caller verifies length and digest
     /// of what it consumed before admitting it.
     fn get_blob_stream<'a>(
@@ -98,20 +97,20 @@ pub trait PortableV2OciRegistry: Send + Sync {
         repository: &str,
         digest: &str,
         size: u64,
-    ) -> Result<Box<dyn Read + 'a>, PortableV2Error>;
-    fn blob_exists(&self, repository: &str, digest: &str) -> Result<bool, PortableV2Error>;
+    ) -> Result<Box<dyn Read + 'a>, PortableError>;
+    fn blob_exists(&self, repository: &str, digest: &str) -> Result<bool, PortableError>;
     fn put_manifest(
         &self,
         repository: &str,
         reference: &str,
         media_type: &str,
         bytes: &[u8],
-    ) -> Result<String, PortableV2Error>;
+    ) -> Result<String, PortableError>;
     fn get_manifest(
         &self,
         repository: &str,
         reference: &str,
-    ) -> Result<(String, Vec<u8>), PortableV2Error>;
+    ) -> Result<(String, Vec<u8>), PortableError>;
     /// Attach a referrer manifest for `subject_digest`. Default: unsupported.
     fn put_referrer_manifest(
         &self,
@@ -119,9 +118,9 @@ pub trait PortableV2OciRegistry: Send + Sync {
         _subject_digest: &str,
         _media_type: &str,
         _bytes: &[u8],
-    ) -> Result<String, PortableV2Error> {
-        Err(PortableV2Error::new(
-            PortableV2ErrorCode::UnsupportedFuture,
+    ) -> Result<String, PortableError> {
+        Err(PortableError::new(
+            PortableErrorCode::UnsupportedFuture,
             "registry does not support referrer attachments",
         ))
     }
@@ -130,7 +129,7 @@ pub trait PortableV2OciRegistry: Send + Sync {
         &self,
         _repository: &str,
         _subject_digest: &str,
-    ) -> Result<Vec<Vec<u8>>, PortableV2Error> {
+    ) -> Result<Vec<Vec<u8>>, PortableError> {
         Ok(Vec::new())
     }
 }
@@ -149,13 +148,8 @@ struct MemoryState {
     referrers: BTreeMap<(String, String), Vec<Vec<u8>>>,
 }
 
-impl PortableV2OciRegistry for MemoryOciRegistry {
-    fn put_blob(
-        &self,
-        repository: &str,
-        digest: &str,
-        bytes: &[u8],
-    ) -> Result<(), PortableV2Error> {
+impl PortableOciRegistry for MemoryOciRegistry {
+    fn put_blob(&self, repository: &str, digest: &str, bytes: &[u8]) -> Result<(), PortableError> {
         self.store_blob(repository, digest, bytes.to_vec())
     }
 
@@ -165,16 +159,16 @@ impl PortableV2OciRegistry for MemoryOciRegistry {
         digest: &str,
         size: u64,
         source: &mut dyn Read,
-    ) -> Result<(), PortableV2Error> {
+    ) -> Result<(), PortableError> {
         validate_repository(repository)?;
         validate_digest(digest)?;
         if size > MEMORY_REGISTRY_MAX_BLOB_BYTES {
-            return Err(PortableV2Error::new(
-                PortableV2ErrorCode::LimitExceeded,
+            return Err(PortableError::new(
+                PortableErrorCode::LimitExceeded,
                 "blob exceeds the memory registry limit",
             ));
         }
-        let io = |detail| PortableV2Error::new(PortableV2ErrorCode::Io, detail);
+        let io = |detail| PortableError::new(PortableErrorCode::Io, detail);
         // Reserve the declared length once (fallibly, so a lying size cannot
         // abort the process) and move the bytes into storage without a copy.
         let mut bytes = Vec::new();
@@ -198,25 +192,25 @@ impl PortableV2OciRegistry for MemoryOciRegistry {
         repository: &str,
         digest: &str,
         _size: u64,
-    ) -> Result<Box<dyn Read + 'a>, PortableV2Error> {
+    ) -> Result<Box<dyn Read + 'a>, PortableError> {
         Ok(Box::new(SharedBlobReader {
             blob: self.stored_blob(repository, digest)?,
             position: 0,
         }))
     }
 
-    fn get_blob(&self, repository: &str, digest: &str) -> Result<Vec<u8>, PortableV2Error> {
+    fn get_blob(&self, repository: &str, digest: &str) -> Result<Vec<u8>, PortableError> {
         self.stored_blob(repository, digest)
             .map(|blob| blob.to_vec())
     }
 
-    fn blob_exists(&self, repository: &str, digest: &str) -> Result<bool, PortableV2Error> {
+    fn blob_exists(&self, repository: &str, digest: &str) -> Result<bool, PortableError> {
         validate_repository(repository)?;
         validate_digest(digest)?;
         Ok(self
             .inner
             .lock()
-            .map_err(|_| PortableV2Error::new(PortableV2ErrorCode::Io, "registry lock poisoned"))?
+            .map_err(|_| PortableError::new(PortableErrorCode::Io, "registry lock poisoned"))?
             .blobs
             .contains_key(&(repository.to_owned(), digest.to_owned())))
     }
@@ -227,14 +221,14 @@ impl PortableV2OciRegistry for MemoryOciRegistry {
         reference: &str,
         _media_type: &str,
         bytes: &[u8],
-    ) -> Result<String, PortableV2Error> {
+    ) -> Result<String, PortableError> {
         validate_repository(repository)?;
         validate_reference(reference)?;
         let digest = digest_sha256(bytes);
         let mut guard = self
             .inner
             .lock()
-            .map_err(|_| PortableV2Error::new(PortableV2ErrorCode::Io, "registry lock poisoned"))?;
+            .map_err(|_| PortableError::new(PortableErrorCode::Io, "registry lock poisoned"))?;
         guard.manifests.insert(
             (repository.to_owned(), digest.clone()),
             (OCI_MANIFEST_MEDIA_TYPE.to_owned(), bytes.to_vec()),
@@ -252,13 +246,13 @@ impl PortableV2OciRegistry for MemoryOciRegistry {
         &self,
         repository: &str,
         reference: &str,
-    ) -> Result<(String, Vec<u8>), PortableV2Error> {
+    ) -> Result<(String, Vec<u8>), PortableError> {
         validate_repository(repository)?;
         validate_reference(reference)?;
         let guard = self
             .inner
             .lock()
-            .map_err(|_| PortableV2Error::new(PortableV2ErrorCode::Io, "registry lock poisoned"))?;
+            .map_err(|_| PortableError::new(PortableErrorCode::Io, "registry lock poisoned"))?;
         let digest = if reference.starts_with("sha256:") {
             reference.to_owned()
         } else {
@@ -267,7 +261,7 @@ impl PortableV2OciRegistry for MemoryOciRegistry {
                 .get(&(repository.to_owned(), reference.to_owned()))
                 .cloned()
                 .ok_or_else(|| {
-                    PortableV2Error::new(PortableV2ErrorCode::InvalidStructure, "tag not found")
+                    PortableError::new(PortableErrorCode::InvalidStructure, "tag not found")
                 })?
         };
         guard
@@ -275,7 +269,7 @@ impl PortableV2OciRegistry for MemoryOciRegistry {
             .get(&(repository.to_owned(), digest))
             .cloned()
             .ok_or_else(|| {
-                PortableV2Error::new(PortableV2ErrorCode::InvalidStructure, "manifest not found")
+                PortableError::new(PortableErrorCode::InvalidStructure, "manifest not found")
             })
     }
 
@@ -285,13 +279,13 @@ impl PortableV2OciRegistry for MemoryOciRegistry {
         subject_digest: &str,
         media_type: &str,
         bytes: &[u8],
-    ) -> Result<String, PortableV2Error> {
+    ) -> Result<String, PortableError> {
         validate_repository(repository)?;
         validate_digest(subject_digest)?;
         let digest = self.put_manifest(repository, &digest_sha256(bytes), media_type, bytes)?;
         self.inner
             .lock()
-            .map_err(|_| PortableV2Error::new(PortableV2ErrorCode::Io, "registry lock poisoned"))?
+            .map_err(|_| PortableError::new(PortableErrorCode::Io, "registry lock poisoned"))?
             .referrers
             .entry((repository.to_owned(), subject_digest.to_owned()))
             .or_default()
@@ -303,13 +297,13 @@ impl PortableV2OciRegistry for MemoryOciRegistry {
         &self,
         repository: &str,
         subject_digest: &str,
-    ) -> Result<Vec<Vec<u8>>, PortableV2Error> {
+    ) -> Result<Vec<Vec<u8>>, PortableError> {
         validate_repository(repository)?;
         validate_digest(subject_digest)?;
         Ok(self
             .inner
             .lock()
-            .map_err(|_| PortableV2Error::new(PortableV2ErrorCode::Io, "registry lock poisoned"))?
+            .map_err(|_| PortableError::new(PortableErrorCode::Io, "registry lock poisoned"))?
             .referrers
             .get(&(repository.to_owned(), subject_digest.to_owned()))
             .cloned()
@@ -339,50 +333,48 @@ impl MemoryOciRegistry {
         repository: &str,
         digest: &str,
         bytes: Vec<u8>,
-    ) -> Result<(), PortableV2Error> {
+    ) -> Result<(), PortableError> {
         validate_repository(repository)?;
         validate_digest(digest)?;
         if digest_sha256(&bytes) != digest {
-            return Err(PortableV2Error::new(
-                PortableV2ErrorCode::DigestMismatch,
+            return Err(PortableError::new(
+                PortableErrorCode::DigestMismatch,
                 "blob bytes do not match declared digest",
             ));
         }
         self.inner
             .lock()
-            .map_err(|_| PortableV2Error::new(PortableV2ErrorCode::Io, "registry lock poisoned"))?
+            .map_err(|_| PortableError::new(PortableErrorCode::Io, "registry lock poisoned"))?
             .blobs
             .insert((repository.to_owned(), digest.to_owned()), Arc::new(bytes));
         Ok(())
     }
 
-    fn stored_blob(&self, repository: &str, digest: &str) -> Result<Arc<Vec<u8>>, PortableV2Error> {
+    fn stored_blob(&self, repository: &str, digest: &str) -> Result<Arc<Vec<u8>>, PortableError> {
         validate_repository(repository)?;
         validate_digest(digest)?;
         self.inner
             .lock()
-            .map_err(|_| PortableV2Error::new(PortableV2ErrorCode::Io, "registry lock poisoned"))?
+            .map_err(|_| PortableError::new(PortableErrorCode::Io, "registry lock poisoned"))?
             .blobs
             .get(&(repository.to_owned(), digest.to_owned()))
             .cloned()
             .ok_or_else(|| {
-                PortableV2Error::new(PortableV2ErrorCode::InvalidStructure, "blob not found")
+                PortableError::new(PortableErrorCode::InvalidStructure, "blob not found")
             })
     }
 
     /// Resolve a mutable tag to the current digest without claiming package identity.
-    pub fn resolve_tag(&self, repository: &str, tag: &str) -> Result<String, PortableV2Error> {
+    pub fn resolve_tag(&self, repository: &str, tag: &str) -> Result<String, PortableError> {
         validate_repository(repository)?;
         validate_reference(tag)?;
         self.inner
             .lock()
-            .map_err(|_| PortableV2Error::new(PortableV2ErrorCode::Io, "registry lock poisoned"))?
+            .map_err(|_| PortableError::new(PortableErrorCode::Io, "registry lock poisoned"))?
             .tags
             .get(&(repository.to_owned(), tag.to_owned()))
             .cloned()
-            .ok_or_else(|| {
-                PortableV2Error::new(PortableV2ErrorCode::InvalidStructure, "tag not found")
-            })
+            .ok_or_else(|| PortableError::new(PortableErrorCode::InvalidStructure, "tag not found"))
     }
 }
 
@@ -429,7 +421,7 @@ impl HttpOciRegistry {
         registry: &str,
         credential: Option<&str>,
         insecure_http: bool,
-    ) -> Result<Self, PortableV2Error> {
+    ) -> Result<Self, PortableError> {
         Self::with_transfer(
             registry,
             credential,
@@ -444,17 +436,17 @@ impl HttpOciRegistry {
         credential: Option<&str>,
         insecure_http: bool,
         transfer: HttpOciTransfer,
-    ) -> Result<Self, PortableV2Error> {
+    ) -> Result<Self, PortableError> {
         if transfer.chunk_bytes == 0 || transfer.idle_timeout.is_zero() {
-            return Err(PortableV2Error::new(
-                PortableV2ErrorCode::InvalidPath,
+            return Err(PortableError::new(
+                PortableErrorCode::InvalidPath,
                 "transfer chunk size and idle timeout must be positive",
             ));
         }
         let host = registry.trim().trim_end_matches('/');
         if host.is_empty() || host.contains("://") || host.contains('@') {
-            return Err(PortableV2Error::new(
-                PortableV2ErrorCode::InvalidPath,
+            return Err(PortableError::new(
+                PortableErrorCode::InvalidPath,
                 "registry must be a host[:port] without scheme or credentials",
             ));
         }
@@ -464,14 +456,14 @@ impl HttpOciRegistry {
         if let Some(cred) = credential
             && cred.chars().any(char::is_control)
         {
-            return Err(PortableV2Error::new(
-                PortableV2ErrorCode::InvalidPath,
+            return Err(PortableError::new(
+                PortableErrorCode::InvalidPath,
                 "credential contains control characters",
             ));
         }
         let scheme = if insecure_http { "http" } else { "https" };
         let origin = url::Url::parse(&format!("{scheme}://{host}")).map_err(|_| {
-            PortableV2Error::new(PortableV2ErrorCode::InvalidPath, "invalid registry origin")
+            PortableError::new(PortableErrorCode::InvalidPath, "invalid registry origin")
         })?;
         if origin.host_str().is_none()
             || origin.path() != "/"
@@ -480,8 +472,8 @@ impl HttpOciRegistry {
             || !origin.username().is_empty()
             || origin.password().is_some()
         {
-            return Err(PortableV2Error::new(
-                PortableV2ErrorCode::InvalidPath,
+            return Err(PortableError::new(
+                PortableErrorCode::InvalidPath,
                 "invalid registry origin",
             ));
         }
@@ -517,12 +509,12 @@ impl HttpOciRegistry {
         }
     }
 
-    fn map_http(_err: ureq::Error) -> PortableV2Error {
-        PortableV2Error::new(PortableV2ErrorCode::Io, "registry transport failed")
+    fn map_http(_err: ureq::Error) -> PortableError {
+        PortableError::new(PortableErrorCode::Io, "registry transport failed")
     }
 
     /// Open an upload session and return its validated same-origin location.
-    fn start_upload(&self, repository: &str) -> Result<url::Url, PortableV2Error> {
+    fn start_upload(&self, repository: &str) -> Result<url::Url, PortableError> {
         let mut start = self
             .agent
             .post(format!("{}/v2/{repository}/blobs/uploads/", self.base_url));
@@ -531,8 +523,8 @@ impl HttpOciRegistry {
         }
         let start_resp = start.send(&[] as &[u8]).map_err(Self::map_http)?;
         if !start_resp.status().is_success() && start_resp.status().as_u16() != 202 {
-            return Err(PortableV2Error::new(
-                PortableV2ErrorCode::Io,
+            return Err(PortableError::new(
+                PortableErrorCode::Io,
                 "blob upload session rejected",
             ));
         }
@@ -541,25 +533,25 @@ impl HttpOciRegistry {
             .get("Location")
             .and_then(|v| v.to_str().ok())
             .ok_or_else(|| {
-                PortableV2Error::new(PortableV2ErrorCode::Io, "upload session missing Location")
+                PortableError::new(PortableErrorCode::Io, "upload session missing Location")
             })?;
         self.upload_location(location)
     }
 
-    fn upload_location(&self, location: &str) -> Result<url::Url, PortableV2Error> {
+    fn upload_location(&self, location: &str) -> Result<url::Url, PortableError> {
         let base = url::Url::parse(&self.base_url).map_err(|_| {
-            PortableV2Error::new(PortableV2ErrorCode::InvalidPath, "invalid registry origin")
+            PortableError::new(PortableErrorCode::InvalidPath, "invalid registry origin")
         })?;
         let upload = base.join(location).map_err(|_| {
-            PortableV2Error::new(PortableV2ErrorCode::InvalidPath, "invalid upload location")
+            PortableError::new(PortableErrorCode::InvalidPath, "invalid upload location")
         })?;
         if upload.origin() != base.origin()
             || !upload.username().is_empty()
             || upload.password().is_some()
             || upload.fragment().is_some()
         {
-            return Err(PortableV2Error::new(
-                PortableV2ErrorCode::InvalidPath,
+            return Err(PortableError::new(
+                PortableErrorCode::InvalidPath,
                 "upload location is outside the registry origin",
             ));
         }
@@ -573,7 +565,7 @@ impl HttpOciRegistry {
         upload: &url::Url,
         digest: &str,
         bytes: &[u8],
-    ) -> Result<(), PortableV2Error> {
+    ) -> Result<(), PortableError> {
         let upload_url = upload.as_str();
         let sep = if upload_url.contains('?') { '&' } else { '?' };
         let put_url = format!("{upload_url}{sep}digest={digest}");
@@ -587,8 +579,8 @@ impl HttpOciRegistry {
             .map_err(Self::map_http)?;
         let status = put_resp.status().as_u16();
         if !(put_resp.status().is_success() || status == 201 || status == 202) {
-            return Err(PortableV2Error::new(
-                PortableV2ErrorCode::Io,
+            return Err(PortableError::new(
+                PortableErrorCode::Io,
                 "blob upload rejected",
             ));
         }
@@ -596,13 +588,8 @@ impl HttpOciRegistry {
     }
 }
 
-impl PortableV2OciRegistry for HttpOciRegistry {
-    fn put_blob(
-        &self,
-        repository: &str,
-        digest: &str,
-        bytes: &[u8],
-    ) -> Result<(), PortableV2Error> {
+impl PortableOciRegistry for HttpOciRegistry {
+    fn put_blob(&self, repository: &str, digest: &str, bytes: &[u8]) -> Result<(), PortableError> {
         validate_repository(repository)?;
         validate_digest(digest)?;
         if self.blob_exists(repository, digest)? {
@@ -618,7 +605,7 @@ impl PortableV2OciRegistry for HttpOciRegistry {
         digest: &str,
         size: u64,
         source: &mut dyn Read,
-    ) -> Result<(), PortableV2Error> {
+    ) -> Result<(), PortableError> {
         validate_repository(repository)?;
         validate_digest(digest)?;
         if self.blob_exists(repository, digest)? {
@@ -644,8 +631,8 @@ impl PortableV2OciRegistry for HttpOciRegistry {
                 .send(ureq::SendBody::from_reader(&mut chunk))
                 .map_err(Self::map_http)?;
             if !resp.status().is_success() {
-                return Err(PortableV2Error::new(
-                    PortableV2ErrorCode::Io,
+                return Err(PortableError::new(
+                    PortableErrorCode::Io,
                     "blob chunk rejected",
                 ));
             }
@@ -656,16 +643,16 @@ impl PortableV2OciRegistry for HttpOciRegistry {
         }
         let trailing = source
             .read(&mut [0_u8])
-            .map_err(|_| PortableV2Error::new(PortableV2ErrorCode::Io, "blob stream failed"))?;
+            .map_err(|_| PortableError::new(PortableErrorCode::Io, "blob stream failed"))?;
         if trailing != 0 {
-            return Err(PortableV2Error::new(
-                PortableV2ErrorCode::Io,
+            return Err(PortableError::new(
+                PortableErrorCode::Io,
                 "blob stream is longer than its declared size",
             ));
         }
         if source.finish().0 != digest {
-            return Err(PortableV2Error::new(
-                PortableV2ErrorCode::DigestMismatch,
+            return Err(PortableError::new(
+                PortableErrorCode::DigestMismatch,
                 "blob bytes do not match declared digest",
             ));
         }
@@ -677,7 +664,7 @@ impl PortableV2OciRegistry for HttpOciRegistry {
         repository: &str,
         digest: &str,
         size: u64,
-    ) -> Result<Box<dyn Read + 'a>, PortableV2Error> {
+    ) -> Result<Box<dyn Read + 'a>, PortableError> {
         validate_repository(repository)?;
         validate_digest(digest)?;
         let mut reader = RangedBlobReader {
@@ -690,16 +677,16 @@ impl PortableV2OciRegistry for HttpOciRegistry {
         // Open the first range now so a missing blob is a typed error.
         reader.open_next_range().map_err(|failure| match failure {
             RangeFailure::Missing => {
-                PortableV2Error::new(PortableV2ErrorCode::InvalidStructure, "blob not found")
+                PortableError::new(PortableErrorCode::InvalidStructure, "blob not found")
             }
             RangeFailure::Transport => {
-                PortableV2Error::new(PortableV2ErrorCode::Io, "blob download failed")
+                PortableError::new(PortableErrorCode::Io, "blob download failed")
             }
         })?;
         Ok(Box::new(reader))
     }
 
-    fn get_blob(&self, repository: &str, digest: &str) -> Result<Vec<u8>, PortableV2Error> {
+    fn get_blob(&self, repository: &str, digest: &str) -> Result<Vec<u8>, PortableError> {
         validate_repository(repository)?;
         validate_digest(digest)?;
         let mut req = self
@@ -710,8 +697,8 @@ impl PortableV2OciRegistry for HttpOciRegistry {
         }
         let mut resp = req.call().map_err(Self::map_http)?;
         if !resp.status().is_success() {
-            return Err(PortableV2Error::new(
-                PortableV2ErrorCode::InvalidStructure,
+            return Err(PortableError::new(
+                PortableErrorCode::InvalidStructure,
                 "blob not found",
             ));
         }
@@ -720,18 +707,18 @@ impl PortableV2OciRegistry for HttpOciRegistry {
             .with_config()
             .limit(MAX_RESPONSE_BYTES)
             .read_to_vec()
-            .map_err(|_| PortableV2Error::new(PortableV2ErrorCode::Io, "blob download failed"))?;
+            .map_err(|_| PortableError::new(PortableErrorCode::Io, "blob download failed"))?;
         let actual = digest_sha256(&body);
         if actual != digest {
-            return Err(PortableV2Error::new(
-                PortableV2ErrorCode::DigestMismatch,
+            return Err(PortableError::new(
+                PortableErrorCode::DigestMismatch,
                 "downloaded blob digest mismatch",
             ));
         }
         Ok(body)
     }
 
-    fn blob_exists(&self, repository: &str, digest: &str) -> Result<bool, PortableV2Error> {
+    fn blob_exists(&self, repository: &str, digest: &str) -> Result<bool, PortableError> {
         validate_repository(repository)?;
         validate_digest(digest)?;
         let mut req = self
@@ -743,8 +730,8 @@ impl PortableV2OciRegistry for HttpOciRegistry {
         match req.call() {
             Ok(resp) => Ok(resp.status().is_success()),
             Err(ureq::Error::StatusCode(404)) => Ok(false),
-            Err(_) => Err(PortableV2Error::new(
-                PortableV2ErrorCode::Io,
+            Err(_) => Err(PortableError::new(
+                PortableErrorCode::Io,
                 "blob existence check failed",
             )),
         }
@@ -756,7 +743,7 @@ impl PortableV2OciRegistry for HttpOciRegistry {
         reference: &str,
         media_type: &str,
         bytes: &[u8],
-    ) -> Result<String, PortableV2Error> {
+    ) -> Result<String, PortableError> {
         validate_repository(repository)?;
         validate_reference(reference)?;
         let mut req = self.agent.put(format!(
@@ -771,8 +758,8 @@ impl PortableV2OciRegistry for HttpOciRegistry {
             .send(bytes)
             .map_err(Self::map_http)?;
         if !resp.status().is_success() && resp.status().as_u16() != 201 {
-            return Err(PortableV2Error::new(
-                PortableV2ErrorCode::Io,
+            return Err(PortableError::new(
+                PortableErrorCode::Io,
                 "manifest upload rejected",
             ));
         }
@@ -783,7 +770,7 @@ impl PortableV2OciRegistry for HttpOciRegistry {
         &self,
         repository: &str,
         reference: &str,
-    ) -> Result<(String, Vec<u8>), PortableV2Error> {
+    ) -> Result<(String, Vec<u8>), PortableError> {
         validate_repository(repository)?;
         validate_reference(reference)?;
         let mut req = self.agent.get(format!(
@@ -801,8 +788,8 @@ impl PortableV2OciRegistry for HttpOciRegistry {
             .call()
             .map_err(Self::map_http)?;
         if !resp.status().is_success() {
-            return Err(PortableV2Error::new(
-                PortableV2ErrorCode::InvalidStructure,
+            return Err(PortableError::new(
+                PortableErrorCode::InvalidStructure,
                 "manifest not found",
             ));
         }
@@ -817,9 +804,7 @@ impl PortableV2OciRegistry for HttpOciRegistry {
             .with_config()
             .limit(MAX_RESPONSE_BYTES)
             .read_to_vec()
-            .map_err(|_| {
-                PortableV2Error::new(PortableV2ErrorCode::Io, "manifest download failed")
-            })?;
+            .map_err(|_| PortableError::new(PortableErrorCode::Io, "manifest download failed"))?;
         Ok((media, body))
     }
 }
@@ -1104,13 +1089,13 @@ fn encode_base64(raw: &[u8]) -> String {
 }
 
 /// Inspect signature referrers without mutating local packages.
-pub fn evaluate_portable_v2_oci_signature_state(
-    registry: &dyn PortableV2OciRegistry,
+pub fn evaluate_portable_oci_signature_state(
+    registry: &dyn PortableOciRegistry,
     repository: &str,
     subject_manifest_digest: &str,
     package_digest: &str,
-    policy: &PortableV2OciAuthenticityPolicy,
-) -> Result<PortableV2OciSignatureState, PortableV2Error> {
+    policy: &PortableOciAuthenticityPolicy,
+) -> Result<PortableOciSignatureState, PortableError> {
     evaluate_signature_state(
         registry,
         repository,
@@ -1121,17 +1106,17 @@ pub fn evaluate_portable_v2_oci_signature_state(
 }
 
 pub fn attach_signature_referrer(
-    registry: &dyn PortableV2OciRegistry,
+    registry: &dyn PortableOciRegistry,
     repository: &str,
     subject_digest: &str,
     package_digest: &str,
-    material: &PortableV2OciSignatureMaterial,
+    material: &PortableOciSignatureMaterial,
     bytes_transferred: &mut u64,
-    progress: &mut impl FnMut(PortableV2OciProgress),
-) -> Result<(), PortableV2Error> {
+    progress: &mut impl FnMut(PortableOciProgress),
+) -> Result<(), PortableError> {
     if material.signer.is_empty() || material.key_id.is_empty() || material.secret.is_empty() {
-        return Err(PortableV2Error::new(
-            PortableV2ErrorCode::InvalidPath,
+        return Err(PortableError::new(
+            PortableErrorCode::InvalidPath,
             "signature material is incomplete",
         ));
     }
@@ -1149,16 +1134,13 @@ pub fn attach_signature_referrer(
         ),
     };
     let payload_bytes = serde_json::to_vec(&payload).map_err(|_| {
-        PortableV2Error::new(
-            PortableV2ErrorCode::Io,
-            "failed to encode signature payload",
-        )
+        PortableError::new(PortableErrorCode::Io, "failed to encode signature payload")
     })?;
     let payload_digest = digest_sha256(&payload_bytes);
     registry.put_blob(repository, &payload_digest, &payload_bytes)?;
     *bytes_transferred += payload_bytes.len() as u64;
-    progress(PortableV2OciProgress {
-        phase: PortableV2OciPhase::UploadBlob,
+    progress(PortableOciProgress {
+        phase: PortableOciPhase::UploadBlob,
         bytes_transferred: *bytes_transferred,
         digest: Some(payload_digest.clone()),
     });
@@ -1189,10 +1171,7 @@ pub fn attach_signature_referrer(
         }),
     };
     let referrer_bytes = serde_json::to_vec(&referrer).map_err(|_| {
-        PortableV2Error::new(
-            PortableV2ErrorCode::Io,
-            "failed to encode signature referrer",
-        )
+        PortableError::new(PortableErrorCode::Io, "failed to encode signature referrer")
     })?;
     registry.put_referrer_manifest(
         repository,
@@ -1205,12 +1184,12 @@ pub fn attach_signature_referrer(
 }
 
 pub fn evaluate_signature_state(
-    registry: &dyn PortableV2OciRegistry,
+    registry: &dyn PortableOciRegistry,
     repository: &str,
     subject_digest: &str,
     package_digest: &str,
-    policy: &PortableV2OciAuthenticityPolicy,
-) -> Result<PortableV2OciSignatureState, PortableV2Error> {
+    policy: &PortableOciAuthenticityPolicy,
+) -> Result<PortableOciSignatureState, PortableError> {
     let referrers = registry.list_referrers(repository, subject_digest)?;
     let mut saw_signature = false;
     let mut mismatched = false;
@@ -1256,39 +1235,39 @@ pub fn evaluate_signature_state(
         };
         let expected = signature_mac(key, &payload.signer, subject_digest, package_digest);
         if expected == payload.mac {
-            return Ok(PortableV2OciSignatureState::Valid);
+            return Ok(PortableOciSignatureState::Valid);
         }
         invalid = true;
     }
     if !saw_signature {
-        return Ok(PortableV2OciSignatureState::Absent);
+        return Ok(PortableOciSignatureState::Absent);
     }
     if mismatched {
-        return Ok(PortableV2OciSignatureState::PolicyMismatched);
+        return Ok(PortableOciSignatureState::PolicyMismatched);
     }
     if invalid {
-        return Ok(PortableV2OciSignatureState::Invalid);
+        return Ok(PortableOciSignatureState::Invalid);
     }
-    Ok(PortableV2OciSignatureState::Absent)
+    Ok(PortableOciSignatureState::Absent)
 }
 
 #[must_use]
-pub fn authenticity_error(state: PortableV2OciSignatureState) -> PortableV2Error {
+pub fn authenticity_error(state: PortableOciSignatureState) -> PortableError {
     match state {
-        PortableV2OciSignatureState::Absent => PortableV2Error::new(
-            PortableV2ErrorCode::Incompatible,
+        PortableOciSignatureState::Absent => PortableError::new(
+            PortableErrorCode::Incompatible,
             "authenticity policy requires a named signer but signature is absent",
         ),
-        PortableV2OciSignatureState::Invalid => PortableV2Error::new(
-            PortableV2ErrorCode::Incompatible,
+        PortableOciSignatureState::Invalid => PortableError::new(
+            PortableErrorCode::Incompatible,
             "authenticity policy rejected an invalid signature",
         ),
-        PortableV2OciSignatureState::PolicyMismatched => PortableV2Error::new(
-            PortableV2ErrorCode::Incompatible,
+        PortableOciSignatureState::PolicyMismatched => PortableError::new(
+            PortableErrorCode::Incompatible,
             "authenticity policy mismatched the attached signer",
         ),
-        PortableV2OciSignatureState::Valid => PortableV2Error::new(
-            PortableV2ErrorCode::Incompatible,
+        PortableOciSignatureState::Valid => PortableError::new(
+            PortableErrorCode::Incompatible,
             "authenticity policy unexpectedly failed a valid signature",
         ),
     }
@@ -1325,16 +1304,16 @@ fn encode_hex(bytes: impl AsRef<[u8]>) -> String {
 }
 
 #[must_use]
-pub fn package_class_str(class: PortableV2PackageClass) -> &'static str {
+pub fn package_class_str(class: PortablePackageClass) -> &'static str {
     match class {
-        PortableV2PackageClass::Complete => "complete",
-        PortableV2PackageClass::OntologyOnly => "ontology-only",
-        PortableV2PackageClass::ComponentSelective => "component-selective",
-        PortableV2PackageClass::GraphDataSubset => "graph-data-subset",
+        PortablePackageClass::Complete => "complete",
+        PortablePackageClass::OntologyOnly => "ontology-only",
+        PortablePackageClass::ComponentSelective => "component-selective",
+        PortablePackageClass::GraphDataSubset => "graph-data-subset",
     }
 }
 
-pub fn validate_repository(repository: &str) -> Result<(), PortableV2Error> {
+pub fn validate_repository(repository: &str) -> Result<(), PortableError> {
     if repository.is_empty()
         || repository.len() > 255
         || repository.contains("..")
@@ -1342,31 +1321,31 @@ pub fn validate_repository(repository: &str) -> Result<(), PortableV2Error> {
         || repository.contains('\\')
         || repository.contains('\n')
     {
-        return Err(PortableV2Error::new(
-            PortableV2ErrorCode::InvalidPath,
+        return Err(PortableError::new(
+            PortableErrorCode::InvalidPath,
             "invalid repository name",
         ));
     }
     Ok(())
 }
 
-pub fn validate_digest(digest: &str) -> Result<(), PortableV2Error> {
+pub fn validate_digest(digest: &str) -> Result<(), PortableError> {
     if !digest.starts_with("sha256:") || digest.len() != 71 {
-        return Err(PortableV2Error::new(
-            PortableV2ErrorCode::DigestMismatch,
+        return Err(PortableError::new(
+            PortableErrorCode::DigestMismatch,
             "digest must be sha256:<64 hex>",
         ));
     }
     if !digest[7..].bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Err(PortableV2Error::new(
-            PortableV2ErrorCode::DigestMismatch,
+        return Err(PortableError::new(
+            PortableErrorCode::DigestMismatch,
             "digest must be sha256:<64 hex>",
         ));
     }
     Ok(())
 }
 
-pub fn validate_reference(reference: &str) -> Result<(), PortableV2Error> {
+pub fn validate_reference(reference: &str) -> Result<(), PortableError> {
     if reference.starts_with("sha256:") {
         return validate_digest(reference);
     }
@@ -1377,18 +1356,18 @@ pub fn validate_reference(reference: &str) -> Result<(), PortableV2Error> {
         || reference.contains('\n')
         || reference.contains('@')
     {
-        return Err(PortableV2Error::new(
-            PortableV2ErrorCode::InvalidPath,
+        return Err(PortableError::new(
+            PortableErrorCode::InvalidPath,
             "invalid tag reference",
         ));
     }
     Ok(())
 }
 
-pub fn check_cancelled(cancelled: Option<&AtomicBool>) -> Result<(), PortableV2Error> {
+pub fn check_cancelled(cancelled: Option<&AtomicBool>) -> Result<(), PortableError> {
     if cancelled.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
-        return Err(PortableV2Error::new(
-            PortableV2ErrorCode::Cancelled,
+        return Err(PortableError::new(
+            PortableErrorCode::Cancelled,
             "portable OCI operation cancelled",
         ));
     }

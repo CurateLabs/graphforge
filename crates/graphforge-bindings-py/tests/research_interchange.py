@@ -51,10 +51,10 @@ class ResearchInterchangeTests(unittest.TestCase):
                 "projection": None,
             }
             receipt = graph.export_research(export)
-            verified = graphforge.GraphForge.verify_portable_v2(str(package), mode="full")
+            verified = graphforge.GraphForge.verify_portable(str(package), mode="full")
             self.assertEqual(verified["package_digest"], receipt["package_digest"])
             imported_root = root / "imported"
-            graphforge.GraphForge.import_portable_v2(
+            graphforge.GraphForge.import_portable(
                 str(imported_root), input=str(package), operation_id=identity()
             )
             imported = graphforge.GraphForge(str(imported_root))

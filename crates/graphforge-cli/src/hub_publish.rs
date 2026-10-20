@@ -14,9 +14,8 @@ use crate::hub_http::{
 use clap::{ArgGroup, Args};
 use graphforge_api::{
     BuildResearchLineageRequest, CancellationToken, ExportResearchRequest, GfError, GraphForge,
-    PortableSelection, PortableV2Limits, PortableV2SelectionPreviewRequest,
-    PortableV2SelectionProfile, PortableV2SelectionRequest, ProjectErrorCode,
-    ResearchReferenceTarget,
+    PortableLimits, PortableSelection, PortableSelectionPreviewRequest, PortableSelectionProfile,
+    PortableSelectionRequest, ProjectErrorCode, ResearchReferenceTarget,
 };
 use graphforge_discovery::{
     DiscoveryLimits, DiscoveryManifest, ObjectDescriptor, RESEARCH_LINEAGE_FORMAT,
@@ -431,18 +430,18 @@ fn derivation(error: &str) -> GfError {
 /// research registry carries operational heads. The workspace metadata and
 /// configuration participants stay in the package, since the Project summary is
 /// derived from them (ADR 0051).
-fn project_package_profile(graph: &GraphForge) -> Result<PortableV2SelectionProfile, GfError> {
+fn project_package_profile(graph: &GraphForge) -> Result<PortableSelectionProfile, GfError> {
     let plan = graph
-        .preview_portable_v2_selection(&PortableV2SelectionPreviewRequest {
+        .preview_portable_selection(&PortableSelectionPreviewRequest {
             selection: PortableSelection::Current,
-            request: PortableV2SelectionRequest {
-                profile: PortableV2SelectionProfile::Complete,
+            request: PortableSelectionRequest {
+                profile: PortableSelectionProfile::Complete,
                 strict: true,
             },
-            limits: PortableV2Limits::default(),
+            limits: PortableLimits::default(),
         })
         .map_err(|error| derivation(&error.to_string()))?;
-    Ok(PortableV2SelectionProfile::Custom(
+    Ok(PortableSelectionProfile::Custom(
         plan.included
             .into_iter()
             .filter(|entry| entry.kind != "research")

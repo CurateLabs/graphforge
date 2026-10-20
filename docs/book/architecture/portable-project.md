@@ -1,0 +1,504 @@
+# Portable project
+
+This document is normative. **MUST**, **MUST NOT**, **REQUIRED**, **SHOULD**, and
+**MAY** have their RFC 2119 meanings. ADR 0021 records the format choice.
+
+## Identities and states
+
+Four identities are deliberately distinct:
+
+- `package_digest` identifies selected logical content. It is
+  `sha256("graphforge-project/2\0" || JCS(manifest without package_digest))`.
+- `transport_digest` is SHA-256 over the exact `.gfpb` bytes, or over the
+  canonical expanded transport inventory described below. It is not package
+  identity.
+- `participant_id` is a stable portable component identity, globally unique
+  within the package; it is never a runtime catalog ID.
+- `source_generation` identifies the committed GraphForge generation from
+  which selection occurred. It proves provenance, not package identity or an
+  import target generation.
+
+`integrity`, `compatibility`, and `authenticity` are separate result axes.
+Digest agreement can establish integrity only. Supported versions,
+capabilities, kinds, and dependency rules establish compatibility. Authenticity
+is `not_evaluated`, `unsigned`, `verified`, or `failed` according to an explicit
+signature/trust policy; it never defaults to verified.
+
+## Semantic manifest
+
+`data/graphforge-project.json` MUST validate against
+[`graphforge-project-v2.schema.json`](../../contracts/graphforge-project-v2.schema.json).
+JSON strings MUST be valid Unicode, object members MUST be JCS-canonical, and
+numbers outside the schema are forbidden. Arrays are ordered as stated by the
+schema; components use ascending UTF-8 byte order of `(kind, participant_id)`
+and dependencies use ascending UTF-8 byte order with no duplicates.
+Each component owns one or more file descriptors in ascending portable-path
+order. Paths are globally unique, so a participant can own bounded Parquet and
+index shards without fabricating per-file participant identities.
+Every selection root and dependency names that globally unique participant ID;
+unknown, duplicate, self, or cyclic required dependencies fail compatibility.
+
+The closed component kinds are `ontology`, `schema`, `migration`, `settings`,
+`graph-data`, `derived-artifact`, `evidence`, `provenance`, `compatibility`, and
+`research`.
+Package classes are `complete`, `ontology-only`, `component-selective`, and
+`graph-data-subset`. Selection records the requested roots, complete required
+dependency closure, explicit omissions and redactions, and graph subset. It
+does not imply graph merge behavior. Required omitted dependencies make the
+package incompatible.
+
+`workspace/saved_queries@1` is a native optional metadata participant,
+explicitly classified as `settings`. Its canonical bounded JSON stores stable
+query identities, unique project-local names, descriptions, read-only Cypher,
+and parameter type declarations. It MUST NOT store execution parameter values,
+compiled plans, or prior query results. Complete and settings profiles include
+the participant; custom profiles select its exact identity. Graph/data subset
+export excludes it. Including definitions does not require widening a graph
+selection or retaining an execution source.
+
+Export and full package verification MUST validate the participant's registered
+metadata, canonical record contract, read-only query syntax, and exact parameter
+declarations. Verification MUST NOT execute or schema-bind saved definitions.
+Import preserves identities and definitions; an explicit later execution binds
+against the selected recipient context. Names and literals inside the definition
+are published content, not a substitute for remote access control.
+
+The on-wire manifest MUST contain `package_digest`. Canonicalization for digest
+calculation removes only that member, without modifying any other value; the
+reader recomputes it and compares in constant time before semantic use.
+
+Duplicate JSON member names, lone Unicode surrogates, absolute paths, `.`/`..`,
+backslashes, drive prefixes, NUL/control characters,
+runtime-local catalog IDs, mutable timestamps, secrets, and session-only
+ontology state MUST NOT occur. NFC-normalized relative paths are compared by
+both exact UTF-8 bytes and Unicode default case folding; a collision fails.
+
+## Expanded `.gfproject/` representation
+
+The root contains exactly these tag files plus enumerated regular payload files:
+
+```text
+bagit.txt
+bag-info.txt
+manifest-sha256.txt
+tagmanifest-sha256.txt
+data/graphforge-project.json
+data/components/<kind>/<participant-id>/<files...>
+```
+
+`bagit.txt` is exactly `BagIt-Version: 1.0\nTag-File-Character-Encoding: UTF-8\n`.
+`bag-info.txt` contains exactly, in this order, LF terminated:
+`Bag-Software-Agent: GraphForge portable-v2\nBagging-Date: 1970-01-01\n`.
+`manifest-sha256.txt` contains every `data/` regular file in ascending portable
+path order as lowercase hex, two spaces, path, LF; any other byte, including a
+CR, is refused. `tagmanifest-sha256.txt`
+contains `bag-info.txt`, `bagit.txt`, and `manifest-sha256.txt` in that order and
+the same syntax. It MUST NOT list itself. No fetch file, hidden file, directory
+entry, link, special file, or unmanifested file is allowed.
+
+The expanded transport digest is SHA-256 over
+`"graphforge-expanded/2\0"` followed, in ascending path order, by an unsigned
+64-bit big-endian path length, path bytes, unsigned 64-bit big-endian file
+length, and file SHA-256 bytes for every regular file including tag files except
+`tagmanifest-sha256.txt`; then the canonical bytes of that tag manifest are
+appended. This digest is transport evidence only.
+
+## Deterministic `.gfpb` bundle
+
+The bundle is an uncompressed POSIX pax interchange-format tar stream. Writers
+MUST emit the same regular files as the expanded form in ascending UTF-8 path
+order; directory headers are forbidden. Each entry uses a ustar header with
+the whole path in `name` when its UTF-8 encoding is at most 100 bytes, otherwise
+with the longest slash boundary producing `prefix` at most 155 bytes and `name`
+at most 100 bytes. An entry uses exactly one preceding local PAX header when
+its path does not fit that split or its length exceeds `0o77777777777`
+(8 GiB - 1), the largest value of the 11-digit octal ustar `size` field, and
+never otherwise. That header holds a `path=<UTF-8 path>\n` record and, only
+when the length exceeds the ustar field, a following POSIX.1-2001
+`size=<decimal length>\n` record with no leading zeros. No other keyword is
+allowed. Records use the POSIX decimal record-length rule with the minimal
+length encoding. PAX header names are `PaxHeaders/<sha256(path)[:16]>`.
+
+Every regular header has mode `0000644`, uid/gid `0`, uname/gname empty, mtime
+`0`, decimal/ustar size encoding, typeflag `0`, and a correct checksum computed
+with the checksum field treated as spaces. Numeric fields MUST use ASCII octal
+with the standard trailing NUL/space and MUST NOT use base-256. Payloads are
+padded with zero bytes to a 512-byte boundary. Exactly two zero blocks terminate
+the archive and no trailing bytes follow. Sparse maps, GNU extensions, global
+PAX headers, compression, encryption, concatenated archives, and duplicate
+headers are forbidden. Readers MUST reject any non-canonical byte even if a
+general tar reader accepts it.
+
+A local PAX header uses typeflag `x` and otherwise the same mode, uid/gid,
+owner-name, mtime, size/checksum encoding, and zero-padding rules. Its ustar
+`name` is the specified `PaxHeaders/` value and its data length is exactly the
+length of its records. The following regular header uses the same digest
+suffix as a bounded placeholder name; the PAX `path` is authoritative. When a
+`size` record is present the regular header's ustar `size` field is zero and
+the record is the entry length. Readers refuse a nonzero ustar `size` beside a
+`size` record, a `size` record whose value the ustar field can carry, a length
+above the ustar field without a `size` record, and a PAX header for an entry
+that needs none. Entries that fit the ustar fields therefore keep the same
+bytes they always had. A reader that predates the `size` record accepts only a
+single `path` record and refuses such a bundle as `InvalidStructure`.
+
+Writers process one header and a bounded copy buffer at a time. They MUST stat,
+open without following links, identity-check, stream/hash, and re-stat each
+source; concurrent mutation fails. Sparse source files are read as logical
+bytes and emitted densely, subject to the declared length and limits.
+
+## Limits, cancellation, and safety
+
+Before payload access, readers enforce configurable limits no weaker than:
+10,000 components, 1,000,000 entries, 16 TiB per entry, 1 PiB declared total,
+16 MiB per retained JSON control (runtime map, ontology composition, ontology
+and bridge documents in aggregate), a 64 MiB semantic manifest ceiling, 4 MiB
+per retained tag file, and 4 KiB paths. Arithmetic is checked. Implementations
+MAY configure lower limits and return a typed limit result. Since v2 is
+uncompressed, decompressed length equals bundle payload length; a compression
+marker is unsupported, not auto-detected.
+
+Limits that grow with the entry count admit every package a project can
+produce. The semantic manifest lists one file record per entry: at most 186
+bytes of record plus the path, so 512 bytes per entry admits paths that average
+up to 326 bytes. Before parsing it, readers bound it by the package itself:
+the 16 MiB control allowance plus 512 bytes per regular entry the package
+holds, never above the ceiling. The ceiling holds the largest graph a project
+stores, 100,000 graph files x 512 bytes, rounded up to 64 MiB. A small package
+therefore cannot present a large manifest. The retained tag files are
+`bagit.txt`, `bag-info.txt`, and the three-row `tagmanifest-sha256.txt`, whose
+sizes do not depend on the entry count. The payload inventory,
+`manifest-sha256.txt`, has one row per `data/` file, so writers render it and
+readers check it as it streams, without holding it whole. Canonical order
+places every `data/` entry before it, and the reader checks each row against
+the entries it has already authenticated. Its size is bounded only by the entry
+and path limits.
+
+Cancellation is checked before each header, before each copy-buffer operation,
+and before publication. Validation and import stage privately; unsupported
+semantics and hostile entries are rejected before publication. Failure or
+cancellation before `CURRENT` replacement preserves the prior authority.
+After replacement, errors report the committed outcome without rollback,
+including failures during reopen, acknowledgement, or staging cleanup.
+Cleanup success requires confirmed removal and namespace synchronization;
+commitment alone is not a cleanup receipt. Reopen and exact-operation replay
+resolve interrupted responses under the documented receipt lifetime.
+Symlinks, hard links, devices, FIFOs, sockets, traversal, absolute paths,
+non-NFC paths, case-fold collisions, duplicate normalized paths, missing or
+extra entries, length/digest mismatch, unstable files, and truncated/end-marker
+errors fail closed.
+
+The billion-edge structural conformance case is a single graph-data component
+whose descriptors may cover many bounded Parquet/sharded-index files totaling
+over 16 GiB. Neither representation has an envelope field; all lengths are
+64-bit and all I/O is incremental, so peak format memory is bounded by manifest,
+entry metadata limits, and the copy buffer rather than payload size. Writer and
+reader hold one path and digest per entry and the semantic manifest as bytes
+and as one parsed JSON tree, so format memory grows with the entry count and
+the manifest size, not with the payload inventory, which streams. A maximally
+hostile manifest (a flat array of zeros) costs about 18 times its size while
+parsed: about 300 MiB at the 16 MiB allowance and 1.2 GiB at the 64 MiB
+ceiling, which only a package of about 98,000 entries may present.
+
+## Compatibility
+
+V2 writers emit only major version 2 and this closed schema. A reader receiving
+an unknown required major version, capability, component kind, or dependency
+rule returns `unsupported_future` before reading component payloads or mutating
+a project. Unknown optional authenticity evidence may be preserved as opaque
+transport data only when it is explicitly outside the closed package.
+
+The legacy envelope is deleted. Its signature returns
+`GF_UNSUPPORTED_PROJECT_FORMAT` before destination admission; there is no reader,
+converter, alias or upgrade path. Primary `gf export` and `gf import` use the
+streaming format and the existing `/2` result contracts.
+
+## Verification API
+
+`graphforge_api::verify_portable` is the shared Rust authority used by import,
+publication, CLI, and binding surfaces. It inspects either an expanded directory
+or a bundle by source type, not filename suffix, and never mutates a project.
+Callers supply finite limits and an optional cancellation flag.
+
+Full mode reads and hashes every regular entry before returning
+`integrity: verified`. Structure-only mode returns `integrity: not_checked` and
+is never import or publication evidence. Reports keep integrity, compatibility,
+and authenticity separate and identify failures only by a bounded
+portable-relative entry. The implementation retains the bounded semantic
+records, the retained tag files, the entry index, and the configured copy
+buffer; the payload inventory and the payloads stream incrementally even when
+the declared package exceeds 16 GiB.
+
+When `ontology-composition@1` is present, the verified report also exposes the
+authenticated exact module, bridge, activation, feature, and composition
+identities. Module documents remain ordinary `ontology` components and bridge
+documents remain ordinary `schema` components. The versioned
+`graphforge-ontology-composition` compatibility component authenticates their
+closure. It deliberately does not appear in the runtime generation map:
+verify, inspect, materialize, and import therefore cannot adopt or replace
+workspace ontology authority. A consumer must pass the verified identities to
+the explicit typed ontology lifecycle API to change authority.
+
+See the [fixture guide](../../../tests/fixtures/portable/README.md) for the
+positive, negative, and structural conformance vectors.
+
+## Complete-package exporter
+
+### Selection planning
+
+`graphforge_storage::preview_portable_selection` resolves a selection before
+any destination is created. Profiles are `Complete`, `OntologyOnly`,
+`DataComponents`, `Artifacts`, `Settings`, and `Custom`. Custom selectors use
+the pair `(capability_id, record_family_id)`; runtime catalog IDs, display names,
+and host paths are not accepted as identity. Graph data selection always means
+the whole committed graph component. Fine-grained row or subgraph selection is
+handled by `preview_portable_graph_subset` / `plan_graph_subset_portable`
+(#786): typed UUID selectors, `induced-edges` and `referential` closure, property
+redaction, and `package_class: graph-data-subset` with a content-free
+`selection.graph_subset` receipt.
+
+The preview lists included and excluded stable identities, inclusion reasons,
+row counts, exact committed participant byte estimates, required capabilities,
+redaction reason codes, package class, and a canonical SHA-256 selection
+fingerprint. It never includes setting values or source paths. Results are
+canonically ordered and bounded by the portable component and byte limits.
+Duplicate, missing, or ambiguous custom identities fail rather than guessing.
+
+Schema authority is added as visible required closure for ontology, graph, and
+artifact selections. Strict mode refuses that widening unless the caller
+selected the authority explicitly. Portable settings use a closed recursive
+JSON scan and fail closed on secret-bearing keys or absolute host paths; neither
+the preview nor its typed failure echoes the rejected value.
+
+`graphforge_storage::plan_selected_portable` consumes that immutable preview
+for both expanded and bundle output. It filters the authenticated runtime map,
+participants, capabilities, and graph-tree placement to the same selected
+closure. The durable receipt repeats the selection fingerprint, so callers can
+prove that the reviewed preview is the plan the writer used.
+
+`graphforge_storage::plan_complete_portable` resolves a current generation
+or checkpoint before planning and retains that generation's lease. The plan is
+a bounded index of portable paths, lengths, digests, and source identities; it
+never contains payload bytes and never follows `CURRENT` again. File-backed
+graph shards come only from the committed graph-files inventory. Runtime files
+such as `CURRENT`, leases, locks, journals, attempts, trash, caches, host paths,
+and secrets are therefore not export candidates.
+
+`export_complete_portable` streams that same plan to either representation.
+The copy buffer, entry count, per-entry bytes, and total declared bytes are
+finite caller-visible limits. Progress contains aggregate entry and byte counts
+only. Cancellation is observed before entries and copy-buffer operations.
+Sources are opened as regular files and compared with their planned identity,
+length and modification state after streaming. Manifest-admitted participants
+and graph files carry their existing SHA-256 identity and mandatory XXH64 into
+the writer; checksums over the actual copied bytes refuse mutation. Unknown
+research objects and other untrusted sources retain genuine SHA-256 admission.
+Links, special files, replacement, short reads and content changes fail closed.
+
+Before publication, the writer checks its staged package with the canonical
+parser against a private capture of the bytes it wrote. This retains one output
+checksum readback: it catches corruption of a successful write, including a
+same-inode, same-length change after writing and before the no-replace rename.
+Checking the input alone cannot catch that failure. The parser still validates
+headers, PAX records, padding, end blocks, tag inventories, bounded composition
+controls and semantic/transport receipt agreement. This private evidence cannot
+be supplied by a public caller. Public portable verification continues to hash
+every untrusted entry and the complete bundle with SHA-256. The wire format and
+portable digest values remain unchanged; writer checksums are private metadata.
+
+Every complete export also carries one canonical, authenticated compatibility
+control component. It maps portable participant IDs back to runtime capability
+and record-family versions, encoding, schema fingerprint, row count, and graph
+placement. The map is bounded and reversible, but deliberately contains no
+host path, lease, credential, or secret. The shared verifier rejects duplicate
+JSON members, unknown fields, non-canonical bytes, unsupported encodings, and
+references that are not authenticated by the semantic manifest.
+
+`materialize_verified_portable` exposes the verified component entries to
+the importer through a new private directory. Bounded control admission happens
+before allocation. One scanner authenticates the exact bytes copied into that
+directory, with the configured buffer, and admits the complete package before
+returning it. Semantic validation reads only authenticated bounded controls;
+it never copies the graph payload into a second temporary directory. Research
+closure derivation reads settings, graph inventories and manifest nodes, while
+opaque Arrow/Parquet participant identities come from the authenticated outer
+entries. Native source identity and entry-set checks remain in place. A checksum
+readback refuses corruption of staged output. Cancellation, mutation or failure
+removes the private directory and its tracked allocation routes.
+Expanded and bundle forms therefore yield the same component tree without
+making unverified bytes available to project publication.
+
+Graph and research installation retain private capabilities from that actual
+copy, binding SHA and XXH64 to native identity, length, allocation and a single
+link. CAS installation verifies the checksum of its consumed buffers and reuses
+only identities installed under the same live publication lease; unknown CAS
+objects and concurrent winners retain genuine SHA authentication. Import's
+missing-CSR builder supplies its own writer captures, while uncaptured derived
+outputs receive one bounded naming pass before following the same private path.
+
+Expanded output is built in a unique sibling directory, synced bottom-up, and
+published with a no-replace atomic rename. Bundles use a unique sibling file,
+canonical header order and PAX paths, exactly two end blocks, and the same
+no-replace publication. Until the final rename, neither representation exposes
+the requested destination. Cancellation, I/O failure, disk exhaustion, source
+mutation, or destination creation removes the private partial output and never
+overwrites an existing destination. The shared Rust filesystem primitive uses
+native no-replace rename on Unix and Windows; Windows publication never enables
+replacement or cross-volume copy. Re-running an unchanged plan produces the
+same package digest and bundle bytes; the two representations intentionally
+have distinct transport digests.
+
+The retired envelope encoder/API is unavailable. Export uses only the streaming
+expanded or bundled representation.
+
+## Complete-package importer
+
+`import_complete_portable` accepts either local representation and invokes
+the shared full verifier before admitting the destination. Authenticated
+component entries are streamed into a transaction-owned materialization tree,
+then streamed again into one private generation with their declared lengths and
+digests rechecked. The configured copy buffer and bounded verifier indexes—not
+package payload size—bound memory. Publication uses the normal generation
+journal, fsync, validation, and atomic `CURRENT` transition, followed by a clean
+public reopen.
+
+The default operation accepts only the `complete` package class and only a new,
+empty, or pristine initialized destination. Existing project state is never
+overwritten or merged. Ontology-only, settings-only/component-selective, and
+graph-subset packages require explicit class-specific consumers; complete
+import returns a typed incompatibility without admitting the destination.
+Cancellation and corruption remove the private materialization, while a crash
+inside generation publication is handled by the normal project recovery and
+transaction-idempotency protocol. The retired envelope has no compatibility API.
+
+For a fresh destination, the imported generation and its empty bootstrap
+parent use separate versioned UUID domains derived from the import operation.
+Importing the same package under the same operation into two fresh roots
+therefore produces identical generation manifests and exact-composition export
+bytes. An already initialized pristine destination retains its existing parent
+generation and lineage; its manifest remains dependent on that parent.
+
+## Optional OCI Distribution transport
+
+Portable packages may be published and pulled through an OCI
+Distribution/ORAS-compatible registry without changing package identity.
+Local expanded/bundle export and air-gapped sharing remain fully functional
+without any registry.
+
+### Media types and digests
+
+| Role               | Media type                                             |
+| ------------------ | ------------------------------------------------------ |
+| Artifact type      | `application/vnd.graphforge.project.v2`                |
+| Config             | `application/vnd.graphforge.project.v2.config+json`    |
+| Bundle layer       | `application/vnd.graphforge.project.v2+tar`            |
+| Signature artifact | `application/vnd.graphforge.project.v2.signature`      |
+| Signature payload  | `application/vnd.graphforge.project.v2.signature+json` |
+
+The GraphForge `package_digest` remains authoritative for package equivalence.
+The OCI manifest digest is transport/distribution identity only. Human tags may
+be written and resolved, but they are mutable references and never substitute
+for a recorded digest. Pull-by-digest is stable even when a tag later moves;
+tag/digest disagreement fails closed.
+
+The same OCI mapping is used for every package class (`complete`,
+`ontology-only`, `component-selective`, `graph-data-subset`). Selective packages
+are not re-wrapped into a different transport semantics.
+
+### Publish / pull behavior
+
+`publish_portable_oci` verifies the local package fully, uploads config and
+layer blobs (deduplicating by digest when the registry already has them),
+writes the digest-pinned manifest, optionally attaches a signature referrer,
+and only reports success after a fresh registry observation re-reads that
+manifest digest. `pull_portable_oci` resolves the reference, downloads
+blobs, verifies the package with the shared verifier, evaluates authenticity
+separately from integrity, and only then publishes the destination. Cancellation,
+missing blobs, digest mismatch, incompatible media types, and auth/transport
+failures never leave a successful receipt or a claimed local package.
+
+The layer is never held in memory. Publish digests the bundle in one pass and
+streams it in a second; pull streams the layer into the exclusively created
+staging file while hashing, and only a layer whose length and digest match the
+manifest descriptor reaches verification and admission. Bundle size therefore
+does not change peak memory (a fixed copy buffer, `copy_buffer_bytes`). Config
+and manifest documents stay buffered under the 10 MiB response bound.
+
+Over HTTP a layer moves as a sequence of requests: OCI chunked upload sessions
+(`PATCH` with `Content-Range`, then a digest-verified `PUT`) and ranged `GET`s,
+8 MiB each by default (`HttpOciTransfer`). There is no deadline on a request or
+a transfer. Connecting, waiting for response headers, and every socket read or
+write must each make progress within the idle timeout (60 seconds by default),
+so a long transfer completes while bytes keep moving and a stalled one fails.
+Response headers are different: they keep a phase budget of the same length
+that does not restart when headers arrive in pieces, so a registry that answers
+slowly byte by byte is cut off at that budget even though the body window would
+have restarted. The in-process `MemoryOciRegistry` refuses streamed blobs over
+256 MiB (`MEMORY_REGISTRY_MAX_BLOB_BYTES`) before reserving anything for them.
+Pull uses `Range`; a registry that ignores it and answers 200 is streamed whole,
+bounded by the manifest's declared size, and a `Content-Range` that contradicts
+that size is refused. An interrupted push or pull is not resumed: the registry
+admits a blob only on the final digest-verified `PUT`, and a pull removes its
+staging file, so a rerun starts clean and no partial package is admitted.
+
+Credentials stay caller-owned (secure providers/stdin). They are never
+persisted or emitted in receipts, errors, or progress events. HTTPS is the
+default; plain HTTP is an explicit `insecure_http` opt-in for disposable local
+registries only.
+
+### Signatures and authenticity
+
+Optional signature/provenance attachments use OCI subject/referrer semantics.
+Integrity and authenticity are distinct: unsigned content may verify as
+integrity-valid while authenticity is `absent`, and policy mismatches or
+invalid MACs fail authenticity without being reported as digest/integrity
+failures. Signature verification requires an explicit signer/key policy.
+
+### Local conformance and hosted registry path
+
+Required conformance uses an in-process disposable registry
+(`MemoryOciRegistry`) so ordinary core CI needs no network. Hosted registries
+that speak OCI Distribution (for example GHCR) are reached with the HTTP
+client:
+
+```text
+# Publish by digest (optional mutable tag)
+registry = ghcr.io
+repository = org/graphforge-packages
+reference = sha256:<oci-manifest-digest>
+
+# Pull only by the recorded OCI digest
+# Tags may be resolved for discovery, then re-pinned to the digest before trust.
+```
+
+Operators retain registry credentials, retention, immutability, and visibility
+policy. Offline/air-gapped users keep using `.gfpb` / `.gfproject/` copies.
+Binding parity for these Rust-owned verbs is owned by the portable promotion
+parity slice (#744).
+
+### Research interchange components
+
+Research export remains a complete portable package: its selected working
+state can be imported atomically. `research@1` is an explicit required portable
+capability. Two authenticated `research` components carry the native registry
+and exact content-addressed closure; the runtime map must identify the matching
+research capability and registry record version. This implementation requires
+native research capability/registry version 6 and interchange manifest contract
+1, including exact reader/producer checks. An older reader refuses the new
+capability; no pre-v1 migration is implied.
+
+The registry contains the selected immutable Version, required Version/proof
+payloads, identity-only ancestor citations, per-Version original Project
+citations, Branch genealogy, and exact accepted-contribution mappings. It does
+not install source live heads or operational acceptance receipts. Re-projected
+acceptance evidence preserves its original Project even when combined with new
+research in an independent Fork. A selected projection has a distinct Version
+UUID and source citation; it is never an interchangeable copy of its source.
+
+Verification checks the exact object inventory and every native historical
+domain before target admission. Missing closure, unsupported formats, forged
+immutable commitments, conflicting citations, and secret-bearing configuration
+are refused. Physical selected-field projection merges deletion overlays and
+excludes deleted values from payload Parquet. Artifact bytes and external-only
+limitations follow their native evidence owner. Hash verification establishes
+integrity, not authorship or access authorization.

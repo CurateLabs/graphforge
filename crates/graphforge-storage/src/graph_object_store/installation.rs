@@ -454,7 +454,7 @@ pub(crate) fn install_captured_workspace_file_with_lease(
 
 pub(crate) fn install_captured_portable_source_with_lease(
     lease: &GraphObjectPublicationLease,
-    source: &crate::project_portable_v2::CapturedPortableSource<'_>,
+    source: &crate::project_portable::CapturedPortableSource<'_>,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<GraphObjectInstallEvidence, GfError> {
     install_captured_source_with_lease(lease, &CapturedSource::Portable(source), false, cancelled)
@@ -463,7 +463,7 @@ pub(crate) fn install_captured_portable_source_with_lease(
 /// A closed set of concrete, privately minted source capabilities.
 enum CapturedSource<'a, 'b> {
     Encoded(&'a crate::graph_construction::CapturedEncodedArtifact<'b>),
-    Portable(&'a crate::project_portable_v2::CapturedPortableSource<'b>),
+    Portable(&'a crate::project_portable::CapturedPortableSource<'b>),
     Workspace(&'a crate::graph_files::CapturedWorkspaceFile),
 }
 impl CapturedSource<'_, '_> {
