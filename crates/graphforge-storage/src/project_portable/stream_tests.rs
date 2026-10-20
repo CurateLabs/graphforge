@@ -352,3 +352,62 @@ fn pax_headers_do_not_count_against_entry_or_byte_limits_on_either_path() {
         assert_eq!(stream.code, file.code);
     }
 }
+
+#[test]
+fn unportable_and_colliding_paths_are_refused_alike_from_a_file_and_a_stream() {
+    let long = "a".repeat(256);
+    let long = format!("data/{long}");
+    let cases: [(&[&str], PortableErrorCode, &str); 5] = [
+        (
+            &["data/CON"],
+            PortableErrorCode::InvalidPath,
+            "Windows reserved device name",
+        ),
+        (
+            &[long.as_str()],
+            PortableErrorCode::InvalidPath,
+            "exceeds 255 bytes",
+        ),
+        (
+            &["data/Readme.txt", "data/readme.txt"],
+            PortableErrorCode::DuplicateEntry,
+            "case-fold collision",
+        ),
+        (
+            &["data/a", "data/a/b"],
+            PortableErrorCode::DuplicateEntry,
+            "file/directory path collision",
+        ),
+        // The collision is inside the research namespace, which a stream
+        // stages: it must be refused before the colliding file is written.
+        (
+            &[
+                "data/components/research/Ab.bin",
+                "data/components/research/aB.bin",
+            ],
+            PortableErrorCode::DuplicateEntry,
+            "case-fold collision",
+        ),
+    ];
+    for (extra, code, detail) in cases {
+        let bundle = fs::read(super::tests::bundle_with_extra_paths(extra).path()).unwrap();
+        let file = by_file(&bundle, PortableLimits::default()).unwrap_err();
+        let scratch = tempfile::tempdir().unwrap();
+        let stream = verify_portable_stream(
+            &mut Cursor::new(&bundle),
+            Some(scratch.path()),
+            PortableLimits::default(),
+            None,
+        )
+        .unwrap_err();
+        for error in [&file, &stream] {
+            assert_eq!(error.code, code, "{extra:?}: {error}");
+            assert!(error.to_string().contains(detail), "{extra:?}: {error}");
+        }
+        assert_eq!(
+            fs::read_dir(scratch.path()).unwrap().count(),
+            0,
+            "{extra:?}: scratch left behind"
+        );
+    }
+}

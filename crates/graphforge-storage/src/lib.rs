@@ -543,6 +543,7 @@ pub use runtime_entity_labels::{
     validate_runtime_entity_label_ids_with_topology, write_runtime_entity_label_encoding_marker,
 };
 
+mod parquet_encoding_profile;
 pub mod parquet_scan;
 
 /// Shared encoding defaults for published project Parquet payloads.

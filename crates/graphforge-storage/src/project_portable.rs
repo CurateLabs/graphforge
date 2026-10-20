@@ -13,7 +13,7 @@ pub(crate) use materialization::{
 };
 mod authenticated_entries;
 mod inventory;
-use authenticated_entries::{Reopen, StreamHash};
+use authenticated_entries::{ParquetWalk, Reopen, StreamHash};
 mod participant_files;
 pub(crate) mod pax;
 pub use participant_files::{PortableFileRef, PortablePackageIndex};
@@ -198,9 +198,15 @@ pub(crate) fn scan_stream(
     check_cancel(cancelled)?;
     let scratch = scratch.map_or_else(std::env::temp_dir, Path::to_path_buf);
     let mut spill = research::Spill::new(&scratch);
-    let scan = read_bundle(source, limits, cancelled, Some(spill.sink()), None, || {
-        PortableError::new(PortableErrorCode::InvalidStructure, "trailing bytes")
-    })?;
+    let scan = read_bundle(
+        source,
+        limits,
+        cancelled,
+        Some(spill.sink()),
+        None,
+        true,
+        || PortableError::new(PortableErrorCode::InvalidStructure, "trailing bytes"),
+    )?;
     let (report, entries) =
         finish_bundle(scan, PortableMode::Full, limits, PortableSource::Stream)?;
     authenticated_entries::validate_semantics(
@@ -324,6 +330,7 @@ fn scan_entries(
         } else {
             Reopen::BundleFile(source)
         };
+        authenticated_entries::validate_parquet_profile(source, &entries, cancelled)?;
         authenticated_entries::validate_semantics(reopen, &entries, &report, limits, cancelled)?;
     }
     let after = fs::symlink_metadata(source).map_err(|_| {
@@ -534,6 +541,7 @@ fn preflight_bundle(
     let mut admitted_composition = false;
     let mut census = Census::default();
     let mut first_header = true;
+    let mut paths = Vec::new();
     loop {
         check_cancel(cancelled)?;
         let mut header = [0_u8; 512];
@@ -587,6 +595,9 @@ fn preflight_bundle(
             continue;
         }
         let entry = pending_pax.take().map_or(raw_path, |records| records.path);
+        // No entry is extracted until every path is creatable everywhere.
+        validate_path(&entry, limits.max_path_bytes)?;
+        paths.push(entry.clone());
         census.admit(&entry, size, limits)?;
         if entry == MANIFEST_PATH || entry == ONTOLOGY_COMPOSITION_PATH {
             // Canonical order puts every component entry before the semantic
@@ -640,6 +651,8 @@ fn preflight_bundle(
             })?;
         }
     }
+    require_canonical_order(paths.iter().map(String::as_str))?;
+    validate_path_set(&paths)?;
     let Some(manifest) = admitted_manifest else {
         return Err(PortableError::at(
             PortableErrorCode::InvalidStructure,
@@ -901,6 +914,7 @@ fn verify_bundle(
         cancelled,
         sink,
         written,
+        false,
         || match probe.metadata() {
             Err(_) => PortableError::new(PortableErrorCode::Io, "bundle metadata"),
             Ok(current)
@@ -962,6 +976,8 @@ fn finish_bundle(
 /// reader: it hashes every byte, checks every header and retains only what
 /// later semantic reads need, within `max_retained_control_bytes`.
 /// `on_trailing_bytes` names the fault when bytes follow the end blocks.
+/// `walk_parquet` walks each Parquet entry's pages as it streams past, for a
+/// source that cannot be read back; a file is walked after the scan instead.
 #[allow(clippy::too_many_lines)]
 fn read_bundle<R: Read + ?Sized>(
     reader: &mut R,
@@ -969,6 +985,7 @@ fn read_bundle<R: Read + ?Sized>(
     cancelled: Option<&AtomicBool>,
     mut sink: Option<&mut materialization::CopySink<'_>>,
     written: Option<&crate::project_portable_export::WrittenPackage>,
+    walk_parquet: bool,
     on_trailing_bytes: impl FnOnce() -> PortableError,
 ) -> Result<BundleScan, PortableError> {
     if limits.copy_buffer_bytes == 0 {
@@ -982,6 +999,7 @@ fn read_bundle<R: Read + ?Sized>(
     );
     let mut entries: Vec<Entry> = Vec::new();
     let mut census = Census::default();
+    let mut path_set = PathSet::default();
     let mut inventory_verdict = None;
     let mut pending_pax: Option<(pax::PaxHeader, String)> = None;
     let mut retained_pool = limits.max_retained_control_bytes;
@@ -1103,6 +1121,9 @@ fn read_bundle<R: Read + ?Sized>(
                 "bundle entries are not canonical order",
             ));
         }
+        // No byte of the entry is read, retained or staged unless its path can
+        // be created everywhere beside every earlier path.
+        path_set.admit(&entry_path)?;
         census.admit(&entry_path, size, limits)?;
         let offset = position;
         position = position.saturating_add(size.saturating_add((512 - size % 512) % 512));
@@ -1119,6 +1140,8 @@ fn read_bundle<R: Read + ?Sized>(
                     size
                 })
             });
+        let mut walk = (walk_parquet && entry_path.starts_with("data/components/") && size >= 12)
+            .then(|| ParquetWalk::new(size, limits.max_parquet_walk_bytes));
         let (digest, bytes) = hash_payload(
             reader,
             size,
@@ -1130,7 +1153,11 @@ fn read_bundle<R: Read + ?Sized>(
             &entry_path,
             sink.as_deref_mut(),
             expected_entry(written, &entry_path, size)?,
+            walk.as_mut(),
         )?;
+        if let Some(walk) = walk {
+            walk.finish(&entry_path)?;
+        }
         if let Some(check) = check {
             inventory_verdict = Some(check.finish());
         }
@@ -1149,7 +1176,6 @@ fn read_bundle<R: Read + ?Sized>(
             "orphan PAX header",
         ));
     }
-    validate_path_set(&entries.iter().map(|e| e.path.clone()).collect::<Vec<_>>())?;
     Ok(BundleScan {
         entries,
         transport_digest: hex(&transport.finish()?),
@@ -1717,7 +1743,62 @@ fn same_identity(left: &fs::Metadata, right: &fs::Metadata) -> bool {
 fn same_identity(_: &fs::Metadata, _: &fs::Metadata) -> bool {
     true
 }
-fn validate_path(path: &str, max: usize) -> Result<(), PortableError> {
+/// Longest path component, in bytes. ext4, XFS and Btrfs limit a name to 255
+/// bytes; NTFS and APFS limit it to 255 UTF-16 units or characters, which a
+/// 255-byte name never exceeds because every UTF-8 sequence is at least as
+/// long as its UTF-16 encoding.
+const MAX_COMPONENT_BYTES: usize = 255;
+
+/// Whether `component` is a Windows reserved device name, with or without an
+/// extension. Windows ignores case, strips trailing spaces from the base name
+/// and counts `¹`, `²` and `³` as digits in `COM#` and `LPT#`.
+/// <https://learn.microsoft.com/windows/win32/fileio/naming-a-file>
+fn is_windows_device_name(component: &str) -> bool {
+    let base = component
+        .split('.')
+        .next()
+        .unwrap_or(component)
+        .trim_end_matches(' ');
+    if ["CON", "PRN", "AUX", "NUL"]
+        .iter()
+        .any(|name| base.eq_ignore_ascii_case(name))
+    {
+        return true;
+    }
+    let mut chars = base.chars();
+    let (Some(a), Some(b), Some(c), Some(digit), None) = (
+        chars.next(),
+        chars.next(),
+        chars.next(),
+        chars.next(),
+        chars.next(),
+    ) else {
+        return false;
+    };
+    let name = [a, b, c].iter().collect::<String>();
+    (name.eq_ignore_ascii_case("COM") || name.eq_ignore_ascii_case("LPT"))
+        && matches!(digit, '1'..='9' | '\u{b9}' | '\u{b2}' | '\u{b3}')
+}
+
+/// The portable rule for one path component: a name that can be created on
+/// Linux, macOS and Windows, so a package verified anywhere extracts anywhere.
+fn component_violation(component: &str) -> Option<&'static str> {
+    if component.len() > MAX_COMPONENT_BYTES {
+        Some("path component exceeds 255 bytes")
+    } else if component.contains(['<', '>', ':', '"', '|', '?', '*']) {
+        Some("path component has a character that Windows forbids")
+    } else if component.ends_with([' ', '.']) {
+        Some("path component ends with a space or a dot")
+    } else if is_windows_device_name(component) {
+        Some("path component is a Windows reserved device name")
+    } else {
+        None
+    }
+}
+
+/// Why `path` cannot be a portable package path, if it cannot. This is the
+/// one path rule; the verifier and the exporter both apply it.
+pub(crate) fn path_violation(path: &str, max: usize) -> Option<&'static str> {
     if path.is_empty()
         || path.len() > max
         || path
@@ -1727,31 +1808,97 @@ fn validate_path(path: &str, max: usize) -> Result<(), PortableError> {
         || path.contains('\\')
         || path.nfc().collect::<String>() != path
         || Path::new(path).is_absolute()
+        || path
+            .split('/')
+            .any(|c| c.is_empty() || c == "." || c == "..")
         || Path::new(path)
             .components()
             .any(|c| !matches!(c, Component::Normal(_)))
     {
-        return Err(PortableError::at(
+        return Some("unsafe/non-canonical path");
+    }
+    path.split('/').find_map(component_violation)
+}
+
+/// The key under which the case- and normalization-insensitive file systems
+/// (the macOS and Windows defaults) treat two paths as one: canonical caseless
+/// matching, so NFD, full Unicode case folding (`CaseFolding.txt` statuses C
+/// and F: `ß` folds to `ss`, `ς` to `σ`), then NFD again. The dotless `ı`,
+/// which Turkic folding alone keeps apart and which some Windows upcase tables
+/// map to `I`, is read as `i`: a key may only err toward refusing.
+pub(crate) fn path_collision_key(path: &str) -> String {
+    let decomposed = path.nfd().collect::<String>();
+    icu_casemap::CaseMapper::new()
+        .fold_string(&decomposed)
+        .nfd()
+        .map(|c| if c == '\u{131}' { 'i' } else { c })
+        .collect()
+}
+
+fn validate_path(path: &str, max: usize) -> Result<(), PortableError> {
+    match path_violation(path, max) {
+        Some(detail) => Err(PortableError::at(
             PortableErrorCode::InvalidPath,
             path,
-            "unsafe/non-canonical path",
+            detail,
+        )),
+        None => Ok(()),
+    }
+}
+fn require_canonical_order<'a>(
+    paths: impl Iterator<Item = &'a str> + Clone,
+) -> Result<(), PortableError> {
+    if paths.clone().zip(paths.skip(1)).any(|(a, b)| a >= b) {
+        return Err(PortableError::new(
+            PortableErrorCode::InvalidStructure,
+            "bundle entries are not canonical order",
         ));
     }
     Ok(())
 }
-fn validate_path_set(paths: &[String]) -> Result<(), PortableError> {
-    let mut exact = BTreeSet::new();
-    let mut folded = BTreeSet::new();
-    for p in paths {
-        if !exact.insert(p) || !folded.insert(p.to_lowercase()) {
+/// The path rule over a set of entries: two entries may not be one on a case-
+/// or normalization-insensitive file system, and a file may not be another
+/// entry's directory (`a` and `a/b`), so extraction can never meet a conflict
+/// half-way. It admits entries one at a time, so a scan applies it before it
+/// reads or stages an entry, and a whole set is checked with the same rule.
+/// Sorted sets keep it O(n log n) in the entry count.
+#[derive(Default)]
+struct PathSet {
+    files: BTreeSet<String>,
+    directories: BTreeSet<String>,
+}
+
+impl PathSet {
+    fn admit(&mut self, path: &str) -> Result<(), PortableError> {
+        let key = path_collision_key(path);
+        if self.files.contains(&key) {
             return Err(PortableError::at(
                 PortableErrorCode::DuplicateEntry,
-                p,
+                path,
                 "duplicate/case-fold collision",
             ));
         }
+        let mut conflict = self.directories.contains(&key);
+        for (slash, _) in key.match_indices('/') {
+            let directory = &key[..slash];
+            conflict |= self.files.contains(directory);
+            self.directories.insert(directory.to_owned());
+        }
+        if conflict {
+            return Err(PortableError::at(
+                PortableErrorCode::DuplicateEntry,
+                path,
+                "file/directory path collision",
+            ));
+        }
+        self.files.insert(key);
+        Ok(())
     }
-    Ok(())
+}
+
+fn validate_path_set(paths: &[String]) -> Result<(), PortableError> {
+    let mut set = PathSet::default();
+    paths.iter().try_for_each(|path| set.admit(path))
 }
 fn read_exact_hash(
     r: &mut (impl Read + ?Sized),
@@ -1901,6 +2048,7 @@ fn hash_payload(
     entry: &str,
     mut sink: Option<&mut materialization::CopySink<'_>>,
     expected: Option<([u8; 32], u64)>,
+    mut walk: Option<&mut ParquetWalk>,
 ) -> Result<([u8; 32], Option<Vec<u8>>), PortableError> {
     let mut payload_hash = StreamHash::new(expected);
     let mut kept = retain_payload(size, retain_limit, entry)?;
@@ -1935,6 +2083,9 @@ fn hash_payload(
         }
         if let Some(inventory) = inventory.as_deref_mut() {
             inventory.update(&copy_buffer[..chunk_len]);
+        }
+        if let Some(walk) = walk.as_deref_mut() {
+            walk.update(&copy_buffer[..chunk_len]);
         }
         left -= chunk_len as u64;
     }
@@ -2435,6 +2586,320 @@ mod tests {
             preflight(bundle, limits, None),
             scan(bundle, PortableMode::Full, limits, None, None, None).map(|_| ()),
         ]
+    }
+
+    /// The fixture package as a bundle that also carries `extra` paths, each
+    /// as a PAX-addressed entry so that any path can be written.
+    pub(super) fn bundle_with_extra_paths(extra: &[&str]) -> tempfile::NamedTempFile {
+        let root = package();
+        let mut paths = Vec::new();
+        walk(
+            root.path(),
+            root.path(),
+            &mut paths,
+            PortableLimits::default(),
+            None,
+        )
+        .unwrap();
+        let mut entries = paths
+            .into_iter()
+            .map(|path| {
+                let payload = fs::read(root.path().join(&path)).unwrap();
+                (path, payload)
+            })
+            .collect::<Vec<_>>();
+        entries.extend(extra.iter().map(|path| ((*path).to_owned(), b"x".to_vec())));
+        entries.sort();
+        let mut bundle = Vec::new();
+        for (path, payload) in entries {
+            if canonical_ustar_split(&path).is_some() {
+                bundle.extend(tar_entry(&path, &payload));
+                continue;
+            }
+            let records = pax::record("path", &path);
+            let suffix = &hex(&ContractSha256::digest(path.as_bytes()))[..16];
+            bundle.extend(raw_header(
+                &format!("PaxHeaders/{suffix}"),
+                b'x',
+                records.len() as u64,
+            ));
+            bundle.extend(padded(records.into_bytes()));
+            bundle.extend(raw_header(
+                &format!("PaxFiles/{suffix}"),
+                b'0',
+                payload.len() as u64,
+            ));
+            bundle.extend(padded(payload));
+        }
+        bundle.extend([0u8; 1024]);
+        let file = tempfile::NamedTempFile::new().unwrap();
+        fs::write(file.path(), bundle).unwrap();
+        file
+    }
+
+    fn list_files(dir: &Path, prefix: &str, out: &mut Vec<String>) {
+        for child in fs::read_dir(dir).unwrap() {
+            let child = child.unwrap();
+            let name = format!("{prefix}{}", child.file_name().to_string_lossy());
+            if child.file_type().unwrap().is_dir() {
+                list_files(&child.path(), &format!("{name}/"), out);
+            } else {
+                out.push(name);
+            }
+        }
+    }
+
+    /// The fixture package expanded on disk with `extra` added, or `None`
+    /// (said on stderr) when this host's file system cannot hold every one of
+    /// those names as distinct entries spelled exactly so: Windows refuses
+    /// reserved names, ext4 refuses 256-byte names, and the default macOS and
+    /// Windows volumes fold case variants into one file.
+    fn expanded_with(extra: &[&str]) -> Option<tempfile::TempDir> {
+        let root = package();
+        let mut baseline = Vec::new();
+        list_files(root.path(), "", &mut baseline);
+        for path in extra {
+            let file = root.path().join(path);
+            let created =
+                fs::create_dir_all(file.parent().unwrap()).and_then(|()| fs::write(&file, b"x"));
+            if let Err(error) = created {
+                eprintln!("expanded form skipped for {extra:?}: host refuses it ({error})");
+                return None;
+            }
+        }
+        let mut found = Vec::new();
+        list_files(root.path(), "", &mut found);
+        if found.len() != baseline.len() + extra.len()
+            || extra.iter().any(|p| !found.contains(&(*p).to_owned()))
+        {
+            eprintln!("expanded form skipped for {extra:?}: host folds or rewrites the names");
+            return None;
+        }
+        Some(root)
+    }
+
+    /// Every source form must be refused with `code` and `detail` by
+    /// verification, and by materialization before it creates its destination
+    /// or writes a byte. The bundle form is always built; the expanded form
+    /// only where the host file system can represent the paths.
+    fn assert_refused_before_extraction(extra: &[&str], code: PortableErrorCode, detail: &str) {
+        let bundle = bundle_with_extra_paths(extra);
+        let expanded = expanded_with(extra);
+        let mut sources = vec![bundle.path().to_owned()];
+        sources.extend(expanded.as_ref().map(|root| root.path().to_owned()));
+        for source in sources {
+            let verified =
+                verify_portable(&source, PortableMode::Full, PortableLimits::default(), None)
+                    .unwrap_err();
+            let parent = tempfile::tempdir().unwrap();
+            let destination = parent.path().join("extracted");
+            let mut writes = 0;
+            let materialized = materialization::materialize_verified_portable_observed(
+                &source,
+                &destination,
+                PortableLimits::default(),
+                None,
+                |_, _| {
+                    writes += 1;
+                    Ok(())
+                },
+                true,
+            )
+            .err()
+            .expect("an unportable path must not materialize");
+            for error in [verified, materialized] {
+                assert_eq!(error.code, code, "{extra:?}: {error}");
+                assert!(error.to_string().contains(detail), "{extra:?}: {error}");
+            }
+            assert_eq!(writes, 0, "{extra:?}: bytes written before refusal");
+            assert!(!destination.exists(), "{extra:?}: destination created");
+            assert_eq!(fs::read_dir(parent.path()).unwrap().count(), 0);
+        }
+    }
+
+    #[test]
+    fn windows_reserved_device_names_are_refused_before_extraction() {
+        for name in [
+            "CON",
+            "con",
+            "Prn",
+            "AUX",
+            "NuL",
+            "COM1",
+            "com9",
+            "LPT1",
+            "lpt9",
+            "COM\u{b9}",
+            "COM\u{b2}",
+            "COM\u{b3}",
+            "LPT\u{b9}",
+            "LPT\u{b2}",
+            "LPT\u{b3}",
+            "CON.txt",
+            "nul.tar.gz",
+            "COM1.json",
+            "AUX .txt",
+        ] {
+            // Any directory or file component counts, not only the last.
+            for path in [format!("data/{name}"), format!("data/{name}/entry")] {
+                assert_refused_before_extraction(
+                    &[&path],
+                    PortableErrorCode::InvalidPath,
+                    "Windows reserved device name",
+                );
+            }
+        }
+        // Names that merely contain or resemble a device name stay valid.
+        for name in [
+            "console",
+            "COM0",
+            "COM10",
+            "LPT",
+            "CONSOLE.txt",
+            "com.json",
+            "xCON",
+        ] {
+            assert_eq!(
+                path_violation(&format!("data/{name}"), 4096),
+                None,
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn characters_windows_forbids_are_refused_before_extraction() {
+        for character in ['<', '>', ':', '"', '|', '?', '*'] {
+            assert_refused_before_extraction(
+                &[&format!("data/a{character}b")],
+                PortableErrorCode::InvalidPath,
+                "character that Windows forbids",
+            );
+        }
+        for control in ["\t", "\u{1f}", "\u{7f}"] {
+            assert_refused_before_extraction(
+                &[&format!("data/a{control}b")],
+                PortableErrorCode::InvalidPath,
+                "unsafe/non-canonical path",
+            );
+        }
+    }
+
+    #[test]
+    fn components_ending_in_a_space_or_dot_are_refused_before_extraction() {
+        for name in ["name ", "name.", "name..", "dir./entry", "dir /entry"] {
+            assert_refused_before_extraction(
+                &[&format!("data/{name}")],
+                PortableErrorCode::InvalidPath,
+                "ends with a space or a dot",
+            );
+        }
+        // A leading dot is a valid Windows name.
+        assert_eq!(path_violation("data/.hidden", 4096), None);
+    }
+
+    #[test]
+    fn over_long_components_are_refused_before_extraction() {
+        let longest = "a".repeat(MAX_COMPONENT_BYTES);
+        assert_eq!(path_violation(&format!("data/{longest}"), 4096), None);
+        // 256 bytes cannot be created on ext4, so only a bundle can carry it.
+        let over = "a".repeat(MAX_COMPONENT_BYTES + 1);
+        assert_refused_before_extraction(
+            &[&format!("data/{over}")],
+            PortableErrorCode::InvalidPath,
+            "exceeds 255 bytes",
+        );
+        // 128 two-byte characters are 128 UTF-16 units but 256 bytes.
+        let wide = "\u{e9}".repeat(128);
+        assert_refused_before_extraction(
+            &[&format!("data/{wide}")],
+            PortableErrorCode::InvalidPath,
+            "exceeds 255 bytes",
+        );
+    }
+
+    #[test]
+    fn case_insensitive_collisions_are_refused_before_extraction() {
+        assert_refused_before_extraction(
+            &["data/Readme.txt", "data/readme.txt"],
+            PortableErrorCode::DuplicateEntry,
+            "case-fold collision",
+        );
+        assert_refused_before_extraction(
+            &["Data/a.txt", "data/A.TXT"],
+            PortableErrorCode::DuplicateEntry,
+            "case-fold collision",
+        );
+    }
+
+    #[test]
+    fn full_case_folding_collisions_are_refused_before_extraction() {
+        for pair in [
+            // Final and medial sigma fold to one letter.
+            ["data/\u{3c3}.txt", "data/\u{3c2}.txt"],
+            [
+                "data/\u{39f}\u{394}\u{39f}\u{3a3}",
+                "data/\u{3bf}\u{3b4}\u{3bf}\u{3c2}",
+            ],
+            // Full folding expands the sharp s.
+            ["data/stra\u{df}e.txt", "data/strasse.txt"],
+            ["data/STRASSE.txt", "data/stra\u{df}e.txt"],
+            // Dotless i: full folding keeps it apart; some Windows tables join it.
+            ["data/\u{131}.txt", "data/I.txt"],
+            // Case differences in a directory component.
+            ["data/Dir/a.txt", "data/dir/A.TXT"],
+        ] {
+            assert_refused_before_extraction(
+                &pair,
+                PortableErrorCode::DuplicateEntry,
+                "case-fold collision",
+            );
+        }
+        // Distinct names stay distinct.
+        assert_ne!(
+            path_collision_key("data/strase.txt"),
+            path_collision_key("data/strasse.txt")
+        );
+    }
+
+    #[test]
+    fn a_file_may_not_be_another_entrys_directory() {
+        for pair in [
+            ["data/a", "data/a/b"],
+            ["data/A", "data/a/b"],
+            ["data/x/y", "data/X/Y/z"],
+            ["data/stra\u{df}e", "data/STRASSE/z"],
+        ] {
+            assert_refused_before_extraction(
+                &pair,
+                PortableErrorCode::DuplicateEntry,
+                "file/directory path collision",
+            );
+        }
+        // A shared directory is fine.
+        validate_path_set(&["data/a/b".into(), "data/a/c".into(), "data/A2".into()]).unwrap();
+    }
+
+    #[test]
+    fn unicode_normalization_variants_are_refused_before_extraction() {
+        // NFD `e` + combining acute: macOS would fold it onto the NFC name.
+        assert_refused_before_extraction(
+            &["data/caf\u{65}\u{301}.txt"],
+            PortableErrorCode::InvalidPath,
+            "unsafe/non-canonical path",
+        );
+        // A canonical pair collides under normalization after case folding.
+        assert_eq!(
+            path_collision_key("data/\u{c9}.txt"),
+            path_collision_key("data/\u{e9}.txt")
+        );
+    }
+
+    #[test]
+    fn empty_and_dot_components_are_refused() {
+        for path in ["data//a", "data/./a", "data/a/", "data/../a"] {
+            assert!(path_violation(path, 4096).is_some(), "{path}");
+        }
     }
 
     #[test]

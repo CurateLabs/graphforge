@@ -84,6 +84,10 @@ fn parse_limits(input: Option<PortableLimitsInput>) -> Result<PortableLimits> {
             Some(value) => crate::node_u64(Some(value), "maxRetainedControlBytes")?,
             None => defaults.max_retained_control_bytes,
         },
+        max_parquet_walk_bytes: match input.max_parquet_walk_bytes {
+            Some(value) => crate::node_u64(Some(value), "maxParquetWalkBytes")?,
+            None => defaults.max_parquet_walk_bytes,
+        },
         max_path_bytes: match input.max_path_bytes {
             Some(value) => crate::node_usize(Some(value), defaults.max_path_bytes, "maxPathBytes")?,
             None => defaults.max_path_bytes,
@@ -351,6 +355,8 @@ pub struct PortableLimitsInput {
     pub max_tag_manifest_bytes: Option<BigInt>,
     /// Bytes the bundle reader may retain for controls it reads after the scan.
     pub max_retained_control_bytes: Option<BigInt>,
+    /// Largest Parquet entry a stream holds in memory to walk its pages.
+    pub max_parquet_walk_bytes: Option<BigInt>,
     pub max_path_bytes: Option<BigInt>,
     pub copy_buffer_bytes: Option<BigInt>,
 }

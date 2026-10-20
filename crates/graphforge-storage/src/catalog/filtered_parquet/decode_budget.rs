@@ -11,11 +11,14 @@ use std::path::Path;
 use arrow::datatypes::DataType;
 use datafusion::error::DataFusionError;
 use graphforge_core::OntologyMode;
-use parquet::basic::{Compression, Encoding, Type};
+use parquet::basic::{Compression, Type};
 use parquet::file::metadata::{ColumnChunkMetaData, ParquetStatisticsPolicy};
 use parquet::file::statistics::Statistics;
 
 use crate::AuthenticatedPropertyInventory;
+use crate::parquet_encoding_profile::{
+    declared_encoding_is_funded, from_footer, value_encoding_is_funded,
+};
 
 pub(super) mod nodes;
 pub use nodes::node_decode_admission_bytes;
@@ -249,35 +252,25 @@ fn construction_bytes(
     let physical = column.column_type();
     let descriptor = column.column_descr();
     let whole = || mul(values, 16);
+    // A footer cannot route an encoding outside the funded profile to a larger
+    // envelope: its decoders allocate from counts the envelope does not bound.
+    // This reads declared encodings only, so it is the cheap second line. The
+    // files reach it through project storage, whose Parquet entered through
+    // portable import after `parquet_encoding_profile::admit_pages` walked
+    // their actual pages.
+    let mut has_data_encoding = false;
+    for encoding in column.encodings() {
+        if value_encoding_is_funded(from_footer(encoding), physical) {
+            has_data_encoding = true;
+        } else if !declared_encoding_is_funded(encoding, physical) {
+            return Err(exhausted());
+        }
+    }
     if physical == Type::BYTE_ARRAY
         || descriptor.max_rep_level() != 0
         || !matches!(descriptor.max_def_level(), 0 | 1)
     {
         return whole();
-    }
-    let mut has_data_encoding = false;
-    for encoding in column.encodings() {
-        has_data_encoding |= match encoding {
-            Encoding::PLAIN | Encoding::PLAIN_DICTIONARY | Encoding::RLE_DICTIONARY => true,
-            Encoding::RLE => physical == Type::BOOLEAN,
-            Encoding::DELTA_BINARY_PACKED if matches!(physical, Type::INT32 | Type::INT64) => true,
-            Encoding::BYTE_STREAM_SPLIT
-                if matches!(
-                    physical,
-                    Type::INT32
-                        | Type::INT64
-                        | Type::FLOAT
-                        | Type::DOUBLE
-                        | Type::FIXED_LEN_BYTE_ARRAY
-                ) =>
-            {
-                true
-            }
-            // Arrow's fixed DELTA_BYTE_ARRAY decoder eagerly allocates both
-            // full-page prefix/suffix Vec<i32>s, independently of batch size.
-            // Empty or unsupported encoding metadata keeps the same envelope.
-            _ => return whole(),
-        };
     }
     if !has_data_encoding {
         return whole();
@@ -331,6 +324,7 @@ fn column_bytes(column: &ColumnChunkMetaData, batch_size: usize) -> Result<usize
 #[cfg(test)]
 mod tests {
     use super::*;
+    use parquet::basic::Encoding;
     use parquet::file::metadata::ColumnChunkMetaData;
     use parquet::schema::types::{ColumnDescriptor, ColumnPath, Type as SchemaType};
     use std::sync::Arc;
@@ -419,14 +413,8 @@ mod tests {
     fn whole_page_and_ambiguous_construction_remain_conservative() {
         let values = 1_000_000;
         for (physical, level, encodings) in [
-            (
-                Type::FIXED_LEN_BYTE_ARRAY,
-                0,
-                vec![Encoding::DELTA_BYTE_ARRAY],
-            ),
             (Type::INT64, 0, vec![]),
             (Type::INT64, 0, vec![Encoding::RLE]),
-            (Type::INT64, 0, vec![Encoding::DELTA_BYTE_ARRAY]),
             (Type::INT64, 2, vec![Encoding::PLAIN]),
         ] {
             let column = fixed_column(physical, level, encodings, values);
@@ -437,6 +425,26 @@ mod tests {
             column_bytes(&huge, 1024),
             Err(DataFusionError::ResourcesExhausted(_))
         ));
+    }
+
+    #[test]
+    fn unfunded_declared_encodings_are_refused_not_charged_a_larger_envelope() {
+        for (physical, encodings) in [
+            (Type::FIXED_LEN_BYTE_ARRAY, vec![Encoding::DELTA_BYTE_ARRAY]),
+            (Type::INT64, vec![Encoding::DELTA_BYTE_ARRAY]),
+            (
+                Type::INT64,
+                vec![Encoding::PLAIN, Encoding::DELTA_LENGTH_BYTE_ARRAY],
+            ),
+            (Type::BYTE_ARRAY, vec![Encoding::DELTA_LENGTH_BYTE_ARRAY]),
+            (Type::BYTE_ARRAY, vec![Encoding::DELTA_BYTE_ARRAY]),
+        ] {
+            let column = fixed_column(physical, 0, encodings, 1_000_000);
+            assert!(matches!(
+                column_bytes(&column, 1024),
+                Err(DataFusionError::ResourcesExhausted(_))
+            ));
+        }
     }
 
     fn sparse_compressed_read_fits(nullable: bool, encoding: Encoding) {

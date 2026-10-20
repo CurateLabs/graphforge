@@ -268,6 +268,10 @@ required-features = ["knowledge", "portable"]
 name = "portable_payload_identity"
 required-features = ["portable"]
 
+[[test]]
+name = "portable_hostile_names"
+required-features = ["portable"]
+
 # Includes knowledge/capability publication on a compact imported graph.
 [[test]]
 name = "publication_payload_identity"

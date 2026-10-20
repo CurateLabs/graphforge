@@ -223,6 +223,193 @@ fn locate(source: Reopen<'_>, path: &str) -> Result<std::path::PathBuf, Portable
     })
 }
 
+/// A byte range of an authenticated entry, served to the Parquet page walk.
+struct EntryWindow {
+    file: fs::File,
+    base: u64,
+    length: u64,
+}
+
+impl parquet::file::reader::Length for EntryWindow {
+    fn len(&self) -> u64 {
+        self.length
+    }
+}
+
+impl parquet::file::reader::ChunkReader for EntryWindow {
+    type T = std::io::Cursor<bytes::Bytes>;
+
+    fn get_read(&self, start: u64) -> parquet::errors::Result<Self::T> {
+        let length = usize::try_from(self.length.saturating_sub(start))
+            .map_err(|_| parquet::errors::ParquetError::General("entry window overflows".into()))?;
+        Ok(std::io::Cursor::new(self.get_bytes(start, length)?))
+    }
+
+    fn get_bytes(&self, start: u64, length: usize) -> parquet::errors::Result<bytes::Bytes> {
+        start
+            .checked_add(length as u64)
+            .filter(|end| *end <= self.length)
+            .ok_or_else(|| {
+                parquet::errors::ParquetError::General("read escapes the entry window".into())
+            })?;
+        let mut file = &self.file;
+        file.seek(SeekFrom::Start(self.base + start))?;
+        let mut buffer = vec![0_u8; length];
+        file.read_exact(&mut buffer)?;
+        Ok(buffer.into())
+    }
+}
+
+/// What the Parquet page walk needs of one streamed entry. A stream cannot be
+/// read back, so the entry is held in memory while it streams past, up to
+/// `max_parquet_walk_bytes`, together with its last four bytes. If it ends in
+/// the footer magic it is walked exactly as a file entry is; if it is larger
+/// than the bound it is refused rather than left unwalked.
+pub(super) struct ParquetWalk {
+    kept: Option<Vec<u8>>,
+    tail: [u8; 4],
+}
+
+impl ParquetWalk {
+    pub(super) fn new(size: u64, limit: u64) -> Self {
+        Self {
+            kept: (size <= limit).then(|| {
+                Vec::with_capacity(usize::try_from(size).unwrap_or(usize::MAX).min(1 << 30))
+            }),
+            tail: [0; 4],
+        }
+    }
+    pub(super) fn update(&mut self, chunk: &[u8]) {
+        if let Some(kept) = &mut self.kept {
+            kept.extend_from_slice(chunk);
+        }
+        if chunk.len() >= 4 {
+            self.tail.copy_from_slice(&chunk[chunk.len() - 4..]);
+        } else {
+            self.tail.rotate_left(chunk.len());
+            let at = 4 - chunk.len();
+            self.tail[at..].copy_from_slice(chunk);
+        }
+    }
+    pub(super) fn finish(self, path: &str) -> Result<(), PortableError> {
+        if &self.tail != b"PAR1" {
+            return Ok(());
+        }
+        let Some(bytes) = self.kept else {
+            return Err(PortableError::at(
+                PortableErrorCode::LimitExceeded,
+                path,
+                "parquet entry exceeds the stream page-walk bound",
+            ));
+        };
+        crate::parquet_encoding_profile::admit_pages(&bytes::Bytes::from(bytes))
+            .map_err(|error| refuse_profile(path, error))
+    }
+}
+
+/// The refusal for a Parquet entry the funded decoder profile does not admit.
+pub(super) fn refuse_profile(
+    path: &str,
+    error: crate::parquet_encoding_profile::PageAdmissionError,
+) -> PortableError {
+    use crate::parquet_encoding_profile::PageAdmissionError;
+    match error {
+        PageAdmissionError::Unfunded => PortableError::at(
+            PortableErrorCode::LimitExceeded,
+            path,
+            "parquet page encoding is outside the funded decoder profile",
+        ),
+        PageAdmissionError::Malformed(message) => {
+            PortableError::at(PortableErrorCode::InvalidStructure, path, message)
+        }
+    }
+}
+
+/// Refuse any Parquet component entry whose actual pages use an encoding outside
+/// the funded profile. This is the trust boundary for external Parquet: portable
+/// verification and import both pass here before any project decoder sees a byte.
+///
+/// An entry is Parquet when it ends in the `PAR1` footer magic, which is all the
+/// Parquet reader requires; paths and declared encodings are not trusted.
+pub(super) fn validate_parquet_profile(
+    source: &Path,
+    entries: &[Entry],
+    cancelled: Option<&AtomicBool>,
+) -> Result<(), PortableError> {
+    use crate::parquet_encoding_profile::admit_pages;
+
+    for entry in entries
+        .iter()
+        .filter(|entry| entry.path.starts_with("data/components/") && entry.length >= 12)
+    {
+        check_cancel(cancelled)?;
+        if let Some(bytes) = &entry.bytes {
+            if bytes.ends_with(b"PAR1") {
+                let bytes = bytes::Bytes::copy_from_slice(bytes);
+                admit_pages(&bytes).map_err(|error| refuse_profile(&entry.path, error))?;
+            }
+            continue;
+        }
+        let input_path = if entry.offset.is_some() {
+            source.to_path_buf()
+        } else {
+            source.join(&entry.path)
+        };
+        let mut file =
+            crate::project_portable_export::open_source_no_follow(&input_path).map_err(|_| {
+                PortableError::at(
+                    PortableErrorCode::ConcurrentMutation,
+                    &entry.path,
+                    "cannot reopen authenticated entry",
+                )
+            })?;
+        let before = file.metadata().map_err(|_| {
+            PortableError::at(PortableErrorCode::Io, &entry.path, "cannot inspect entry")
+        })?;
+        let window = EntryWindow {
+            file: file.try_clone().map_err(|_| {
+                PortableError::at(PortableErrorCode::Io, &entry.path, "cannot read entry")
+            })?,
+            base: entry.offset.unwrap_or(0),
+            length: entry.length,
+        };
+        if entry.offset.is_none() && before.len() != entry.length {
+            return Err(PortableError::at(
+                PortableErrorCode::ConcurrentMutation,
+                &entry.path,
+                "entry length changed",
+            ));
+        }
+        let mut tail = [0_u8; 4];
+        file.seek(SeekFrom::Start(window.base + entry.length - 4))
+            .and_then(|_| file.read_exact(&mut tail))
+            .map_err(|_| {
+                PortableError::at(
+                    PortableErrorCode::ConcurrentMutation,
+                    &entry.path,
+                    "entry truncated",
+                )
+            })?;
+        if &tail == b"PAR1" {
+            admit_pages(&window).map_err(|error| refuse_profile(&entry.path, error))?;
+        }
+        let after = file.metadata().map_err(|_| {
+            PortableError::at(PortableErrorCode::Io, &entry.path, "cannot inspect entry")
+        })?;
+        if !same_identity(&before, &after)
+            || before.len() != after.len()
+            || modified(&before) != modified(&after)
+        {
+            return Err(PortableError::at(
+                PortableErrorCode::ConcurrentMutation,
+                &entry.path,
+                "authenticated entry changed",
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Native admission uses authenticated runtime identities rather than payload paths.
 fn validate_saved_queries(
     source: Reopen<'_>,

@@ -349,3 +349,84 @@ fn invalid_versions_layouts_and_overflowing_ranges_are_refused() {
     assert_eq!(source.read_at(&mut [0; 1], u64::MAX).unwrap(), 0);
     assert_eq!(source.get_bytes(3, 0).unwrap().len(), 0);
 }
+
+#[path = "../../../tests/support/hostile_parquet.rs"]
+mod hostile;
+
+/// An envelope part whose payload column is written with `encoding`.
+fn envelope_with_encoding(encoding: parquet::basic::Encoding, payload: &[u8]) -> Vec<u8> {
+    let schema = Arc::new(
+        Schema::new(vec![Field::new(PAYLOAD_FIELD, DataType::Binary, false)]).with_metadata(
+            [
+                (FORMAT_KEY.to_owned(), FORMAT_VERSION.to_owned()),
+                (LENGTH_KEY.to_owned(), payload.len().to_string()),
+                (COUNT_KEY.to_owned(), "1".to_owned()),
+                (INDEX_KEY.to_owned(), "0".to_owned()),
+            ]
+            .into_iter()
+            .collect(),
+        ),
+    );
+    let batch = RecordBatch::try_new(
+        Arc::clone(&schema),
+        vec![Arc::new(BinaryArray::from_vec(vec![payload])) as ArrayRef],
+    )
+    .unwrap();
+    let properties = WriterProperties::builder()
+        .set_writer_version(WriterVersion::PARQUET_1_0)
+        .set_compression(Compression::UNCOMPRESSED)
+        .set_dictionary_enabled(false)
+        .set_encoding(encoding)
+        .set_statistics_enabled(EnabledStatistics::None)
+        .set_offset_index_disabled(true)
+        .set_max_row_group_row_count(Some(1))
+        .build();
+    let mut output = Vec::new();
+    let mut writer = ArrowWriter::try_new(&mut output, schema, Some(properties)).unwrap();
+    writer.write(&batch).unwrap();
+    writer.close().unwrap();
+    output
+}
+
+fn assert_profile_limit(error: &GfError) {
+    let GfError::Project { code, message } = error else {
+        panic!("expected a project error: {error}");
+    };
+    assert_eq!(*code, ProjectErrorCode::ResourceLimit);
+    assert!(
+        message.contains("outside the funded decoder profile"),
+        "{message}"
+    );
+}
+
+#[test]
+fn unfunded_envelope_encodings_are_refused_before_a_reader_is_built() {
+    let payload = payload(100);
+    let layout = EnvelopeLayout {
+        logical_length: payload.len() as u64,
+        part_count: 1,
+    };
+    // The plain envelope still decodes.
+    let plain = envelope_with_encoding(parquet::basic::Encoding::PLAIN, &payload);
+    assert_eq!(
+        decode_part(Bytes::from(plain), layout, 0).unwrap().as_ref(),
+        payload.as_slice()
+    );
+    let delta = envelope_with_encoding(parquet::basic::Encoding::DELTA_LENGTH_BYTE_ARRAY, &payload);
+    // The declaring footer is refused when the envelope is recognized...
+    assert_profile_limit(&inspect_envelope(Bytes::from(delta.clone())).unwrap_err());
+    // ...and a footer that lies is refused by the page walk before decode.
+    let lying = hostile::declaring(
+        &delta,
+        &[
+            parquet::basic::Encoding::PLAIN,
+            parquet::basic::Encoding::RLE,
+        ],
+    );
+    assert_eq!(
+        inspect_envelope(Bytes::from(lying.clone())).unwrap(),
+        Some((layout, 0))
+    );
+    assert_profile_limit(&decode_part(Bytes::from(lying), layout, 0).unwrap_err());
+    assert_profile_limit(&decode_part(Bytes::from(delta), layout, 0).unwrap_err());
+}

@@ -19,7 +19,7 @@ python3 scripts/generate_third_party_notices.py
 
 - Apache License 2.0 (388)
 - MIT License (91)
-- Unicode License v3 (19)
+- Unicode License v3 (21)
 - BSD 3-Clause "New" or "Revised" License (13)
 - ISC License (4)
 - zlib License (3)
@@ -10977,6 +10977,8 @@ authorization of the copyright holder.
 ## Unicode License v3
 
 Used by:
+- icu_casemap 2.2.0
+- icu_casemap_data 2.2.0
 - icu_collections 2.2.0
 - icu_locale_core 2.2.0
 - icu_normalizer 2.2.0
