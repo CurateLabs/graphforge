@@ -24,7 +24,7 @@ def check_research_metadata_and_discovery() -> None:
             return
 
         metadata = {
-            "contract_version": 1,
+            "contract_version": 2,
             "title": "Arabian Nights",
             "description": None,
             "authors": [],

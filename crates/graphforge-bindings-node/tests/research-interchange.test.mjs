@@ -97,8 +97,7 @@ test("native research interchange preserves citations exports and independent Fo
     }
     const metadata = graph.researchProjectMetadata();
     metadata.title = "Independent research";
-    metadata.access.visibility = "private";
-    metadata.access.access_policy = "Independent local review";
+    metadata.description = "Independent local review";
     const fork = {
       operation_uuid: identity(),
       project_uuid: identity(),
