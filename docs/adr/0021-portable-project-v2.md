@@ -229,10 +229,11 @@ for L in 1 3 9 19; do
 done
 /usr/bin/time -f '%e s %M KiB' zstd -q --single-thread -3 --long=27 -c BUNDLE > c.zst; wc -c < c.zst
 /usr/bin/time -f '%e s %M KiB' zstd -q -d --single-thread --long=27 -c c.zst > /dev/null
-# SCALE 20 only (sizes only; run without --single-thread, which does not change the ratio)
-zstd -q -12 -c g500-s20.gfpb | wc -c
-zstd -q -15 -c g500-s20.gfpb | wc -c
-/usr/bin/time -f '%e s %M KiB' zstd -q -19 -T8 -c g500-s20.gfpb | wc -c   # 8-thread level 19
+# SCALE 20 only (sizes only; run without --single-thread: multi-threaded output differs slightly,
+# 64,606 bytes (0.008% of the bundle) at level 19, and the rounded ratio is unchanged)
+zstd -q -12 -c $W/g500-s20.gfpb | wc -c
+zstd -q -15 -c $W/g500-s20.gfpb | wc -c
+/usr/bin/time -f '%e s %M KiB' zstd -q -19 -T8 -c $W/g500-s20.gfpb | wc -c   # 8-thread level 19
 ```
 
 Saved fraction is `1 - compressed/bundle_bytes`; throughput is bundle bytes over
@@ -256,7 +257,7 @@ with tarfile.open(sys.argv[1], "r:") as tf:
         a = agg[key]; a[0] += 1; a[1] += m.size; a[2] += len(packed)
 total = os.path.getsize(sys.argv[1])
 for key, (n, raw, z) in sorted(agg.items(), key=lambda kv: -kv[1][1]):
-    print(key, n, raw, z, f"saved={100 * (1 - z / raw):.2f}% share={100 * raw / total:.2f}%")
+    print(key, n, raw, z, f"saved={(100 * (1 - z / raw)) if raw else 0.0:.2f}% share={100 * raw / total:.2f}%")
 PY
 ```
 
