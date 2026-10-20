@@ -300,7 +300,7 @@ fn retry_after_paces_the_bounded_retry_of_documents_and_objects() {
     let root = tempfile::tempdir().unwrap();
     let partial = root.path().join("package.part");
     let started = Instant::now();
-    let report = download_with_progress(
+    let (report, digest) = download_with_progress(
         &Routed::new(server.address),
         &descriptor,
         &partial,
@@ -309,6 +309,7 @@ fn retry_after_paces_the_bounded_retry_of_documents_and_objects() {
     )
     .unwrap();
     assert_eq!(report.attempts, 2);
+    assert_eq!(digest, descriptor.digest.0);
     assert!(
         started.elapsed() >= Duration::from_secs(1),
         "{:?}",

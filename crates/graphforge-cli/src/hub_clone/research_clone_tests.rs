@@ -191,13 +191,137 @@ struct Published {
     project_package: (PortablePackageReference, Vec<u8>),
 }
 
-#[allow(clippy::too_many_lines)]
 fn publish_history() -> Published {
+    publish_history_with_padding(0)
+}
+
+/// [`publish_history`] over a graph that also holds `padding` nodes of about
+/// 200 bytes each, which every published Version carries.
+#[allow(clippy::too_many_lines)]
+fn publish_history_with_padding(padding: u32) -> Published {
+    publish_history_shaped(padding, 0, 0, false)
+}
+
+/// Incompressible text of `bytes` bytes, distinct per `seed`.
+fn incompressible_text(bytes: usize, seed: u64) -> String {
+    let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+    (0..bytes)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            char::from(b'a' + u8::try_from(state % 26).unwrap())
+        })
+        .collect()
+}
+
+/// Republish a durable project's current generation as an expanded (V1)
+/// graph/files record, the form every Version of a project written before
+/// compact roots carries and a research package still admits.
+fn expand_project(path: &Path) {
+    use graphforge_storage::{
+        ProjectCapability, ProjectGenerationRequest, ProjectParticipant,
+        ProjectParticipantEncoding, ProjectStageOutcome, capture_graph_files,
+        materialize_graph_objects, resolve_project_generation,
+        stage_project_generation_with_graph_tree_mode,
+    };
+    let current = resolve_project_generation(path).unwrap();
+    let inventory = current.graph_files_inventory().unwrap().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    materialize_graph_objects(current.container_root(), &inventory, workspace.path()).unwrap();
+    let (_, graph_participant) = capture_graph_files(workspace.path()).unwrap();
+    let capabilities = current
+        .capabilities()
+        .into_iter()
+        .map(|capability| ProjectCapability {
+            capability_id: capability.capability_id,
+            capability_version: capability.capability_version,
+        })
+        .collect();
+    let mut participants = current
+        .participant_snapshots()
+        .unwrap()
+        .into_iter()
+        .filter(|snapshot| {
+            snapshot.capability_id != graphforge_storage::GRAPH_CAPABILITY_ID
+                || snapshot.record_family_id != graphforge_storage::GRAPH_FILES_FAMILY
+        })
+        .map(|snapshot| ProjectParticipant {
+            capability_id: snapshot.capability_id,
+            capability_version: snapshot.capability_version,
+            record_family_id: snapshot.record_family_id,
+            record_version: snapshot.record_version,
+            encoding: match snapshot.encoding.as_str() {
+                "parquet" => ProjectParticipantEncoding::Parquet,
+                "arrow" => ProjectParticipantEncoding::Arrow,
+                "json" => ProjectParticipantEncoding::Json,
+                other => panic!("unsupported fixture participant encoding {other}"),
+            },
+            schema_fingerprint: snapshot.schema_fingerprint,
+            row_count: snapshot.row_count,
+            bytes: snapshot.bytes,
+        })
+        .collect::<Vec<_>>();
+    participants.push(graph_participant);
+    let request = ProjectGenerationRequest {
+        transaction_uuid: Uuid::new_v4(),
+        generation_uuid: Uuid::new_v4(),
+        capabilities,
+        participants,
+    };
+    let ProjectStageOutcome::Staged(staged) = stage_project_generation_with_graph_tree_mode(
+        path,
+        &request,
+        Some(workspace.path()),
+        graphforge_storage::filesystem_admission::ProjectLifecycleMode::Durable,
+    )
+    .unwrap() else {
+        panic!("expanded graph publication unexpectedly replayed");
+    };
+    staged
+        .validate(|_| Ok(()), |_, _| Ok(()))
+        .unwrap()
+        .publish()
+        .unwrap();
+}
+
+/// [`publish_history`] over a graph that also holds `padding` small nodes and
+/// `blobs` nodes carrying `blob_bytes` of incompressible text each, which every
+/// published Version carries. With `expanded`, the origin's graph/files record
+/// is the expanded form, so its Version (and every Version forked from it)
+/// retains the graph as an expanded tree.
+fn publish_history_shaped(
+    padding: u32,
+    blobs: usize,
+    blob_bytes: usize,
+    expanded: bool,
+) -> Published {
     let cancellation = CancellationToken::new();
     let root = tempfile::tempdir().unwrap();
     // The origin Project: one retained Version to fork from.
     let mut origin = GraphForge::new(root.path().join("origin").to_str()).unwrap();
     origin.execute("CREATE (:Item {score:0})").unwrap();
+    if padding > 0 {
+        origin
+            .execute(&format!(
+                "UNWIND range(1, {padding}) AS i CREATE (:Pad {{id: i, body: '{}'}})",
+                "x".repeat(200)
+            ))
+            .unwrap();
+    }
+    for blob in 0..blobs {
+        origin
+            .execute(&format!(
+                "CREATE (:Blob {{id: {blob}, body: '{}'}})",
+                incompressible_text(blob_bytes, blob as u64 + 1)
+            ))
+            .unwrap();
+    }
+    if expanded {
+        drop(origin);
+        expand_project(&root.path().join("origin"));
+        origin = GraphForge::new(root.path().join("origin").to_str()).unwrap();
+    }
     let origin_version = Uuid::now_v7();
     create_branch(
         &mut origin,
@@ -1509,4 +1633,224 @@ fn forged_project_boundary_anchor_is_not_native_history_authority() {
         assert!(clone_into(&hub, &destination, Some("main"), None).is_err());
         assert!(!destination.exists());
     }
+}
+
+/// Allocated bytes (blocks, each hard-linked file once) under `root`.
+#[cfg(unix)]
+fn allocated_bytes(root: &Path) -> u64 {
+    use std::os::unix::fs::MetadataExt as _;
+    fn visit(directory: &Path, seen: &mut BTreeSet<(u64, u64)>, total: &mut u64) {
+        let Ok(entries) = std::fs::read_dir(directory) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let Ok(metadata) = std::fs::symlink_metadata(entry.path()) else {
+                continue;
+            };
+            if metadata.is_dir() {
+                visit(&entry.path(), seen, total);
+            } else if metadata.is_file() && seen.insert((metadata.dev(), metadata.ino())) {
+                *total += metadata.blocks() * 512;
+            }
+        }
+    }
+    let mut total = 0;
+    visit(root, &mut BTreeSet::new(), &mut total);
+    total
+}
+
+/// The budget a research clone checks before it downloads bounds the disk the
+/// clone holds beside its destination, measured from outside by sampling every
+/// allocated block of the clone's parent directory: the downloaded package, the
+/// import's stage, the validation object store and the rebuilt Version's
+/// object store, each live at once.
+///
+/// The footprint read from the package's own controls bounds the same peak,
+/// and the production budget, which knows only the package's length, must
+/// never be below that exact footprint. This compact-graph fixture holds fewer
+/// copies than the footprint counts (it has no temporary expanded graph), so
+/// it is not a tightness check; the expanded-graph test below is.
+#[cfg(unix)]
+#[test]
+fn the_budget_bounds_the_measured_peak_of_a_research_clone() {
+    let published = publish_history_with_padding(800);
+    let lineage = published
+        .fork
+        .build_research_lineage_for_discovery(
+            &lineage_request(&published),
+            &CancellationToken::new(),
+        )
+        .unwrap();
+    let hub = serve(&published, &lineage);
+    let (_, bundle) = &published.packages[&published.main_head];
+    let package = tempfile::tempdir().unwrap();
+    std::fs::write(package.path().join("head.gfpb"), bundle).unwrap();
+    let footprint = graphforge_storage::portable_import_footprint(
+        package.path().join("head.gfpb"),
+        PortableLimits::default(),
+        None,
+    )
+    .unwrap();
+    assert!(footprint.research_bytes > 0, "{footprint:?}");
+
+    let root = tempfile::tempdir().unwrap();
+    let stop = std::sync::Arc::new(AtomicBool::new(false));
+    let flag = std::sync::Arc::clone(&stop);
+    let watched = root.path().to_path_buf();
+    let sampler = std::thread::spawn(move || {
+        let mut peak = 0;
+        while !flag.load(Ordering::Relaxed) {
+            peak = peak.max(allocated_bytes(&watched));
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        peak
+    });
+    clone_into(&hub, &root.path().join("head"), Some("main"), None).unwrap();
+    stop.store(true, Ordering::Relaxed);
+    let observed = sampler.join().unwrap();
+    // The clone's parent holds the download as well as the import.
+    let length = bundle.len() as u64;
+    let exact = length + footprint.peak_bytes();
+    let budget = required_space(length, 0, 0, false, true);
+    println!(
+        "research clone: package={length} payload={} research={} generated={} entries={} observed={observed} exact={exact} budget={budget}",
+        footprint.payload_bytes,
+        footprint.research_bytes,
+        footprint.generated_bytes,
+        footprint.entries
+    );
+    assert!(
+        observed <= budget,
+        "a research clone held {observed} bytes, more than the {budget} it budgets"
+    );
+    assert!(
+        budget >= exact,
+        "the budget {budget} is below the package's own footprint {exact}"
+    );
+    assert!(
+        observed <= exact,
+        "observed {observed} exceeds footprint {exact}"
+    );
+}
+
+/// Verification and import are measured against their budgets on a package
+/// whose largest Version is an expanded graph/files record of a few MiB, the
+/// shape that holds the most copies at once: the stage, the validation store,
+/// the temporary expanded graph and the Version's project, all alive while a
+/// Version is rebuilt.
+///
+/// The real clone runs `verify_discovered_research_version` and then the real
+/// import in its own scratch root while a sampler thread records the allocated
+/// bytes under the root (the download, staging and target) every millisecond,
+/// split at the start of the import. Sampling can only miss a peak, so an
+/// observed peak above its budget is a real overrun and never a flake. The
+/// invariant is observed peak ≤ budget and nothing more: a budget far above a
+/// sampled peak is not a failure, so removing a copy never breaks the test.
+#[cfg(unix)]
+#[test]
+fn research_verification_and_import_stay_within_their_budgets_with_an_expanded_graph() {
+    let published = publish_history_shaped(0, 12, 512 * 1024, true);
+    let lineage = published
+        .fork
+        .build_research_lineage_for_discovery(
+            &lineage_request(&published),
+            &CancellationToken::new(),
+        )
+        .unwrap();
+    let hub = serve(&published, &lineage);
+    let (_, bundle) = &published.packages[&published.main_base];
+    let package = tempfile::tempdir().unwrap();
+    std::fs::write(package.path().join("base.gfpb"), bundle).unwrap();
+    let footprint = graphforge_storage::portable_import_footprint(
+        package.path().join("base.gfpb"),
+        PortableLimits::default(),
+        None,
+    )
+    .unwrap();
+    assert!(footprint.research_bytes > 2 << 20, "{footprint:?}");
+
+    let root = tempfile::tempdir().unwrap();
+    let peak = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let verification_peak = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let stop = std::sync::Arc::new(AtomicBool::new(false));
+    let sampler = {
+        let (peak, stop, watched) = (
+            std::sync::Arc::clone(&peak),
+            std::sync::Arc::clone(&stop),
+            root.path().to_path_buf(),
+        );
+        std::thread::spawn(move || {
+            while !stop.load(Ordering::Relaxed) {
+                peak.fetch_max(allocated_bytes(&watched), Ordering::Relaxed);
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        })
+    };
+    let boundary = {
+        let (peak, verification_peak) = (
+            std::sync::Arc::clone(&peak),
+            std::sync::Arc::clone(&verification_peak),
+        );
+        move || verification_peak.store(peak.swap(0, Ordering::Relaxed), Ordering::Relaxed)
+    };
+    let delays = CloneDelays {
+        before_import: Some(Box::new(boundary)),
+        ..CloneDelays::default()
+    };
+    run_clone_profiled_with_delays(
+        &hub,
+        CloneArgs {
+            hub: None,
+            token_env: None,
+            protection_bypass_env: None,
+            repository: REPOSITORY.into(),
+            destination: Some(root.path().join("base")),
+            telemetry_endpoint: None,
+            git_ref: None,
+            version_uuid: Some(published.main_base.to_string()),
+        },
+        true,
+        &mut Vec::new(),
+        &TelemetryRuntime::default(),
+        &delays,
+        &mut CloneEnv::quiet(),
+    )
+    .unwrap();
+    stop.store(true, Ordering::Relaxed);
+    sampler.join().unwrap();
+    let verification = verification_peak.load(Ordering::Relaxed);
+    let import = peak.load(Ordering::Relaxed);
+
+    // Both phases hold the downloaded package as well.
+    let length = bundle.len() as u64;
+    let verification_budget = length + footprint.verification_peak_bytes();
+    let import_budget = length + footprint.peak_bytes();
+    let clone_budget = required_space(length, 0, 0, false, true);
+    println!(
+        "expanded research: package={length} payload={} research={} entries={} \
+         verification observed={verification} budget={verification_budget} \
+         import observed={import} budget={import_budget} clone budget={clone_budget}",
+        footprint.payload_bytes, footprint.research_bytes, footprint.entries
+    );
+    assert!(
+        verification <= verification_budget,
+        "verification held {verification} bytes, more than its {verification_budget} \
+         (import held {import} against {import_budget}; package {length}, payload {}, research {})",
+        footprint.payload_bytes,
+        footprint.research_bytes
+    );
+    assert!(
+        import <= import_budget,
+        "the import held {import} bytes, more than its {import_budget} \
+         (verification held {verification} against {verification_budget}; package {length}, \
+         payload {}, research {})",
+        footprint.payload_bytes,
+        footprint.research_bytes
+    );
+    assert!(
+        verification.max(import) <= clone_budget,
+        "the clone budgets {clone_budget} for a peak of {} (verification {verification}, \
+         import {import}, exact budgets {verification_budget} and {import_budget})",
+        verification.max(import)
+    );
 }

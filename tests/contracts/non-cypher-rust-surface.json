@@ -1,7 +1,7 @@
 {
   "contract_version": 1,
   "scope": "Rust non-Cypher public release surface",
-  "public_method_digest": "3b0eea2b0622c5c833ac4c200a74bc023c8c798a7794ec31f8de7cf1d9ffb82b",
+  "public_method_digest": "e3fd0c711289ff5a00d0a94b988616513828b8adf2f2853bcd135362956fc39c",
   "method_policy": {
     "receiver_defaults": {
       "PortableImportResult": "release-tested",
@@ -99,7 +99,8 @@
       "crate.publish_portable_oci": "designed-only",
       "crate.pull_portable_oci": "designed-only",
       "crate.publish_portable_oci_with_registry": "designed-only",
-      "crate.pull_portable_oci_with_registry": "designed-only"
+      "crate.pull_portable_oci_with_registry": "designed-only",
+      "crate.portable_import_held_bytes": "internal-helper"
     },
     "reasons": {
       "internal-helper": "exported execution plumbing, not a persisted product facade",

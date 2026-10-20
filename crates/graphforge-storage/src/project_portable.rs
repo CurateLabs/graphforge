@@ -19,7 +19,10 @@ mod participant_files;
 pub(crate) mod pax;
 mod plausibility;
 pub use participant_files::{PortableFileRef, PortablePackageIndex};
+mod import_footprint;
 pub(crate) mod research;
+use import_footprint::footprint_of_manifest;
+pub use import_footprint::portable_import_footprint;
 mod semantic_validation;
 pub(crate) use semantic_validation::decode_runtime_map;
 use semantic_validation::{
@@ -251,11 +254,13 @@ impl Census {
     }
 }
 
-fn preflight(
+/// Admit a package's controls without extracting or mutating anything, and
+/// report what extracting it would write.
+pub(crate) fn preflight(
     source: &Path,
     limits: PortableLimits,
     cancelled: Option<&AtomicBool>,
-) -> Result<(), PortableError> {
+) -> Result<graphforge_core::portable::PortableImportFootprint, PortableError> {
     if limits.copy_buffer_bytes == 0 {
         return Err(PortableError::new(
             PortableErrorCode::LimitExceeded,
@@ -272,17 +277,15 @@ fn preflight(
         ));
     }
     if metadata.is_dir() {
-        preflight_expanded(source, limits, cancelled)?;
+        preflight_expanded(source, limits, cancelled)
     } else if metadata.is_file() {
-        preflight_bundle(source, limits, cancelled)?;
-    }
-    if !metadata.is_dir() && !metadata.is_file() {
-        return Err(PortableError::new(
+        preflight_bundle(source, limits, cancelled)
+    } else {
+        Err(PortableError::new(
             PortableErrorCode::InvalidStructure,
             "source is not a regular file or directory",
-        ));
+        ))
     }
-    Ok(())
 }
 
 fn scan(
@@ -497,7 +500,7 @@ fn preflight_expanded(
     root: &Path,
     limits: PortableLimits,
     cancelled: Option<&AtomicBool>,
-) -> Result<(), PortableError> {
+) -> Result<graphforge_core::portable::PortableImportFootprint, PortableError> {
     let mut paths = Vec::new();
     walk(root, root, &mut paths, limits, cancelled)?;
     let bound = limits.semantic_manifest_bound(paths.len() as u64);
@@ -527,7 +530,7 @@ fn preflight_expanded(
         )?;
         admit_composition_features(&control)?;
     }
-    Ok(())
+    Ok(footprint_of_manifest(&admitted, limits))
 }
 
 #[expect(
@@ -538,7 +541,7 @@ fn preflight_bundle(
     path: &Path,
     limits: PortableLimits,
     cancelled: Option<&AtomicBool>,
-) -> Result<(), PortableError> {
+) -> Result<graphforge_core::portable::PortableImportFootprint, PortableError> {
     let mut input = crate::project_portable_export::open_source_no_follow(path)
         .map_err(|_| PortableError::new(PortableErrorCode::Io, "cannot open bundle"))?;
     let mut pending_pax: Option<pax::PaxHeader> = None;
@@ -679,7 +682,7 @@ fn preflight_bundle(
             "required preflight control is missing",
         ));
     }
-    Ok(())
+    Ok(footprint_of_manifest(&manifest, limits))
 }
 
 pub(crate) struct VerifiedMaterialization {
@@ -2558,7 +2561,7 @@ mod tests {
     fn read_both(bundle: &Path) -> [Result<(), PortableError>; 2] {
         let limits = PortableLimits::default();
         [
-            preflight(bundle, limits, None),
+            preflight(bundle, limits, None).map(|_| ()),
             scan(bundle, PortableMode::Full, limits, None, None, None).map(|_| ()),
         ]
     }

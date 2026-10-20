@@ -9,7 +9,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { tableFromIPC } from "apache-arrow";
 import { GraphForge } from "../index.js";
@@ -198,6 +198,95 @@ test("retired project format is rejected before a binding import touches its des
       (error) => error.code === "GF_UNSUPPORTED_PROJECT_FORMAT",
     );
     assert.equal(existsSync(target), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+function canonicalJson(value) {
+  if (Array.isArray(value)) {
+    return `[${value.map(canonicalJson).join(",")}]`;
+  }
+  if (value !== null && typeof value === "object") {
+    return `{${Object.keys(value)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+// An expanded package whose resealed manifest declares eight tebibytes, so its
+// controls are admitted and only the disk can refuse it.
+async function packageTooLargeForAnyDisk(root) {
+  const source = join(root, "source");
+  const package_ = join(root, "too-large.gfproject");
+  await new GraphForge(source).exportPortable({
+    outputPath: package_,
+    representation: "expanded",
+    profile: "complete",
+  });
+  const manifestPath = join(package_, "data", "graphforge-project.json");
+  const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+  delete manifest.package_digest;
+  manifest.components[0].files[0].length += 2 ** 43;
+  const preimage = Buffer.concat([
+    Buffer.from("graphforge-project/2\0"),
+    Buffer.from(canonicalJson(manifest)),
+  ]);
+  manifest.package_digest = `sha256:${createHash("sha256").update(preimage).digest("hex")}`;
+  writeFileSync(manifestPath, canonicalJson(manifest));
+  return package_;
+}
+
+async function refusedImport(projectRoot, input) {
+  try {
+    await GraphForge.importPortable({
+      input,
+      projectRoot,
+      operationId: randomUUID(),
+    });
+  } catch (error) {
+    return error;
+  }
+  throw new Error("the import was admitted");
+}
+
+test("import refusals before extraction keep their code and diagnostic", async () => {
+  const root = mkdtempSync(join(tmpdir(), "gf-refused-import-"));
+  try {
+    const input = await packageTooLargeForAnyDisk(root);
+    const target = join(root, "destination");
+    let error = await refusedImport(target, input);
+    assert.equal(error.code, "GF_STORAGE");
+    let envelope = JSON.parse(error.message);
+    assert.equal(envelope.diagnostics[0].code, "storage.insufficient_space");
+    assert.match(
+      envelope.diagnostics[0].message,
+      /bytes available beside the target/,
+    );
+    assert.equal(existsSync(target), false);
+    if (process.platform === "linux") {
+      // `/dev/shm` is tmpfs, which the durable-publication contract does not admit.
+      const shm = mkdtempSync("/dev/shm/gf-refused-import-");
+      try {
+        const shmTarget = join(shm, "destination");
+        error = await refusedImport(shmTarget, input);
+        assert.equal(error.code, "GF_UNSUPPORTED_FILESYSTEM");
+        envelope = JSON.parse(error.message);
+        assert.equal(
+          envelope.diagnostics[0].code,
+          "storage.unsupported_filesystem",
+        );
+        assert.match(
+          envelope.diagnostics[0].message,
+          /GF_UNSUPPORTED_FILESYSTEM/,
+        );
+        assert.equal(existsSync(shmTarget), false);
+      } finally {
+        rmSync(shm, { recursive: true, force: true });
+      }
+    }
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

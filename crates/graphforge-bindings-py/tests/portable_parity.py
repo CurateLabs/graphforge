@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
+import sys
 import tempfile
 import uuid
 
@@ -131,8 +133,66 @@ def check_retired_format_is_rejected_before_target_creation() -> None:
         assert not target.exists()
 
 
+def canonical(value: object) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def package_too_large_for_any_disk(root: Path) -> Path:
+    """An expanded package whose resealed manifest declares eight tebibytes."""
+    import graphforge as gf
+
+    source = root / "source"
+    source.mkdir()
+    package = root / "too-large.gfproject"
+    gf.GraphForge(str(source)).export_portable(
+        output_path=str(package), representation="expanded", profile="complete"
+    )
+    manifest_path = package / "data" / "graphforge-project.json"
+    manifest = json.loads(manifest_path.read_text())
+    del manifest["package_digest"]
+    manifest["components"][0]["files"][0]["length"] += 1 << 43
+    preimage = b"graphforge-project/2\0" + canonical(manifest).encode()
+    manifest["package_digest"] = "sha256:" + hashlib.sha256(preimage).hexdigest()
+    manifest_path.write_text(canonical(manifest))
+    return package
+
+
+def refused_import(target: Path, package: Path) -> Exception:
+    import graphforge as gf
+
+    try:
+        gf.GraphForge.import_portable(
+            project_root=str(target), input=str(package), operation_id=str(uuid.uuid4())
+        )
+    except Exception as error:
+        return error
+    raise AssertionError("the import was admitted")
+
+
+def check_import_refusals_keep_their_identity() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        package = package_too_large_for_any_disk(root)
+        target = root / "destination"
+        error = refused_import(target, package)
+        assert getattr(error, "code", None) == "GF_STORAGE", error
+        assert error.diagnostics[0]["code"] == "storage.insufficient_space", error.diagnostics
+        assert "bytes available beside the target" in error.diagnostics[0]["message"]
+        assert not target.exists()
+        if sys.platform.startswith("linux"):
+            # `/dev/shm` is tmpfs, which the durable-publication contract does not admit.
+            with tempfile.TemporaryDirectory(dir="/dev/shm") as shm:
+                target = Path(shm) / "destination"
+                error = refused_import(target, package)
+                assert getattr(error, "code", None) == "GF_UNSUPPORTED_FILESYSTEM", error
+                assert error.diagnostics[0]["code"] == "storage.unsupported_filesystem"
+                assert "GF_UNSUPPORTED_FILESYSTEM" in error.diagnostics[0]["message"]
+                assert not target.exists()
+
+
 def main() -> None:
     check_retired_format_is_rejected_before_target_creation()
+    check_import_refusals_keep_their_identity()
     check_portable_parity()
     check_shared_verification_receipts()
 
