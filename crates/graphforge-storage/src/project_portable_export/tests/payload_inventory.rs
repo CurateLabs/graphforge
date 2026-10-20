@@ -497,7 +497,7 @@ fn a_bundle_with_a_tampered_inventory_row_is_refused() {
 
 /// Each bundle member as `(path, start, end)` byte offsets, its PAX header
 /// included, read independently of the verifier.
-fn bundle_members(bundle: &[u8]) -> Vec<(String, usize, usize)> {
+pub(super) fn bundle_members(bundle: &[u8]) -> Vec<(String, usize, usize)> {
     let octal = |field: &[u8]| {
         let text = std::str::from_utf8(field).unwrap();
         usize::from_str_radix(text.trim_matches(['\0', ' ']), 8).unwrap()
@@ -538,7 +538,7 @@ fn bundle_members(bundle: &[u8]) -> Vec<(String, usize, usize)> {
 }
 
 /// Rebuild a bundle from `members` of `bundle` in the given order.
-fn reassemble(bundle: &[u8], members: &[&(String, usize, usize)]) -> Vec<u8> {
+pub(super) fn reassemble(bundle: &[u8], members: &[&(String, usize, usize)]) -> Vec<u8> {
     let mut output = Vec::new();
     for (_, start, end) in members {
         output.extend_from_slice(&bundle[*start..*end]);

@@ -11,8 +11,8 @@ use crate::project_portable::pax::{self, test_seam::lower_ustar_size_limit};
 use crate::{PortableReport, PortableRepresentation};
 
 /// One regular bundle entry as its headers encode it.
-struct BundleEntry {
-    path: String,
+pub(super) struct BundleEntry {
+    pub(super) path: String,
     ustar_size_field: u64,
     pax_size: Option<u64>,
     length: u64,
@@ -28,7 +28,7 @@ fn padded(length: u64) -> usize {
 }
 
 /// Walk a canonical bundle independently of the verifier under test.
-fn bundle_entries(bundle: &[u8]) -> Vec<BundleEntry> {
+pub(super) fn bundle_entries(bundle: &[u8]) -> Vec<BundleEntry> {
     let mut entries = Vec::new();
     let mut offset = 0;
     let mut pending: Option<pax::PaxHeader> = None;
@@ -103,7 +103,7 @@ fn import(source: &Path, target: &Path, generation: &ResolvedProjectGeneration) 
     .unwrap();
 }
 
-fn verify(bundle: &Path) -> Result<PortableReport, PortableError> {
+pub(super) fn verify(bundle: &Path) -> Result<PortableReport, PortableError> {
     crate::verify_portable(
         bundle,
         crate::PortableMode::Full,
