@@ -15,6 +15,7 @@ use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Mutex, MutexGuard};
 
 use graphforge_api::{
     GraphForge, IrLiteral, MemoryOciRegistry, PortableSelection, PortableV2ExportRequest,
@@ -22,7 +23,7 @@ use graphforge_api::{
     publish_portable_v2_oci_with_registry, pull_portable_v2_oci_with_registry,
 };
 use graphforge_core::portable::{PortableV2Error, PortableV2ErrorCode, PortableV2Limits};
-use graphforge_portable_oci::DigestingReader;
+use graphforge_portable_oci::{DigestingReader, digest_reader};
 use graphforge_storage::{PortableV2Output, PortableV2SelectionProfile};
 
 struct Counting;
@@ -72,6 +73,15 @@ unsafe impl GlobalAlloc for Counting {
 
 #[global_allocator]
 static ALLOCATOR: Counting = Counting;
+
+/// The counters are process-wide, so the tests here do not overlap.
+static SERIAL: Mutex<()> = Mutex::new(());
+
+fn serial() -> MutexGuard<'static, ()> {
+    SERIAL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 
 /// Run `operation`; return its result and the most bytes it held live at once
 /// above where it started.
@@ -198,6 +208,7 @@ fn export_large_bundle(dir: &Path, docs: usize, doc_bytes: usize) -> PathBuf {
 
 #[test]
 fn publish_and_pull_hold_a_fixed_buffer_regardless_of_bundle_size() {
+    let _serial = serial();
     let dir = tempfile::tempdir().unwrap();
     let bundle = export_large_bundle(dir.path(), DOCS, 1024 * 1024);
     let bundle_bytes = fs::metadata(&bundle).unwrap().len() as usize;
@@ -262,3 +273,49 @@ fn publish_and_pull_hold_a_fixed_buffer_regardless_of_bundle_size() {
 const DOCS: usize = 32;
 const COPY_BUFFER_BYTES: usize = 256 * 1024;
 const PEAK_BOUND_BYTES: usize = 1024 * 1024;
+
+/// Yields `remaining` deterministic bytes without holding them.
+struct Generated {
+    remaining: usize,
+    next: u8,
+}
+
+impl Read for Generated {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let read = buf.len().min(self.remaining);
+        for byte in &mut buf[..read] {
+            *byte = self.next;
+            self.next = self.next.wrapping_mul(31).wrapping_add(7);
+        }
+        self.remaining -= read;
+        Ok(read)
+    }
+}
+
+/// The memory registry keeps what it is given, so its retained bytes are the
+/// layer. Uploading must not add a second whole-layer copy on top of that.
+#[test]
+fn memory_registry_upload_adds_no_second_copy_of_the_layer() {
+    let _serial = serial();
+    const LAYER: usize = 8 * 1024 * 1024;
+    const OVERHEAD_BOUND: usize = 512 * 1024;
+    let generated = || Generated {
+        remaining: LAYER,
+        next: 1,
+    };
+    let (digest, size) = digest_reader(&mut generated(), 64 * 1024).unwrap();
+    let registry = MemoryOciRegistry::default();
+    let baseline = CURRENT.load(Ordering::Relaxed);
+    let (uploaded, peak) = peak_live_bytes(|| {
+        registry.put_blob_stream("tests/large", &digest, size, &mut generated())
+    });
+    uploaded.unwrap();
+    let retained = CURRENT.load(Ordering::Relaxed).saturating_sub(baseline);
+    eprintln!("layer={LAYER} retained={retained} peak={peak}");
+    assert!(retained >= LAYER, "the registry holds the layer");
+    assert!(
+        peak.saturating_sub(retained) < OVERHEAD_BOUND,
+        "upload held {} bytes beyond the {retained} it retained",
+        peak.saturating_sub(retained)
+    );
+}
