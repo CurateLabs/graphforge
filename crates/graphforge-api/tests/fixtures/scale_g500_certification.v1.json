@@ -47,7 +47,7 @@
   },
   "identity_reconciliation": {
     "source_generation": "distinct durable source generation identity",
-    "semantic_package": "portable-v2 semantic package digest",
+    "semantic_package": "portable semantic package digest",
     "transport": "bundle transport digest distinct from semantic package digest",
     "imported_generation": "distinct durable imported generation identity",
     "authority": "source and imported ontology/capability fingerprints must match",

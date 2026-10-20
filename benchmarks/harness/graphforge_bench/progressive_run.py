@@ -1184,7 +1184,7 @@ def _construction_metrics(
 
 
 def _portable_allocation(graphforge: Mapping[str, Any]) -> Mapping[str, Any]:
-    receipt = _phase_bound_receipt(graphforge, "export", "graphforge-portable-export/2")
+    receipt = _phase_bound_receipt(graphforge, "export", "graphforge-portable-export/1")
     names = (
         "allocation_logical_bytes",
         "allocation_allocated_bytes",

@@ -72,7 +72,7 @@
           "type": "object", "additionalProperties": false,
           "required": ["contract", "allocation_logical_bytes", "allocation_allocated_bytes", "allocation_physical_objects"],
           "properties": {
-            "contract": {"const": "graphforge-portable-export/2"},
+            "contract": {"const": "graphforge-portable-export/1"},
             "allocation_logical_bytes": {"$ref": "#/$defs/nonnegative"},
             "allocation_allocated_bytes": {"$ref": "#/$defs/nonnegative"},
             "allocation_physical_objects": {"$ref": "#/$defs/nonnegative"}

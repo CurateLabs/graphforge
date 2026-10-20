@@ -945,7 +945,7 @@
               {
                 "if": {
                   "properties": {
-                    "contract": { "const": "graphforge-portable-export/2" }
+                    "contract": { "const": "graphforge-portable-export/1" }
                   },
                   "required": ["contract"]
                 },
