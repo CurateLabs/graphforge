@@ -209,7 +209,7 @@ impl parquet::file::reader::ChunkReader for EntryWindow {
     }
 
     fn get_bytes(&self, start: u64, length: usize) -> parquet::errors::Result<bytes::Bytes> {
-        let end = start
+        start
             .checked_add(length as u64)
             .filter(|end| *end <= self.length)
             .ok_or_else(|| {
@@ -217,7 +217,7 @@ impl parquet::file::reader::ChunkReader for EntryWindow {
             })?;
         let mut file = &self.file;
         file.seek(SeekFrom::Start(self.base + start))?;
-        let mut buffer = vec![0_u8; (end - start) as usize];
+        let mut buffer = vec![0_u8; length];
         file.read_exact(&mut buffer)?;
         Ok(buffer.into())
     }
