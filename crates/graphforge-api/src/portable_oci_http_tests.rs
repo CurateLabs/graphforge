@@ -8,16 +8,34 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::thread;
 
+/// Faults for the loopback registry; `0` means never.
+#[derive(Clone, Copy, Default)]
+struct ServerFaults {
+    /// Close the connection halfway through this (1-based) PATCH body.
+    drop_patch: usize,
+    /// Close the connection halfway through this (1-based) ranged GET body.
+    drop_range: usize,
+}
+
 struct RegistryServer {
     host: String,
     worker: Option<thread::JoinHandle<()>>,
+    registry: std::sync::Arc<MemoryOciRegistry>,
 }
 impl RegistryServer {
     fn start() -> Self {
+        Self::start_with(ServerFaults::default())
+    }
+
+    fn start_with(faults: ServerFaults) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let host = listener.local_addr().unwrap().to_string();
+        let registry = std::sync::Arc::new(MemoryOciRegistry::default());
+        let served = std::sync::Arc::clone(&registry);
         let worker = thread::spawn(move || {
-            let registry = MemoryOciRegistry::default();
+            let registry = served;
+            let mut pending = Vec::new();
+            let (mut patches, mut ranges) = (0, 0);
             loop {
                 let (mut stream, _) = listener.accept().unwrap();
                 let mut header = Vec::new();
@@ -34,16 +52,27 @@ impl RegistryServer {
                 if path == "/stop" {
                     break;
                 }
-                let length: usize = header
-                    .lines()
-                    .find_map(|line| {
+                let header_value = |name: &str| -> Option<String> {
+                    header.lines().find_map(|line| {
                         line.split_once(':')
-                            .filter(|(name, _)| name.eq_ignore_ascii_case("content-length"))
-                            .map(|(_, value)| value.trim().parse().unwrap())
+                            .filter(|(key, _)| key.eq_ignore_ascii_case(name))
+                            .map(|(_, value)| value.trim().to_owned())
                     })
+                };
+                let length: usize = header_value("content-length")
+                    .map(|value| value.parse().unwrap())
                     .unwrap_or(0);
                 let mut body = vec![0; length];
-                stream.read_exact(&mut body).unwrap();
+                if method == "PATCH" {
+                    patches += 1;
+                    if patches == faults.drop_patch {
+                        let _ = stream.read_exact(&mut body[..length / 2]);
+                        continue;
+                    }
+                }
+                if stream.read_exact(&mut body).is_err() {
+                    continue;
+                }
                 let (status, extra, response) = if let Some(digest) =
                     path.strip_prefix("/v2/tests/portable/blobs/")
                 {
@@ -58,15 +87,50 @@ impl RegistryServer {
                             vec![],
                         )
                     } else if method == "POST" {
+                        pending.clear();
                         (202, "Location: /upload\r\n".into(), vec![])
                     } else {
                         match registry.get_blob("tests/portable", digest) {
-                            Ok(body) => (200, String::new(), body),
+                            Ok(blob) => {
+                                if let Some(range) = header_value("range") {
+                                    ranges += 1;
+                                    let (first, last) = range
+                                        .strip_prefix("bytes=")
+                                        .unwrap()
+                                        .split_once('-')
+                                        .unwrap();
+                                    let first: usize = first.parse().unwrap();
+                                    let last = last.parse::<usize>().unwrap().min(blob.len() - 1);
+                                    let part = &blob[first..=last];
+                                    let extra = format!(
+                                        "Content-Range: bytes {first}-{last}/{}\r\n",
+                                        blob.len()
+                                    );
+                                    if ranges == faults.drop_range {
+                                        let _ = write!(
+                                            stream,
+                                            "HTTP/1.1 206 Partial\r\n{extra}Content-Length: {}\r\nConnection: close\r\n\r\n",
+                                            part.len()
+                                        );
+                                        let _ = stream.write_all(&part[..part.len() / 2]);
+                                        continue;
+                                    }
+                                    (206, extra, part.to_vec())
+                                } else {
+                                    (200, String::new(), blob)
+                                }
+                            }
                             Err(_) => (404, String::new(), vec![]),
                         }
                     }
+                } else if path == "/upload" && method == "PATCH" {
+                    pending.extend_from_slice(&body);
+                    (202, "Location: /upload\r\n".into(), vec![])
                 } else if let Some(digest) = path.strip_prefix("/upload?digest=") {
-                    registry.put_blob("tests/portable", digest, &body).unwrap();
+                    pending.extend_from_slice(&body);
+                    registry
+                        .put_blob("tests/portable", digest, &std::mem::take(&mut pending))
+                        .unwrap();
                     (201, String::new(), vec![])
                 } else if let Some(reference) = path.strip_prefix("/v2/tests/portable/manifests/") {
                     if method == "PUT" {
@@ -94,6 +158,7 @@ impl RegistryServer {
         Self {
             host,
             worker: Some(worker),
+            registry,
         }
     }
 }
