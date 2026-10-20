@@ -45,6 +45,51 @@ pub struct LineageForkOrigin {
     pub origin_committer: Option<CreditSignature>,
 }
 
+impl LineageForkOrigin {
+    /// This published citation completed with the origin credit that `next`
+    /// verifies, or `None` when `next` is not the same citation.
+    ///
+    /// Every origin identity field must be equal. The Version identity commits to
+    /// author and committer (ADR 0055), so credit absent from a citation published
+    /// before credit display is filled from `next`; credit already published may be
+    /// neither changed nor removed. One rule serves the publisher's merge and the
+    /// Hub's history check, so the two cannot disagree.
+    #[must_use]
+    pub fn completed_by(&self, next: &Self) -> Option<Self> {
+        // Exhaustive destructuring: a new field must be classified here.
+        let Self {
+            origin_repository,
+            origin_project_uuid,
+            origin_version_uuid,
+            origin_version_identity,
+            origin_author,
+            origin_committer,
+        } = self;
+        if *origin_repository != next.origin_repository
+            || *origin_project_uuid != next.origin_project_uuid
+            || *origin_version_uuid != next.origin_version_uuid
+            || *origin_version_identity != next.origin_version_identity
+        {
+            return None;
+        }
+        let fill = |published: &Option<CreditSignature>, verified: &Option<CreditSignature>| {
+            match published {
+                None => Some(verified.clone()),
+                Some(_) if published == verified => Some(published.clone()),
+                Some(_) => None,
+            }
+        };
+        Some(Self {
+            origin_repository: origin_repository.clone(),
+            origin_project_uuid: origin_project_uuid.clone(),
+            origin_version_uuid: origin_version_uuid.clone(),
+            origin_version_identity: origin_version_identity.clone(),
+            origin_author: fill(origin_author, &next.origin_author)?,
+            origin_committer: fill(origin_committer, &next.origin_committer)?,
+        })
+    }
+}
+
 /// Immutable Branch genealogy and creation selection commitment.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

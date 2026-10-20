@@ -104,6 +104,109 @@ fn credit_may_be_added_to_a_pre_credit_entry_but_never_changed_or_removed() {
     removed.versions[1].committer = None;
     assert!(validate_history_transition(&credited, &removed, &refs, true, true, limits).is_err());
 }
+fn citation(
+    author: Option<&str>,
+    committer: Option<&str>,
+) -> graphforge_discovery::LineageForkOrigin {
+    let credit = |name: &str| graphforge_discovery::CreditSignature {
+        name: name.into(),
+        email: None,
+        orcid: None,
+    };
+    graphforge_discovery::LineageForkOrigin {
+        origin_repository: RepositoryIdentity::parse("curate/origin").unwrap(),
+        origin_project_uuid: uuid(7),
+        origin_version_uuid: uuid(8),
+        origin_version_identity: Sha256Digest(sha256_digest(b"origin identity")),
+        origin_author: author.map(credit),
+        origin_committer: committer.map(credit),
+    }
+}
+
+#[test]
+fn fork_origin_credit_may_be_filled_but_never_changed_or_removed() {
+    let refs = vec!["main".into()];
+    let limits = DiscoveryLimits::default();
+    let transition = |old: Option<graphforge_discovery::LineageForkOrigin>,
+                      new: Option<graphforge_discovery::LineageForkOrigin>| {
+        let mut previous = lineage();
+        previous.fork = old;
+        let mut next = previous.clone();
+        next.fork = new;
+        validate_history_transition(&previous, &next, &refs, false, false, limits)
+    };
+    // A citation published before credit display gains it (both, or either).
+    assert!(
+        transition(
+            Some(citation(None, None)),
+            Some(citation(Some("Ada"), Some("Grace")))
+        )
+        .is_ok()
+    );
+    assert!(
+        transition(
+            Some(citation(None, None)),
+            Some(citation(Some("Ada"), None))
+        )
+        .is_ok()
+    );
+    assert!(
+        transition(
+            Some(citation(Some("Ada"), None)),
+            Some(citation(Some("Ada"), Some("Grace")))
+        )
+        .is_ok()
+    );
+    // An identical citation is untouched.
+    assert!(
+        transition(
+            Some(citation(Some("Ada"), Some("Grace"))),
+            Some(citation(Some("Ada"), Some("Grace")))
+        )
+        .is_ok()
+    );
+    // Published credit is permanent: changed or removed is a different origin.
+    assert!(
+        transition(
+            Some(citation(Some("Ada"), None)),
+            Some(citation(Some("Mallory"), None))
+        )
+        .is_err()
+    );
+    assert!(
+        transition(
+            Some(citation(Some("Ada"), Some("Grace"))),
+            Some(citation(Some("Ada"), None))
+        )
+        .is_err()
+    );
+    assert!(
+        transition(
+            Some(citation(Some("Ada"), None)),
+            Some(citation(None, None))
+        )
+        .is_err()
+    );
+    // Filling credit never excuses a different origin identity.
+    for tamper in [
+        |c: &mut graphforge_discovery::LineageForkOrigin| {
+            c.origin_repository = RepositoryIdentity::parse("curate/elsewhere").unwrap();
+        },
+        |c: &mut graphforge_discovery::LineageForkOrigin| c.origin_project_uuid = uuid(9),
+        |c: &mut graphforge_discovery::LineageForkOrigin| c.origin_version_uuid = uuid(9),
+        |c: &mut graphforge_discovery::LineageForkOrigin| {
+            c.origin_version_identity = Sha256Digest(sha256_digest(b"other"));
+        },
+    ] {
+        let mut changed = citation(Some("Ada"), Some("Grace"));
+        tamper(&mut changed);
+        assert!(transition(Some(citation(None, None)), Some(changed)).is_err());
+    }
+    // A citation is neither dropped nor introduced.
+    assert!(transition(Some(citation(None, None)), None).is_err());
+    assert!(transition(None, Some(citation(None, None))).is_err());
+    assert!(transition(None, None).is_ok());
+}
 #[test]
 fn pruning_is_explicit_and_preserves_surviving_parent_and_origin_dependencies() {
     let old = lineage();

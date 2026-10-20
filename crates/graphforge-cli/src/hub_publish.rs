@@ -1148,8 +1148,15 @@ fn merge_lineage(
             "the repository publishes a different research Project",
         ));
     }
-    if previous.fork.is_some() && previous.fork != next.fork {
-        return Err(invalid("the repository cites a different Fork origin"));
+    if let Some(published) = &previous.fork {
+        // The same citation, with origin credit filled where it was published
+        // without any; changed or removed credit is a different origin.
+        next.fork = Some(
+            next.fork
+                .as_ref()
+                .and_then(|proposed| published.completed_by(proposed))
+                .ok_or_else(|| invalid("the repository cites a different Fork origin"))?,
+        );
     }
     let mut versions: BTreeMap<String, _> = previous
         .versions

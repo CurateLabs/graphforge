@@ -88,9 +88,18 @@ pub(crate) fn validate_snapshot_history_transition(
     next.validate(limits)
         .map_err(|_| invalid("proposed research lineage is invalid"))?;
     validate_ref_list(refs)?;
+    // A Fork citation is unchanged except that origin credit absent from one
+    // published before credit display may be filled (see `completed_by`).
+    let same_fork = match (&previous.fork, &next.fork) {
+        (None, None) => true,
+        (Some(published), Some(proposed)) => {
+            published.completed_by(proposed).as_ref() == Some(proposed)
+        }
+        _ => false,
+    };
     if previous.repository != next.repository
         || previous.project_uuid != next.project_uuid
-        || previous.fork != next.fork
+        || !same_fork
     {
         return Err(invalid(
             "publication changes repository or research origin authority",

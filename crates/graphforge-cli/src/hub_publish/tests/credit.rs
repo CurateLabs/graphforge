@@ -349,3 +349,82 @@ fn a_published_credit_that_contradicts_the_local_record_is_refused() {
         assert_eq!(error_code(&error), "hub.publish.integrity_failure");
     }
 }
+
+fn origin(
+    author: Option<&str>,
+    committer: Option<&str>,
+) -> graphforge_discovery::LineageForkOrigin {
+    let credit = |name: &str| graphforge_discovery::CreditSignature {
+        name: name.into(),
+        email: None,
+        orcid: None,
+    };
+    graphforge_discovery::LineageForkOrigin {
+        origin_repository: RepositoryIdentity::parse("curate/origin").unwrap(),
+        origin_project_uuid: Uuid::from_u128(7).to_string(),
+        origin_version_uuid: Uuid::from_u128(8).to_string(),
+        origin_version_identity: Sha256Digest(format!("sha256:{}", "7".repeat(64))),
+        origin_author: author.map(credit),
+        origin_committer: committer.map(credit),
+    }
+}
+
+fn forked(
+    history: &History,
+    head: Uuid,
+    citation: graphforge_discovery::LineageForkOrigin,
+) -> ResearchLineage {
+    let mut lineage = full_lineage(history, head);
+    lineage.fork = Some(citation);
+    lineage
+}
+
+#[test]
+fn republishing_a_pre_credit_fork_adopts_the_verified_origin_credit_and_keeps_every_identity() {
+    let history = history();
+    let head = history.head;
+    let published = forked(&history, head, origin(None, None));
+    let local = forked(&history, head, origin(Some("Ada"), Some("Grace")));
+    let merged = merge_lineage(Some(&published), local.clone(), false, false).unwrap();
+    let cited = merged.fork.as_ref().unwrap();
+    let before = published.fork.as_ref().unwrap();
+    assert_eq!(cited.origin_author.as_ref().unwrap().name, "Ada");
+    assert_eq!(cited.origin_committer.as_ref().unwrap().name, "Grace");
+    assert_eq!(cited.origin_repository, before.origin_repository);
+    assert_eq!(cited.origin_project_uuid, before.origin_project_uuid);
+    assert_eq!(cited.origin_version_uuid, before.origin_version_uuid);
+    assert_eq!(
+        cited.origin_version_identity,
+        before.origin_version_identity
+    );
+    assert_eq!(merged, local);
+    // Credit already published is carried unchanged on a later republish.
+    assert_eq!(
+        merge_lineage(Some(&merged), local, false, false).unwrap(),
+        merged
+    );
+}
+
+#[test]
+fn a_fork_whose_published_origin_credit_differs_or_whose_origin_differs_is_refused() {
+    let history = history();
+    let head = history.head;
+    let published = forked(&history, head, origin(Some("Ada"), Some("Grace")));
+    let mut other_origin = origin(Some("Ada"), Some("Grace"));
+    other_origin.origin_version_uuid = Uuid::from_u128(9).to_string();
+    for (name, proposed) in [
+        ("changed", origin(Some("Mallory"), Some("Grace"))),
+        ("removed", origin(Some("Ada"), None)),
+        ("different origin", other_origin),
+    ] {
+        let local = forked(&history, head, proposed);
+        let error = merge_lineage(Some(&published), local, false, false).expect_err(name);
+        assert_eq!(error_code(&error), "hub.publish.invalid_input", "{name}");
+    }
+    // Filling credit does not excuse a different origin identity either.
+    let pre_credit = forked(&history, head, origin(None, None));
+    let mut shifted = origin(Some("Ada"), Some("Grace"));
+    shifted.origin_project_uuid = Uuid::from_u128(10).to_string();
+    let local = forked(&history, head, shifted);
+    assert!(merge_lineage(Some(&pre_credit), local, false, false).is_err());
+}
