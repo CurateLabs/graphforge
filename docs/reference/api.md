@@ -41,7 +41,7 @@ Portable project movement is exposed through the Rust-owned preview, export,
 verify, complete-import, OCI-publish, and OCI-pull facades. Python, Node, and
 the CLI project the same typed receipts and failures; they do not implement
 archive, selection, or registry behavior. Start with the user workflow in
-[Move projects with portable project v2](../guide/portable-projects.md), then
+[Move projects with portable projects](../guide/portable-projects.md), then
 use the [normative architecture contract](../book/architecture/portable-project.md)
 for exact types, limits, identities, and security states.
 

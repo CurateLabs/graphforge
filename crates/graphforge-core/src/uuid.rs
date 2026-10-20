@@ -205,6 +205,10 @@ mod tests {
         let version_b = format!("sha256:{}", "b".repeat(64));
         let vectors = [
             (
+                new_v5(&operation, b"graphforge-portable-import-generation/1"),
+                "02abd337-e93c-56a3-bf8f-dadbb5b1e8d5",
+            ),
+            (
                 portable_import_generation(&operation),
                 "167a58d3-52f2-533e-b3c4-01d743d7537d",
             ),

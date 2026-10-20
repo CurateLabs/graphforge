@@ -197,7 +197,7 @@ export default defineConfig({
                   slug: "book/architecture/project-format-compatibility",
                 },
                 {
-                  label: "Portable Project v2",
+                  label: "Portable Project",
                   slug: "book/architecture/portable-project",
                 },
                 {

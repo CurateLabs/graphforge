@@ -1,4 +1,4 @@
-# Portable project v2
+# Portable project
 
 This document is normative. **MUST**, **MUST NOT**, **REQUIRED**, **SHOULD**, and
 **MAY** have their RFC 2119 meanings. ADR 0021 records the format choice.

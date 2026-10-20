@@ -1,10 +1,10 @@
-# Move projects with portable project v2
+# Move projects with portable projects
 
 **Advanced · Assumes basic Python, database, and terminal skills.**
 Start with the [Advanced introduction](advanced.md) for GraphForge terminology,
 or [Basic](overview.md#basic) for a guided first graph.
 
-Portable project v2 is GraphForge's primary workflow for moving a project
+Portable projects are GraphForge's primary workflow for moving a project
 between workspaces, machines, and registries. It packages one immutable project
 generation with a canonical semantic identity. Use it for local copies,
 air-gapped transfer, selective sharing, and OCI promotion.
@@ -414,7 +414,7 @@ pull methods without wrapper-owned archive, selection, registry, or fallback
 semantics. Counts and byte sizes remain lossless at the binding boundary.
 
 For the normative layout, identity, resource, compatibility, and security
-contract, see [Portable project v2 architecture](../book/architecture/portable-project.md)
+contract, see [Portable project architecture](../book/architecture/portable-project.md)
 and [ADR 0021](../adr/0021-portable-project.md).
 
 Primary `export` and `import` reuse the streaming `graphforge-portable-export/2`

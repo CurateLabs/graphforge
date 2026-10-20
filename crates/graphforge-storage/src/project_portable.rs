@@ -1,4 +1,4 @@
-//! Bounded, read-only verification for portable project v2 packages.
+//! Bounded, read-only verification for portable project packages.
 //!
 //! This module deliberately does not use a general tar decoder: portable's
 //! canonical bundle bytes are narrower than the formats those decoders accept.

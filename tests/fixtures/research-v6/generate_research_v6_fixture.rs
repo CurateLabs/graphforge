@@ -110,9 +110,9 @@ fn main() {
             &cancel,
         )
         .unwrap();
-    GraphForge::import_portable(
+    GraphForge::import_portable_v2(
         &out.join("imported"),
-        &PortableImportRequest {
+        &PortableV2ImportRequest {
             input: out.join("package.gfpb"),
             operation_id: OperationId(Uuid::now_v7()),
             limits: Default::default(),

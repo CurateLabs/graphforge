@@ -43,7 +43,7 @@ pub fn open_package_file(path: &Path, report: &PortableReport) -> Result<File, P
     if report.representation != PortableRepresentation::Bundle {
         return Err(PortableError::new(
             PortableErrorCode::Incompatible,
-            "OCI publish currently requires a bundle representation",
+            "OCI publish currently requires a portable bundle representation",
         ));
     }
     File::open(path)
