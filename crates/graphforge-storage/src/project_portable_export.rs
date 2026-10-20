@@ -744,6 +744,7 @@ mod tests {
     mod parquet_profile;
     mod participant_files;
     mod payload_inventory;
+    mod research_layout;
     mod saved_queries;
     mod semantic_refusals;
     use super::planning::exact_identity;

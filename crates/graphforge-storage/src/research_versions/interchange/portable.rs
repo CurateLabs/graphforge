@@ -1,5 +1,8 @@
 //! Closed portable registry admission and exact CAS closure accounting.
-use super::super::{BTreeMap, BTreeSet, Digest, GfError, ResearchRegistry, Sha256, hex, invalid};
+use super::super::{
+    BTreeMap, BTreeSet, Digest, GfError, ResearchRegistry, ResearchVersionRecord, Sha256, Uuid,
+    hex, invalid,
+};
 
 pub(crate) fn portable_registry(bytes: &[u8]) -> Result<ResearchRegistry, GfError> {
     if bytes.len() > super::super::MAX_REGISTRY_BYTES {
@@ -22,71 +25,61 @@ pub(crate) fn portable_registry(bytes: &[u8]) -> Result<ResearchRegistry, GfErro
     Ok(registry)
 }
 
-/// Authenticate participant control bytes and derive the exact exported object set.
-/// File contents are also covered by the outer verifier's streaming digest checks.
-pub(crate) fn portable_objects(
-    registry: &ResearchRegistry,
+/// Authenticate one Version's participant control bytes and derive its exact exported
+/// object set. File contents are also covered by the outer verifier's streaming digest checks.
+pub(crate) fn version_objects(
+    version: &ResearchVersionRecord,
     mut read: impl FnMut(&str, u64) -> Result<Vec<u8>, GfError>,
 ) -> Result<BTreeMap<String, Option<u64>>, GfError> {
     let mut objects = BTreeMap::new();
-    for version in registry.versions.values() {
-        for participant in &version.content.participants {
-            let digest = hex(&participant.content_sha256);
-            let bytes = read(&digest, super::super::participant_byte_bound(participant))?;
-            if hex(&Sha256::digest(&bytes).into()) != digest {
-                return Err(invalid("portable research participant identity conflicts"));
-            }
-            super::super::validate_saved_query_participant(participant, &bytes)?;
-            if participant.key.capability == "workspace"
-                && participant.key.family == "configuration"
-            {
-                let value = serde_json::from_slice(&bytes)
-                    .map_err(|_| invalid("invalid research settings"))?;
-                crate::project_portable_selection::validate_setting_value(None, &value).map_err(
-                    |_| {
-                        invalid(
-                            "secret-bearing or host-specific research settings are not portable",
-                        )
-                    },
-                )?;
-            }
-            add(&mut objects, digest, Some(bytes.len() as u64))?;
-            if participant.key.capability == "graph" && participant.key.family == "files" {
-                let files = match crate::graph_files::decode_versioned_graph_files_participant(
-                    participant.record_version,
-                    &bytes,
-                )? {
-                    crate::GraphFilesParticipant::V1(inventory) => inventory.files,
-                    crate::GraphFilesParticipant::V2(root) => {
-                        crate::resolve_graph_manifest(
-                            &root,
-                            crate::GraphManifestLimits::default(),
-                            |digest| {
-                                let bytes = read(
-                                    digest,
-                                    crate::graph_manifest::GRAPH_MANIFEST_NODE_MAX_BYTES,
-                                )?;
-                                add(&mut objects, digest.to_owned(), Some(bytes.len() as u64))?;
-                                Ok(bytes)
-                            },
-                        )?
-                        .0
-                    }
-                };
-                for file in files {
-                    add(&mut objects, file.content_sha256, Some(file.byte_length))?;
+    for participant in &version.content.participants {
+        let digest = hex(&participant.content_sha256);
+        let bytes = read(&digest, super::super::participant_byte_bound(participant))?;
+        if hex(&Sha256::digest(&bytes).into()) != digest {
+            return Err(invalid("portable research participant identity conflicts"));
+        }
+        super::super::validate_saved_query_participant(participant, &bytes)?;
+        if participant.key.capability == "workspace" && participant.key.family == "configuration" {
+            let value =
+                serde_json::from_slice(&bytes).map_err(|_| invalid("invalid research settings"))?;
+            crate::project_portable_selection::validate_setting_value(None, &value).map_err(
+                |_| invalid("secret-bearing or host-specific research settings are not portable"),
+            )?;
+        }
+        add(&mut objects, digest, Some(bytes.len() as u64))?;
+        if participant.key.capability == "graph" && participant.key.family == "files" {
+            let files = match crate::graph_files::decode_versioned_graph_files_participant(
+                participant.record_version,
+                &bytes,
+            )? {
+                crate::GraphFilesParticipant::V1(inventory) => inventory.files,
+                crate::GraphFilesParticipant::V2(root) => {
+                    crate::resolve_graph_manifest(
+                        &root,
+                        crate::GraphManifestLimits::default(),
+                        |digest| {
+                            let bytes =
+                                read(digest, crate::graph_manifest::GRAPH_MANIFEST_NODE_MAX_BYTES)?;
+                            add(&mut objects, digest.to_owned(), Some(bytes.len() as u64))?;
+                            Ok(bytes)
+                        },
+                    )?
+                    .0
                 }
+            };
+            for file in files {
+                add(&mut objects, file.content_sha256, Some(file.byte_length))?;
             }
         }
-        for evidence in &version.content.evidence {
-            if let super::super::ResearchEvidenceReference::Local {
-                sha256,
-                byte_length,
-                ..
-            } = evidence
-            {
-                add(&mut objects, hex(sha256), Some(*byte_length))?;
-            }
+    }
+    for evidence in &version.content.evidence {
+        if let super::super::ResearchEvidenceReference::Local {
+            sha256,
+            byte_length,
+            ..
+        } = evidence
+        {
+            add(&mut objects, hex(sha256), Some(*byte_length))?;
         }
     }
     Ok(objects)
@@ -106,100 +99,97 @@ fn add(
     Ok(())
 }
 
-/// Derive closure from identities authenticated by the outer portable scanner.
+/// Derive one Version's closure from identities authenticated by the outer portable scanner.
 /// Only settings, saved definitions, graph inventories and manifest nodes need decoding;
 /// Arrow/Parquet participant bodies are not composition metadata.
-pub(crate) fn portable_objects_admitted(
-    registry: &ResearchRegistry,
+pub(crate) fn version_objects_admitted(
+    version: &ResearchVersionRecord,
     mut length: impl FnMut(&str) -> Result<u64, GfError>,
     mut read_control: impl FnMut(&str, u64) -> Result<Vec<u8>, GfError>,
 ) -> Result<BTreeMap<String, Option<u64>>, GfError> {
     let mut objects = BTreeMap::new();
-    for version in registry.versions.values() {
-        for participant in &version.content.participants {
-            let digest = hex(&participant.content_sha256);
-            let byte_length = length(&digest)?;
-            if byte_length > super::super::participant_byte_bound(participant) {
-                return Err(invalid("portable research participant exceeds its bound"));
-            }
-            add(&mut objects, digest.clone(), Some(byte_length))?;
-            if participant.key.capability == crate::WORKSPACE_CAPABILITY_ID
-                && participant.key.family == crate::WORKSPACE_SAVED_QUERIES_FAMILY
-            {
-                let bytes =
-                    read_control(&digest, super::super::participant_byte_bound(participant))?;
-                super::super::validate_saved_query_participant(participant, &bytes)?;
-            }
-            if participant.key.capability == "workspace"
-                && participant.key.family == "configuration"
-            {
-                let bytes = read_control(&digest, 256 * 1024 * 1024)?;
-                let value = serde_json::from_slice(&bytes)
-                    .map_err(|_| invalid("invalid research settings"))?;
-                crate::project_portable_selection::validate_setting_value(None, &value).map_err(
-                    |_| {
-                        invalid(
-                            "secret-bearing or host-specific research settings are not portable",
-                        )
-                    },
-                )?;
-            }
-            if participant.key.capability == "graph" && participant.key.family == "files" {
-                let bytes = read_control(&digest, 256 * 1024 * 1024)?;
-                let files = match crate::graph_files::decode_versioned_graph_files_participant(
-                    participant.record_version,
-                    &bytes,
-                )? {
-                    crate::GraphFilesParticipant::V1(inventory) => inventory.files,
-                    crate::GraphFilesParticipant::V2(root) => {
-                        crate::resolve_graph_manifest(
-                            &root,
-                            crate::GraphManifestLimits::default(),
-                            |digest| {
-                                let bytes = read_control(
-                                    digest,
-                                    crate::graph_manifest::GRAPH_MANIFEST_NODE_MAX_BYTES,
-                                )?;
-                                add(&mut objects, digest.to_owned(), Some(bytes.len() as u64))?;
-                                Ok(bytes)
-                            },
-                        )?
-                        .0
-                    }
-                };
-                for file in files {
-                    add(&mut objects, file.content_sha256, Some(file.byte_length))?;
+    for participant in &version.content.participants {
+        let digest = hex(&participant.content_sha256);
+        let byte_length = length(&digest)?;
+        if byte_length > super::super::participant_byte_bound(participant) {
+            return Err(invalid("portable research participant exceeds its bound"));
+        }
+        add(&mut objects, digest.clone(), Some(byte_length))?;
+        if participant.key.capability == crate::WORKSPACE_CAPABILITY_ID
+            && participant.key.family == crate::WORKSPACE_SAVED_QUERIES_FAMILY
+        {
+            let bytes = read_control(&digest, super::super::participant_byte_bound(participant))?;
+            super::super::validate_saved_query_participant(participant, &bytes)?;
+        }
+        if participant.key.capability == "workspace" && participant.key.family == "configuration" {
+            let bytes = read_control(&digest, 256 * 1024 * 1024)?;
+            let value =
+                serde_json::from_slice(&bytes).map_err(|_| invalid("invalid research settings"))?;
+            crate::project_portable_selection::validate_setting_value(None, &value).map_err(
+                |_| invalid("secret-bearing or host-specific research settings are not portable"),
+            )?;
+        }
+        if participant.key.capability == "graph" && participant.key.family == "files" {
+            let bytes = read_control(&digest, 256 * 1024 * 1024)?;
+            let files = match crate::graph_files::decode_versioned_graph_files_participant(
+                participant.record_version,
+                &bytes,
+            )? {
+                crate::GraphFilesParticipant::V1(inventory) => inventory.files,
+                crate::GraphFilesParticipant::V2(root) => {
+                    crate::resolve_graph_manifest(
+                        &root,
+                        crate::GraphManifestLimits::default(),
+                        |digest| {
+                            let bytes = read_control(
+                                digest,
+                                crate::graph_manifest::GRAPH_MANIFEST_NODE_MAX_BYTES,
+                            )?;
+                            add(&mut objects, digest.to_owned(), Some(bytes.len() as u64))?;
+                            Ok(bytes)
+                        },
+                    )?
+                    .0
                 }
+            };
+            for file in files {
+                add(&mut objects, file.content_sha256, Some(file.byte_length))?;
             }
         }
-        for evidence in &version.content.evidence {
-            if let super::super::ResearchEvidenceReference::Local {
-                sha256,
-                byte_length,
-                ..
-            } = evidence
-            {
-                add(&mut objects, hex(sha256), Some(*byte_length))?;
-            }
+    }
+    for evidence in &version.content.evidence {
+        if let super::super::ResearchEvidenceReference::Local {
+            sha256,
+            byte_length,
+            ..
+        } = evidence
+        {
+            add(&mut objects, hex(sha256), Some(*byte_length))?;
         }
     }
     Ok(objects)
 }
 
+/// Each Version's complete object closure, keyed by `version_uuid`. A shared object
+/// appears in every Version that needs it.
 pub(crate) fn object_inventory(
     generation: &crate::ResolvedProjectGeneration,
-) -> Result<BTreeSet<String>, GfError> {
+) -> Result<BTreeMap<Uuid, BTreeSet<String>>, GfError> {
     let snapshot = generation
         .participant_snapshot("research", "registry")?
         .ok_or_else(|| invalid("portable research registry is unavailable"))?;
     let registry = portable_registry(&snapshot.bytes)?;
-    let objects = portable_objects(&registry, |digest, limit| {
-        crate::read_graph_object_by_digest(generation.container_root(), digest, limit)
-    })?;
-    for (digest, length) in &objects {
-        if let Some(length) = length {
-            crate::verify_graph_object(generation.container_root(), digest, *length)?;
+    let mut inventory = BTreeMap::new();
+    for (id, version) in &registry.versions {
+        let objects = version_objects(version, |digest, limit| {
+            crate::read_graph_object_by_digest(generation.container_root(), digest, limit)
+        })?;
+        for (digest, length) in &objects {
+            if let Some(length) = length {
+                crate::verify_graph_object(generation.container_root(), digest, *length)?;
+            }
         }
+        inventory.insert(*id, objects.into_keys().collect());
     }
-    Ok(objects.into_keys().collect())
+    Ok(inventory)
 }

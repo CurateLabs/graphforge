@@ -258,7 +258,7 @@ fn research_bundle_streams_to_the_file_verdict() {
     native_failure_is_refused_alike_from_a_file_and_a_stream(directory.path(), &package, limits);
     // A changed research object is refused alike from a file and a stream.
     let mut bytes = std::fs::read(&package).unwrap();
-    let name = b"research-content/";
+    let name = b"research-retained/";
     let header = bytes
         .windows(name.len())
         .position(|window| window == name)
