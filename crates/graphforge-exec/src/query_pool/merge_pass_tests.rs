@@ -541,15 +541,16 @@ async fn a_later_pass_opens_with_its_minimum_in_one_request() {
     );
 }
 
-/// The merge of a spilled aggregate beside a full exchange starts on the one
-/// request the pool guarantees it (#2173). The exchange has taken every byte it
-/// is admitted and a busy partition holds a quarter of the pool; the idle
-/// aggregate has spilled, so its last bulk shrink armed a loan. It admits its
-/// state bound and the narrowest pass of its two files in one request, which
-/// the loan serves although it is past the floor, and the merge asks the pool
-/// for nothing after that.
-#[tokio::test]
-async fn a_spilled_aggregate_merges_beside_a_full_exchange_on_one_request() {
+/// The merge of a spilled aggregate beside a full exchange (#2173). The
+/// exchange has taken every byte it is admitted and a busy partition holds a
+/// quarter of the pool; the idle aggregate has spilled, so its last bulk shrink
+/// armed a loan, the one request the pool guarantees it past its floor.
+/// `pre_reserve` makes the aggregate's request: its state bound and the
+/// narrowest pass of its two files together, which the loan serves although it
+/// is past the floor of 10 MiB. Without it the merge selects on its own, and
+/// the same loan has to carry the whole selection. Either way the merge asks
+/// the pool for nothing once its first reader exists.
+async fn merge_beside_a_full_exchange(pre_reserve: bool) {
     let query: Arc<dyn MemoryPool> = Arc::new(QueryMemoryPool::new(64 * MIB));
     let pool = Recorder::new(Arc::clone(&query));
     let dynamic: Arc<dyn MemoryPool> = Arc::clone(&pool) as Arc<dyn MemoryPool>;
@@ -567,21 +568,16 @@ async fn a_spilled_aggregate_merges_beside_a_full_exchange_on_one_request() {
     assert!(error.contains("0.0 B remain available"), "{error}");
     let filled = pool.requests.lock().unwrap().len();
 
-    let order_bound = {
-        let scratch = Recorder::new(Arc::new(GreedyMemoryPool::new(256 * MIB)));
-        let scratch: Arc<dyn MemoryPool> = scratch;
-        let directory = tempfile::tempdir().unwrap();
-        let scratch_manager = spill_manager(&scratch, &directory);
-        let files = spill_files(&scratch_manager, 2, 4, 8192, |largest| largest);
-        let sponsor = MemoryConsumer::new(SPONSOR).register(&scratch);
-        merge_with_bound(scratch_manager, files.files, sponsor, 8192).1
+    let sponsor = if pre_reserve {
+        let narrowest = narrowest_pass(2, 4, 8192, 8192);
+        assert!(narrowest > 10 * MIB, "{narrowest}");
+        idle.try_grow(narrowest)
+            .expect("the loan serves the one request");
+        idle.split(narrowest)
+    } else {
+        idle
     };
-    // One request, as the aggregate makes it, past its floor of 10 MiB.
-    assert!(order_bound > 10 * MIB, "{order_bound}");
-    idle.try_grow(order_bound)
-        .expect("the loan serves the one request");
-    let pass = idle.split(order_bound);
-    let stream = merge(manager, set.files, pass, 8192);
+    let stream = merge(manager, set.files, sponsor, 8192);
     drain(stream, set.total_rows).await.unwrap();
     let requests = pool.requests.lock().unwrap()[filled..].to_vec();
     let first_reader = requests
@@ -594,4 +590,14 @@ async fn a_spilled_aggregate_merges_beside_a_full_exchange_on_one_request() {
         .collect::<Vec<_>>();
     assert!(late.is_empty(), "asked after its readers: {late:?}");
     assert!(pool.reserved() <= 64 * MIB, "{}", pool.reserved());
+}
+
+#[tokio::test]
+async fn a_spilled_aggregate_merges_beside_a_full_exchange_on_one_request() {
+    merge_beside_a_full_exchange(true).await;
+}
+
+#[tokio::test]
+async fn a_merge_without_a_pre_reserve_beside_a_full_exchange_is_carried_by_the_loan() {
+    merge_beside_a_full_exchange(false).await;
 }
