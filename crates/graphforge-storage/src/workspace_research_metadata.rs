@@ -254,10 +254,6 @@ impl WorkspaceResearchMetadata {
         }
         // The contract version is read first, so a record of another version is
         // refused as unsupported rather than as malformed against this shape.
-        #[derive(Deserialize)]
-        struct Header {
-            contract_version: u32,
-        }
         if let Ok(header) = serde_json::from_slice::<Header>(bytes)
             && header.contract_version != WORKSPACE_RESEARCH_METADATA_VERSION
         {
@@ -566,6 +562,12 @@ fn canonical_json<T: Serialize>(value: &T, label: &str) -> Result<Vec<u8>, GfErr
         return Err(corrupt(format!("{label} exceeds size limit")));
     }
     Ok(bytes)
+}
+
+/// Only the contract version, read before the record's shape.
+#[derive(Deserialize)]
+struct Header {
+    contract_version: u32,
 }
 
 fn parse_canonical_json<T: for<'de> Deserialize<'de>>(
