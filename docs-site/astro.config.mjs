@@ -402,12 +402,12 @@ export default defineConfig({
                   slug: 'adr/0020-ntfs-write-through-namespace-durability',
                 },
                 {
-                  label: '0021 — Portable project v2 package layout and identity',
+                  label: '0021 — Portable project package layout and identity',
                   slug: 'adr/0021-portable-project',
                 },
                 {
-                  label: '0022 — Multi-ontology semantics in portable project v2',
-                  slug: 'adr/0022-portable-multi-ontology-compatibility',
+                  label: '0022 — Multi-ontology semantics in portable projects',
+                  slug: 'adr/0022-multi-ontology-compatibility',
                 },
                 {
                   label: '0023 — Composable ontology modules and semantic bridges',
