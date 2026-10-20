@@ -1945,7 +1945,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             ledger["contract"],
-            "graphforge-portable-v2-multi-ontology-interchange-cases/1"
+            "graphforge-portable-multi-ontology-interchange-cases/1"
         );
         assert_eq!(
             ledger["representations"],
