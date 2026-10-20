@@ -67,7 +67,7 @@ pub fn validate_research_package_stream(
 pub(super) fn validate(
     stage: &Path,
     registry: &ResearchRegistry,
-    objects: &BTreeMap<(Uuid, String), u64>,
+    objects: &crate::project_portable::research::Objects,
     captures: &BTreeMap<String, crate::project_portable::MaterializedCapture>,
     cancelled: Option<&AtomicBool>,
     validator: Option<&mut NativeResearchValidator<'_>>,
@@ -75,10 +75,10 @@ pub(super) fn validate(
     let validator = validator.ok_or_else(invalid)?;
     for (id, version) in &registry.versions {
         check_cancel(cancelled)?;
-        let version_objects: BTreeMap<_, _> = objects
+        let version_objects: crate::project_portable::research::Objects = objects
             .range((*id, String::new())..)
             .take_while(|((owner, _), _)| owner == id)
-            .map(|(key, length)| (key.clone(), *length))
+            .map(|(key, held)| (key.clone(), *held))
             .collect();
         validate_version(
             stage,
@@ -98,13 +98,13 @@ pub(super) fn validate(
 /// The Version's objects are installed into a private object store, and its
 /// historical Project is opened there, both beside the stage, on the
 /// filesystem the caller already admitted and never in the system temporary
-/// directory. Both are removed when this returns. Local evidence that nothing
-/// else in the Version needs is authenticated by the scan and is not read.
+/// directory. Both are removed when this returns. Evidence that only
+/// evidence needs is authenticated by the scan and is not read.
 pub(crate) fn validate_version(
     stage: &Path,
     registry: &ResearchRegistry,
     version: &ResearchVersionRecord,
-    objects: &BTreeMap<(Uuid, String), u64>,
+    objects: &crate::project_portable::research::Objects,
     captures: &BTreeMap<String, crate::project_portable::MaterializedCapture>,
     cancelled: Option<&AtomicBool>,
     validator: &mut NativeResearchValidator<'_>,
@@ -113,11 +113,10 @@ pub(crate) fn validate_version(
     let source = private_directory_in(scratch)?;
     crate::open_or_initialize_ephemeral_project(source.path()).map_err(|_| invalid())?;
     let lease = crate::begin_graph_object_publication(source.path()).map_err(|_| invalid())?;
-    let evidence_only = crate::project_portable::research::evidence_only(version);
-    let needed: BTreeMap<_, _> = objects
+    let needed: crate::project_portable::research::Objects = objects
         .iter()
-        .filter(|((_, digest), _)| !evidence_only.contains(digest))
-        .map(|(key, length)| (key.clone(), *length))
+        .filter(|(_, held)| !held.evidence_only)
+        .map(|(key, held)| (key.clone(), *held))
         .collect();
     crate::project_portable::research::install_captured_with_lease(
         stage, &lease, &needed, captures, cancelled,

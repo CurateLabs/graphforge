@@ -1,15 +1,15 @@
 //! Research validation one Version at a time, driven by the package scan.
 //!
 //! A research package stores its registry first and then each Version's
-//! retained objects in one contiguous run (`research-retained/<version>/`), so
+//! retained objects in one contiguous run (`research-retained/<version>/`);
+//! objects only evidence needs sit apart in `research-retained-evidence/`, so
 //! the scan can stage a Version, validate it with the native owners and remove
 //! it before the next Version is read. Temporary disk is bounded by one Version
 //! (`max_research_version_bytes`), not by the package. The same driver serves a
 //! bundle file, an expanded directory and a sequential stream, so the verdict
 //! never depends on how the bytes arrive.
 use super::{
-    NAMESPACE, check_version, evidence_only, invalid, provided_by_report, registry_path,
-    retained_key,
+    Held, NAMESPACE, Objects, check_version, invalid, object_key, provided_by_report, registry_path,
 };
 use crate::project_portable::{
     PortableError, PortableErrorCode, PortableLimits, PortableMode, PortableReport, PortableSource,
@@ -24,7 +24,7 @@ use crate::research_versions::{
     MAX_REGISTRY_BYTES, ResearchRegistry, ResearchVersionRecord, interchange::portable,
 };
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeSet,
     fs::File,
     io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
@@ -40,7 +40,7 @@ struct VersionStage {
     /// Staged bytes, which `max_research_version_bytes` bounds.
     bytes: u64,
     /// The objects that were staged, by owning Version and digest.
-    staged: BTreeMap<(Uuid, String), u64>,
+    staged: Objects,
 }
 
 pub(crate) struct Driver<'a, 'v> {
@@ -52,13 +52,16 @@ pub(crate) struct Driver<'a, 'v> {
     registry: Option<ResearchRegistry>,
     current: Option<VersionStage>,
     /// Every retained object seen so far, staged or not, with its length.
-    seen: BTreeMap<(Uuid, String), u64>,
+    seen: Objects,
     finished: BTreeSet<Uuid>,
 }
 
 enum Slot {
     Registry,
+    /// Staged under `research-retained/`.
     Retained(Uuid, String),
+    /// Authenticated and not staged: only evidence needs it.
+    Evidence(Uuid, String),
     Other,
 }
 
@@ -76,14 +79,18 @@ impl<'a, 'v> Driver<'a, 'v> {
             validator,
             registry: None,
             current: None,
-            seen: BTreeMap::new(),
+            seen: Objects::new(),
             finished: BTreeSet::new(),
         }
     }
 
     fn slot(relative: &str) -> Slot {
-        if let Some((version, digest)) = retained_key(relative) {
-            Slot::Retained(version, digest)
+        if let Some((version, digest, evidence_only)) = object_key(relative) {
+            if evidence_only {
+                Slot::Evidence(version, digest)
+            } else {
+                Slot::Retained(version, digest)
+            }
         } else if relative == format!("{NAMESPACE}{}/participant.json", super::registry_id()) {
             Slot::Registry
         } else {
@@ -177,9 +184,17 @@ impl<'a, 'v> Driver<'a, 'v> {
             id,
             sink: CopySink::staged_in(self.scratch.clone(), NAMESPACE),
             bytes: 0,
-            staged: BTreeMap::new(),
+            staged: Objects::new(),
         });
         Ok(())
+    }
+
+    /// Remember an object; the same Version and digest in both directories is refused.
+    fn record(&mut self, id: Uuid, digest: String, held: Held) -> Result<(), PortableError> {
+        match self.seen.insert((id, digest), held) {
+            None => Ok(()),
+            Some(_) => Err(invalid()),
+        }
     }
 
     fn version(&self, id: &Uuid) -> Result<&ResearchVersionRecord, PortableError> {
@@ -274,7 +289,8 @@ impl EntrySink for Driver<'_, '_> {
                         .with_cause(error.kind().to_string())
                     })
             }
-            Slot::Retained(id, digest) => {
+            Slot::Evidence(..) => Ok(None),
+            Slot::Retained(id, _) => {
                 if self.registry.is_none() {
                     return Err(PortableError::at(
                         PortableErrorCode::InvalidStructure,
@@ -284,9 +300,6 @@ impl EntrySink for Driver<'_, '_> {
                 }
                 self.version(&id)?;
                 self.start_version(id)?;
-                if evidence_only(self.version(&id)?).contains(&digest) {
-                    return Ok(None);
-                }
                 let limit = self.limits.max_research_version_bytes;
                 let stage = self.current.as_mut().expect("Version stage was started");
                 stage.bytes = stage.bytes.saturating_add(length);
@@ -338,11 +351,14 @@ impl EntrySink for Driver<'_, '_> {
                 stage
                     .sink
                     .finish(relative, file, length, digest, checksum)?;
-                stage.staged.insert((id, hex.clone()), length);
-                self.seen.insert((id, hex), length);
-                Ok(())
+                let held = Held {
+                    length,
+                    evidence_only: false,
+                };
+                stage.staged.insert((id, hex.clone()), held);
+                self.record(id, hex, held)
             }
-            Slot::Other => Ok(()),
+            Slot::Evidence(..) | Slot::Other => Ok(()),
         }
     }
 
@@ -352,9 +368,13 @@ impl EntrySink for Driver<'_, '_> {
         length: u64,
         digest: [u8; 32],
     ) -> Result<(), PortableError> {
-        if let Slot::Retained(id, hex) = Self::slot(relative) {
+        if let Slot::Evidence(id, hex) = Self::slot(relative) {
             authenticate(relative, &hex, digest)?;
-            self.seen.insert((id, hex), length);
+            let held = Held {
+                length,
+                evidence_only: true,
+            };
+            return self.record(id, hex, held);
         }
         Ok(())
     }

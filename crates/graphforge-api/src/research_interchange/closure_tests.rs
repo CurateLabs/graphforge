@@ -227,7 +227,10 @@ fn selected_artifact_bytes_external_limits_and_ontology_survive_reopen() {
 }
 
 /// A bundled selected export whose Version holds one local evidence object.
-fn evidence_bundle(owner: &std::path::Path, payload: &[u8]) -> (std::path::PathBuf, Vec<u8>) {
+fn evidence_bundle(
+    owner: &std::path::Path,
+    payload: impl FnOnce(&std::path::Path) -> Vec<u8>,
+) -> (std::path::PathBuf, Vec<u8>) {
     let mut graph = GraphForge::new(owner.join("source").to_str()).unwrap();
     graph.execute("CREATE (:Character), (:Character)").unwrap();
     for capability_id in [CapabilityId::Provenance, CapabilityId::Knowledge] {
@@ -250,6 +253,7 @@ fn evidence_bundle(owner: &std::path::Path, payload: &[u8]) -> (std::path::PathB
         })
         .unwrap();
     let artifact = Uuid::now_v7();
+    let payload = payload(&owner.join("source"));
     graph
         .register_artifact(RegisterArtifactRequest {
             context: context(),
@@ -257,7 +261,7 @@ fn evidence_bundle(owner: &std::path::Path, payload: &[u8]) -> (std::path::PathB
             artifact_uuid: artifact,
             artifact_kind: ArtifactKind::Other,
             media_type: "application/octet-stream".into(),
-            payload: ArtifactPayloadRequest::LocalBytes(payload.to_vec()),
+            payload: ArtifactPayloadRequest::LocalBytes(payload),
             derivation_inputs: vec![],
             run_uuid: None,
         })
@@ -337,7 +341,7 @@ fn local_evidence_is_authenticated_in_the_stream_and_never_staged() {
     use graphforge_core::portable::{PortableErrorCode, PortableLimits, PortableMode};
     let owner = tempfile::tempdir().unwrap();
     let payload = vec![0x5a_u8; 9 * 1024 * 1024];
-    let (package, bytes) = evidence_bundle(owner.path(), &payload);
+    let (package, bytes) = evidence_bundle(owner.path(), |_| payload.clone());
     let by_file = |path: &std::path::Path, limits: PortableLimits| {
         crate::verify_portable(
             &crate::PortableVerifyRequest {
@@ -421,6 +425,71 @@ fn local_evidence_is_authenticated_in_the_stream_and_never_staged() {
             "{name}"
         );
     }
+}
+
+/// The smallest Parquet file under a project: one of its graph files.
+fn graph_file_bytes(root: &std::path::Path) -> Vec<u8> {
+    let mut pending = vec![root.to_path_buf()];
+    let mut smallest: Option<Vec<u8>> = None;
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(&directory).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if let Ok(bytes) = std::fs::read(&path) {
+                if bytes.starts_with(b"PAR1")
+                    && smallest
+                        .as_ref()
+                        .is_none_or(|best| bytes.len() < best.len())
+                {
+                    smallest = Some(bytes);
+                }
+            }
+        }
+    }
+    smallest.expect("the project holds a graph file")
+}
+
+/// A valid Version can carry one object that is both a local evidence blob and
+/// one of its graph files: identical bytes have one path. It is staged like any
+/// closure member, so it verifies alike from a file and a stream.
+#[test]
+fn evidence_identical_to_a_graph_file_is_staged_and_verifies() {
+    use graphforge_core::portable::{PortableLimits, PortableMode};
+    let owner = tempfile::tempdir().unwrap();
+    let (package, bytes) = evidence_bundle(owner.path(), graph_file_bytes);
+    let limits = PortableLimits::default();
+    let file = crate::verify_portable(
+        &crate::PortableVerifyRequest {
+            input: package,
+            mode: PortableMode::Full,
+            limits,
+        },
+        None,
+    )
+    .unwrap();
+    assert!(file.research_interchange);
+    assert!(
+        file.research_entries
+            .iter()
+            .all(|entry| !entry.path.contains("/research-retained-evidence/")),
+        "the evidence is also a graph file, so nothing is evidence-only"
+    );
+    let scratch = tempfile::tempdir().unwrap();
+    let stream = crate::verify_portable_stream(
+        &mut std::io::Cursor::new(&bytes),
+        Some(scratch.path()),
+        limits,
+        None,
+    )
+    .unwrap();
+    let strip = |report: &graphforge_core::portable::PortableReport| {
+        let mut value = serde_json::to_value(report).unwrap();
+        value.as_object_mut().unwrap().remove("source").unwrap();
+        value
+    };
+    assert_eq!(strip(&file), strip(&stream));
+    assert_eq!(std::fs::read_dir(scratch.path()).unwrap().count(), 0);
 }
 
 fn directory_bytes(root: &std::path::Path) -> u64 {

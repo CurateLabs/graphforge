@@ -860,12 +860,24 @@ pub fn plan_selected_portable(
         let lease = crate::graph_object_store::begin_graph_object_read(g.container_root())?;
         let mut owned = Vec::new();
         for (version, objects) in inventory {
-            for digest in objects {
+            // An object that only evidence needs is announced as such by its path,
+            // so a reader can decline to stage it before it knows the Version's
+            // closure. One any other role needs is staged like the rest.
+            let evidence_only = objects.evidence.difference(&objects.core).cloned();
+            let core = objects.core.iter().cloned();
+            for (digest, is_evidence_only) in core
+                .map(|digest| (digest, false))
+                .chain(evidence_only.map(|digest| (digest, true)))
+            {
                 let length =
                     std::fs::metadata(crate::graph_object_path(g.container_root(), &digest)?)
                         .map_err(storage)?
                         .len();
-                let path = format!("data/components/research/research-retained/{version}/{digest}");
+                let path = crate::project_portable::research::object_path(
+                    &version,
+                    &digest,
+                    is_evidence_only,
+                );
                 let file = inspect_cas(&lease, &digest, length, &path, limits, &mut total)?;
                 owned.push(ComponentFile {
                     media_type: "application/octet-stream".into(),

@@ -185,9 +185,12 @@ scan's own limits and the owners' existing bounds, one Version at a time.
 one Version that verification stages: the participants, graph files and
 manifest nodes, counted from the entry sizes before any byte is written. A
 Version over it is refused with `LimitExceeded`, from a file and from a stream
-alike. Local evidence objects are authenticated as they stream (their digest
-must equal their path and their length the registry's) and are never staged, so
-they do not count and need no disk. While a Version is validated its staged
+alike. Local evidence objects that nothing else in the Version needs are
+authenticated as they stream (their digest must equal their path and their
+length the registry's) and are never staged, so they do not count and need no
+disk; the producer carries them under `research-retained-evidence/`. An evidence
+blob that is also a participant, graph file or manifest node of the Version is
+one object under `research-retained/` and is staged and counted like the rest. While a Version is validated its staged
 objects exist once in the stage and again in each copy the validation makes (an
 ephemeral object store, the expanded graph tree built for a graph without a
 file manifest, and the private project that tree is copied into; the copy count
@@ -207,12 +210,6 @@ are refusals, never a false `verified`:
 - when a package has two independent defects, such as a digest mismatch in
   a later entry and an invalid commitment in an earlier Version, the native
   refusal of the earlier Version is reported first.
-
-An evidence object that is byte-identical to a participant is staged like any
-participant. One that is byte-identical to a graph file or manifest node of the
-same Version, and to nothing else the registry names, is treated as evidence,
-and the Version is then refused as incompatible because that graph object is
-not staged.
 
 ```text
 graphforge --project ./citation-project portable preview --current --profile complete --strict
