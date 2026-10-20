@@ -65,18 +65,6 @@ pub struct ResearchCorpusSize {
     pub artifact_count: Option<u64>,
 }
 
-/// Policy metadata for consumers; Core does not enforce access.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ResearchAccessPolicyMetadata {
-    /// Optional visibility label such as `private`, `shared`, or `public`.
-    pub visibility: Option<String>,
-    /// Optional access-policy description.
-    pub access_policy: Option<String>,
-    /// Maintainer or collaborator labels in canonical order.
-    pub collaborators: Vec<String>,
-}
-
 /// Entry-point availability counts for discovery summaries.
 ///
 /// Later lifecycle issues populate these without changing the contract.
@@ -133,8 +121,6 @@ pub struct WorkspaceResearchMetadata {
     pub ontologies: Vec<String>,
     /// SPDX or other license label.
     pub license: Option<String>,
-    /// Access metadata for consumers.
-    pub access: ResearchAccessPolicyMetadata,
     /// Free-form tags in canonical order.
     pub tags: Vec<String>,
     /// Originating Project identifiers.
@@ -229,11 +215,6 @@ impl WorkspaceResearchMetadata {
             corpus_size: None,
             ontologies: Vec::new(),
             license: None,
-            access: ResearchAccessPolicyMetadata {
-                visibility: None,
-                access_policy: None,
-                collaborators: Vec::new(),
-            },
             tags: Vec::new(),
             originating_projects: Vec::new(),
             related_projects: Vec::new(),
@@ -490,9 +471,6 @@ fn validate_research_metadata(record: &WorkspaceResearchMetadata) -> Result<(), 
         validate_optional_string(temporal.end.as_deref(), "temporal end")?;
         validate_optional_string(temporal.label.as_deref(), "temporal label")?;
     }
-    validate_optional_string(record.access.visibility.as_deref(), "visibility")?;
-    validate_optional_string(record.access.access_policy.as_deref(), "access policy")?;
-    validate_string_list(&record.access.collaborators, "collaborators")?;
     if record.extensions.len() > MAX_RESEARCH_METADATA_EXTENSION_FIELDS {
         return Err(corrupt("research metadata extensions exceed limit"));
     }
@@ -621,11 +599,6 @@ mod tests {
             corpus_size: None,
             ontologies: vec!["narrative-events".into()],
             license: None,
-            access: ResearchAccessPolicyMetadata {
-                visibility: None,
-                access_policy: None,
-                collaborators: Vec::new(),
-            },
             tags: Vec::new(),
             originating_projects: Vec::new(),
             related_projects: Vec::new(),

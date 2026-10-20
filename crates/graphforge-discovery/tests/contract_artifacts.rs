@@ -197,13 +197,33 @@ fn lineage_schema() -> Value {
             map.insert("semantic".into(), json!({"type":"object","additionalProperties":false,"required":["capability","major"],"properties":{"capability":{"type":"string","minLength":1,"maxLength":128},"major":{"type":"integer","minimum":0,"maximum":65535}}}));
             map.insert("uuid".into(), json!({"type":"string","minLength":36,"maxLength":36,"pattern":"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"}));
             map.insert("package_reference".into(), json!({"type":"object","additionalProperties":false,"required":["format","package_digest","object_digest"],"properties":{"format":{"const":"graphforge-project/2"},"package_digest":{"$ref":"#/$defs/digest"},"object_digest":{"$ref":"#/$defs/digest"}}}));
-            map.insert("fork_origin".into(), json!({"type":"object","additionalProperties":false,"required":["origin_repository","origin_project_uuid","origin_version_uuid","origin_version_identity"],"properties":{"origin_repository":{"$ref":"#/$defs/identity"},"origin_project_uuid":{"$ref":"#/$defs/uuid"},"origin_version_uuid":{"$ref":"#/$defs/uuid"},"origin_version_identity":{"$ref":"#/$defs/digest"}}}));
+            map.insert("fork_origin".into(), json!({"type":"object","additionalProperties":false,"required":["origin_repository","origin_project_uuid","origin_version_uuid","origin_version_identity"],"properties":{"origin_repository":{"$ref":"#/$defs/identity"},"origin_project_uuid":{"$ref":"#/$defs/uuid"},"origin_version_uuid":{"$ref":"#/$defs/uuid"},"origin_version_identity":{"$ref":"#/$defs/digest"},"origin_author":{"$ref":"#/$defs/signature"},"origin_committer":{"$ref":"#/$defs/signature"}}}));
             map.insert("branch".into(), json!({"type":"object","additionalProperties":false,"required":["branch_uuid","ref_name","project_uuid","head_version_uuid","origin_version_uuid","base_version_uuid","selection_sha256","label"],"properties":{"branch_uuid":{"$ref":"#/$defs/uuid"},"ref_name":{"type":"string","minLength":1,"maxLength":4096},"project_uuid":{"$ref":"#/$defs/uuid"},"head_version_uuid":{"$ref":"#/$defs/uuid"},"parent_branch_uuid":{"anyOf":[{"$ref":"#/$defs/uuid"},{"type":"null"}]},"origin_version_uuid":{"$ref":"#/$defs/uuid"},"base_version_uuid":{"$ref":"#/$defs/uuid"},"selection_sha256":{"$ref":"#/$defs/digest"},"label":{"type":"string","minLength":1,"maxLength":4096}}}));
-            map.insert("research_version".into(), json!({"type":"object","additionalProperties":false,"required":["version_uuid","parents","identity_digest","kind","branch_uuid"],"properties":{"parents":{"type":"array","maxItems":8,"uniqueItems":true,"items":{"$ref":"#/$defs/uuid"}},"version_uuid":{"$ref":"#/$defs/uuid"},"identity_digest":{"$ref":"#/$defs/digest"},"kind":{"enum":["complete","projection"]},"branch_uuid":{"$ref":"#/$defs/uuid"},"source_version_uuid":{"anyOf":[{"$ref":"#/$defs/uuid"},{"type":"null"}]},"package":{"anyOf":[{"$ref":"#/$defs/package_reference"},{"type":"null"}]}}}));
+            map.insert("research_version".into(), json!({"type":"object","additionalProperties":false,"required":["version_uuid","parents","identity_digest","kind","branch_uuid"],"properties":{"parents":{"type":"array","maxItems":8,"uniqueItems":true,"items":{"$ref":"#/$defs/uuid"}},"version_uuid":{"$ref":"#/$defs/uuid"},"identity_digest":{"$ref":"#/$defs/digest"},"kind":{"enum":["complete","projection"]},"branch_uuid":{"$ref":"#/$defs/uuid"},"source_version_uuid":{"anyOf":[{"$ref":"#/$defs/uuid"},{"type":"null"}]},"author":{"$ref":"#/$defs/signature"},"committer":{"$ref":"#/$defs/signature"},"package":{"anyOf":[{"$ref":"#/$defs/package_reference"},{"type":"null"}]}}}));
+            insert_credit_defs(map);
             map.insert("proposal".into(), json!({"type":"object","additionalProperties":false,"required":["proposal_uuid","source_branch_uuid","source_version_uuid","payload_version_uuid","package"],"properties":{"proposal_uuid":{"$ref":"#/$defs/uuid"},"source_branch_uuid":{"$ref":"#/$defs/uuid"},"source_version_uuid":{"$ref":"#/$defs/uuid"},"payload_version_uuid":{"$ref":"#/$defs/uuid"},"package":{"$ref":"#/$defs/package_reference"}}}));
             defs
         },
     )
+}
+
+/// Definitions shared by every document that publishes credit. Credit is
+/// recorded display text (ADR 0055), never access control.
+fn insert_credit_defs(map: &mut serde_json::Map<String, Value>) {
+    map.insert(
+        "credit_name".into(),
+        json!({"type":"string","minLength":1,"maxLength":256}),
+    );
+    map.insert(
+        "credit_email".into(),
+        json!({"type":"string","minLength":3,"maxLength":254}),
+    );
+    map.insert(
+        "credit_orcid".into(),
+        json!({"type":"string","pattern":"^[0-9]{4}-[0-9]{4}-[0-9]{4}-[0-9]{3}[0-9X]$"}),
+    );
+    map.insert("signature".into(), json!({"type":"object","additionalProperties":false,"required":["name"],"properties":{
+        "name":{"$ref":"#/$defs/credit_name"},"email":{"$ref":"#/$defs/credit_email"},"orcid":{"$ref":"#/$defs/credit_orcid"}}}));
 }
 
 fn bridge_descriptor_schema() -> Value {
@@ -236,6 +256,7 @@ fn summary_schema() -> Value {
             "capabilities",
             "metadata",
             "facts",
+            "people",
         ],
         json!({
             "format":{"const":"graphforge-project-summary/1"}, "version":{"$ref":"#/$defs/version"},
@@ -244,6 +265,7 @@ fn summary_schema() -> Value {
             "requirements":{"type":"array","maxItems":1,"items":{"type":"object","additionalProperties":false,"required":["capability","major"],"properties":{"capability":{"const":"project-summary"},"major":{"const":1}}}},
             "capabilities":{"type":"array","maxItems":256,"items":{"$ref":"#/$defs/semantic"}},
             "metadata":{"$ref":"#/$defs/metadata"}, "facts":{"$ref":"#/$defs/facts"},
+            "people":{"type":"array","maxItems":10000,"items":{"$ref":"#/$defs/person"}},
             "extensions":{"$ref":"#/$defs/extensions"}
         }),
         {
@@ -266,7 +288,7 @@ fn summary_schema() -> Value {
             );
             map.insert("bridge_descriptor".into(), bridge_descriptor_schema());
             map.insert("metadata".into(), json!({"type":"object","additionalProperties":false,
-                "required":["title","description","authors","subjects","languages","geographic_coverage","temporal_coverage","source_types","corpus_size","ontologies","license","access","tags","originating_projects","related_projects","canonical_identifiers","external_identifiers","created_at","updated_at"],
+                "required":["title","description","authors","subjects","languages","geographic_coverage","temporal_coverage","source_types","corpus_size","ontologies","license","tags","originating_projects","related_projects","canonical_identifiers","external_identifiers","created_at","updated_at"],
                 "properties":{
                     "title":{"$ref":"#/$defs/optional_text"},"description":{"$ref":"#/$defs/optional_text"},
                     "authors":{"$ref":"#/$defs/text_list"},"subjects":{"$ref":"#/$defs/text_list"},"languages":{"$ref":"#/$defs/text_list"},
@@ -275,11 +297,14 @@ fn summary_schema() -> Value {
                     "source_types":{"$ref":"#/$defs/text_list"},
                     "corpus_size":{"anyOf":[{"type":"object","additionalProperties":false,"required":["node_count","relationship_count","source_count","artifact_count"],"properties":{"node_count":{"$ref":"#/$defs/optional_count"},"relationship_count":{"$ref":"#/$defs/optional_count"},"source_count":{"$ref":"#/$defs/optional_count"},"artifact_count":{"$ref":"#/$defs/optional_count"}}},{"type":"null"}]},
                     "ontologies":{"$ref":"#/$defs/text_list"},"license":{"$ref":"#/$defs/optional_text"},
-                    "access":{"type":"object","additionalProperties":false,"required":["visibility","access_policy"],"properties":{"visibility":{"$ref":"#/$defs/optional_text"},"access_policy":{"$ref":"#/$defs/optional_text"}}},
                     "tags":{"$ref":"#/$defs/text_list"},"originating_projects":{"$ref":"#/$defs/text_list"},"related_projects":{"$ref":"#/$defs/text_list"},
                     "canonical_identifiers":{"$ref":"#/$defs/text_list"},"external_identifiers":{"$ref":"#/$defs/text_list"},
                     "created_at":{"$ref":"#/$defs/optional_text"},"updated_at":{"$ref":"#/$defs/optional_text"}
                 }}));
+            insert_credit_defs(map);
+            map.insert("person".into(), json!({"type":"object","additionalProperties":false,"required":["name","roles"],"properties":{
+                "name":{"$ref":"#/$defs/credit_name"},"email":{"$ref":"#/$defs/credit_email"},"orcid":{"$ref":"#/$defs/credit_orcid"},
+                "roles":{"enum":[["author"],["committer"],["author","committer"]]}}}));
             map.insert("facts".into(), json!({"type":"object","additionalProperties":false,
                 "required":["ontology_mode","components","research_present","evidence_present","payload_bytes","ontology_composition"],
                 "properties":{
@@ -354,7 +379,6 @@ fn base_summary() -> Value {
             "source_types":["bibliographic-database"],
             "corpus_size":{"node_count":1000,"relationship_count":2500,"source_count":1,"artifact_count":null},
             "ontologies":[MODULE_ID],"license":"CC0-1.0",
-            "access":{"visibility":"public","access_policy":"open"},
             "tags":[],"originating_projects":[],"related_projects":[],
             "canonical_identifiers":[],"external_identifiers":[],
             "created_at":"2026-01-01T00:00:00.000000Z","updated_at":"2026-01-01T00:00:00.000000Z"
@@ -369,6 +393,10 @@ fn base_summary() -> Value {
                 "bridge_sets":[{"id":BRIDGE_ID,"version":"1","content_digest":digest('9')}]
             }
         },
+        "people":[
+            {"name":"Ada Lovelace","email":"ada@example.org","orcid":"0000-0002-1825-0097","roles":["author"]},
+            {"name":"Grace Hopper","roles":["committer"]}
+        ],
         "extensions":{"x-example":true}
     })
 }
@@ -397,14 +425,14 @@ fn base_lineage() -> Value {
         "immutable_version":digest('a'),
         "project_uuid":LINEAGE_PROJECT,
         "requirements":[{"capability":"research-lineage","major":2}],"capabilities":[],
-        "fork":{"origin_repository":{"owner":"curate","repository":"source"},"origin_project_uuid":"01900000-0000-7000-8000-000000000099","origin_version_uuid":"01900000-0000-7000-8000-000000000098","origin_version_identity":digest('8')},
+        "fork":{"origin_repository":{"owner":"curate","repository":"source"},"origin_project_uuid":"01900000-0000-7000-8000-000000000099","origin_version_uuid":"01900000-0000-7000-8000-000000000098","origin_version_identity":digest('8'),"origin_author":{"name":"Ada Lovelace","email":"ada@example.org","orcid":"0000-0002-1825-0097"},"origin_committer":{"name":"Grace Hopper"}},
         "branches":[
             {"branch_uuid":LINEAGE_BRANCH_MAIN,"ref_name":"main","project_uuid":LINEAGE_PROJECT,"head_version_uuid":LINEAGE_VERSION_MAIN,"parent_branch_uuid":null,"origin_version_uuid":LINEAGE_VERSION_ORIGIN,"base_version_uuid":LINEAGE_VERSION_ORIGIN,"selection_sha256":digest('1'),"label":"main"},
             {"branch_uuid":LINEAGE_BRANCH_FEATURE,"ref_name":"feature/claims","project_uuid":LINEAGE_PROJECT,"head_version_uuid":LINEAGE_VERSION_FEATURE,"parent_branch_uuid":LINEAGE_BRANCH_MAIN,"origin_version_uuid":LINEAGE_VERSION_MAIN,"base_version_uuid":LINEAGE_VERSION_FEATURE,"selection_sha256":digest('2'),"label":"claims"}
         ],
         "versions":[
             {"version_uuid":LINEAGE_VERSION_ORIGIN,"parents":[],"identity_digest":digest('3'),"kind":"complete","branch_uuid":LINEAGE_BRANCH_MAIN,"source_version_uuid":null,"package":{"format":"graphforge-project/2","package_digest":digest('4'),"object_digest":digest('5')}},
-            {"version_uuid":LINEAGE_VERSION_MAIN,"parents":[],"identity_digest":digest('6'),"kind":"complete","branch_uuid":LINEAGE_BRANCH_MAIN,"source_version_uuid":null,"package":{"format":"graphforge-project/2","package_digest":digest('7'),"object_digest":digest('8')}},
+            {"version_uuid":LINEAGE_VERSION_MAIN,"parents":[],"identity_digest":digest('6'),"kind":"complete","branch_uuid":LINEAGE_BRANCH_MAIN,"source_version_uuid":null,"author":{"name":"Ada Lovelace","email":"ada@example.org","orcid":"0000-0002-1825-0097"},"committer":{"name":"Grace Hopper"},"package":{"format":"graphforge-project/2","package_digest":digest('7'),"object_digest":digest('8')}},
             {"version_uuid":LINEAGE_VERSION_FEATURE,"parents":[],"identity_digest":digest('9'),"kind":"complete","branch_uuid":LINEAGE_BRANCH_FEATURE,"source_version_uuid":null,"package":{"format":"graphforge-project/2","package_digest":digest('a'),"object_digest":digest('b')}},
             {"version_uuid":LINEAGE_VERSION_PROJECTION,"parents":[],"identity_digest":digest('c'),"kind":"projection","branch_uuid":LINEAGE_BRANCH_FEATURE,"source_version_uuid":LINEAGE_VERSION_FEATURE,"package":{"format":"graphforge-project/2","package_digest":digest('d'),"object_digest":digest('e')}}
         ],
@@ -1193,11 +1221,39 @@ fn summary_cases() -> Vec<Case> {
             |v| v["surprise"] = json!(true),
         ),
         (
-            "summary-rejects-collaborators",
+            "summary-rejects-access-metadata",
             Document::Summary,
             "malformed_response",
             None,
-            |v| v["metadata"]["access"]["collaborators"] = json!(["private-person"]),
+            |v| v["metadata"]["access"] = json!({"visibility":"public","access_policy":"open"}),
+        ),
+        (
+            "summary-rejects-unordered-people",
+            Document::Summary,
+            "duplicate",
+            Some("people"),
+            |v| v["people"].as_array_mut().unwrap().reverse(),
+        ),
+        (
+            "summary-rejects-invalid-person-roles",
+            Document::Summary,
+            "malformed_response",
+            Some("people"),
+            |v| v["people"][1]["roles"] = json!(["owner"]),
+        ),
+        (
+            "summary-rejects-invalid-orcid",
+            Document::Summary,
+            "malformed_response",
+            Some("people"),
+            |v| v["people"][0]["orcid"] = json!("0000-0002-1825-0098"),
+        ),
+        (
+            "lineage-rejects-invalid-credit-email",
+            Document::Lineage,
+            "malformed_response",
+            Some("versions.credit"),
+            |v| v["versions"][1]["author"]["email"] = json!("not-an-address"),
         ),
         (
             "summary-rejects-metadata-extensions",
@@ -1828,4 +1884,73 @@ fn unknown_required_summary_capability_fails_before_metadata_is_considered() {
         .unwrap_err();
     assert_eq!(error.code, DiscoveryErrorCode::UnsupportedFuture);
     assert_eq!(error.field, Some("requirements"));
+}
+
+fn parsed_lineage() -> ResearchLineage {
+    ResearchLineage::from_json(
+        compact(&base_lineage()).as_bytes(),
+        DiscoveryLimits::default(),
+    )
+    .unwrap()
+}
+
+fn parsed_summary() -> ProjectSummary {
+    ProjectSummary::from_json(
+        compact(&base_summary()).as_bytes(),
+        DiscoveryLimits::default(),
+    )
+    .unwrap()
+}
+
+#[test]
+fn people_are_derived_from_lineage_credit_and_bind_exactly() {
+    let lineage = parsed_lineage();
+    let people = lineage.people();
+    // Ada is only an author and Grace only a committer; the Fork origin's credit
+    // cites another Project's Version and is not this Project's people.
+    assert_eq!(
+        people
+            .iter()
+            .map(|person| (person.name.as_str(), person.roles.clone()))
+            .collect::<Vec<_>>(),
+        vec![
+            ("Ada Lovelace", vec!["author".to_owned()]),
+            ("Grace Hopper", vec!["committer".to_owned()]),
+        ]
+    );
+    let summary = parsed_summary();
+    assert_eq!(summary.people, people);
+    summary.bind_lineage(Some(&lineage)).unwrap();
+
+    // An unpublished credit, an extra person, or a changed role never binds.
+    let mut changed = summary.clone();
+    changed.people[0].roles = vec!["author".into(), "committer".into()];
+    assert_eq!(
+        changed.bind_lineage(Some(&lineage)).unwrap_err().code,
+        DiscoveryErrorCode::IntegrityFailure
+    );
+    let mut extra = summary.clone();
+    extra.people.push(graphforge_discovery::SummaryPerson {
+        name: "Zed".into(),
+        email: None,
+        orcid: None,
+        roles: vec!["author".into()],
+    });
+    assert!(extra.bind_lineage(Some(&lineage)).is_err());
+    // A summary published without research history lists no people.
+    assert!(summary.bind_lineage(None).is_err());
+    let mut none = summary;
+    none.people.clear();
+    none.bind_lineage(None).unwrap();
+}
+
+#[test]
+fn a_person_holding_both_roles_is_one_entry() {
+    let mut value = base_lineage();
+    value["versions"][1]["committer"] = value["versions"][1]["author"].clone();
+    let lineage =
+        ResearchLineage::from_json(compact(&value).as_bytes(), DiscoveryLimits::default()).unwrap();
+    let people = lineage.people();
+    assert_eq!(people.len(), 1);
+    assert_eq!(people[0].roles, vec!["author", "committer"]);
 }

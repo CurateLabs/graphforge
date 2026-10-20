@@ -235,7 +235,9 @@ Against a conforming publish-capable Hub, clone a named Branch, edit it through
 the native research Branch API, then publish that same ref back. The clone keeps
 the original Project and Branch UUID, creation record and selected head; the next
 commit records that head as its first parent. Authors and committers remain exact
-native record metadata. Reopen and inspect historical records with
+native record metadata and are always published: they appear in the lineage and,
+as the derived people list with their roles, in the Project summary. Published
+credit is public and permanent. Reopen and inspect historical records with
 `research_version`; a metadata-only ancestor is not a retained payload.
 
 The other advertised refs remain read-only remote citations. Immutable-Version

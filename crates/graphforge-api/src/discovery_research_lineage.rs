@@ -9,12 +9,12 @@
 
 use crate::{CancellationToken, GfError, GraphForge};
 use graphforge_discovery::{
-    DiscoveryError, DiscoveryLimits, LineageBranch, LineageForkOrigin, LineageProposal,
-    LineageVersion, PortablePackageReference, ProtocolRequirement, ProtocolVersion,
-    RESEARCH_LINEAGE_CAPABILITY, RESEARCH_LINEAGE_FORMAT, RepositoryIdentity, ResearchLineage,
-    Sha256Digest,
+    CreditSignature, DiscoveryError, DiscoveryLimits, LineageBranch, LineageForkOrigin,
+    LineageProposal, LineageVersion, PortablePackageReference, ProtocolRequirement,
+    ProtocolVersion, RESEARCH_LINEAGE_CAPABILITY, RESEARCH_LINEAGE_FORMAT, RepositoryIdentity,
+    ResearchLineage, Sha256Digest,
 };
-use graphforge_storage::research_versions::ResearchRegistry;
+use graphforge_storage::research_versions::{ResearchRegistry, ResearchSignature};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use uuid::Uuid;
@@ -154,6 +154,8 @@ pub fn build_research_lineage_from_registry(
             .into(),
             branch_uuid: version.context_uuid.to_string(),
             source_version_uuid: source_version.map(|id| id.to_string()),
+            author: version.author.as_ref().map(credit),
+            committer: version.committer.as_ref().map(credit),
             package: package.cloned(),
         });
     }
@@ -267,7 +269,13 @@ fn fork_origin(
                 .identities
                 .get(&archive.selected_version_uuid)
                 .ok_or_else(|| GfError::Validation("fork origin identity is missing".into()))?;
+            let origin = archive
+                .versions
+                .get(&archive.selected_version_uuid)
+                .ok_or_else(|| GfError::Validation("fork origin Version is missing".into()))?;
             Ok(Some(LineageForkOrigin {
+                origin_author: origin.author.as_ref().map(credit),
+                origin_committer: origin.committer.as_ref().map(credit),
                 origin_repository: origin_repository.clone(),
                 origin_project_uuid: archive.source_project_uuid.to_string(),
                 origin_version_uuid: archive.selected_version_uuid.to_string(),
@@ -275,6 +283,15 @@ fn fork_origin(
                     .map_err(|error| map_discovery_error(&error))?,
             }))
         }
+    }
+}
+
+/// The published form of a native signature: the same recorded fields.
+fn credit(signature: &ResearchSignature) -> CreditSignature {
+    CreditSignature {
+        name: signature.name.clone(),
+        email: signature.email.clone(),
+        orcid: signature.orcid.clone(),
     }
 }
 

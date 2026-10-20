@@ -13,6 +13,8 @@ fn chain(count: usize) -> Vec<LineageVersion> {
             kind: "complete".into(),
             branch_uuid: "00000000-0000-0000-0001-000000000000".into(),
             source_version_uuid: None,
+            author: None,
+            committer: None,
             package: None,
         })
         .collect()

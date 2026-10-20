@@ -40,11 +40,6 @@ def check_research_metadata_and_discovery() -> None:
             "corpus_size": None,
             "ontologies": ["narrative-events"],
             "license": None,
-            "access": {
-                "visibility": None,
-                "access_policy": None,
-                "collaborators": [],
-            },
             "tags": [],
             "originating_projects": [],
             "related_projects": [],

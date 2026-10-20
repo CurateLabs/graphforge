@@ -67,8 +67,10 @@ reader (`PortableV2PackageIndex`), so a verifier that runs it on the same packag
 obtains the same canonical bytes for a bundle and for an expanded directory. The
 public-safe projection is one exhaustive destructuring function: a new Project
 metadata field does not compile until a maintainer decides whether it is public.
-`access.collaborators`, `extensions`, and `discovery_facets` are never included,
-and local paths and Project identity are never consulted.
+`extensions` and `discovery_facets` are never included, and local paths and
+Project identity are never consulted. The `people` list is not read from the
+package (it excludes research); the caller passes the research lineage published
+with the summary and the list is derived from its credited Versions.
 
 ## Lineage read
 

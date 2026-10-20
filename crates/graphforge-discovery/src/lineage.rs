@@ -4,6 +4,7 @@
 //! frozen Proposal projections without graph payload I/O. Transport locations
 //! live only in the manifest `objects` inventory.
 
+use crate::credit::{CreditSignature, ROLE_AUTHOR, ROLE_COMMITTER, SummaryPerson, derive_people};
 use crate::{
     DiscoveryError, DiscoveryErrorCode, DiscoveryLimits, DiscoveryVersionDetails,
     DiscoveryVersionSubject, PORTABLE_V2_FORMAT, PortablePackageReference, ProtocolCapability,
@@ -36,6 +37,12 @@ pub struct LineageForkOrigin {
     pub origin_version_uuid: String,
     /// Native immutable identity commitment for `origin_version_uuid`.
     pub origin_version_identity: Sha256Digest,
+    /// Author of the cited origin Version, when it records one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_author: Option<CreditSignature>,
+    /// Committer of the cited origin Version, when it records one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_committer: Option<CreditSignature>,
 }
 
 /// Immutable Branch genealogy and creation selection commitment.
@@ -93,6 +100,12 @@ pub struct LineageVersion {
     /// Source Version UUID when `kind` is `projection`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_version_uuid: Option<String>,
+    /// Who wrote the change. Published credit is public and permanent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<CreditSignature>,
+    /// Who recorded the Version. Published credit is public and permanent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub committer: Option<CreditSignature>,
     /// Optional portable package carrying this Version or projection.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub package: Option<PortablePackageReference>,
@@ -149,6 +162,25 @@ pub struct ResearchLineage {
 }
 
 impl ResearchLineage {
+    /// The Project people list derived from this lineage's credited Versions:
+    /// every distinct author or committer with the roles held, in canonical order.
+    /// Fork origin credit cites another Project's Version and is not included.
+    #[must_use]
+    pub fn people(&self) -> Vec<SummaryPerson> {
+        derive_people(self.versions.iter().flat_map(|version| {
+            version
+                .author
+                .iter()
+                .map(|signature| (signature, ROLE_AUTHOR))
+                .chain(
+                    version
+                        .committer
+                        .iter()
+                        .map(|signature| (signature, ROLE_COMMITTER)),
+                )
+        }))
+    }
+
     /// Parse and fully validate untrusted JSON without performing object I/O.
     pub fn from_json(bytes: &[u8], limits: DiscoveryLimits) -> Result<Self, DiscoveryError> {
         if bytes.len() > limits.max_response_bytes {
@@ -232,6 +264,12 @@ impl ResearchLineage {
                 limits,
             )?;
             fork.origin_version_identity.validate()?;
+            for signature in [&fork.origin_author, &fork.origin_committer]
+                .into_iter()
+                .flatten()
+            {
+                signature.validate("fork.origin_credit")?;
+            }
         }
         if self.branches.len() > limits.max_lineage_entries {
             return Err(limit("branches"));
@@ -302,6 +340,9 @@ impl ResearchLineage {
                 ));
             }
             check_uuid(&version.branch_uuid, "versions.branch_uuid", limits)?;
+            for signature in [&version.author, &version.committer].into_iter().flatten() {
+                signature.validate("versions.credit")?;
+            }
             if version.kind == "projection" {
                 let Some(source) = &version.source_version_uuid else {
                     return Err(DiscoveryError::new(

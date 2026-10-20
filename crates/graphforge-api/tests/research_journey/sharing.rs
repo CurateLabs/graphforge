@@ -294,8 +294,7 @@ impl Journey {
         drop(selected);
         let mut metadata = self.graph.research_project_metadata().unwrap();
         metadata.title = Some(self.text("fork_title").into());
-        metadata.access.visibility = Some("private".into());
-        metadata.access.access_policy = Some("Independent review".into());
+        metadata.description = Some("Independent review".into());
         let fork: ForkResearchRequest = request(
             json!({"operation_uuid":Uuid::now_v7(),"project_uuid":Uuid::now_v7(),"version_uuid":version,"projection":null,"target":self.owner.path().join("fork"),"actor_uuid":self.actor,"governance":"Independent review","adopt_selected_ontology":true,"metadata":metadata}),
         );

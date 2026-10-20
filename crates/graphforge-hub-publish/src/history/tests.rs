@@ -46,6 +46,8 @@ fn lineage() -> ResearchLineage {
                 kind: "complete".into(),
                 branch_uuid: uuid(2),
                 source_version_uuid: None,
+                author: None,
+                committer: None,
                 package: None,
             })
             .collect(),

@@ -459,7 +459,7 @@ class Journey:
             selected.close()
         metadata = self.graph.research_project_metadata()
         metadata["title"] = CORPUS["fork_title"]
-        metadata["access"]["access_policy"] = "Independent local governance"
+        metadata["description"] = "Independent local governance"
         request = {
             "operation_uuid": identity(),
             "project_uuid": identity(),

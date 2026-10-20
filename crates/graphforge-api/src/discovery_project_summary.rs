@@ -18,15 +18,15 @@ use graphforge_core::portable::{
 use graphforge_discovery::{
     BridgeSetDescriptor, DiscoveryLimits, PORTABLE_V2_FORMAT, PROJECT_SUMMARY_CAPABILITY,
     PROJECT_SUMMARY_FORMAT, ProjectSummary, ProtocolRequirement, ProtocolVersion,
-    RepositoryIdentity, Sha256Digest, SummaryAccess, SummaryCorpusSize, SummaryFacts,
+    RepositoryIdentity, ResearchLineage, Sha256Digest, SummaryCorpusSize, SummaryFacts,
     SummaryGeographicCoverage, SummaryMetadata, SummaryOntologyComposition, SummaryOntologyModule,
     SummaryPackageReference, SummaryTemporalCoverage,
 };
 use graphforge_storage::{
-    MAX_WORKSPACE_RESEARCH_METADATA_BYTES, PortableV2PackageIndex, ResearchAccessPolicyMetadata,
-    ResearchCorpusSize, ResearchGeographicCoverage, ResearchTemporalCoverage,
-    WORKSPACE_CAPABILITY_ID, WORKSPACE_CONFIGURATION_FAMILY, WORKSPACE_RESEARCH_METADATA_FAMILY,
-    WorkspaceConfiguration, WorkspaceOntologyMode, WorkspaceResearchMetadata,
+    MAX_WORKSPACE_RESEARCH_METADATA_BYTES, PortableV2PackageIndex, ResearchCorpusSize,
+    ResearchGeographicCoverage, ResearchTemporalCoverage, WORKSPACE_CAPABILITY_ID,
+    WORKSPACE_CONFIGURATION_FAMILY, WORKSPACE_RESEARCH_METADATA_FAMILY, WorkspaceConfiguration,
+    WorkspaceOntologyMode, WorkspaceResearchMetadata,
 };
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -46,6 +46,10 @@ pub struct ProjectSummaryRequest<'a> {
     pub portable_limits: PortableV2Limits,
     /// Optional cooperative cancellation signal.
     pub cancelled: Option<&'a AtomicBool>,
+    /// The research lineage published with this summary. The Project people
+    /// list is derived from its credited Versions (ADR 0055); a summary
+    /// published without research history lists no people.
+    pub lineage: Option<&'a ResearchLineage>,
 }
 
 /// Fully verify a portable-v2 package, then derive its validated [`ProjectSummary`].
@@ -107,6 +111,10 @@ pub fn summarize_verified_portable_v2(
         capabilities: Vec::new(),
         metadata: project_public_metadata(&metadata),
         facts,
+        people: request
+            .lineage
+            .map(ResearchLineage::people)
+            .unwrap_or_default(),
         extensions: BTreeMap::new(),
     };
     summary
@@ -198,7 +206,8 @@ fn composition_facts(composition: &PortableV2OntologyComposition) -> SummaryOnto
 /// the Project. Every field of [`WorkspaceResearchMetadata`] and its nested
 /// records is destructured by name, so adding a field fails to compile here
 /// until a maintainer decides whether it is public. The deliberate exclusions
-/// are `access.collaborators`, `extensions`, and `discovery_facets`.
+/// are `extensions` and `discovery_facets`. `authors` is user-authored display
+/// text and is published as written.
 fn project_public_metadata(record: &WorkspaceResearchMetadata) -> SummaryMetadata {
     let WorkspaceResearchMetadata {
         // Record contract version is a storage detail, not Project content.
@@ -214,7 +223,6 @@ fn project_public_metadata(record: &WorkspaceResearchMetadata) -> SummaryMetadat
         corpus_size,
         ontologies,
         license,
-        access,
         tags,
         originating_projects,
         related_projects,
@@ -227,12 +235,6 @@ fn project_public_metadata(record: &WorkspaceResearchMetadata) -> SummaryMetadat
         // Excluded: index counters are not authored Project metadata.
         discovery_facets: _,
     } = record;
-    let ResearchAccessPolicyMetadata {
-        visibility,
-        access_policy,
-        // Excluded: collaborator labels identify people.
-        collaborators: _,
-    } = access;
     SummaryMetadata {
         title: title.clone(),
         description: description.clone(),
@@ -271,10 +273,6 @@ fn project_public_metadata(record: &WorkspaceResearchMetadata) -> SummaryMetadat
         }),
         ontologies: ontologies.clone(),
         license: license.clone(),
-        access: SummaryAccess {
-            visibility: visibility.clone(),
-            access_policy: access_policy.clone(),
-        },
         tags: tags.clone(),
         originating_projects: originating_projects.clone(),
         related_projects: related_projects.clone(),

@@ -8,7 +8,7 @@ use graphforge_api::{
     ActivationMode, ActivationProfileChangeRequest, DiscoveryOntologyModuleRequest, GraphForge,
     ModuleAdoptionRequest, OntologyAuthorityExpectation, OntologyDoc, OperationId,
     PortableSelection, PortableV2ExportRequest, PortableV2ImportRequest, PortableV2Limits,
-    PortableV2Output, PortableV2SelectionProfile, ResearchAccessPolicyMetadata, ResearchCorpusSize,
+    PortableV2Output, PortableV2SelectionProfile, ResearchCorpusSize,
     UpdateResearchMetadataRequest, WorkspaceResearchMetadata, WriteContext,
     repack_verified_expanded_portable_v2, resolve_discovered_ontology_module,
 };
@@ -131,11 +131,6 @@ fn fixture_research_metadata() -> WorkspaceResearchMetadata {
         source_count: Some(1),
         artifact_count: Some(0),
     });
-    metadata.access = ResearchAccessPolicyMetadata {
-        visibility: Some("public".into()),
-        access_policy: Some("open".into()),
-        collaborators: Vec::new(),
-    };
     metadata.created_at = Some("2026-01-01T00:00:00.000000Z".into());
     metadata.updated_at = Some("2026-01-01T00:00:00.000000Z".into());
     metadata

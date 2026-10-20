@@ -17,9 +17,7 @@ use graphforge_discovery::{
     ProtocolVersion, RepositoryIdentity, Sha256Digest,
 };
 use graphforge_ontology::OntologyDoc;
-use graphforge_storage::{
-    ResearchAccessPolicyMetadata, ResearchCorpusSize, ResearchDiscoveryFacets,
-};
+use graphforge_storage::{ResearchCorpusSize, ResearchDiscoveryFacets};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -32,7 +30,6 @@ const BAGIT: &[u8] = b"BagIt-Version: 1.0\nTag-File-Character-Encoding: UTF-8\n"
 const BAG_INFO: &[u8] = b"Bag-Software-Agent: GraphForge portable-v2\nBagging-Date: 1970-01-01\n";
 const MANIFEST_PATH: &str = "data/graphforge-project.json";
 
-const PRIVATE_COLLABORATOR: &str = "private-collaborator@example.org";
 const PRIVATE_EXTENSION: &str = "private-extension-value";
 
 fn hex(bytes: impl AsRef<[u8]>) -> String {
@@ -81,11 +78,6 @@ fn rich_metadata() -> WorkspaceResearchMetadata {
         source_count: Some(1),
         artifact_count: None,
     });
-    metadata.access = ResearchAccessPolicyMetadata {
-        visibility: Some("public".into()),
-        access_policy: Some("open".into()),
-        collaborators: vec![PRIVATE_COLLABORATOR.into()],
-    };
     metadata.extensions = BTreeMap::from([("x-private".into(), Value::from(PRIVATE_EXTENSION))]);
     metadata.discovery_facets = ResearchDiscoveryFacets {
         text_entry_points: 7,
@@ -174,6 +166,7 @@ fn summarize(package: &Path) -> Result<ProjectSummary, DiscoveryPortableV2Error>
         discovery_limits: DiscoveryLimits::default(),
         portable_limits: PortableV2Limits::default(),
         cancelled: None,
+        lineage: None,
     })
 }
 
@@ -214,6 +207,7 @@ fn summary_bytes_are_identical_for_bundle_and_expanded_and_facts_are_verified() 
         discovery_limits: DiscoveryLimits::default(),
         portable_limits: PortableV2Limits::default(),
         cancelled: None,
+        lineage: None,
     })
     .unwrap();
     let from_directory = summarize_verified_portable_v2(&ProjectSummaryRequest {
@@ -223,6 +217,7 @@ fn summary_bytes_are_identical_for_bundle_and_expanded_and_facts_are_verified() 
         discovery_limits: DiscoveryLimits::default(),
         portable_limits: PortableV2Limits::default(),
         cancelled: None,
+        lineage: None,
     })
     .unwrap();
     assert_eq!(from_bundle, from_directory);
@@ -298,7 +293,7 @@ fn summary_bytes_are_identical_for_bundle_and_expanded_and_facts_are_verified() 
 }
 
 #[test]
-fn public_projection_excludes_collaborators_extensions_and_discovery_facets() {
+fn public_projection_excludes_extensions_discovery_facets_and_access_metadata() {
     let exported = exported_project();
     let summary = summarize(&exported.bundle).unwrap();
     let bytes = summary.to_canonical_json().unwrap();
@@ -309,28 +304,26 @@ fn public_projection_excludes_collaborators_extensions_and_discovery_facets() {
         &serde_json::from_slice::<Value>(&bytes).unwrap(),
         &mut found,
     );
-    for excluded in ["collaborators", "discovery_facets", "extensions"] {
+    for excluded in [
+        "access",
+        "access_policy",
+        "collaborators",
+        "visibility",
+        "discovery_facets",
+        "extensions",
+    ] {
         assert!(!found.contains(excluded), "{excluded} leaked into summary");
     }
-    assert!(!text.contains(PRIVATE_COLLABORATOR));
     assert!(!text.contains(PRIVATE_EXTENSION));
     assert!(!text.contains("x-private"));
     assert!(!text.contains("text_entry_points"));
     // Local paths and Project identity are never consulted.
     assert!(!text.contains(exported.bundle.parent().unwrap().to_str().unwrap()));
 
-    // Public fields survive, including consumer access metadata.
+    // Public fields survive; `authors` is user-authored display text, as written.
     assert_eq!(summary.metadata.title.as_deref(), Some("Summary Corpus"));
     assert_eq!(summary.metadata.license.as_deref(), Some("CC0-1.0"));
     assert_eq!(summary.metadata.authors, ["Ada Lovelace", "Grace Hopper"]);
-    assert_eq!(
-        summary.metadata.access.visibility.as_deref(),
-        Some("public")
-    );
-    assert_eq!(
-        summary.metadata.access.access_policy.as_deref(),
-        Some("open")
-    );
     assert_eq!(
         summary
             .metadata

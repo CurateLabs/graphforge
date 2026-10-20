@@ -6,13 +6,14 @@
 //! `objects`, so summary bytes and `summary_digest` do not depend on where the
 //! bytes are hosted.
 
+use crate::credit::{SummaryPerson, people_mismatch, validate_people};
 use crate::{
     BridgeSetDescriptor, DiscoveryError, DiscoveryErrorCode, DiscoveryLimits,
     DiscoveryVersionDetails, DiscoveryVersionSubject, PORTABLE_V2_FORMAT,
     PROJECT_SUMMARY_CAPABILITY, PROJECT_SUMMARY_FORMAT, PROJECT_SUMMARY_FORMAT_NAME,
-    ProtocolCapability, ProtocolRequirement, ProtocolVersion, RepositoryIdentity, Sha256Digest,
-    canonical_json, check_ascending, check_identity_text, check_string, format_major, limit,
-    parse_unique_json, sha256_digest, validate_extensions, validate_semantics,
+    ProtocolCapability, ProtocolRequirement, ProtocolVersion, RepositoryIdentity, ResearchLineage,
+    Sha256Digest, canonical_json, check_ascending, check_identity_text, check_string, format_major,
+    limit, parse_unique_json, sha256_digest, validate_extensions, validate_semantics,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -94,21 +95,11 @@ pub struct SummaryCorpusSize {
     pub artifact_count: Option<u64>,
 }
 
-/// Consumer-facing access metadata. Core does not enforce it; collaborators are
-/// deliberately not part of the public projection.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SummaryAccess {
-    /// Optional visibility label such as `private`, `shared`, or `public`.
-    pub visibility: Option<String>,
-    /// Optional access-policy description.
-    pub access_policy: Option<String>,
-}
-
 /// Public-safe projection of Project research metadata.
 ///
-/// Mirrors every Project metadata field except `access.collaborators`,
-/// `extensions`, and `discovery_facets`. String and list bounds are those of the
+/// Mirrors every Project metadata field except `extensions` and `discovery_facets`.
+/// `authors` is user-authored display text published as written; the derived
+/// credit of research history is the summary's `people`. String and list bounds are those of the
 /// source record: strings are non-empty, at most 4096 bytes, and free of ASCII
 /// control characters; lists hold at most 256 strictly ascending entries.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -136,8 +127,6 @@ pub struct SummaryMetadata {
     pub ontologies: Vec<String>,
     /// SPDX or other license label.
     pub license: Option<String>,
-    /// Consumer access metadata.
-    pub access: SummaryAccess,
     /// Free-form tags.
     pub tags: Vec<String>,
     /// Originating Project identifiers.
@@ -223,6 +212,9 @@ pub struct ProjectSummary {
     pub metadata: SummaryMetadata,
     /// Verified package facts.
     pub facts: SummaryFacts,
+    /// Authors and committers of the published research history, derived from
+    /// the research lineage and always published. Credit, not access control.
+    pub people: Vec<SummaryPerson>,
     /// Explicit optional extension values, preserved canonically by readers.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub extensions: BTreeMap<String, Value>,
@@ -276,7 +268,19 @@ impl ProjectSummary {
         )?;
         validate_extensions(&self.extensions, limits)?;
         validate_metadata(&self.metadata, limits)?;
+        validate_people(&self.people, limits)?;
         validate_facts(&self.facts, limits)
+    }
+
+    /// Require `people` to equal the list derived from the research lineage this
+    /// summary is published with; absent lineage means no published credit.
+    pub fn bind_lineage(&self, lineage: Option<&ResearchLineage>) -> Result<(), DiscoveryError> {
+        let derived = lineage.map(ResearchLineage::people).unwrap_or_default();
+        if self.people == derived {
+            Ok(())
+        } else {
+            Err(people_mismatch())
+        }
     }
 
     fn validate_package(&self) -> Result<(), DiscoveryError> {
@@ -393,7 +397,6 @@ fn validate_metadata(
         corpus_size: _,
         ontologies,
         license,
-        access,
         tags,
         originating_projects,
         related_projects,
@@ -432,8 +435,6 @@ fn validate_metadata(
     check_list(source_types, "metadata.source_types", limits)?;
     check_list(ontologies, "metadata.ontologies", limits)?;
     check_optional_text(license.as_ref(), "metadata.license", limits)?;
-    check_optional_text(access.visibility.as_ref(), "metadata.access", limits)?;
-    check_optional_text(access.access_policy.as_ref(), "metadata.access", limits)?;
     check_list(tags, "metadata.tags", limits)?;
     check_list(
         originating_projects,

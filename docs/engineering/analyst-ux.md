@@ -38,7 +38,8 @@ absence; failure to reject a statistical null does not prove it.
 
 Public projects support transparent participation and Git-style author/committer
 attribution. Private projects provide a non-public space for known collaborators.
-Hosting owns access enforcement. Privacy and advanced research vocabulary are
+Hosting owns access enforcement; Project metadata carries no access fields, and
+published author/committer credit is public and permanent. Privacy and advanced research vocabulary are
 not prerequisites for obtaining the first useful graph result.
 
 From any meaningful analytical object, the analyst must be able to determine:

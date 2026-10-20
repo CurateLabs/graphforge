@@ -725,6 +725,8 @@ fn research_publication(
             origin_project_uuid: lineage.project_uuid.clone(),
             origin_version_uuid: version.version_uuid.clone(),
             origin_version_identity: version.identity_digest.clone(),
+            origin_author: version.author.clone(),
+            origin_committer: version.committer.clone(),
         }
     });
     let lineage = ResearchLineage {
@@ -758,6 +760,8 @@ fn research_publication(
             kind: "complete".into(),
             branch_uuid,
             source_version_uuid: None,
+            author: None,
+            committer: None,
             package: Some(PortablePackageReference {
                 format: PORTABLE_V2_FORMAT.into(),
                 package_digest: Sha256Digest(digest_of('e')),

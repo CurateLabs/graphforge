@@ -88,7 +88,9 @@ when you need selective packages, collaboration, or registry transport.
 Public projects support transparent participation with attributable authors and
 committers, following Git practices. Private projects provide a non-public
 space for known collaborators. The Hub or hosting application enforces that
-access; local Project metadata and Branch isolation do not enforce it.
+access; Project metadata and the portable formats carry no access fields.
+Published credit is public and permanent: there is no anonymity and no
+redaction option.
 
 For ordinary graph use, you do not need to publish anything. Start with
 [saving and reopening a local graph](tutorial.md). When sharing is useful,
@@ -418,7 +420,9 @@ Against a conforming publish-capable Hub, clone a named Branch, edit it through
 the native research Branch API, then publish that same ref back. The clone keeps
 the original Project and Branch UUID, creation record and selected head; the next
 commit records that head as its first parent. Authors and committers remain exact
-native record metadata. Reopen and inspect historical records with
+native record metadata and are published in the lineage and, as the derived
+people list with their roles, in the Project summary; a Fork's origin citation
+carries the cited Version's credit. Reopen and inspect historical records with
 `research_version`; a metadata-only ancestor is not a retained payload.
 
 The other advertised refs remain read-only remote citations. Immutable-Version

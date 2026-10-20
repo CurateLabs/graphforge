@@ -1267,7 +1267,30 @@ fn build_snapshot(
     add_bundle(&mut objects, &mut sources, &project, &location);
     let immutable_version = Sha256Digest(project.package_digest.clone());
 
-    let summary = derive_summary(identity, &immutable_version, &project.path)
+    let lineage = graph.build_research_lineage_for_discovery(
+        &BuildResearchLineageRequest {
+            repository: identity.clone(),
+            immutable_version: immutable_version.clone(),
+            project_uuid: selection.project_uuid,
+            branch_ref_names: selection
+                .branch_uuid
+                .zip(selection.git_ref.clone())
+                .into_iter()
+                .collect(),
+            version_packages: BTreeMap::from([(selection.version_uuid, version_package)]),
+            fork_origin_repository,
+            published_proposals: BTreeSet::new(),
+        },
+        &cancellation,
+    )?;
+    let lineage = merge_lineage(
+        published.map(|published| &published.lineage),
+        lineage,
+        history.rewrite,
+        history.prune,
+    )?;
+
+    let summary = derive_summary(identity, &immutable_version, &project.path, Some(&lineage))
         .map_err(|error| derivation(&error))?;
     let summary_object = object_descriptor(
         digest_bytes(&summary.bytes),
@@ -1291,29 +1314,6 @@ fn build_snapshot(
     for module in &modules {
         add_bundle(&mut objects, &mut sources, &module.bundle, &location);
     }
-
-    let lineage = graph.build_research_lineage_for_discovery(
-        &BuildResearchLineageRequest {
-            repository: identity.clone(),
-            immutable_version: immutable_version.clone(),
-            project_uuid: selection.project_uuid,
-            branch_ref_names: selection
-                .branch_uuid
-                .zip(selection.git_ref.clone())
-                .into_iter()
-                .collect(),
-            version_packages: BTreeMap::from([(selection.version_uuid, version_package)]),
-            fork_origin_repository,
-            published_proposals: BTreeSet::new(),
-        },
-        &cancellation,
-    )?;
-    let lineage = merge_lineage(
-        published.map(|published| &published.lineage),
-        lineage,
-        history.rewrite,
-        history.prune,
-    )?;
 
     // Earlier published Version and Proposal packages are carried unchanged.
     let carried: BTreeSet<&Sha256Digest> = lineage

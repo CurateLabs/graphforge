@@ -599,7 +599,7 @@ fn interchange(
     );
     let mut metadata = decode(&j.run(&["research", "metadata", "show"]))["metadata"].clone();
     metadata["title"] = corpus["fork_title"].clone();
-    metadata["access"]["access_policy"] = json!("Independent local review");
+    metadata["description"] = json!("Independent local review");
     let fork = Journey {
         root: directory.join("fork"),
         file: directory.join("fork-request.json"),

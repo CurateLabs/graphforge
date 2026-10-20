@@ -25,6 +25,7 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 mod ancestor_publication;
+mod credit;
 mod remote_fetch;
 mod rewrite_prune;
 mod selection;
@@ -2841,18 +2842,31 @@ fn opaque_workbench_file_cannot_be_selected_as_native_package_data() {
     );
 }
 
-fn edit_by(graph: &mut GraphForge, branch: Uuid, score: i64, name: &str) -> Uuid {
-    let version_uuid = Uuid::now_v7();
-    let signature = graphforge_storage::research_versions::ResearchSignature {
+fn signature(name: &str) -> graphforge_storage::research_versions::ResearchSignature {
+    graphforge_storage::research_versions::ResearchSignature {
         name: name.into(),
         email: None,
         orcid: None,
-    };
+    }
+}
+
+fn edit_by(graph: &mut GraphForge, branch: Uuid, score: i64, name: &str) -> Uuid {
+    edit_credited(graph, branch, score, signature(name), signature(name))
+}
+
+fn edit_credited(
+    graph: &mut GraphForge,
+    branch: Uuid,
+    score: i64,
+    author: graphforge_storage::research_versions::ResearchSignature,
+    committer: graphforge_storage::research_versions::ResearchSignature,
+) -> Uuid {
+    let version_uuid = Uuid::now_v7();
     graph
         .execute_research_branch(
             &ExecuteResearchBranchRequest {
-                author: Some(signature.clone()),
-                committer: Some(signature),
+                author: Some(author),
+                committer: Some(committer),
                 operation_uuid: Uuid::now_v7(),
                 expected_generation_uuid: generation(graph),
                 branch_uuid: branch,
@@ -2864,6 +2878,18 @@ fn edit_by(graph: &mut GraphForge, branch: Uuid, score: i64, name: &str) -> Uuid
         )
         .unwrap();
     version_uuid
+}
+
+/// The summary a consumer reads from the Hub's current documents.
+fn served_summary(hub: &LoopbackHub, repository: &str) -> ProjectSummary {
+    let (manifest, lineage) = served_lineage(hub, repository);
+    let object = manifest.summary_object().unwrap();
+    let bytes = hub.get(&object.locations[0]).body;
+    assert_eq!(digest_bytes(&bytes), object.digest.0);
+    let summary = ProjectSummary::from_json(&bytes, DiscoveryLimits::default()).unwrap();
+    manifest.bind_summary(&summary).unwrap();
+    summary.bind_lineage(Some(&lineage)).unwrap();
+    summary
 }
 
 #[test]

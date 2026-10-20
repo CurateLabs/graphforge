@@ -15,8 +15,8 @@ use graphforge_discovery::{
     DISCOVERY_FORMAT, DiscoveryLimits, DiscoveryManifest, ObjectDescriptor, OntologyInventory,
     OntologyModuleDescriptor, PORTABLE_V2_FORMAT, PORTABLE_V2_MEDIA_TYPE, PROJECT_SUMMARY_FORMAT,
     PROJECT_SUMMARY_MEDIA_TYPE, PortablePackageReference, ProjectSummary, ProjectSummaryReference,
-    ProtocolRequirement, ProtocolVersion, RepositoryIdentity, ResearchLineageReference,
-    Sha256Digest,
+    ProtocolRequirement, ProtocolVersion, RepositoryIdentity, ResearchLineage,
+    ResearchLineageReference, Sha256Digest,
 };
 use sha2::{Digest as _, Sha256};
 use std::collections::BTreeMap;
@@ -168,6 +168,7 @@ pub fn derive_summary(
     repository: &RepositoryIdentity,
     immutable_version: &Sha256Digest,
     package: &Path,
+    lineage: Option<&ResearchLineage>,
 ) -> Result<DerivedSummary, DerivationError> {
     let summary = summarize_verified_portable_v2(&ProjectSummaryRequest {
         repository,
@@ -176,6 +177,7 @@ pub fn derive_summary(
         discovery_limits: DiscoveryLimits::default(),
         portable_limits: PortableV2Limits::default(),
         cancelled: None,
+        lineage,
     })
     .map_err(err)?;
     let bytes = summary.to_canonical_json().map_err(err)?;

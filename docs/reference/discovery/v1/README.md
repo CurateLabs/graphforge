@@ -75,11 +75,14 @@ parsing, before any other content is read. Unknown optional `capabilities` are
 accepted; unknown fields fail `malformed_response`.
 
 `metadata` is the public-safe projection of Project research metadata: every
-field except `access.collaborators`, `extensions`, and `discovery_facets`. The
-record's `contract_version` is not carried; the summary `format` versions the
-document instead.
-`access.visibility` and `access.access_policy` are consumer metadata, not
-enforcement. Counts are the declared `corpus_size`. Strings are non-empty, at
+field except `extensions` and `discovery_facets`. The record's
+`contract_version` is not carried; the summary `format` versions the document
+instead. `authors` is user-authored display text, published as written. No
+access field exists in any format; the host enforces access. `people` lists the
+authors and committers of the published research lineage's Versions (each
+distinct signature with its `roles`), derived and checked by
+`ProjectSummary::bind_lineage`; credit is public and permanent. Counts are the
+declared `corpus_size`. Strings are non-empty, at
 most 4096 bytes, and free of ASCII control characters; lists hold at most 256
 strictly ascending entries. `facts` holds verified package facts that need no
 graph payload: `ontology_mode`, a component-kind histogram (only kinds with at

@@ -72,8 +72,7 @@ class ResearchInterchangeTests(unittest.TestCase):
                 imported.close()
             metadata = graph.research_project_metadata()
             metadata["title"] = "Independent research"
-            metadata["access"]["visibility"] = "private"
-            metadata["access"]["access_policy"] = "Independent local review"
+            metadata["description"] = "Independent local review"
             fork = {
                 "operation_uuid": identity(),
                 "project_uuid": identity(),

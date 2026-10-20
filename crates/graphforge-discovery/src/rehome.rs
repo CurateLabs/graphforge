@@ -103,25 +103,29 @@ fn validate_snapshot(
     if manifest.repository != refs.repository {
         return Err(mismatch());
     }
-    match (&manifest.summary, &snapshot.summary) {
+    let summary = match (&manifest.summary, &snapshot.summary) {
         (Some(reference), Some(bytes)) => {
             bind_raw(manifest, &reference.object_digest, bytes)?;
             let summary = ProjectSummary::from_json(bytes, limits)?;
             manifest.bind_summary(&summary)?;
+            Some(summary)
         }
-        (None, None) => {}
+        (None, None) => None,
         _ => return Err(mismatch()),
-    }
-    match (&manifest.lineage, &snapshot.lineage) {
+    };
+    let lineage = match (&manifest.lineage, &snapshot.lineage) {
         (Some(reference), Some(bytes)) => {
             bind_raw(manifest, &reference.object_digest, bytes)?;
             let lineage = ResearchLineage::from_json(bytes, limits)?;
             manifest.bind_lineage_document(&lineage)?;
+            Some(lineage)
         }
-        (None, None) => {}
+        (None, None) => None,
         _ => return Err(mismatch()),
-    }
-    Ok(())
+    };
+    summary
+        .as_ref()
+        .map_or(Ok(()), |summary| summary.bind_lineage(lineage.as_ref()))
 }
 
 fn derive_snapshot(

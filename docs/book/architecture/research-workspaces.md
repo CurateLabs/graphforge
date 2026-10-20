@@ -576,6 +576,13 @@ imply that decision.
 Version-addressed sharing must distinguish a current Branch reference from an
 immutable Version reference independently of the consumer's URL scheme.
 
+Credit is part of Version history ([ADR 0055](../../adr/0055-versions-are-commits.md)).
+The authors and committers a Version records are always published: lineage Versions
+and Fork origin citations carry them, and the Project summary lists the people
+derived from the lineage with their roles. Published credit is public and
+permanent. Project metadata and every portable, lineage and summary format carry no
+access fields; permission belongs to the host.
+
 ## Consumer interaction contract
 
 Define these projections in #1346 before runtime implementation. Each owning
