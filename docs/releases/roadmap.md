@@ -28,6 +28,9 @@ research model to use GraphForge.
 
 ## Release readiness
 
+Draft release-note and announcement copy is in
+[v0.6.0 notes (draft)](v0.6.0-notes-draft.md); it is not published.
+
 [M13](https://github.com/CurateLabs/graphforge/milestone/13) owns coordinated
 release readiness and publication across Rust, Python, Node, CLI, skills, and
 docs. [#1096](https://github.com/CurateLabs/graphforge/issues/1096) tracks readiness;

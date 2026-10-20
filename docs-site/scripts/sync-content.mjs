@@ -54,6 +54,7 @@ const PAGES = [
   "guide/overview.md",
   "guide/advanced.md",
   "guide/first-research-project.md",
+  "guide/audience-and-fit.md",
   "guide/installation.md",
   "guide/quickstart.md",
   "guide/work-with-an-agent.md",
@@ -185,6 +186,7 @@ const PAGES = [
   // END generated ADR records
   "releases/roadmap.md",
   "legal/licensing.md",
+  "community/support.md",
   "community/security.md",
   "community/code-of-conduct.md",
 ];

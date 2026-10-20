@@ -41,6 +41,7 @@ export default defineConfig({
           label: "Basic",
           items: [
             { label: "Choose your learning path", slug: "guide/overview" },
+            { label: "Who it is for", slug: "guide/audience-and-fit" },
             { label: "Your first graph", slug: "guide/quickstart" },
             { label: "Work with an agent", slug: "guide/work-with-an-agent" },
             {
@@ -558,6 +559,7 @@ export default defineConfig({
           collapsed: true,
           items: [
             { label: "Licensing", slug: "legal/licensing" },
+            { label: "Get help", slug: "community/support" },
             { label: "Security", slug: "community/security" },
             { label: "Code of Conduct", slug: "community/code-of-conduct" },
           ],
