@@ -341,7 +341,7 @@ pub use graphforge_core::portable::{
     PortableIntegrity, PortableLimits, PortableMode, PortableOutput, PortablePackageClass,
     PortableParticipantId, PortablePropertyProjection, PortableRepresentation,
     PortableSelectionEntry, PortableSelectionPlan, PortableSelectionProfile,
-    PortableSelectionReason, PortableSelectionRequest, PortableSubsetClosure,
+    PortableSelectionReason, PortableSelectionRequest, PortableSource, PortableSubsetClosure,
     PortableSubsetPreview as PortableSubsetPlan, PortableSubsetRequest,
 };
 pub use graphforge_core::storage_receipt::{
@@ -362,7 +362,7 @@ pub use portable::{
     PortableSelectionPreviewRequest, PortableSubsetPreviewRequest, PortableVerifyRequest,
     PortableVerifyResult, publish_portable_oci, publish_portable_oci_with_registry,
     pull_portable_oci, pull_portable_oci_with_registry, repack_verified_expanded_portable,
-    verify_portable,
+    verify_portable, verify_portable_stream,
 };
 pub use repository::{
     GitProvenance, InfraCapabilityCompatibility, InfraNotChecked, InfraPlan, InfraStaticValidity,

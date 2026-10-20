@@ -113,6 +113,7 @@ export function canonicalVerification(report) {
     })),
     contract: report.contract,
     representation: report.representation,
+    source: report.source,
     package_digest: report.packageDigest,
     package_class: report.packageClass.replaceAll("_", "-"),
     component_count: exactNumber(report.componentCount),
