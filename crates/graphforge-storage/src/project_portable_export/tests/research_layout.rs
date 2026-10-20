@@ -16,6 +16,8 @@ struct Fixture {
     versions: [Uuid; 2],
     /// Digests of the graph files both Versions share.
     shared: BTreeSet<String>,
+    /// One shared graph file: carried, never read, by verification.
+    shard: String,
 }
 
 /// Two Versions committing to the same graph: the participant, its files, and
@@ -29,12 +31,14 @@ fn two_versions_sharing_one_graph() -> Fixture {
         .find(|p| p.capability_id == "graph" && p.record_family_id == "files")
         .unwrap();
     let mut shared = BTreeSet::new();
+    let mut shard = None;
     for file in crate::graph_files::decode_inventory(&snapshot.bytes)
         .unwrap()
         .files
     {
         let bytes = fs::read(parent.graph_tree_root().join(&file.relative_path)).unwrap();
         crate::graph_object_store::install_graph_object_bytes(root.path(), &bytes).unwrap();
+        shard.get_or_insert_with(|| file.content_sha256.clone());
         shared.insert(file.content_sha256);
     }
     crate::graph_object_store::install_graph_object_bytes(root.path(), &snapshot.bytes).unwrap();
@@ -64,6 +68,7 @@ fn two_versions_sharing_one_graph() -> Fixture {
         generation,
         versions,
         shared,
+        shard: shard.unwrap(),
     }
 }
 
@@ -95,6 +100,20 @@ fn rename_entry(plan: &mut PortableExportPlan, old: &str, new: &str) {
                     .cmp(b["path"].as_str().unwrap().as_bytes())
             });
         }
+    }
+    plan.manifest = canonical_json(&manifest).unwrap();
+    resign_test_manifest(plan);
+}
+
+/// Drop one research entry, re-signing the manifest.
+fn remove_entry(plan: &mut PortableExportPlan, path: &str) {
+    plan.files.retain(|file| file.path != path);
+    let mut manifest: Value = serde_json::from_slice(&plan.manifest).unwrap();
+    for component in manifest["components"].as_array_mut().unwrap() {
+        component["files"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|file| file["path"] != path);
     }
     plan.manifest = canonical_json(&manifest).unwrap();
     resign_test_manifest(plan);
@@ -314,6 +333,29 @@ fn research_entries_out_of_canonical_order_are_refused() {
         error
             .to_string()
             .ends_with("bundle entries are not canonical order"),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_shared_object_missing_from_one_version_is_incompatible() {
+    let fixture = two_versions_sharing_one_graph();
+    let mut plan =
+        plan_complete_portable(&fixture.generation, PortableExportLimits::default()).unwrap();
+    let [kept, stripped] = fixture
+        .versions
+        .map(|id| format!("{RETAINED}{id}/{}", fixture.shard));
+    assert!(plan.files.iter().any(|file| file.path == kept));
+    // The other Version still carries the object, so the package holds it; only the
+    // stripped Version's own closure is incomplete.
+    remove_entry(&mut plan, &stripped);
+    let (_output, bundle) = export_bundle(&plan);
+    let error = verify(&bundle).unwrap_err();
+    assert_eq!(error.code, PortableErrorCode::Incompatible);
+    assert!(
+        error.to_string().contains(
+            "research component identity, schema, provenance or selected closure is invalid"
+        ),
         "{error}"
     );
 }
