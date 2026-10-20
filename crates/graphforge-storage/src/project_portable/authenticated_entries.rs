@@ -23,6 +23,9 @@ pub(super) enum Reopen<'a> {
     /// reads of an already scanned package at the offsets the scan recorded.
     /// Verification never uses this.
     Indexed(&'a Path),
+    /// Research files were validated per Version while they streamed past and
+    /// none is read back.
+    Driven,
 }
 
 /// Authentication for untrusted bytes, or corruption refusal against evidence
@@ -100,9 +103,11 @@ pub(super) fn validate_semantics(
         }
         Ok(value)
     })?;
-    research::validate_with_reader(report, limits, cancelled, |path, bound| {
-        read(source, entries, path, bound, cancelled)
-    })?;
+    if !matches!(source, Reopen::Driven) {
+        research::validate_with_reader(report, limits, cancelled, |path, bound| {
+            read(source, entries, path, bound, cancelled)
+        })?;
+    }
     Ok(())
 }
 
@@ -207,14 +212,14 @@ fn locate(source: Reopen<'_>, path: &str) -> Result<std::path::PathBuf, Portable
         Reopen::Indexed(bundle) => bundle.to_path_buf(),
         Reopen::BundleFile(bundle) if path.starts_with(research::NAMESPACE) => bundle.to_path_buf(),
         Reopen::Bundle(Some(stage)) if path.starts_with(research::NAMESPACE) => stage.join(path),
-        Reopen::Bundle(None) if path.starts_with(research::NAMESPACE) => {
+        Reopen::Bundle(None) | Reopen::Driven if path.starts_with(research::NAMESPACE) => {
             return Err(PortableError::at(
                 PortableErrorCode::Io,
                 path,
                 "research file was not staged",
             ));
         }
-        Reopen::Bundle(_) | Reopen::BundleFile(_) => {
+        Reopen::Bundle(_) | Reopen::BundleFile(_) | Reopen::Driven => {
             return Err(PortableError::at(
                 PortableErrorCode::LimitExceeded,
                 path,

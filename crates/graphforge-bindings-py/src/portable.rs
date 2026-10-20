@@ -77,6 +77,9 @@ fn parse_limits(py: Python<'_>, value: Option<&Bound<'_, PyDict>>) -> PyResult<P
     if let Some(item) = dict.get_item("max_parquet_walk_bytes")? {
         limits.max_parquet_walk_bytes = item.extract()?;
     }
+    if let Some(item) = dict.get_item("max_research_version_bytes")? {
+        limits.max_research_version_bytes = item.extract()?;
+    }
     if let Some(item) = dict.get_item("max_path_bytes")? {
         limits.max_path_bytes = item.extract()?;
     }

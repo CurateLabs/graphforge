@@ -48,6 +48,18 @@ pub struct PortableLimits {
     /// routine, so the verdict never depends on this value or on the source:
     /// it only trades memory for scratch writes.
     pub max_parquet_walk_bytes: u64,
+    /// Bytes of one research Version's retained objects that native validation
+    /// stages on disk: the sum over its entries under
+    /// `data/components/research/research-retained/<version>/`, not counting
+    /// local evidence objects, which are authenticated as they stream and never
+    /// staged. A Version is validated and its scratch removed before the next
+    /// Version is read, so temporary disk is bounded by one Version, not by the
+    /// package. Validating it holds the stage plus the further copies that
+    /// `PortableImportFootprint::VALIDATION_RESEARCH_COPIES` counts, so peak
+    /// temporary disk is that many times this limit plus one. A Version over
+    /// the limit is refused with `LimitExceeded`, from a file and from a stream
+    /// alike.
+    pub max_research_version_bytes: u64,
     /// UTF-8 bytes in one portable path.
     pub max_path_bytes: usize,
     /// Bytes in the streaming copy buffer.
@@ -95,6 +107,7 @@ impl Default for PortableLimits {
             max_tag_manifest_bytes: 4 * 1024 * 1024,
             max_retained_control_bytes: 256 * 1024 * 1024,
             max_parquet_walk_bytes: 64 * 1024 * 1024,
+            max_research_version_bytes: 1024 * 1024 * 1024,
             max_path_bytes: 4096,
             copy_buffer_bytes: 1024 * 1024,
         }

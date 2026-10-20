@@ -510,6 +510,14 @@ contiguous (UUID text order equals the registry's key order). A reader that
 consumes the bundle in order therefore knows the registry, and the Version
 that owns each object, before the object arrives.
 
+Native verification uses that order. One driver, over a bundle file, an
+expanded directory or a stream alike, stages a Version's non-evidence objects,
+validates the Version with the native owners and removes it before the next
+Version arrives, so temporary disk is bounded by `max_research_version_bytes`
+and not by the package; local evidence is authenticated as it streams and is
+never staged. The Version's closure check and the end-of-scan comparison of the
+objects seen against the manifest replace the whole-package closure check.
+
 The registry contains the selected immutable Version, required Version/proof
 payloads, identity-only ancestor citations, per-Version original Project
 citations, Branch genealogy, and exact accepted-contribution mappings. It does

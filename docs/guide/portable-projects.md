@@ -171,6 +171,49 @@ independent. Its operation UUID supports exact replay after source Version
 release and subsequent destination edits; a changed request is rejected.
 See [research workspace semantics](../book/architecture/research-workspaces.md).
 
+**Verifying a research package.** Full native verification of a research
+package reads it once, in canonical order: the registry first, then each
+Version's retained objects together under `research-retained/<version>/`. The
+scan stages one Version, checks its closure against the registry, runs the
+native domain and commitment checks on it, and removes it before it reads the
+next one, so temporary disk is bounded by one Version and not by the package.
+A bundle file, an expanded directory and a stream run the same code and give
+the same verdict; only the report's `source` differs. Memory is bounded by the
+scan's own limits and the owners' existing bounds, one Version at a time.
+
+`max_research_version_bytes` (default 1 GiB) bounds the retained objects of
+one Version that verification stages: the participants, graph files and
+manifest nodes, counted from the entry sizes before any byte is written. A
+Version over it is refused with `LimitExceeded`, from a file and from a stream
+alike. Local evidence objects are authenticated as they stream (their digest
+must equal their path and their length the registry's) and are never staged, so
+they do not count and need no disk. While a Version is validated its staged
+objects exist once in the stage and again in each copy the validation makes (an
+ephemeral object store, the expanded graph tree built for a graph without a
+file manifest, and the private project that tree is copied into; the copy count
+is `PortableImportFootprint::VALIDATION_RESEARCH_COPIES`). Budget the stage and
+those copies, each up to `max_research_version_bytes`, as free space in `scratch`
+(the system temporary directory when none is given), and pass the destination's filesystem as
+`scratch` when you know it. The limit is a ceiling for adversarial packages:
+a Version whose graph exceeds about 64 MiB of projected memory is already
+refused by the commitment check, so a genuine Version stays far below it.
+
+Compared with whole-package materialization, three outcomes differ, and all
+are refusals, never a false `verified`:
+
+- a package that still uses the earlier layout, `research-content/<digest>`,
+  is refused as incompatible;
+- a Version over `max_research_version_bytes` is refused with `LimitExceeded`;
+- when a package has two independent defects, such as a digest mismatch in
+  a later entry and an invalid commitment in an earlier Version, the native
+  refusal of the earlier Version is reported first.
+
+An evidence object that is byte-identical to a participant is staged like any
+participant. One that is byte-identical to a graph file or manifest node of the
+same Version, and to nothing else the registry names, is treated as evidence,
+and the Version is then refused as incompatible because that graph object is
+not staged.
+
 ```text
 graphforge --project ./citation-project portable preview --current --profile complete --strict
 graphforge --project ./citation-project export --current --profile complete \

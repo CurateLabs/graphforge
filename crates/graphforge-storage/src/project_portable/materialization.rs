@@ -265,6 +265,70 @@ type EntryObserver<'a> = dyn FnMut(&Path, Option<&File>) -> Result<(), PortableE
 /// Every component file an import stages.
 const COMPONENT_NAMESPACE: &str = "data/components/";
 
+/// Where a scan sends the bytes of the entries it stages, one entry at a time
+/// in canonical order. The import's [`CopySink`] stages every component file; the
+/// research driver stages one Version's files and validates them before the
+/// next Version arrives.
+pub(super) trait EntrySink {
+    /// The directory every staged entry is copied under, when it is one stage.
+    fn destination(&self) -> Option<&Path> {
+        None
+    }
+    /// The file to copy an entry of `length` bytes into, or `None` to only authenticate it.
+    fn open(&mut self, relative: &str, length: u64) -> Result<Option<File>, PortableError>;
+    fn write(&mut self, relative: &str, file: &mut File, bytes: &[u8])
+    -> Result<(), PortableError>;
+    fn finish(
+        &mut self,
+        relative: &str,
+        file: File,
+        length: u64,
+        digest: [u8; 32],
+        checksum: u64,
+    ) -> Result<(), PortableError>;
+    /// An entry that `open` declined, with the digest the scan computed over it.
+    fn declined(
+        &mut self,
+        _relative: &str,
+        _length: u64,
+        _digest: [u8; 32],
+    ) -> Result<(), PortableError> {
+        Ok(())
+    }
+    /// True when the sink validates research files as they stream, so a
+    /// finished scan has nothing to read back.
+    fn validates_research(&self) -> bool {
+        false
+    }
+}
+
+impl EntrySink for CopySink<'_> {
+    fn destination(&self) -> Option<&Path> {
+        Some(CopySink::destination(self))
+    }
+    fn open(&mut self, relative: &str, _length: u64) -> Result<Option<File>, PortableError> {
+        CopySink::open(self, relative)
+    }
+    fn write(
+        &mut self,
+        relative: &str,
+        file: &mut File,
+        bytes: &[u8],
+    ) -> Result<(), PortableError> {
+        CopySink::write(self, relative, file, bytes)
+    }
+    fn finish(
+        &mut self,
+        relative: &str,
+        file: File,
+        length: u64,
+        digest: [u8; 32],
+        checksum: u64,
+    ) -> Result<(), PortableError> {
+        CopySink::finish(self, relative, file, length, digest, checksum)
+    }
+}
+
 pub(super) struct CopySink<'a> {
     destination: std::path::PathBuf,
     /// Only entries whose path starts with this prefix are copied.

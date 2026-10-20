@@ -19,10 +19,14 @@ pub type NativeResearchValidator<'a> = dyn FnMut(
 
 /// Verify native historical content without admitting or mutating any destination.
 ///
-/// The package is materialized in a private directory created inside
-/// `scratch`, or in the system temporary directory when `scratch` is `None`.
-/// A caller that knows where the package will be imported passes a directory
-/// on that filesystem, so verification needs no space anywhere else.
+/// The package is read once, in canonical order, and each research Version is
+/// staged in a private directory created inside `scratch` (the system
+/// temporary directory when `scratch` is `None`), validated and removed before
+/// the next one is read, so the disk it needs is bounded by one Version
+/// (`PortableLimits::max_research_version_bytes`), not by the package. A caller
+/// that knows where the package will be imported passes a directory on that
+/// filesystem, so verification needs no space anywhere else. `source` is a
+/// bundle file or an expanded directory.
 pub fn validate_research_package(
     source: &Path,
     scratch: Option<&Path>,
@@ -30,43 +34,19 @@ pub fn validate_research_package(
     cancelled: Option<&AtomicBool>,
     validator: &mut NativeResearchValidator<'_>,
 ) -> Result<graphforge_core::portable::PortableReport, PortableError> {
-    let owner = match scratch {
-        Some(directory) => private_directory_in(directory)?,
-        None => private_directory_in(&std::env::temp_dir())?,
-    };
-    let stage = owner.path().join("verified");
-    let materialized = crate::project_portable::materialize_verified_portable_observed(
+    crate::project_portable::research::stream::validate_research_path(
         source,
-        &stage,
+        scratch,
         limits,
         cancelled,
-        |_, _| Ok(()),
-        false,
-    )?;
-    let report = materialized.report;
-    if let Some((registry, objects)) =
-        crate::project_portable::research::validate_stage(&stage, &report, limits, cancelled)?
-    {
-        validate(
-            &stage,
-            &registry,
-            &objects,
-            &materialized.captures,
-            cancelled,
-            Some(validator),
-        )?;
-    }
-    Ok(report)
+        Some(validator),
+    )
 }
 
 /// [`validate_research_package`] for a canonical bundle read once from a
-/// sequential reader.
-///
-/// The scan stages only the research files, `data/components/research/**`,
-/// because they are all native validation reads; the other components are
-/// authenticated and discarded. A package without research files writes
-/// nothing. The verdict equals [`validate_research_package`] on the same bytes
-/// in a file, and the report's `source` is `stream`.
+/// sequential reader. The verdict equals [`validate_research_package`] on the
+/// same bytes in a file, and the report's `source` is `stream`. A package
+/// without research Versions writes nothing.
 pub fn validate_research_package_stream(
     source: &mut dyn std::io::Read,
     scratch: Option<&Path>,
@@ -74,26 +54,16 @@ pub fn validate_research_package_stream(
     cancelled: Option<&AtomicBool>,
     validator: &mut NativeResearchValidator<'_>,
 ) -> Result<graphforge_core::portable::PortableReport, PortableError> {
-    let scan = crate::project_portable::scan_stream(source, limits, cancelled, scratch)?;
-    let report = scan.report;
-    if report.research_interchange {
-        let (stage, captures) = scan.spill.authenticated(cancelled)?;
-        if let Some((registry, objects)) =
-            crate::project_portable::research::validate_stage(stage, &report, limits, cancelled)?
-        {
-            validate(
-                stage,
-                &registry,
-                &objects,
-                captures,
-                cancelled,
-                Some(validator),
-            )?;
-        }
-    }
-    Ok(report)
+    crate::project_portable::research::stream::scan_stream(
+        source,
+        limits,
+        cancelled,
+        scratch,
+        Some(validator),
+    )
 }
 
+/// Validate every Version of a package staged whole, as an import does.
 pub(super) fn validate(
     stage: &Path,
     registry: &ResearchRegistry,
@@ -103,26 +73,64 @@ pub(super) fn validate(
     validator: Option<&mut NativeResearchValidator<'_>>,
 ) -> Result<(), PortableError> {
     let validator = validator.ok_or_else(invalid)?;
-    // Historical views live beside the stage, on the filesystem the import
-    // already admitted, never in the system temporary directory.
+    for (id, version) in &registry.versions {
+        check_cancel(cancelled)?;
+        let version_objects: BTreeMap<_, _> = objects
+            .range((*id, String::new())..)
+            .take_while(|((owner, _), _)| owner == id)
+            .map(|(key, length)| (key.clone(), *length))
+            .collect();
+        validate_version(
+            stage,
+            registry,
+            version,
+            &version_objects,
+            captures,
+            cancelled,
+            validator,
+        )?;
+    }
+    check_cancel(cancelled)
+}
+
+/// Run the native owner over one Version staged under `stage`.
+///
+/// The Version's objects are installed into a private object store, and its
+/// historical Project is opened there, both beside the stage, on the
+/// filesystem the caller already admitted and never in the system temporary
+/// directory. Both are removed when this returns. Local evidence that nothing
+/// else in the Version needs is authenticated by the scan and is not read.
+pub(crate) fn validate_version(
+    stage: &Path,
+    registry: &ResearchRegistry,
+    version: &ResearchVersionRecord,
+    objects: &BTreeMap<(Uuid, String), u64>,
+    captures: &BTreeMap<String, crate::project_portable::MaterializedCapture>,
+    cancelled: Option<&AtomicBool>,
+    validator: &mut NativeResearchValidator<'_>,
+) -> Result<(), PortableError> {
     let scratch = stage.parent().unwrap_or_else(|| Path::new("."));
     let source = private_directory_in(scratch)?;
     crate::open_or_initialize_ephemeral_project(source.path()).map_err(|_| invalid())?;
     let lease = crate::begin_graph_object_publication(source.path()).map_err(|_| invalid())?;
+    let evidence_only = crate::project_portable::research::evidence_only(version);
+    let needed: BTreeMap<_, _> = objects
+        .iter()
+        .filter(|((_, digest), _)| !evidence_only.contains(digest))
+        .map(|(key, length)| (key.clone(), *length))
+        .collect();
     crate::project_portable::research::install_captured_with_lease(
-        stage, &lease, objects, captures, cancelled,
+        stage, &lease, &needed, captures, cancelled,
     )?;
-    for version in registry.versions.values() {
-        check_cancel(cancelled)?;
-        let target = private_directory_in(scratch)?;
-        let generation = crate::research_versions::materialize_prepared_research_version(
-            source.path(),
-            version,
-            target.path(),
-        )
-        .map_err(|_| invalid())?;
-        validator(&generation, version, registry).map_err(|_| invalid())?;
-    }
+    check_cancel(cancelled)?;
+    let target = private_directory_in(scratch)?;
+    let generation = crate::research_versions::materialize_prepared_research_version(
+        source.path(),
+        version,
+        target.path(),
+    )
+    .map_err(|_| invalid())?;
+    validator(&generation, version, registry).map_err(|_| invalid())?;
     check_cancel(cancelled)
 }
 

@@ -169,54 +169,19 @@ pub fn verify_portable(
 /// mode, without any path, size or file identity.
 ///
 /// Memory is bounded by the limits and `max_retained_control_bytes`, whatever
-/// the package size. A package with research files stages those files in a
-/// private directory inside `scratch` (the system temporary directory when
-/// `None`, as [`validate_research_package`] does); no other package writes
-/// anything. The verdict is the one [`verify_portable`] gives the same
-/// bytes in a file, apart from the report's `source`.
+/// the package size. A research package's Versions are staged one at a time in
+/// a private directory inside `scratch` (the system temporary directory when
+/// `None`, as [`validate_research_package`] does) and checked against their
+/// closures before the next is read; no other package writes anything. The
+/// verdict is the one [`verify_portable`] gives the same bytes in a file, apart
+/// from the report's `source`.
 pub fn verify_portable_stream(
     source: &mut dyn Read,
     scratch: Option<&Path>,
     limits: PortableLimits,
     cancelled: Option<&AtomicBool>,
 ) -> Result<PortableReport, PortableError> {
-    scan_stream(source, limits, cancelled, scratch).map(|scan| scan.report)
-}
-
-/// A bundle verified in one pass, with the stage that holds its research files.
-pub(crate) struct StreamScan {
-    pub(crate) report: PortableReport,
-    pub(crate) spill: research::Spill,
-}
-
-pub(crate) fn scan_stream(
-    source: &mut dyn Read,
-    limits: PortableLimits,
-    cancelled: Option<&AtomicBool>,
-    scratch: Option<&Path>,
-) -> Result<StreamScan, PortableError> {
-    check_cancel(cancelled)?;
-    let scratch = scratch.map_or_else(std::env::temp_dir, Path::to_path_buf);
-    let mut spill = research::Spill::new(&scratch);
-    let scan = read_bundle(
-        source,
-        limits,
-        cancelled,
-        Some(spill.sink()),
-        None,
-        Some(&scratch),
-        || PortableError::new(PortableErrorCode::InvalidStructure, "trailing bytes"),
-    )?;
-    let (report, entries) =
-        finish_bundle(scan, PortableMode::Full, limits, PortableSource::Stream)?;
-    authenticated_entries::validate_semantics(
-        Reopen::Bundle(spill.stage()),
-        &entries,
-        &report,
-        limits,
-        cancelled,
-    )?;
-    Ok(StreamScan { report, spill })
+    research::stream::scan_stream(source, limits, cancelled, scratch, None)
 }
 
 /// The entry and byte census of a bundle: the one rule the preflight and the
@@ -286,7 +251,7 @@ fn scan(
     mode: PortableMode,
     limits: PortableLimits,
     cancelled: Option<&AtomicBool>,
-    sink: Option<&mut materialization::CopySink<'_>>,
+    sink: Option<&mut (dyn materialization::EntrySink + '_)>,
     written: Option<&crate::project_portable_export::WrittenPackage>,
 ) -> Result<PortableReport, PortableError> {
     scan_entries(source, mode, limits, cancelled, sink, written).map(|(report, _)| report)
@@ -298,14 +263,17 @@ fn scan_entries(
     mode: PortableMode,
     limits: PortableLimits,
     cancelled: Option<&AtomicBool>,
-    sink: Option<&mut materialization::CopySink<'_>>,
+    sink: Option<&mut (dyn materialization::EntrySink + '_)>,
     written: Option<&crate::project_portable_export::WrittenPackage>,
 ) -> Result<(PortableReport, Vec<Entry>), PortableError> {
     let metadata = fs::symlink_metadata(source)
         .map_err(|_| PortableError::new(PortableErrorCode::Io, "source unavailable"))?;
     // The research files that validation reads back by digest come from the
     // importer's own stage when it copies them, and from the file otherwise.
-    let import_stage = sink.as_ref().map(|sink| sink.destination().to_path_buf());
+    let import_stage = sink
+        .as_ref()
+        .and_then(|sink| sink.destination().map(Path::to_path_buf));
+    let driven = sink.as_ref().is_some_and(|sink| sink.validates_research());
     let (report, entries) = if metadata.is_dir() {
         verify_expanded(source, mode, limits, cancelled, sink, written)
     } else if metadata.is_file() {
@@ -323,7 +291,9 @@ fn scan_entries(
         ));
     }
     if mode == PortableMode::Full {
-        let reopen = if metadata.is_dir() {
+        let reopen = if driven {
+            Reopen::Driven
+        } else if metadata.is_dir() {
             Reopen::Directory(source)
         } else if import_stage.is_some() {
             Reopen::Bundle(import_stage.as_deref())
@@ -720,7 +690,7 @@ fn verify_expanded(
     mode: PortableMode,
     limits: PortableLimits,
     cancelled: Option<&AtomicBool>,
-    mut sink: Option<&mut materialization::CopySink<'_>>,
+    mut sink: Option<&mut (dyn materialization::EntrySink + '_)>,
     written: Option<&crate::project_portable_export::WrittenPackage>,
 ) -> Result<(PortableReport, Vec<Entry>), PortableError> {
     let root_before = fs::symlink_metadata(root)
@@ -890,7 +860,7 @@ fn verify_bundle(
     mode: PortableMode,
     limits: PortableLimits,
     cancelled: Option<&AtomicBool>,
-    sink: Option<&mut materialization::CopySink<'_>>,
+    sink: Option<&mut (dyn materialization::EntrySink + '_)>,
     written: Option<&crate::project_portable_export::WrittenPackage>,
 ) -> Result<(PortableReport, Vec<Entry>), PortableError> {
     let before = fs::metadata(path)
@@ -984,7 +954,7 @@ fn read_bundle<R: Read + ?Sized>(
     reader: &mut R,
     limits: PortableLimits,
     cancelled: Option<&AtomicBool>,
-    mut sink: Option<&mut materialization::CopySink<'_>>,
+    mut sink: Option<&mut (dyn materialization::EntrySink + '_)>,
     written: Option<&crate::project_portable_export::WrittenPackage>,
     walk_parquet: Option<&Path>,
     on_trailing_bytes: impl FnOnce() -> PortableError,
@@ -1640,7 +1610,7 @@ fn hash_file(
     retain_limit: Option<u64>,
     mut inventory: Option<&mut inventory::InventoryCheck<'_>>,
     cancelled: Option<&AtomicBool>,
-    mut sink: Option<&mut materialization::CopySink<'_>>,
+    mut sink: Option<&mut (dyn materialization::EntrySink + '_)>,
     expected: Option<([u8; 32], u64)>,
 ) -> Result<([u8; 32], Option<Vec<u8>>), PortableError> {
     let mut f = crate::project_portable_export::open_source_no_follow(path).map_err(|_| {
@@ -1664,7 +1634,7 @@ fn hash_file(
     let mut kept = retain_payload(length, retain_limit, entry)?;
     let mut output = sink
         .as_deref_mut()
-        .map(|sink| sink.open(entry))
+        .map(|sink| sink.open(entry, length))
         .transpose()?
         .flatten();
     let mut checksum = output
@@ -1713,8 +1683,8 @@ fn hash_file(
         ));
     }
     let digest = h.finish()?;
-    if let (Some(sink), Some(output)) = (sink, output) {
-        sink.finish(
+    match (sink, output) {
+        (Some(sink), Some(output)) => sink.finish(
             entry,
             output,
             length,
@@ -1722,7 +1692,9 @@ fn hash_file(
             checksum
                 .expect("materialized output has a checksum capture")
                 .finish(),
-        )?;
+        )?,
+        (Some(sink), None) => sink.declined(entry, length, digest)?,
+        _ => {}
     }
     Ok((digest, kept))
 }
@@ -2050,7 +2022,7 @@ fn hash_payload(
     mut inventory: Option<&mut inventory::InventoryCheck<'_>>,
     cancelled: Option<&AtomicBool>,
     entry: &str,
-    mut sink: Option<&mut materialization::CopySink<'_>>,
+    mut sink: Option<&mut (dyn materialization::EntrySink + '_)>,
     expected: Option<([u8; 32], u64)>,
     mut walk: Option<&mut ParquetWalk<'_>>,
 ) -> Result<([u8; 32], Option<Vec<u8>>), PortableError> {
@@ -2058,7 +2030,7 @@ fn hash_payload(
     let mut kept = retain_payload(size, retain_limit, entry)?;
     let mut output = sink
         .as_deref_mut()
-        .map(|sink| sink.open(entry))
+        .map(|sink| sink.open(entry, size))
         .transpose()?
         .flatten();
     let mut checksum = output
@@ -2095,8 +2067,8 @@ fn hash_payload(
     }
     read_padding(reader, size, transport_hash)?;
     let digest = payload_hash.finish()?;
-    if let (Some(sink), Some(output)) = (sink, output) {
-        sink.finish(
+    match (sink, output) {
+        (Some(sink), Some(output)) => sink.finish(
             entry,
             output,
             size,
@@ -2104,7 +2076,9 @@ fn hash_payload(
             checksum
                 .expect("materialized output has a checksum capture")
                 .finish(),
-        )?;
+        )?,
+        (Some(sink), None) => sink.declined(entry, size, digest)?,
+        _ => {}
     }
     Ok((digest, kept))
 }

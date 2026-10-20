@@ -88,6 +88,10 @@ fn parse_limits(input: Option<PortableLimitsInput>) -> Result<PortableLimits> {
             Some(value) => crate::node_u64(Some(value), "maxParquetWalkBytes")?,
             None => defaults.max_parquet_walk_bytes,
         },
+        max_research_version_bytes: match input.max_research_version_bytes {
+            Some(value) => crate::node_u64(Some(value), "maxResearchVersionBytes")?,
+            None => defaults.max_research_version_bytes,
+        },
         max_path_bytes: match input.max_path_bytes {
             Some(value) => crate::node_usize(Some(value), defaults.max_path_bytes, "maxPathBytes")?,
             None => defaults.max_path_bytes,
@@ -358,6 +362,8 @@ pub struct PortableLimitsInput {
     /// Largest Parquet entry a stream holds in memory to walk its pages; a
     /// larger one is staged in scratch.
     pub max_parquet_walk_bytes: Option<BigInt>,
+    /// Bytes of one research Version's objects that native validation stages on disk.
+    pub max_research_version_bytes: Option<BigInt>,
     pub max_path_bytes: Option<BigInt>,
     pub copy_buffer_bytes: Option<BigInt>,
 }
