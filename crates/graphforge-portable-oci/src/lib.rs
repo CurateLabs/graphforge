@@ -13,6 +13,11 @@ use std::io::Read;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use ureq::unversioned::resolver::DefaultResolver;
+use ureq::unversioned::transport::{
+    Buffers, ConnectionDetails, Connector, DefaultConnector, NextTimeout, Transport,
+    time::Duration as WaitDuration,
+};
 /// Artifact type for a GraphForge portable-v2 package in an OCI registry.
 pub const OCI_ARTIFACT_TYPE: &str = "application/vnd.graphforge.project.v2";
 /// Config media type carrying GraphForge semantic identity.
@@ -138,7 +143,7 @@ pub struct MemoryOciRegistry {
 
 #[derive(Default)]
 struct MemoryState {
-    blobs: BTreeMap<(String, String), Arc<[u8]>>,
+    blobs: BTreeMap<(String, String), Arc<Vec<u8>>>,
     manifests: BTreeMap<(String, String), (String, Vec<u8>)>,
     tags: BTreeMap<(String, String), String>,
     referrers: BTreeMap<(String, String), Vec<Vec<u8>>>,
@@ -151,21 +156,7 @@ impl PortableV2OciRegistry for MemoryOciRegistry {
         digest: &str,
         bytes: &[u8],
     ) -> Result<(), PortableV2Error> {
-        validate_repository(repository)?;
-        validate_digest(digest)?;
-        let actual = digest_sha256(bytes);
-        if actual != digest {
-            return Err(PortableV2Error::new(
-                PortableV2ErrorCode::DigestMismatch,
-                "blob bytes do not match declared digest",
-            ));
-        }
-        self.inner
-            .lock()
-            .map_err(|_| PortableV2Error::new(PortableV2ErrorCode::Io, "registry lock poisoned"))?
-            .blobs
-            .insert((repository.to_owned(), digest.to_owned()), Arc::from(bytes));
-        Ok(())
+        self.store_blob(repository, digest, bytes.to_vec())
     }
 
     fn put_blob_stream(
@@ -177,18 +168,23 @@ impl PortableV2OciRegistry for MemoryOciRegistry {
     ) -> Result<(), PortableV2Error> {
         validate_repository(repository)?;
         validate_digest(digest)?;
+        let io = |detail| PortableV2Error::new(PortableV2ErrorCode::Io, detail);
+        // Reserve the declared length once (fallibly, so a lying size cannot
+        // abort the process) and move the bytes into storage without a copy.
         let mut bytes = Vec::new();
+        bytes
+            .try_reserve_exact(
+                usize::try_from(size).map_err(|_| io("blob size is not addressable"))?,
+            )
+            .map_err(|_| io("blob size cannot be reserved"))?;
         (&mut *source)
             .take(size.saturating_add(1))
             .read_to_end(&mut bytes)
-            .map_err(|_| PortableV2Error::new(PortableV2ErrorCode::Io, "blob stream failed"))?;
+            .map_err(|_| io("blob stream failed"))?;
         if bytes.len() as u64 != size {
-            return Err(PortableV2Error::new(
-                PortableV2ErrorCode::Io,
-                "blob stream length does not match declared size",
-            ));
+            return Err(io("blob stream length does not match declared size"));
         }
-        self.put_blob(repository, digest, &bytes)
+        self.store_blob(repository, digest, bytes)
     }
 
     fn get_blob_stream<'a>(
@@ -197,9 +193,10 @@ impl PortableV2OciRegistry for MemoryOciRegistry {
         digest: &str,
         _size: u64,
     ) -> Result<Box<dyn Read + 'a>, PortableV2Error> {
-        Ok(Box::new(std::io::Cursor::new(
-            self.stored_blob(repository, digest)?,
-        )))
+        Ok(Box::new(SharedBlobReader {
+            blob: self.stored_blob(repository, digest)?,
+            position: 0,
+        }))
     }
 
     fn get_blob(&self, repository: &str, digest: &str) -> Result<Vec<u8>, PortableV2Error> {
@@ -314,8 +311,46 @@ impl PortableV2OciRegistry for MemoryOciRegistry {
     }
 }
 
+/// Reads a stored blob in place; the blob is shared, not copied.
+struct SharedBlobReader {
+    blob: Arc<Vec<u8>>,
+    position: usize,
+}
+
+impl Read for SharedBlobReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let rest = &self.blob[self.position..];
+        let read = rest.len().min(buf.len());
+        buf[..read].copy_from_slice(&rest[..read]);
+        self.position += read;
+        Ok(read)
+    }
+}
+
 impl MemoryOciRegistry {
-    fn stored_blob(&self, repository: &str, digest: &str) -> Result<Arc<[u8]>, PortableV2Error> {
+    fn store_blob(
+        &self,
+        repository: &str,
+        digest: &str,
+        bytes: Vec<u8>,
+    ) -> Result<(), PortableV2Error> {
+        validate_repository(repository)?;
+        validate_digest(digest)?;
+        if digest_sha256(&bytes) != digest {
+            return Err(PortableV2Error::new(
+                PortableV2ErrorCode::DigestMismatch,
+                "blob bytes do not match declared digest",
+            ));
+        }
+        self.inner
+            .lock()
+            .map_err(|_| PortableV2Error::new(PortableV2ErrorCode::Io, "registry lock poisoned"))?
+            .blobs
+            .insert((repository.to_owned(), digest.to_owned()), Arc::new(bytes));
+        Ok(())
+    }
+
+    fn stored_blob(&self, repository: &str, digest: &str) -> Result<Arc<Vec<u8>>, PortableV2Error> {
         validate_repository(repository)?;
         validate_digest(digest)?;
         self.inner
@@ -350,20 +385,22 @@ impl MemoryOciRegistry {
 pub const MAX_RESPONSE_BYTES: u64 = 10 * 1024 * 1024;
 
 /// How layer blobs move over HTTP. Layers are transferred as a sequence of
-/// requests of at most `chunk_bytes` (OCI chunked upload, ranged download),
-/// each with its own `request_timeout`, so a long transfer completes as long
-/// as every request does.
+/// requests of at most `chunk_bytes` (OCI chunked upload, ranged download).
+/// There is no deadline on a request or a transfer: connecting, waiting for
+/// response headers, and every single socket read or write must each make
+/// progress within `idle_timeout`, so a long transfer completes as long as
+/// bytes keep moving and a stalled one fails after `idle_timeout`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct HttpOciTransfer {
     pub chunk_bytes: u64,
-    pub request_timeout: Duration,
+    pub idle_timeout: Duration,
 }
 
 impl Default for HttpOciTransfer {
     fn default() -> Self {
         Self {
             chunk_bytes: 8 * 1024 * 1024,
-            request_timeout: Duration::from_mins(1),
+            idle_timeout: Duration::from_mins(1),
         }
     }
 }
@@ -398,10 +435,10 @@ impl HttpOciRegistry {
         insecure_http: bool,
         transfer: HttpOciTransfer,
     ) -> Result<Self, PortableV2Error> {
-        if transfer.chunk_bytes == 0 || transfer.request_timeout.is_zero() {
+        if transfer.chunk_bytes == 0 || transfer.idle_timeout.is_zero() {
             return Err(PortableV2Error::new(
                 PortableV2ErrorCode::InvalidPath,
-                "transfer chunk size and request timeout must be positive",
+                "transfer chunk size and idle timeout must be positive",
             ));
         }
         let host = registry.trim().trim_end_matches('/');
@@ -438,15 +475,24 @@ impl HttpOciRegistry {
                 "invalid registry origin",
             ));
         }
+        // No per-call, global or body deadline: a body may take as long as it
+        // keeps moving. Every wait is bounded by `IdleTransport` instead, and
+        // the phases before the body are bounded here.
         let config = ureq::Agent::config_builder()
-            .timeout_per_call(Some(transfer.request_timeout))
+            .timeout_resolve(Some(transfer.idle_timeout))
+            .timeout_connect(Some(transfer.idle_timeout))
+            .timeout_send_request(Some(transfer.idle_timeout))
+            .timeout_recv_response(Some(transfer.idle_timeout))
             .http_status_as_error(false)
             .max_redirects(0)
             .build();
+        let connector = DefaultConnector::default().chain(IdleConnector {
+            idle: transfer.idle_timeout,
+        });
         Ok(Self {
             base_url: format!("{scheme}://{host}"),
             credential: credential.map(str::to_owned),
-            agent: ureq::Agent::new_with_config(config),
+            agent: ureq::Agent::with_parts(config, connector, DefaultResolver::default()),
             chunk_bytes: transfer.chunk_bytes,
         })
     }
@@ -768,6 +814,82 @@ impl PortableV2OciRegistry for HttpOciRegistry {
     }
 }
 
+/// Caps every socket wait of the wrapped transport at `idle`. ureq's own
+/// timeouts are deadlines measured from the start of a phase and are not
+/// restarted by progress; each transport read or write is the unit that must
+/// make progress, so bounding those gives an idle timeout.
+#[derive(Debug)]
+struct IdleConnector {
+    idle: Duration,
+}
+
+impl<In: Transport> Connector<In> for IdleConnector {
+    type Out = IdleTransport<In>;
+
+    fn connect(
+        &self,
+        _details: &ConnectionDetails,
+        chained: Option<In>,
+    ) -> Result<Option<Self::Out>, ureq::Error> {
+        Ok(chained.map(|inner| IdleTransport {
+            inner,
+            idle: self.idle,
+        }))
+    }
+}
+
+#[derive(Debug)]
+struct IdleTransport<T> {
+    inner: T,
+    idle: Duration,
+}
+
+impl<T> IdleTransport<T> {
+    fn capped(&self, timeout: NextTimeout) -> NextTimeout {
+        if timeout.after.is_not_happening() || *timeout.after > self.idle {
+            NextTimeout {
+                after: WaitDuration::Exact(self.idle),
+                reason: timeout.reason,
+            }
+        } else {
+            timeout
+        }
+    }
+}
+
+impl<T: Transport> Transport for IdleTransport<T> {
+    fn buffers(&mut self) -> &mut dyn Buffers {
+        self.inner.buffers()
+    }
+
+    fn transmit_output(&mut self, amount: usize, timeout: NextTimeout) -> Result<(), ureq::Error> {
+        let timeout = self.capped(timeout);
+        self.inner.transmit_output(amount, timeout)
+    }
+
+    fn await_input(&mut self, timeout: NextTimeout) -> Result<bool, ureq::Error> {
+        let timeout = self.capped(timeout);
+        self.inner.await_input(timeout)
+    }
+
+    fn is_open(&mut self) -> bool {
+        self.inner.is_open()
+    }
+
+    fn is_tls(&self) -> bool {
+        self.inner.is_tls()
+    }
+}
+
+/// Whether a `Content-Range` value is exactly `bytes first-last/total` for the
+/// requested range and a blob of `size` bytes (`*` leaves the total unstated).
+fn content_range_matches(value: &str, first: u64, last: u64, size: u64) -> bool {
+    let Some((range, total)) = value.strip_prefix("bytes ").and_then(|v| v.split_once('/')) else {
+        return false;
+    };
+    range == format!("{first}-{last}") && (total == "*" || total.parse() == Ok(size))
+}
+
 enum RangeFailure {
     Missing,
     Transport,
@@ -808,13 +930,14 @@ impl RangedBlobReader<'_> {
                 .headers()
                 .get("Content-Range")
                 .and_then(|value| value.to_str().ok())
-                .is_some_and(|value| value.starts_with(&format!("bytes {}-{last}/", self.offset)));
-        // A registry that ignores `Range` may answer 200 with the whole blob;
-        // that is acceptable only when the whole blob is a single request.
-        let whole = status == 200 && self.offset == 0 && length == self.size;
+                .is_some_and(|value| content_range_matches(value, self.offset, last, self.size));
+        // A registry that ignores `Range` answers the first request with 200
+        // and the whole blob; stream all of it, bounded by the declared size.
+        let whole = status == 200 && self.offset == 0;
         if !ranged && !whole {
             return Err(RangeFailure::Transport);
         }
+        let length = if whole { self.size } else { length };
         let body = resp
             .into_parts()
             .1

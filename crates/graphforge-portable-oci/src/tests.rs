@@ -204,6 +204,10 @@ struct Faults {
     short_range: bool,
     /// Answer ranged GETs with the whole blob and 200.
     ignore_range: bool,
+    /// Send each ranged GET body in eight pieces with this pause before each.
+    trickle: Duration,
+    /// Send half of each ranged GET body, pause this long, then send the rest.
+    stall: Duration,
     /// Sleep before answering every PATCH and ranged GET.
     delay: Duration,
 }
@@ -298,6 +302,20 @@ impl LoopbackRegistry {
                             first + part.len() - 1,
                             blob.len()
                         );
+                        if !faults.trickle.is_zero() || !faults.stall.is_zero() {
+                            let _ = write!(
+                                stream,
+                                "HTTP/1.1 206 Partial Content\r\n{extra}Content-Length: {}\r\nConnection: close\r\n\r\n",
+                                part.len()
+                            );
+                            let pieces = if faults.stall.is_zero() { 8 } else { 2 };
+                            let pause = faults.trickle.max(faults.stall);
+                            for piece in part.chunks(part.len().div_ceil(pieces)) {
+                                thread::sleep(pause);
+                                let _ = stream.write_all(piece);
+                            }
+                            continue;
+                        }
                         if faults.short_range {
                             let half = part.len() / 2;
                             let _ = write!(
@@ -400,7 +418,7 @@ fn drain(reader: &mut dyn Read) -> std::io::Result<(String, u64)> {
 
 const SMALL_CHUNKS: HttpOciTransfer = HttpOciTransfer {
     chunk_bytes: 64 * 1024,
-    request_timeout: Duration::from_secs(30),
+    idle_timeout: Duration::from_secs(30),
 };
 
 #[test]
@@ -436,7 +454,7 @@ fn a_layer_larger_than_the_response_bound_streams_through_http() {
 }
 
 #[test]
-fn a_transfer_outliving_the_request_timeout_completes_while_it_progresses() {
+fn a_transfer_outliving_the_idle_timeout_completes_while_it_progresses() {
     let layer = pattern(5 * 64 * 1024);
     let digest = digest_sha256(&layer);
     let delay = Duration::from_millis(600);
@@ -446,7 +464,7 @@ fn a_transfer_outliving_the_request_timeout_completes_while_it_progresses() {
     });
     let timeout = Duration::from_secs(2);
     let client = server.client(HttpOciTransfer {
-        request_timeout: timeout,
+        idle_timeout: timeout,
         ..SMALL_CHUNKS
     });
     let started = Instant::now();
@@ -470,7 +488,7 @@ fn a_single_request_slower_than_the_timeout_still_fails() {
         ..Faults::default()
     });
     let client = server.client(HttpOciTransfer {
-        request_timeout: Duration::from_secs(1),
+        idle_timeout: Duration::from_secs(1),
         ..SMALL_CHUNKS
     });
     assert_eq!(
@@ -587,8 +605,8 @@ fn a_stream_that_does_not_match_its_digest_or_size_is_never_finalized() {
 }
 
 #[test]
-fn a_registry_that_ignores_range_cannot_serve_a_multi_request_layer() {
-    let layer = pattern(3 * 64 * 1024);
+fn a_registry_that_ignores_range_streams_the_whole_layer() {
+    let layer = pattern(3 * 64 * 1024 + 11);
     let digest = digest_sha256(&layer);
     let server = LoopbackRegistry::start(Faults {
         ignore_range: true,
@@ -599,20 +617,113 @@ fn a_registry_that_ignores_range_cannot_serve_a_multi_request_layer() {
     client
         .put_blob_stream("repo", &digest, size, &mut layer.as_slice())
         .unwrap();
-    assert_eq!(
-        client
-            .get_blob_stream("repo", &digest, size)
-            .err()
-            .map(|error| error.code),
-        Some(PortableV2ErrorCode::Io)
-    );
-    // One request covers the whole layer, so a 200 answer is exact.
-    let whole = server.client(HttpOciTransfer {
-        chunk_bytes: size,
-        ..SMALL_CHUNKS
-    });
-    let mut stream = whole.get_blob_stream("repo", &digest, size).unwrap();
+    let mut stream = client.get_blob_stream("repo", &digest, size).unwrap();
     assert_eq!(drain(&mut stream).unwrap(), (digest, size));
+}
+
+#[test]
+fn a_content_range_total_that_contradicts_the_descriptor_is_refused() {
+    let layer = pattern(3 * 64 * 1024);
+    let digest = digest_sha256(&layer);
+    let server = LoopbackRegistry::start(Faults::default());
+    let client = server.client(SMALL_CHUNKS);
+    let size = layer.len() as u64;
+    client
+        .put_blob_stream("repo", &digest, size, &mut layer.as_slice())
+        .unwrap();
+    for declared in [size - 1, size + 1] {
+        assert_eq!(
+            client
+                .get_blob_stream("repo", &digest, declared)
+                .err()
+                .map(|error| error.code),
+            Some(PortableV2ErrorCode::Io)
+        );
+    }
+    assert!(content_range_matches("bytes 0-9/100", 0, 9, 100));
+    assert!(content_range_matches("bytes 0-9/*", 0, 9, 100));
+    for refused in [
+        "bytes 0-9/101",
+        "bytes 0-9",
+        "bytes 0-9/x",
+        "0-9/100",
+        "bytes 1-9/100",
+    ] {
+        assert!(!content_range_matches(refused, 0, 9, 100), "{refused}");
+    }
+}
+
+/// Yields `piece` bytes per read, pausing before each.
+struct SlowReader<'a> {
+    bytes: &'a [u8],
+    piece: usize,
+    pause: Duration,
+}
+
+impl Read for SlowReader<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        thread::sleep(self.pause);
+        let read = self.bytes.len().min(self.piece).min(buf.len());
+        buf[..read].copy_from_slice(&self.bytes[..read]);
+        self.bytes = &self.bytes[read..];
+        Ok(read)
+    }
+}
+
+const IDLE_WINDOW: HttpOciTransfer = HttpOciTransfer {
+    chunk_bytes: 64 * 1024,
+    idle_timeout: Duration::from_secs(1),
+};
+
+#[test]
+fn a_body_trickling_for_longer_than_the_idle_window_completes_while_it_progresses() {
+    let layer = pattern(64 * 1024);
+    let digest = digest_sha256(&layer);
+    let size = layer.len() as u64;
+    let pause = Duration::from_millis(300);
+    let server = LoopbackRegistry::start(Faults {
+        trickle: pause,
+        ..Faults::default()
+    });
+    let client = server.client(IDLE_WINDOW);
+    // Upload: the source yields eight pieces, 300 ms apart (2.4 s > 1 s).
+    let started = Instant::now();
+    client
+        .put_blob_stream(
+            "repo",
+            &digest,
+            size,
+            &mut SlowReader {
+                bytes: &layer,
+                piece: 8 * 1024,
+                pause,
+            },
+        )
+        .unwrap();
+    // Download: the body arrives in eight pieces, 300 ms apart.
+    let mut stream = client.get_blob_stream("repo", &digest, size).unwrap();
+    assert_eq!(drain(&mut stream).unwrap(), (digest, size));
+    assert!(started.elapsed() > 2 * IDLE_WINDOW.idle_timeout);
+}
+
+#[test]
+fn a_body_that_stalls_for_longer_than_the_idle_window_fails() {
+    let layer = pattern(64 * 1024);
+    let digest = digest_sha256(&layer);
+    let size = layer.len() as u64;
+    let server = LoopbackRegistry::start(Faults {
+        stall: Duration::from_secs(3),
+        ..Faults::default()
+    });
+    let client = server.client(IDLE_WINDOW);
+    client
+        .put_blob_stream("repo", &digest, size, &mut layer.as_slice())
+        .unwrap();
+    let started = Instant::now();
+    let mut stream = client.get_blob_stream("repo", &digest, size).unwrap();
+    assert!(drain(&mut stream).is_err());
+    // It gave up on the stall; it did not wait the 3 s for the rest.
+    assert!(started.elapsed() < Duration::from_millis(2900));
 }
 
 #[test]
