@@ -385,11 +385,11 @@ async fn an_aggregate_that_waits_while_the_exchange_fills_the_pool_spills_and_ma
 
 mod trace {
     use super::*;
+    use datafusion::execution::TaskContext;
     use datafusion::execution::memory_pool::{
         MemoryConsumer, MemoryLimit, MemoryPool, MemoryReservation, TrackConsumersPool,
     };
     use datafusion::execution::runtime_env::RuntimeEnvBuilder;
-    use datafusion::execution::TaskContext;
     use std::collections::VecDeque;
     use std::sync::Mutex;
     use std::time::Instant;

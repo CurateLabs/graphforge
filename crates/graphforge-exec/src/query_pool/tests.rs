@@ -761,3 +761,19 @@ async fn a_real_external_sort_drains_spill_output_before_retaining_the_next_batc
     // output crosses the buffered-sort share while most of the pool is free.
     assert_external_sort_spills_with_sibling(262_144, true).await;
 }
+
+/// A consumer that can spill is kept one floor short of the pool. The reader
+/// of a batch an exchange spilled, and the writer of a spill, cannot spill
+/// and fail the query when refused; an aggregate that had grown to within a
+/// batch of the limit left the exchange's reader 95 KiB for a 398 KiB batch
+/// (run 39356061798, #2173).
+#[test]
+fn a_spilling_consumer_leaves_the_last_floor_to_the_readers_of_spilled_data() {
+    let pool = query_pool(64 * MIB);
+    let busy = aggregate(&pool, 0);
+    while busy.try_grow(2 * MIB).is_ok() {}
+    assert!(busy.size() <= 54 * MIB, "{}", busy.size());
+    let reader = MemoryConsumer::new("SpillReaderDecode").register(&pool);
+    reader.try_grow(MIB).unwrap();
+    assert!(pool.reserved() <= 64 * MIB, "{}", pool.reserved());
+}

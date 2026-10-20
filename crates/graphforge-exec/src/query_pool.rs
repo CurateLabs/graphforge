@@ -342,7 +342,8 @@ impl MemoryPool for QueryMemoryPool {
             (
                 state.reserved,
                 self.unfilled_floors_except(&state, id)
-                    .saturating_add(self.headroom(reservation, &state)),
+                    .saturating_add(self.headroom(reservation, &state))
+                    .saturating_add(self.floor(1)),
             )
         } else {
             (state.reserved.saturating_sub(Self::lent(&state)), 0)
