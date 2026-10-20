@@ -131,9 +131,10 @@ Downloads use finite response, object (1 TiB), redirect, and connection
 limits, and an idle bound instead of a whole-transfer deadline: a slow transfer
 continues as long as bytes keep arriving. Transient failures (a failed
 connection, a cut body, or a `408`, `429`, `502`, `503`, or `504` status) are
-retried in the same invocation with backoff; a `Retry-After` in seconds sets a
+retried in the same invocation with backoff; a `Retry-After` (seconds or an HTTP date) sets a
 longer wait, up to 30 seconds, and a longer one ends the retries with the wait in
-the message. Other statuses fail at once. A retry uses a strong ETag with
+the message. A download cut short by a retryable status keeps that status's
+code and class (with a rerun resuming it). Other statuses fail at once. A retry uses a strong ETag with
 `Range`/`If-Range`, appends only an exact matching `206` response, and reads a
 full `200` response as the whole object again. Before downloading, clone checks
 that the destination filesystem is admissible (`GF_UNSUPPORTED_FILESYSTEM`) and

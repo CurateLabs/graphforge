@@ -304,7 +304,7 @@ bound, so a slow but steady transfer is never cut off however long it takes.
 Clone retries a failed connection, a cut body, or a `408`, `429`, `502`, `503`,
 or `504` response in the same invocation, up to five attempts without progress,
 waiting 1, 2, 4, then 8 seconds, or longer when the Hub sends `Retry-After` (in
-seconds, up to 30; a longer request is reported with its wait); a retry asks only for the missing bytes with `Range`
+seconds or as an HTTP date, up to 30 seconds; a longer request is reported with its wait); a retry asks only for the missing bytes with `Range`
 and the strong `ETag` the partial bytes came from. A server that ignores `Range`
 sends the whole object again, which clone accepts and verifies. After the retry
 bound, or a kill, power loss, or Ctrl-C at any point, a rerun of the same command
