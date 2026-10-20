@@ -223,6 +223,29 @@ fn research_bundle_streams_to_the_file_verdict() {
     )
     .unwrap();
     assert!(file.research_interchange);
+    // The package is in the per-Version layout: the registry precedes every
+    // retained object, which sits under its owning Version.
+    let paths = file
+        .research_entries
+        .iter()
+        .map(|entry| entry.path.as_str())
+        .collect::<Vec<_>>();
+    let registry = paths
+        .iter()
+        .position(|path| path.contains("research-registry-"))
+        .expect("a registry entry");
+    let retained = paths
+        .iter()
+        .filter(|path| path.contains("/research-retained/"))
+        .count();
+    assert!(retained > 0 && paths.iter().all(|path| !path.contains("research-content/")));
+    assert!(
+        paths
+            .iter()
+            .filter(|path| path.contains("/research-retained/"))
+            .all(|path| *path > paths[registry]),
+        "the registry precedes every retained object in canonical order"
+    );
     let scratch = tempfile::tempdir().unwrap();
     // The storage helper proves the native validator runs on the staged files.
     let mut native_runs = 0;
