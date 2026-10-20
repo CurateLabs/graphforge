@@ -52,6 +52,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
 serde_yaml = { version = "0.9", package = "serde_yaml_ng" }
 sha2 = "0.11"
+# Full Unicode case folding for portable path collisions; the ICU4X release already locked for icu_normalizer and icu_properties, so the shipped lock only gains two crates.
+icu_casemap = "~2.2"
 unicode-normalization = "0.1"
 url = { version = "2", features = ["serde"] }
 ureq = { version = "=3.4.2", default-features = false, features = ["rustls"] }
