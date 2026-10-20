@@ -1385,21 +1385,25 @@ impl GroupedHashAggregateStream {
                 .max()
                 .unwrap_or(0);
             let merge_state_bound = 2 * largest + 64 * (self.batch_size + 1);
-            self.reservation.try_grow(merge_state_bound)?;
-            self.spill_state.merge_state_bound = merge_state_bound;
-
-            // Mark that we're switching to stream merging mode.
-            self.spill_state.is_stream_merging = true;
-
-            self.input = StreamingMergeBuilder::new()
+            let builder = StreamingMergeBuilder::new()
                 .with_schema(Arc::clone(&self.spill_state.spill_schema))
                 .with_spill_manager(self.spill_state.spill_manager.clone())
                 .with_sorted_spill_files(std::mem::take(&mut self.spill_state.spills))
                 .with_expressions(&self.spill_state.spill_expr)
                 .with_metrics(self.baseline_metrics.clone())
-                .with_batch_size(self.batch_size)
-                .with_reservation(self.reservation.new_empty())
-                .build()?;
+                .with_batch_size(self.batch_size);
+            // The state bound and the narrowest merge pass are one request:
+            // the pool guarantees a spiller one request right after its final
+            // spill (its floor, or the loan the spill armed), not two.
+            let pass = builder.minimum_pass_bound()?;
+            self.reservation.try_grow(merge_state_bound + pass)?;
+            self.spill_state.merge_state_bound = merge_state_bound;
+            let merge_reservation = self.reservation.split(pass);
+
+            // Mark that we're switching to stream merging mode.
+            self.spill_state.is_stream_merging = true;
+
+            self.input = builder.with_reservation(merge_reservation).build()?;
             self.input_done = false;
 
             // Reset the group values collectors.

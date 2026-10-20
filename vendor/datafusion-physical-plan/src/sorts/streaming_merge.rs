@@ -210,6 +210,31 @@ impl<'a> StreamingMergeBuilder<'a> {
         )
     }
 
+    /// What the narrowest merge pass of the spill files given so far needs,
+    /// which a consumer admits before it builds the merge (see
+    /// `multi_level_merge::minimum_pass_bound`).
+    pub fn minimum_pass_bound(&self) -> Result<usize> {
+        let (Some(schema), Some(expressions), Some(batch_size), Some(manager)) = (
+            self.schema.as_ref(),
+            self.expressions,
+            self.batch_size,
+            self.spill_manager.as_ref(),
+        ) else {
+            return internal_err!(
+                "minimum_pass_bound needs schema, expressions, batch size and spill manager"
+            );
+        };
+        crate::sorts::multi_level_merge::minimum_pass_bound(
+            schema,
+            expressions,
+            batch_size,
+            manager.compression,
+            &self.sorted_spill_files,
+            2_usize.saturating_sub(self.streams.len()),
+            self.streams.is_empty(),
+        )
+    }
+
     pub fn build(self) -> Result<SendableRecordBatchStream> {
         let Self {
             streams,

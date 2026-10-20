@@ -258,7 +258,7 @@ has passed. Test results and native workload receipts belong on the issue/PR.
 
 ## Spill merge pass admission patch
 
-GraphForge #2173 changes `src/sorts/{multi_level_merge,copy_admission,copy_bounds,sort}.rs`,
+GraphForge #2173 changes `src/sorts/{multi_level_merge,copy_admission,copy_bounds,sort,streaming_merge}.rs`,
 `src/spill/{admission,credit,in_progress_spill_file,spill_manager,spill_pool,mod}.rs`,
 `src/aggregates/row_hash.rs` and `src/joins/nested_loop_join.rs`. A spill merge
 used to choose how many files to read before it knew what reading them costs:
@@ -300,6 +300,16 @@ pool afterwards:
   holds it as a floor of its state reservation through the merge: within it the
   state asks nothing, and an accumulator whose state grows with its group
   (`array_agg`) asks for the excess only.
+
+- The pass is admitted at the moment the pool guarantees a spiller a request.
+  `StreamingMergeBuilder::minimum_pass_bound` (the selection's arithmetic at its
+  second file with one buffered batch, the intermediate writer only when a third
+  file exists) is what a merging aggregate adds to its state bound, as one
+  request right after its final spill (`row_hash.rs`), and what every later
+  pass of `create_stream` requests before its selection. The selection charges
+  the intermediate writer only from the minimum stream count on, and a narrower
+  retry shrinks to the size the pass entered with instead of freeing it, so a
+  pre-reserve survives the retry.
 
 The product controls are `query_pool::merge_pass_tests::*` and
 `query_pool::tests::{a_merge_pass_with_*,merge_passes_that_write_*,a_merging_aggregate_holds_*}`

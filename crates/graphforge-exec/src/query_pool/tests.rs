@@ -902,7 +902,10 @@ impl MemoryPool for PassRecorder {
 
 /// What a sort that spills at least twice did to the pool while it merged.
 struct MergeRun {
+    /// The events from the first reader of the merge on.
     events: Vec<PassEvent>,
+    /// The events before it.
+    before: Vec<PassEvent>,
     passes: usize,
 }
 
@@ -993,6 +996,7 @@ async fn merge_of_spilled_sort(keys: &[&str], pool: usize) -> MergeRun {
         .count();
     MergeRun {
         events: events[first_reader..].to_vec(),
+        before: events[..first_reader].to_vec(),
         passes: intermediates + 1,
     }
 }
@@ -1119,14 +1123,15 @@ async fn spilled_aggregate(
         .unwrap();
     let result = context.sql(sql).await.unwrap().collect().await;
     let events = pool.events.lock().unwrap().clone();
-    let merge = events
+    let first = events
         .iter()
         .position(|event| event.consumer.starts_with("SpillReader"))
-        .map_or_else(Vec::new, |first| events[first..].to_vec());
+        .unwrap_or(events.len());
     (
         result,
         MergeRun {
-            events: merge,
+            events: events[first..].to_vec(),
+            before: events[..first].to_vec(),
             passes: 1,
         },
     )
@@ -1156,4 +1161,47 @@ async fn a_merging_aggregate_holds_its_state_bound_and_asks_the_pool_for_nothing
         "the groups exceed the pool, so the aggregate merged spill files"
     );
     assert_the_passes_ask_for_nothing_after_their_selection(&run);
+}
+
+/// The consumer of a spilled aggregate admits its state bound and the
+/// narrowest pass of its merge as one request, right after its final spill
+/// (#2173): the pool guarantees a spiller one request there (its floor, or the
+/// loan the spill armed), and a merge that needs two before its pass can start
+/// is refused on the second whenever the pool is full. Between the writer of
+/// the final spill and the first reader, the aggregate asks exactly once.
+#[tokio::test]
+async fn a_spilled_aggregate_admits_its_minimum_pass_in_one_request() {
+    let (result, run) = spilled_aggregate(
+        "SELECT g, max(pad) FROM t GROUP BY g",
+        262_144,
+        262_144,
+        100,
+        8192,
+        24 * MIB,
+    )
+    .await;
+    result.unwrap();
+    let last_spill = run
+        .before
+        .iter()
+        .rposition(|event| {
+            !event.registered && event.bytes > 0 && event.consumer.starts_with("SpillWriter")
+        })
+        .expect("the aggregate spilled");
+    let asked = run.before[last_spill..]
+        .iter()
+        .filter(|event| {
+            !event.registered
+                && event.bytes > 0
+                && event.consumer.starts_with(AGGREGATE_CONSUMER_PREFIX)
+        })
+        .collect::<Vec<_>>();
+    // The first request is the state bound and the narrowest pass together,
+    // past the spiller's floor of 10 MiB and so served by the loan the final
+    // spill armed; what follows is the selection growing above it.
+    let first = asked.first().expect("the aggregate admits its merge");
+    assert!(
+        first.bytes > 10 * MIB,
+        "state bound and narrowest pass in one request: {asked:?}"
+    );
 }

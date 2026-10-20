@@ -38,12 +38,16 @@
 //! # The merge of the spill files
 //!
 //! When an aggregate that has spilled finishes its input, it merges its spill
-//! files. The merge reserves its read buffers one stream at a time, two batches
-//! per stream. When a request is refused and fewer than the minimum number of
-//! streams are chosen, it frees what it reserved and retries with one batch per
-//! stream; a refusal there fails the query. A loan serves one request beyond
-//! the free memory, but the merge makes two consecutive requests, so a loan
-//! cannot guarantee the merge.
+//! files. A merge pass is admitted in one selection: the aggregate asks for the
+//! state it holds while merging and for the narrowest pass (two streams, one
+//! batch each) as one request right after its final spill, and the selection
+//! then only grows above that, two batches per stream at a time. A narrower
+//! retry returns to what the pass held when it began instead of freeing it, and
+//! every later pass opens the same way. A loan serves one request beyond the
+//! free memory, so one request is what a loan can guarantee: the final spill's
+//! bulk shrink arms it, and that request is the one it serves. The loan is armed
+//! again by every full release of a piece of a pass, so a spiller has a fresh
+//! one for the request that opens each pass.
 //!
 //! The pool is full at that point when an exchange is holding the input of a
 //! busy partition. DataFusion's repartition spills only when the pool refuses a
@@ -74,8 +78,8 @@
 //! If it takes memory a floor or a loan was reserved from, the aggregate that
 //! owns it still has it, so the pool then passes its limit by that much.
 //!
-//! The floor is a minimum, not an exact bound. The merge needs two streams of
-//! two batches each, and a batch holds the groups of one emit: an aggregate
+//! The floor is a minimum, not an exact bound. The narrowest pass needs two
+//! streams of one batch each and the copies' working set, and a batch holds the groups of one emit: an aggregate
 //! whose groups are far larger than a quarter of the floor, such as one
 //! `collect(DISTINCT ...)` of tens of megabytes in one group, merges with the
 //! free memory and the loan, as it did before the floor, and fails when the pool

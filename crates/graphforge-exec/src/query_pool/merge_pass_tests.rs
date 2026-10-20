@@ -57,6 +57,11 @@ fn batch(first: i64, step: i64, rows: usize, pad: usize) -> RecordBatch {
 struct Recorder {
     inner: Arc<dyn MemoryPool>,
     requests: Mutex<Vec<(String, usize)>>,
+    /// Requests the inner pool refused.
+    refused: Mutex<Vec<(String, usize)>>,
+    /// Shrinks of the sponsor: the number of requests made so far, the size it
+    /// had before and the bytes released.
+    sponsor_shrinks: Mutex<Vec<(usize, usize, usize)>>,
     registered: Mutex<Vec<String>>,
     sponsor_peak: AtomicUsize,
 }
@@ -66,6 +71,8 @@ impl Recorder {
         Arc::new(Self {
             inner,
             requests: Mutex::default(),
+            refused: Mutex::default(),
+            sponsor_shrinks: Mutex::default(),
             registered: Mutex::default(),
             sponsor_peak: AtomicUsize::new(0),
         })
@@ -109,6 +116,13 @@ impl MemoryPool for Recorder {
         self.inner.grow(reservation, additional);
     }
     fn shrink(&self, reservation: &MemoryReservation, shrink: usize) {
+        if reservation.consumer().name() == SPONSOR {
+            let made = self.requests.lock().unwrap().len();
+            self.sponsor_shrinks
+                .lock()
+                .unwrap()
+                .push((made, reservation.size(), shrink));
+        }
         self.inner.shrink(reservation, shrink);
     }
     fn try_grow(&self, reservation: &MemoryReservation, additional: usize) -> Result<()> {
@@ -118,6 +132,12 @@ impl MemoryPool for Recorder {
             .unwrap()
             .push((name.to_string(), additional));
         let result = self.inner.try_grow(reservation, additional);
+        if result.is_err() {
+            self.refused
+                .lock()
+                .unwrap()
+                .push((name.to_string(), additional));
+        }
         if result.is_ok() && name == SPONSOR {
             self.sponsor_peak
                 .fetch_max(reservation.size() + additional, Ordering::SeqCst);
@@ -176,7 +196,7 @@ fn spill_files(
     }
 }
 
-fn manager(pool: &Arc<dyn MemoryPool>, directory: &tempfile::TempDir) -> SpillManager {
+fn spill_manager(pool: &Arc<dyn MemoryPool>, directory: &tempfile::TempDir) -> SpillManager {
     let env = RuntimeEnvBuilder::new()
         .with_memory_pool(Arc::clone(pool))
         .with_temp_file_path(directory.path().to_path_buf())
@@ -195,18 +215,28 @@ fn merge(
     sponsor: MemoryReservation,
     batch_size: usize,
 ) -> SendableRecordBatchStream {
+    merge_with_bound(manager, files, sponsor, batch_size).0
+}
+
+/// The merge, and the bytes of its narrowest pass (what the consumer of a
+/// spilled aggregate admits in one request before it builds the merge).
+fn merge_with_bound(
+    manager: SpillManager,
+    files: Vec<SortedSpillFile>,
+    sponsor: MemoryReservation,
+    batch_size: usize,
+) -> (SendableRecordBatchStream, usize) {
     let order =
         LexOrdering::new([PhysicalSortExpr::new_default(Arc::new(Column::new("k", 0)))]).unwrap();
-    StreamingMergeBuilder::new()
+    let builder = StreamingMergeBuilder::new()
         .with_sorted_spill_files(files)
         .with_spill_manager(manager)
         .with_schema(schema())
         .with_expressions(&order)
         .with_metrics(BaselineMetrics::new(&ExecutionPlanMetricsSet::new(), 0))
-        .with_batch_size(batch_size)
-        .with_reservation(sponsor)
-        .build()
-        .unwrap()
+        .with_batch_size(batch_size);
+    let bound = builder.minimum_pass_bound().unwrap();
+    (builder.with_reservation(sponsor).build().unwrap(), bound)
 }
 
 /// Drains the merge and checks that it delivered every key once, in order.
@@ -239,7 +269,7 @@ async fn a_reader_with_credit_never_requests_fresh() {
     let pool = Recorder::new(Arc::new(GreedyMemoryPool::new(256 * MIB)));
     let dynamic: Arc<dyn MemoryPool> = Arc::clone(&pool) as Arc<dyn MemoryPool>;
     let directory = tempfile::tempdir().unwrap();
-    let manager = manager(&dynamic, &directory);
+    let manager = spill_manager(&dynamic, &directory);
     let files = spill_files(&manager, 2, 12, 2048, |largest| largest / 4);
     let sponsor = MemoryConsumer::new(SPONSOR).register(&dynamic);
     let stream = merge(manager, files.files, sponsor, 2048);
@@ -272,7 +302,7 @@ async fn the_pass_bound_covers_every_live_batch() {
         let pool = Recorder::new(Arc::new(GreedyMemoryPool::new(limit)));
         let dynamic: Arc<dyn MemoryPool> = Arc::clone(&pool) as Arc<dyn MemoryPool>;
         let directory = tempfile::tempdir().unwrap();
-        let manager = manager(&dynamic, &directory);
+        let manager = spill_manager(&dynamic, &directory);
         let files = spill_files(&manager, FILES, BATCHES, ROWS, |largest| largest);
         let maximum = files.maximum;
         let sponsor = MemoryConsumer::new(SPONSOR).register(&dynamic);
@@ -325,36 +355,233 @@ async fn the_pass_bound_covers_every_live_batch() {
     );
 }
 
-/// The merge of a spilled aggregate beside a full exchange starts, and asks
-/// the pool for nothing once its first reader exists. The exchange has taken
-/// every byte it is admitted, so the merge has what the pool keeps for the
-/// aggregate: its floor and the loan its last spill armed. Its first selection
-/// (two buffered batches per reader, the intermediate file's writer included)
-/// is served by the loan, the second file's is refused, and the merge narrows
-/// to one buffered batch per reader and starts; every byte it asks, it asks
-/// before its first reader registers.
+/// The bytes of the narrowest pass of `files` sorted files of `batches`
+/// batches, as the consumer of a merge computes them.
+fn narrowest_pass(files: usize, batches: usize, rows: usize, batch_size: usize) -> usize {
+    let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(256 * MIB));
+    let directory = tempfile::tempdir().unwrap();
+    let manager = spill_manager(&pool, &directory);
+    let set = spill_files(&manager, files, batches, rows, |largest| largest);
+    let sponsor = MemoryConsumer::new(SPONSOR).register(&pool);
+    merge_with_bound(manager, set.files, sponsor, batch_size).1
+}
+
+/// The narrowest pass is the selection of two files at one buffered batch
+/// each, with an intermediate writer only when a third file exists (#2173): a
+/// pool of exactly the bytes `minimum_pass_bound` names admits the merge, with
+/// the sponsor peaking at that size; a byte less is refused at selection,
+/// before a reader exists. The two-file pass is the output pass and has no
+/// writer to charge.
 #[tokio::test]
-async fn a_spilled_aggregate_merges_beside_a_full_exchange_and_asks_for_nothing_after_its_readers()
-{
+async fn the_minimum_pass_bound_is_the_selection_of_two_files_at_one_batch() {
+    const ROWS: usize = 256;
+    const BATCH_SIZE: usize = 256;
+    for files in [2, 3] {
+        let bound = narrowest_pass(files, 24, ROWS, BATCH_SIZE);
+        let run = |limit: usize| async move {
+            let pool = Recorder::new(Arc::new(GreedyMemoryPool::new(limit)));
+            let dynamic: Arc<dyn MemoryPool> = Arc::clone(&pool) as Arc<dyn MemoryPool>;
+            let directory = tempfile::tempdir().unwrap();
+            let manager = spill_manager(&dynamic, &directory);
+            let set = spill_files(&manager, files, 24, ROWS, |largest| largest);
+            let sponsor = MemoryConsumer::new(SPONSOR).register(&dynamic);
+            let stream = merge(manager, set.files, sponsor, BATCH_SIZE);
+            (drain(stream, set.total_rows).await, pool)
+        };
+        let (result, pool) = run(bound).await;
+        result.unwrap_or_else(|error| panic!("{files} files in {bound} bytes: {error}"));
+        assert_eq!(
+            pool.sponsor_peak.load(Ordering::SeqCst),
+            bound,
+            "{files} files: the narrowest pass is what the selection takes at its second file"
+        );
+        assert!(pool.fresh("SpillReader").is_empty());
+        let (result, pool) = run(bound - 1).await;
+        let error = result.expect_err("one byte short of the narrowest pass");
+        assert!(error.to_string().contains("Resources exhausted"), "{error}");
+        assert!(
+            !pool
+                .registered
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|name| name.starts_with("SpillReader")),
+            "{files} files: the refusal came after a reader existed"
+        );
+    }
+    // Three files leave one for a later pass, so their narrowest pass writes.
+    let two = narrowest_pass(2, 24, ROWS, BATCH_SIZE);
+    let three = narrowest_pass(3, 24, ROWS, BATCH_SIZE);
+    assert!(three > two + 1000, "{two} {three}");
+}
+
+/// A narrower retry returns to what the pass held when its selection began,
+/// not to nothing (#2173): the consumer that pre-reserved its narrowest pass
+/// keeps it when the two-batch attempt is refused, so the retry at one batch
+/// is covered and asks the pool for nothing.
+#[tokio::test]
+async fn a_narrower_retry_keeps_the_pass_pre_reserve() {
+    const ROWS: usize = 256;
+    const BATCH_SIZE: usize = 256;
+    let bound = narrowest_pass(2, 24, ROWS, BATCH_SIZE);
+    let pool = Recorder::new(Arc::new(GreedyMemoryPool::new(bound + 1)));
+    let dynamic: Arc<dyn MemoryPool> = Arc::clone(&pool) as Arc<dyn MemoryPool>;
+    let directory = tempfile::tempdir().unwrap();
+    let manager = spill_manager(&dynamic, &directory);
+    let set = spill_files(&manager, 2, 24, ROWS, |largest| largest);
+    let sponsor = MemoryConsumer::new(SPONSOR).register(&dynamic);
+    sponsor.try_grow(bound).unwrap();
+    pool.requests.lock().unwrap().clear();
+    let stream = merge(manager, set.files, sponsor, BATCH_SIZE);
+    drain(stream, set.total_rows).await.unwrap();
+    let refused = pool.refused.lock().unwrap().clone();
+    assert_eq!(
+        refused.len(),
+        1,
+        "only the two-batch attempt is refused: {refused:?}"
+    );
+    // Until the merge starts reading, the sponsor returns nothing it holds.
+    let started = pool
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .position(|(name, _)| name.starts_with("register:SpillReader"))
+        .expect("the merge reads its spill files");
+    let shrinks = pool.sponsor_shrinks.lock().unwrap().clone();
+    let early = shrinks
+        .iter()
+        .filter(|(made, _, _)| *made < started)
+        .collect::<Vec<_>>();
+    assert!(
+        early.is_empty(),
+        "the retry released the pre-reserve: {early:?}"
+    );
+    let asked = pool
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(name, bytes)| name == SPONSOR && *bytes > 0)
+        .count();
+    assert_eq!(asked, 1, "the retry asked again");
+}
+
+/// Every pass of a multi-level merge opens with its narrowest form as one
+/// request (#2173): six files in a pool that admits four of them at two
+/// batches write one intermediate file, and the second pass (two files and the
+/// intermediate) is admitted by one request before its first reader exists,
+/// not one request per file.
+#[tokio::test]
+async fn a_later_pass_opens_with_its_minimum_in_one_request() {
+    const ROWS: usize = 256;
+    const BATCH_SIZE: usize = 256;
+    // Four files in one pass, then the writer of the intermediate file.
+    let four = {
+        let pool = Recorder::new(Arc::new(GreedyMemoryPool::new(256 * MIB)));
+        let dynamic: Arc<dyn MemoryPool> = Arc::clone(&pool) as Arc<dyn MemoryPool>;
+        let directory = tempfile::tempdir().unwrap();
+        let manager = spill_manager(&dynamic, &directory);
+        let set = spill_files(&manager, 4, 24, ROWS, |largest| largest);
+        let sponsor = MemoryConsumer::new(SPONSOR).register(&dynamic);
+        drain(
+            merge(manager, set.files, sponsor, BATCH_SIZE),
+            set.total_rows,
+        )
+        .await
+        .unwrap();
+        pool.sponsor_peak.load(Ordering::SeqCst)
+    };
+    let pool = Recorder::new(Arc::new(GreedyMemoryPool::new(256 * MIB)));
+    let dynamic: Arc<dyn MemoryPool> = Arc::clone(&pool) as Arc<dyn MemoryPool>;
+    let directory = tempfile::tempdir().unwrap();
+    let manager = spill_manager(&dynamic, &directory);
+    let writer = datafusion::physical_plan::spill::writer_pass_bound(
+        &schema(),
+        spill_files(&manager, 1, 24, ROWS, |largest| largest).maximum,
+        BATCH_SIZE,
+        SpillCompression::Uncompressed,
+    )
+    .unwrap()
+    .expect("a flat schema has a writer bound");
+    drop(pool);
+    let limit = four + writer;
+    let pool = Recorder::new(Arc::new(GreedyMemoryPool::new(limit)));
+    let dynamic: Arc<dyn MemoryPool> = Arc::clone(&pool) as Arc<dyn MemoryPool>;
+    let directory = tempfile::tempdir().unwrap();
+    let manager = spill_manager(&dynamic, &directory);
+    let set = spill_files(&manager, 6, 24, ROWS, |largest| largest);
+    let sponsor = MemoryConsumer::new(SPONSOR).register(&dynamic);
+    drain(
+        merge(manager, set.files, sponsor, BATCH_SIZE),
+        set.total_rows,
+    )
+    .await
+    .unwrap();
+    let requests = pool.requests.lock().unwrap().clone();
+    let readers = requests
+        .iter()
+        .enumerate()
+        .filter(|(_, (name, _))| name == "register:SpillReaderMetadata")
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    assert_eq!(readers.len(), 4 + 3, "a pass of four files, then of three");
+    let opening = requests[readers[3]..readers[4]]
+        .iter()
+        .filter(|(name, bytes)| name == SPONSOR && *bytes > 0)
+        .collect::<Vec<_>>();
+    // The pass opens with its narrowest form (two files and the intermediate
+    // one: three files, so a writer) in one request, and only then selects.
+    let minimum = narrowest_pass(3, 24, ROWS, BATCH_SIZE);
+    assert_eq!(
+        opening.first().map(|(_, bytes)| *bytes),
+        Some(minimum),
+        "the second pass did not open with its narrowest form: {opening:?}"
+    );
+}
+
+/// The merge of a spilled aggregate beside a full exchange starts on the one
+/// request the pool guarantees it (#2173). The exchange has taken every byte it
+/// is admitted and a busy partition holds a quarter of the pool; the idle
+/// aggregate has spilled, so its last bulk shrink armed a loan. It admits its
+/// state bound and the narrowest pass of its two files in one request, which
+/// the loan serves although it is past the floor, and the merge asks the pool
+/// for nothing after that.
+#[tokio::test]
+async fn a_spilled_aggregate_merges_beside_a_full_exchange_on_one_request() {
     let query: Arc<dyn MemoryPool> = Arc::new(QueryMemoryPool::new(64 * MIB));
     let pool = Recorder::new(Arc::clone(&query));
     let dynamic: Arc<dyn MemoryPool> = Arc::clone(&pool) as Arc<dyn MemoryPool>;
     let directory = tempfile::tempdir().unwrap();
-    let manager = manager(&dynamic, &directory);
-    let files = spill_files(&manager, 2, 4, 8192, |largest| largest);
-    assert!(files.maximum > 900_000 && files.maximum < 1_100_000);
+    let manager = spill_manager(&dynamic, &directory);
+    let set = spill_files(&manager, 2, 4, 8192, |largest| largest);
+    assert!(set.maximum > 900_000 && set.maximum < 1_100_000);
 
     let busy = spilled(&dynamic, 0);
     let idle = spilled(&dynamic, 1);
     let repartition = exchange(&dynamic, 0);
-    busy.try_grow(8 * MIB).unwrap();
+    busy.try_grow(26 * MIB).unwrap();
     while repartition.try_grow(MIB).is_ok() {}
     let error = repartition.try_grow(MIB).unwrap_err().to_string();
     assert!(error.contains("0.0 B remain available"), "{error}");
     let filled = pool.requests.lock().unwrap().len();
 
-    let stream = merge(manager, files.files, idle, 8192);
-    drain(stream, files.total_rows).await.unwrap();
+    let order_bound = {
+        let scratch = Recorder::new(Arc::new(GreedyMemoryPool::new(256 * MIB)));
+        let scratch: Arc<dyn MemoryPool> = scratch;
+        let directory = tempfile::tempdir().unwrap();
+        let scratch_manager = spill_manager(&scratch, &directory);
+        let files = spill_files(&scratch_manager, 2, 4, 8192, |largest| largest);
+        let sponsor = MemoryConsumer::new(SPONSOR).register(&scratch);
+        merge_with_bound(scratch_manager, files.files, sponsor, 8192).1
+    };
+    // One request, as the aggregate makes it, past its floor of 10 MiB.
+    assert!(order_bound > 10 * MIB, "{order_bound}");
+    idle.try_grow(order_bound)
+        .expect("the loan serves the one request");
+    let pass = idle.split(order_bound);
+    let stream = merge(manager, set.files, pass, 8192);
+    drain(stream, set.total_rows).await.unwrap();
     let requests = pool.requests.lock().unwrap()[filled..].to_vec();
     let first_reader = requests
         .iter()
@@ -365,13 +592,5 @@ async fn a_spilled_aggregate_merges_beside_a_full_exchange_and_asks_for_nothing_
         .filter(|(_, bytes)| *bytes > 0)
         .collect::<Vec<_>>();
     assert!(late.is_empty(), "asked after its readers: {late:?}");
-    let selection = requests[..first_reader]
-        .iter()
-        .filter(|(_, bytes)| *bytes > 0)
-        .count();
-    assert!(
-        selection >= 2,
-        "the first selection was served whole: {requests:?}"
-    );
     assert!(pool.reserved() <= 64 * MIB, "{}", pool.reserved());
 }
