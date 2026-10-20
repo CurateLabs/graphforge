@@ -58,7 +58,7 @@ pub struct PortableLimits {
     /// temporary disk is bounded by the largest Version, not by the package. An
     /// operator who sets a limit bounds that scratch: validating a Version holds
     /// the stage plus the further copies that
-    /// `PortableImportFootprint::VALIDATION_RESEARCH_COPIES` counts, so peak
+    /// [`PortableImportFootprint::VALIDATION_RESEARCH_COPIES`] counts, so peak
     /// temporary disk is that many times the limit plus one. A Version over it is
     /// refused with `LimitExceeded`, from a file and from a stream alike.
     pub max_research_version_bytes: u64,
