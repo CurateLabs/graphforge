@@ -16,7 +16,7 @@ use std::sync::atomic::AtomicBool;
 use unicode_normalization::UnicodeNormalization;
 
 /// Longest `producing_core_version` a manifest may declare.
-const MAX_PRODUCING_CORE_VERSION_BYTES: usize = 128;
+pub(super) const MAX_PRODUCING_CORE_VERSION_BYTES: usize = 128;
 
 pub(super) fn admit_composition_features(bytes: &[u8]) -> Result<(), PortableError> {
     let control: PortableOntologyComposition = serde_json::from_slice(bytes).map_err(|_| {
@@ -302,15 +302,7 @@ pub(super) fn validate_semantics(
             "unknown selection root",
         ));
     }
-    if m.producing_core_version.is_empty()
-        || m.producing_core_version.len() > MAX_PRODUCING_CORE_VERSION_BYTES
-        || m.producing_core_version.chars().any(char::is_control)
-    {
-        return Err(PortableError::new(
-            PortableErrorCode::Incompatible,
-            "producing core version",
-        ));
-    }
+    m.producing_core_version()?;
     let generation = uuid::Uuid::parse_str(&m.source_generation.generation_uuid).map_err(|_| {
         PortableError::new(PortableErrorCode::Incompatible, "source generation UUID")
     })?;

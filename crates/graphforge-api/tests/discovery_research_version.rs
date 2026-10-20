@@ -422,6 +422,13 @@ fn package_without_research_interchange_never_proves_a_version() {
         .as_mut()
         .unwrap()
         .package_digest = Sha256Digest(package_digest);
+    // The hand-built package declares the template's producer, so only the
+    // missing research identity can refuse it.
+    version_mut(&mut lineage, published.head)
+        .package
+        .as_mut()
+        .unwrap()
+        .producing_core_version = "0.6.0".into();
     assert!(matches!(
         verify(
             &lineage,

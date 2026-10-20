@@ -54,12 +54,34 @@ struct Manifest {
     format: String,
     package_digest: String,
     package_class: String,
-    producing_core_version: String,
+    /// Absent only in packages written by a Core that predates the declaration;
+    /// verification refuses those as `Incompatible`, never as malformed.
+    #[serde(default)]
+    producing_core_version: Option<String>,
     source_generation: SourceGeneration,
     selection: Selection,
     components: Vec<ManifestComponent>,
     requirements: Requirements,
     states: States,
+}
+impl Manifest {
+    /// The declared producer. A package without one was written by an older
+    /// Core, and data runs only on the Core that wrote it (ADR 0054 section 9).
+    fn producing_core_version(&self) -> Result<&str, PortableError> {
+        match self.producing_core_version.as_deref() {
+            Some(version)
+                if !version.is_empty()
+                    && version.len() <= semantic_validation::MAX_PRODUCING_CORE_VERSION_BYTES
+                    && !version.chars().any(char::is_control) =>
+            {
+                Ok(version)
+            }
+            _ => Err(PortableError::new(
+                PortableErrorCode::Incompatible,
+                "producing core version",
+            )),
+        }
+    }
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1071,7 +1093,7 @@ fn validate_package(
         representation,
         package_digest: manifest.package_digest.clone(),
         package_class: package_class(&manifest.package_class)?,
-        producing_core_version: manifest.producing_core_version.clone(),
+        producing_core_version: manifest.producing_core_version()?.to_owned(),
         component_count: manifest.components.len() as u64,
         entry_count: entries.len() as u64,
         payload_bytes: entries.iter().map(|e| e.length).sum(),
