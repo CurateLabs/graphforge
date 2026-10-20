@@ -71,7 +71,7 @@ pub struct CompositionChangePreview {
     pub affected_modules: Vec<String>,
     /// Identity-sorted affected bridges.
     pub affected_bridges: Vec<String>,
-    /// Portable-v2 disposition until #841 adds authenticated package support.
+    /// Portable disposition until #841 adds authenticated package support.
     pub portable_compatibility: CompositionPortableReceipt,
     /// Bounded diagnostics; empty means publishable.
     pub diagnostics: Vec<CompositionChangeDiagnostic>,

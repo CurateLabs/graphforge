@@ -640,7 +640,7 @@ pub struct PortableGraphSelector {
     pub edge_uuids: Vec<String>,
 }
 
-/// Portable-v2 on-wire closure tokens.
+/// Portable on-wire closure tokens.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum PortableSubsetClosure {
@@ -697,7 +697,7 @@ pub struct PortableSubsetPreview {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-/// Portable-v2 transport representation.
+/// Portable transport representation.
 pub enum PortableOutput {
     /// Closed BagIt-compatible directory.
     Expanded,

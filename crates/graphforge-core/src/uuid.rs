@@ -37,27 +37,28 @@ pub fn new_v5(namespace: &Uuid, name: &[u8]) -> Uuid {
 /// Derive the portable-v1 imported generation from its caller-owned operation.
 /// The versioned name is a persisted compatibility contract.
 #[must_use]
-pub fn portable_import_generation(operation: &Uuid) -> Uuid {
+pub fn portable_v1_import_generation(operation: &Uuid) -> Uuid {
     new_v5(operation, b"graphforge-portable-import-generation/1")
 }
 
-/// Derive the portable imported generation in a separate versioned domain.
+/// Derive the streaming portable imported generation from its caller-owned operation.
+/// The versioned name is a persisted compatibility contract.
 #[must_use]
 pub fn portable_import_generation(operation: &Uuid) -> Uuid {
-    new_v5(operation, b"graphforge-portable-import-generation/1")
+    new_v5(operation, b"graphforge-portable-v2-import-generation/1")
 }
 
 /// Derive the empty parent generation used by a fresh portable import.
 /// The versioned name is a persisted compatibility contract.
 #[must_use]
 pub fn portable_bootstrap_generation(operation: &Uuid) -> Uuid {
-    new_v5(operation, b"graphforge-portable-bootstrap-generation/1")
+    new_v5(operation, b"graphforge-portable-v2-bootstrap-generation/1")
 }
 
 /// Derive the empty parent's transaction in a separate versioned domain.
 #[must_use]
 pub fn portable_bootstrap_transaction(operation: &Uuid) -> Uuid {
-    new_v5(operation, b"graphforge-portable-bootstrap-transaction/1")
+    new_v5(operation, b"graphforge-portable-v2-bootstrap-transaction/1")
 }
 
 /// Derive one composite delta operation using its original mutation index.
@@ -211,7 +212,7 @@ mod tests {
         let version_b = format!("sha256:{}", "b".repeat(64));
         let vectors = [
             (
-                portable_import_generation(&operation),
+                portable_v1_import_generation(&operation),
                 "02abd337-e93c-56a3-bf8f-dadbb5b1e8d5",
             ),
             (

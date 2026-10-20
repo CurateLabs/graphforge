@@ -291,7 +291,7 @@ enum Command {
     Export(portable_cli::PortableExportArgs),
     /// Import a streaming portable package into a new or empty project.
     Import(portable_cli::PortableImportArgs),
-    /// Portable-v2 selection preview, verification, staging, and OCI promotion.
+    /// Portable selection preview, verification, staging, and OCI promotion.
     Portable {
         #[command(subcommand)]
         command: portable_cli::PortableCommand,

@@ -1,4 +1,4 @@
-"""Portable-v2 export/verify/import identity parity through the Python binding."""
+"""Portable export/verify/import identity parity through the Python binding."""
 
 from __future__ import annotations
 

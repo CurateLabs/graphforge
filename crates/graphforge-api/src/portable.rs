@@ -121,7 +121,7 @@ pub struct PortableVerifyRequest {
 /// Stable Rust-owned portable verification report.
 pub type PortableVerifyResult = graphforge_core::portable::PortableReport;
 
-/// Portable-v2 selection preview request against a pinned generation.
+/// Portable selection preview request against a pinned generation.
 #[derive(Clone, Debug)]
 pub struct PortableSelectionPreviewRequest {
     /// Current or named-checkpoint selection.
@@ -132,7 +132,7 @@ pub struct PortableSelectionPreviewRequest {
     pub limits: graphforge_core::portable::PortableLimits,
 }
 
-/// Portable-v2 graph-subset preview request against a pinned generation.
+/// Portable graph-subset preview request against a pinned generation.
 #[derive(Clone, Debug)]
 pub struct PortableSubsetPreviewRequest {
     /// Current or named-checkpoint selection.
@@ -143,7 +143,7 @@ pub struct PortableSubsetPreviewRequest {
     pub limits: graphforge_core::portable::PortableLimits,
 }
 
-/// Portable-v2 export request (expanded directory or canonical bundle).
+/// Portable export request (expanded directory or canonical bundle).
 #[derive(Clone, Debug)]
 pub struct PortableExportRequest {
     /// Current or named-checkpoint selection.

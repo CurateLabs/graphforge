@@ -198,7 +198,7 @@ export default defineConfig({
                 },
                 {
                   label: "Portable Project v2",
-                  slug: "book/architecture/portable-project-v2",
+                  slug: "book/architecture/portable-project",
                 },
                 {
                   label: "Composable Multi-Ontology",
@@ -403,7 +403,7 @@ export default defineConfig({
                 },
                 {
                   label: '0021 — Portable project v2 package layout and identity',
-                  slug: 'adr/0021-portable-project-v2',
+                  slug: 'adr/0021-portable-project',
                 },
                 {
                   label: '0022 — Multi-ontology semantics in portable project v2',
