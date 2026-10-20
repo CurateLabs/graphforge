@@ -42,7 +42,9 @@ use crate::hub_http::{
 use crate::hub_http::{fetch, parse_input};
 
 mod module_fetch;
+pub(crate) mod repository_listing;
 pub(crate) use module_fetch::{ModuleFetchArgs, run_module_fetch};
+pub(crate) use repository_listing::{HubArgs, run_hub};
 
 /// Largest single object a clone downloads: the cumulative object bound
 /// `gf publish` admits ([`DiscoveryLimits::default`]), so any object a
@@ -271,10 +273,16 @@ fn classify_failure(error: &graphforge_api::GfError) -> Failure {
     };
     let code = detail.split_once(':').map_or(detail, |(code, _)| code);
     match code {
-        "hub.network" | "hub.unsafe_location" => Failure::Network,
+        "hub.network"
+        | "hub.unsafe_location"
+        | "hub.rate_limited"
+        | "hub.unavailable"
+        | "hub.unexpected_status" => Failure::Network,
         "hub.limit_exceeded" | "hub.package.limit_exceeded" => Failure::ResourceLimit,
         "hub.invalid_identity"
         | "hub.auth_denied"
+        | "hub.not_found"
+        | "hub.access_denied"
         | "hub.malformed_response"
         | "hub.unsupported_future"
         | "hub.missing_ref"
@@ -315,10 +323,18 @@ struct CloneResult {
     package_digest: String,
     generation_uuid: String,
     resumed_bytes: u64,
+    /// Branch ref a research clone resolved: `--ref`, or the repository's
+    /// default ref when it names a lineage Branch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    resolved_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    research_branch_uuid: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     research_version_uuid: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     research_version_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    research_version_identity: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     moved_from: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -333,6 +349,7 @@ struct CloneImported {
 struct ResearchCloneContext {
     selected_branch: Option<graphforge_discovery::LineageBranch>,
     lineage_bytes: Vec<u8>,
+    branch_uuid: String,
     version_uuid: String,
     version_kind: String,
     identity_digest: String,
@@ -414,15 +431,44 @@ fn resolve_research_version_uuid(
     Ok(branch.head_version_uuid.clone())
 }
 
-fn prepare_research_clone(
+/// Discovery bounds for clone and listing.
+fn discovery_limits() -> DiscoveryLimits {
+    DiscoveryLimits {
+        max_response_bytes: MAX_METADATA_BYTES,
+        ..DiscoveryLimits::default()
+    }
+}
+
+/// Parse and validate the refs and manifest documents of `identity` and bind
+/// them to each other. Clone and `gf hub list` verify discovery only through
+/// this.
+fn verify_discovery(
+    identity: &RepositoryIdentity,
+    refs_bytes: &[u8],
+    manifest_bytes: &[u8],
+    limits: DiscoveryLimits,
+) -> Result<(RefSet, DiscoveryManifest), graphforge_api::GfError> {
+    let refs = RefSet::from_json(refs_bytes, limits).map_err(|error| protocol_error(&error))?;
+    let manifest = DiscoveryManifest::from_json(manifest_bytes, limits)
+        .map_err(|error| protocol_error(&error))?;
+    if refs.repository != *identity || manifest.repository != *identity {
+        return Err(validation("hub.integrity", "discovery repository mismatch"));
+    }
+    refs.validate_manifest(&manifest)
+        .map_err(|error| protocol_error(&error))?;
+    Ok((refs, manifest))
+}
+
+/// Fetch the advertised research lineage and verify it against the manifest
+/// and refs snapshot: transport digest, required semantics, and bindings.
+/// Clone and `gf hub list` read lineage only through this.
+fn read_lineage(
     transport: &dyn Transport,
     manifest: &DiscoveryManifest,
     refs: &RefSet,
     limits: DiscoveryLimits,
-    git_ref: Option<&str>,
-    version_uuid: Option<&str>,
     retry: &RetryPolicy,
-) -> Result<Option<(ObjectDescriptor, ResearchCloneContext)>, graphforge_api::GfError> {
+) -> Result<(Vec<u8>, ResearchLineage), graphforge_api::GfError> {
     let lineage_object = manifest
         .lineage_object()
         .map_err(|error| protocol_error(&error))?;
@@ -433,6 +479,19 @@ fn prepare_research_clone(
     manifest
         .bind_lineage(refs, &lineage)
         .map_err(|error| protocol_error(&error))?;
+    Ok((lineage_bytes, lineage))
+}
+
+fn prepare_research_clone(
+    transport: &dyn Transport,
+    manifest: &DiscoveryManifest,
+    refs: &RefSet,
+    limits: DiscoveryLimits,
+    git_ref: Option<&str>,
+    version_uuid: Option<&str>,
+    retry: &RetryPolicy,
+) -> Result<Option<(ObjectDescriptor, ResearchCloneContext)>, graphforge_api::GfError> {
+    let (lineage_bytes, lineage) = read_lineage(transport, manifest, refs, limits, retry)?;
     let implicit_default = git_ref.is_none() && version_uuid.is_none();
     if implicit_default && lineage.branches.is_empty() {
         return Ok(None);
@@ -455,6 +514,7 @@ fn prepare_research_clone(
                 })
                 .cloned(),
             lineage_bytes,
+            branch_uuid: version.branch_uuid.clone(),
             version_uuid: selected_uuid,
             version_kind: version.kind.clone(),
             identity_digest: version.identity_digest.0.clone(),
@@ -816,6 +876,7 @@ fn download_with_progress(
             return Err(cancelled_error());
         }
         let range = (offset > 0).then_some(offset);
+        let mut retry_after = None;
         // The server may ignore `Range` and send the whole object, so the
         // transport bound is always the object length; the expected size is
         // applied once the status is known.
@@ -827,7 +888,10 @@ fn download_with_progress(
             object.length,
             &mut report.attempts,
         ) {
-            Err(failure) if failure.transient => failure.error,
+            Err(failure) if failure.transient => {
+                retry_after = failure.retry_after;
+                failure.error
+            }
             // The partial bytes no longer match the object the server holds
             // under this location: discard them and restart from zero rather
             // than repeat the same unsatisfiable range on every rerun.
@@ -914,14 +978,19 @@ fn download_with_progress(
             failures = 0;
         }
         failures += 1;
+        // A Hub that asks for a longer pause than one wait may last gets its
+        // own error, which says when to rerun.
+        let Some(wait) = control.retry.wait(failures, retry_after) else {
+            return Err(resumable_failure(failure, offset));
+        };
         if failures >= control.retry.attempts {
             return Err(if offset > 0 {
-                validation("hub.interrupted", "download is incomplete; rerun to resume")
+                resumable_failure(failure, offset)
             } else {
                 failure
             });
         }
-        std::thread::sleep(control.retry.backoff(failures));
+        std::thread::sleep(wait);
     }
     let mut file = open_read_nofollow(partial).map_err(storage)?;
     let length = file.metadata().map_err(storage)?.len();
@@ -1683,6 +1752,25 @@ fn removal_order(
     entries
 }
 
+/// The error for a download that stopped with `offset` bytes kept. A Hub
+/// status that a later rerun may cure keeps its retry class (`hub.unavailable`,
+/// `hub.rate_limited`) and gains the resume guidance; any other failure of a
+/// partial download is `hub.interrupted`.
+fn resumable_failure(failure: graphforge_api::GfError, offset: u64) -> graphforge_api::GfError {
+    const GUIDANCE: &str = "download is incomplete; rerun to resume";
+    match failure {
+        graphforge_api::GfError::Storage(detail)
+            if offset > 0
+                && (detail.starts_with("hub.unavailable:")
+                    || detail.starts_with("hub.rate_limited:")) =>
+        {
+            graphforge_api::GfError::Storage(format!("{detail}; {GUIDANCE}"))
+        }
+        other if offset == 0 => other,
+        _ => validation("hub.interrupted", GUIDANCE),
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 fn run_clone_job(
     transport: &dyn Transport,
@@ -1799,10 +1887,7 @@ fn run_clone_job(
     }
     let manifest_bytes = manifest_result?;
     let (identity, _, moved) = move_transport.resolved(false)?;
-    let limits = DiscoveryLimits {
-        max_response_bytes: MAX_METADATA_BYTES,
-        ..DiscoveryLimits::default()
-    };
+    let limits = discovery_limits();
     profile.handoff(
         ComponentKind::NetworkTransport,
         ComponentKind::Discovery,
@@ -1816,15 +1901,7 @@ fn run_clone_job(
         None,
         1,
         || {
-            let refs =
-                RefSet::from_json(&refs_bytes, limits).map_err(|error| protocol_error(&error))?;
-            let manifest = DiscoveryManifest::from_json(&manifest_bytes, limits)
-                .map_err(|error| protocol_error(&error))?;
-            if refs.repository != identity || manifest.repository != identity {
-                return Err(validation("hub.integrity", "discovery repository mismatch"));
-            }
-            refs.validate_manifest(&manifest)
-                .map_err(|error| protocol_error(&error))?;
+            let (_, manifest) = verify_discovery(&identity, &refs_bytes, &manifest_bytes, limits)?;
             let staging = acquire_staging(&destination)?;
             Ok(((manifest, staging), None, None))
         },
@@ -2272,8 +2349,18 @@ fn clone_into_staging(
         package_digest: imported.package_digest,
         generation_uuid: imported.generation_uuid.to_string(),
         resumed_bytes: download.resumed_bytes,
+        resolved_ref: research_context
+            .as_ref()
+            .and_then(|context| context.selected_branch.as_ref())
+            .map(|branch| branch.ref_name.clone()),
+        research_branch_uuid: research_context
+            .as_ref()
+            .map(|context| context.branch_uuid.clone()),
         research_version_uuid,
         research_version_kind,
+        research_version_identity: research_context
+            .as_ref()
+            .map(|context| context.identity_digest.clone()),
         moved_from: moved.map(|m| m.moved_from.canonical_name()),
         moved_to: moved.map(|m| m.moved_to.canonical_name()),
     };
@@ -2304,9 +2391,14 @@ fn write_clone_result(
         if let (Some(from), Some(to)) = (&result.moved_from, &result.moved_to) {
             writeln!(output, "Repository moved from {from} to {to}").map_err(storage)?;
         }
+        let selected = match (&result.resolved_ref, &result.research_version_uuid) {
+            (Some(name), Some(version)) => format!(" ref {name} (Version {version})"),
+            (None, Some(version)) => format!(" Version {version}"),
+            _ => String::new(),
+        };
         writeln!(
             output,
-            "Cloned {} to {}",
+            "Cloned {}{selected} to {}",
             result.repository, result.destination
         )
         .map_err(storage)?;
@@ -2389,7 +2481,11 @@ fn portable_error(error: DiscoveryPortableV2Error) -> graphforge_api::GfError {
     }
 }
 #[cfg(test)]
+mod listing_tests;
+#[cfg(test)]
 mod research_clone_tests;
+#[cfg(test)]
+mod status_tests;
 #[cfg(test)]
 mod transfer_tests;
 

@@ -136,6 +136,7 @@ pub(super) fn response(status: u16, content_range: Option<&str>, body: &[u8]) ->
         location: None,
         content_range: content_range.map(str::to_owned),
         etag: Some("\"fixture-1\"".to_owned()),
+        retry_after: None,
         body: Box::new(std::io::Cursor::new(body.to_vec())),
     }
 }
@@ -716,6 +717,16 @@ fn clone_succeeds_against_the_checked_in_hub_fixture() {
     let result: serde_json::Value = serde_json::from_slice(&output).unwrap();
     assert_eq!(result["contract"], "graphforge-hub-clone/1");
     assert_eq!(result["package_digest"], manifest.package.package_digest.0);
+    // Without lineage the default ref selects the Project package itself.
+    assert!(manifest.lineage.is_none());
+    for field in [
+        "resolved_ref",
+        "research_branch_uuid",
+        "research_version_uuid",
+        "research_version_identity",
+    ] {
+        assert!(result.get(field).is_none(), "{field}: {result}");
+    }
     let cloned = GraphForge::new(destination.to_str()).expect("clone reopens");
     let metadata = cloned.research_project_metadata().unwrap();
     assert_eq!(metadata.title.as_deref(), Some("OpenAlex"));
@@ -890,6 +901,11 @@ fn hub_failure_codes_map_through_a_finite_matrix() {
         ("hub.limit_exceeded", Failure::ResourceLimit),
         ("hub.unsafe_location", Failure::Network),
         ("hub.network", Failure::Network),
+        ("hub.not_found", Failure::InvalidInput),
+        ("hub.access_denied", Failure::InvalidInput),
+        ("hub.rate_limited", Failure::Network),
+        ("hub.unavailable", Failure::Network),
+        ("hub.unexpected_status", Failure::Network),
         ("hub.package.io", Failure::Storage),
     ] {
         assert_eq!(classify_failure(&validation(code, "redacted")), expected);

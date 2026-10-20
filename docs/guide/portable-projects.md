@@ -253,10 +253,14 @@ machine configuration cannot enter the semantic package identity.
 
 ## Clone from a Hub
 
-`gf clone OWNER/REPOSITORY [DESTINATION]` downloads a published Project
-package, verifies it, and imports it as a new project (see the
+`gf clone OWNER/REPOSITORY [DESTINATION]` downloads a published package,
+verifies it, and imports it as a new project (see the
 [CLI reference](https://github.com/CurateLabs/graphforge/blob/main/packages/cli/README.md)
-for identity forms and transport rules). Everything in progress lives in a
+for identity forms, transport rules, and every error code's class). Without
+`--ref` or `--version-uuid`, clone follows the repository's default ref: when the
+repository has research Branches, the default ref must name one and clone gets its
+head Version; a repository without Branches gets the Project package. `gf hub list OWNER/REPOSITORY` shows the refs, Branches,
+Versions, Fork origin, and Proposals before you choose. Everything in progress lives in a
 private staging directory beside the destination, `.DESTINATION.graphforge-clone`:
 the partial download, its resume checkpoint, and the import target. The project
 appears at `DESTINATION` only once it is complete and reopened, through one
@@ -297,9 +301,10 @@ package are removed and only the project remains.
 **Interruptions and resume.** Rerun the same command. A network stall is
 detected when no bytes arrive for a minute; each phase of a request has its own
 bound, so a slow but steady transfer is never cut off however long it takes.
-Clone retries a failed connection, a cut body, or a `408`, `429`, or `5xx`
-response in the same invocation, up to five attempts without progress, waiting
-1, 2, 4, then 8 seconds; a retry asks only for the missing bytes with `Range`
+Clone retries a failed connection, a cut body, or a `408`, `429`, `502`, `503`,
+or `504` response in the same invocation, up to five attempts without progress,
+waiting 1, 2, 4, then 8 seconds, or longer when the Hub sends `Retry-After` (in
+seconds or as an HTTP date, up to 30 seconds; a longer request is reported with its wait); a retry asks only for the missing bytes with `Range`
 and the strong `ETag` the partial bytes came from. A server that ignores `Range`
 sends the whole object again, which clone accepts and verifies. After the retry
 bound, or a kill, power loss, or Ctrl-C at any point, a rerun of the same command
@@ -324,7 +329,12 @@ Progress is printed to standard error.
 | `GF_UNSUPPORTED_FILESYSTEM` | The destination filesystem cannot hold a durable project                                                                                                                  | Clone onto a supported local volume                                                  |
 | `hub.insufficient_space`    | Not enough free space beside the destination                                                                                                                              | Free space or choose another destination                                             |
 | `hub.interrupted`           | The download stopped or was cancelled                                                                                                                                     | Rerun the same command                                                               |
-| `hub.network`               | The Hub could not be reached or answered with an error status (named in the message)                                                                                      | Rerun later                                                                          |
+| `hub.network`               | The Hub could not be reached, or the connection failed                                                                                                                    | Rerun later                                                                          |
+| `hub.unavailable`           | The Hub answered `408`, `502`, `503`, or `504` after every retry                                                                                                          | Rerun later                                                                          |
+| `hub.rate_limited`          | The Hub answered `429`; the message gives its `Retry-After` wait when sent                                                                                                | Rerun after that wait                                                                |
+| `hub.not_found`             | The Hub answered `404` or `410`: no such repository or object                                                                                                             | Check the repository name and `--hub`                                                |
+| `hub.access_denied`         | The Hub answered `401` or `403`                                                                                                                                           | Ask the repository owner for access                                                  |
+| `hub.unexpected_status`     | The Hub answered any other unsuccessful status (named in the message)                                                                                                     | Report it to the Hub operator                                                        |
 | `hub.integrity`             | The downloaded bytes do not match their digest; the partial download was removed                                                                                          | Rerun to download again                                                              |
 | `hub.package.*`             | The package failed verification or import, with the import's own code (for example `hub.package.io` or `hub.package.cancelled`)                                           | `hub.package.io` and `hub.package.cancelled`: rerun; others: the package is unusable |
 | `hub.destination_conflict`  | The destination already exists, or appeared while the clone ran. Clone never replaces it; it removes its own staging for that destination, including any partial download | Choose another destination, or remove the existing one and rerun                     |
