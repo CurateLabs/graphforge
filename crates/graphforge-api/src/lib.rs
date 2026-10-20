@@ -341,7 +341,7 @@ pub use graphforge_core::portable::{
     PortableIntegrity, PortableLimits, PortableMode, PortableOutput, PortablePackageClass,
     PortableParticipantId, PortablePropertyProjection, PortableRepresentation,
     PortableSelectionEntry, PortableSelectionPlan, PortableSelectionProfile,
-    PortableSelectionReason, PortableSelectionRequest, PortableSubsetClosure,
+    PortableSelectionReason, PortableSelectionRequest, PortableSource, PortableSubsetClosure,
     PortableSubsetPreview as PortableSubsetPlan, PortableSubsetRequest,
 };
 pub use graphforge_core::storage_receipt::{

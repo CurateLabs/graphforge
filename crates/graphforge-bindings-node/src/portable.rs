@@ -278,6 +278,10 @@ fn verify_report_output(report: graphforge_api::PortableVerifyResult) -> Portabl
             graphforge_api::PortableRepresentation::Expanded => "expanded".into(),
             graphforge_api::PortableRepresentation::Bundle => "bundle".into(),
         },
+        source: match report.source {
+            graphforge_api::PortableSource::File => "file".into(),
+            graphforge_api::PortableSource::Stream => "stream".into(),
+        },
         package_digest: report.package_digest,
         package_class: match report.package_class {
             graphforge_api::PortablePackageClass::Complete => "complete".into(),
@@ -480,6 +484,8 @@ pub struct PortableVerifyOutput {
     pub research_entries: Vec<PortableResearchEntryOutput>,
     pub contract: String,
     pub representation: String,
+    /// How the verified bytes were read: `file` or `stream`.
+    pub source: String,
     pub package_digest: String,
     pub package_class: String,
     pub component_count: BigInt,
