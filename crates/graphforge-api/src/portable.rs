@@ -781,10 +781,45 @@ mod tests {
             );
         }
 
-        // The declaration is authenticated: relabeling the producer is refused.
+        // The declaration is inside `package_digest`: relabel the producer, keep
+        // the original `package_digest`, and refresh every outer BagIt checksum so
+        // only the package digest can refuse the package.
         let mut forged = manifest;
         forged["producing_core_version"] = serde_json::json!("0.0.1");
-        std::fs::write(&manifest_path, serde_json::to_vec(&forged).unwrap()).unwrap();
+        let forged_bytes = serde_json::to_vec(&forged).unwrap();
+        std::fs::write(&manifest_path, &forged_bytes).unwrap();
+        let sha = |bytes: &[u8]| {
+            use sha2::Digest as _;
+            let digest = sha2::Sha256::digest(bytes);
+            digest
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        };
+        let data_manifest_path = expanded.join("manifest-sha256.txt");
+        let data_manifest = std::fs::read_to_string(&data_manifest_path)
+            .unwrap()
+            .lines()
+            .map(|line| match line.split_once("  ") {
+                Some((_, "data/graphforge-project.json")) => {
+                    format!("{}  data/graphforge-project.json\n", sha(&forged_bytes))
+                }
+                _ => format!("{line}\n"),
+            })
+            .collect::<String>();
+        std::fs::write(&data_manifest_path, &data_manifest).unwrap();
+        let tag_manifest_path = expanded.join("tagmanifest-sha256.txt");
+        let tag_manifest = std::fs::read_to_string(&tag_manifest_path)
+            .unwrap()
+            .lines()
+            .map(|line| match line.split_once("  ") {
+                Some((_, "manifest-sha256.txt")) => {
+                    format!("{}  manifest-sha256.txt\n", sha(data_manifest.as_bytes()))
+                }
+                _ => format!("{line}\n"),
+            })
+            .collect::<String>();
+        std::fs::write(&tag_manifest_path, tag_manifest).unwrap();
         let error = verify_portable(
             &PortableVerifyRequest {
                 input: expanded,
@@ -798,6 +833,8 @@ mod tests {
             error.code,
             graphforge_core::portable::PortableErrorCode::DigestMismatch
         );
+        assert_eq!(error.entry.as_deref(), Some("data/graphforge-project.json"));
+        assert_eq!(error.to_string(), "portable DigestMismatch: package digest");
     }
 
     #[test]

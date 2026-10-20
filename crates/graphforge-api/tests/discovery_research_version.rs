@@ -367,6 +367,25 @@ fn research_package_digest_mismatch_fails_without_acceptance() {
 }
 
 #[test]
+fn research_package_producer_mismatch_fails_without_acceptance() {
+    let published = publish();
+    // Only the advertised producer differs; the semantic package digest agrees.
+    let mut lineage = published.lineage.clone();
+    version_mut(&mut lineage, published.head)
+        .package
+        .as_mut()
+        .unwrap()
+        .producing_core_version = "0.0.1".into();
+    let (_, path) = &published.packages[&published.head];
+    assert!(matches!(
+        verify(&lineage, &published.repository, published.head, path),
+        Err(DiscoveryResearchVersionError::ReferenceMismatch(
+            DiscoveryPortableMismatch::ProducingCoreVersion
+        ))
+    ));
+}
+
+#[test]
 fn version_identity_must_match_the_verified_research_registry() {
     let published = publish();
     let (_, head_path) = &published.packages[&published.head];
