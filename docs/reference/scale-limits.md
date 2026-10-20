@@ -19,7 +19,9 @@ re-verified against the selected release candidate
 publication.
 
 **Host for every measured row below:** OVHC-AGENCY (Ryzen 7 3800X, 16 threads,
-125 GiB, ext4 on NVMe RAID, Linux 7.0.0-34), `local-linux-cgroups-v2` profile.
+125 GiB, ext4 on NVMe RAID, Linux 7.0 kernel series), `local-linux-cgroups-v2`
+profile. The exact kernel patch level differs between campaigns; each linked
+source records its own.
 
 | Claim | Version / source and workload | Configuration | Command and result | Limitations and reproducibility |
 | ----- | ----------------------------- | ------------- | ------------------ | ------------------------------- |
