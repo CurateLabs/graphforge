@@ -321,10 +321,18 @@ struct CloneResult {
     package_digest: String,
     generation_uuid: String,
     resumed_bytes: u64,
+    /// Branch ref a research clone resolved: `--ref`, or the repository's
+    /// default ref when it names a lineage Branch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    resolved_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    research_branch_uuid: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     research_version_uuid: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     research_version_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    research_version_identity: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     moved_from: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -339,6 +347,7 @@ struct CloneImported {
 struct ResearchCloneContext {
     selected_branch: Option<graphforge_discovery::LineageBranch>,
     lineage_bytes: Vec<u8>,
+    branch_uuid: String,
     version_uuid: String,
     version_kind: String,
     identity_digest: String,
@@ -461,6 +470,7 @@ fn prepare_research_clone(
                 })
                 .cloned(),
             lineage_bytes,
+            branch_uuid: version.branch_uuid.clone(),
             version_uuid: selected_uuid,
             version_kind: version.kind.clone(),
             identity_digest: version.identity_digest.0.clone(),
@@ -2287,8 +2297,18 @@ fn clone_into_staging(
         package_digest: imported.package_digest,
         generation_uuid: imported.generation_uuid.to_string(),
         resumed_bytes: download.resumed_bytes,
+        resolved_ref: research_context
+            .as_ref()
+            .and_then(|context| context.selected_branch.as_ref())
+            .map(|branch| branch.ref_name.clone()),
+        research_branch_uuid: research_context
+            .as_ref()
+            .map(|context| context.branch_uuid.clone()),
         research_version_uuid,
         research_version_kind,
+        research_version_identity: research_context
+            .as_ref()
+            .map(|context| context.identity_digest.clone()),
         moved_from: moved.map(|m| m.moved_from.canonical_name()),
         moved_to: moved.map(|m| m.moved_to.canonical_name()),
     };
@@ -2319,9 +2339,14 @@ fn write_clone_result(
         if let (Some(from), Some(to)) = (&result.moved_from, &result.moved_to) {
             writeln!(output, "Repository moved from {from} to {to}").map_err(storage)?;
         }
+        let selected = match (&result.resolved_ref, &result.research_version_uuid) {
+            (Some(name), Some(version)) => format!(" ref {name} (Version {version})"),
+            (None, Some(version)) => format!(" Version {version}"),
+            _ => String::new(),
+        };
         writeln!(
             output,
-            "Cloned {} to {}",
+            "Cloned {}{selected} to {}",
             result.repository, result.destination
         )
         .map_err(storage)?;
