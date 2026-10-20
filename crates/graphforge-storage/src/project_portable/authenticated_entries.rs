@@ -263,8 +263,8 @@ fn validate_parquet_profile(
         } else {
             source.join(&entry.path)
         };
-        let mut file = crate::project_portable_export::open_source_no_follow(&input_path)
-            .map_err(|_| {
+        let mut file =
+            crate::project_portable_export::open_source_no_follow(&input_path).map_err(|_| {
                 PortableError::at(
                     PortableErrorCode::ConcurrentMutation,
                     &entry.path,

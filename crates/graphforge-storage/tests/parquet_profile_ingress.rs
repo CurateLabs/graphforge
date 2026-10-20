@@ -188,13 +188,7 @@ fn hostile_package(
 }
 
 fn verify(package: &Path) -> Result<(), graphforge_storage::PortableError> {
-    verify_portable(
-        package,
-        PortableMode::Full,
-        PortableLimits::default(),
-        None,
-    )
-    .map(|_| ())
+    verify_portable(package, PortableMode::Full, PortableLimits::default(), None).map(|_| ())
 }
 
 fn import(

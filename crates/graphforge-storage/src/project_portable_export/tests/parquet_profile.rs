@@ -58,12 +58,7 @@ fn generation_with_graph_file(bytes: &[u8]) -> (tempfile::TempDir, ResolvedProje
 }
 
 fn verify(package: &Path) -> Result<crate::PortableReport, PortableError> {
-    crate::verify_portable(
-        package,
-        PortableMode::Full,
-        PortableLimits::default(),
-        None,
-    )
+    crate::verify_portable(package, PortableMode::Full, PortableLimits::default(), None)
 }
 
 fn import(
@@ -119,8 +114,7 @@ fn unfunded_parquet_is_refused_by_verify_and_import_in_both_package_forms() {
     ];
     for (name, bytes) in cases {
         let (_project, generation) = generation_with_graph_file(&bytes);
-        let plan =
-            plan_complete_portable(&generation, PortableExportLimits::default()).unwrap();
+        let plan = plan_complete_portable(&generation, PortableExportLimits::default()).unwrap();
         let outputs = tempfile::tempdir().unwrap();
         let (expanded, bundle) = write_test_representations(&plan, outputs.path());
         for package in [&expanded, &bundle] {
