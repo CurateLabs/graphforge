@@ -27,7 +27,7 @@ fn query_pool(size: usize) -> Arc<dyn MemoryPool> {
 }
 
 /// An exchange, the consumer DataFusion's repartition registers.
-fn exchange(pool: &Arc<dyn MemoryPool>, partition: usize) -> MemoryReservation {
+pub(super) fn exchange(pool: &Arc<dyn MemoryPool>, partition: usize) -> MemoryReservation {
     MemoryConsumer::new(format!("RepartitionExec[{partition}]"))
         .with_can_spill(true)
         .register(pool)
@@ -35,7 +35,7 @@ fn exchange(pool: &Arc<dyn MemoryPool>, partition: usize) -> MemoryReservation {
 
 /// An aggregate that has spilled and holds nothing: it released what it held in
 /// a bulk shrink.
-fn spilled(pool: &Arc<dyn MemoryPool>, partition: usize) -> MemoryReservation {
+pub(super) fn spilled(pool: &Arc<dyn MemoryPool>, partition: usize) -> MemoryReservation {
     let spilled = aggregate(pool, partition);
     spilled.try_grow(MIB).unwrap();
     spilled.shrink(MIB);
@@ -806,46 +806,90 @@ fn a_spilling_consumer_leaves_the_last_floor_to_the_readers_of_spilled_data() {
     assert_eq!(pool.reserved(), 64 * MIB);
 }
 
-/// Delegates to the query pool and records every request a sort's merge
-/// reservation makes, with the number of output batches already delivered.
-#[derive(Debug)]
-struct MergeRecorder {
-    inner: QueryMemoryPool,
-    delivered: std::sync::atomic::AtomicUsize,
-    requests: Mutex<Vec<(usize, usize)>>,
+/// A request, registration or unregistration of a consumer a merge pass is
+/// made of, with the number of output batches already delivered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PassEvent {
+    delivered: usize,
+    consumer: String,
+    bytes: usize,
+    registered: bool,
+    /// Spill readers alive when the event happened.
+    readers: usize,
 }
 
-impl std::fmt::Display for MergeRecorder {
+/// Delegates to the query pool and records every request of the consumers a
+/// sort's merge is made of: its reservation (`ExternalSorterMerge`, which
+/// carries the copies) and the readers and writers of its spill files.
+#[derive(Debug)]
+struct PassRecorder {
+    inner: QueryMemoryPool,
+    delivered: std::sync::atomic::AtomicUsize,
+    readers: std::sync::atomic::AtomicUsize,
+    events: Mutex<Vec<PassEvent>>,
+}
+
+impl PassRecorder {
+    fn new(size: usize) -> Arc<Self> {
+        Arc::new(Self {
+            inner: QueryMemoryPool::new(size),
+            delivered: Default::default(),
+            readers: Default::default(),
+            events: Mutex::default(),
+        })
+    }
+    fn record(&self, consumer: &MemoryConsumer, bytes: usize, registered: bool) {
+        let name = consumer.name();
+        if name.starts_with("ExternalSorterMerge")
+            || name.starts_with(AGGREGATE_CONSUMER_PREFIX)
+            || name.starts_with("SpillReader")
+            || name.starts_with("SpillWriter")
+        {
+            self.events.lock().unwrap().push(PassEvent {
+                delivered: self.delivered.load(std::sync::atomic::Ordering::SeqCst),
+                consumer: name.to_string(),
+                bytes,
+                registered,
+                readers: self.readers.load(std::sync::atomic::Ordering::SeqCst),
+            });
+        }
+    }
+}
+
+impl std::fmt::Display for PassRecorder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.inner.fmt(f)
     }
 }
 
-impl MemoryPool for MergeRecorder {
+impl MemoryPool for PassRecorder {
     fn name(&self) -> &str {
-        "merge-recorder"
+        "pass-recorder"
     }
     fn register(&self, consumer: &MemoryConsumer) {
+        if consumer.name().starts_with("SpillReader") {
+            self.readers
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        self.record(consumer, 0, true);
         self.inner.register(consumer);
     }
     fn unregister(&self, consumer: &MemoryConsumer) {
+        if consumer.name().starts_with("SpillReader") {
+            self.readers
+                .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        }
         self.inner.unregister(consumer);
     }
     fn grow(&self, reservation: &MemoryReservation, additional: usize) {
+        self.record(reservation.consumer(), additional, false);
         self.inner.grow(reservation, additional);
     }
     fn shrink(&self, reservation: &MemoryReservation, shrink: usize) {
         self.inner.shrink(reservation, shrink);
     }
     fn try_grow(&self, reservation: &MemoryReservation, additional: usize) -> Result<()> {
-        if reservation
-            .consumer()
-            .name()
-            .starts_with("ExternalSorterMerge")
-        {
-            let delivered = self.delivered.load(std::sync::atomic::Ordering::SeqCst);
-            self.requests.lock().unwrap().push((delivered, additional));
-        }
+        self.record(reservation.consumer(), additional, false);
         self.inner.try_grow(reservation, additional)
     }
     fn reserved(&self) -> usize {
@@ -856,15 +900,18 @@ impl MemoryPool for MergeRecorder {
     }
 }
 
-/// The merge of the spill files of a sort admits the memory it copies in at
-/// file selection and keeps it until its last batch (#2173). Replays the
-/// merge's request sequence: once the first merged batch has been delivered,
-/// the merge reservation asks the pool for nothing more. Before the repair
-/// every merged batch asked for its interleave workspace again, a request an
-/// aggregate that cannot spill any further fails its query on. `keys` choose
-/// the cursor of the merge: one Utf8 column reads with a Field cursor, which
-/// keeps the envelope of its copies, and two columns with a Row cursor.
-async fn assert_merge_asks_the_pool_for_nothing_after_its_first_batch(keys: &[&str]) {
+/// What a sort that spills at least twice did to the pool while it merged.
+struct MergeRun {
+    events: Vec<PassEvent>,
+    passes: usize,
+}
+
+/// Sorts 2 x 131072 rows of a Utf8 key `k`, an Int64 key `j` and a 100-byte
+/// payload under a pool of `pool` bytes and records the requests of the merge.
+/// `keys` choose the cursor of the merge: the Int64 column reads with a
+/// primitive Field cursor (the schema holds only Int64 and Utf8), the Utf8
+/// column with a Field cursor, and both with a Row cursor.
+async fn merge_of_spilled_sort(keys: &[&str], pool: usize) -> MergeRun {
     use datafusion::datasource::memory::MemorySourceConfig;
     use datafusion::physical_expr::expressions::Column;
     use datafusion::physical_expr::{LexOrdering, PhysicalSortExpr};
@@ -875,11 +922,7 @@ async fn assert_merge_asks_the_pool_for_nothing_after_its_first_batch(keys: &[&s
 
     const KEYS: i64 = 131_072;
     const ROWS: usize = 8_192;
-    let pool = Arc::new(MergeRecorder {
-        inner: QueryMemoryPool::new(128 * MIB),
-        delivered: Default::default(),
-        requests: Mutex::default(),
-    });
+    let pool = PassRecorder::new(pool);
     let dynamic: Arc<dyn MemoryPool> = Arc::clone(&pool) as Arc<dyn MemoryPool>;
     let directory = tempfile::tempdir().unwrap();
     let runtime = RuntimeEnvBuilder::new()
@@ -928,29 +971,189 @@ async fn assert_merge_asks_the_pool_for_nothing_after_its_first_batch(keys: &[&s
     let mut rows = 0;
     while let Some(batch) = stream.next().await {
         rows += batch
-            .unwrap_or_else(|error| panic!("{error}: {:?}", pool.requests.lock().unwrap()))
+            .unwrap_or_else(|error| panic!("{error}: {:?}", pool.events.lock().unwrap()))
             .num_rows();
         pool.delivered.fetch_add(1, Ordering::SeqCst);
     }
     drop(stream);
     assert_eq!(rows, 2 * KEYS as usize);
     assert!(sort.metrics().unwrap().spill_count().unwrap() >= 2);
-    let delivered = pool.delivered.load(Ordering::SeqCst);
-    assert!(delivered > 2, "{delivered} batches");
-    let requests = pool.requests.lock().unwrap();
-    let late = requests
+    assert!(pool.delivered.load(Ordering::SeqCst) > 2);
+    let events = pool.events.lock().unwrap().clone();
+    // The merge starts with its first reader; the sort wrote its own spill
+    // files before it, and an intermediate file of the merge registers a
+    // writer after it.
+    let first_reader = events
         .iter()
-        .filter(|(delivered, _)| *delivered > 0)
+        .position(|event| event.consumer.starts_with("SpillReader"))
+        .expect("the merge reads its spill files");
+    let intermediates = events[first_reader..]
+        .iter()
+        .filter(|event| event.registered && event.consumer == "SpillWriterCodec")
+        .count();
+    MergeRun {
+        events: events[first_reader..].to_vec(),
+        passes: intermediates + 1,
+    }
+}
+
+/// Nothing a merge pass is made of asks the pool for bytes once the pass has
+/// been admitted (#2173): not the readers' decoders and metadata, not the
+/// writer of an intermediate file, not the copies' interleave workspace and
+/// outputs on the merge reservation, which selects the files of the next pass
+/// only while no reader of the last is alive.
+fn assert_the_passes_ask_for_nothing_after_their_selection(run: &MergeRun) {
+    let fresh = run
+        .events
+        .iter()
+        .filter(|event| {
+            !event.registered
+                && event.bytes > 0
+                && (event.consumer.starts_with("SpillReader")
+                    || event.consumer.starts_with("SpillWriter"))
+        })
         .collect::<Vec<_>>();
-    assert!(late.is_empty(), "{late:?} of {requests:?}");
+    assert!(fresh.is_empty(), "readers and writers asked: {fresh:?}");
+    let during = run
+        .events
+        .iter()
+        .filter(|event| {
+            !event.registered
+                && event.bytes > 0
+                && (event.consumer.starts_with("ExternalSorterMerge")
+                    || event.consumer.starts_with(AGGREGATE_CONSUMER_PREFIX))
+                && event.readers > 0
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        during.is_empty(),
+        "a pass asked after its selection: {during:?}"
+    );
 }
 
 #[tokio::test]
-async fn a_field_merge_of_the_spill_files_asks_the_pool_for_nothing_after_its_first_batch() {
-    assert_merge_asks_the_pool_for_nothing_after_its_first_batch(&["k"]).await;
+async fn a_merge_pass_with_a_row_cursor_asks_the_pool_for_nothing_after_its_selection() {
+    let run = merge_of_spilled_sort(&["k", "j"], 128 * MIB).await;
+    assert_the_passes_ask_for_nothing_after_their_selection(&run);
 }
 
 #[tokio::test]
-async fn a_row_merge_of_the_spill_files_asks_the_pool_for_nothing_after_its_first_batch() {
-    assert_merge_asks_the_pool_for_nothing_after_its_first_batch(&["k", "j"]).await;
+async fn a_merge_pass_with_a_primitive_field_cursor_asks_the_pool_for_nothing_after_its_selection()
+{
+    let run = merge_of_spilled_sort(&["j"], 128 * MIB).await;
+    assert_the_passes_ask_for_nothing_after_their_selection(&run);
+}
+
+#[tokio::test]
+async fn a_merge_pass_with_a_field_cursor_asks_the_pool_for_nothing_after_its_selection() {
+    let run = merge_of_spilled_sort(&["k"], 128 * MIB).await;
+    assert_the_passes_ask_for_nothing_after_their_selection(&run);
+}
+
+/// The files of the sort do not fit one pass: the passes narrow their breadth
+/// to the pool, write their intermediate files from the bank they were
+/// admitted, and the last one reads them back. No pass asks the pool for
+/// anything after its selection.
+#[tokio::test]
+async fn merge_passes_that_write_intermediate_files_ask_the_pool_for_nothing_after_their_selection()
+{
+    for keys in [&["k", "j"][..], &["j"][..], &["k"][..]] {
+        let run = merge_of_spilled_sort(keys, 48 * MIB).await;
+        assert!(run.passes > 2, "{keys:?}: {} passes", run.passes);
+        assert_the_passes_ask_for_nothing_after_their_selection(&run);
+    }
+}
+
+/// Runs `sql` over `rows` rows of an Int64 group `g` (`groups` of them) and a
+/// `pad`-byte payload under a query pool of `pool` bytes, one partition and
+/// batches of `batch_size` rows; the requests of the consumers of the merge
+/// pass of its aggregate, and the result.
+async fn spilled_aggregate(
+    sql: &str,
+    groups: i64,
+    rows: i64,
+    pad: usize,
+    batch_size: usize,
+    pool: usize,
+) -> (Result<Vec<RecordBatch>>, MergeRun) {
+    let pool = PassRecorder::new(pool);
+    let dynamic: Arc<dyn MemoryPool> = Arc::clone(&pool) as Arc<dyn MemoryPool>;
+    let directory = tempfile::tempdir().unwrap();
+    let runtime = RuntimeEnvBuilder::new()
+        .with_memory_pool(dynamic)
+        .with_temp_file_path(directory.path().to_path_buf())
+        .build_arc()
+        .unwrap();
+    let context = SessionContext::new_with_config_rt(
+        SessionConfig::new()
+            .with_target_partitions(1)
+            .with_batch_size(batch_size),
+        runtime,
+    );
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("g", DataType::Int64, false),
+        Field::new("pad", DataType::Utf8, false),
+    ]));
+    let text = "x".repeat(pad);
+    let batches = (0..rows)
+        .step_by(8192)
+        .map(|first| {
+            let keys = (first..(first + 8192).min(rows))
+                .map(|row| row % groups)
+                .collect::<Vec<_>>();
+            RecordBatch::try_new(
+                Arc::clone(&schema),
+                vec![
+                    Arc::new(Int64Array::from(keys.clone())),
+                    Arc::new(StringArray::from(vec![text.as_str(); keys.len()])),
+                ],
+            )
+            .unwrap()
+        })
+        .collect::<Vec<_>>();
+    context
+        .register_table(
+            "t",
+            Arc::new(MemTable::try_new(schema, vec![batches]).unwrap()),
+        )
+        .unwrap();
+    let result = context.sql(sql).await.unwrap().collect().await;
+    let events = pool.events.lock().unwrap().clone();
+    let merge = events
+        .iter()
+        .position(|event| event.consumer.starts_with("SpillReader"))
+        .map_or_else(Vec::new, |first| events[first..].to_vec());
+    (
+        result,
+        MergeRun {
+            events: merge,
+            passes: 1,
+        },
+    )
+}
+
+/// A grouped aggregate that has spilled merges its spill files holding the
+/// bound it admitted when it began to: after its first reader exists, neither
+/// the state of its groups, nor its readers, nor the copies of its merge ask
+/// the pool for a byte.
+#[tokio::test]
+async fn a_merging_aggregate_holds_its_state_bound_and_asks_the_pool_for_nothing() {
+    let (result, run) = spilled_aggregate(
+        "SELECT g, max(pad) FROM t GROUP BY g",
+        262_144,
+        262_144,
+        100,
+        8192,
+        24 * MIB,
+    )
+    .await;
+    assert_eq!(
+        result.unwrap().iter().map(|b| b.num_rows()).sum::<usize>(),
+        262_144
+    );
+    assert!(
+        !run.events.is_empty(),
+        "the groups exceed the pool, so the aggregate merged spill files"
+    );
+    assert_the_passes_ask_for_nothing_after_their_selection(&run);
 }

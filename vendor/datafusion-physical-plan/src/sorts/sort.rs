@@ -288,8 +288,14 @@ impl ExternalSorter {
             .with_can_spill(true)
             .register(&runtime.memory_pool);
 
+        // The merge pass adapts the breadth of its selection to the pool, which
+        // the pool learns only from `can_spill`; the consumer itself never
+        // grows in a way that cannot be refused (a sort spills its in-memory
+        // batches before a multi-level merge). Its name does not carry the
+        // sort's `ExternalSorter[` prefix, so no sort headroom applies to it.
         let merge_reservation =
             MemoryConsumer::new(format!("ExternalSorterMerge[{partition_id}]"))
+                .with_can_spill(true)
                 .register(&runtime.memory_pool);
 
         let spill_manager = SpillManager::new(

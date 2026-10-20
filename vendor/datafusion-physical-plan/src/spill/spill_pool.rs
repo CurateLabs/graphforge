@@ -288,7 +288,7 @@ impl SpillPoolWriter {
                         "FIFO writer registration bound overflow".into(),
                     )
                 })?;
-                Credit::with_readers_and_control(authority, 1, registration)
+                Credit::with_readers_and_control(authority, 1, registration, false)
             })?;
         let producer = producers.pop().expect("one preadmitted FIFO root");
         drop(producers);

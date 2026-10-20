@@ -96,8 +96,16 @@ impl Budget {
     pub(super) fn try_grow(&self, bytes: usize) -> Result<()> {
         let _transition = od::Transition::begin();
         add(self.size(), bytes)?;
-        let borrowed = self.credit.as_ref().map_or(0, |credit| credit.take(bytes));
-        if let Err(error) = self.fresh.try_grow(bytes - borrowed) {
+        let (borrowed, may_ask) = self
+            .credit
+            .as_ref()
+            .map_or((0, true), |credit| credit.take(bytes));
+        let result = if borrowed < bytes && !may_ask {
+            Err(self.beyond_credit(bytes - borrowed))
+        } else {
+            self.fresh.try_grow(bytes - borrowed)
+        };
+        if let Err(error) = result {
             if let Some(credit) = &self.credit {
                 credit.give(borrowed);
             }
@@ -107,6 +115,9 @@ impl Budget {
         self.borrowed.fetch_add(borrowed, Ordering::Relaxed);
         self.observe();
         Ok(())
+    }
+    fn beyond_credit(&self, short: usize) -> DataFusionError {
+        beyond_credit(self.fresh.consumer().name(), short)
     }
     pub(super) fn split(&mut self, bytes: usize) -> Self {
         let _transition = od::Transition::begin();
@@ -200,6 +211,37 @@ impl Drop for Budget {
         }
     }
 }
+/// A borrower of an exact bank needed `short` bytes more than the bank held.
+fn beyond_credit(name: &str, short: usize) -> DataFusionError {
+    let kind = if name.starts_with("SpillWriter") {
+        "writer"
+    } else {
+        "reader"
+    };
+    DataFusionError::ResourcesExhausted(format!(
+        "spill {kind} exceeded its admitted credit: {name} needed {short} more bytes"
+    ))
+}
+/// A registered consumer holding nothing, which draws on `credit` when it grows.
+pub(super) fn register(
+    pool: &Arc<dyn MemoryPool>,
+    name: &str,
+    credit: Option<Arc<Credit>>,
+) -> Budget {
+    let _transition = od::Transition::begin();
+    let fresh = MemoryConsumer::new(name).register(pool);
+    let diagnostic = od::Life::inherited(od::Kind::Budget);
+    let diagnostic_piece = od::Piece::new(&fresh, diagnostic.id());
+    let budget = Budget {
+        fresh,
+        borrowed: AtomicUsize::new(0),
+        credit,
+        diagnostic_piece,
+        diagnostic,
+    };
+    budget.observe();
+    budget
+}
 pub(super) fn reserve(
     pool: &Arc<dyn MemoryPool>,
     bytes: usize,
@@ -215,7 +257,9 @@ pub(super) fn reserve_with_credit(
 ) -> Result<Budget> {
     let _transition = od::Transition::begin();
     let fresh = MemoryConsumer::new(name).register(pool);
-    let borrowed = credit.as_ref().map_or(0, |credit| credit.take(bytes));
+    let (borrowed, may_ask) = credit
+        .as_ref()
+        .map_or((0, true), |credit| credit.take(bytes));
     let diagnostic = od::Life::inherited(od::Kind::Budget);
     let diagnostic_piece = od::Piece::new(&fresh, diagnostic.id());
     let budget = Budget {
@@ -226,7 +270,11 @@ pub(super) fn reserve_with_credit(
         diagnostic,
     };
     budget.observe();
-    let result = budget.fresh.try_grow(bytes - borrowed);
+    let result = if borrowed < bytes && !may_ask {
+        Err(budget.beyond_credit(bytes - borrowed))
+    } else {
+        budget.fresh.try_grow(bytes - borrowed)
+    };
     budget.observe();
     result?;
     Ok(budget)
@@ -274,6 +322,170 @@ pub(super) fn codec_bound(codec: SpillCompression, writing: bool) -> Result<usiz
             Ok(size)
         }
     }
+}
+
+/// The IPC nodes and buffers one record batch of `schema` carries, when that
+/// count does not depend on the data: flat fixed-width and binary columns.
+/// Nested columns (the value count of a child is not derivable from the bytes
+/// of the batch), views (any number of data buffers), dictionaries (separate
+/// dictionary messages), unions, run-end and the other layouts have no such
+/// count, so a merge of them keeps its original, unbounded reader admission.
+fn ipc_shape(data_type: &DataType) -> Option<(usize, usize)> {
+    match data_type {
+        DataType::Null => Some((1, 0)),
+        DataType::Boolean | DataType::FixedSizeBinary(_) => Some((1, 2)),
+        data_type if data_type.primitive_width().is_some() => Some((1, 2)),
+        DataType::Utf8 | DataType::LargeUtf8 | DataType::Binary | DataType::LargeBinary => {
+            Some((1, 3))
+        }
+        _ => None,
+    }
+}
+fn schema_shape(schema: &Schema) -> Option<(usize, usize)> {
+    schema.fields().iter().try_fold((0, 0), |(nodes, buffers), field| {
+        let (n, b) = ipc_shape(field.data_type())?;
+        Some((nodes + n, buffers + b))
+    })
+}
+/// Layouts whose uncompressed IPC body the decoder aliases without copying
+/// (see `aligned_body_matches`): its payload admission is the body alone.
+fn aliased_layout(data_type: &DataType) -> bool {
+    matches!(
+        data_type,
+        DataType::Int64
+            | DataType::UInt64
+            | DataType::UInt32
+            | DataType::FixedSizeBinary(16)
+            | DataType::Timestamp(_, _)
+            | DataType::Utf8
+    )
+}
+/// Whether a spill file of `schema` has reader and writer bounds derivable
+/// from its largest batch alone. A merge of any other schema is not admitted
+/// to an exact bank (see [`Credit::new`]).
+pub(crate) fn bounded_schema(schema: &Schema) -> bool {
+    !schema.fields().is_empty() && schema_shape(schema).is_some()
+}
+/// The IPC body of a batch whose sliced memory is `max` and whose columns hold
+/// at most `rows` values: each buffer is padded to its 64-byte alignment and a
+/// column without nulls still writes a validity bitmap (V5).
+fn body_bound(schema: &Schema, max: usize, rows: usize) -> Result<usize> {
+    let (nodes, buffers) = schema_shape(schema).ok_or_else(overflow)?;
+    add(
+        max,
+        add(mul(buffers, 64)?, mul(nodes, add(rows / 8, 64)?)?)?,
+    )
+}
+/// Bytes the decoder of a spill file admits for its largest batch, from the
+/// arithmetic of `scan` and the decode that follows it: the fixed schema
+/// grant, the message-metadata Vec (at most doubling a metadata length that
+/// the headers allowance bounds), the body or its decompressed copies, the
+/// header allowance and the codec.
+fn reader_batch_bound(
+    schema: &Schema,
+    max: usize,
+    rows: usize,
+    codec: SpillCompression,
+) -> Result<usize> {
+    let (nodes, buffers) = schema_shape(schema).ok_or_else(overflow)?;
+    let body = body_bound(schema, max, rows)?;
+    let headers = add(add(4096, mul(nodes, 512)?)?, mul(buffers, 256)?)?;
+    let payload = if codec != SpillCompression::Uncompressed {
+        // (body + 2 * decoded) * 2, with the compressed body at most the
+        // decoded bytes and a length word per buffer.
+        mul(add(mul(body, 3)?, mul(buffers, 24)?)?, 2)?
+    } else if schema.fields().iter().all(|f| aliased_layout(f.data_type())) {
+        body
+    } else {
+        mul(body, 2)?
+    };
+    let codec_bytes = if codec == SpillCompression::Uncompressed {
+        0
+    } else {
+        codec_bound(codec, false)?
+    };
+    add(
+        add(schema_bound(schema)?, mul(headers, 2)?)?,
+        add(add(payload, headers)?, codec_bytes)?,
+    )
+}
+/// Bytes a reader of a spill file keeps for as long as it lives: the shared
+/// schema owner, the `BufReader`, and the message-metadata Vec of its longest
+/// message.
+fn reader_fixed_bound(schema: &Schema) -> Result<usize> {
+    let (nodes, buffers) = schema_shape(schema).ok_or_else(overflow)?;
+    let headers = add(add(4096, mul(nodes, 512)?)?, mul(buffers, 256)?)?;
+    add(
+        SharedSchema::bound(schema)?,
+        add(8192, mul(headers.max(schema_bound(schema)?), 2)?)?,
+    )
+}
+/// Every byte one reader of a spill file whose largest batch is `max` can hold
+/// alive at once, with `buffer_len` batches buffered. One reader keeps
+/// `buffer_len` batches in its channel, one in flight in its producer (which
+/// polls the next decode only after sending), and the merge keeps its current
+/// batch and one earlier batch whose rows are still pending in the output.
+/// `None` for a schema without a derivable bound.
+pub fn reader_pass_bound(
+    schema: &Schema,
+    max: usize,
+    rows: usize,
+    codec: SpillCompression,
+    buffer_len: usize,
+) -> Result<Option<usize>> {
+    if !bounded_schema(schema) {
+        return Ok(None);
+    }
+    add(
+        reader_fixed_bound(schema)?,
+        mul(add(buffer_len, 3)?, reader_batch_bound(schema, max, rows, codec)?)?,
+    )
+    .map(Some)
+}
+/// Every byte the writer of an intermediate spill file takes for an output
+/// batch that is no larger than `max`: the source metadata, the encoding
+/// workspace, and the codec. The writer holds the larger of the metadata and
+/// the workspace, then the codec beside it. `None` for a schema without a
+/// derivable bound.
+pub fn writer_pass_bound(
+    schema: &Schema,
+    max: usize,
+    rows: usize,
+    codec: SpillCompression,
+) -> Result<Option<usize>> {
+    let Some((nodes, buffers)) = schema_shape(schema) else {
+        return Ok(None);
+    };
+    if schema.fields().is_empty() {
+        return Ok(None);
+    }
+    let body = body_bound(schema, max, rows)?;
+    let headers = add(add(4096, mul(nodes, 512)?)?, mul(buffers, 256)?)?;
+    let schema_bytes = schema_bound(schema)?;
+    let flat = codec == SpillCompression::Uncompressed
+        && schema
+            .fields()
+            .iter()
+            .all(|f| matches!(f.data_type(), DataType::Int64 | DataType::Utf8));
+    let workspace = if flat {
+        // `flat_write_peak`: the Vec grows to `max(2 * capacity, required)`
+        // and holds its old and new capacity while it does, so its peak is
+        // under three times the final length (a length just past a power of
+        // two, or a last padding byte after a jump to the required length),
+        // beside a rebased-offsets or validity scratch.
+        let scratch = round_64(add(mul(add(rows, 1)?, 4)?, 64)?)?;
+        add(add(mul(body, 3)?, scratch)?, add(headers, schema_bytes)?)?
+    } else {
+        // `write_bound`: the append-only encoder Vec grows geometrically, a
+        // compressed body has a temporary output of up to twice its raw size.
+        let padding = mul(add(buffers, 1)?, 128)?;
+        add(
+            add(mul(add(body, padding)?, 4)?, headers)?,
+            schema_bytes,
+        )?
+    };
+    let metadata = add(schema_bytes, mul(nodes, 2048)?)?;
+    add(workspace.max(metadata), codec_bound(codec, true)?).map(Some)
 }
 
 #[derive(Default)]

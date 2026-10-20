@@ -432,4 +432,6 @@ impl Display for QueryMemoryPool {
 }
 
 #[cfg(test)]
+mod merge_pass_tests;
+#[cfg(test)]
 mod tests;

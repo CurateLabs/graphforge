@@ -106,6 +106,11 @@ struct SpillState {
     /// spill files (in Arrow IPC format)
     spills: Vec<SortedSpillFile>,
 
+    /// The bytes held for the state of the groups while the streaming merge
+    /// is in progress, admitted when it began (zero before). The state asks
+    /// the pool only for what it holds beyond them.
+    merge_state_bound: usize,
+
     /// true when streaming merge is in progress
     is_stream_merging: bool,
 
@@ -616,6 +621,7 @@ impl GroupedHashAggregateStream {
             spills: vec![],
             spill_expr: spill_ordering,
             spill_schema,
+            merge_state_bound: 0,
             is_stream_merging: false,
             merging_aggregate_arguments,
             merging_group_by: PhysicalGroupBy::new_single(merging_group_by_expr),
@@ -1089,7 +1095,13 @@ impl GroupedHashAggregateStream {
                 0
             };
 
-        let new_size = groups_and_acc_size + sort_headroom;
+        // While it merges, the state is held at the bound admitted when the
+        // merge began (see `set_input_done_and_produce_output`): within it,
+        // the state neither grows nor shrinks the reservation. An accumulator
+        // whose state grows with its group (array_agg) can outgrow the bound,
+        // and then asks for the excess like any other state.
+        let new_size =
+            (groups_and_acc_size + sort_headroom).max(self.spill_state.merge_state_bound);
         let reservation_result = self.reservation.try_resize(new_size);
 
         if reservation_result.is_ok() {
@@ -1357,6 +1369,24 @@ impl GroupedHashAggregateStream {
             // Spilling to disk and reading back also ensures batch size is consistent
             // rather than potentially having one significantly larger last batch.
             self.spill()?;
+
+            // The state this stream keeps while it merges holds the groups of
+            // one merged batch and one carried group: its keys and accumulators
+            // copy at most one batch's bytes (a Vec that doubles holds at most
+            // twice that) and each group adds 64 bytes of hash, index and
+            // ordering state. Admit that bound now, while the spill above has
+            // left this stream within its floor, and hold it through the
+            // merge; the merge then asks nothing for it.
+            let largest = self
+                .spill_state
+                .spills
+                .iter()
+                .map(|spill| spill.max_record_batch_memory)
+                .max()
+                .unwrap_or(0);
+            let merge_state_bound = 2 * largest + 64 * (self.batch_size + 1);
+            self.reservation.try_grow(merge_state_bound)?;
+            self.spill_state.merge_state_bound = merge_state_bound;
 
             // Mark that we're switching to stream merging mode.
             self.spill_state.is_stream_merging = true;

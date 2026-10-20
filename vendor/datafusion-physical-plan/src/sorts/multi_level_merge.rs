@@ -33,6 +33,7 @@ use datafusion_execution::memory_pool::MemoryReservation;
 
 use crate::sorts::builder::try_grow_reservation_to_at_least;
 use crate::sorts::copy_admission::{CopyAdmission, CopyCapability};
+use crate::spill::admission::Credit;
 use crate::sorts::sort::get_reserved_bytes_for_record_batch_size;
 use crate::sorts::streaming_merge::{SortedSpillFile, StreamingMergeBuilder};
 use crate::stream::RecordBatchStreamAdapter;
@@ -195,7 +196,7 @@ impl MultiLevelMergeBuilder {
 
     async fn create_stream(mut self) -> Result<SendableRecordBatchStream> {
         loop {
-            let mut stream = self.merge_sorted_runs_within_mem_limit()?;
+            let (mut stream, bank) = self.merge_sorted_runs_within_mem_limit()?;
 
             // TODO - add a threshold for number of files to disk even if empty and reading from disk so
             //        we can avoid the memory reservation
@@ -217,6 +218,7 @@ impl MultiLevelMergeBuilder {
                 .spill_record_batch_stream_and_return_max_batch_memory(
                     &mut stream,
                     "MultiLevelMergeBuilder intermediate spill",
+                    bank,
                 )
                 .await?
             else {
@@ -232,19 +234,21 @@ impl MultiLevelMergeBuilder {
     }
 
     /// This tries to create a stream that merges the most sorted streams and sorted spill files
-    /// as possible within the memory limit.
+    /// as possible within the memory limit. A pass that leaves spill files
+    /// behind also returns the bank its intermediate spill file is written from.
     fn merge_sorted_runs_within_mem_limit(
         &mut self,
-    ) -> Result<SendableRecordBatchStream> {
+    ) -> Result<(SendableRecordBatchStream, Option<Arc<Credit>>)> {
         let _transition = od::Transition::begin();
         match (self.sorted_spill_files.len(), self.sorted_streams.len()) {
             // No data so empty batch
-            (0, 0) => Ok(Box::pin(EmptyRecordBatchStream::new(Arc::clone(
-                &self.schema,
-            )))),
+            (0, 0) => Ok((
+                Box::pin(EmptyRecordBatchStream::new(Arc::clone(&self.schema))),
+                None,
+            )),
 
             // Only in-memory stream, return that
-            (0, 1) => Ok(self.sorted_streams.remove(0)),
+            (0, 1) => Ok((self.sorted_streams.remove(0), None)),
 
             // Only single sorted spill file so return it
             (1, 0) => {
@@ -253,6 +257,7 @@ impl MultiLevelMergeBuilder {
                 // Not reserving any memory for this disk as we are not holding it in memory
                 self.spill_manager
                     .read_spill_as_stream(spill_file.file, None)
+                    .map(|stream| (stream, None))
             }
 
             // Only in memory streams, so merge them all in a single pass
@@ -265,6 +270,7 @@ impl MultiLevelMergeBuilder {
                     true,
                     None,
                 )
+                .map(|stream| (stream, None))
             }
 
             // Need to merge multiple streams
@@ -293,14 +299,15 @@ impl MultiLevelMergeBuilder {
                     && !memory_reservation.consumer().can_spill()
                     && crate::spill::resident_metadata::std_mutex_heap_bound().is_some()
                     && crate::spill::admission::ticket_schema(&self.schema);
-                // Qualification precedes all authority moves and prefetch.
+                // Qualification precedes all authority moves and prefetch. A
+                // primitive Field key needs no non-spilling sponsor: only the
+                // lifecycle of the readers' credit (`retiring`) does.
                 let capability = if all_ipc_inputs {
                     if let Some(encoded_width) =
                         super::copy_bounds::qualified_columns(&self.schema, &self.expr)?
                     {
                         CopyCapability::Row { encoded_width }
-                    } else if retiring
-                        && super::copy_bounds::primitive_field(&self.schema, &self.expr)
+                    } else if super::copy_bounds::primitive_field(&self.schema, &self.expr)
                     {
                         CopyCapability::PrimitiveField
                     } else {
@@ -316,7 +323,7 @@ impl MultiLevelMergeBuilder {
                     && super::copy_bounds::single_column_field(&self.schema, &self.expr)?;
                 // Streams that are all spill files select at least two of them,
                 // so a merge with a copy capability always reads spill files.
-                let (sorted_spill_files, buffer_size, working_set) = self
+                let (sorted_spill_files, buffer_size, working_set, writer) = self
                     .get_sorted_spill_files_to_merge(
                         2,
                         // we must have at least 2 streams to merge
@@ -339,21 +346,16 @@ impl MultiLevelMergeBuilder {
                     mem::swap(&mut self.diagnostic_piece, &mut memory_piece);
                 }
 
-                // Preserve the existing sorted-copy half of the reservation.
-                // Only the previously prepaid input-buffer half is transferable
-                // to readers; leases protect queues and escaped aliases.
-                let input_bytes =
-                    sorted_spill_files
-                        .iter()
-                        .try_fold(0_usize, |total, spill| {
-                            crate::spill::admission::add(
-                                total,
-                                crate::spill::admission::mul(
-                                    spill.max_record_batch_memory,
-                                    buffer_size,
-                                )?,
-                            )
-                        })?;
+                // What the readers of the chosen files may hold, which the
+                // selection admitted; the copies keep what remains of the
+                // reservation, and an intermediate spill file its writer's.
+                let exact = crate::spill::admission::bounded_schema(&self.schema);
+                let input_bytes = sorted_spill_files.iter().try_fold(0_usize, |total, spill| {
+                    crate::spill::admission::add(
+                        total,
+                        self.credit_bytes(spill.max_record_batch_memory, buffer_size)?,
+                    )
+                })?;
                 memory_piece.refresh(&memory_reservation, self.diagnostic.id());
                 let (input_credit, producers) = if retiring {
                     let input = memory_reservation.split(input_bytes);
@@ -364,9 +366,10 @@ impl MultiLevelMergeBuilder {
                         self.diagnostic.id(),
                         od::Kind::Credit as u64,
                         || {
-                            crate::spill::admission::Credit::with_readers(
+                            Credit::with_readers(
                                 input,
                                 sorted_spill_files.len(),
+                                exact,
                             )
                         },
                     )?
@@ -384,11 +387,23 @@ impl MultiLevelMergeBuilder {
                             piece.transfer_to(
                                 self.diagnostic.id(),
                                 od::Kind::Credit as u64,
-                                || crate::spill::admission::Credit::new(input),
-                            )
+                                || Credit::held(input, exact),
+                            )?
                         },
                         Vec::new(),
                     )
+                };
+                let bank = if writer > 0 {
+                    let bytes = memory_reservation.split(writer);
+                    let piece = memory_piece.child(&bytes, self.diagnostic.id(), writer);
+                    memory_piece.refresh(&memory_reservation, self.diagnostic.id());
+                    Some(piece.transfer_to(
+                        self.diagnostic.id(),
+                        od::Kind::Credit as u64,
+                        || Credit::held(bytes, true),
+                    )?)
+                } else {
+                    None
                 };
                 // All roots are registered/sealed above, before spawn_buffered
                 // can poll the first reader. The iterator owns any unused roots
@@ -458,17 +473,20 @@ impl MultiLevelMergeBuilder {
                         "when only merging memory streams, we should not have any memory reservation and let the merge sort handle the memory"
                     );
 
-                    Ok(merge_sort_stream)
+                    Ok((merge_sort_stream, None))
                 } else {
                     // Attach the memory reservation to the stream to make sure we have enough memory
                     // throughout the merge process as we bypassed the memory pool for the merge sort stream
-                    Ok(memory_piece.transfer(self.diagnostic.id(), || {
-                        Box::pin(StreamAttachedReservation::new(
-                            merge_sort_stream,
-                            memory_reservation,
-                            copy,
-                        )) as SendableRecordBatchStream
-                    }))
+                    Ok((
+                        memory_piece.transfer(self.diagnostic.id(), || {
+                            Box::pin(StreamAttachedReservation::new(
+                                merge_sort_stream,
+                                memory_reservation,
+                                copy,
+                            )) as SendableRecordBatchStream
+                        }),
+                        bank,
+                    ))
                 }
             }
         }
@@ -527,13 +545,16 @@ impl MultiLevelMergeBuilder {
     /// it will try to reduce the buffer size until we have enough streams to merge
     /// otherwise it will return an error
     ///
-    /// A merge with a copy capability also admits, with the same loop, what
-    /// building its copies and merging with them takes beyond the buffers of
-    /// the files it chose: their metadata and their working set (see
-    /// [`copy_working_set`]); a merge with a Field cursor, which keeps the
-    /// envelope of its copies, admits the working set beside it. The breadth of
-    /// the merge adapts to it, and no batch merged later asks the pool for its
-    /// workspace. The working set is returned (zero for any other merge).
+    /// The pass is admitted here, in one adaptive loop, for everything its
+    /// participants can hold alive at once (see [`Self::credit_bytes`]): the
+    /// batches of every reader, what building the copies and merging with them
+    /// takes (their metadata and their working set, see [`copy_working_set`];
+    /// a merge with a Field cursor, which keeps the envelope of its copies,
+    /// admits the working set beside it), and, when files remain for a later
+    /// pass, the writer of this pass's intermediate file. The breadth of the
+    /// merge and its buffers shrink until the pass fits, and nothing the pass
+    /// does afterwards asks the pool. The working set and the writer's bytes
+    /// are returned (zero where the pass has none).
     fn get_sorted_spill_files_to_merge(
         &mut self,
         buffer_len: usize,
@@ -542,13 +563,16 @@ impl MultiLevelMergeBuilder {
         field: bool,
         backing: usize,
         reservation: &mut MemoryReservation,
-    ) -> Result<(Vec<SortedSpillFile>, usize, usize)> {
+    ) -> Result<(Vec<SortedSpillFile>, usize, usize, usize)> {
         assert_ne!(buffer_len, 0, "Buffer length must be greater than 0");
         let mut number_of_spills_to_read_for_current_phase = 0;
+        let bounded = crate::spill::admission::bounded_schema(&self.schema);
         // Track total memory needed for spill file buffers. When the
         // reservation has pre-reserved bytes (from sort_spill_reservation_bytes),
         // those bytes cover the first N spill files without additional pool
-        // allocation, preventing starvation under memory pressure.
+        // allocation, preventing starvation under memory pressure. A schema
+        // without a derivable reader bound keeps the estimate of the largest
+        // batch twice per buffer.
         let mut total_needed: usize = 0;
         // The buffers the readers take from the reservation; the copies keep
         // what remains of it.
@@ -556,19 +580,20 @@ impl MultiLevelMergeBuilder {
         let mut largest: usize = 0;
         let heap = crate::spill::resident_metadata::std_mutex_heap_bound().unwrap_or(0);
 
-        for spill in &self.sorted_spill_files {
-            let per_spill = get_reserved_bytes_for_record_batch_size(
-                spill.max_record_batch_memory,
-                // Size will be the same as the sliced size, bc it is a spilled batch.
-                spill.max_record_batch_memory,
-            ) * buffer_len;
-            total_needed += per_spill;
-            let mut needed = total_needed;
+        for (index, spill) in self.sorted_spill_files.iter().enumerate() {
+            let max = spill.max_record_batch_memory;
+            let credit = self.credit_bytes(max, buffer_len)?;
+            // Size will be the same as the sliced size, bc it is a spilled batch.
+            total_needed += get_reserved_bytes_for_record_batch_size(max, max) * buffer_len;
+            if bounded || capability != CopyCapability::Legacy {
+                input_bytes = crate::spill::admission::add(input_bytes, credit)?;
+            }
+            let base = if bounded { input_bytes } else { total_needed };
+            let mut needed = base;
             if capability != CopyCapability::Legacy {
-                input_bytes += spill.max_record_batch_memory * buffer_len;
                 let streams = number_of_spills_to_read_for_current_phase + 1;
                 let copies = crate::spill::admission::add(
-                    copy_working_set(largest.max(spill.max_record_batch_memory))?,
+                    copy_working_set(largest.max(max))?,
                     crate::spill::admission::add(
                         self.copy_metadata(capability, streams, streams, backing)?,
                         heap,
@@ -578,7 +603,13 @@ impl MultiLevelMergeBuilder {
             } else if field {
                 needed = crate::spill::admission::add(
                     needed,
-                    copy_working_set(largest.max(spill.max_record_batch_memory))?,
+                    copy_working_set(largest.max(max))?,
+                )?;
+            }
+            if index + 1 < self.sorted_spill_files.len() {
+                needed = crate::spill::admission::add(
+                    needed,
+                    self.writer_bytes(largest.max(max))?,
                 )?;
             }
 
@@ -588,7 +619,7 @@ impl MultiLevelMergeBuilder {
             match try_grow_reservation_to_at_least(reservation, needed) {
                 Ok(_) => {
                     number_of_spills_to_read_for_current_phase += 1;
-                    largest = largest.max(spill.max_record_batch_memory);
+                    largest = largest.max(max);
                 }
                 // If we can't grow the reservation, we need to stop
                 Err(err) => {
@@ -621,6 +652,8 @@ impl MultiLevelMergeBuilder {
             }
         }
 
+        let writes = number_of_spills_to_read_for_current_phase
+            < self.sorted_spill_files.len();
         let spills = self
             .sorted_spill_files
             .drain(..number_of_spills_to_read_for_current_phase)
@@ -631,7 +664,39 @@ impl MultiLevelMergeBuilder {
         } else {
             copy_working_set(largest)?
         };
-        Ok((spills, buffer_len, working_set))
+        let writer = if writes { self.writer_bytes(largest)? } else { 0 };
+        Ok((spills, buffer_len, working_set, writer))
+    }
+
+    /// What the readers of a spill file whose largest batch is `max` may hold
+    /// at once with `buffer_len` batches buffered, which the pass credits to
+    /// them: every batch that can be alive (see
+    /// [`crate::spill::admission::reader_pass_bound`]), or, for a schema with
+    /// no derivable bound, the buffered batches alone.
+    fn credit_bytes(&self, max: usize, buffer_len: usize) -> Result<usize> {
+        match crate::spill::admission::reader_pass_bound(
+            &self.schema,
+            max,
+            self.batch_size,
+            self.spill_manager.compression,
+            buffer_len,
+        )? {
+            Some(bound) => Ok(bound),
+            None => crate::spill::admission::mul(max, buffer_len),
+        }
+    }
+
+    /// What the writer of the intermediate file of a pass whose largest input
+    /// batch is `largest` takes, which the pass hands it (zero for a schema
+    /// with no derivable bound, whose writer asks the pool as it always did).
+    fn writer_bytes(&self, largest: usize) -> Result<usize> {
+        Ok(crate::spill::admission::writer_pass_bound(
+            &self.schema,
+            largest,
+            self.batch_size,
+            self.spill_manager.compression,
+        )?
+        .unwrap_or(0))
     }
 
     /// The bytes the cursor and merge constructors, the schema and the list of
