@@ -27,8 +27,8 @@ production_source = runpy.run_path(str(Path(__file__).with_name("native_sources.
     "production_source"
 ]
 PYO3_SOURCE = ROOT / "crates/graphforge-bindings-py/src/lib.rs"
-EXPECTED_RUST_DIGEST = "80538ee0093bd8d9a7f4dbc4a6a8a26a3527cbfc5d5a4398de99b7c9a8400820"
-EXPECTED_RELEASE_DIGEST = "27f4e49f442cc6997dcf71321470ab84e1f79229f6a6eb88511e0455bc218b12"
+EXPECTED_RUST_DIGEST = "042ffd2ba95cb00c46aa891af9c9b4689ff8aa99c429cf75bf6d2ffe692fd636"
+EXPECTED_RELEASE_DIGEST = "6aaea1fb842909a607554ddf9241bc76ae6f5be2a4aa8a924c9a6dfa228eaf61"
 
 PYTHON_ONLY_METHODS = frozenset(
     {

@@ -324,8 +324,8 @@ mod tests {
         }
         let other_operation = Uuid::from_bytes([7; 16]);
         assert_ne!(
-            portable_import_generation(&operation),
-            portable_import_generation(&other_operation)
+            portable_v1_import_generation(&operation),
+            portable_v1_import_generation(&other_operation)
         );
         assert_ne!(
             portable_import_generation(&operation),

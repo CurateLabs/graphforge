@@ -44,7 +44,7 @@ pub(crate) const RUNTIME_MAP_PATH: &str =
 pub(crate) const ONTOLOGY_COMPOSITION_PATH: &str =
     "data/components/compatibility/graphforge-ontology-composition/composition.json";
 const BAGIT: &[u8] = b"BagIt-Version: 1.0\nTag-File-Character-Encoding: UTF-8\n";
-const BAG_INFO: &[u8] = b"Bag-Software-Agent: GraphForge portable\nBagging-Date: 1970-01-01\n";
+const BAG_INFO: &[u8] = b"Bag-Software-Agent: GraphForge portable-v2\nBagging-Date: 1970-01-01\n";
 
 pub use graphforge_core::portable::*;
 

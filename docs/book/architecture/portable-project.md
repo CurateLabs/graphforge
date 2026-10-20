@@ -88,7 +88,7 @@ data/components/<kind>/<participant-id>/<files...>
 
 `bagit.txt` is exactly `BagIt-Version: 1.0\nTag-File-Character-Encoding: UTF-8\n`.
 `bag-info.txt` contains exactly, in this order, LF terminated:
-`Bag-Software-Agent: GraphForge portable\nBagging-Date: 1970-01-01\n`.
+`Bag-Software-Agent: GraphForge portable-v2\nBagging-Date: 1970-01-01\n`.
 `manifest-sha256.txt` contains every `data/` regular file in ascending portable
 path order as lowercase hex, two spaces, path, LF; any other byte, including a
 CR, is refused. `tagmanifest-sha256.txt`

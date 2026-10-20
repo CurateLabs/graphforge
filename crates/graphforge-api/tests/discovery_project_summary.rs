@@ -29,7 +29,7 @@ use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 const BAGIT: &[u8] = b"BagIt-Version: 1.0\nTag-File-Character-Encoding: UTF-8\n";
-const BAG_INFO: &[u8] = b"Bag-Software-Agent: GraphForge portable\nBagging-Date: 1970-01-01\n";
+const BAG_INFO: &[u8] = b"Bag-Software-Agent: GraphForge portable-v2\nBagging-Date: 1970-01-01\n";
 const MANIFEST_PATH: &str = "data/graphforge-project.json";
 
 const PRIVATE_COLLABORATOR: &str = "private-collaborator@example.org";

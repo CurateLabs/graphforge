@@ -145,10 +145,7 @@ test("shared immutable package has the complete Rust facade verification receipt
   );
   const expected = JSON.parse(
     readFileSync(
-      join(
-        root,
-        "tests/fixtures/portable/facade-verification-receipts.json",
-      ),
+      join(root, "tests/fixtures/portable/facade-verification-receipts.json"),
       "utf8",
     ),
   );
