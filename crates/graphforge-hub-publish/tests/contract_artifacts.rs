@@ -15,11 +15,12 @@
 mod history;
 
 use graphforge_discovery::{
-    DISCOVERY_FORMAT, DiscoveryErrorCode, DiscoveryLimits, DiscoveryManifest, LineageBranch,
-    LineageForkOrigin, LineageVersion, PORTABLE_V2_FORMAT, PORTABLE_V2_MEDIA_TYPE,
-    PortablePackageReference, ProtocolRequirement, ProtocolVersion, RESEARCH_LINEAGE_CAPABILITY,
-    RESEARCH_LINEAGE_FORMAT, RESEARCH_LINEAGE_MEDIA_TYPE, RefSet, RepositoryIdentity,
-    RepositoryRef, ResearchLineage, ResearchLineageReference, Sha256Digest,
+    CreditSignature, DISCOVERY_FORMAT, DiscoveryErrorCode, DiscoveryLimits, DiscoveryManifest,
+    LineageBranch, LineageForkOrigin, LineageVersion, PORTABLE_V2_FORMAT, PORTABLE_V2_MEDIA_TYPE,
+    PROJECT_SUMMARY_FORMAT, PROJECT_SUMMARY_MEDIA_TYPE, PortablePackageReference, ProjectSummary,
+    ProtocolRequirement, ProtocolVersion, RESEARCH_LINEAGE_CAPABILITY, RESEARCH_LINEAGE_FORMAT,
+    RESEARCH_LINEAGE_MEDIA_TYPE, RefSet, RepositoryIdentity, RepositoryRef, ResearchLineage,
+    ResearchLineageReference, Sha256Digest,
 };
 use graphforge_hub_publish::{
     DEVICE_CODE_GRANT_TYPE, HubMethod, HubRequest, HubResponse, ObjectDeclaration, PublishIntent,
@@ -299,6 +300,19 @@ impl Publication {
                 )],
             })).collect::<Vec<_>>(),
         });
+        if let Some(object) = self
+            .objects
+            .iter()
+            .find(|object| object.media_type == PROJECT_SUMMARY_MEDIA_TYPE)
+        {
+            let summary =
+                ProjectSummary::from_json(&object.bytes, DiscoveryLimits::default()).unwrap();
+            manifest["summary"] = json!({
+                "format": PROJECT_SUMMARY_FORMAT,
+                "summary_digest": summary.canonical_digest().unwrap(),
+                "object_digest": object.digest(),
+            });
+        }
         if let Some(object) = self
             .objects
             .iter()
@@ -2157,6 +2171,41 @@ fn check(
     }
 }
 
+/// Replay one case's steps against `hub`, asserting every expectation.
+fn replay(hub: &ReferenceHub, name: &str, steps: &[Step]) {
+    let mut variables = BTreeMap::new();
+    for (index, step) in steps.iter().enumerate() {
+        let label = format!("{name} step {index}");
+        match step {
+            Step::Request { request, expect } => {
+                let response = hub.handle(&build(request, &variables, &label));
+                check(&response, expect, &mut variables, &label);
+            }
+            Step::Action { action } => match action {
+                Action::IssueToken {
+                    scope,
+                    ttl_seconds,
+                    capture,
+                } => {
+                    let token = hub.issue_token(scope, *ttl_seconds);
+                    variables.insert(capture.clone(), token);
+                }
+                Action::AdvanceClock { seconds } => hub.advance_clock(*seconds),
+                Action::ApproveDevice { user_code } => {
+                    assert!(hub.approve_device(&substitute(user_code, &variables, &label)));
+                }
+                Action::DenyDevice { user_code } => {
+                    assert!(hub.deny_device(&substitute(user_code, &variables, &label)));
+                }
+                Action::SetQuota { owner, bytes } => hub.set_quota(owner, *bytes),
+                Action::CorruptObject { digest } => {
+                    assert!(hub.corrupt_object(digest) > 0, "{label}: nothing corrupted");
+                }
+            },
+        }
+    }
+}
+
 #[test]
 fn every_conformance_case_replays_through_the_reference_hub() {
     let corpus: Corpus = serde_json::from_str(ARTIFACTS[ARTIFACTS.len() - 1].1).unwrap();
@@ -2182,36 +2231,143 @@ fn every_conformance_case_replays_through_the_reference_hub() {
         } else {
             ReferenceHub::new()
         };
-        let mut variables = BTreeMap::new();
-        for (index, step) in case.steps.iter().enumerate() {
-            let label = format!("{} step {index}", case.name);
-            match step {
-                Step::Request { request, expect } => {
-                    let response = hub.handle(&build(request, &variables, &label));
-                    check(&response, expect, &mut variables, &label);
-                }
-                Step::Action { action } => match action {
-                    Action::IssueToken {
-                        scope,
-                        ttl_seconds,
-                        capture,
-                    } => {
-                        let token = hub.issue_token(scope, *ttl_seconds);
-                        variables.insert(capture.clone(), token);
-                    }
-                    Action::AdvanceClock { seconds } => hub.advance_clock(*seconds),
-                    Action::ApproveDevice { user_code } => {
-                        assert!(hub.approve_device(&substitute(user_code, &variables, &label)));
-                    }
-                    Action::DenyDevice { user_code } => {
-                        assert!(hub.deny_device(&substitute(user_code, &variables, &label)));
-                    }
-                    Action::SetQuota { owner, bytes } => hub.set_quota(owner, *bytes),
-                    Action::CorruptObject { digest } => {
-                        assert!(hub.corrupt_object(digest) > 0, "{label}: nothing corrupted");
-                    }
-                },
-            }
-        }
+        replay(&hub, &case.name, &case.steps);
+    }
+}
+
+fn signature(name: &str) -> CreditSignature {
+    CreditSignature {
+        name: name.into(),
+        email: None,
+        orcid: None,
+    }
+}
+
+/// Credit the lineage's only Version (author Ada Lovelace, committer Grace Hopper).
+fn credit_lineage(mut publication: Publication) -> Publication {
+    let object = publication
+        .objects
+        .iter_mut()
+        .find(|object| object.media_type == RESEARCH_LINEAGE_MEDIA_TYPE)
+        .unwrap();
+    let mut lineage =
+        ResearchLineage::from_json(&object.bytes, DiscoveryLimits::default()).unwrap();
+    lineage.versions[0].author = Some(signature("Ada Lovelace"));
+    lineage.versions[0].committer = Some(signature("Grace Hopper"));
+    object.bytes = lineage.to_canonical_json().unwrap();
+    publication.objects.sort_by_key(Object::digest);
+    publication
+}
+
+/// Attach a Project summary whose people list is exactly `people`.
+fn with_summary(mut publication: Publication, people: Value) -> Publication {
+    let summary = json!({
+        "format": PROJECT_SUMMARY_FORMAT, "version": {"major": 1, "minor": 1},
+        "repository": publication.repository,
+        "immutable_version": publication.package_digest,
+        "package": {"format": "graphforge-project/2", "package_digest": publication.package_digest, "package_class": "complete"},
+        "requirements": [{"capability": "project-summary", "major": 1}], "capabilities": [],
+        "metadata": {
+            "title": null, "description": null, "authors": [], "subjects": [], "languages": [],
+            "geographic_coverage": null, "temporal_coverage": null, "source_types": [],
+            "corpus_size": null, "ontologies": [], "license": null, "tags": [],
+            "originating_projects": [], "related_projects": [], "canonical_identifiers": [],
+            "external_identifiers": [], "created_at": null, "updated_at": null,
+        },
+        "facts": {"ontology_mode": "none", "components": {}, "research_present": false,
+                  "evidence_present": false, "payload_bytes": 0, "ontology_composition": null},
+        "people": people,
+    });
+    let summary = ProjectSummary::from_json(
+        &serde_json::to_vec(&summary).unwrap(),
+        DiscoveryLimits::default(),
+    )
+    .unwrap();
+    publication.objects.push(Object {
+        media_type: PROJECT_SUMMARY_MEDIA_TYPE,
+        bytes: summary.to_canonical_json().unwrap(),
+    });
+    publication.objects.sort_by_key(Object::digest);
+    publication
+}
+
+fn derived_people(publication: &Publication) -> Value {
+    let object = publication
+        .objects
+        .iter()
+        .find(|object| object.media_type == RESEARCH_LINEAGE_MEDIA_TYPE)
+        .unwrap();
+    let lineage = ResearchLineage::from_json(&object.bytes, DiscoveryLimits::default()).unwrap();
+    serde_json::to_value(lineage.people()).unwrap()
+}
+
+/// The reference Hub binds a summary's people to the credited Versions of its
+/// lineage when it accepts the publication, so a conflicting list is refused at
+/// commit and never stored (it would otherwise only fail a later rehome).
+#[test]
+fn the_hub_refuses_conflicting_people_when_it_accepts_a_publication() {
+    let repository = demo();
+    let credited = credit_lineage(research_publication(v1(60), 61, 62, 63, 'c', None));
+    let honest = derived_people(&credited);
+    assert_eq!(honest.as_array().unwrap().len(), 2);
+
+    let refusals = [
+        ("missing-people", with_summary(credited.clone(), json!([]))),
+        (
+            "changed-role",
+            with_summary(
+                credited.clone(),
+                json!([
+                    {"name": "Ada Lovelace", "roles": ["author", "committer"]},
+                    {"name": "Grace Hopper", "roles": ["committer"]},
+                ]),
+            ),
+        ),
+        (
+            "invented-person",
+            with_summary(
+                credited.clone(),
+                json!([
+                    {"name": "Ada Lovelace", "roles": ["author"]},
+                    {"name": "Grace Hopper", "roles": ["committer"]},
+                    {"name": "Zed", "roles": ["author"]},
+                ]),
+            ),
+        ),
+        // No lineage at all: any listed person conflicts with it.
+        (
+            "people-without-lineage",
+            with_summary(
+                v1(64),
+                json!([{"name": "Ada Lovelace", "roles": ["author"]}]),
+            ),
+        ),
+    ];
+    for (name, publication) in refusals {
+        let mut steps = vec![
+            token(&repository, "token"),
+            open_new(&publication, "token", "p"),
+        ];
+        steps.extend(upload_all(&publication, "p"));
+        steps.push(commit(
+            &publication,
+            "token",
+            "p",
+            error(400, "invalid_input"),
+        ));
+        // The refused publication stored nothing.
+        steps.push(refs_absent(&repository));
+        replay(&ReferenceHub::new(), name, &steps);
+    }
+
+    // The same publications with the derived list are accepted.
+    for (name, publication) in [
+        ("derived-people", with_summary(credited, honest)),
+        ("no-lineage-no-people", with_summary(v1(65), json!([]))),
+    ] {
+        let mut model = RepoModel::default();
+        let mut steps = vec![token(&repository, "token")];
+        steps.extend(publish(&publication, "token", "p", &mut model));
+        replay(&ReferenceHub::new(), name, &steps);
     }
 }

@@ -92,6 +92,14 @@ struct Published {
     repository: RepositoryIdentity,
 }
 
+fn signature(name: &str) -> graphforge_storage::research_versions::ResearchSignature {
+    graphforge_storage::research_versions::ResearchSignature {
+        name: name.into(),
+        email: None,
+        orcid: None,
+    }
+}
+
 fn generation(graph: &GraphForge) -> Uuid {
     graph
         .committed_generation_identity()
@@ -109,8 +117,8 @@ fn publish() -> Published {
     graph
         .create_research_branch(
             &CreateResearchBranchRequest {
-                author: None,
-                committer: None,
+                author: Some(signature("Dana")),
+                committer: Some(signature("Dana")),
                 operation_uuid: Uuid::now_v7(),
                 expected_generation_uuid: generation(&graph),
                 branch_uuid: branch,
@@ -130,8 +138,8 @@ fn publish() -> Published {
     graph
         .execute_research_branch(
             &ExecuteResearchBranchRequest {
-                author: None,
-                committer: None,
+                author: Some(signature("Alice")),
+                committer: Some(signature("Carol")),
                 operation_uuid: Uuid::now_v7(),
                 expected_generation_uuid: generation(&graph),
                 branch_uuid: branch,
@@ -341,6 +349,53 @@ fn valid_lineage_version_maps_to_the_storage_verified_package() {
         assert_eq!(accepted.version_uuid, version.to_string());
         assert_eq!(accepted.version.kind, "complete");
         assert_eq!(accepted.report.package_digest, package.package_digest.0);
+    }
+    // Credit is part of what was verified.
+    let head = published
+        .lineage
+        .version(&published.head.to_string())
+        .unwrap();
+    assert_eq!(head.author.as_ref().unwrap().name, "Alice");
+    assert_eq!(head.committer.as_ref().unwrap().name, "Carol");
+}
+
+/// An authentic package and digest with a lineage that credits someone else is
+/// refused with the existing identity mismatch: credit is verified, not trusted.
+#[test]
+fn credit_must_match_the_native_version_and_its_ancestors() {
+    let published = publish();
+    let (_, head_path) = &published.packages[&published.head];
+    let tampers: [(&str, Uuid, fn(&mut graphforge_discovery::LineageVersion)); 5] = [
+        ("selected author", published.head, |v| {
+            v.author.as_mut().unwrap().name = "Mallory".into();
+        }),
+        ("selected committer", published.head, |v| {
+            v.committer.as_mut().unwrap().name = "Mallory".into();
+        }),
+        ("selected author dropped", published.head, |v| {
+            v.author = None
+        }),
+        ("selected committer invented email", published.head, |v| {
+            v.committer.as_mut().unwrap().email = Some("mallory@example.org".into());
+        }),
+        // The checked ancestor is the base Version, verified with the head's package.
+        ("ancestor author", published.base, |v| {
+            v.author.as_mut().unwrap().name = "Mallory".into();
+        }),
+    ];
+    for (name, target, tamper) in tampers {
+        let mut lineage = published.lineage.clone();
+        tamper(version_mut(&mut lineage, target));
+        let result = verify(&lineage, &published.repository, published.head, head_path);
+        assert!(
+            matches!(
+                result,
+                Err(DiscoveryResearchVersionError::ReferenceMismatch(
+                    DiscoveryPortableV2Mismatch::ResearchVersionIdentity
+                ))
+            ),
+            "{name}: {result:?}"
+        );
     }
 }
 

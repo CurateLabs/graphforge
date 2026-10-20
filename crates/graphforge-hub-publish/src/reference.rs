@@ -1276,6 +1276,45 @@ impl ReferenceHub {
                 .into());
             }
         }
+        // The summary's people list is derived from the lineage's credited Versions
+        // (ADR 0055). Refuse a conflicting list when the publication is accepted,
+        // including a summary published with no lineage, rather than storing it for
+        // a later rehome to reject.
+        if let Some(reference) = &manifest.summary {
+            let upload = session
+                .request
+                .objects
+                .iter()
+                .zip(&session.uploads)
+                .find(|(object, _)| object.digest == reference.object_digest.0)
+                .ok_or_else(|| invalid("native summary object is absent"))?;
+            let summary = graphforge_discovery::ProjectSummary::from_json(
+                &bounded_blob_read(&upload.1.bytes, discovery_limits.max_summary_bytes)?,
+                discovery_limits,
+            )
+            .map_err(|_| invalid("native summary is invalid"))?;
+            let lineage = manifest
+                .lineage
+                .as_ref()
+                .map(|lineage| {
+                    let upload = session
+                        .request
+                        .objects
+                        .iter()
+                        .zip(&session.uploads)
+                        .find(|(object, _)| object.digest == lineage.object_digest.0)
+                        .ok_or_else(|| invalid("native lineage object is absent"))?;
+                    graphforge_discovery::ResearchLineage::from_json(
+                        &bounded_blob_read(&upload.1.bytes, discovery_limits.max_lineage_bytes)?,
+                        discovery_limits,
+                    )
+                    .map_err(|_| invalid("native lineage is invalid"))
+                })
+                .transpose()?;
+            summary.bind_lineage(lineage.as_ref()).map_err(|_| {
+                invalid("summary people differ from the credited Versions of the research lineage")
+            })?;
+        }
         if let Some(reference) = &manifest.lineage {
             let upload = session
                 .request

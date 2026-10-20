@@ -494,3 +494,49 @@ fn rewriting_legacy_research_metadata_makes_the_project_exportable_without_acces
         assert!(!exported.contains(retired), "{retired} reached an export");
     }
 }
+
+/// A checkpoint pins the generation it was taken at, so rewriting the live
+/// metadata afterwards cannot clean it: the checkpoint export is refused, while the
+/// rewritten current Project exports.
+#[test]
+fn a_checkpoint_pinning_legacy_metadata_is_never_exported() {
+    use graphforge_core::portable::{
+        PortableV2ErrorCode, PortableV2Output, PortableV2SelectionProfile,
+    };
+    let export = |graph: &GraphForge, selection, output: PathBuf| {
+        graph.export_portable_v2(
+            &PortableV2ExportRequest {
+                selection,
+                output_path: output,
+                representation: PortableV2Output::Expanded,
+                profile: PortableV2SelectionProfile::Settings,
+                subset: None,
+                limits: graphforge_core::portable::PortableV2Limits::default(),
+            },
+            None,
+            |_| {},
+        )
+    };
+    let (directory, project, _) = fixture();
+    let mut graph = GraphForge::new(project.to_str()).unwrap();
+    graph
+        .checkpoint(CheckpointRequest {
+            name: "legacy".into(),
+            description: None,
+            idempotency_key: OperationId(Uuid::now_v7()),
+            actor_uuid: None,
+        })
+        .unwrap();
+    rewrite_legacy_metadata(&mut graph);
+    let current = directory.path().join("current");
+    export(&graph, PortableSelection::Current, current.clone()).unwrap();
+    let pinned = directory.path().join("pinned");
+    let error = export(
+        &graph,
+        PortableSelection::Checkpoint("legacy".into()),
+        pinned.clone(),
+    )
+    .expect_err("a checkpoint pinning retired metadata must not be exported");
+    assert_eq!(error.code, PortableV2ErrorCode::UnsupportedProjectFormat);
+    assert!(!pinned.exists());
+}

@@ -287,7 +287,7 @@ fn fork_origin(
 }
 
 /// The published form of a native signature: the same recorded fields.
-fn credit(signature: &ResearchSignature) -> CreditSignature {
+pub(crate) fn credit(signature: &ResearchSignature) -> CreditSignature {
     CreditSignature {
         name: signature.name.clone(),
         email: signature.email.clone(),
