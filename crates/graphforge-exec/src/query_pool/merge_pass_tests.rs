@@ -568,14 +568,18 @@ async fn merge_beside_a_full_exchange(pre_reserve: bool) {
     assert!(error.contains("0.0 B remain available"), "{error}");
     let filled = pool.requests.lock().unwrap().len();
 
+    // The state a merging aggregate holds beside its pass (two largest batches
+    // and 64 bytes a group), admitted within its floor right after its spill.
+    let state = 2 * set.maximum + 64 * (8192 + 1);
     let sponsor = if pre_reserve {
         let narrowest = narrowest_pass(2, 4, 8192, 8192);
-        assert!(narrowest > 10 * MIB, "{narrowest}");
-        idle.try_grow(narrowest)
+        assert!(state + narrowest > 10 * MIB, "{narrowest}");
+        idle.try_grow(state + narrowest)
             .expect("the loan serves the one request");
         idle.split(narrowest)
     } else {
-        idle
+        idle.try_grow(state).unwrap();
+        idle.split(0)
     };
     let stream = merge(manager, set.files, sponsor, 8192);
     drain(stream, set.total_rows).await.unwrap();
