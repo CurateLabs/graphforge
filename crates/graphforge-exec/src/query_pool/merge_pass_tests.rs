@@ -374,16 +374,17 @@ fn narrowest_pass(files: usize, batches: usize, rows: usize, batch_size: usize) 
 /// writer to charge.
 #[tokio::test]
 async fn the_minimum_pass_bound_is_the_selection_of_two_files_at_one_batch() {
-    const ROWS: usize = 256;
-    const BATCH_SIZE: usize = 256;
+    const ROWS: usize = 8192;
+    const BATCH_SIZE: usize = 8192;
+    const BATCHES: usize = 3;
     for files in [2, 3] {
-        let bound = narrowest_pass(files, 24, ROWS, BATCH_SIZE);
+        let bound = narrowest_pass(files, BATCHES, ROWS, BATCH_SIZE);
         let run = |limit: usize| async move {
             let pool = Recorder::new(Arc::new(GreedyMemoryPool::new(limit)));
             let dynamic: Arc<dyn MemoryPool> = Arc::clone(&pool) as Arc<dyn MemoryPool>;
             let directory = tempfile::tempdir().unwrap();
             let manager = spill_manager(&dynamic, &directory);
-            let set = spill_files(&manager, files, 24, ROWS, |largest| largest);
+            let set = spill_files(&manager, files, BATCHES, ROWS, |largest| largest);
             let sponsor = MemoryConsumer::new(SPONSOR).register(&dynamic);
             let stream = merge(manager, set.files, sponsor, BATCH_SIZE);
             (drain(stream, set.total_rows).await, pool)
@@ -410,8 +411,8 @@ async fn the_minimum_pass_bound_is_the_selection_of_two_files_at_one_batch() {
         );
     }
     // Three files leave one for a later pass, so their narrowest pass writes.
-    let two = narrowest_pass(2, 24, ROWS, BATCH_SIZE);
-    let three = narrowest_pass(3, 24, ROWS, BATCH_SIZE);
+    let two = narrowest_pass(2, BATCHES, ROWS, BATCH_SIZE);
+    let three = narrowest_pass(3, BATCHES, ROWS, BATCH_SIZE);
     assert!(three > two + 1000, "{two} {three}");
 }
 
