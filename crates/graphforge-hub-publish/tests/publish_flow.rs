@@ -84,7 +84,7 @@ impl<'a> Client<'a> {
         let object = plan.declaration();
         json!({
             "format": DISCOVERY_FORMAT,
-            "version": {"major": 1, "minor": 1},
+            "version": {"major": 1, "minor": 2},
             "repository": self.repository,
             "default_ref": "main",
             "resolved_ref": "main",

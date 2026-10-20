@@ -342,7 +342,7 @@ const BRIDGE_ID: &str = "https://openalex.org/bridge/works-authors";
 
 fn base_summary() -> Value {
     json!({
-        "format":"graphforge-project-summary/1","version":{"major":1,"minor":1},
+        "format":"graphforge-project-summary/1","version":{"major":1,"minor":2},
         "repository":{"owner":"openalex","repository":"openalex"},
         "immutable_version":digest('a'),
         "package":{"format":"graphforge-project/2","package_digest":digest('b'),"producing_core_version":"0.6.0","package_class":"complete"},
@@ -393,7 +393,7 @@ const LINEAGE_PROPOSAL: &str = "01900000-0000-7000-8000-000000000030";
 
 fn base_lineage() -> Value {
     json!({
-        "boundary_anchors":[],"format":"graphforge-research-lineage/2","version":{"major":1,"minor":1},
+        "boundary_anchors":[],"format":"graphforge-research-lineage/2","version":{"major":1,"minor":2},
         "repository":{"owner":"openalex","repository":"openalex-fork"},
         "immutable_version":digest('a'),
         "project_uuid":LINEAGE_PROJECT,

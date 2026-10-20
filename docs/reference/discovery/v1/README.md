@@ -46,12 +46,13 @@ Schema-derived Hub artifacts consume the required `package.object_digest` field
 from `manifest.schema.json`; regenerating the Rust-owned artifacts updates that
 versioned input and the conformance cases together.
 
-## Project summary and ontology descriptors (protocol 1.1)
+## Project summary and ontology descriptors (protocol 1.2)
 
-`ProtocolVersion::CURRENT` is 1.1. Version 1.0 was never released and is retired:
-the manifest gained two optional fields, and readers reject unknown fields, so a
-reader that predates them rejects a manifest that uses them. A manifest that
-carries neither field is still valid, and clone consumers need neither.
+`ProtocolVersion::CURRENT` is 1.2. Versions 1.0 and 1.1 were never released and
+are retired: the manifest gained two optional fields (1.1) and every package
+reference gained the required `producing_core_version` (1.2), and readers reject
+unknown fields and missing required fields. A manifest that carries neither
+optional field is still valid, and clone consumers need neither.
 
 - `summary { format, summary_digest, object_digest }` selects a Project summary
   object from `objects` by `object_digest`, the same way `package` selects the

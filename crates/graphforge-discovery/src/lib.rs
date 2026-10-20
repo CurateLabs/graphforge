@@ -273,7 +273,7 @@ pub struct ProtocolVersion {
 
 impl ProtocolVersion {
     /// Version implemented by this crate.
-    pub const CURRENT: Self = Self { major: 1, minor: 1 };
+    pub const CURRENT: Self = Self { major: 1, minor: 2 };
 
     fn validate(self) -> Result<(), DiscoveryError> {
         if self.major != Self::CURRENT.major {
@@ -446,7 +446,7 @@ pub struct OntologyInventory {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProjectSummaryReference {
-    /// Must be [`PROJECT_SUMMARY_FORMAT`] in discovery v1.1.
+    /// Must be [`PROJECT_SUMMARY_FORMAT`] in discovery v1.2.
     pub format: String,
     /// Canonical digest of the summary document (semantic identity).
     pub summary_digest: Sha256Digest,

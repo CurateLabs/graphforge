@@ -269,7 +269,7 @@ impl Publication {
     fn manifest(&self) -> Value {
         let mut manifest = json!({
             "format": DISCOVERY_FORMAT,
-            "version": {"major": 1, "minor": 1},
+            "version": {"major": 1, "minor": 2},
             "repository": self.repository,
             "default_ref": "main",
             "resolved_ref": self.resolved_ref,
