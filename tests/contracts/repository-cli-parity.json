@@ -28,6 +28,20 @@
       "exitCode": 2,
       "stdout": "",
       "stderr": "{\"error\":{\"code\":\"GF_VALIDATION\",\"message\":\"validation error: hub.unsafe_location: URL must be credential-free HTTPS\",\"details\":{\"source\":\"runtime\",\"kind\":\"validation\",\"semantic_code\":\"hub.unsafe_location\"}}}\n"
+    },
+    {
+      "name": "hub list of an unsafe hub location",
+      "args": ["--json", "hub", "list", "curate/claims", "--hub", "http://127.0.0.1"],
+      "exitCode": 2,
+      "stdout": "",
+      "stderr": "{\"error\":{\"code\":\"GF_VALIDATION\",\"message\":\"validation error: hub.unsafe_location: URL must be credential-free HTTPS\",\"details\":{\"source\":\"runtime\",\"kind\":\"validation\",\"semantic_code\":\"hub.unsafe_location\"}}}\n"
+    },
+    {
+      "name": "hub ls of an invalid repository identity",
+      "args": ["--json", "hub", "ls", "not-a-repository"],
+      "exitCode": 2,
+      "stdout": "",
+      "stderr": "{\"error\":{\"code\":\"GF_VALIDATION\",\"message\":\"validation error: hub.invalid_identity: invalid repository identity\",\"details\":{\"source\":\"runtime\",\"kind\":\"validation\",\"semantic_code\":\"hub.invalid_identity\"}}}\n"
     }
   ]
 }
