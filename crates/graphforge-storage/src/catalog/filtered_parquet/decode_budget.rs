@@ -254,6 +254,10 @@ fn construction_bytes(
     let whole = || mul(values, 16);
     // A footer cannot route an encoding outside the funded profile to a larger
     // envelope: its decoders allocate from counts the envelope does not bound.
+    // This reads declared encodings only, so it is the cheap second line. The
+    // files reach it through project storage, whose Parquet entered through
+    // portable import after `parquet_encoding_profile::admit_pages` walked
+    // their actual pages.
     let mut has_data_encoding = false;
     for encoding in column.encodings() {
         if value_encoding_is_funded(from_footer(encoding), physical) {
