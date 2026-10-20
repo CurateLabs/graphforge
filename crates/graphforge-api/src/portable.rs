@@ -229,6 +229,38 @@ pub fn verify_portable(
     Ok(report)
 }
 
+/// Verify a canonical portable bundle read once from a sequential reader, in
+/// `Full` mode, and return the verdict [`verify_portable`] gives the same bytes
+/// in a file; only the report's `source` differs. Research archives run the
+/// same native owner checks, with their research files staged in a private
+/// directory under the system temporary directory; no other package writes
+/// anything.
+pub fn verify_portable_stream(
+    source: &mut dyn std::io::Read,
+    limits: graphforge_core::portable::PortableLimits,
+    cancelled: Option<&AtomicBool>,
+) -> Result<PortableVerifyResult, graphforge_core::portable::PortableError> {
+    #[cfg(feature = "research")]
+    return graphforge_storage::validate_research_package_stream(
+        source,
+        None,
+        limits,
+        cancelled,
+        &mut crate::research_interchange::validation::validate,
+    );
+    #[cfg(not(feature = "research"))]
+    {
+        let report = graphforge_storage::verify_portable_stream(source, limits, cancelled)?;
+        if report.research_interchange {
+            return Err(graphforge_core::portable::PortableError::new(
+                graphforge_core::portable::PortableErrorCode::Incompatible,
+                "research package validation requires the `research` feature",
+            ));
+        }
+        Ok(report)
+    }
+}
+
 /// Publish a verified portable package through an OCI Distribution registry.
 pub fn publish_portable_oci(
     request: &PortableOciPublishFacadeRequest,

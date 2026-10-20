@@ -2069,6 +2069,8 @@ impl<'de> Visitor<'de> for UniqueVisitor {
 }
 
 #[cfg(test)]
+pub(crate) mod stream_tests;
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicBool;

@@ -362,7 +362,7 @@ pub use portable::{
     PortableSelectionPreviewRequest, PortableSubsetPreviewRequest, PortableVerifyRequest,
     PortableVerifyResult, publish_portable_oci, publish_portable_oci_with_registry,
     pull_portable_oci, pull_portable_oci_with_registry, repack_verified_expanded_portable,
-    verify_portable,
+    verify_portable, verify_portable_stream,
 };
 pub use repository::{
     GitProvenance, InfraCapabilityCompatibility, InfraNotChecked, InfraPlan, InfraStaticValidity,
