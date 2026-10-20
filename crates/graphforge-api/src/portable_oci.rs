@@ -1532,6 +1532,23 @@ impl PortableOciRegistry for RetiredSignatureContract {
     fn put_blob(&self, r: &str, d: &str, b: &[u8]) -> Result<(), PortableError> {
         self.registry.put_blob(r, d, b)
     }
+    fn put_blob_stream(
+        &self,
+        r: &str,
+        d: &str,
+        size: u64,
+        source: &mut dyn Read,
+    ) -> Result<(), PortableError> {
+        self.registry.put_blob_stream(r, d, size, source)
+    }
+    fn get_blob_stream<'a>(
+        &'a self,
+        r: &str,
+        d: &str,
+        size: u64,
+    ) -> Result<Box<dyn Read + 'a>, PortableError> {
+        self.registry.get_blob_stream(r, d, size)
+    }
     fn get_blob(&self, r: &str, d: &str) -> Result<Vec<u8>, PortableError> {
         let blob = self.registry.get_blob(r, d)?;
         Ok(String::from_utf8_lossy(&blob)
