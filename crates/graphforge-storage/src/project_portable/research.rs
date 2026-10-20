@@ -53,7 +53,9 @@ impl Spill {
         self.sink.as_mut()
     }
     pub(super) fn stage(&self) -> Option<&Path> {
-        self.sink.as_ref().map(|sink| sink.destination())
+        self.sink
+            .as_ref()
+            .map(super::materialization::CopySink::destination)
     }
     /// Authenticate the staged files and return the stage with the captures
     /// that bind them. The stage lives as long as `self`.

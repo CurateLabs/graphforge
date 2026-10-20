@@ -129,25 +129,7 @@ pub(super) fn read(
     if let Some(bytes) = &entry.bytes {
         return Ok(bytes.clone());
     }
-    let input_path = match source {
-        Reopen::Directory(root) => root.join(path),
-        Reopen::Indexed(bundle) => bundle.to_path_buf(),
-        Reopen::Bundle(Some(stage)) if path.starts_with(research::NAMESPACE) => stage.join(path),
-        Reopen::Bundle(None) if path.starts_with(research::NAMESPACE) => {
-            return Err(PortableError::at(
-                PortableErrorCode::Io,
-                path,
-                "cannot create research validation scratch",
-            ));
-        }
-        Reopen::Bundle(_) => {
-            return Err(PortableError::at(
-                PortableErrorCode::LimitExceeded,
-                path,
-                "retained control budget",
-            ));
-        }
-    };
+    let input_path = locate(source, path)?;
     let mut file =
         crate::project_portable_export::open_source_no_follow(&input_path).map_err(|_| {
             PortableError::at(
@@ -211,6 +193,29 @@ pub(super) fn read(
         ));
     }
     Ok(bytes)
+}
+
+/// The file that holds `path` when the scan did not retain its bytes.
+fn locate(source: Reopen<'_>, path: &str) -> Result<std::path::PathBuf, PortableError> {
+    Ok(match source {
+        Reopen::Directory(root) => root.join(path),
+        Reopen::Indexed(bundle) => bundle.to_path_buf(),
+        Reopen::Bundle(Some(stage)) if path.starts_with(research::NAMESPACE) => stage.join(path),
+        Reopen::Bundle(None) if path.starts_with(research::NAMESPACE) => {
+            return Err(PortableError::at(
+                PortableErrorCode::Io,
+                path,
+                "cannot create research validation scratch",
+            ));
+        }
+        Reopen::Bundle(_) => {
+            return Err(PortableError::at(
+                PortableErrorCode::LimitExceeded,
+                path,
+                "retained control budget",
+            ));
+        }
+    })
 }
 
 /// Native admission uses authenticated runtime identities rather than payload paths.
