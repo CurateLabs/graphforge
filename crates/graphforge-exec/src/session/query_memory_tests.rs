@@ -410,7 +410,35 @@ mod trace {
     pub(super) struct TracingPool {
         inner: crate::query_pool::QueryMemoryPool,
         start: Instant,
-        events: Mutex<VecDeque<Event>>,
+        events: Arc<Mutex<VecDeque<Event>>>,
+    }
+
+    /// The event ring shared with the test, so it can be written out after the run.
+    pub(super) struct Ring(Arc<Mutex<VecDeque<Event>>>);
+
+    impl Ring {
+        pub(super) fn dump_to(&self, path: &std::path::Path) {
+            use std::io::Write;
+            let events = self.0.lock().unwrap();
+            let mut out = std::fs::File::create(path).unwrap();
+            for e in events.iter() {
+                writeln!(
+                    out,
+                    "{:>9}us {:<22} {:<9} {} #{} spill={} size={} bytes={} ok={} total={}",
+                    e.at_us,
+                    e.thread,
+                    e.op,
+                    e.consumer,
+                    e.id,
+                    e.can_spill as u8,
+                    e.size_before,
+                    e.bytes,
+                    e.ok as u8,
+                    e.reserved_after
+                )
+                .unwrap();
+            }
+        }
     }
 
     impl std::fmt::Debug for TracingPool {
@@ -426,12 +454,14 @@ mod trace {
     }
 
     impl TracingPool {
-        pub(super) fn new(pool_size: usize) -> Self {
-            Self {
+        pub(super) fn new(pool_size: usize) -> (Self, Ring) {
+            let events = Arc::new(Mutex::new(VecDeque::with_capacity(4096)));
+            let pool = Self {
                 inner: crate::query_pool::QueryMemoryPool::new(pool_size),
                 start: Instant::now(),
-                events: Mutex::new(VecDeque::with_capacity(4096)),
-            }
+                events: Arc::clone(&events),
+            };
+            (pool, Ring(events))
         }
 
         fn record(
@@ -543,10 +573,11 @@ mod trace {
         session: &ExecutionSession,
         budget: usize,
         spill: &TempDir,
-    ) -> Arc<TaskContext> {
+    ) -> (Arc<TaskContext>, Ring) {
+        let (tracing, ring) = TracingPool::new(budget);
         let runtime = RuntimeEnvBuilder::new()
             .with_memory_pool(Arc::new(TrackConsumersPool::new(
-                TracingPool::new(budget),
+                tracing,
                 std::num::NonZeroUsize::new(5).unwrap(),
             )))
             .with_temp_file_path(spill.path().to_path_buf())
@@ -554,7 +585,7 @@ mod trace {
             .map(Arc::new)
             .unwrap();
         let tc = session.ctx.task_ctx();
-        Arc::new(TaskContext::new(
+        let ctx = Arc::new(TaskContext::new(
             None,
             tc.session_id(),
             tc.session_config().clone(),
@@ -563,12 +594,13 @@ mod trace {
             tc.aggregate_functions().clone(),
             tc.window_functions().clone(),
             runtime,
-        ))
+        ));
+        (ctx, ring)
     }
 }
 
 /// Diagnostic: run `AGGREGATE` on a tracing pool; a refusal prints the trace.
-async fn traced_aggregate(keys: &[i64]) {
+async fn traced_aggregate(keys: &[i64], trace_name: &str) {
     let spill = TempDir::new().unwrap();
     let (small, _small_dir) = session_over(64 * MIB, 2, &spill, keys);
     let plan = small
@@ -579,10 +611,12 @@ async fn traced_aggregate(keys: &[i64]) {
         .create_physical_plan()
         .await
         .unwrap();
-    let ctx = trace::tracing_task_ctx(&small, (64 * MIB) as usize, &spill);
-    let batches = datafusion::physical_plan::collect(Arc::clone(&plan), ctx)
-        .await
-        .expect("an aggregate over the budget must spill, not exhaust the pool");
+    let (ctx, tracing) = trace::tracing_task_ctx(&small, (64 * MIB) as usize, &spill);
+    let result = datafusion::physical_plan::collect(Arc::clone(&plan), ctx).await;
+    if let Ok(dir) = std::env::var("GF_POOL_TRACE_DIR") {
+        tracing.dump_to(&PathBuf::from(dir).join(format!("{trace_name}.trace")));
+    }
+    let batches = result.expect("an aggregate over the budget must spill, not exhaust the pool");
     assert!(spills(&plan, "AggregateExec") > 0);
     let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
     assert_eq!(rows, 1);
@@ -590,10 +624,10 @@ async fn traced_aggregate(keys: &[i64]) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn diagnostic_trace_sequential() {
-    traced_aggregate(&sequential_keys()).await;
+    traced_aggregate(&sequential_keys(), "sequential").await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn diagnostic_trace_skewed() {
-    traced_aggregate(&skewed_keys(2, 90)).await;
+    traced_aggregate(&skewed_keys(2, 90), "skewed").await;
 }
