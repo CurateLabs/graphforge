@@ -21,6 +21,10 @@ use parquet::errors::ParquetError;
 use parquet::file::properties::{EnabledStatistics, WriterProperties, WriterVersion};
 use parquet::file::reader::{ChunkReader, Length};
 
+use crate::parquet_encoding_profile::{
+    PageAdmissionError, admit_pages, declared_encoding_is_funded,
+};
+
 /// Maximum complete physical object, including the envelope's Parquet footer.
 pub const MAX_PROPERTY_OBJECT_BYTES: usize = 4 << 20;
 /// Fixed payload size; reserved space covers the fixed envelope schema/footer.
@@ -198,6 +202,13 @@ fn inspect_builder<R: ChunkReader + 'static>(
     {
         return Err(invalid("invalid envelope payload encoding"));
     }
+    // The footer's declared encodings are only a cheap first refusal; decode_part
+    // walks the actual pages before any reader is built.
+    if !column.encodings().all(|encoding| {
+        declared_encoding_is_funded(encoding, column.column_descr().physical_type())
+    }) {
+        return Err(super::parquet_budget::unfunded_encoding());
+    }
     Ok(Some(info))
 }
 
@@ -288,6 +299,12 @@ fn decode_part(bytes: Bytes, layout: EnvelopeLayout, index: u64) -> Result<Bytes
         return Err(invalid("physical part exceeds fixed object bound"));
     }
     let physical_length = bytes.len() as u64;
+    // The embedded counts of unfunded encodings size allocations before any
+    // payload check, so refuse the actual pages before a reader exists.
+    admit_pages(&bytes).map_err(|error| match error {
+        PageAdmissionError::Unfunded => super::parquet_budget::unfunded_encoding(),
+        PageAdmissionError::Malformed(message) => invalid(message),
+    })?;
     let builder = ParquetRecordBatchReaderBuilder::try_new(bytes).map_err(parquet_error)?;
     if inspect_builder(&builder, physical_length)? != Some((layout, index)) {
         return Err(invalid("part does not match anchor layout and position"));
