@@ -741,6 +741,7 @@ fn storage(e: impl std::fmt::Display) -> ExportError {
 mod tests {
     mod historical_saved_queries;
     mod large_entries;
+    mod parquet_profile;
     mod participant_files;
     mod payload_inventory;
     mod saved_queries;
