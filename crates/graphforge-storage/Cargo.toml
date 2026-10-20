@@ -49,6 +49,7 @@ sha2 = { workspace = true }
 tempfile = "3"
 thiserror = { workspace = true }
 tokio = { workspace = true }
+icu_casemap = { workspace = true }
 unicode-normalization = { workspace = true }
 uuid = { workspace = true }
 url = { workspace = true }
