@@ -263,6 +263,7 @@ enum Command {
     Telemetry(TelemetryArgs),
     Clone(hub_clone::CloneArgs),
     Publish(hub_publish::PublishArgs),
+    Hub(hub_clone::HubArgs),
     /// Initialize repository-local GraphForge definitions and state.
     Init(InitArgs),
     /// Compare or reconcile declared definitions and source digests without ingesting data.
@@ -1149,7 +1150,7 @@ fn run_with_allocation(
     if let Command::Auth(args) = command {
         return auth::run(args, cli.json, output);
     }
-    if let hub @ (Command::Clone(_) | Command::Publish(_)) = command {
+    if let hub @ (Command::Clone(_) | Command::Publish(_) | Command::Hub(_)) = command {
         return hub_publish::run_hub_command(hub, cli.project, cli.project_dir, cli.json, output);
     }
     if let Command::Ontology { command } = &command

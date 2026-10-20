@@ -148,6 +148,9 @@ fn each_hub_status_class_has_its_semantic_code_and_exit_class_over_real_http() {
             &Routed::new(server.address),
             CloneArgs {
                 repository: "https://hub.test/curate/claims".into(),
+                hub: None,
+                token_env: None,
+                protection_bypass_env: None,
                 destination: Some(destination.clone()),
                 telemetry_endpoint: None,
                 git_ref: None,

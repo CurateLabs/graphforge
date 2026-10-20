@@ -88,7 +88,7 @@ impl<'a> RepositoryMoveTransport<'a> {
             } else {
                 self.inner.get(&counterpart, None, None, 4096)?
             };
-            if transient_status(response.status) {
+            if StatusClass::of(response.status).transient() {
                 return Err(network(
                     "repository move confirmation temporarily unavailable",
                 ));

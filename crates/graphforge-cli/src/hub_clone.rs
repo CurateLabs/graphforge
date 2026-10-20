@@ -42,7 +42,9 @@ use crate::hub_http::{
 use crate::hub_http::{fetch, parse_input};
 
 mod module_fetch;
+mod repository_listing;
 pub(crate) use module_fetch::{ModuleFetchArgs, run_module_fetch};
+pub(crate) use repository_listing::{HubArgs, run_hub};
 
 /// Largest single object a clone downloads: the cumulative object bound
 /// `gf publish` admits ([`DiscoveryLimits::default`]), so any object a
@@ -429,15 +431,44 @@ fn resolve_research_version_uuid(
     Ok(branch.head_version_uuid.clone())
 }
 
-fn prepare_research_clone(
+/// Discovery bounds for clone and listing.
+fn discovery_limits() -> DiscoveryLimits {
+    DiscoveryLimits {
+        max_response_bytes: MAX_METADATA_BYTES,
+        ..DiscoveryLimits::default()
+    }
+}
+
+/// Parse and validate the refs and manifest documents of `identity` and bind
+/// them to each other. Clone and `gf hub list` verify discovery only through
+/// this.
+fn verify_discovery(
+    identity: &RepositoryIdentity,
+    refs_bytes: &[u8],
+    manifest_bytes: &[u8],
+    limits: DiscoveryLimits,
+) -> Result<(RefSet, DiscoveryManifest), graphforge_api::GfError> {
+    let refs = RefSet::from_json(refs_bytes, limits).map_err(|error| protocol_error(&error))?;
+    let manifest = DiscoveryManifest::from_json(manifest_bytes, limits)
+        .map_err(|error| protocol_error(&error))?;
+    if refs.repository != *identity || manifest.repository != *identity {
+        return Err(validation("hub.integrity", "discovery repository mismatch"));
+    }
+    refs.validate_manifest(&manifest)
+        .map_err(|error| protocol_error(&error))?;
+    Ok((refs, manifest))
+}
+
+/// Fetch the advertised research lineage and verify it against the manifest
+/// and refs snapshot: transport digest, required semantics, and bindings.
+/// Clone and `gf hub list` read lineage only through this.
+fn read_lineage(
     transport: &dyn Transport,
     manifest: &DiscoveryManifest,
     refs: &RefSet,
     limits: DiscoveryLimits,
-    git_ref: Option<&str>,
-    version_uuid: Option<&str>,
     retry: &RetryPolicy,
-) -> Result<Option<(ObjectDescriptor, ResearchCloneContext)>, graphforge_api::GfError> {
+) -> Result<(Vec<u8>, ResearchLineage), graphforge_api::GfError> {
     let lineage_object = manifest
         .lineage_object()
         .map_err(|error| protocol_error(&error))?;
@@ -448,6 +479,19 @@ fn prepare_research_clone(
     manifest
         .bind_lineage(refs, &lineage)
         .map_err(|error| protocol_error(&error))?;
+    Ok((lineage_bytes, lineage))
+}
+
+fn prepare_research_clone(
+    transport: &dyn Transport,
+    manifest: &DiscoveryManifest,
+    refs: &RefSet,
+    limits: DiscoveryLimits,
+    git_ref: Option<&str>,
+    version_uuid: Option<&str>,
+    retry: &RetryPolicy,
+) -> Result<Option<(ObjectDescriptor, ResearchCloneContext)>, graphforge_api::GfError> {
+    let (lineage_bytes, lineage) = read_lineage(transport, manifest, refs, limits, retry)?;
     let implicit_default = git_ref.is_none() && version_uuid.is_none();
     if implicit_default && lineage.branches.is_empty() {
         return Ok(None);
@@ -1824,10 +1868,7 @@ fn run_clone_job(
     }
     let manifest_bytes = manifest_result?;
     let (identity, _, moved) = move_transport.resolved(false)?;
-    let limits = DiscoveryLimits {
-        max_response_bytes: MAX_METADATA_BYTES,
-        ..DiscoveryLimits::default()
-    };
+    let limits = discovery_limits();
     profile.handoff(
         ComponentKind::NetworkTransport,
         ComponentKind::Discovery,
@@ -1841,15 +1882,7 @@ fn run_clone_job(
         None,
         1,
         || {
-            let refs =
-                RefSet::from_json(&refs_bytes, limits).map_err(|error| protocol_error(&error))?;
-            let manifest = DiscoveryManifest::from_json(&manifest_bytes, limits)
-                .map_err(|error| protocol_error(&error))?;
-            if refs.repository != identity || manifest.repository != identity {
-                return Err(validation("hub.integrity", "discovery repository mismatch"));
-            }
-            refs.validate_manifest(&manifest)
-                .map_err(|error| protocol_error(&error))?;
+            let (_, manifest) = verify_discovery(&identity, &refs_bytes, &manifest_bytes, limits)?;
             let staging = acquire_staging(&destination)?;
             Ok(((manifest, staging), None, None))
         },
