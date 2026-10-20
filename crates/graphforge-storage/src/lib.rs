@@ -299,6 +299,7 @@ pub use project_portable_import::{
     import_complete_portable_with_allocation, import_complete_portable_with_native_validation,
     import_complete_portable_with_progress, load_portable_ontology_staging,
     portable_import_held_bytes, portable_import_pending, validate_research_package,
+    validate_research_package_stream,
 };
 
 pub mod project_portable;
@@ -307,8 +308,9 @@ pub use project_portable::{
     PortableCompatibility, PortableCompositionEntry, PortableError, PortableErrorCode,
     PortableExactIdentity, PortableFileRef, PortableIntegrity, PortableLimits, PortableMode,
     PortableOntologyComposition, PortableOntologyModule, PortablePackageClass,
-    PortablePackageIndex, PortableReport, PortableRepresentation, materialize_verified_portable,
-    portable_import_footprint, verify_portable,
+    PortablePackageIndex, PortableReport, PortableRepresentation, PortableSource,
+    materialize_verified_portable, portable_import_footprint, verify_portable,
+    verify_portable_stream,
 };
 
 mod project_portable_selection;

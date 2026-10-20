@@ -113,6 +113,7 @@ export function canonicalVerification(report) {
     })),
     contract: report.contract,
     representation: report.representation,
+    source: report.source,
     package_digest: report.packageDigest,
     package_class: report.packageClass.replaceAll("_", "-"),
     component_count: exactNumber(report.componentCount),
@@ -240,7 +241,10 @@ test("import refusals before extraction keep their code and diagnostic", async (
     assert.equal(error.code, "GF_STORAGE");
     let envelope = JSON.parse(error.message);
     assert.equal(envelope.diagnostics[0].code, "storage.insufficient_space");
-    assert.match(envelope.diagnostics[0].message, /bytes available beside the target/);
+    assert.match(
+      envelope.diagnostics[0].message,
+      /bytes available beside the target/,
+    );
     assert.equal(existsSync(target), false);
     if (process.platform === "linux") {
       // `/dev/shm` is tmpfs, which the durable-publication contract does not admit.
@@ -250,8 +254,14 @@ test("import refusals before extraction keep their code and diagnostic", async (
         error = await refusedImport(shmTarget, input);
         assert.equal(error.code, "GF_UNSUPPORTED_FILESYSTEM");
         envelope = JSON.parse(error.message);
-        assert.equal(envelope.diagnostics[0].code, "storage.unsupported_filesystem");
-        assert.match(envelope.diagnostics[0].message, /GF_UNSUPPORTED_FILESYSTEM/);
+        assert.equal(
+          envelope.diagnostics[0].code,
+          "storage.unsupported_filesystem",
+        );
+        assert.match(
+          envelope.diagnostics[0].message,
+          /GF_UNSUPPORTED_FILESYSTEM/,
+        );
         assert.equal(existsSync(shmTarget), false);
       } finally {
         rmSync(shm, { recursive: true, force: true });

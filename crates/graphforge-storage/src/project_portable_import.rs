@@ -3,7 +3,7 @@
 mod native_validation;
 pub use native_validation::{
     NativeResearchValidator, import_complete_portable_with_native_validation,
-    validate_research_package,
+    validate_research_package, validate_research_package_stream,
 };
 
 use std::fs::{self, OpenOptions};

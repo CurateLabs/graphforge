@@ -4,6 +4,9 @@ use crate::research_versions::{ResearchRegistry, interchange::portable};
 use std::{collections::BTreeMap, path::Path, sync::atomic::AtomicBool};
 use uuid::Uuid;
 
+/// Every file of the research component lives here. Research validation reads
+/// no other path, so a bundle read in one pass stages exactly this prefix.
+pub(super) const NAMESPACE: &str = "data/components/research/";
 const PREFIX: &str = "data/components/research/research-retained/";
 
 /// The registry and every retained object with its length, keyed by the owning Version.
@@ -18,6 +21,42 @@ fn retained_key(path: &str) -> Option<(Uuid, String)> {
     let (version, digest) = path.strip_prefix(PREFIX)?.split_once('/')?;
     let version: Uuid = version.parse().ok()?;
     (retained_path(&version, digest) == path).then(|| (version, digest.to_owned()))
+}
+
+/// Private stage holding the research files of a bundle that is read once and
+/// never re-read. Research validation opens each Version over its retained
+/// objects with random access, which a stream cannot give, so the files are
+/// staged on disk instead. The directory is created when the first research
+/// file arrives, so a package without research files writes nothing.
+pub(crate) struct Spill {
+    sink: super::materialization::CopySink<'static>,
+}
+
+impl Spill {
+    /// A stage that will live in a private directory inside `scratch`.
+    pub(super) fn new(scratch: &Path) -> Self {
+        Self {
+            sink: super::materialization::CopySink::staged_in(scratch.to_path_buf(), NAMESPACE),
+        }
+    }
+    pub(super) fn sink(&mut self) -> &mut super::materialization::CopySink<'static> {
+        &mut self.sink
+    }
+    pub(super) fn stage(&self) -> Option<&Path> {
+        self.sink.staged()
+    }
+    /// Authenticate the staged files and return the stage with the captures
+    /// that bind them. The stage lives as long as `self`.
+    pub(crate) fn authenticated(
+        &self,
+        cancelled: Option<&AtomicBool>,
+    ) -> Result<(&Path, &BTreeMap<String, super::MaterializedCapture>), PortableError> {
+        let stage = self.sink.staged().ok_or_else(|| {
+            PortableError::new(PortableErrorCode::Io, "research files were not staged")
+        })?;
+        self.sink.authenticate_and_sync(cancelled)?;
+        Ok((stage, self.sink.captures()))
+    }
 }
 
 pub(crate) fn validate_stage(
