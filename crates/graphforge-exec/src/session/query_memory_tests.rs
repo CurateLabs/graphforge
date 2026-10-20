@@ -375,3 +375,225 @@ async fn an_aggregate_that_waits_while_the_exchange_fills_the_pool_spills_and_ma
  {
     aggregate_spills_and_matches_the_large_budget(64 * MIB, 2, &skewed_keys(2, 90), true).await;
 }
+
+// ---------------------------------------------------------------------------
+// Diagnostic (#2173): the same aggregate under a tracing wrapper of the query
+// pool. Every pool event is kept in a ring; a refusal dumps the ring so the
+// interleaving that produced it can be read. Test-only; nothing in product
+// code changes.
+// ---------------------------------------------------------------------------
+
+mod trace {
+    use super::*;
+    use datafusion::execution::memory_pool::{
+        MemoryConsumer, MemoryLimit, MemoryPool, MemoryReservation, TrackConsumersPool,
+    };
+    use datafusion::execution::runtime_env::RuntimeEnvBuilder;
+    use datafusion::execution::TaskContext;
+    use std::collections::VecDeque;
+    use std::sync::Mutex;
+    use std::time::Instant;
+
+    struct Event {
+        at_us: u128,
+        thread: String,
+        op: &'static str,
+        consumer: String,
+        id: usize,
+        can_spill: bool,
+        size_before: usize,
+        bytes: usize,
+        ok: bool,
+        reserved_after: usize,
+    }
+
+    pub(super) struct TracingPool {
+        inner: crate::query_pool::QueryMemoryPool,
+        start: Instant,
+        events: Mutex<VecDeque<Event>>,
+    }
+
+    impl std::fmt::Debug for TracingPool {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "TracingPool({:?})", self.inner)
+        }
+    }
+
+    impl std::fmt::Display for TracingPool {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "{}", self.inner)
+        }
+    }
+
+    impl TracingPool {
+        pub(super) fn new(pool_size: usize) -> Self {
+            Self {
+                inner: crate::query_pool::QueryMemoryPool::new(pool_size),
+                start: Instant::now(),
+                events: Mutex::new(VecDeque::with_capacity(4096)),
+            }
+        }
+
+        fn record(
+            &self,
+            op: &'static str,
+            reservation: &MemoryReservation,
+            size_before: usize,
+            bytes: usize,
+            ok: bool,
+        ) {
+            let consumer = reservation.consumer();
+            let event = Event {
+                at_us: self.start.elapsed().as_micros(),
+                thread: format!("{:?}", std::thread::current().id()),
+                op,
+                consumer: consumer.name().to_string(),
+                id: consumer.id(),
+                can_spill: consumer.can_spill(),
+                size_before,
+                bytes,
+                ok,
+                reserved_after: self.inner.reserved(),
+            };
+            let mut events = self.events.lock().unwrap();
+            if events.len() == 4000 {
+                events.pop_front();
+            }
+            events.push_back(event);
+        }
+
+        fn dump(&self, why: &str) {
+            let events = self.events.lock().unwrap();
+            eprintln!("==== POOL TRACE ({why}): last {} events ====", events.len());
+            for e in events.iter() {
+                eprintln!(
+                    "{:>9}us {:<22} {:<9} {} #{} spill={} size={} bytes={} ok={} total={}",
+                    e.at_us,
+                    e.thread,
+                    e.op,
+                    e.consumer,
+                    e.id,
+                    e.can_spill as u8,
+                    e.size_before,
+                    e.bytes,
+                    e.ok as u8,
+                    e.reserved_after
+                );
+            }
+            eprintln!("==== END POOL TRACE ====");
+        }
+    }
+
+    impl MemoryPool for TracingPool {
+        fn name(&self) -> &str {
+            "query"
+        }
+        fn unregister(&self, consumer: &MemoryConsumer) {
+            self.inner.unregister(consumer);
+            let mut events = self.events.lock().unwrap();
+            if events.len() == 4000 {
+                events.pop_front();
+            }
+            events.push_back(Event {
+                at_us: self.start.elapsed().as_micros(),
+                thread: format!("{:?}", std::thread::current().id()),
+                op: "unregister",
+                consumer: consumer.name().to_string(),
+                id: consumer.id(),
+                can_spill: consumer.can_spill(),
+                size_before: 0,
+                bytes: 0,
+                ok: true,
+                reserved_after: self.inner.reserved(),
+            });
+        }
+        fn grow(&self, reservation: &MemoryReservation, additional: usize) {
+            let before = reservation.size();
+            self.inner.grow(reservation, additional);
+            self.record("grow", reservation, before, additional, true);
+        }
+        fn shrink(&self, reservation: &MemoryReservation, shrink: usize) {
+            let before = reservation.size();
+            self.inner.shrink(reservation, shrink);
+            self.record("shrink", reservation, before, shrink, true);
+        }
+        fn try_grow(
+            &self,
+            reservation: &MemoryReservation,
+            additional: usize,
+        ) -> Result<(), DataFusionError> {
+            let before = reservation.size();
+            let result = self.inner.try_grow(reservation, additional);
+            self.record("try_grow", reservation, before, additional, result.is_ok());
+            if let Err(err) = &result {
+                self.dump(&format!("refused: {err}"));
+            }
+            result
+        }
+        fn reserved(&self) -> usize {
+            self.inner.reserved()
+        }
+        fn memory_limit(&self) -> MemoryLimit {
+            self.inner.memory_limit()
+        }
+    }
+
+    /// The session's task context with a runtime whose pool traces.
+    pub(super) fn tracing_task_ctx(
+        session: &ExecutionSession,
+        budget: usize,
+        spill: &TempDir,
+    ) -> Arc<TaskContext> {
+        let runtime = RuntimeEnvBuilder::new()
+            .with_memory_pool(Arc::new(TrackConsumersPool::new(
+                TracingPool::new(budget),
+                std::num::NonZeroUsize::new(5).unwrap(),
+            )))
+            .with_temp_file_path(spill.path().to_path_buf())
+            .build()
+            .map(Arc::new)
+            .unwrap();
+        let tc = session.ctx.task_ctx();
+        Arc::new(TaskContext::new(
+            None,
+            tc.session_id(),
+            tc.session_config().clone(),
+            tc.scalar_functions().clone(),
+            tc.higher_order_functions().clone(),
+            tc.aggregate_functions().clone(),
+            tc.window_functions().clone(),
+            runtime,
+        ))
+    }
+}
+
+/// Diagnostic: run `AGGREGATE` on a tracing pool; a refusal prints the trace.
+async fn traced_aggregate(keys: &[i64]) {
+    let spill = TempDir::new().unwrap();
+    let (small, _small_dir) = session_over(64 * MIB, 2, &spill, keys);
+    let plan = small
+        .ctx
+        .sql(AGGREGATE)
+        .await
+        .unwrap()
+        .create_physical_plan()
+        .await
+        .unwrap();
+    let ctx = trace::tracing_task_ctx(&small, (64 * MIB) as usize, &spill);
+    let batches = datafusion::physical_plan::collect(Arc::clone(&plan), ctx)
+        .await
+        .expect("an aggregate over the budget must spill, not exhaust the pool");
+    assert!(spills(&plan, "AggregateExec") > 0);
+    let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(rows, 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn diagnostic_trace_sequential() {
+    traced_aggregate(&sequential_keys()).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn diagnostic_trace_skewed() {
+    traced_aggregate(&skewed_keys(2, 90)).await;
+}
