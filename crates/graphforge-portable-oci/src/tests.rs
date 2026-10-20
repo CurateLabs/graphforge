@@ -684,13 +684,20 @@ fn a_body_longer_than_the_descriptor_is_refused_not_truncated() {
             .blobs
             .insert(digest.clone(), layer.clone());
         let client = server.client(SMALL_CHUNKS);
-        let outcome = client
-            .get_blob_stream("repo", &digest, size)
+        let opened = client.get_blob_stream("repo", &digest, size);
+        if oversize == 1 {
+            // A Content-Length that contradicts the descriptor is refused
+            // before any body is read.
+            assert!(opened.is_err(), "ignore_range={ignore_range}");
+            continue;
+        }
+        // Chunked framing states no length; the body must be seen to end.
+        let outcome = opened
             .map_err(|_| ())
             .and_then(|mut stream| drain(&mut stream).map_err(|_| ()));
         assert!(
             outcome.is_err(),
-            "ignore_range={ignore_range} oversize={oversize} returned {outcome:?}"
+            "ignore_range={ignore_range} returned {outcome:?}"
         );
     }
 }

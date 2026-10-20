@@ -23,7 +23,7 @@ use graphforge_api::{
     publish_portable_v2_oci_with_registry, pull_portable_v2_oci_with_registry,
 };
 use graphforge_core::portable::{PortableV2Error, PortableV2ErrorCode, PortableV2Limits};
-use graphforge_portable_oci::{DigestingReader, digest_reader};
+use graphforge_portable_oci::{DigestingReader, MEMORY_REGISTRY_MAX_BLOB_BYTES, digest_reader};
 use graphforge_storage::{PortableV2Output, PortableV2SelectionProfile};
 
 struct Counting;
@@ -318,4 +318,26 @@ fn memory_registry_upload_adds_no_second_copy_of_the_layer() {
         "upload held {} bytes beyond the {retained} it retained",
         peak.saturating_sub(retained)
     );
+}
+
+/// A declared size is a claim, not a measurement: over the registry's limit it
+/// is refused before anything is reserved for it.
+#[test]
+fn memory_registry_refuses_an_oversized_declared_size_before_reserving() {
+    let _serial = serial();
+    let registry = MemoryOciRegistry::default();
+    let digest = graphforge_portable_oci::digest_sha256(b"");
+    let (outcome, peak) = peak_live_bytes(|| {
+        registry.put_blob_stream(
+            "tests/large",
+            &digest,
+            MEMORY_REGISTRY_MAX_BLOB_BYTES + 1,
+            &mut std::io::empty(),
+        )
+    });
+    assert_eq!(
+        outcome.unwrap_err().code,
+        PortableV2ErrorCode::LimitExceeded
+    );
+    assert!(peak < 64 * 1024, "refusal still reserved {peak} bytes");
 }

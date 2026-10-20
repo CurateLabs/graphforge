@@ -430,6 +430,11 @@ Over HTTP a layer moves as a sequence of requests: OCI chunked upload sessions
 a transfer. Connecting, waiting for response headers, and every socket read or
 write must each make progress within the idle timeout (60 seconds by default),
 so a long transfer completes while bytes keep moving and a stalled one fails.
+Response headers are different: they keep a phase budget of the same length
+that does not restart when headers arrive in pieces, so a registry that answers
+slowly byte by byte is cut off at that budget even though the body window would
+have restarted. The in-process `MemoryOciRegistry` refuses streamed blobs over
+256 MiB (`MEMORY_REGISTRY_MAX_BLOB_BYTES`) before reserving anything for them.
 Pull uses `Range`; a registry that ignores it and answers 200 is streamed whole,
 bounded by the manifest's declared size, and a `Content-Range` that contradicts
 that size is refused. An interrupted push or pull is not resumed: the registry
