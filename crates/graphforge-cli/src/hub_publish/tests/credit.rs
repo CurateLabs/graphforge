@@ -3,6 +3,56 @@
 //! summary's people list is derived from the lineage, never entered by hand.
 use super::*;
 
+pub(super) fn signature(name: &str) -> graphforge_storage::research_versions::ResearchSignature {
+    graphforge_storage::research_versions::ResearchSignature {
+        name: name.into(),
+        email: None,
+        orcid: None,
+    }
+}
+
+pub(super) fn edit_by(graph: &mut GraphForge, branch: Uuid, score: i64, name: &str) -> Uuid {
+    edit_credited(graph, branch, score, signature(name), signature(name))
+}
+
+pub(super) fn edit_credited(
+    graph: &mut GraphForge,
+    branch: Uuid,
+    score: i64,
+    author: graphforge_storage::research_versions::ResearchSignature,
+    committer: graphforge_storage::research_versions::ResearchSignature,
+) -> Uuid {
+    let version_uuid = Uuid::now_v7();
+    graph
+        .execute_research_branch(
+            &ExecuteResearchBranchRequest {
+                author: Some(author),
+                committer: Some(committer),
+                operation_uuid: Uuid::now_v7(),
+                expected_generation_uuid: generation(graph),
+                branch_uuid: branch,
+                version_uuid,
+                created_at: 3,
+                query: format!("MATCH (n:Item) SET n.score={score}"),
+            },
+            &CancellationToken::new(),
+        )
+        .unwrap();
+    version_uuid
+}
+
+/// The summary a consumer reads from the Hub's current documents.
+pub(super) fn served_summary(hub: &LoopbackHub, repository: &str) -> ProjectSummary {
+    let (manifest, lineage) = served_lineage(hub, repository);
+    let object = manifest.summary_object().unwrap();
+    let bytes = hub.get(&object.locations[0]).body;
+    assert_eq!(digest_bytes(&bytes), object.digest.0);
+    let summary = ProjectSummary::from_json(&bytes, DiscoveryLimits::default()).unwrap();
+    manifest.bind_summary(&summary).unwrap();
+    summary.bind_lineage(Some(&lineage)).unwrap();
+    summary
+}
+
 fn person(summary: &ProjectSummary, name: &str) -> Vec<String> {
     summary
         .people

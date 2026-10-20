@@ -570,20 +570,6 @@ fn canonical_json<T: Serialize>(value: &T, label: &str) -> Result<Vec<u8>, GfErr
     Ok(bytes)
 }
 
-fn parse_canonical_json<T: for<'de> Deserialize<'de>>(
-    bytes: &[u8],
-    label: &str,
-    validate: impl Fn(&T) -> Result<(), GfError>,
-) -> Result<T, GfError> {
-    if !bytes.ends_with(b"\n") {
-        return Err(corrupt(format!("{label} is not canonical JSON plus LF")));
-    }
-    let value =
-        serde_json::from_slice(bytes).map_err(|_| corrupt(format!("{label} is malformed")))?;
-    validate(&value)?;
-    Ok(value)
-}
-
 fn corrupt(message: impl Into<String>) -> GfError {
     GfError::Project {
         code: ProjectErrorCode::ProjectCorrupt,

@@ -149,7 +149,7 @@ pub(crate) fn validate_people(
         let roles: Vec<&str> = person.roles.iter().map(String::as_str).collect();
         if !matches!(
             roles.as_slice(),
-            [ROLE_AUTHOR] | [ROLE_COMMITTER] | [ROLE_AUTHOR, ROLE_COMMITTER]
+            [ROLE_AUTHOR | ROLE_COMMITTER] | [ROLE_AUTHOR, ROLE_COMMITTER]
         ) {
             return Err(malformed_field(FIELD, "person roles are invalid"));
         }
