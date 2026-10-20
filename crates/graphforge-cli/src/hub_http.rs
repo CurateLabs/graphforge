@@ -696,24 +696,48 @@ pub(crate) fn retry_after_seconds(value: &str, now: u64) -> Option<u64> {
     if !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()) {
         return Some(value.parse().unwrap_or(u64::MAX));
     }
-    http_date_unix(value)?
+    http_date_unix(value, now)?
         .checked_sub(now)
         .filter(|wait| *wait > 0)
 }
 
 /// Seconds since the Unix epoch of an IMF-fixdate (`Sun, 06 Nov 1994 08:49:37
 /// GMT`), an obsolete RFC 850 date (`Sunday, 06-Nov-94 08:49:37 GMT`), or an
-/// asctime date (`Sun Nov  6 08:49:37 1994`).
-fn http_date_unix(value: &str) -> Option<u64> {
+/// asctime date (`Sun Nov  6 08:49:37 1994`), read at `now` (seconds since the
+/// epoch). The weekday must be a real weekday name but is not checked against
+/// the date. Anything that is not a valid calendar instant from 1970 through
+/// 9999 is `None`.
+fn http_date_unix(value: &str, now: u64) -> Option<u64> {
     const MONTHS: [&str; 12] = [
         "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec",
+    ];
+    const WEEKDAYS: [(&str, &str); 7] = [
+        ("mon", "monday"),
+        ("tue", "tuesday"),
+        ("wed", "wednesday"),
+        ("thu", "thursday"),
+        ("fri", "friday"),
+        ("sat", "saturday"),
+        ("sun", "sunday"),
     ];
     let tokens: Vec<&str> = value
         .split(|c: char| !c.is_ascii_alphanumeric())
         .filter(|token| !token.is_empty())
-        .skip(1)
         .collect();
-    let number = |token: &str| token.parse::<u64>().ok();
+    let weekday = tokens.first()?.to_ascii_lowercase();
+    if !WEEKDAYS
+        .iter()
+        .any(|(short, long)| weekday == *short || weekday == *long)
+    {
+        return None;
+    }
+    let number = |token: &str| {
+        token
+            .bytes()
+            .all(|byte| byte.is_ascii_digit())
+            .then(|| token.parse::<u64>().ok())
+            .flatten()
+    };
     let month_number = |token: &str| {
         let lower = token.to_ascii_lowercase();
         MONTHS
@@ -721,37 +745,83 @@ fn http_date_unix(value: &str) -> Option<u64> {
             .position(|name| *name == lower)
             .map(|m| m as u64 + 1)
     };
-    let (day, month, year, clock) = if tokens.first().is_some_and(|t| number(t).is_some()) {
-        let [day, month, year, h, m, s, ..] = tokens[..] else {
-            return None;
-        };
-        // RFC 850 carries a two-digit year.
-        let year = match (year.len(), number(year)?) {
-            (2, y) if y < 70 => 2000 + y,
-            (2, y) => 1900 + y,
-            (_, y) => y,
-        };
-        (number(day)?, month_number(month)?, year, [h, m, s])
-    } else {
-        let [month, day, h, m, s, year, ..] = tokens[..] else {
-            return None;
-        };
-        (number(day)?, month_number(month)?, number(year)?, [h, m, s])
+    let (day, month, year, clock) = match tokens[..] {
+        // IMF-fixdate and RFC 850 share a shape: day, month, year, clock, zone.
+        [_, day, month, year, h, m, s, zone] if zone.eq_ignore_ascii_case("GMT") => {
+            let year = match year.len() {
+                4 => number(year)?,
+                2 => two_digit_year(number(year)?, now)?,
+                _ => return None,
+            };
+            (number(day)?, month_number(month)?, year, [h, m, s])
+        }
+        [_, month, day, h, m, s, year] if year.len() == 4 => {
+            (number(day)?, month_number(month)?, number(year)?, [h, m, s])
+        }
+        _ => return None,
     };
     let [h, m, s] = clock.map(number);
     let (h, m, s) = (h?, m?, s?);
-    if !(1..=31).contains(&day) || h > 23 || m > 59 || s > 60 || year < 1970 {
+    if !(1970..=9999).contains(&year) || h > 23 || m > 59 || s > 60 {
         return None;
     }
-    // Days from civil (proleptic Gregorian), after Howard Hinnant.
-    let y = if month <= 2 { year - 1 } else { year };
+    if !(1..=days_in_month(year, month)).contains(&day) {
+        return None;
+    }
+    days_from_civil(year, month, day)?
+        .checked_mul(86_400)?
+        .checked_add(h * 3600 + m * 60 + s)
+}
+
+/// RFC 9110 §5.6.7: a two-digit year that appears to be more than 50 years
+/// after the current year is the most recent past year with the same last two
+/// digits.
+fn two_digit_year(yy: u64, now: u64) -> Option<u64> {
+    let current = civil_year(now / 86_400)?;
+    let candidate = current / 100 * 100 + yy;
+    Some(if candidate > current + 50 {
+        candidate.checked_sub(100)?
+    } else {
+        candidate
+    })
+}
+
+fn days_in_month(year: u64, month: u64) -> u64 {
+    match month {
+        2 if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    }
+}
+
+/// Days since 1970-01-01 of a proleptic Gregorian date (after Howard Hinnant).
+fn days_from_civil(year: u64, month: u64, day: u64) -> Option<u64> {
+    let y = if month <= 2 {
+        year.checked_sub(1)?
+    } else {
+        year
+    };
     let era = y / 400;
     let yoe = y - era * 400;
     let mp = (month + 9) % 12;
     let doy = (153 * mp + 2) / 5 + day - 1;
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    let days = (era * 146_097 + doe).checked_sub(719_468)?;
-    Some(days * 86_400 + h * 3600 + m * 60 + s)
+    era.checked_mul(146_097)?
+        .checked_add(doe)?
+        .checked_sub(719_468)
+}
+
+/// The Gregorian year of `days` since 1970-01-01 (after Howard Hinnant).
+fn civil_year(days: u64) -> Option<u64> {
+    let z = days.checked_add(719_468)?;
+    let era = z / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let year = era.checked_mul(400)?.checked_add(yoe)?;
+    Some(if mp >= 10 { year + 1 } else { year })
 }
 
 /// What an unsuccessful Hub status means to the caller. The class decides both

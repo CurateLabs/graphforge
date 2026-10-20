@@ -151,6 +151,14 @@ fn each_hub_status_class_has_its_semantic_code_and_exit_class_over_real_http() {
         ),
         (
             429,
+            "Retry-After: Fri, 01 Jan 18446744073709551615 00:00:00 GMT\r\n",
+            "hub.rate_limited",
+            "GF_IO",
+            3,
+            retries,
+        ),
+        (
+            429,
             "Retry-After: 99999999999999999999999\r\n",
             "hub.rate_limited",
             "GF_IO",
@@ -213,7 +221,9 @@ fn each_hub_status_class_has_its_semantic_code_and_exit_class_over_real_http() {
         assert!(!destination.exists());
         // Only a header that asks for a wait is reported; a date already past
         // (1994) asks for none.
-        let asked = !headers.is_empty() && !headers.contains("1994");
+        let asked = !headers.is_empty()
+            && !headers.contains("1994")
+            && !headers.contains("18446744073709551615 00:00");
         assert_eq!(message.contains("retry after"), asked, "{message}");
         if headers.contains("120") {
             assert!(message.contains("retry after 120 s"), "{message}");
@@ -345,10 +355,28 @@ fn retry_after_reads_delta_seconds_and_every_http_date_form() {
         ("Sun, 06 Nov 1994 08:49:47 GMT", Some(10)),
         ("Sunday, 06-Nov-94 08:50:37 GMT", Some(60)),
         ("Sun Nov  6 08:49:57 1994", Some(20)),
+        // A year no calendar holds must not overflow the day count.
+        ("Fri, 01 Jan 18446744073709551615 00:00:00 GMT", None),
+        ("Fri, 01 Jan 10000 00:00:00 GMT", None),
+        ("Fri, 01 Jan 1969 00:00:00 GMT", None),
         ("Sun, 06 Nov 1994 08:49:37 GMT", None),
         ("Sat, 05 Nov 1994 08:49:37 GMT", None),
         ("Mon, 32 Nov 1994 08:49:47 GMT", None),
         ("Sun, 06 Foo 1994 08:49:47 GMT", None),
+        // Invalid calendar dates, a missing zone and an unknown weekday.
+        ("Wed, 31 Feb 2027 00:00:00 GMT", None),
+        ("Wed, 30 Feb 2027 00:00:00 GMT", None),
+        ("Mon, 29 Feb 2027 00:00:00 GMT", None),
+        ("Tue, 31 Apr 2027 00:00:00 GMT", None),
+        ("Mon, 06 Nov 2028 08:49:37 PST", None),
+        ("Mon, 06 Nov 2028 08:49:37", None),
+        ("Fun, 06 Nov 2028 08:49:37 GMT", None),
+        ("Sun Nov  6 08:49:37 GMT 2028", None),
+        // A leap day exists in a leap year.
+        (
+            "Tue, 29 Feb 2028 00:00:00 GMT",
+            Some(1_835_395_200 - 784_111_777),
+        ),
         ("soon", None),
         ("", None),
         ("-5", None),
@@ -385,4 +413,28 @@ fn a_partial_download_that_meets_repeated_503s_keeps_its_retry_class() {
     assert_eq!(exit_code, 3);
     assert!(message.contains("rerun to resume"), "{message}");
     assert!(!message.contains(HUB_BODY), "{message}");
+}
+
+/// RFC 9110 §5.6.7: a two-digit year more than 50 years ahead is read as the
+/// most recent past year with the same last two digits.
+#[test]
+fn a_two_digit_rfc_850_year_follows_the_fifty_year_rule_from_now() {
+    use crate::hub_http::retry_after_seconds;
+    // 2026-10-20T00:00:00Z
+    let now = 1_792_454_400;
+    let at = |value: &str| retry_after_seconds(value, now);
+    // 2070-11-06T08:50:37Z and 2076-11-06T08:50:37Z are within 50 years of 2026.
+    assert_eq!(
+        at("Thursday, 06-Nov-70 08:50:37 GMT"),
+        Some(3_182_489_437 - now)
+    );
+    assert_eq!(
+        at("Thursday, 06-Nov-76 08:50:37 GMT"),
+        Some(3_371_878_237 - now)
+    );
+    // 2077 would be 51 years ahead, so it is 1977: in the past, no wait.
+    assert_eq!(at("Thursday, 06-Nov-77 08:50:37 GMT"), None);
+    // 2069 and 2000 are both in range; 2025 is the past.
+    assert_eq!(at("Thursday, 06-Nov-25 08:50:37 GMT"), None);
+    assert!(at("Thursday, 06-Nov-69 08:50:37 GMT").is_some());
 }
