@@ -5,7 +5,7 @@ use graphforge_api::{
     PortableLimits, PortableMode, verify_discovered_portable,
 };
 use graphforge_discovery::{
-    DISCOVERY_FORMAT, DiscoveryLimits, DiscoveryManifest, ObjectDescriptor, PORTABLE_V2_FORMAT,
+    DISCOVERY_FORMAT, DiscoveryLimits, DiscoveryManifest, ObjectDescriptor, PORTABLE_FORMAT,
     PortablePackageReference, ProtocolRequirement, ProtocolVersion, RefSet, RepositoryIdentity,
     RepositoryRef, Sha256Digest,
 };
@@ -87,7 +87,7 @@ fn discovery(package_digest: String) -> (DiscoveryManifest, RefSet, RepositoryId
         resolved_ref: "main".into(),
         immutable_version: immutable_version.clone(),
         package: PortablePackageReference {
-            format: PORTABLE_V2_FORMAT.into(),
+            format: PORTABLE_FORMAT.into(),
             package_digest: Sha256Digest(package_digest),
             object_digest: digest('c'),
         },

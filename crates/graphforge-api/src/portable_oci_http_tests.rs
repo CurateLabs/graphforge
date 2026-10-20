@@ -1,10 +1,10 @@
 //! Real HTTP transport plus local durable facade parity.
 use super::*;
-use crate::portable::{PortableSelection, PortableV2ExportRequest, PortableV2ImportRequest};
+use crate::portable::{PortableExportRequest, PortableImportRequest, PortableSelection};
 use crate::{GraphForge, OperationId};
 use arrow::array::Array;
 use graphforge_ir::IrLiteral;
-use graphforge_storage::{PortableV2Output, PortableV2SelectionProfile};
+use graphforge_storage::{PortableOutput, PortableSelectionProfile};
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -182,14 +182,14 @@ fn http_and_memory_receipts_match_and_http_package_reopens_durably() {
     graph.execute("CREATE (:Person {name:'Ada'})").unwrap();
     let package = dir.path().join("package.gfpb");
     graph
-        .export_portable_v2(
-            &PortableV2ExportRequest {
+        .export_portable(
+            &PortableExportRequest {
                 selection: PortableSelection::Current,
                 output_path: package.clone(),
-                representation: PortableV2Output::Bundle,
-                profile: PortableV2SelectionProfile::Complete,
+                representation: PortableOutput::Bundle,
+                profile: PortableSelectionProfile::Complete,
                 subset: None,
-                limits: PortableV2Limits::default(),
+                limits: PortableLimits::default(),
             },
             None,
             |_| {},
@@ -197,19 +197,19 @@ fn http_and_memory_receipts_match_and_http_package_reopens_durably() {
         .unwrap();
     let server = RegistryServer::start();
     let memory = MemoryOciRegistry::default();
-    let publish = PortableV2OciPublishRequest {
+    let publish = PortableOciPublishRequest {
         package_path: &package,
         registry: &server.host,
         repository: "tests/portable",
         tag: Some("latest"),
-        limits: PortableV2Limits::default(),
+        limits: PortableLimits::default(),
         authenticity: Default::default(),
         signature: None,
         credential: None,
     };
-    let expected = crate::publish_portable_v2_oci_with_registry(&memory, &publish, None).unwrap();
-    let actual = crate::publish_portable_v2_oci(
-        &crate::PortableV2OciPublishFacadeRequest {
+    let expected = crate::publish_portable_oci_with_registry(&memory, &publish, None).unwrap();
+    let actual = crate::publish_portable_oci(
+        &crate::PortableOciPublishFacadeRequest {
             package_path: package.clone(),
             registry: server.host.clone(),
             repository: "tests/portable".into(),
@@ -228,20 +228,20 @@ fn http_and_memory_receipts_match_and_http_package_reopens_durably() {
         serde_json::to_value(&expected).unwrap()
     );
     let destination = dir.path().join("pull.gfpb");
-    let pull = PortableV2OciPullRequest {
+    let pull = PortableOciPullRequest {
         registry: &server.host,
         repository: "tests/portable",
         reference: &actual.oci_manifest_digest,
         expected_oci_digest: Some(&actual.oci_manifest_digest),
         destination: &destination,
-        limits: PortableV2Limits::default(),
+        limits: PortableLimits::default(),
         authenticity: Default::default(),
         credential: None,
     };
-    let expected = crate::pull_portable_v2_oci_with_registry(&memory, &pull, None).unwrap();
+    let expected = crate::pull_portable_oci_with_registry(&memory, &pull, None).unwrap();
     fs::remove_file(&destination).unwrap();
-    let actual = crate::pull_portable_v2_oci(
-        &crate::PortableV2OciPullFacadeRequest {
+    let actual = crate::pull_portable_oci(
+        &crate::PortableOciPullFacadeRequest {
             registry: server.host.clone(),
             repository: "tests/portable".into(),
             reference: actual.oci_manifest_digest.clone(),
@@ -260,12 +260,12 @@ fn http_and_memory_receipts_match_and_http_package_reopens_durably() {
         serde_json::to_value(expected).unwrap()
     );
     let imported = dir.path().join("imported");
-    GraphForge::import_portable_v2(
+    GraphForge::import_portable(
         &imported,
-        &PortableV2ImportRequest {
+        &PortableImportRequest {
             input: destination,
             operation_id: OperationId(uuid::Uuid::now_v7()),
-            limits: PortableV2Limits::default(),
+            limits: PortableLimits::default(),
         },
         None,
     )
@@ -306,14 +306,14 @@ fn export_large_bundle(dir: &Path, docs: usize, doc_bytes: usize) -> PathBuf {
     }
     let package = dir.join("large.gfpb");
     graph
-        .export_portable_v2(
-            &PortableV2ExportRequest {
+        .export_portable(
+            &PortableExportRequest {
                 selection: PortableSelection::Current,
                 output_path: package.clone(),
-                representation: PortableV2Output::Bundle,
-                profile: PortableV2SelectionProfile::Complete,
+                representation: PortableOutput::Bundle,
+                profile: PortableSelectionProfile::Complete,
                 subset: None,
-                limits: PortableV2Limits::default(),
+                limits: PortableLimits::default(),
             },
             None,
             |_| {},
@@ -326,14 +326,14 @@ fn publish_over_http(
     server: &RegistryServer,
     package: &Path,
     tag: Option<&str>,
-) -> Result<graphforge_core::portable::PortableV2OciReference, PortableV2Error> {
-    crate::publish_portable_v2_oci(
-        &crate::PortableV2OciPublishFacadeRequest {
+) -> Result<graphforge_core::portable::PortableOciReference, PortableError> {
+    crate::publish_portable_oci(
+        &crate::PortableOciPublishFacadeRequest {
             package_path: package.to_path_buf(),
             registry: server.host.clone(),
             repository: "tests/portable".into(),
             tag: tag.map(str::to_owned),
-            limits: PortableV2Limits::default(),
+            limits: PortableLimits::default(),
             authenticity: Default::default(),
             signature: None,
             insecure_http: true,
@@ -347,15 +347,15 @@ fn pull_over_http(
     server: &RegistryServer,
     reference: &str,
     destination: &Path,
-) -> Result<graphforge_core::portable::PortableV2OciPullReceipt, PortableV2Error> {
-    crate::pull_portable_v2_oci(
-        &crate::PortableV2OciPullFacadeRequest {
+) -> Result<graphforge_core::portable::PortableOciPullReceipt, PortableError> {
+    crate::pull_portable_oci(
+        &crate::PortableOciPullFacadeRequest {
             registry: server.host.clone(),
             repository: "tests/portable".into(),
             reference: reference.to_owned(),
             expected_oci_digest: None,
             destination: destination.to_path_buf(),
-            limits: PortableV2Limits::default(),
+            limits: PortableLimits::default(),
             authenticity: Default::default(),
             insecure_http: true,
             credential: None,
@@ -403,7 +403,7 @@ fn an_interrupted_http_push_admits_no_package_and_a_rerun_completes() {
         publish_over_http(&server, &package, Some("latest"))
             .unwrap_err()
             .code,
-        PortableV2ErrorCode::Io
+        PortableErrorCode::Io
     );
     assert!(
         !server
@@ -443,7 +443,7 @@ fn an_interrupted_http_pull_leaves_no_stage_or_package_and_a_rerun_completes() {
         pull_over_http(&server, &published.oci_manifest_digest, &destination)
             .unwrap_err()
             .code,
-        PortableV2ErrorCode::Io
+        PortableErrorCode::Io
     );
     assert!(!destination.exists());
     assert!(!stage.exists());

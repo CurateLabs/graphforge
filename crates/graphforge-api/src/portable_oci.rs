@@ -1,21 +1,21 @@
 //! API-owned portable OCI publication and retrieval.
 #![allow(missing_docs)]
 use graphforge_core::portable::{
-    PortableV2Error, PortableV2ErrorCode, PortableV2Integrity, PortableV2Limits, PortableV2Mode,
-    PortableV2OciAuthenticityPolicy, PortableV2OciPhase, PortableV2OciProgress,
-    PortableV2OciPullReceipt, PortableV2OciReference, PortableV2OciSignatureMaterial,
-    PortableV2OciSignatureState, PortableV2Representation,
+    PortableError, PortableErrorCode, PortableIntegrity, PortableLimits, PortableMode,
+    PortableOciAuthenticityPolicy, PortableOciPhase, PortableOciProgress, PortableOciPullReceipt,
+    PortableOciReference, PortableOciSignatureMaterial, PortableOciSignatureState,
+    PortableRepresentation,
 };
 use graphforge_portable_oci::{
     CONFIG_CONTRACT, DigestingReader, OCI_ARTIFACT_TYPE, OCI_CONFIG_MEDIA_TYPE,
     OCI_LAYER_MEDIA_TYPE, OCI_MANIFEST_MEDIA_TYPE, OciConfig, OciDescriptor, OciManifest,
-    PortableV2OciRegistry, attach_signature_referrer, authenticity_error, check_cancelled,
+    PortableOciRegistry, attach_signature_referrer, authenticity_error, check_cancelled,
     digest_reader, digest_sha256, evaluate_signature_state, package_class_str, validate_digest,
     validate_reference, validate_repository,
 };
 use graphforge_storage::{
     portable_bytes::{PortablePackageStage, open_package_file, portable_bundle_byte_limit},
-    verify_portable_v2,
+    verify_portable,
 };
 use std::fs;
 use std::io::Read;
@@ -43,9 +43,9 @@ impl<R: Read> Read for CancellableReader<'_, R> {
     }
 }
 
-/// Publish request for a locally verified portable-v2 bundle.
+/// Publish request for a locally verified portable bundle.
 #[derive(Clone)]
-pub struct PortableV2OciPublishRequest<'a> {
+pub struct PortableOciPublishRequest<'a> {
     /// Verified local package path (bundle or expanded).
     pub package_path: &'a Path,
     /// Registry host, e.g. `127.0.0.1:5000` or `ghcr.io`.
@@ -55,11 +55,11 @@ pub struct PortableV2OciPublishRequest<'a> {
     /// Optional mutable tag annotation; pull-by-digest remains authoritative.
     pub tag: Option<&'a str>,
     /// Verifier limits applied before upload.
-    pub limits: PortableV2Limits,
+    pub limits: PortableLimits,
     /// Optional authenticity policy (signature verification is explicit).
-    pub authenticity: PortableV2OciAuthenticityPolicy,
+    pub authenticity: PortableOciAuthenticityPolicy,
     /// Optional signature to attach as an OCI referrer after publish.
-    pub signature: Option<PortableV2OciSignatureMaterial>,
+    pub signature: Option<PortableOciSignatureMaterial>,
     /// Optional bearer token or basic `user:pass` supplied by the caller.
     /// Never persisted or logged by GraphForge.
     pub credential: Option<&'a str>,
@@ -68,7 +68,7 @@ pub struct PortableV2OciPublishRequest<'a> {
 /// Pull request resolved by OCI manifest digest (or tag that is immediately
 /// re-resolved to a digest before materialization).
 #[derive(Clone)]
-pub struct PortableV2OciPullRequest<'a> {
+pub struct PortableOciPullRequest<'a> {
     /// Registry host without scheme or credentials.
     pub registry: &'a str,
     /// Repository path.
@@ -81,20 +81,20 @@ pub struct PortableV2OciPullRequest<'a> {
     /// Destination path for the verified local package.
     pub destination: &'a Path,
     /// Verifier limits.
-    pub limits: PortableV2Limits,
+    pub limits: PortableLimits,
     /// Optional authenticity policy.
-    pub authenticity: PortableV2OciAuthenticityPolicy,
+    pub authenticity: PortableOciAuthenticityPolicy,
     /// Optional credential (never logged).
     pub credential: Option<&'a str>,
 }
 
 /// Verify locally, map to OCI descriptors, and publish by digest (optional tag).
-pub(crate) fn publish_portable_v2_oci(
-    registry: &dyn PortableV2OciRegistry,
-    request: &PortableV2OciPublishRequest<'_>,
+pub(crate) fn publish_portable_oci(
+    registry: &dyn PortableOciRegistry,
+    request: &PortableOciPublishRequest<'_>,
     cancelled: Option<&AtomicBool>,
-) -> Result<PortableV2OciReference, PortableV2Error> {
-    publish_portable_v2_oci_with_progress(registry, request, cancelled, |_| {})
+) -> Result<PortableOciReference, PortableError> {
+    publish_portable_oci_with_progress(registry, request, cancelled, |_| {})
 }
 
 /// Publish with sanitized progress callbacks.
@@ -102,27 +102,27 @@ pub(crate) fn publish_portable_v2_oci(
     clippy::too_many_lines,
     reason = "keeps verify/upload/observe and signature attach in one fail-closed publish path"
 )]
-pub(crate) fn publish_portable_v2_oci_with_progress(
-    registry: &dyn PortableV2OciRegistry,
-    request: &PortableV2OciPublishRequest<'_>,
+pub(crate) fn publish_portable_oci_with_progress(
+    registry: &dyn PortableOciRegistry,
+    request: &PortableOciPublishRequest<'_>,
     cancelled: Option<&AtomicBool>,
-    mut progress: impl FnMut(PortableV2OciProgress),
-) -> Result<PortableV2OciReference, PortableV2Error> {
+    mut progress: impl FnMut(PortableOciProgress),
+) -> Result<PortableOciReference, PortableError> {
     check_cancelled(cancelled)?;
-    progress(PortableV2OciProgress {
-        phase: PortableV2OciPhase::VerifyLocal,
+    progress(PortableOciProgress {
+        phase: PortableOciPhase::VerifyLocal,
         bytes_transferred: 0,
         digest: None,
     });
-    let report = verify_portable_v2(
+    let report = verify_portable(
         request.package_path,
-        PortableV2Mode::Full,
+        PortableMode::Full,
         request.limits,
         cancelled,
     )?;
-    if report.integrity != PortableV2Integrity::Verified {
-        return Err(PortableV2Error::new(
-            PortableV2ErrorCode::DigestMismatch,
+    if report.integrity != PortableIntegrity::Verified {
+        return Err(PortableError::new(
+            PortableErrorCode::DigestMismatch,
             "package integrity is not verified",
         ));
     }
@@ -136,12 +136,11 @@ pub(crate) fn publish_portable_v2_oci_with_progress(
         };
         let identity = digest_reader(&mut source, request.limits.copy_buffer_bytes);
         check_cancelled(cancelled)?;
-        identity
-            .map_err(|_| PortableV2Error::new(PortableV2ErrorCode::Io, "failed to read package"))?
+        identity.map_err(|_| PortableError::new(PortableErrorCode::Io, "failed to read package"))?
     };
     if layer_size > max_layer_bytes {
-        return Err(PortableV2Error::new(
-            PortableV2ErrorCode::LimitExceeded,
+        return Err(PortableError::new(
+            PortableErrorCode::LimitExceeded,
             "package exceeds byte limit",
         ));
     }
@@ -150,23 +149,22 @@ pub(crate) fn publish_portable_v2_oci_with_progress(
         package_digest: report.package_digest.clone(),
         package_class: package_class_str(report.package_class).to_owned(),
         representation: match report.representation {
-            PortableV2Representation::Bundle => "bundle".to_owned(),
-            PortableV2Representation::Expanded => "expanded".to_owned(),
+            PortableRepresentation::Bundle => "bundle".to_owned(),
+            PortableRepresentation::Expanded => "expanded".to_owned(),
         },
         transport_digest: report.transport_digest.clone(),
         layer_media_type: OCI_LAYER_MEDIA_TYPE.to_owned(),
     };
-    let config_bytes = serde_json::to_vec(&config).map_err(|_| {
-        PortableV2Error::new(PortableV2ErrorCode::Io, "failed to encode OCI config")
-    })?;
+    let config_bytes = serde_json::to_vec(&config)
+        .map_err(|_| PortableError::new(PortableErrorCode::Io, "failed to encode OCI config"))?;
     let config_digest = digest_sha256(&config_bytes);
     let mut bytes_transferred = 0_u64;
 
     if !registry.blob_exists(request.repository, &config_digest)? {
         registry.put_blob(request.repository, &config_digest, &config_bytes)?;
         bytes_transferred += config_bytes.len() as u64;
-        progress(PortableV2OciProgress {
-            phase: PortableV2OciPhase::UploadBlob,
+        progress(PortableOciProgress {
+            phase: PortableOciPhase::UploadBlob,
             bytes_transferred,
             digest: Some(config_digest.clone()),
         });
@@ -184,8 +182,8 @@ pub(crate) fn publish_portable_v2_oci_with_progress(
         check_cancelled(cancelled)?;
         uploaded?;
         bytes_transferred += layer_size;
-        progress(PortableV2OciProgress {
-            phase: PortableV2OciPhase::UploadBlob,
+        progress(PortableOciProgress {
+            phase: PortableOciPhase::UploadBlob,
             bytes_transferred,
             digest: Some(layer_digest.clone()),
         });
@@ -208,9 +206,8 @@ pub(crate) fn publish_portable_v2_oci_with_progress(
         }],
         subject: None,
     };
-    let manifest_bytes = serde_json::to_vec(&manifest).map_err(|_| {
-        PortableV2Error::new(PortableV2ErrorCode::Io, "failed to encode OCI manifest")
-    })?;
+    let manifest_bytes = serde_json::to_vec(&manifest)
+        .map_err(|_| PortableError::new(PortableErrorCode::Io, "failed to encode OCI manifest"))?;
     let digest_ref = digest_sha256(&manifest_bytes);
     let published = registry.put_manifest(
         request.repository,
@@ -219,14 +216,14 @@ pub(crate) fn publish_portable_v2_oci_with_progress(
         &manifest_bytes,
     )?;
     if published != digest_ref {
-        return Err(PortableV2Error::new(
-            PortableV2ErrorCode::DigestMismatch,
+        return Err(PortableError::new(
+            PortableErrorCode::DigestMismatch,
             "registry returned a different manifest digest",
         ));
     }
     bytes_transferred += manifest_bytes.len() as u64;
-    progress(PortableV2OciProgress {
-        phase: PortableV2OciPhase::UploadManifest,
+    progress(PortableOciProgress {
+        phase: PortableOciPhase::UploadManifest,
         bytes_transferred,
         digest: Some(digest_ref.clone()),
     });
@@ -250,33 +247,33 @@ pub(crate) fn publish_portable_v2_oci_with_progress(
             &mut bytes_transferred,
             &mut progress,
         )?;
-        progress(PortableV2OciProgress {
-            phase: PortableV2OciPhase::AttachSignature,
+        progress(PortableOciProgress {
+            phase: PortableOciPhase::AttachSignature,
             bytes_transferred,
             digest: Some(digest_ref.clone()),
         });
     }
 
-    progress(PortableV2OciProgress {
-        phase: PortableV2OciPhase::Observe,
+    progress(PortableOciProgress {
+        phase: PortableOciPhase::Observe,
         bytes_transferred,
         digest: Some(digest_ref.clone()),
     });
     let (media, observed) = registry.get_manifest(request.repository, &digest_ref)?;
     if media != OCI_MANIFEST_MEDIA_TYPE && !media.starts_with(OCI_MANIFEST_MEDIA_TYPE) {
-        return Err(PortableV2Error::new(
-            PortableV2ErrorCode::Incompatible,
+        return Err(PortableError::new(
+            PortableErrorCode::Incompatible,
             "incompatible manifest media type",
         ));
     }
     if digest_sha256(&observed) != digest_ref {
-        return Err(PortableV2Error::new(
-            PortableV2ErrorCode::DigestMismatch,
+        return Err(PortableError::new(
+            PortableErrorCode::DigestMismatch,
             "fresh registry observation does not match published digest",
         ));
     }
 
-    Ok(PortableV2OciReference {
+    Ok(PortableOciReference {
         registry: request.registry.to_owned(),
         repository: request.repository.to_owned(),
         oci_manifest_digest: digest_ref,
@@ -289,12 +286,12 @@ pub(crate) fn publish_portable_v2_oci_with_progress(
 }
 
 /// Pull by digest (or tag→digest), verify fully, then materialize to destination.
-pub(crate) fn pull_portable_v2_oci(
-    registry: &dyn PortableV2OciRegistry,
-    request: &PortableV2OciPullRequest<'_>,
+pub(crate) fn pull_portable_oci(
+    registry: &dyn PortableOciRegistry,
+    request: &PortableOciPullRequest<'_>,
     cancelled: Option<&AtomicBool>,
-) -> Result<PortableV2OciPullReceipt, PortableV2Error> {
-    pull_portable_v2_oci_with_progress(registry, request, cancelled, |_| {})
+) -> Result<PortableOciPullReceipt, PortableError> {
+    pull_portable_oci_with_progress(registry, request, cancelled, |_| {})
 }
 
 /// Pull with sanitized progress callbacks.
@@ -302,12 +299,12 @@ pub(crate) fn pull_portable_v2_oci(
     clippy::too_many_lines,
     reason = "keeps download/verify/authenticity evaluation in one fail-closed pull path"
 )]
-pub(crate) fn pull_portable_v2_oci_with_progress(
-    registry: &dyn PortableV2OciRegistry,
-    request: &PortableV2OciPullRequest<'_>,
+pub(crate) fn pull_portable_oci_with_progress(
+    registry: &dyn PortableOciRegistry,
+    request: &PortableOciPullRequest<'_>,
     cancelled: Option<&AtomicBool>,
-    mut progress: impl FnMut(PortableV2OciProgress),
-) -> Result<PortableV2OciPullReceipt, PortableV2Error> {
+    mut progress: impl FnMut(PortableOciProgress),
+) -> Result<PortableOciPullReceipt, PortableError> {
     check_cancelled(cancelled)?;
     validate_repository(request.repository)?;
     validate_reference(request.reference)?;
@@ -315,8 +312,8 @@ pub(crate) fn pull_portable_v2_oci_with_progress(
         validate_digest(expected)?;
     }
 
-    progress(PortableV2OciProgress {
-        phase: PortableV2OciPhase::DownloadManifest,
+    progress(PortableOciProgress {
+        phase: PortableOciPhase::DownloadManifest,
         bytes_transferred: 0,
         digest: None,
     });
@@ -324,88 +321,88 @@ pub(crate) fn pull_portable_v2_oci_with_progress(
     let oci_manifest_digest = digest_sha256(&manifest_bytes);
     let mut bytes_transferred = manifest_bytes.len() as u64;
     if request.reference.starts_with("sha256:") && request.reference != oci_manifest_digest {
-        return Err(PortableV2Error::new(
-            PortableV2ErrorCode::DigestMismatch,
+        return Err(PortableError::new(
+            PortableErrorCode::DigestMismatch,
             "requested digest does not match downloaded manifest",
         ));
     }
     if let Some(expected) = request.expected_oci_digest
         && expected != oci_manifest_digest
     {
-        return Err(PortableV2Error::new(
-            PortableV2ErrorCode::DigestMismatch,
+        return Err(PortableError::new(
+            PortableErrorCode::DigestMismatch,
             "tag or reference disagrees with expected OCI digest",
         ));
     }
     let manifest: OciManifest = serde_json::from_slice(&manifest_bytes).map_err(|_| {
-        PortableV2Error::new(
-            PortableV2ErrorCode::InvalidStructure,
+        PortableError::new(
+            PortableErrorCode::InvalidStructure,
             "manifest is not valid OCI JSON",
         )
     })?;
     if manifest.artifact_type != OCI_ARTIFACT_TYPE {
-        return Err(PortableV2Error::new(
-            PortableV2ErrorCode::Incompatible,
+        return Err(PortableError::new(
+            PortableErrorCode::Incompatible,
             "unsupported OCI artifact type",
         ));
     }
     if manifest.layers.len() != 1 {
-        return Err(PortableV2Error::new(
-            PortableV2ErrorCode::InvalidStructure,
-            "portable-v2 OCI artifacts require exactly one layer",
+        return Err(PortableError::new(
+            PortableErrorCode::InvalidStructure,
+            "portable OCI artifacts require exactly one layer",
         ));
     }
     if manifest.layers[0].media_type != OCI_LAYER_MEDIA_TYPE {
-        return Err(PortableV2Error::new(
-            PortableV2ErrorCode::Incompatible,
+        return Err(PortableError::new(
+            PortableErrorCode::Incompatible,
             "incompatible layer media type",
         ));
     }
     if manifest.config.media_type != OCI_CONFIG_MEDIA_TYPE {
-        return Err(PortableV2Error::new(
-            PortableV2ErrorCode::Incompatible,
+        return Err(PortableError::new(
+            PortableErrorCode::Incompatible,
             "incompatible config media type",
         ));
     }
 
     check_cancelled(cancelled)?;
-    progress(PortableV2OciProgress {
-        phase: PortableV2OciPhase::DownloadBlob,
+    progress(PortableOciProgress {
+        phase: PortableOciPhase::DownloadBlob,
         bytes_transferred,
         digest: Some(manifest.config.digest.clone()),
     });
     let config_bytes = registry.get_blob(request.repository, &manifest.config.digest)?;
     bytes_transferred += config_bytes.len() as u64;
     if digest_sha256(&config_bytes) != manifest.config.digest {
-        return Err(PortableV2Error::new(
-            PortableV2ErrorCode::DigestMismatch,
+        return Err(PortableError::new(
+            PortableErrorCode::DigestMismatch,
             "config blob digest mismatch",
         ));
     }
     let config: OciConfig = serde_json::from_slice(&config_bytes).map_err(|_| {
-        PortableV2Error::new(
-            PortableV2ErrorCode::InvalidStructure,
+        PortableError::new(
+            PortableErrorCode::InvalidStructure,
             "config blob is not valid GraphForge OCI config",
         )
     })?;
     if config.contract != CONFIG_CONTRACT {
-        return Err(PortableV2Error::new(
-            PortableV2ErrorCode::UnsupportedFuture,
+        return Err(PortableError::new(
+            PortableErrorCode::UnsupportedFuture,
             "unsupported OCI config contract",
         ));
     }
 
     check_cancelled(cancelled)?;
-    progress(PortableV2OciProgress {
-        phase: PortableV2OciPhase::DownloadBlob,
+    progress(PortableOciProgress {
+        phase: PortableOciPhase::DownloadBlob,
         bytes_transferred,
         digest: Some(manifest.layers[0].digest.clone()),
     });
     let layer = &manifest.layers[0];
     let max_layer_bytes = portable_bundle_byte_limit(request.limits)?;
     if layer.size > max_layer_bytes {
-        return Err(PortableV2Error::new(
-            PortableV2ErrorCode::LimitExceeded,
+        return Err(PortableError::new(
+            PortableErrorCode::LimitExceeded,
             "layer exceeds byte limit",
         ));
     }
@@ -413,16 +410,10 @@ pub(crate) fn pull_portable_v2_oci_with_progress(
     bytes_transferred += layer.size;
 
     let parent = request.destination.parent().ok_or_else(|| {
-        PortableV2Error::new(
-            PortableV2ErrorCode::InvalidPath,
-            "destination has no parent",
-        )
+        PortableError::new(PortableErrorCode::InvalidPath, "destination has no parent")
     })?;
     fs::create_dir_all(parent).map_err(|_| {
-        PortableV2Error::new(
-            PortableV2ErrorCode::Io,
-            "failed to create destination parent",
-        )
+        PortableError::new(PortableErrorCode::Io, "failed to create destination parent")
     })?;
     let stage = parent.join(format!(
         ".{}.oci.partial",
@@ -440,42 +431,38 @@ pub(crate) fn pull_portable_v2_oci_with_progress(
     check_cancelled(cancelled)?;
     let stage = stage?;
     if layer_source.finish() != (layer.digest.clone(), layer.size) {
-        return Err(PortableV2Error::new(
-            PortableV2ErrorCode::DigestMismatch,
+        return Err(PortableError::new(
+            PortableErrorCode::DigestMismatch,
             "layer blob digest mismatch",
         ));
     }
     if check_cancelled(cancelled).is_err() {
-        return Err(PortableV2Error::new(
-            PortableV2ErrorCode::Cancelled,
+        return Err(PortableError::new(
+            PortableErrorCode::Cancelled,
             "portable OCI pull cancelled",
         ));
     }
-    progress(PortableV2OciProgress {
-        phase: PortableV2OciPhase::VerifyPulled,
+    progress(PortableOciProgress {
+        phase: PortableOciPhase::VerifyPulled,
         bytes_transferred,
         digest: Some(oci_manifest_digest.clone()),
     });
-    let report = match verify_portable_v2(
-        stage.path(),
-        PortableV2Mode::Full,
-        request.limits,
-        cancelled,
-    ) {
+    let report = match verify_portable(stage.path(), PortableMode::Full, request.limits, cancelled)
+    {
         Ok(report) => report,
         Err(error) => {
             return Err(error);
         }
     };
     if report.package_digest != config.package_digest {
-        return Err(PortableV2Error::new(
-            PortableV2ErrorCode::DigestMismatch,
+        return Err(PortableError::new(
+            PortableErrorCode::DigestMismatch,
             "pulled package digest does not match OCI config",
         ));
     }
 
-    progress(PortableV2OciProgress {
-        phase: PortableV2OciPhase::EvaluateAuthenticity,
+    progress(PortableOciProgress {
+        phase: PortableOciPhase::EvaluateAuthenticity,
         bytes_transferred,
         digest: Some(oci_manifest_digest.clone()),
     });
@@ -487,14 +474,14 @@ pub(crate) fn pull_portable_v2_oci_with_progress(
         &request.authenticity,
     )?;
     if request.authenticity.require_named_signer.is_some()
-        && signature_state != PortableV2OciSignatureState::Valid
+        && signature_state != PortableOciSignatureState::Valid
     {
         return Err(authenticity_error(signature_state));
     }
 
     if request.destination.exists() {
-        return Err(PortableV2Error::new(
-            PortableV2ErrorCode::InvalidPath,
+        return Err(PortableError::new(
+            PortableErrorCode::InvalidPath,
             "destination already exists",
         ));
     }
@@ -505,8 +492,8 @@ pub(crate) fn pull_portable_v2_oci_with_progress(
     } else {
         Some(request.reference.to_owned())
     };
-    Ok(PortableV2OciPullReceipt {
-        reference: PortableV2OciReference {
+    Ok(PortableOciPullReceipt {
+        reference: PortableOciReference {
             registry: request.registry.to_owned(),
             repository: request.repository.to_owned(),
             oci_manifest_digest,
@@ -528,13 +515,13 @@ mod tests {
     use graphforge_core::{OntologyMode, TypeId};
     use graphforge_ir::IrLiteral;
     use graphforge_storage::{
-        GRAPH_CAPABILITY_ID, GRAPH_CAPABILITY_VERSION, GraphWriter, PortableV2ExportLimits,
-        PortableV2GraphSelector, PortableV2Output, PortableV2PropertyProjection,
-        PortableV2SelectionProfile, PortableV2SelectionRequest, PortableV2SubsetClosure,
-        PortableV2SubsetRequest, ProjectCapability, ProjectGenerationRequest, ProjectStageOutcome,
-        capture_graph_files, empty_workspace_participants, export_complete_portable_v2,
-        open_or_initialize_project, plan_complete_portable_v2, plan_graph_subset_portable_v2,
-        plan_selected_portable_v2, preview_portable_v2_graph_subset, preview_portable_v2_selection,
+        GRAPH_CAPABILITY_ID, GRAPH_CAPABILITY_VERSION, GraphWriter, PortableExportLimits,
+        PortableGraphSelector, PortableOutput, PortablePropertyProjection,
+        PortableSelectionProfile, PortableSelectionRequest, PortableSubsetClosure,
+        PortableSubsetRequest, ProjectCapability, ProjectGenerationRequest, ProjectStageOutcome,
+        capture_graph_files, empty_workspace_participants, export_complete_portable,
+        open_or_initialize_project, plan_complete_portable, plan_graph_subset_portable,
+        plan_selected_portable, preview_portable_graph_subset, preview_portable_selection,
         resolve_project_generation, stage_project_generation_with_graph_tree,
     };
     use std::collections::HashMap;
@@ -543,67 +530,62 @@ mod tests {
     use uuid::Uuid;
 
     fn export_bundle_for(
-        profile: PortableV2SelectionProfile,
-    ) -> (tempfile::TempDir, PathBuf, PortableV2Report) {
+        profile: PortableSelectionProfile,
+    ) -> (tempfile::TempDir, PathBuf, PortableReport) {
         let dir = tempdir().unwrap();
         let root = dir.path().join("project");
         open_or_initialize_project(&root).unwrap();
         let generation = resolve_project_generation(&root).unwrap();
-        let limits = PortableV2ExportLimits::default();
+        let limits = PortableExportLimits::default();
         let plan = match profile {
-            PortableV2SelectionProfile::Complete => {
-                plan_complete_portable_v2(&generation, limits).unwrap()
+            PortableSelectionProfile::Complete => {
+                plan_complete_portable(&generation, limits).unwrap()
             }
             other => {
-                let selection = preview_portable_v2_selection(
+                let selection = preview_portable_selection(
                     &generation,
-                    &PortableV2SelectionRequest {
+                    &PortableSelectionRequest {
                         profile: other,
                         strict: false,
                     },
                     limits,
                 )
                 .unwrap();
-                plan_selected_portable_v2(&generation, &selection, limits).unwrap()
+                plan_selected_portable(&generation, &selection, limits).unwrap()
             }
         };
         let bundle = dir.path().join("pkg.gfpb");
-        export_complete_portable_v2(
+        export_complete_portable(
             &plan,
             &bundle,
-            PortableV2Output::Bundle,
+            PortableOutput::Bundle,
             limits,
             &AtomicBool::new(false),
             |_| {},
         )
         .unwrap();
-        let report = verify_portable_v2(
-            &bundle,
-            PortableV2Mode::Full,
-            PortableV2Limits::default(),
-            None,
-        )
-        .unwrap();
+        let report =
+            verify_portable(&bundle, PortableMode::Full, PortableLimits::default(), None).unwrap();
         (dir, bundle, report)
     }
 
-    fn export_bundle() -> (tempfile::TempDir, PathBuf, PortableV2Report) {
-        export_bundle_for(PortableV2SelectionProfile::Complete)
+    fn export_bundle() -> (tempfile::TempDir, PathBuf, PortableReport) {
+        export_bundle_for(PortableSelectionProfile::Complete)
     }
 
     fn publish_req<'a>(
         bundle: &'a Path,
         tag: Option<&'a str>,
-        signature: Option<PortableV2OciSignatureMaterial>,
+        signature: Option<PortableOciSignatureMaterial>,
         credential: Option<&'a str>,
-    ) -> PortableV2OciPublishRequest<'a> {
-        PortableV2OciPublishRequest {
+    ) -> PortableOciPublishRequest<'a> {
+        PortableOciPublishRequest {
             package_path: bundle,
             registry: "memory.local",
             repository: "tests/portable",
             tag,
-            limits: PortableV2Limits::default(),
-            authenticity: PortableV2OciAuthenticityPolicy::default(),
+            limits: PortableLimits::default(),
+            authenticity: PortableOciAuthenticityPolicy::default(),
             signature,
             credential,
         }
@@ -613,15 +595,15 @@ mod tests {
         reference: &'a str,
         destination: &'a Path,
         expected: Option<&'a str>,
-        authenticity: PortableV2OciAuthenticityPolicy,
-    ) -> PortableV2OciPullRequest<'a> {
-        PortableV2OciPullRequest {
+        authenticity: PortableOciAuthenticityPolicy,
+    ) -> PortableOciPullRequest<'a> {
+        PortableOciPullRequest {
             registry: "memory.local",
             repository: "tests/portable",
             reference,
             expected_oci_digest: expected,
             destination,
-            limits: PortableV2Limits::default(),
+            limits: PortableLimits::default(),
             authenticity,
             credential: None,
         }
@@ -632,14 +614,13 @@ mod tests {
         let (_dir, bundle, _) = export_bundle();
         let registry = MemoryOciRegistry::default();
         let reference =
-            publish_portable_v2_oci(&registry, &publish_req(&bundle, None, None, None), None)
-                .unwrap();
+            publish_portable_oci(&registry, &publish_req(&bundle, None, None, None), None).unwrap();
         let out = tempdir().unwrap();
         let destination = out.path().join("pull.gfpb");
         let stage = out.path().join(".pull.gfpb.oci.partial");
         fs::write(&stage, b"foreign stage").unwrap();
         assert!(
-            pull_portable_v2_oci(
+            pull_portable_oci(
                 &registry,
                 &pull_req(
                     &reference.oci_manifest_digest,
@@ -661,7 +642,7 @@ mod tests {
             referrer_error: true,
             cancel: None,
         };
-        let error = pull_portable_v2_oci(
+        let error = pull_portable_oci(
             &registry,
             &pull_req(
                 &reference.oci_manifest_digest,
@@ -672,7 +653,7 @@ mod tests {
             None,
         )
         .unwrap_err();
-        assert_eq!(error.code, PortableV2ErrorCode::Io);
+        assert_eq!(error.code, PortableErrorCode::Io);
         assert!(!stage.exists());
         assert!(!destination.exists());
     }
@@ -684,7 +665,7 @@ mod tests {
         let registry = MemoryOciRegistry::default();
         let mut request = publish_req(&bundle, None, None, None);
         request.limits.max_total_bytes = report.payload_bytes;
-        let published = publish_portable_v2_oci(&registry, &request, None).unwrap();
+        let published = publish_portable_oci(&registry, &request, None).unwrap();
         let output = tempdir().unwrap();
         let destination = output.path().join("pull.gfpb");
         let mut request = pull_req(
@@ -694,14 +675,14 @@ mod tests {
             Default::default(),
         );
         request.limits.max_total_bytes = report.payload_bytes;
-        let receipt = pull_portable_v2_oci(&registry, &request, None).unwrap();
+        let receipt = pull_portable_oci(&registry, &request, None).unwrap();
         assert_eq!(receipt.report, report);
     }
     #[test]
     fn publish_and_pull_by_digest_preserves_package_identity() {
         let (_dir, bundle, report) = export_bundle();
         let registry = MemoryOciRegistry::default();
-        let published = publish_portable_v2_oci(
+        let published = publish_portable_oci(
             &registry,
             &publish_req(&bundle, Some("latest"), None, Some("user:secret-token")),
             None,
@@ -711,23 +692,23 @@ mod tests {
 
         let out_dir = tempdir().unwrap();
         let destination = out_dir.path().join("pulled.gfpb");
-        let pulled = pull_portable_v2_oci(
+        let pulled = pull_portable_oci(
             &registry,
-            &PortableV2OciPullRequest {
+            &PortableOciPullRequest {
                 registry: "memory.local",
                 repository: "tests/portable",
                 reference: &published.oci_manifest_digest,
                 expected_oci_digest: None,
                 destination: &destination,
-                limits: PortableV2Limits::default(),
-                authenticity: PortableV2OciAuthenticityPolicy::default(),
+                limits: PortableLimits::default(),
+                authenticity: PortableOciAuthenticityPolicy::default(),
                 credential: Some("user:secret-token"),
             },
             None,
         )
         .unwrap();
         assert_eq!(pulled.report.package_digest, report.package_digest);
-        assert_eq!(pulled.signature_state, PortableV2OciSignatureState::Absent);
+        assert_eq!(pulled.signature_state, PortableOciSignatureState::Absent);
         let json = serde_json::to_string(&pulled).unwrap();
         assert!(!json.contains("secret-token"));
         assert!(!json.contains("user:"));
@@ -736,19 +717,19 @@ mod tests {
     #[test]
     fn selective_package_classes_round_trip_through_local_registry() {
         for profile in [
-            PortableV2SelectionProfile::Complete,
-            PortableV2SelectionProfile::OntologyOnly,
-            PortableV2SelectionProfile::Settings,
+            PortableSelectionProfile::Complete,
+            PortableSelectionProfile::OntologyOnly,
+            PortableSelectionProfile::Settings,
         ] {
             let (_dir, bundle, report) = export_bundle_for(profile);
             let registry = MemoryOciRegistry::default();
             let published =
-                publish_portable_v2_oci(&registry, &publish_req(&bundle, None, None, None), None)
+                publish_portable_oci(&registry, &publish_req(&bundle, None, None, None), None)
                     .unwrap();
             assert_eq!(published.package_class, report.package_class);
             let out_dir = tempdir().unwrap();
             let destination = out_dir.path().join("pulled.gfpb");
-            let pulled = pull_portable_v2_oci(
+            let pulled = pull_portable_oci(
                 &registry,
                 &pull_req(
                     &published.oci_manifest_digest,
@@ -842,41 +823,37 @@ mod tests {
             .publish()
             .unwrap();
         let generation = resolve_project_generation(root.path()).unwrap();
-        let limits = PortableV2Limits::default();
+        let limits = PortableLimits::default();
         let mut selected = [nodes[0], nodes[1]].map(|uuid| uuid.hyphenated().to_string());
         selected.sort();
-        let subset = PortableV2SubsetRequest {
-            selector: PortableV2GraphSelector {
+        let subset = PortableSubsetRequest {
+            selector: PortableGraphSelector {
                 node_uuids: selected.to_vec(),
                 edge_uuids: vec![],
             },
-            closure: PortableV2SubsetClosure::InducedEdges,
-            projection: PortableV2PropertyProjection { exclude: vec![] },
+            closure: PortableSubsetClosure::InducedEdges,
+            projection: PortablePropertyProjection { exclude: vec![] },
         };
-        let preview = preview_portable_v2_graph_subset(&generation, &subset, limits).unwrap();
-        let plan = plan_graph_subset_portable_v2(&generation, &preview, limits).unwrap();
+        let preview = preview_portable_graph_subset(&generation, &subset, limits).unwrap();
+        let plan = plan_graph_subset_portable(&generation, &preview, limits).unwrap();
         let bundle = root.path().join("subset.gfpb");
-        export_complete_portable_v2(
+        export_complete_portable(
             &plan,
             &bundle,
-            PortableV2Output::Bundle,
+            PortableOutput::Bundle,
             limits,
             &AtomicBool::new(false),
             |_| {},
         )
         .unwrap();
-        let report = verify_portable_v2(&bundle, PortableV2Mode::Full, limits, None).unwrap();
-        assert_eq!(
-            report.package_class,
-            PortableV2PackageClass::GraphDataSubset
-        );
+        let report = verify_portable(&bundle, PortableMode::Full, limits, None).unwrap();
+        assert_eq!(report.package_class, PortablePackageClass::GraphDataSubset);
         let registry = MemoryOciRegistry::default();
         let published =
-            publish_portable_v2_oci(&registry, &publish_req(&bundle, None, None, None), None)
-                .unwrap();
+            publish_portable_oci(&registry, &publish_req(&bundle, None, None, None), None).unwrap();
         let out_dir = tempdir().unwrap();
         let destination = out_dir.path().join("pulled.gfpb");
-        let pulled = pull_portable_v2_oci(
+        let pulled = pull_portable_oci(
             &registry,
             &pull_req(
                 &published.oci_manifest_digest,
@@ -890,7 +867,7 @@ mod tests {
         assert_eq!(pulled.report.package_digest, report.package_digest);
         assert_eq!(
             pulled.report.package_class,
-            PortableV2PackageClass::GraphDataSubset
+            PortablePackageClass::GraphDataSubset
         );
     }
 
@@ -898,7 +875,7 @@ mod tests {
     fn mutable_tag_move_does_not_alter_digest_pinned_pull() {
         let (_dir, bundle, report) = export_bundle();
         let registry = MemoryOciRegistry::default();
-        let first = publish_portable_v2_oci(
+        let first = publish_portable_oci(
             &registry,
             &publish_req(&bundle, Some("moving"), None, None),
             None,
@@ -932,7 +909,7 @@ mod tests {
 
         let out_dir = tempdir().unwrap();
         let destination = out_dir.path().join("pinned.gfpb");
-        let pulled = pull_portable_v2_oci(
+        let pulled = pull_portable_oci(
             &registry,
             &pull_req(
                 &first.oci_manifest_digest,
@@ -946,7 +923,7 @@ mod tests {
         assert_eq!(pulled.report.package_digest, report.package_digest);
 
         let disagree = out_dir.path().join("disagree.gfpb");
-        let error = pull_portable_v2_oci(
+        let error = pull_portable_oci(
             &registry,
             &pull_req(
                 "moving",
@@ -957,7 +934,7 @@ mod tests {
             None,
         )
         .unwrap_err();
-        assert_eq!(error.code, PortableV2ErrorCode::DigestMismatch);
+        assert_eq!(error.code, PortableErrorCode::DigestMismatch);
     }
 
     #[test]
@@ -965,14 +942,13 @@ mod tests {
         let (_dir, bundle, _) = export_bundle();
         let registry = MemoryOciRegistry::default();
         let published =
-            publish_portable_v2_oci(&registry, &publish_req(&bundle, None, None, None), None)
-                .unwrap();
+            publish_portable_oci(&registry, &publish_req(&bundle, None, None, None), None).unwrap();
 
         // Missing blob / manifest
         let empty = MemoryOciRegistry::default();
         let out_dir = tempdir().unwrap();
         let destination = out_dir.path().join("missing.gfpb");
-        let error = pull_portable_v2_oci(
+        let error = pull_portable_oci(
             &empty,
             &pull_req(
                 &published.oci_manifest_digest,
@@ -983,7 +959,7 @@ mod tests {
             None,
         )
         .unwrap_err();
-        assert_eq!(error.code, PortableV2ErrorCode::InvalidStructure);
+        assert_eq!(error.code, PortableErrorCode::InvalidStructure);
         assert!(!destination.exists());
 
         // Incompatible media type
@@ -1013,19 +989,19 @@ mod tests {
             )
             .unwrap();
         let destination = out_dir.path().join("bad-media.gfpb");
-        let error = pull_portable_v2_oci(
+        let error = pull_portable_oci(
             &registry,
             &pull_req(&digest, &destination, None, Default::default()),
             None,
         )
         .unwrap_err();
-        assert_eq!(error.code, PortableV2ErrorCode::Incompatible);
+        assert_eq!(error.code, PortableErrorCode::Incompatible);
         assert!(!destination.exists());
 
         // Digest mismatch on layer by corrupting stored blob after publish
         let registry2 = MemoryOciRegistry::default();
         let published2 =
-            publish_portable_v2_oci(&registry2, &publish_req(&bundle, None, None, None), None)
+            publish_portable_oci(&registry2, &publish_req(&bundle, None, None, None), None)
                 .unwrap();
         let registry2 = FaultyDownload {
             registry: registry2,
@@ -1035,7 +1011,7 @@ mod tests {
             cancel: None,
         };
         let destination = out_dir.path().join("corrupt.gfpb");
-        let error = pull_portable_v2_oci(
+        let error = pull_portable_oci(
             &registry2,
             &pull_req(
                 &published2.oci_manifest_digest,
@@ -1046,7 +1022,7 @@ mod tests {
             None,
         )
         .unwrap_err();
-        assert_eq!(error.code, PortableV2ErrorCode::DigestMismatch);
+        assert_eq!(error.code, PortableErrorCode::DigestMismatch);
         assert!(!destination.exists());
     }
 
@@ -1055,8 +1031,7 @@ mod tests {
         let (_dir, bundle, report) = export_bundle();
         let registry = MemoryOciRegistry::default();
         let published =
-            publish_portable_v2_oci(&registry, &publish_req(&bundle, None, None, None), None)
-                .unwrap();
+            publish_portable_oci(&registry, &publish_req(&bundle, None, None, None), None).unwrap();
         // Rebuild what whole-buffer publication produced, from the file bytes alone.
         let whole = fs::read(&bundle).unwrap();
         let layer_digest = digest_sha256(&whole);
@@ -1105,7 +1080,7 @@ mod tests {
 
         let out = tempdir().unwrap();
         let destination = out.path().join("pulled.gfpb");
-        let pulled = pull_portable_v2_oci(
+        let pulled = pull_portable_oci(
             &registry,
             &pull_req(
                 &published.oci_manifest_digest,
@@ -1132,7 +1107,7 @@ mod tests {
         ] {
             let registry = MemoryOciRegistry::default();
             let reference =
-                publish_portable_v2_oci(&registry, &publish_req(&bundle, None, None, None), None)
+                publish_portable_oci(&registry, &publish_req(&bundle, None, None, None), None)
                     .unwrap();
             let registry = FaultyDownload {
                 registry,
@@ -1141,7 +1116,7 @@ mod tests {
                 referrer_error: false,
                 cancel: cancel.clone(),
             };
-            let error = pull_portable_v2_oci(
+            let error = pull_portable_oci(
                 &registry,
                 &pull_req(
                     &reference.oci_manifest_digest,
@@ -1155,9 +1130,9 @@ mod tests {
             assert_eq!(
                 error.code,
                 if corrupt {
-                    PortableV2ErrorCode::DigestMismatch
+                    PortableErrorCode::DigestMismatch
                 } else {
-                    PortableV2ErrorCode::Cancelled
+                    PortableErrorCode::Cancelled
                 }
             );
             if corrupt {
@@ -1174,12 +1149,12 @@ mod tests {
         let (_dir, bundle, _) = export_bundle();
         let registry = MemoryOciRegistry::default();
         let secret = b"test-signing-key".to_vec();
-        let published = publish_portable_v2_oci(
+        let published = publish_portable_oci(
             &registry,
             &publish_req(
                 &bundle,
                 None,
-                Some(PortableV2OciSignatureMaterial {
+                Some(PortableOciSignatureMaterial {
                     signer: "releases@curatelabs.ai".into(),
                     key_id: "test-key".into(),
                     secret: secret.clone(),
@@ -1190,61 +1165,61 @@ mod tests {
         )
         .unwrap();
 
-        let absent = evaluate_portable_v2_oci_signature_state(
+        let absent = evaluate_portable_oci_signature_state(
             &MemoryOciRegistry::default(),
             "tests/portable",
             &published.oci_manifest_digest,
             &published.package_digest,
-            &PortableV2OciAuthenticityPolicy {
+            &PortableOciAuthenticityPolicy {
                 require_named_signer: Some("releases@curatelabs.ai".into()),
                 verification_key: Some(secret.clone()),
             },
         )
         .unwrap();
-        assert_eq!(absent, PortableV2OciSignatureState::Absent);
+        assert_eq!(absent, PortableOciSignatureState::Absent);
 
-        let valid = evaluate_portable_v2_oci_signature_state(
+        let valid = evaluate_portable_oci_signature_state(
             &registry,
             "tests/portable",
             &published.oci_manifest_digest,
             &published.package_digest,
-            &PortableV2OciAuthenticityPolicy {
+            &PortableOciAuthenticityPolicy {
                 require_named_signer: Some("releases@curatelabs.ai".into()),
                 verification_key: Some(secret.clone()),
             },
         )
         .unwrap();
-        assert_eq!(valid, PortableV2OciSignatureState::Valid);
+        assert_eq!(valid, PortableOciSignatureState::Valid);
 
-        let mismatched = evaluate_portable_v2_oci_signature_state(
+        let mismatched = evaluate_portable_oci_signature_state(
             &registry,
             "tests/portable",
             &published.oci_manifest_digest,
             &published.package_digest,
-            &PortableV2OciAuthenticityPolicy {
+            &PortableOciAuthenticityPolicy {
                 require_named_signer: Some("other@example.com".into()),
                 verification_key: Some(secret.clone()),
             },
         )
         .unwrap();
-        assert_eq!(mismatched, PortableV2OciSignatureState::PolicyMismatched);
+        assert_eq!(mismatched, PortableOciSignatureState::PolicyMismatched);
 
-        let invalid = evaluate_portable_v2_oci_signature_state(
+        let invalid = evaluate_portable_oci_signature_state(
             &registry,
             "tests/portable",
             &published.oci_manifest_digest,
             &published.package_digest,
-            &PortableV2OciAuthenticityPolicy {
+            &PortableOciAuthenticityPolicy {
                 require_named_signer: Some("releases@curatelabs.ai".into()),
                 verification_key: Some(b"wrong-key".to_vec()),
             },
         )
         .unwrap();
-        assert_eq!(invalid, PortableV2OciSignatureState::Invalid);
+        assert_eq!(invalid, PortableOciSignatureState::Invalid);
 
         // Policy requiring signer with unsigned package: integrity would pass, authenticity absent.
         let unsigned_registry = MemoryOciRegistry::default();
-        let unsigned = publish_portable_v2_oci(
+        let unsigned = publish_portable_oci(
             &unsigned_registry,
             &publish_req(&bundle, None, None, None),
             None,
@@ -1252,13 +1227,13 @@ mod tests {
         .unwrap();
         let out_dir = tempdir().unwrap();
         let destination = out_dir.path().join("unsigned.gfpb");
-        let error = pull_portable_v2_oci(
+        let error = pull_portable_oci(
             &unsigned_registry,
             &pull_req(
                 &unsigned.oci_manifest_digest,
                 &destination,
                 None,
-                PortableV2OciAuthenticityPolicy {
+                PortableOciAuthenticityPolicy {
                     require_named_signer: Some("releases@curatelabs.ai".into()),
                     verification_key: Some(secret),
                 },
@@ -1266,7 +1241,7 @@ mod tests {
             None,
         )
         .unwrap_err();
-        assert_eq!(error.code, PortableV2ErrorCode::Incompatible);
+        assert_eq!(error.code, PortableErrorCode::Incompatible);
         assert!(!destination.exists());
         let detail = format!("{error:?}");
         assert!(!detail.contains("DigestMismatch"));
@@ -1277,23 +1252,23 @@ mod tests {
         let (_dir, bundle, _) = export_bundle();
         let registry = MemoryOciRegistry::default();
         let cancelled = AtomicBool::new(true);
-        let error = publish_portable_v2_oci(
+        let error = publish_portable_oci(
             &registry,
             &publish_req(&bundle, None, None, None),
             Some(&cancelled),
         )
         .unwrap_err();
-        assert_eq!(error.code, PortableV2ErrorCode::Cancelled);
+        assert_eq!(error.code, PortableErrorCode::Cancelled);
     }
 
     #[test]
     fn requests_redact_credentials_and_signing_material_in_debug() {
         let secret = b"private-key-sentinel".to_vec();
-        let policy = PortableV2OciAuthenticityPolicy {
+        let policy = PortableOciAuthenticityPolicy {
             require_named_signer: Some("release".into()),
             verification_key: Some(secret.clone()),
         };
-        let material = PortableV2OciSignatureMaterial {
+        let material = PortableOciSignatureMaterial {
             signer: "release".into(),
             key_id: "key-id".into(),
             secret: secret.clone(),
@@ -1307,13 +1282,13 @@ mod tests {
         publish.authenticity = policy.clone();
         let mut pull = pull_req("latest", Path::new("destination"), None, policy.clone());
         pull.credential = Some("credential-sentinel");
-        let facade = crate::portable::PortableV2OciPullFacadeRequest {
+        let facade = crate::portable::PortableOciPullFacadeRequest {
             registry: "local".into(),
             repository: "repo".into(),
             reference: "latest".into(),
             expected_oci_digest: None,
             destination: PathBuf::from("destination"),
-            limits: PortableV2Limits::default(),
+            limits: PortableLimits::default(),
             authenticity: policy,
             insecure_http: true,
             credential: Some("credential-sentinel".into()),
@@ -1334,13 +1309,13 @@ mod tests {
             Err(error) => error,
             Ok(_) => panic!("expected invalid registry host"),
         };
-        assert_eq!(error.code, PortableV2ErrorCode::InvalidPath);
+        assert_eq!(error.code, PortableErrorCode::InvalidPath);
     }
 }
 
-impl std::fmt::Debug for PortableV2OciPublishRequest<'_> {
+impl std::fmt::Debug for PortableOciPublishRequest<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("PortableV2OciPublishRequest")
+        f.debug_struct("PortableOciPublishRequest")
             .field("package_path", &self.package_path)
             .field("registry", &self.registry)
             .field("repository", &self.repository)
@@ -1353,9 +1328,9 @@ impl std::fmt::Debug for PortableV2OciPublishRequest<'_> {
     }
 }
 
-impl std::fmt::Debug for PortableV2OciPullRequest<'_> {
+impl std::fmt::Debug for PortableOciPullRequest<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("PortableV2OciPullRequest")
+        f.debug_struct("PortableOciPullRequest")
             .field("registry", &self.registry)
             .field("repository", &self.repository)
             .field("reference", &self.reference)
@@ -1392,11 +1367,11 @@ impl Read for CancelOnRead {
     }
 }
 #[cfg(test)]
-impl PortableV2OciRegistry for FaultyDownload {
-    fn list_referrers(&self, r: &str, d: &str) -> Result<Vec<Vec<u8>>, PortableV2Error> {
+impl PortableOciRegistry for FaultyDownload {
+    fn list_referrers(&self, r: &str, d: &str) -> Result<Vec<Vec<u8>>, PortableError> {
         if self.referrer_error {
-            Err(PortableV2Error::new(
-                PortableV2ErrorCode::Io,
+            Err(PortableError::new(
+                PortableErrorCode::Io,
                 "injected referrer failure",
             ))
         } else {
@@ -1404,7 +1379,7 @@ impl PortableV2OciRegistry for FaultyDownload {
         }
     }
 
-    fn put_blob(&self, r: &str, d: &str, b: &[u8]) -> Result<(), PortableV2Error> {
+    fn put_blob(&self, r: &str, d: &str, b: &[u8]) -> Result<(), PortableError> {
         self.registry.put_blob(r, d, b)
     }
     fn put_blob_stream(
@@ -1413,7 +1388,7 @@ impl PortableV2OciRegistry for FaultyDownload {
         d: &str,
         size: u64,
         source: &mut dyn Read,
-    ) -> Result<(), PortableV2Error> {
+    ) -> Result<(), PortableError> {
         self.registry.put_blob_stream(r, d, size, source)
     }
     fn get_blob_stream<'a>(
@@ -1421,7 +1396,7 @@ impl PortableV2OciRegistry for FaultyDownload {
         r: &str,
         d: &str,
         size: u64,
-    ) -> Result<Box<dyn Read + 'a>, PortableV2Error> {
+    ) -> Result<Box<dyn Read + 'a>, PortableError> {
         let mut bytes = Vec::new();
         self.registry
             .get_blob_stream(r, d, size)?
@@ -1441,7 +1416,7 @@ impl PortableV2OciRegistry for FaultyDownload {
             None => Box::new(inner),
         })
     }
-    fn get_blob(&self, r: &str, d: &str) -> Result<Vec<u8>, PortableV2Error> {
+    fn get_blob(&self, r: &str, d: &str) -> Result<Vec<u8>, PortableError> {
         let mut b = self.registry.get_blob(r, d)?;
         if self.corrupt_config
             && let Some(first) = b.first_mut()
@@ -1450,13 +1425,13 @@ impl PortableV2OciRegistry for FaultyDownload {
         }
         Ok(b)
     }
-    fn blob_exists(&self, r: &str, d: &str) -> Result<bool, PortableV2Error> {
+    fn blob_exists(&self, r: &str, d: &str) -> Result<bool, PortableError> {
         self.registry.blob_exists(r, d)
     }
-    fn put_manifest(&self, r: &str, d: &str, m: &str, b: &[u8]) -> Result<String, PortableV2Error> {
+    fn put_manifest(&self, r: &str, d: &str, m: &str, b: &[u8]) -> Result<String, PortableError> {
         self.registry.put_manifest(r, d, m, b)
     }
-    fn get_manifest(&self, r: &str, d: &str) -> Result<(String, Vec<u8>), PortableV2Error> {
+    fn get_manifest(&self, r: &str, d: &str) -> Result<(String, Vec<u8>), PortableError> {
         self.registry.get_manifest(r, d)
     }
 }
@@ -1466,8 +1441,8 @@ impl PortableV2OciRegistry for FaultyDownload {
 mod http_tests;
 
 #[cfg(test)]
-use graphforge_core::portable::{PortableV2PackageClass, PortableV2Report};
+use graphforge_core::portable::{PortablePackageClass, PortableReport};
 #[cfg(test)]
 use graphforge_portable_oci::{
-    HttpOciRegistry, MemoryOciRegistry, evaluate_portable_v2_oci_signature_state,
+    HttpOciRegistry, MemoryOciRegistry, evaluate_portable_oci_signature_state,
 };

@@ -493,7 +493,7 @@ fn a_layer_larger_than_the_response_bound_streams_through_http() {
     // The whole-document bound still guards small JSON documents.
     assert_eq!(
         client.get_blob("repo", &digest).unwrap_err().code,
-        PortableV2ErrorCode::Io
+        PortableErrorCode::Io
     );
 }
 
@@ -540,7 +540,7 @@ fn a_single_request_slower_than_the_timeout_still_fails() {
             .put_blob_stream("repo", &digest, layer.len() as u64, &mut layer.as_slice())
             .unwrap_err()
             .code,
-        PortableV2ErrorCode::Io
+        PortableErrorCode::Io
     );
     assert!(!server.state.lock().unwrap().blobs.contains_key(&digest));
 }
@@ -560,7 +560,7 @@ fn an_interrupted_push_admits_no_blob_and_a_rerun_completes() {
             .put_blob_stream("repo", &digest, size, &mut layer.as_slice())
             .unwrap_err()
             .code,
-        PortableV2ErrorCode::Io
+        PortableErrorCode::Io
     );
     assert!(!client.blob_exists("repo", &digest).unwrap());
     assert_eq!(server.state.lock().unwrap().finalized, 0);
@@ -619,7 +619,7 @@ fn a_stream_that_does_not_match_its_digest_or_size_is_never_finalized() {
             .put_blob_stream("repo", &digest, other.len() as u64, &mut other.as_slice())
             .unwrap_err()
             .code,
-        PortableV2ErrorCode::DigestMismatch
+        PortableErrorCode::DigestMismatch
     );
     assert_eq!(
         client
@@ -631,7 +631,7 @@ fn a_stream_that_does_not_match_its_digest_or_size_is_never_finalized() {
             )
             .unwrap_err()
             .code,
-        PortableV2ErrorCode::Io
+        PortableErrorCode::Io
     );
     assert_eq!(
         client
@@ -643,7 +643,7 @@ fn a_stream_that_does_not_match_its_digest_or_size_is_never_finalized() {
             )
             .unwrap_err()
             .code,
-        PortableV2ErrorCode::Io
+        PortableErrorCode::Io
     );
     assert_eq!(server.state.lock().unwrap().finalized, 0);
 }
@@ -718,7 +718,7 @@ fn a_content_range_total_that_contradicts_the_descriptor_is_refused() {
                 .get_blob_stream("repo", &digest, declared)
                 .err()
                 .map(|error| error.code),
-            Some(PortableV2ErrorCode::Io)
+            Some(PortableErrorCode::Io)
         );
     }
     assert!(content_range_matches("bytes 0-9/100", 0, 9, 100));
@@ -818,7 +818,7 @@ fn the_memory_registry_refuses_a_declared_size_over_its_limit() {
             &mut std::io::empty(),
         )
         .unwrap_err();
-    assert_eq!(error.code, PortableV2ErrorCode::LimitExceeded);
+    assert_eq!(error.code, PortableErrorCode::LimitExceeded);
 }
 
 #[test]
@@ -837,13 +837,13 @@ fn the_memory_registry_streams_layers_and_checks_size_and_digest() {
             .put_blob_stream("repo", &digest, size - 1, &mut layer.as_slice())
             .unwrap_err()
             .code,
-        PortableV2ErrorCode::Io
+        PortableErrorCode::Io
     );
     assert_eq!(
         registry
             .put_blob_stream("repo", &digest_sha256(b"x"), size, &mut layer.as_slice())
             .unwrap_err()
             .code,
-        PortableV2ErrorCode::DigestMismatch
+        PortableErrorCode::DigestMismatch
     );
 }

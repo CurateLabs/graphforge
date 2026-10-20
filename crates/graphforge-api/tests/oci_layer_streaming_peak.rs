@@ -18,13 +18,13 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
 use graphforge_api::{
-    GraphForge, IrLiteral, MemoryOciRegistry, PortableSelection, PortableV2ExportRequest,
-    PortableV2OciPublishRequest, PortableV2OciPullRequest, PortableV2OciRegistry,
-    publish_portable_v2_oci_with_registry, pull_portable_v2_oci_with_registry,
+    GraphForge, IrLiteral, MemoryOciRegistry, PortableExportRequest, PortableOciPublishRequest,
+    PortableOciPullRequest, PortableOciRegistry, PortableSelection,
+    publish_portable_oci_with_registry, pull_portable_oci_with_registry,
 };
-use graphforge_core::portable::{PortableV2Error, PortableV2ErrorCode, PortableV2Limits};
+use graphforge_core::portable::{PortableError, PortableErrorCode, PortableLimits};
 use graphforge_portable_oci::{DigestingReader, MEMORY_REGISTRY_MAX_BLOB_BYTES, digest_reader};
-use graphforge_storage::{PortableV2Output, PortableV2SelectionProfile};
+use graphforge_storage::{PortableOutput, PortableSelectionProfile};
 
 struct Counting;
 static CURRENT: AtomicUsize = AtomicUsize::new(0);
@@ -107,8 +107,8 @@ impl DiskLayerRegistry {
     }
 }
 
-impl PortableV2OciRegistry for DiskLayerRegistry {
-    fn put_blob(&self, r: &str, d: &str, b: &[u8]) -> Result<(), PortableV2Error> {
+impl PortableOciRegistry for DiskLayerRegistry {
+    fn put_blob(&self, r: &str, d: &str, b: &[u8]) -> Result<(), PortableError> {
         self.small.put_blob(r, d, b)
     }
 
@@ -118,16 +118,16 @@ impl PortableV2OciRegistry for DiskLayerRegistry {
         digest: &str,
         size: u64,
         source: &mut dyn Read,
-    ) -> Result<(), PortableV2Error> {
-        let io = |_| PortableV2Error::new(PortableV2ErrorCode::Io, "layer file failed");
+    ) -> Result<(), PortableError> {
+        let io = |_| PortableError::new(PortableErrorCode::Io, "layer file failed");
         let path = self.layer(digest);
         let mut file = fs::File::create(&path).map_err(io)?;
         let mut source = DigestingReader::new(source);
         std::io::copy(&mut source, &mut file).map_err(io)?;
         if source.finish() != (digest.to_owned(), size) {
             fs::remove_file(&path).map_err(io)?;
-            return Err(PortableV2Error::new(
-                PortableV2ErrorCode::DigestMismatch,
+            return Err(PortableError::new(
+                PortableErrorCode::DigestMismatch,
                 "layer does not match its digest or size",
             ));
         }
@@ -139,17 +139,17 @@ impl PortableV2OciRegistry for DiskLayerRegistry {
         _repository: &str,
         digest: &str,
         _size: u64,
-    ) -> Result<Box<dyn Read + 'a>, PortableV2Error> {
+    ) -> Result<Box<dyn Read + 'a>, PortableError> {
         fs::File::open(self.layer(digest))
             .map(|file| Box::new(file) as Box<dyn Read>)
-            .map_err(|_| PortableV2Error::new(PortableV2ErrorCode::InvalidStructure, "no layer"))
+            .map_err(|_| PortableError::new(PortableErrorCode::InvalidStructure, "no layer"))
     }
 
-    fn get_blob(&self, r: &str, d: &str) -> Result<Vec<u8>, PortableV2Error> {
+    fn get_blob(&self, r: &str, d: &str) -> Result<Vec<u8>, PortableError> {
         self.small.get_blob(r, d)
     }
 
-    fn blob_exists(&self, r: &str, d: &str) -> Result<bool, PortableV2Error> {
+    fn blob_exists(&self, r: &str, d: &str) -> Result<bool, PortableError> {
         Ok(self.layer(d).exists() || self.small.blob_exists(r, d)?)
     }
 
@@ -159,11 +159,11 @@ impl PortableV2OciRegistry for DiskLayerRegistry {
         reference: &str,
         media: &str,
         b: &[u8],
-    ) -> Result<String, PortableV2Error> {
+    ) -> Result<String, PortableError> {
         self.small.put_manifest(r, reference, media, b)
     }
 
-    fn get_manifest(&self, r: &str, reference: &str) -> Result<(String, Vec<u8>), PortableV2Error> {
+    fn get_manifest(&self, r: &str, reference: &str) -> Result<(String, Vec<u8>), PortableError> {
         self.small.get_manifest(r, reference)
     }
 }
@@ -190,14 +190,14 @@ fn export_large_bundle(dir: &Path, docs: usize, doc_bytes: usize) -> PathBuf {
     }
     let package = dir.join("large.gfpb");
     graph
-        .export_portable_v2(
-            &PortableV2ExportRequest {
+        .export_portable(
+            &PortableExportRequest {
                 selection: PortableSelection::Current,
                 output_path: package.clone(),
-                representation: PortableV2Output::Bundle,
-                profile: PortableV2SelectionProfile::Complete,
+                representation: PortableOutput::Bundle,
+                profile: PortableSelectionProfile::Complete,
                 subset: None,
-                limits: PortableV2Limits::default(),
+                limits: PortableLimits::default(),
             },
             None,
             |_| {},
@@ -212,9 +212,9 @@ fn publish_and_pull_hold_a_fixed_buffer_regardless_of_bundle_size() {
     let dir = tempfile::tempdir().unwrap();
     let bundle = export_large_bundle(dir.path(), DOCS, 1024 * 1024);
     let bundle_bytes = fs::metadata(&bundle).unwrap().len() as usize;
-    let limits = PortableV2Limits {
+    let limits = PortableLimits {
         copy_buffer_bytes: COPY_BUFFER_BYTES,
-        ..PortableV2Limits::default()
+        ..PortableLimits::default()
     };
     let layers = dir.path().join("layers");
     fs::create_dir(&layers).unwrap();
@@ -224,9 +224,9 @@ fn publish_and_pull_hold_a_fixed_buffer_regardless_of_bundle_size() {
     };
 
     let (published, publish_peak) = peak_live_bytes(|| {
-        publish_portable_v2_oci_with_registry(
+        publish_portable_oci_with_registry(
             &registry,
-            &PortableV2OciPublishRequest {
+            &PortableOciPublishRequest {
                 package_path: &bundle,
                 registry: "disk.local",
                 repository: "tests/large",
@@ -242,9 +242,9 @@ fn publish_and_pull_hold_a_fixed_buffer_regardless_of_bundle_size() {
     });
     let destination = dir.path().join("pulled.gfpb");
     let (pulled, pull_peak) = peak_live_bytes(|| {
-        pull_portable_v2_oci_with_registry(
+        pull_portable_oci_with_registry(
             &registry,
-            &PortableV2OciPullRequest {
+            &PortableOciPullRequest {
                 registry: "disk.local",
                 repository: "tests/large",
                 reference: &published.oci_manifest_digest,
@@ -335,9 +335,6 @@ fn memory_registry_refuses_an_oversized_declared_size_before_reserving() {
             &mut std::io::empty(),
         )
     });
-    assert_eq!(
-        outcome.unwrap_err().code,
-        PortableV2ErrorCode::LimitExceeded
-    );
+    assert_eq!(outcome.unwrap_err().code, PortableErrorCode::LimitExceeded);
     assert!(peak < 64 * 1024, "refusal still reserved {peak} bytes");
 }

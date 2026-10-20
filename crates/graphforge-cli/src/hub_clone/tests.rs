@@ -146,7 +146,7 @@ pub(super) fn object(bytes: &[u8]) -> ObjectDescriptor {
     ObjectDescriptor {
         digest: graphforge_discovery::Sha256Digest(hash_reader(&mut cursor).unwrap()),
         length: bytes.len() as u64,
-        media_type: graphforge_discovery::PORTABLE_V2_MEDIA_TYPE.into(),
+        media_type: graphforge_discovery::PORTABLE_MEDIA_TYPE.into(),
         locations: vec!["https://objects.example/project.gfpb".into()],
     }
 }
@@ -473,7 +473,7 @@ fn research_ref_without_lineage_stops_before_project_download() {
         "requirements":[{"capability":"portable-v2","major":1}],"capabilities":[],
         "objects":[{
             "digest":format!("sha256:{}", "c".repeat(64)),"length":1,
-            "media_type":graphforge_discovery::PORTABLE_V2_MEDIA_TYPE,
+            "media_type":graphforge_discovery::PORTABLE_MEDIA_TYPE,
             "locations":["https://objects.example/project.gfpb"]
         }]
     }))
@@ -530,7 +530,7 @@ fn unsupported_future_manifest_stops_before_object_access() {
         "requirements":[],"capabilities":[],
         "objects":[{
             "digest":format!("sha256:{}", "c".repeat(64)),"length":1,
-            "media_type":graphforge_discovery::PORTABLE_V2_MEDIA_TYPE,
+            "media_type":graphforge_discovery::PORTABLE_MEDIA_TYPE,
             "locations":["https://objects.example/project.gfpb"]
         }]
     }))
@@ -595,7 +595,7 @@ pub(super) fn clone_documents(
     }))
     .unwrap();
     let mut objects = vec![
-        serde_json::json!({"digest":object_digest,"length":bundle.len(),"media_type":graphforge_discovery::PORTABLE_V2_MEDIA_TYPE,"locations":["https://objects.example/project.gfpb"]}),
+        serde_json::json!({"digest":object_digest,"length":bundle.len(),"media_type":graphforge_discovery::PORTABLE_MEDIA_TYPE,"locations":["https://objects.example/project.gfpb"]}),
     ];
     objects.extend(extra.iter().cloned());
     objects.sort_by(|left, right| left["digest"].as_str().cmp(&right["digest"].as_str()));

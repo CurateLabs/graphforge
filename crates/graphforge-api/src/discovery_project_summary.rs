@@ -16,7 +16,7 @@ use graphforge_core::portable::{
     PortableParticipantId,
 };
 use graphforge_discovery::{
-    BridgeSetDescriptor, DiscoveryLimits, PORTABLE_V2_FORMAT, PROJECT_SUMMARY_CAPABILITY,
+    BridgeSetDescriptor, DiscoveryLimits, PORTABLE_FORMAT, PROJECT_SUMMARY_CAPABILITY,
     PROJECT_SUMMARY_FORMAT, ProjectSummary, ProtocolRequirement, ProtocolVersion,
     RepositoryIdentity, Sha256Digest, SummaryAccess, SummaryCorpusSize, SummaryFacts,
     SummaryGeographicCoverage, SummaryMetadata, SummaryOntologyComposition, SummaryOntologyModule,
@@ -96,7 +96,7 @@ pub fn summarize_verified_portable(
         repository: request.repository.clone(),
         immutable_version: request.immutable_version.clone(),
         package: SummaryPackageReference {
-            format: PORTABLE_V2_FORMAT.into(),
+            format: PORTABLE_FORMAT.into(),
             package_digest: Sha256Digest(report.package_digest),
             package_class: package_class_label(report.package_class).into(),
         },

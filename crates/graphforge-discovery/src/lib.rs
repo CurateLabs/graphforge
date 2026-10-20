@@ -48,16 +48,16 @@ use url::Url;
 /// Discovery protocol format emitted and accepted by this release.
 pub const DISCOVERY_FORMAT: &str = "graphforge-discovery/1";
 /// Portable project format referenced by discovery v1.
-pub const PORTABLE_V2_FORMAT: &str = "graphforge-project/2";
+pub const PORTABLE_FORMAT: &str = "graphforge-project/2";
 /// Media type of the immutable portable package object selected by discovery.
-pub const PORTABLE_V2_MEDIA_TYPE: &str = "application/vnd.graphforge.project";
+pub const PORTABLE_MEDIA_TYPE: &str = "application/vnd.graphforge.project";
 /// Project summary document format emitted and accepted by this release.
 pub const PROJECT_SUMMARY_FORMAT: &str = "graphforge-project-summary/1";
 /// Media type of an immutable Project summary object selected by discovery.
 pub const PROJECT_SUMMARY_MEDIA_TYPE: &str = "application/vnd.graphforge.project-summary+json";
 /// Capability that a Project summary document may require, at major version 1.
 pub const PROJECT_SUMMARY_CAPABILITY: &str = "project-summary";
-const PORTABLE_V2_CAPABILITY: &str = "portable-v2";
+const PORTABLE_CAPABILITY: &str = "portable-v2";
 const PROJECT_SUMMARY_FORMAT_NAME: &str = "graphforge-project-summary";
 
 /// Explicit resource bounds for untrusted discovery responses.
@@ -347,7 +347,7 @@ pub struct ProtocolCapability {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PortablePackageReference {
-    /// Must be [`PORTABLE_V2_FORMAT`] in discovery v1.
+    /// Must be [`PORTABLE_FORMAT`] in discovery v1.
     pub format: String,
     /// Portable semantic package identity, distinct from transport/object identities.
     pub package_digest: Sha256Digest,
@@ -538,7 +538,7 @@ impl DiscoveryManifest {
         validate_ref_name(&self.default_ref, limits)?;
         validate_ref_name(&self.resolved_ref, limits)?;
         self.immutable_version.validate()?;
-        if self.package.format != PORTABLE_V2_FORMAT {
+        if self.package.format != PORTABLE_FORMAT {
             let error = DiscoveryError::new(
                 DiscoveryErrorCode::UnsupportedFuture,
                 Some("package.format"),
@@ -560,7 +560,7 @@ impl DiscoveryManifest {
         validate_semantics(
             &self.requirements,
             &self.capabilities,
-            PORTABLE_V2_CAPABILITY,
+            PORTABLE_CAPABILITY,
             limits,
         )?;
         validate_extensions(&self.extensions, limits)?;
@@ -674,7 +674,7 @@ impl DiscoveryManifest {
         limits: DiscoveryLimits,
     ) -> Result<(), DiscoveryError> {
         const OBJECT_FIELD: &str = "ontology.modules.package.object_digest";
-        if package.format != PORTABLE_V2_FORMAT {
+        if package.format != PORTABLE_FORMAT {
             let error = DiscoveryError::new(
                 DiscoveryErrorCode::UnsupportedFuture,
                 Some("ontology.modules.package.format"),
@@ -705,7 +705,7 @@ impl DiscoveryManifest {
                     "module package object is absent",
                 )
             })?;
-        if object.media_type != PORTABLE_V2_MEDIA_TYPE
+        if object.media_type != PORTABLE_MEDIA_TYPE
             || package.object_digest == self.package.object_digest
         {
             return Err(DiscoveryError::new(
@@ -809,7 +809,7 @@ impl DiscoveryManifest {
                     "module package object is absent",
                 )
             })?;
-        if object.media_type != PORTABLE_V2_MEDIA_TYPE
+        if object.media_type != PORTABLE_MEDIA_TYPE
             || package.object_digest == self.package.object_digest
         {
             return Err(DiscoveryError::new(
@@ -1007,7 +1007,7 @@ impl DiscoveryManifest {
                     "research Version package object is absent",
                 )
             })?;
-        if object.media_type != PORTABLE_V2_MEDIA_TYPE
+        if object.media_type != PORTABLE_MEDIA_TYPE
             || package.object_digest == self.package.object_digest
         {
             return Err(DiscoveryError::new(
@@ -1072,7 +1072,7 @@ impl DiscoveryManifest {
                     "research package object is absent",
                 )
             })?;
-        if object.media_type != PORTABLE_V2_MEDIA_TYPE
+        if object.media_type != PORTABLE_MEDIA_TYPE
             || package.object_digest == self.package.object_digest
         {
             return Err(DiscoveryError::new(
@@ -1103,7 +1103,7 @@ impl DiscoveryManifest {
                     "portable package object is absent",
                 )
             })?;
-        if object.media_type != PORTABLE_V2_MEDIA_TYPE {
+        if object.media_type != PORTABLE_MEDIA_TYPE {
             return Err(DiscoveryError::new(
                 DiscoveryErrorCode::MalformedResponse,
                 Some("package.object_digest"),
@@ -1680,7 +1680,7 @@ mod tests {
             resolved_ref: "main".to_owned(),
             immutable_version: digest('a'),
             package: PortablePackageReference {
-                format: PORTABLE_V2_FORMAT.to_owned(),
+                format: PORTABLE_FORMAT.to_owned(),
                 package_digest: digest('b'),
                 object_digest: digest('c'),
             },

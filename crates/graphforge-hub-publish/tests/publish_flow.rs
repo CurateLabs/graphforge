@@ -2,7 +2,7 @@
 //! [`ReferenceHub`], asserting Hub state as well as responses.
 
 use graphforge_discovery::{
-    DISCOVERY_FORMAT, DiscoveryLimits, DiscoveryManifest, PORTABLE_V2_MEDIA_TYPE, RefSet,
+    DISCOVERY_FORMAT, DiscoveryLimits, DiscoveryManifest, PORTABLE_MEDIA_TYPE, RefSet,
     RepositoryIdentity,
 };
 use graphforge_hub_publish::{
@@ -55,7 +55,7 @@ impl Plan {
         ObjectDeclaration {
             digest: sha256_digest(&self.bytes),
             length: self.bytes.len() as u64,
-            media_type: PORTABLE_V2_MEDIA_TYPE.to_owned(),
+            media_type: PORTABLE_MEDIA_TYPE.to_owned(),
         }
     }
 }
@@ -939,7 +939,7 @@ fn actual_200_gib_object_publishes_in_uniform_64_mib_parts() {
     let object = ObjectDeclaration {
         digest: digest.clone(),
         length: TOTAL,
-        media_type: PORTABLE_V2_MEDIA_TYPE.into(),
+        media_type: PORTABLE_MEDIA_TYPE.into(),
     };
     let mut manifest = client.manifest(&plan);
     manifest["package"]["object_digest"] = json!(digest);

@@ -13,7 +13,7 @@ use graphforge_api::{
     SliceSelector, SliceSource, SubmitResearchProposalRequest, WorkspaceResearchMetadata,
 };
 use graphforge_discovery::{
-    DISCOVERY_FORMAT, PORTABLE_V2_FORMAT, PORTABLE_V2_MEDIA_TYPE, PortablePackageReference,
+    DISCOVERY_FORMAT, PORTABLE_FORMAT, PORTABLE_MEDIA_TYPE, PortablePackageReference,
     ProtocolRequirement, ProtocolVersion, RESEARCH_LINEAGE_FORMAT, RESEARCH_LINEAGE_MEDIA_TYPE,
     RepositoryRef, ResearchLineageReference, Sha256Digest,
 };
@@ -333,7 +333,7 @@ fn publish_history() -> Published {
             version_uuid,
             (
                 PortablePackageReference {
-                    format: PORTABLE_V2_FORMAT.into(),
+                    format: PORTABLE_FORMAT.into(),
                     package_digest: Sha256Digest(exported.package_digest),
                     object_digest: sha256(&bytes),
                 },
@@ -363,7 +363,7 @@ fn publish_history() -> Published {
     let bytes = std::fs::read(&output).unwrap();
     let project_package = (
         PortablePackageReference {
-            format: PORTABLE_V2_FORMAT.into(),
+            format: PORTABLE_FORMAT.into(),
             package_digest: Sha256Digest(exported.package_digest),
             object_digest: sha256(&bytes),
         },
@@ -428,11 +428,11 @@ fn serve(published: &Published, lineage: &ResearchLineage) -> Hub {
     };
     publish(
         &published.project_package.0.object_digest,
-        PORTABLE_V2_MEDIA_TYPE,
+        PORTABLE_MEDIA_TYPE,
         &published.project_package.1,
     );
     for (package, bytes) in published.packages.values() {
-        publish(&package.object_digest, PORTABLE_V2_MEDIA_TYPE, bytes);
+        publish(&package.object_digest, PORTABLE_MEDIA_TYPE, bytes);
     }
     publish(&lineage_object, RESEARCH_LINEAGE_MEDIA_TYPE, &lineage_bytes);
     objects.sort_by(|left, right| left.digest.0.cmp(&right.digest.0));
@@ -764,7 +764,7 @@ fn minimal_documents(
     let package_object = format!("sha256:{}", "c".repeat(64));
     let mut objects = vec![serde_json::json!({
         "digest": package_object, "length": 1,
-        "media_type": PORTABLE_V2_MEDIA_TYPE,
+        "media_type": PORTABLE_MEDIA_TYPE,
         "locations": ["https://objects.example/sha256/package"]
     })];
     let mut manifest = serde_json::json!({
@@ -1140,7 +1140,7 @@ fn branchless_hub(
         resolved_ref: "main".into(),
         immutable_version: package_digest.clone(),
         package: PortablePackageReference {
-            format: PORTABLE_V2_FORMAT.into(),
+            format: PORTABLE_FORMAT.into(),
             package_digest,
             object_digest: project_object.clone(),
         },
@@ -1162,7 +1162,7 @@ fn branchless_hub(
                 ObjectDescriptor {
                     digest: project_object.clone(),
                     length: bytes.len() as u64,
-                    media_type: PORTABLE_V2_MEDIA_TYPE.into(),
+                    media_type: PORTABLE_MEDIA_TYPE.into(),
                     locations: vec![object_url(&project_object)],
                 },
                 ObjectDescriptor {

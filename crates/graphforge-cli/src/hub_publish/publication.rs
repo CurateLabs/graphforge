@@ -12,7 +12,7 @@ use graphforge_api::{
 };
 use graphforge_discovery::{
     DISCOVERY_FORMAT, DiscoveryLimits, DiscoveryManifest, ObjectDescriptor, OntologyInventory,
-    OntologyModuleDescriptor, PORTABLE_V2_FORMAT, PORTABLE_V2_MEDIA_TYPE, PROJECT_SUMMARY_FORMAT,
+    OntologyModuleDescriptor, PORTABLE_FORMAT, PORTABLE_MEDIA_TYPE, PROJECT_SUMMARY_FORMAT,
     PROJECT_SUMMARY_MEDIA_TYPE, PortablePackageReference, ProjectSummary, ProjectSummaryReference,
     ProtocolRequirement, ProtocolVersion, RepositoryIdentity, ResearchLineageReference,
     Sha256Digest,
@@ -92,7 +92,7 @@ impl VerifiedBundle {
     #[must_use]
     pub fn package_reference(&self) -> PortablePackageReference {
         PortablePackageReference {
-            format: PORTABLE_V2_FORMAT.into(),
+            format: PORTABLE_FORMAT.into(),
             package_digest: Sha256Digest(self.package_digest.clone()),
             object_digest: Sha256Digest(self.object_digest.clone()),
         }
@@ -309,6 +309,6 @@ pub fn build_manifest(inputs: ManifestInputs) -> Result<DiscoveryManifest, Deriv
 }
 
 /// Media type of a Project or module package object.
-pub const PACKAGE_MEDIA_TYPE: &str = PORTABLE_V2_MEDIA_TYPE;
+pub const PACKAGE_MEDIA_TYPE: &str = PORTABLE_MEDIA_TYPE;
 /// Media type of a Project summary object.
 pub const SUMMARY_MEDIA_TYPE: &str = PROJECT_SUMMARY_MEDIA_TYPE;

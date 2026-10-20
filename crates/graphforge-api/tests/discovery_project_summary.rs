@@ -11,8 +11,8 @@ use graphforge_api::{
 };
 use graphforge_discovery::{
     BridgeSetDescriptor, DISCOVERY_FORMAT, DiscoveryErrorCode, DiscoveryLimits, DiscoveryManifest,
-    ObjectDescriptor, OntologyInventory, OntologyModuleDescriptor, PORTABLE_V2_FORMAT,
-    PORTABLE_V2_MEDIA_TYPE, PROJECT_SUMMARY_FORMAT, PROJECT_SUMMARY_MEDIA_TYPE,
+    ObjectDescriptor, OntologyInventory, OntologyModuleDescriptor, PORTABLE_FORMAT,
+    PORTABLE_MEDIA_TYPE, PROJECT_SUMMARY_FORMAT, PROJECT_SUMMARY_MEDIA_TYPE,
     PortablePackageReference, ProjectSummary, ProjectSummaryReference, ProtocolRequirement,
     ProtocolVersion, RepositoryIdentity, Sha256Digest,
 };
@@ -359,7 +359,7 @@ fn summary_binds_to_a_manifest_built_with_discovery_types() {
         resolved_ref: "main".into(),
         immutable_version: marker('a'),
         package: PortablePackageReference {
-            format: PORTABLE_V2_FORMAT.into(),
+            format: PORTABLE_FORMAT.into(),
             package_digest: summary.package.package_digest.clone(),
             object_digest: marker('c'),
         },
@@ -393,7 +393,7 @@ fn summary_binds_to_a_manifest_built_with_discovery_types() {
                 ObjectDescriptor {
                     digest: marker('c'),
                     length: 1,
-                    media_type: PORTABLE_V2_MEDIA_TYPE.into(),
+                    media_type: PORTABLE_MEDIA_TYPE.into(),
                     locations: vec!["https://data.example.org/project".into()],
                 },
                 ObjectDescriptor {

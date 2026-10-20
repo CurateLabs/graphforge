@@ -11,8 +11,8 @@ use graphforge_api::{
 use graphforge_core::portable::PortableExactIdentity;
 use graphforge_discovery::{
     DISCOVERY_FORMAT, DiscoveryErrorCode, DiscoveryLimits, DiscoveryManifest, ExactIdentity,
-    ObjectDescriptor, OntologyInventory, OntologyModuleDescriptor, PORTABLE_V2_FORMAT,
-    PORTABLE_V2_MEDIA_TYPE, PortablePackageReference, ProtocolRequirement, ProtocolVersion, RefSet,
+    ObjectDescriptor, OntologyInventory, OntologyModuleDescriptor, PORTABLE_FORMAT,
+    PORTABLE_MEDIA_TYPE, PortablePackageReference, ProtocolRequirement, ProtocolVersion, RefSet,
     RepositoryIdentity, RepositoryRef, Sha256Digest,
 };
 use graphforge_ontology::OntologyDoc;
@@ -161,7 +161,7 @@ fn discovery(
         resolved_ref: "main".into(),
         immutable_version: immutable_version.clone(),
         package: PortablePackageReference {
-            format: PORTABLE_V2_FORMAT.into(),
+            format: PORTABLE_FORMAT.into(),
             package_digest: marker('1'),
             object_digest: project_object.clone(),
         },
@@ -174,7 +174,7 @@ fn discovery(
                 version: exact.version.clone(),
                 content_digest: exact.content_digest.clone(),
                 package: Some(PortablePackageReference {
-                    format: PORTABLE_V2_FORMAT.into(),
+                    format: PORTABLE_FORMAT.into(),
                     package_digest: Sha256Digest(advertised_package_digest.into()),
                     object_digest: package_object.clone(),
                 }),
@@ -190,14 +190,14 @@ fn discovery(
             let mut objects = vec![ObjectDescriptor {
                 digest: project_object,
                 length: 1,
-                media_type: PORTABLE_V2_MEDIA_TYPE.into(),
+                media_type: PORTABLE_MEDIA_TYPE.into(),
                 locations: vec!["https://data.example.org/project".into()],
             }];
             if package_object != marker('c') {
                 objects.push(ObjectDescriptor {
                     digest: package_object,
                     length: package_bytes.len() as u64,
-                    media_type: PORTABLE_V2_MEDIA_TYPE.into(),
+                    media_type: PORTABLE_MEDIA_TYPE.into(),
                     locations: vec!["https://data.example.org/module".into()],
                 });
             }

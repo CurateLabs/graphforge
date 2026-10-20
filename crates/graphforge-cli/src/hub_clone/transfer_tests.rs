@@ -302,7 +302,7 @@ fn objects_that_each_fit_clone_when_their_total_exceeds_one_hundred_gib() {
         &[serde_json::json!({
             "digest": format!("sha256:{}", "f".repeat(64)),
             "length": large,
-            "media_type": graphforge_discovery::PORTABLE_V2_MEDIA_TYPE,
+            "media_type": graphforge_discovery::PORTABLE_MEDIA_TYPE,
             "locations": ["https://objects.example/other.gfpb"]
         })],
     );

@@ -8,7 +8,7 @@ use graphforge_api::{
     verify_discovered_research_version,
 };
 use graphforge_discovery::{
-    DISCOVERY_FORMAT, DiscoveryLimits, DiscoveryManifest, ObjectDescriptor, PORTABLE_V2_FORMAT,
+    DISCOVERY_FORMAT, DiscoveryLimits, DiscoveryManifest, ObjectDescriptor, PORTABLE_FORMAT,
     PortablePackageReference, ProtocolRequirement, ProtocolVersion, RefSet, RepositoryIdentity,
     RepositoryRef, ResearchLineage, ResearchLineageReference, Sha256Digest,
 };
@@ -160,7 +160,7 @@ fn publish() -> Published {
             version,
             (
                 PortablePackageReference {
-                    format: PORTABLE_V2_FORMAT.into(),
+                    format: PORTABLE_FORMAT.into(),
                     package_digest: Sha256Digest(exported.package_digest),
                     object_digest: digest(marker),
                 },
@@ -246,7 +246,7 @@ fn documents(lineage: &ResearchLineage) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
         resolved_ref: "main".into(),
         immutable_version: lineage.immutable_version.clone(),
         package: PortablePackageReference {
-            format: PORTABLE_V2_FORMAT.into(),
+            format: PORTABLE_FORMAT.into(),
             package_digest: digest('9'),
             object_digest: digest('e'),
         },
