@@ -741,8 +741,10 @@ fn storage(e: impl std::fmt::Display) -> ExportError {
 mod tests {
     mod historical_saved_queries;
     mod large_entries;
+    mod parquet_profile;
     mod participant_files;
     mod payload_inventory;
+    mod research_layout;
     mod saved_queries;
     mod semantic_refusals;
     use super::planning::exact_identity;

@@ -6,7 +6,7 @@ use crate::research_versions::{
 };
 use serde_json::Value;
 
-fn identity(version: &ResearchVersionRecord) -> [u8; 32] {
+pub(super) fn identity(version: &ResearchVersionRecord) -> [u8; 32] {
     // Re-sign the documented logical Version commitment, excluding physical locators.
     let mut logical = version.clone();
     logical.content.generation_uuid = Uuid::nil();
@@ -14,7 +14,7 @@ fn identity(version: &ResearchVersionRecord) -> [u8; 32] {
     Sha256::digest(serde_json::to_vec(&logical).unwrap()).into()
 }
 
-fn version(participants: Vec<ResearchParticipantCommitment>) -> ResearchVersionRecord {
+pub(super) fn version(participants: Vec<ResearchParticipantCommitment>) -> ResearchVersionRecord {
     ResearchVersionRecord {
         parents: Vec::new(),
         author: None,
@@ -43,41 +43,18 @@ fn version(participants: Vec<ResearchParticipantCommitment>) -> ResearchVersionR
     }
 }
 
-fn archived_queries() -> (
+/// Publish a generation whose Research registry holds `selected` (requiring
+/// `historical`) beside the parent's graph participants.
+pub(super) fn publish_archive(
+    selected: ResearchVersionRecord,
+    historical: ResearchVersionRecord,
+    root: tempfile::TempDir,
+    parent: ResolvedProjectGeneration,
+) -> (
     tempfile::TempDir,
     ResolvedProjectGeneration,
     ResearchInterchangeManifest,
-    crate::WorkspaceSavedQueries,
 ) {
-    let query = crate::SavedQuery {
-        query_uuid: Uuid::new_v4(),
-        name: "Historical analysis".into(),
-        description: None,
-        query: "MATCH (n:NotPublishedYet) RETURN n.name".into(),
-        parameters: BTreeMap::new(),
-    };
-    let definitions = crate::WorkspaceSavedQueries {
-        queries: BTreeMap::from([(query.query_uuid, query)]),
-        ..crate::WorkspaceSavedQueries::default()
-    };
-    let participant = definitions.to_project_participant().unwrap();
-    let historical = version(vec![ResearchParticipantCommitment {
-        key: ResearchParticipantKey {
-            capability: participant.capability_id,
-            family: participant.record_family_id,
-        },
-        capability_version: participant.capability_version,
-        record_version: participant.record_version,
-        encoding: "json".into(),
-        schema_sha256: participant.schema_fingerprint,
-        row_count: participant.row_count,
-        content_sha256: Sha256::digest(&participant.bytes).into(),
-    }]);
-    let mut selected = version(Vec::new());
-    selected
-        .content
-        .required_versions
-        .insert(historical.version_uuid);
     let project_uuid = Uuid::new_v4();
     let archive = ResearchInterchangeManifest {
         history: BTreeMap::new(),
@@ -114,8 +91,6 @@ fn archived_queries() -> (
         proof_exports: BTreeMap::new(),
     };
     let registry = archive.registry().unwrap();
-    let (root, parent) = graph_generation();
-    crate::graph_object_store::install_graph_object_bytes(root.path(), &participant.bytes).unwrap();
     let mut participants = parent
         .participant_snapshots()
         .unwrap()
@@ -171,6 +146,47 @@ fn archived_queries() -> (
         .publish()
         .unwrap();
     let generation = crate::resolve_project_generation(root.path()).unwrap();
+    (root, generation, archive)
+}
+
+fn archived_queries() -> (
+    tempfile::TempDir,
+    ResolvedProjectGeneration,
+    ResearchInterchangeManifest,
+    crate::WorkspaceSavedQueries,
+) {
+    let query = crate::SavedQuery {
+        query_uuid: Uuid::new_v4(),
+        name: "Historical analysis".into(),
+        description: None,
+        query: "MATCH (n:NotPublishedYet) RETURN n.name".into(),
+        parameters: BTreeMap::new(),
+    };
+    let definitions = crate::WorkspaceSavedQueries {
+        queries: BTreeMap::from([(query.query_uuid, query)]),
+        ..crate::WorkspaceSavedQueries::default()
+    };
+    let participant = definitions.to_project_participant().unwrap();
+    let historical = version(vec![ResearchParticipantCommitment {
+        key: ResearchParticipantKey {
+            capability: participant.capability_id,
+            family: participant.record_family_id,
+        },
+        capability_version: participant.capability_version,
+        record_version: participant.record_version,
+        encoding: "json".into(),
+        schema_sha256: participant.schema_fingerprint,
+        row_count: participant.row_count,
+        content_sha256: Sha256::digest(&participant.bytes).into(),
+    }]);
+    let mut selected = version(Vec::new());
+    selected
+        .content
+        .required_versions
+        .insert(historical.version_uuid);
+    let (root, parent) = graph_generation();
+    crate::graph_object_store::install_graph_object_bytes(root.path(), &participant.bytes).unwrap();
+    let (root, generation, archive) = publish_archive(selected, historical, root, parent);
     assert!(
         crate::read_workspace_saved_queries(&generation)
             .unwrap()
@@ -200,6 +216,7 @@ fn full_package_verification_and_import_decode_required_historical_saved_queries
         .values_mut()
         .find(|version| !version.content.participants.is_empty())
         .unwrap();
+    let version = historical.version_uuid;
     let old_digest = hex(historical.content.participants[0].content_sha256);
     let new_digest: [u8; 32] = Sha256::digest(&malformed).into();
     historical.content.participants[0].content_sha256 = new_digest;
@@ -214,9 +231,9 @@ fn full_package_verification_and_import_decode_required_historical_saved_queries
         &registry_path,
         registry.participant().unwrap().bytes,
     );
-    let old_path = format!("data/components/research/research-content/{old_digest}");
+    let old_path = format!("data/components/research/research-retained/{version}/{old_digest}");
     let new_path = format!(
-        "data/components/research/research-content/{}",
+        "data/components/research/research-retained/{version}/{}",
         hex(new_digest)
     );
     replace_test_control(&mut plan, &old_path, malformed);

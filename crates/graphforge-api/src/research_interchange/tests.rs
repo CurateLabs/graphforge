@@ -107,7 +107,8 @@ fn complete_research_roundtrip_preserves_version_and_historical_genealogy() {
     // Integrity and closure rejection happen before a new destination is admitted.
     let cas = import
         .input
-        .join("data/components/research/research-content");
+        .join("data/components/research/research-retained")
+        .join(version_uuid.to_string());
     let entry = std::fs::read_dir(cas)
         .unwrap()
         .next()

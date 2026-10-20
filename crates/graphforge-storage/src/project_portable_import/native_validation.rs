@@ -62,7 +62,7 @@ pub fn validate_research_package(
 pub(super) fn validate(
     stage: &Path,
     registry: &ResearchRegistry,
-    objects: &BTreeMap<String, u64>,
+    objects: &BTreeMap<(Uuid, String), u64>,
     captures: &BTreeMap<String, crate::project_portable::MaterializedCapture>,
     cancelled: Option<&AtomicBool>,
     validator: Option<&mut NativeResearchValidator<'_>>,

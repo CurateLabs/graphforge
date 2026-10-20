@@ -17,7 +17,6 @@ use graphforge_core::hash_observation::{ContractSha256, ControlSha256 as Sha256,
 use serde::Serialize;
 use sha2::Digest;
 use std::io::Read;
-use unicode_normalization::UnicodeNormalization;
 
 impl PortableExportPlan {
     /// Replace whole-graph tree payload with a projected subset staging tree.
@@ -857,23 +856,27 @@ pub fn plan_selected_portable(
         });
     }
     if selection.includes("research", "registry") {
-        let objects = crate::research_versions::interchange::portable::object_inventory(g)?;
+        let inventory = crate::research_versions::interchange::portable::object_inventory(g)?;
         let lease = crate::graph_object_store::begin_graph_object_read(g.container_root())?;
         let mut owned = Vec::new();
-        for digest in objects {
-            let length = std::fs::metadata(crate::graph_object_path(g.container_root(), &digest)?)
-                .map_err(storage)?
-                .len();
-            let path = format!("data/components/research/research-content/{digest}");
-            let file = inspect_cas(&lease, &digest, length, &path, limits, &mut total)?;
-            owned.push(ComponentFile {
-                media_type: "application/octet-stream".into(),
-                path,
-                length,
-                sha256: digest,
-            });
-            files.push(file);
+        for (version, objects) in inventory {
+            for digest in objects {
+                let length =
+                    std::fs::metadata(crate::graph_object_path(g.container_root(), &digest)?)
+                        .map_err(storage)?
+                        .len();
+                let path = format!("data/components/research/research-retained/{version}/{digest}");
+                let file = inspect_cas(&lease, &digest, length, &path, limits, &mut total)?;
+                owned.push(ComponentFile {
+                    media_type: "application/octet-stream".into(),
+                    path,
+                    length,
+                    sha256: digest,
+                });
+                files.push(file);
+            }
         }
+        owned.sort_by(|a, b| a.path.as_bytes().cmp(b.path.as_bytes()));
         roots.push("research-content".into());
         components.push(Component {
             kind: "research".into(),
@@ -1246,13 +1249,7 @@ fn parse_sha256(value: &str) -> Result<[u8; 32], ExportError> {
 }
 
 fn valid_path(p: &str) -> Result<(), ExportError> {
-    if p.len() > 4096
-        || p.starts_with('/')
-        || p.contains('\\')
-        || p.bytes().any(|b| b < 32 || b == 127)
-        || p.split('/').any(|x| x.is_empty() || x == "." || x == "..")
-        || p.nfc().ne(p.chars())
-    {
+    if crate::project_portable::path_violation(p, 4096).is_some() {
         return Err(err("GF_INVALID_PORTABLE_PATH", "invalid path"));
     }
     Ok(())
@@ -1261,7 +1258,7 @@ fn collisions(f: &[PlannedFile]) -> Result<(), ExportError> {
     let mut a = BTreeSet::new();
     let mut b = BTreeSet::new();
     for x in f {
-        if !a.insert(&x.path) || !b.insert(x.path.to_lowercase()) {
+        if !a.insert(&x.path) || !b.insert(crate::project_portable::path_collision_key(&x.path)) {
             return Err(err("GF_DUPLICATE_PORTABLE_PATH", "path collision"));
         }
     }
