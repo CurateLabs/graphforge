@@ -342,7 +342,12 @@ impl HttpTransport {
             .headers()
             .get("retry-after")
             .and_then(|v| v.to_str().ok())
-            .and_then(retry_after_seconds);
+            .and_then(|v| {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |elapsed| elapsed.as_secs());
+                retry_after_seconds(v, now)
+            });
         let (_, body) = response.into_parts();
         Ok(HttpResponse {
             status,
@@ -681,13 +686,72 @@ impl RetryPolicy {
     }
 }
 
-/// `Retry-After` as delta-seconds. The HTTP-date form is not interpreted; a
-/// response carrying it is retried on the ordinary backoff schedule.
-fn retry_after_seconds(value: &str) -> Option<u64> {
+/// `Retry-After` as the number of seconds to wait from `now` (seconds since
+/// the Unix epoch): delta-seconds, or one of the three HTTP-date forms of
+/// RFC 9110. A delta too large for `u64` saturates, so it exceeds any cap. A
+/// date that is not in the future, or a value that is neither form, asks for
+/// no particular wait and the ordinary backoff applies.
+pub(crate) fn retry_after_seconds(value: &str, now: u64) -> Option<u64> {
     let value = value.trim();
-    (!value.is_empty() && value.len() <= 10 && value.bytes().all(|byte| byte.is_ascii_digit()))
-        .then(|| value.parse().ok())
-        .flatten()
+    if !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Some(value.parse().unwrap_or(u64::MAX));
+    }
+    http_date_unix(value)?
+        .checked_sub(now)
+        .filter(|wait| *wait > 0)
+}
+
+/// Seconds since the Unix epoch of an IMF-fixdate (`Sun, 06 Nov 1994 08:49:37
+/// GMT`), an obsolete RFC 850 date (`Sunday, 06-Nov-94 08:49:37 GMT`), or an
+/// asctime date (`Sun Nov  6 08:49:37 1994`).
+fn http_date_unix(value: &str) -> Option<u64> {
+    const MONTHS: [&str; 12] = [
+        "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec",
+    ];
+    let tokens: Vec<&str> = value
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .skip(1)
+        .collect();
+    let number = |token: &str| token.parse::<u64>().ok();
+    let month_number = |token: &str| {
+        let lower = token.to_ascii_lowercase();
+        MONTHS
+            .iter()
+            .position(|name| *name == lower)
+            .map(|m| m as u64 + 1)
+    };
+    let (day, month, year, clock) = if tokens.first().is_some_and(|t| number(t).is_some()) {
+        let [day, month, year, h, m, s, ..] = tokens[..] else {
+            return None;
+        };
+        // RFC 850 carries a two-digit year.
+        let year = match (year.len(), number(year)?) {
+            (2, y) if y < 70 => 2000 + y,
+            (2, y) => 1900 + y,
+            (_, y) => y,
+        };
+        (number(day)?, month_number(month)?, year, [h, m, s])
+    } else {
+        let [month, day, h, m, s, year, ..] = tokens[..] else {
+            return None;
+        };
+        (number(day)?, month_number(month)?, number(year)?, [h, m, s])
+    };
+    let [h, m, s] = clock.map(number);
+    let (h, m, s) = (h?, m?, s?);
+    if !(1..=31).contains(&day) || h > 23 || m > 59 || s > 60 || year < 1970 {
+        return None;
+    }
+    // Days from civil (proleptic Gregorian), after Howard Hinnant.
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = y / 400;
+    let yoe = y - era * 400;
+    let mp = (month + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = (era * 146_097 + doe).checked_sub(719_468)?;
+    Some(days * 86_400 + h * 3600 + m * 60 + s)
 }
 
 /// What an unsuccessful Hub status means to the caller. The class decides both

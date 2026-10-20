@@ -43,10 +43,16 @@ impl StatusServer {
                         break;
                     }
                 }
+                // A script that declares its own Content-Length can promise more
+                // bytes than it sends, which cuts the body short.
+                let length = if headers.contains("Content-Length:") {
+                    String::new()
+                } else {
+                    format!("Content-Length: {}\r\n", body.len())
+                };
                 write!(
                     stream,
-                    "HTTP/1.1 {status} Scripted\r\nContent-Length: {}\r\n{headers}Connection: close\r\n\r\n",
-                    body.len()
+                    "HTTP/1.1 {status} Scripted\r\n{length}{headers}Connection: close\r\n\r\n"
                 )
                 .unwrap();
                 stream.write_all(&body).unwrap();
@@ -133,6 +139,32 @@ fn each_hub_status_class_has_its_semantic_code_and_exit_class_over_real_http() {
             3,
             1,
         ),
+        // The HTTP-date form, and a delta too large for any integer, ask for
+        // a wait beyond the cap; a date already past asks for none.
+        (
+            429,
+            "Retry-After: Fri, 01 Jan 2100 00:00:00 GMT\r\n",
+            "hub.rate_limited",
+            "GF_IO",
+            3,
+            1,
+        ),
+        (
+            429,
+            "Retry-After: 99999999999999999999999\r\n",
+            "hub.rate_limited",
+            "GF_IO",
+            3,
+            1,
+        ),
+        (
+            429,
+            "Retry-After: Sun, 06 Nov 1994 08:49:37 GMT\r\n",
+            "hub.rate_limited",
+            "GF_IO",
+            3,
+            retries,
+        ),
         (429, "", "hub.rate_limited", "GF_IO", 3, retries),
         (503, "", "hub.unavailable", "GF_IO", 3, retries),
         (502, "", "hub.unavailable", "GF_IO", 3, retries),
@@ -179,9 +211,11 @@ fn each_hub_status_class_has_its_semantic_code_and_exit_class_over_real_http() {
             "{status}"
         );
         assert!(!destination.exists());
-        if headers.is_empty() {
-            assert!(!message.contains("retry after"), "{message}");
-        } else {
+        // Only a header that asks for a wait is reported; a date already past
+        // (1994) asks for none.
+        let asked = !headers.is_empty() && !headers.contains("1994");
+        assert_eq!(message.contains("retry after"), asked, "{message}");
+        if headers.contains("120") {
             assert!(message.contains("retry after 120 s"), "{message}");
         }
     }
@@ -294,4 +328,61 @@ fn retry_after_paces_the_bounded_retry_of_documents_and_objects() {
             .contains("hub.unavailable: Hub returned HTTP status 503; retry after 3 s"),
         "{error}"
     );
+}
+
+#[test]
+fn retry_after_reads_delta_seconds_and_every_http_date_form() {
+    use crate::hub_http::retry_after_seconds;
+    // 1994-11-06T08:49:37Z, the RFC 9110 example instant.
+    let now = 784_111_777;
+    for (value, expected) in [
+        ("120", Some(120)),
+        (" 7 ", Some(7)),
+        ("12345678901", Some(12_345_678_901)),
+        ("18446744073709551615", Some(u64::MAX)),
+        ("18446744073709551616", Some(u64::MAX)),
+        ("99999999999999999999999", Some(u64::MAX)),
+        ("Sun, 06 Nov 1994 08:49:47 GMT", Some(10)),
+        ("Sunday, 06-Nov-94 08:50:37 GMT", Some(60)),
+        ("Sun Nov  6 08:49:57 1994", Some(20)),
+        ("Sun, 06 Nov 1994 08:49:37 GMT", None),
+        ("Sat, 05 Nov 1994 08:49:37 GMT", None),
+        ("Mon, 32 Nov 1994 08:49:47 GMT", None),
+        ("Sun, 06 Foo 1994 08:49:47 GMT", None),
+        ("soon", None),
+        ("", None),
+        ("-5", None),
+    ] {
+        assert_eq!(retry_after_seconds(value, now), expected, "{value:?}");
+    }
+}
+
+#[test]
+fn a_partial_download_that_meets_repeated_503s_keeps_its_retry_class() {
+    let bytes = b"verified portable bytes".to_vec();
+    let mut descriptor = super::tests::object(&bytes);
+    descriptor.locations = vec!["https://hub.test/objects/project.gfpb".into()];
+    let declared = format!("Content-Length: {}\r\nETag: \"fixture-1\"\r\n", bytes.len());
+    // Ten bytes arrive, the connection ends, and the Hub then stays unavailable.
+    let mut script = vec![(200, declared, bytes[..10].to_vec())];
+    script.extend(failing(503, "", TEST_RETRY_POLICY.attempts as usize));
+    let server = StatusServer::start(script);
+    let root = tempfile::tempdir().unwrap();
+    let partial = root.path().join("package.part");
+    let error = download_with_progress(
+        &Routed::new(server.address),
+        &descriptor,
+        &partial,
+        &mut DownloadReport::default(),
+        &mut DownloadControl::quiet(&TEST_RETRY_POLICY),
+    )
+    .unwrap_err();
+    assert_eq!(std::fs::read(&partial).unwrap(), &bytes[..10]);
+    let message = error.to_string();
+    let (json, exit_code) = rendered(error);
+    assert_eq!(json["error"]["details"]["semantic_code"], "hub.unavailable");
+    assert_eq!(json["error"]["code"], "GF_IO");
+    assert_eq!(exit_code, 3);
+    assert!(message.contains("rerun to resume"), "{message}");
+    assert!(!message.contains(HUB_BODY), "{message}");
 }

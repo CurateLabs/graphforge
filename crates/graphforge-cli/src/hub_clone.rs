@@ -981,11 +981,11 @@ fn download_with_progress(
         // A Hub that asks for a longer pause than one wait may last gets its
         // own error, which says when to rerun.
         let Some(wait) = control.retry.wait(failures, retry_after) else {
-            return Err(failure);
+            return Err(resumable_failure(failure, offset));
         };
         if failures >= control.retry.attempts {
             return Err(if offset > 0 {
-                validation("hub.interrupted", "download is incomplete; rerun to resume")
+                resumable_failure(failure, offset)
             } else {
                 failure
             });
@@ -1750,6 +1750,25 @@ fn removal_order(
 ) -> Vec<(PathBuf, bool)> {
     entries.sort_by_key(|(path, _)| (*path == staging.lock, *path == staging.installed));
     entries
+}
+
+/// The error for a download that stopped with `offset` bytes kept. A Hub
+/// status that a later rerun may cure keeps its retry class (`hub.unavailable`,
+/// `hub.rate_limited`) and gains the resume guidance; any other failure of a
+/// partial download is `hub.interrupted`.
+fn resumable_failure(failure: graphforge_api::GfError, offset: u64) -> graphforge_api::GfError {
+    const GUIDANCE: &str = "download is incomplete; rerun to resume";
+    match failure {
+        graphforge_api::GfError::Storage(detail)
+            if offset > 0
+                && (detail.starts_with("hub.unavailable:")
+                    || detail.starts_with("hub.rate_limited:")) =>
+        {
+            graphforge_api::GfError::Storage(format!("{detail}; {GUIDANCE}"))
+        }
+        other if offset == 0 => other,
+        _ => validation("hub.interrupted", GUIDANCE),
+    }
 }
 
 #[allow(clippy::too_many_lines)]
