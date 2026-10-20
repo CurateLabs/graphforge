@@ -1968,7 +1968,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             full.package_digest,
-            "sha256:869da25f99c90864c321bf8c42aa3f1f3642c877b92bc34255c900d3083a525d"
+            "sha256:c20ff8c5533161824e2e7b7c296b166151e4fb2688636031cdae20b1c39c58b3"
         );
         assert_eq!(full.integrity, PortableIntegrity::Verified);
         assert_eq!(structure.integrity, PortableIntegrity::NotChecked);
