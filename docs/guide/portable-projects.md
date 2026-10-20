@@ -294,9 +294,10 @@ the system temporary directory: the package itself, plus the import's peak. The
 import extracts the payload into a private stage and then publishes a second
 copy of it into the project while the stage still exists, so a project package
 needs about two more payload lengths. A research package is also validated
-before it is published: its research files are copied into a validation store
-and each archived Version is rebuilt, so it may need up to three payload lengths
-for the import. A package that carries an ontology composition also writes
+before it is published: its research files are copied into a validation store,
+and each archived Version is rebuilt (an expanded graph through a temporary copy
+of the tree, then into the Version's own project), so it may need up to four
+payload lengths for the import when research content fills the package. A package that carries an ontology composition also writes
 two generated controls, each about the size of its authored ontologies, into the
 stage and again into the project. A package without an adjacency index spills additionally while
 the import derives one, which this estimate does not cover. Less is needed for
