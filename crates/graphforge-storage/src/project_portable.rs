@@ -170,15 +170,17 @@ pub fn verify_portable(
 ///
 /// Memory is bounded by the limits and `max_retained_control_bytes`, whatever
 /// the package size. A package with research files stages those files in a
-/// private directory in the system temporary directory; no other package
-/// writes anything. The verdict is the one [`verify_portable`] gives the same
+/// private directory inside `scratch` (the system temporary directory when
+/// `None`, as [`validate_research_package`] does); no other package writes
+/// anything. The verdict is the one [`verify_portable`] gives the same
 /// bytes in a file, apart from the report's `source`.
 pub fn verify_portable_stream(
     source: &mut dyn Read,
+    scratch: Option<&Path>,
     limits: PortableLimits,
     cancelled: Option<&AtomicBool>,
 ) -> Result<PortableReport, PortableError> {
-    scan_stream(source, limits, cancelled, None).map(|scan| scan.report)
+    scan_stream(source, limits, cancelled, scratch).map(|scan| scan.report)
 }
 
 /// A bundle verified in one pass, with the stage that holds its research files.
@@ -194,8 +196,9 @@ pub(crate) fn scan_stream(
     scratch: Option<&Path>,
 ) -> Result<StreamScan, PortableError> {
     check_cancel(cancelled)?;
-    let mut spill = research::Spill::new(scratch);
-    let scan = read_bundle(source, limits, cancelled, spill.sink(), None, || {
+    let scratch = scratch.map_or_else(std::env::temp_dir, Path::to_path_buf);
+    let mut spill = research::Spill::new(&scratch);
+    let scan = read_bundle(source, limits, cancelled, Some(spill.sink()), None, || {
         PortableError::new(PortableErrorCode::InvalidStructure, "trailing bytes")
     })?;
     let (report, entries) =
@@ -294,25 +297,13 @@ fn scan_entries(
 ) -> Result<(PortableReport, Vec<Entry>), PortableError> {
     let metadata = fs::symlink_metadata(source)
         .map_err(|_| PortableError::new(PortableErrorCode::Io, "source unavailable"))?;
-    // A bundle is read once. The research files that validation reads back
-    // by digest go to a stage: the importer's own, or a private one.
+    // The research files that validation reads back by digest come from the
+    // importer's own stage when it copies them, and from the file otherwise.
     let import_stage = sink.as_ref().map(|sink| sink.destination().to_path_buf());
-    let mut spill = (metadata.is_file() && sink.is_none() && mode == PortableMode::Full)
-        .then(|| research::Spill::new(None));
     let (report, entries) = if metadata.is_dir() {
         verify_expanded(source, mode, limits, cancelled, sink, written)
     } else if metadata.is_file() {
-        match sink {
-            Some(sink) => verify_bundle(source, mode, limits, cancelled, Some(sink), written),
-            None => verify_bundle(
-                source,
-                mode,
-                limits,
-                cancelled,
-                spill.as_mut().and_then(research::Spill::sink),
-                written,
-            ),
-        }
+        verify_bundle(source, mode, limits, cancelled, sink, written)
     } else {
         return Err(PortableError::new(
             PortableErrorCode::InvalidStructure,
@@ -328,12 +319,10 @@ fn scan_entries(
     if mode == PortableMode::Full {
         let reopen = if metadata.is_dir() {
             Reopen::Directory(source)
+        } else if import_stage.is_some() {
+            Reopen::Bundle(import_stage.as_deref())
         } else {
-            Reopen::Bundle(
-                import_stage
-                    .as_deref()
-                    .or_else(|| spill.as_ref().and_then(research::Spill::stage)),
-            )
+            Reopen::BundleFile(source)
         };
         authenticated_entries::validate_semantics(reopen, &entries, &report, limits, cancelled)?;
     }
@@ -1026,11 +1015,14 @@ fn read_bundle<R: Read + ?Sized>(
                 ));
             }
             let mut extra = [0u8; 1];
-            if reader
-                .read(&mut extra)
-                .map_err(|_| PortableError::new(PortableErrorCode::Io, "bundle read"))?
-                != 0
-            {
+            let count = loop {
+                match reader.read(&mut extra) {
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                    Err(_) => return Err(PortableError::new(PortableErrorCode::Io, "bundle read")),
+                    Ok(count) => break count,
+                }
+            };
+            if count != 0 {
                 return Err(on_trailing_bytes());
             }
             break;

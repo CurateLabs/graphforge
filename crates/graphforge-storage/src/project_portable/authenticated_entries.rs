@@ -14,6 +14,10 @@ pub(super) enum Reopen<'a> {
     Directory(&'a Path),
     /// A bundle: only the research files, which the scan copied to this stage.
     Bundle(Option<&'a Path>),
+    /// A bundle file on disk: the research files, read back at the offsets the
+    /// scan recorded. Validation reads them after the scan, as it always has,
+    /// so a local file needs no staging directory.
+    BundleFile(&'a Path),
     /// A bundle file served by [`super::PortablePackageIndex`]: random-access
     /// reads of an already scanned package at the offsets the scan recorded.
     /// Verification never uses this.
@@ -148,7 +152,7 @@ pub(super) fn read(
             "hard-linked control",
         ));
     }
-    if let (Reopen::Indexed(_), Some(offset)) = (source, entry.offset) {
+    if let (Reopen::Indexed(_) | Reopen::BundleFile(_), Some(offset)) = (source, entry.offset) {
         file.seek(SeekFrom::Start(offset))
             .map_err(|_| PortableError::at(PortableErrorCode::Io, path, "cannot seek control"))?;
     } else if before.len() != entry.length {
@@ -200,15 +204,16 @@ fn locate(source: Reopen<'_>, path: &str) -> Result<std::path::PathBuf, Portable
     Ok(match source {
         Reopen::Directory(root) => root.join(path),
         Reopen::Indexed(bundle) => bundle.to_path_buf(),
+        Reopen::BundleFile(bundle) if path.starts_with(research::NAMESPACE) => bundle.to_path_buf(),
         Reopen::Bundle(Some(stage)) if path.starts_with(research::NAMESPACE) => stage.join(path),
         Reopen::Bundle(None) if path.starts_with(research::NAMESPACE) => {
             return Err(PortableError::at(
                 PortableErrorCode::Io,
                 path,
-                "cannot create research validation scratch",
+                "research file was not staged",
             ));
         }
-        Reopen::Bundle(_) => {
+        Reopen::Bundle(_) | Reopen::BundleFile(_) => {
             return Err(PortableError::at(
                 PortableErrorCode::LimitExceeded,
                 path,

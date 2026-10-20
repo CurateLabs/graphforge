@@ -231,6 +231,7 @@ fn research_bundle_streams_to_the_file_verdict() {
     // The public facade, from a plain reader, gives the same verdict.
     let stream = crate::verify_portable_stream(
         &mut std::io::BufReader::new(std::fs::File::open(&package).unwrap()),
+        Some(scratch.path()),
         limits,
         None,
     )
@@ -275,8 +276,13 @@ fn research_bundle_streams_to_the_file_verdict() {
         None,
     )
     .unwrap_err();
-    let by_stream =
-        crate::verify_portable_stream(&mut std::io::Cursor::new(bytes), limits, None).unwrap_err();
+    let by_stream = crate::verify_portable_stream(
+        &mut std::io::Cursor::new(bytes),
+        Some(directory.path()),
+        limits,
+        None,
+    )
+    .unwrap_err();
     assert_eq!(by_file.code, by_stream.code);
     assert_eq!(by_file.entry, by_stream.entry);
 }
@@ -318,8 +324,13 @@ fn native_failure_is_refused_alike_from_a_file_and_a_stream(
         None,
     )
     .unwrap_err();
-    let by_stream =
-        crate::verify_portable_stream(&mut std::io::Cursor::new(forged), limits, None).unwrap_err();
+    let by_stream = crate::verify_portable_stream(
+        &mut std::io::Cursor::new(forged),
+        Some(directory),
+        limits,
+        None,
+    )
+    .unwrap_err();
     assert_eq!(by_file.code, PortableErrorCode::Incompatible);
     assert_eq!(by_stream.code, by_file.code);
     assert_eq!(by_stream.entry, by_file.entry);

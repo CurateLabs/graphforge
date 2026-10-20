@@ -269,6 +269,11 @@ pub(super) struct CopySink<'a> {
     destination: std::path::PathBuf,
     /// Only entries whose path starts with this prefix are copied.
     namespace: &'static str,
+    /// A private directory created in this parent when the first entry is
+    /// copied; `destination` is inside it. A sink without one writes to a
+    /// `destination` its caller created.
+    lazy_parent: Option<std::path::PathBuf>,
+    owner: Option<tempfile::TempDir>,
     observed: Option<&'a mut EntryObserver<'a>>,
     routes: BTreeSet<std::path::PathBuf>,
     track_removals: bool,
@@ -286,6 +291,8 @@ impl<'a> CopySink<'a> {
         Self {
             destination,
             namespace,
+            lazy_parent: None,
+            owner: None,
             observed,
             routes: BTreeSet::new(),
             track_removals,
@@ -294,8 +301,41 @@ impl<'a> CopySink<'a> {
             captures: BTreeMap::new(),
         }
     }
+    /// A sink that creates nothing until it copies its first entry, then
+    /// stages the entries under `namespace` in a private directory inside
+    /// `parent`; dropping the sink removes it.
+    pub(super) fn staged_in(parent: std::path::PathBuf, namespace: &'static str) -> Self {
+        let mut sink = Self::new(std::path::PathBuf::new(), namespace, None, false);
+        sink.lazy_parent = Some(parent);
+        sink
+    }
     pub(super) fn destination(&self) -> &Path {
         &self.destination
+    }
+    /// The stage, once an entry has been copied into a lazily created one.
+    pub(super) fn staged(&self) -> Option<&Path> {
+        (self.lazy_parent.is_none() || self.owner.is_some()).then_some(self.destination.as_path())
+    }
+    fn ensure_stage(&mut self, relative: &str) -> Result<(), PortableError> {
+        let Some(parent) = &self.lazy_parent else {
+            return Ok(());
+        };
+        if self.owner.is_none() {
+            let owner = tempfile::Builder::new()
+                .prefix(".graphforge-research-validation-")
+                .tempdir_in(parent)
+                .map_err(|error| {
+                    PortableError::at(
+                        PortableErrorCode::Io,
+                        relative,
+                        "cannot create research validation scratch",
+                    )
+                    .with_cause(error.kind().to_string())
+                })?;
+            self.destination = owner.path().join("verified");
+            self.owner = Some(owner);
+        }
+        Ok(())
     }
     pub(super) fn captures(&self) -> &BTreeMap<String, MaterializedCapture> {
         &self.captures
@@ -315,7 +355,7 @@ impl<'a> CopySink<'a> {
         for (relative, capture) in &self.captures {
             capture.authenticate(&self.destination.join(relative), cancelled)?;
         }
-        if self.destination.exists() {
+        if self.staged().is_some() && self.destination.exists() {
             sync_materialized_tree(&self.destination)?;
         }
         Ok(())
@@ -324,6 +364,7 @@ impl<'a> CopySink<'a> {
         if !relative.starts_with(self.namespace) {
             return Ok(None);
         }
+        self.ensure_stage(relative)?;
         let path = self.destination.join(relative);
         fs::create_dir_all(path.parent().expect("component parent")).map_err(|_| {
             PortableError::at(

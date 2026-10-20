@@ -80,7 +80,10 @@ fn parse_limits(input: Option<PortableLimitsInput>) -> Result<PortableLimits> {
             Some(value) => crate::node_u64(Some(value), "maxTagManifestBytes")?,
             None => defaults.max_tag_manifest_bytes,
         },
-        max_retained_control_bytes: defaults.max_retained_control_bytes,
+        max_retained_control_bytes: match input.max_retained_control_bytes {
+            Some(value) => crate::node_u64(Some(value), "maxRetainedControlBytes")?,
+            None => defaults.max_retained_control_bytes,
+        },
         max_path_bytes: match input.max_path_bytes {
             Some(value) => crate::node_usize(Some(value), defaults.max_path_bytes, "maxPathBytes")?,
             None => defaults.max_path_bytes,
@@ -346,6 +349,8 @@ pub struct PortableLimitsInput {
     pub max_manifest_bytes: Option<BigInt>,
     pub max_semantic_manifest_bytes: Option<BigInt>,
     pub max_tag_manifest_bytes: Option<BigInt>,
+    /// Bytes the bundle reader may retain for controls it reads after the scan.
+    pub max_retained_control_bytes: Option<BigInt>,
     pub max_path_bytes: Option<BigInt>,
     pub copy_buffer_bytes: Option<BigInt>,
 }

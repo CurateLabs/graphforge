@@ -14,7 +14,7 @@ fn by_file(bytes: &[u8], limits: PortableLimits) -> Result<PortableReport, Porta
 }
 
 fn by_stream(bytes: &[u8], limits: PortableLimits) -> Result<PortableReport, PortableError> {
-    verify_portable_stream(&mut Cursor::new(bytes), limits, None)
+    verify_portable_stream(&mut Cursor::new(bytes), None, limits, None)
 }
 
 /// A report as JSON without its `source`, the one field that may differ.
@@ -270,7 +270,7 @@ fn a_repeated_fixed_control_is_refused_at_its_second_occurrence() {
         max_retained_control_bytes: 0,
         ..PortableLimits::default()
     };
-    let error = verify_portable_stream(&mut reader, limits, None).unwrap_err();
+    let error = verify_portable_stream(&mut reader, None, limits, None).unwrap_err();
     assert_eq!(error.code, PortableErrorCode::InvalidStructure);
     assert_eq!(error.entry.as_deref(), Some("bag-info.txt"));
     // The first occurrence was read; the second was refused at its header.
@@ -306,7 +306,7 @@ fn the_stream_entry_point_does_not_buffer_its_input() {
         max_retained_control_bytes: 1024,
         ..PortableLimits::default()
     };
-    let error = verify_portable_stream(&mut reader, limits, None).unwrap_err();
+    let error = verify_portable_stream(&mut reader, None, limits, None).unwrap_err();
     assert_eq!(error.code, PortableErrorCode::InvalidStructure);
     assert!(
         stats.consumed.get() <= (3 * (2 * MIB + 512) + 1024) as u64,

@@ -13,49 +13,25 @@ type ResearchArchive = (ResearchRegistry, BTreeMap<String, u64>);
 /// Private stage holding the research files of a bundle that is read once and
 /// never re-read. Research validation reads a registry and then objects chosen
 /// by digest from the registry, and canonical order puts the objects first, so
-/// the files cannot be kept in memory; they are staged on disk instead. A
-/// package without research files stages nothing.
+/// the files cannot be kept in memory; they are staged on disk instead. The
+/// directory is created when the first research file arrives, so a package
+/// without research files writes nothing.
 pub(crate) struct Spill {
-    /// Holds the private directory; dropping it removes the stage.
-    _owner: Option<tempfile::TempDir>,
-    sink: Option<super::materialization::CopySink<'static>>,
+    sink: super::materialization::CopySink<'static>,
 }
 
 impl Spill {
-    /// `scratch` is the directory that holds the stage, or the system
-    /// temporary directory. A directory that cannot be created is reported
-    /// only by a package that has research files to stage.
-    pub(super) fn new(scratch: Option<&Path>) -> Self {
-        let parent = scratch.map_or_else(std::env::temp_dir, Path::to_path_buf);
-        match tempfile::Builder::new()
-            .prefix(".graphforge-research-validation-")
-            .tempdir_in(parent)
-        {
-            Ok(owner) => {
-                let sink = super::materialization::CopySink::new(
-                    owner.path().join("verified"),
-                    NAMESPACE,
-                    None,
-                    false,
-                );
-                Self {
-                    _owner: Some(owner),
-                    sink: Some(sink),
-                }
-            }
-            Err(_) => Self {
-                _owner: None,
-                sink: None,
-            },
+    /// A stage that will live in a private directory inside `scratch`.
+    pub(super) fn new(scratch: &Path) -> Self {
+        Self {
+            sink: super::materialization::CopySink::staged_in(scratch.to_path_buf(), NAMESPACE),
         }
     }
-    pub(super) fn sink(&mut self) -> Option<&mut super::materialization::CopySink<'static>> {
-        self.sink.as_mut()
+    pub(super) fn sink(&mut self) -> &mut super::materialization::CopySink<'static> {
+        &mut self.sink
     }
     pub(super) fn stage(&self) -> Option<&Path> {
-        self.sink
-            .as_ref()
-            .map(super::materialization::CopySink::destination)
+        self.sink.staged()
     }
     /// Authenticate the staged files and return the stage with the captures
     /// that bind them. The stage lives as long as `self`.
@@ -63,14 +39,11 @@ impl Spill {
         &self,
         cancelled: Option<&AtomicBool>,
     ) -> Result<(&Path, &BTreeMap<String, super::MaterializedCapture>), PortableError> {
-        let sink = self.sink.as_ref().ok_or_else(|| {
-            PortableError::new(
-                PortableErrorCode::Io,
-                "cannot create research validation scratch",
-            )
+        let stage = self.sink.staged().ok_or_else(|| {
+            PortableError::new(PortableErrorCode::Io, "research files were not staged")
         })?;
-        sink.authenticate_and_sync(cancelled)?;
-        Ok((sink.destination(), sink.captures()))
+        self.sink.authenticate_and_sync(cancelled)?;
+        Ok((stage, self.sink.captures()))
     }
 }
 
