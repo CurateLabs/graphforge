@@ -13,6 +13,7 @@ from unittest import mock
 from graphforge_bench import portable_receipt_contracts as contracts
 from graphforge_bench.native_ladder_bundle import NativeBundleError, validate_native_bundle
 from graphforge_bench.native_rung import NativeRungError, read_native_rung
+from graphforge_bench.progressive_run import ControllerError, assemble_rung_evidence
 
 ROOT = Path(__file__).resolve().parents[1]
 BUNDLE = ROOT / "fixtures/parity/ladder-bundle"
@@ -79,6 +80,39 @@ class RecordedEvidenceContractTests(unittest.TestCase):
             self.assertRaisesRegex(NativeBundleError, "not those emitted"),
         ):
             validate_native_bundle(BUNDLE)
+
+
+class LiveAssemblyContractTests(unittest.TestCase):
+    """Live ingestion needs the exact current contract on every portable receipt."""
+
+    def documents(self, *, verify: str) -> tuple[dict, dict]:
+        text = (BUNDLE / "s18-graphforge.json").read_text(encoding="utf-8")
+        for family in ("export", "import"):
+            text = text.replace(
+                f"graphforge-portable-{family}/2", f"graphforge-portable-{family}/1"
+            )
+        text = text.replace("graphforge-portable-verify/2", f"graphforge-portable-verify/{verify}")
+        graphforge = json.loads(text)
+        benchexec = json.loads((BUNDLE / "s18-benchexec.json").read_text(encoding="utf-8"))
+        benchexec["graphforge"] = graphforge
+        return graphforge, benchexec
+
+    def assemble(self, graphforge: dict, benchexec: dict) -> dict:
+        return assemble_rung_evidence(
+            root=ROOT,
+            scale=18,
+            graphforge=graphforge,
+            benchexec=benchexec,
+            profile_id="graph500-s18-local",
+            source="progressive_profile",
+        )
+
+    def test_all_current_receipts_assemble(self) -> None:
+        self.assertEqual(self.assemble(*self.documents(verify="1"))["status"], "passed")
+
+    def test_mixed_revision_receipts_are_refused_live(self) -> None:
+        with self.assertRaisesRegex(ControllerError, "graphforge-portable-verify/2"):
+            self.assemble(*self.documents(verify="2"))
 
 
 if __name__ == "__main__":

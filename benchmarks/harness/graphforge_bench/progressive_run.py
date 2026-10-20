@@ -35,7 +35,7 @@ from graphforge_bench.local_admission import qualify_local_host
 from graphforge_bench.phase_cgroup import EVIDENCE_NAME as PHASE_SWAP_EVIDENCE
 from graphforge_bench.phase_cgroup import PhaseSwapSampler
 from graphforge_bench.portable_receipt_contracts import CURRENT as CURRENT_PORTABLE_CONTRACTS
-from graphforge_bench.portable_receipt_contracts import PortableContracts
+from graphforge_bench.portable_receipt_contracts import PortableContracts, stray_contracts
 from graphforge_bench.progressive_qualification import QualificationError, load_profiles, project
 from graphforge_bench.progressive_queries import ORDERED_LIMIT_ROW_COUNT
 
@@ -1211,6 +1211,12 @@ def assemble_rung_evidence(
 ) -> dict[str, Any]:
     if graphforge.get("status") != "passed" or benchexec.get("outcome") != "passed":
         raise ControllerError("a failed execution cannot produce passed rung evidence")
+    stray = stray_contracts(graphforge, contracts)
+    if stray:
+        raise ControllerError(
+            f"portable receipt contracts {sorted(set(stray))} are not the required "
+            f"{contracts.export}, {contracts.import_}, {contracts.verify}"
+        )
     committed_import = _phase_bound_receipt(
         graphforge,
         "ingest",

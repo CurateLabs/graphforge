@@ -1477,7 +1477,7 @@ fn sanitize_receipt(value: &serde_json::Value) -> Option<serde_json::Value> {
                     .get("application_io")
                     .is_none_or(sanitized_lifecycle_application_io)
         }),
-        Some(contract) if contract.starts_with("graphforge-portable-") => copy_selected_receipt(
+        Some("graphforge-portable-verify/1") => copy_selected_receipt(
             object,
             &[
                 "contract",
@@ -3125,6 +3125,27 @@ mod tests {
             .remove("source_project_current_allocated_bytes");
         let encoded = serde_json::to_vec(&missing).expect("incomplete lifecycle receipt JSON");
         assert!(parse_receipts(&encoded, true).is_err());
+    }
+
+    #[test]
+    fn portable_receipts_are_admitted_only_under_their_exact_current_contract() {
+        let verify = |contract: &str| {
+            sanitize_receipt(&serde_json::json!({
+                "contract": contract,
+                "package_digest": format!("sha256:{}", "0".repeat(64)),
+                "integrity": "verified",
+            }))
+        };
+        assert!(verify("graphforge-portable-verify/1").is_some());
+        for contract in [
+            "graphforge-portable-verify/2",
+            "graphforge-portable-export/2",
+            "graphforge-portable-import/2",
+            "graphforge-portable-preview/1",
+            "graphforge-portable-verify/10",
+        ] {
+            assert!(verify(contract).is_none(), "{contract} must not be admitted");
+        }
     }
 
     #[test]
