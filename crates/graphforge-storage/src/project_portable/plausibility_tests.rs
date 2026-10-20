@@ -3,6 +3,11 @@
 //! and packages built to look like one.
 use super::stream_tests::{Generated, MIB, by_file, by_stream, sans_source};
 use super::*;
+use parquet::basic::Encoding;
+use parquet::file::properties::WriterVersion;
+
+#[path = "../../tests/support/hostile_parquet.rs"]
+mod hostile;
 
 const HUB_BUNDLE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -156,9 +161,10 @@ fn zero_digest(length: u64) -> [u8; 32] {
 }
 
 /// The fixture package plus one `evidence` component whose only file is
-/// `length` zero bytes with SHA-256 `digest`. Every control the package carries
-/// is rebuilt to describe it, so the package is valid.
-fn padded_package(length: u64, digest: [u8; 32]) -> Vec<(String, Body)> {
+/// `evidence`, with SHA-256 `digest`. Every control the package carries is
+/// rebuilt to describe it, so the package is valid.
+fn evidence_package(evidence: Body, digest: [u8; 32]) -> Vec<(String, Body)> {
+    let length = evidence.length();
     let mut manifest: Value = serde_json::from_str(include_str!(
         "../../../../tests/fixtures/portable/ontology-only.manifest.json"
     ))
@@ -208,7 +214,7 @@ fn padded_package(length: u64, digest: [u8; 32]) -> Vec<(String, Body)> {
     vec![
         ("bag-info.txt".into(), Body::Bytes(BAG_INFO.to_vec())),
         ("bagit.txt".into(), Body::Bytes(BAGIT.to_vec())),
-        (EVIDENCE_PATH.into(), Body::Zeros(length)),
+        (EVIDENCE_PATH.into(), evidence),
         (ontology_path.into(), Body::Bytes(b"{}".to_vec())),
         (MANIFEST_PATH.into(), Body::Bytes(manifest)),
         ("manifest-sha256.txt".into(), Body::Bytes(inventory.into())),
@@ -218,6 +224,11 @@ fn padded_package(length: u64, digest: [u8; 32]) -> Vec<(String, Body)> {
 
 /// The canonical bundle of `entries`, produced one part at a time so that a
 /// zero-filled entry is never held whole. Zero entries must fill whole blocks.
+/// [`evidence_package`] around `length` zero bytes.
+fn padded_package(length: u64, digest: [u8; 32]) -> Vec<(String, Body)> {
+    evidence_package(Body::Zeros(length), digest)
+}
+
 fn bundle_stream(entries: Vec<(String, Body)>) -> impl Iterator<Item = Vec<u8>> {
     entries
         .into_iter()
@@ -243,6 +254,31 @@ fn bundle_stream(entries: Vec<(String, Body)>) -> impl Iterator<Item = Vec<u8>> 
 
 fn bundle_bytes(entries: Vec<(String, Body)>) -> Vec<u8> {
     bundle_stream(entries).flatten().collect()
+}
+
+#[test]
+fn evidence_that_is_itself_parquet_is_never_walked_on_either_path() {
+    // Unfunded pages would be refused anywhere a decoder could reach them.
+    let unfunded = hostile::string_file(
+        Encoding::DELTA_LENGTH_BYTE_ARRAY,
+        WriterVersion::PARQUET_1_0,
+        64,
+    );
+    let digest = Sha256::digest(&unfunded).into();
+    let bytes = bundle_bytes(evidence_package(Body::Bytes(unfunded.clone()), digest));
+    // Under a lowered threshold the same bytes would spill to scratch if walked.
+    let limits = PortableLimits {
+        max_parquet_walk_bytes: 16,
+        ..PortableLimits::default()
+    };
+    let file = by_file(&bytes, limits).unwrap();
+    let stream = by_stream(&bytes, limits).unwrap();
+    assert_eq!(sans_source(&file), sans_source(&stream));
+    assert_eq!(stream.bytes_by_kind["evidence"], unfunded.len() as u64);
+    assert_eq!(
+        stream.plausibility.parquet.map(|parquet| parquet.files),
+        Some(0)
+    );
 }
 
 #[test]
@@ -279,8 +315,21 @@ fn peak_resident_bytes() -> u64 {
         * 1024
 }
 
+/// Bytes this thread has passed to `write(2)` so far, to any file. The scan
+/// runs on the calling thread, so other tests' writes do not count.
+#[cfg(target_os = "linux")]
+fn written_bytes() -> u64 {
+    let io = fs::read_to_string("/proc/thread-self/io").unwrap();
+    let line = io
+        .lines()
+        .find(|line| line.starts_with("wchar:"))
+        .expect("wchar");
+    line.split_whitespace().nth(1).unwrap().parse().unwrap()
+}
+
 /// A 3 GiB opaque artifact in an otherwise valid package: a stream verifies it
-/// without holding it, writes nothing to disk, and reports it as evidence.
+/// without holding it, writes next to nothing to disk, and reports it as
+/// evidence.
 #[cfg(target_os = "linux")]
 #[test]
 fn a_three_gib_evidence_entry_streams_in_bounded_memory_with_no_disk() {
@@ -297,6 +346,7 @@ fn a_three_gib_evidence_entry_streams_in_bounded_memory_with_no_disk() {
         + 1024;
     let (mut reader, stats) = Generated::new(bundle_stream(package));
     let scratch = tempfile::tempdir().unwrap();
+    let written_before = written_bytes();
     let report = verify_portable_stream(
         &mut reader,
         Some(scratch.path()),
@@ -304,6 +354,7 @@ fn a_three_gib_evidence_entry_streams_in_bounded_memory_with_no_disk() {
         None,
     )
     .unwrap();
+    let written = written_bytes() - written_before;
     assert_eq!(stats.consumed.get(), expected_stream, "the whole stream");
     assert_eq!(report.source, PortableSource::Stream);
     assert_eq!(report.integrity, PortableIntegrity::Verified);
@@ -314,11 +365,9 @@ fn a_three_gib_evidence_entry_streams_in_bounded_memory_with_no_disk() {
         "{:?}",
         report.plausibility
     );
-    assert_eq!(
-        fs::read_dir(scratch.path()).unwrap().count(),
-        0,
-        "the stream wrote to disk"
-    );
+    // Opaque evidence is never staged for a page walk: the scan writes nothing
+    // but what the stream's own controls need, whatever the entry's size.
+    assert!(written < MIB as u64, "the stream wrote {written} bytes");
     let peak = peak_resident_bytes();
     assert!(peak < GIB, "peak resident memory was {peak} bytes");
 }

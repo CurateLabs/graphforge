@@ -88,6 +88,10 @@ fn parse_limits(input: Option<PortableLimitsInput>) -> Result<PortableLimits> {
             Some(value) => crate::node_u64(Some(value), "maxParquetWalkBytes")?,
             None => defaults.max_parquet_walk_bytes,
         },
+        max_parquet_footer_bytes: match input.max_parquet_footer_bytes {
+            Some(value) => crate::node_u64(Some(value), "maxParquetFooterBytes")?,
+            None => defaults.max_parquet_footer_bytes,
+        },
         max_path_bytes: match input.max_path_bytes {
             Some(value) => crate::node_usize(Some(value), defaults.max_path_bytes, "maxPathBytes")?,
             None => defaults.max_path_bytes,
@@ -381,6 +385,8 @@ pub struct PortableLimitsInput {
     /// Largest Parquet entry a stream holds in memory to walk its pages; a
     /// larger one is staged in scratch.
     pub max_parquet_walk_bytes: Option<BigInt>,
+    /// Largest Parquet footer whose row counts the report carries.
+    pub max_parquet_footer_bytes: Option<BigInt>,
     pub max_path_bytes: Option<BigInt>,
     pub copy_buffer_bytes: Option<BigInt>,
 }

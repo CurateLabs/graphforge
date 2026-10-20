@@ -338,7 +338,8 @@ fn scan_entries(
             Reopen::BundleFile(source)
         };
         report.plausibility.parquet = Some(
-            authenticated_entries::validate_parquet_profile(source, &entries, cancelled)?.finish(),
+            authenticated_entries::validate_parquet_profile(source, &entries, limits, cancelled)?
+                .finish(),
         );
         authenticated_entries::validate_semantics(reopen, &entries, &report, limits, cancelled)?;
     }
@@ -1014,7 +1015,7 @@ fn read_bundle<R: Read + ?Sized>(
     let mut census = Census::default();
     let mut path_set = PathSet::default();
     let mut inventory_verdict = None;
-    let mut parquet = walk_parquet.map(|_| ParquetSignals::default());
+    let mut parquet = walk_parquet.map(|_| ParquetSignals::new(limits.max_parquet_footer_bytes));
     let mut pending_pax: Option<(pax::PaxHeader, String)> = None;
     let mut retained_pool = limits.max_retained_control_bytes;
     // Bytes consumed so far; payload offsets are counted, never asked of the reader.
@@ -1155,7 +1156,7 @@ fn read_bundle<R: Read + ?Sized>(
                 })
             });
         let mut walk = walk_parquet
-            .filter(|_| entry_path.starts_with("data/components/") && size >= 12)
+            .filter(|_| authenticated_entries::reaches_a_decoder(&entry_path) && size >= 12)
             .map(|scratch| {
                 ParquetWalk::new(&entry_path, size, limits.max_parquet_walk_bytes, scratch)
             });

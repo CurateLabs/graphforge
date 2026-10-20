@@ -57,22 +57,32 @@ pub(super) fn plausibility(
 
 /// Footer facts of the graph-tree Parquet files, accumulated one entry at a
 /// time as the page walk admits them.
-#[derive(Default)]
-pub(super) struct ParquetSignals(PortableParquetSignals);
+pub(super) struct ParquetSignals {
+    signals: PortableParquetSignals,
+    /// Footers larger than this are admitted but not reported.
+    max_footer_bytes: u64,
+}
 
 impl ParquetSignals {
+    pub(super) fn new(max_footer_bytes: u64) -> Self {
+        Self {
+            signals: PortableParquetSignals::default(),
+            max_footer_bytes,
+        }
+    }
+
     /// Record one component entry: its package path and, when the page walk
     /// admitted it as Parquet, the shape its footer declares.
     pub(super) fn observe(&mut self, path: &str, shape: Option<ParquetShape>) {
         let Some(relative) = path.strip_prefix(GRAPH_TREE) else {
             return;
         };
-        if !relative.ends_with(".parquet") {
+        if !relative.to_ascii_lowercase().ends_with(".parquet") {
             return;
         }
-        let signals = &mut self.0;
+        let signals = &mut self.signals;
         signals.files = signals.files.saturating_add(1);
-        let Some(shape) = shape else {
+        let Some(shape) = shape.filter(|shape| shape.footer_bytes <= self.max_footer_bytes) else {
             return;
         };
         signals.files_with_footer = signals.files_with_footer.saturating_add(1);
@@ -88,6 +98,6 @@ impl ParquetSignals {
     }
 
     pub(super) fn finish(self) -> PortableParquetSignals {
-        self.0
+        self.signals
     }
 }

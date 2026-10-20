@@ -126,6 +126,8 @@ pub(crate) fn page_encodings_are_funded(header: &PageHeader, physical: Type) -> 
 pub(crate) struct ParquetShape {
     pub(crate) rows: u64,
     pub(crate) row_groups: u64,
+    /// Bytes of the Thrift footer, not counting its length and magic.
+    pub(crate) footer_bytes: u64,
 }
 
 /// Walk the actual page headers of a Parquet object and refuse any encoding
@@ -164,6 +166,7 @@ pub(crate) fn admit_pages<R: ChunkReader>(source: &R) -> Result<ParquetShape, Pa
         rows: u64::try_from(metadata.file_metadata().num_rows())
             .map_err(|_| malformed("Parquet footer has a negative row count"))?,
         row_groups: metadata.num_row_groups() as u64,
+        footer_bytes: footer,
     })
 }
 

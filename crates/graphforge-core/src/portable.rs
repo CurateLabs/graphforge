@@ -49,6 +49,11 @@ pub struct PortableLimits {
     /// routine, so the verdict never depends on this value or on the source:
     /// it only trades memory for scratch writes.
     pub max_parquet_walk_bytes: u64,
+    /// Largest Parquet footer whose row counts the report carries. A larger
+    /// footer is still admitted (page admission has its own bound) and the
+    /// package still verifies; the file simply reports no footer signals, so
+    /// `files_with_footer` does not count it.
+    pub max_parquet_footer_bytes: u64,
     /// UTF-8 bytes in one portable path.
     pub max_path_bytes: usize,
     /// Bytes in the streaming copy buffer.
@@ -96,6 +101,7 @@ impl Default for PortableLimits {
             max_tag_manifest_bytes: 4 * 1024 * 1024,
             max_retained_control_bytes: 256 * 1024 * 1024,
             max_parquet_walk_bytes: 64 * 1024 * 1024,
+            max_parquet_footer_bytes: 16 * 1024 * 1024,
             max_path_bytes: 4096,
             copy_buffer_bytes: 1024 * 1024,
         }

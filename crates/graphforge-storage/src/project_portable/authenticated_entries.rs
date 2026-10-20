@@ -263,6 +263,28 @@ impl parquet::file::reader::ChunkReader for EntryWindow {
     }
 }
 
+/// Whether the engine can ever hand `entry_path` to a Parquet decoder, which
+/// is exactly the set of entries the page walk must cover: the walk exists so
+/// that no decoder sees an unwalked page, and an entry no decoder opens needs
+/// neither the walk nor the scratch it costs a stream.
+///
+/// Only component entries are candidates; the package controls are JSON and
+/// text. Among components, `evidence` is opaque data authored outside the
+/// engine: the exporter never emits that kind for its own participants
+/// (`project_portable_selection::component_kind`), and import opens Parquet
+/// only under the graph tree (`project_portable_import.rs`, the
+/// `package_graph_tree` root). Everything else may be decoded, so it is
+/// walked: when unsure, walk.
+///
+/// Both walks use this one function: [`ParquetWalk`] for a stream and
+/// [`validate_parquet_profile`] for a file or directory.
+pub(super) fn reaches_a_decoder(entry_path: &str) -> bool {
+    entry_path
+        .strip_prefix("data/components/")
+        .and_then(|rest| rest.split('/').next())
+        .is_some_and(|kind| kind != "evidence")
+}
+
 /// What the Parquet page walk needs of one streamed entry. A stream cannot be
 /// read back, so the entry is kept while it streams past: in memory up to
 /// `max_parquet_walk_bytes`, in an unnamed scratch file beyond that (the page
@@ -387,14 +409,15 @@ pub(super) fn refuse_profile(
 pub(super) fn validate_parquet_profile(
     source: &Path,
     entries: &[Entry],
+    limits: PortableLimits,
     cancelled: Option<&AtomicBool>,
 ) -> Result<ParquetSignals, PortableError> {
     use crate::parquet_encoding_profile::admit_pages;
 
-    let mut signals = ParquetSignals::default();
+    let mut signals = ParquetSignals::new(limits.max_parquet_footer_bytes);
     for entry in entries
         .iter()
-        .filter(|entry| entry.path.starts_with("data/components/"))
+        .filter(|entry| reaches_a_decoder(&entry.path))
     {
         check_cancel(cancelled)?;
         if entry.length < 12 {
