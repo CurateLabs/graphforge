@@ -417,6 +417,22 @@ separately from integrity, and only then publishes the destination. Cancellation
 missing blobs, digest mismatch, incompatible media types, and auth/transport
 failures never leave a successful receipt or a claimed local package.
 
+The layer is never held in memory. Publish digests the bundle in one pass and
+streams it in a second; pull streams the layer into the exclusively created
+staging file while hashing, and only a layer whose length and digest match the
+manifest descriptor reaches verification and admission. Bundle size therefore
+does not change peak memory (a fixed copy buffer, `copy_buffer_bytes`). Config
+and manifest documents stay buffered under the 10 MiB response bound.
+
+Over HTTP a layer moves as a sequence of requests: OCI chunked upload sessions
+(`PATCH` with `Content-Range`, then a digest-verified `PUT`) and ranged `GET`s,
+8 MiB each by default (`HttpOciTransfer`). Each request carries its own
+60-second timeout instead of one deadline for the whole transfer, so a long
+transfer completes as long as every request does. Pull requires the registry
+to honour `Range`. An interrupted push or pull is not resumed: the registry
+admits a blob only on the final digest-verified `PUT`, and a pull removes its
+staging file, so a rerun starts clean and no partial package is admitted.
+
 Credentials stay caller-owned (secure providers/stdin). They are never
 persisted or emitted in receipts, errors, or progress events. HTTPS is the
 default; plain HTTP is an explicit `insecure_http` opt-in for disposable local

@@ -4,6 +4,8 @@ use crate::portable::{PortableSelection, PortableV2ExportRequest, PortableV2Impo
 use crate::{GraphForge, OperationId};
 use arrow::array::Array;
 use graphforge_storage::{PortableV2Output, PortableV2SelectionProfile};
+use graphforge_ir::IrLiteral;
+use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::thread;
@@ -279,4 +281,154 @@ fn http_and_memory_receipts_match_and_http_package_reopens_durably() {
         .unwrap();
     assert_eq!(values.len(), 1);
     assert_eq!(values.value(0), "Ada");
+}
+
+/// A verified bundle whose size is dominated by `docs` incompressible-ish
+/// string properties of `doc_bytes` each.
+fn export_large_bundle(dir: &Path, docs: usize, doc_bytes: usize) -> PathBuf {
+    let graph = GraphForge::new(dir.join("large-source").to_str()).unwrap();
+    let mut state = 0x9E37_79B9_7F4A_7C15_u64;
+    for _ in 0..docs {
+        let body: String = (0..doc_bytes)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                char::from(b'a' + (state % 26) as u8)
+            })
+            .collect();
+        graph
+            .execute_with_params(
+                "CREATE (:Doc {body:$body})",
+                &HashMap::from([("body".to_owned(), IrLiteral::Str(body.into()))]),
+            )
+            .unwrap();
+    }
+    let package = dir.join("large.gfpb");
+    graph
+        .export_portable_v2(
+            &PortableV2ExportRequest {
+                selection: PortableSelection::Current,
+                output_path: package.clone(),
+                representation: PortableV2Output::Bundle,
+                profile: PortableV2SelectionProfile::Complete,
+                subset: None,
+                limits: PortableV2Limits::default(),
+            },
+            None,
+            |_| {},
+        )
+        .unwrap();
+    package
+}
+
+fn publish_over_http(
+    server: &RegistryServer,
+    package: &Path,
+    tag: Option<&str>,
+) -> Result<graphforge_core::portable::PortableV2OciReference, PortableV2Error> {
+    crate::publish_portable_v2_oci(
+        &crate::PortableV2OciPublishFacadeRequest {
+            package_path: package.to_path_buf(),
+            registry: server.host.clone(),
+            repository: "tests/portable".into(),
+            tag: tag.map(str::to_owned),
+            limits: PortableV2Limits::default(),
+            authenticity: Default::default(),
+            signature: None,
+            insecure_http: true,
+            credential: None,
+        },
+        None,
+    )
+}
+
+fn pull_over_http(
+    server: &RegistryServer,
+    reference: &str,
+    destination: &Path,
+) -> Result<graphforge_core::portable::PortableV2OciPullReceipt, PortableV2Error> {
+    crate::pull_portable_v2_oci(
+        &crate::PortableV2OciPullFacadeRequest {
+            registry: server.host.clone(),
+            repository: "tests/portable".into(),
+            reference: reference.to_owned(),
+            expected_oci_digest: None,
+            destination: destination.to_path_buf(),
+            limits: PortableV2Limits::default(),
+            authenticity: Default::default(),
+            insecure_http: true,
+            credential: None,
+        },
+        None,
+    )
+}
+
+const LARGE_DOCS: usize = 24;
+
+#[test]
+fn a_bundle_far_larger_than_the_response_bound_publishes_and_pulls_over_http() {
+    let dir = tempfile::tempdir().unwrap();
+    let package = export_large_bundle(dir.path(), LARGE_DOCS, 1024 * 1024);
+    let bytes = fs::read(&package).unwrap();
+    assert!(bytes.len() as u64 > graphforge_portable_oci::MAX_RESPONSE_BYTES);
+    let server = RegistryServer::start();
+    let published = publish_over_http(&server, &package, None).unwrap();
+    assert_eq!(
+        server
+            .registry
+            .get_blob("tests/portable", &graphforge_portable_oci::digest_sha256(&bytes))
+            .unwrap(),
+        bytes
+    );
+    let destination = dir.path().join("pulled.gfpb");
+    let pulled = pull_over_http(&server, &published.oci_manifest_digest, &destination).unwrap();
+    assert_eq!(pulled.report.package_digest, published.package_digest);
+    assert_eq!(fs::read(&destination).unwrap(), bytes);
+}
+
+#[test]
+fn an_interrupted_http_push_admits_no_package_and_a_rerun_completes() {
+    let dir = tempfile::tempdir().unwrap();
+    let package = export_large_bundle(dir.path(), LARGE_DOCS, 1024 * 1024);
+    let layer = graphforge_portable_oci::digest_sha256(&fs::read(&package).unwrap());
+    let server = RegistryServer::start_with(ServerFaults {
+        drop_patch: 2,
+        ..ServerFaults::default()
+    });
+    assert_eq!(
+        publish_over_http(&server, &package, Some("latest"))
+            .unwrap_err()
+            .code,
+        PortableV2ErrorCode::Io
+    );
+    assert!(!server.registry.blob_exists("tests/portable", &layer).unwrap());
+    assert!(server.registry.get_manifest("tests/portable", "latest").is_err());
+    let published = publish_over_http(&server, &package, Some("latest")).unwrap();
+    assert!(server.registry.blob_exists("tests/portable", &layer).unwrap());
+    let destination = dir.path().join("pulled.gfpb");
+    pull_over_http(&server, &published.oci_manifest_digest, &destination).unwrap();
+}
+
+#[test]
+fn an_interrupted_http_pull_leaves_no_stage_or_package_and_a_rerun_completes() {
+    let dir = tempfile::tempdir().unwrap();
+    let package = export_large_bundle(dir.path(), LARGE_DOCS, 1024 * 1024);
+    let server = RegistryServer::start_with(ServerFaults {
+        drop_range: 2,
+        ..ServerFaults::default()
+    });
+    let published = publish_over_http(&server, &package, None).unwrap();
+    let destination = dir.path().join("pulled.gfpb");
+    let stage = dir.path().join(".pulled.gfpb.oci.partial");
+    assert_eq!(
+        pull_over_http(&server, &published.oci_manifest_digest, &destination)
+            .unwrap_err()
+            .code,
+        PortableV2ErrorCode::Io
+    );
+    assert!(!destination.exists());
+    assert!(!stage.exists());
+    pull_over_http(&server, &published.oci_manifest_digest, &destination).unwrap();
+    assert_eq!(fs::read(&destination).unwrap(), fs::read(&package).unwrap());
 }
