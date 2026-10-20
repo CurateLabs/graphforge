@@ -32,7 +32,7 @@ use std::path::Path;
 
 use arrow::array::{Array, StringArray};
 use graphforge_api::{
-    GraphForge, PortableSelection, PortableExportRequest, PortableLimits, PortableOutput,
+    GraphForge, PortableExportRequest, PortableLimits, PortableOutput, PortableSelection,
     PortableSelectionProfile,
 };
 use graphforge_storage::resolve_project_generation;

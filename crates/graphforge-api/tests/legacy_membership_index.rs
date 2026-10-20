@@ -14,8 +14,8 @@ use std::sync::Arc;
 
 use arrow::array::{FixedSizeBinaryArray, RecordBatch, StringArray};
 use graphforge_api::{
-    GraphForge, OperationId, PortableSelection, PortableExportRequest, PortableImportRequest,
-    PortableLimits, PortableOutput, PortableSelectionProfile, PortableVerifyRequest,
+    GraphForge, OperationId, PortableExportRequest, PortableImportRequest, PortableLimits,
+    PortableOutput, PortableSelection, PortableSelectionProfile, PortableVerifyRequest,
     bulk_edge_input_schema, bulk_node_input_schema, verify_portable,
 };
 use graphforge_core::portable::PortableMode;

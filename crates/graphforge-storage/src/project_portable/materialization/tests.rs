@@ -240,14 +240,7 @@ fn materialization_refuses_corruption_of_written_output_with_unchanged_source() 
 
 fn bundle_from_expanded(source: &Path) -> tempfile::NamedTempFile {
     let mut paths = Vec::new();
-    walk(
-        source,
-        source,
-        &mut paths,
-        PortableLimits::default(),
-        None,
-    )
-    .unwrap();
+    walk(source, source, &mut paths, PortableLimits::default(), None).unwrap();
     paths.sort();
     let mut bytes = Vec::new();
     for path in paths {

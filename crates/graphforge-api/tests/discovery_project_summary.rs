@@ -4,10 +4,10 @@
 use graphforge_api::{
     ActivationMode, ActivationProfileChangeRequest, AdoptOntologyRequest, DiscoveryPortableError,
     GraphForge, ModuleAdoptionRequest, OntologyAuthorityExpectation, OntologyMode,
-    PortableSelection, PortableExportRequest, PortableLimits, PortableMode, PortableOutput,
-    PortablePackageIndex, PortableParticipantId, PortableSelectionProfile,
-    PortableVerifyRequest, ProjectSummaryRequest, UpdateResearchMetadataRequest,
-    WorkspaceResearchMetadata, WriteContext, summarize_verified_portable, verify_portable,
+    PortableExportRequest, PortableLimits, PortableMode, PortableOutput, PortablePackageIndex,
+    PortableParticipantId, PortableSelection, PortableSelectionProfile, PortableVerifyRequest,
+    ProjectSummaryRequest, UpdateResearchMetadataRequest, WorkspaceResearchMetadata, WriteContext,
+    summarize_verified_portable, verify_portable,
 };
 use graphforge_discovery::{
     BridgeSetDescriptor, DISCOVERY_FORMAT, DiscoveryErrorCode, DiscoveryLimits, DiscoveryManifest,
@@ -709,19 +709,15 @@ fn replace_package_file(package: &Path, path: &str, bytes: &[u8]) {
 fn malformed_research_metadata_participant_is_a_participant_error() {
     let exported = exported_project();
     let digest = report(&exported.expanded).package_digest;
-    let record = PortablePackageIndex::open(
-        &exported.expanded,
-        &digest,
-        PortableLimits::default(),
-        None,
-    )
-    .unwrap()
-    .participant_file(&PortableParticipantId {
-        capability_id: "workspace".into(),
-        record_family_id: "research_metadata".into(),
-    })
-    .unwrap()
-    .unwrap();
+    let record =
+        PortablePackageIndex::open(&exported.expanded, &digest, PortableLimits::default(), None)
+            .unwrap()
+            .participant_file(&PortableParticipantId {
+                capability_id: "workspace".into(),
+                record_family_id: "research_metadata".into(),
+            })
+            .unwrap()
+            .unwrap();
     replace_package_file(&exported.expanded, &record.path, b"{}\n");
 
     // The rewritten package still verifies: only the participant record is bad.

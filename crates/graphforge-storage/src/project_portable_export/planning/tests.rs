@@ -23,10 +23,7 @@ fn selection_preview_is_stable_exact_and_consumed_by_export_plan() {
 
     let plan = plan_selected_portable(&generation, &first, limits).unwrap();
     assert_eq!(plan.selection_fingerprint, first.selection_fingerprint);
-    assert_eq!(
-        plan.package_class,
-        PortablePackageClass::ComponentSelective
-    );
+    assert_eq!(plan.package_class, PortablePackageClass::ComponentSelective);
     let out = tempfile::tempdir().unwrap();
     let receipt = export_complete_portable(
         &plan,

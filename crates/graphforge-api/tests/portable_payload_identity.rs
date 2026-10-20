@@ -11,8 +11,8 @@ use std::sync::Arc;
 use arrow::array::{FixedSizeBinaryBuilder, Int64Array, StringArray};
 use arrow::record_batch::RecordBatch;
 use graphforge_api::{
-    BulkInputKind, GraphForge, ImportSessionLimits, OperationId, PortableSelection,
-    PortableExportRequest, PortableImportRequest, PortableLimits, PortableOutput,
+    BulkInputKind, GraphForge, ImportSessionLimits, OperationId, PortableExportRequest,
+    PortableImportRequest, PortableLimits, PortableOutput, PortableSelection,
     PortableSelectionProfile, bulk_edge_input_schema, bulk_node_input_schema,
 };
 use graphforge_storage::payload_digest::{PayloadDigestCapture, PayloadDigestSnapshot};

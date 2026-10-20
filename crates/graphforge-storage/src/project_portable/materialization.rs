@@ -1,8 +1,8 @@
 //! Single-pass authentication and private component materialization.
 use super::{
-    AtomicBool, BTreeMap, BTreeSet, File, Path, PortableError, PortableErrorCode,
-    PortableLimits, PortableMode, PortableReport, Read, VerifiedMaterialization,
-    check_cancel, fs, hex, preflight, scan,
+    AtomicBool, BTreeMap, BTreeSet, File, Path, PortableError, PortableErrorCode, PortableLimits,
+    PortableMode, PortableReport, Read, VerifiedMaterialization, check_cancel, fs, hex, preflight,
+    scan,
 };
 use std::io::Write;
 mod derived;
@@ -84,9 +84,9 @@ impl MaterializedCapture {
         cancelled: Option<&AtomicBool>,
     ) -> Result<[u8; 32], PortableError> {
         let mut file = crate::project_portable_export::open_source_no_follow(path)?;
-        if graphforge_filesystem::file_identity(&file).map_err(|_| {
-            PortableError::new(PortableErrorCode::Io, "materialized file identity")
-        })? != self.identity
+        if graphforge_filesystem::file_identity(&file)
+            .map_err(|_| PortableError::new(PortableErrorCode::Io, "materialized file identity"))?
+            != self.identity
             || file
                 .metadata()
                 .map_err(|_| {
@@ -220,9 +220,8 @@ pub(crate) fn materialize_verified_portable_observed(
     }
     // Admission happens before creation; no malformed/future package can allocate payload staging.
     preflight(source.as_ref(), limits, cancelled)?;
-    fs::create_dir(destination).map_err(|_| {
-        PortableError::new(PortableErrorCode::Io, "cannot create materialization")
-    })?;
+    fs::create_dir(destination)
+        .map_err(|_| PortableError::new(PortableErrorCode::Io, "cannot create materialization"))?;
     let mut sink = CopySink {
         destination,
         observed: &mut observed,
@@ -310,9 +309,9 @@ impl CopySink<'_> {
         file: &mut File,
         bytes: &[u8],
     ) -> Result<(), PortableError> {
-        let result = file.write_all(bytes).map_err(|_| {
-            PortableError::at(PortableErrorCode::Io, relative, "cannot copy entry")
-        });
+        let result = file
+            .write_all(bytes)
+            .map_err(|_| PortableError::at(PortableErrorCode::Io, relative, "cannot copy entry"));
         let refreshed = (self.observed)(&self.destination.join(relative), Some(file));
         result?;
         refreshed?;
@@ -328,9 +327,8 @@ impl CopySink<'_> {
         digest: [u8; 32],
         checksum: u64,
     ) -> Result<(), PortableError> {
-        let result = crate::durable_commit::seal_file(&file).map_err(|_| {
-            PortableError::at(PortableErrorCode::Io, relative, "cannot sync entry")
-        });
+        let result = crate::durable_commit::seal_file(&file)
+            .map_err(|_| PortableError::at(PortableErrorCode::Io, relative, "cannot sync entry"));
         let refreshed = (self.observed)(&self.destination.join(relative), Some(&file));
         result?;
         refreshed?;

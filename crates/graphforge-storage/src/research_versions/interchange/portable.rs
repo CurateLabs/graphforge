@@ -42,12 +42,13 @@ pub(crate) fn portable_objects(
             {
                 let value = serde_json::from_slice(&bytes)
                     .map_err(|_| invalid("invalid research settings"))?;
-                crate::project_portable_selection::validate_setting_value(None, &value)
-                    .map_err(|_| {
+                crate::project_portable_selection::validate_setting_value(None, &value).map_err(
+                    |_| {
                         invalid(
                             "secret-bearing or host-specific research settings are not portable",
                         )
-                    })?;
+                    },
+                )?;
             }
             add(&mut objects, digest, Some(bytes.len() as u64))?;
             if participant.key.capability == "graph" && participant.key.family == "files" {
@@ -135,12 +136,13 @@ pub(crate) fn portable_objects_admitted(
                 let bytes = read_control(&digest, 256 * 1024 * 1024)?;
                 let value = serde_json::from_slice(&bytes)
                     .map_err(|_| invalid("invalid research settings"))?;
-                crate::project_portable_selection::validate_setting_value(None, &value)
-                    .map_err(|_| {
+                crate::project_portable_selection::validate_setting_value(None, &value).map_err(
+                    |_| {
                         invalid(
                             "secret-bearing or host-specific research settings are not portable",
                         )
-                    })?;
+                    },
+                )?;
             }
             if participant.key.capability == "graph" && participant.key.family == "files" {
                 let bytes = read_control(&digest, 256 * 1024 * 1024)?;

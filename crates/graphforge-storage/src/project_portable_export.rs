@@ -1463,10 +1463,7 @@ mod tests {
                 },
             );
             assert!(injected, "{output:?}");
-            assert_eq!(
-                result.unwrap_err().code,
-                PortableErrorCode::DigestMismatch
-            );
+            assert_eq!(result.unwrap_err().code, PortableErrorCode::DigestMismatch);
             assert!(!destination.exists());
             assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
             assert_eq!(fs::read(project.path().join("CURRENT")).unwrap(), current);
@@ -1749,10 +1746,8 @@ mod tests {
 
         let output = tempfile::tempdir().unwrap();
         let (expanded, bundle) = write_test_representations(&with_evidence, output.path());
-        let expanded_report =
-            verify_portable(&expanded, PortableMode::Full, limits, None).unwrap();
-        let bundle_report =
-            verify_portable(&bundle, PortableMode::Full, limits, None).unwrap();
+        let expanded_report = verify_portable(&expanded, PortableMode::Full, limits, None).unwrap();
+        let bundle_report = verify_portable(&bundle, PortableMode::Full, limits, None).unwrap();
         assert_eq!(expanded_report.package_digest, bundle_report.package_digest);
         assert_eq!(
             expanded_report.ontology_composition,
@@ -1802,8 +1797,7 @@ mod tests {
         let outputs = tempfile::tempdir().unwrap();
         let (expanded, bundle) = write_test_representations(&semantic_tamper, outputs.path());
         for package in [&expanded, &bundle] {
-            let error =
-                verify_portable(package, PortableMode::Full, limits, None).unwrap_err();
+            let error = verify_portable(package, PortableMode::Full, limits, None).unwrap_err();
             assert!(matches!(
                 error.code,
                 PortableErrorCode::InvalidStructure | PortableErrorCode::DigestMismatch
@@ -1846,8 +1840,7 @@ mod tests {
         let outputs = tempfile::tempdir().unwrap();
         let (expanded, bundle) = write_test_representations(&future, outputs.path());
         for package in [&expanded, &bundle] {
-            let error =
-                verify_portable(package, PortableMode::Full, limits, None).unwrap_err();
+            let error = verify_portable(package, PortableMode::Full, limits, None).unwrap_err();
             assert_eq!(error.code, PortableErrorCode::UnsupportedFuture);
             assert_eq!(error.entry.as_deref(), Some(control_path));
         }
@@ -1883,8 +1876,7 @@ mod tests {
         let outputs = tempfile::tempdir().unwrap();
         let (expanded, bundle) = write_test_representations(&plan, outputs.path());
         for package in [&expanded, &bundle] {
-            let error =
-                verify_portable(package, PortableMode::Full, limits, None).unwrap_err();
+            let error = verify_portable(package, PortableMode::Full, limits, None).unwrap_err();
             assert_eq!(error.code, PortableErrorCode::DigestMismatch);
             assert_eq!(error.entry.as_deref(), Some(bridge_path.as_str()));
         }
@@ -1931,8 +1923,7 @@ mod tests {
             let outputs = tempfile::tempdir().unwrap();
             let (expanded, bundle) = write_test_representations(&plan, outputs.path());
             for package in [&expanded, &bundle] {
-                let error =
-                    verify_portable(package, PortableMode::Full, limits, None).unwrap_err();
+                let error = verify_portable(package, PortableMode::Full, limits, None).unwrap_err();
                 assert!(
                     matches!(
                         error.code,
@@ -2505,13 +2496,9 @@ mod tests {
             Some(&cancelled),
         )
         .unwrap();
-        let bundle_report = crate::materialize_verified_portable(
-            &first,
-            &bundle_stage,
-            limits,
-            Some(&cancelled),
-        )
-        .unwrap();
+        let bundle_report =
+            crate::materialize_verified_portable(&first, &bundle_stage, limits, Some(&cancelled))
+                .unwrap();
         assert_eq!(expanded_report.package_digest, bundle_report.package_digest);
         assert_eq!(tree_bytes(&expanded_stage), tree_bytes(&bundle_stage));
         let runtime =

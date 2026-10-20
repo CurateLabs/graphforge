@@ -1,8 +1,8 @@
 //! Selection, authenticated source planning, and manifest assembly.
 use super::{
     BTreeSet, ExportError, Path, PlannedFile, PlannedSource, PortableExportLimits,
-    PortableExportPlan, PortablePackageClass, err, hex, identity, identity_with_link_policy,
-    limit, open_source_no_follow, storage, validate_limits,
+    PortableExportPlan, PortablePackageClass, err, hex, identity, identity_with_link_policy, limit,
+    open_source_no_follow, storage, validate_limits,
 };
 use crate::project_portable::{
     PortableActivationOverride, PortableActivationProfile, PortableBridgeSet,

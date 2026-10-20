@@ -337,12 +337,11 @@ mod write_modes;
 
 pub use graphforge_core::portable::{
     PortableAuthenticity, PortableCompatibility, PortableError, PortableErrorCode,
-    PortableExactIdentity, PortableExportProgress, PortableGraphSelector,
-    PortableGraphSubsetMeta, PortableIntegrity, PortableLimits, PortableMode,
-    PortableOutput, PortablePackageClass, PortableParticipantId,
-    PortablePropertyProjection, PortableRepresentation, PortableSelectionEntry,
-    PortableSelectionPlan, PortableSelectionProfile, PortableSelectionReason,
-    PortableSelectionRequest, PortableSubsetClosure,
+    PortableExactIdentity, PortableExportProgress, PortableGraphSelector, PortableGraphSubsetMeta,
+    PortableIntegrity, PortableLimits, PortableMode, PortableOutput, PortablePackageClass,
+    PortableParticipantId, PortablePropertyProjection, PortableRepresentation,
+    PortableSelectionEntry, PortableSelectionPlan, PortableSelectionProfile,
+    PortableSelectionReason, PortableSelectionRequest, PortableSubsetClosure,
     PortableSubsetPreview as PortableSubsetPlan, PortableSubsetRequest,
 };
 pub use graphforge_core::storage_receipt::{
@@ -357,13 +356,13 @@ pub use graphforge_storage::{
 #[cfg(feature = "portable")]
 #[cfg(feature = "portable")]
 pub use portable::{
-    PortableSelection, PortableExportFacadeResult, PortableExportReceiptView,
-    PortableExportRequest, PortableImportRequest, PortableImportResult,
-    PortableOciPublishFacadeRequest, PortableOciPullFacadeRequest, PortableRepackRequest,
-    PortableRepackResult, PortableSelectionPreviewRequest, PortableSubsetPreviewRequest,
-    PortableVerifyRequest, PortableVerifyResult, publish_portable_oci,
-    publish_portable_oci_with_registry, pull_portable_oci,
-    pull_portable_oci_with_registry, repack_verified_expanded_portable, verify_portable,
+    PortableExportFacadeResult, PortableExportReceiptView, PortableExportRequest,
+    PortableImportRequest, PortableImportResult, PortableOciPublishFacadeRequest,
+    PortableOciPullFacadeRequest, PortableRepackRequest, PortableRepackResult, PortableSelection,
+    PortableSelectionPreviewRequest, PortableSubsetPreviewRequest, PortableVerifyRequest,
+    PortableVerifyResult, publish_portable_oci, publish_portable_oci_with_registry,
+    pull_portable_oci, pull_portable_oci_with_registry, repack_verified_expanded_portable,
+    verify_portable,
 };
 pub use repository::{
     GitProvenance, InfraCapabilityCompatibility, InfraNotChecked, InfraPlan, InfraStaticValidity,
@@ -2879,9 +2878,8 @@ mod portable_oci;
 
 #[cfg(feature = "portable")]
 pub use graphforge_core::portable::{
-    PortableOciAuthenticityPolicy, PortableOciPhase, PortableOciProgress,
-    PortableOciPullReceipt, PortableOciReference, PortableOciSignatureMaterial,
-    PortableOciSignatureState,
+    PortableOciAuthenticityPolicy, PortableOciPhase, PortableOciProgress, PortableOciPullReceipt,
+    PortableOciReference, PortableOciSignatureMaterial, PortableOciSignatureState,
 };
 #[cfg(feature = "portable")]
 pub use graphforge_portable_oci::{HttpOciRegistry, MemoryOciRegistry, PortableOciRegistry};

@@ -2,8 +2,8 @@
 
 use super::{
     AtomicBool, ControlSha256, Digest, Entry, Path, PortableError, PortableErrorCode,
-    PortableLimits, PortableReport, Read, Seek, SeekFrom, Sha256, canonical_json, check_cancel,
-    fs, has_multiple_links, hex, modified, research, same_identity, semantic_validation,
+    PortableLimits, PortableReport, Read, Seek, SeekFrom, Sha256, canonical_json, check_cancel, fs,
+    has_multiple_links, hex, modified, research, same_identity, semantic_validation,
 };
 
 /// Authentication for untrusted bytes, or corruption refusal against evidence
@@ -128,9 +128,9 @@ pub(super) fn read(
                 "cannot reopen authenticated control",
             )
         })?;
-    let before = file.metadata().map_err(|_| {
-        PortableError::at(PortableErrorCode::Io, path, "cannot inspect control")
-    })?;
+    let before = file
+        .metadata()
+        .map_err(|_| PortableError::at(PortableErrorCode::Io, path, "cannot inspect control"))?;
     if has_multiple_links(&before) {
         return Err(PortableError::at(
             PortableErrorCode::InvalidStructure,
@@ -139,9 +139,8 @@ pub(super) fn read(
         ));
     }
     if let Some(offset) = entry.offset {
-        file.seek(SeekFrom::Start(offset)).map_err(|_| {
-            PortableError::at(PortableErrorCode::Io, path, "cannot seek control")
-        })?;
+        file.seek(SeekFrom::Start(offset))
+            .map_err(|_| PortableError::at(PortableErrorCode::Io, path, "cannot seek control"))?;
     } else if before.len() != entry.length {
         return Err(PortableError::at(
             PortableErrorCode::ConcurrentMutation,
@@ -150,11 +149,7 @@ pub(super) fn read(
         ));
     }
     let length = usize::try_from(entry.length).map_err(|_| {
-        PortableError::at(
-            PortableErrorCode::LimitExceeded,
-            path,
-            "control allocation",
-        )
+        PortableError::at(PortableErrorCode::LimitExceeded, path, "control allocation")
     })?;
     let mut bytes = vec![0; length];
     file.read_exact(&mut bytes).map_err(|_| {
@@ -165,9 +160,9 @@ pub(super) fn read(
         )
     })?;
     check_cancel(cancelled)?;
-    let after = file.metadata().map_err(|_| {
-        PortableError::at(PortableErrorCode::Io, path, "cannot inspect control")
-    })?;
+    let after = file
+        .metadata()
+        .map_err(|_| PortableError::at(PortableErrorCode::Io, path, "cannot inspect control"))?;
     let named = fs::symlink_metadata(&input_path).map_err(|_| {
         PortableError::at(
             PortableErrorCode::ConcurrentMutation,

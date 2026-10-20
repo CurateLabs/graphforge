@@ -4,16 +4,15 @@ use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
 use graphforge_api::{
-    CancellationToken, GfError, MultiOntologyError, PortableSelection, PortableAuthenticity,
-    PortableCompatibility, PortableError, PortableExportRequest, PortableGraphSelector,
-    PortableImportRequest, PortableIntegrity, PortableLimits, PortableMode,
-    PortableOciAuthenticityPolicy, PortableOciPublishFacadeRequest,
-    PortableOciPullFacadeRequest, PortableOciSignatureMaterial, PortableOciSignatureState,
-    PortableOutput, PortableParticipantId, PortablePropertyProjection,
-    PortableSelectionPreviewRequest, PortableSelectionProfile, PortableSelectionRequest,
-    PortableSubsetClosure, PortableSubsetPlan, PortableSubsetPreviewRequest,
-    PortableSubsetRequest, PortableVerifyRequest, ResultSinkFormat, ResultSinkOptions,
-    ResultSinkReceipt,
+    CancellationToken, GfError, MultiOntologyError, PortableAuthenticity, PortableCompatibility,
+    PortableError, PortableExportRequest, PortableGraphSelector, PortableImportRequest,
+    PortableIntegrity, PortableLimits, PortableMode, PortableOciAuthenticityPolicy,
+    PortableOciPublishFacadeRequest, PortableOciPullFacadeRequest, PortableOciSignatureMaterial,
+    PortableOciSignatureState, PortableOutput, PortableParticipantId, PortablePropertyProjection,
+    PortableSelection, PortableSelectionPreviewRequest, PortableSelectionProfile,
+    PortableSelectionRequest, PortableSubsetClosure, PortableSubsetPlan,
+    PortableSubsetPreviewRequest, PortableSubsetRequest, PortableVerifyRequest, ResultSinkFormat,
+    ResultSinkOptions, ResultSinkReceipt,
 };
 use napi::bindgen_prelude::{AbortSignal, AsyncTask, BigInt, Buffer};
 use napi::{Env, Task};
@@ -597,8 +596,7 @@ pub struct ExportPortableTask {
 }
 
 impl Task for ExportPortableTask {
-    type Output =
-        std::result::Result<graphforge_api::PortableExportFacadeResult, PortableError>;
+    type Output = std::result::Result<graphforge_api::PortableExportFacadeResult, PortableError>;
     type JsValue = PortableExportOutput;
 
     fn compute(&mut self) -> napi::Result<Self::Output> {

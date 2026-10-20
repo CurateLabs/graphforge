@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 
 use graphforge_api::{
     GraphForge, ModuleAdoptionRequest, OntologyAuthorityExpectation, OntologyModuleId, OperationId,
-    PortableSelection, PortableExactIdentity, PortableExportRequest, PortableImportRequest,
-    PortableLimits, PortableOutput, PortableSelectionProfile, WriteContext,
+    PortableExactIdentity, PortableExportRequest, PortableImportRequest, PortableLimits,
+    PortableOutput, PortableSelection, PortableSelectionProfile, WriteContext,
 };
 use graphforge_ontology::OntologyDoc;
 use uuid::Uuid;

@@ -360,8 +360,8 @@ fn oversized_property_values_round_trip_through_bounded_objects() {
 #[cfg(feature = "portable")]
 fn assert_portable_large_round_trip(root: &std::path::Path, forge: &GraphForge, payload: &str) {
     use graphforge_api::{
-        OperationId, PortableSelection, PortableExportRequest, PortableImportRequest,
-        PortableLimits, PortableOutput, PortableSelectionProfile,
+        OperationId, PortableExportRequest, PortableImportRequest, PortableLimits, PortableOutput,
+        PortableSelection, PortableSelectionProfile,
     };
     let package = root.join("large-values.gfpb");
     forge

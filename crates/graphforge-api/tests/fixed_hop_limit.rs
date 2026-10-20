@@ -12,8 +12,8 @@ use std::time::{Duration, Instant};
 use arrow::array::{Array, FixedSizeBinaryArray, Int64Array, StringArray, UInt64Array};
 use arrow::record_batch::RecordBatch;
 use graphforge_api::{
-    ExecutionResourcePolicy, GraphForge, GraphForgeOptions, OperationId, PortableSelection,
-    PortableExportRequest, PortableImportRequest, PortableVerifyRequest, ResourcePolicyMode,
+    ExecutionResourcePolicy, GraphForge, GraphForgeOptions, OperationId, PortableExportRequest,
+    PortableImportRequest, PortableSelection, PortableVerifyRequest, ResourcePolicyMode,
     ResultSinkFormat, ResultSinkOptions, verify_portable,
 };
 use graphforge_core::OntologyMode;
@@ -22,8 +22,7 @@ use graphforge_exec::demand::{self, DemandSnapshot};
 use graphforge_ir::IrLiteral;
 use graphforge_storage::adjacency::build_adjacency_index;
 use graphforge_storage::{
-    GraphWriter, PortableLimits, PortableMode, PortableOutput, PortableSelectionProfile,
-    io_stats,
+    GraphWriter, PortableLimits, PortableMode, PortableOutput, PortableSelectionProfile, io_stats,
 };
 use tempfile::TempDir;
 

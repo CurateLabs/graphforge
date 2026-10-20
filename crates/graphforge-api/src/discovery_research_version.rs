@@ -9,9 +9,7 @@
 //! destination exists.
 
 use crate::discovery_portable::DiscoveryPortableMismatch;
-use graphforge_core::portable::{
-    PortableError, PortableLimits, PortableMode, PortableReport,
-};
+use graphforge_core::portable::{PortableError, PortableLimits, PortableMode, PortableReport};
 use graphforge_discovery::{
     DiscoveryError, DiscoveryLimits, DiscoveryManifest, LineageVersion, RefSet, RepositoryIdentity,
     ResearchLineage,
@@ -228,12 +226,10 @@ fn verify_selected_research_version(
     _expected: &LineageVersion,
     _lineage: &ResearchLineage,
 ) -> Result<PortableReport, DiscoveryResearchVersionError> {
-    Err(DiscoveryResearchVersionError::Portable(
-        PortableError::new(
-            graphforge_core::portable::PortableErrorCode::Incompatible,
-            "research package validation requires the `research` feature",
-        ),
-    ))
+    Err(DiscoveryResearchVersionError::Portable(PortableError::new(
+        graphforge_core::portable::PortableErrorCode::Incompatible,
+        "research package validation requires the `research` feature",
+    )))
 }
 
 /// True when the archived record is exactly the lineage Version: the registry

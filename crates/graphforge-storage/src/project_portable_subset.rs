@@ -15,12 +15,12 @@ use crate::project_portable_export::{
     PortableExportLimits, PortableExportPlan, plan_selected_portable,
 };
 use crate::project_portable_selection::{
-    PortableParticipantId, PortableSelectionEntry, PortableSelectionPlan,
-    PortableSelectionReason, component_kind, fingerprint, validate_selection_plan,
+    PortableParticipantId, PortableSelectionEntry, PortableSelectionPlan, PortableSelectionReason,
+    component_kind, fingerprint, validate_selection_plan,
 };
 use crate::{
-    GRAPH_CAPABILITY_ID, GRAPH_FILES_FAMILY, PortableError, PortableErrorCode,
-    PortableLimits, ResolvedProjectGeneration, capture_graph_files,
+    GRAPH_CAPABILITY_ID, GRAPH_FILES_FAMILY, PortableError, PortableErrorCode, PortableLimits,
+    ResolvedProjectGeneration, capture_graph_files,
 };
 
 pub use graphforge_core::portable::{
@@ -867,9 +867,7 @@ mod tests {
                     )
                     .unwrap(),
                 );
-                reports.push(
-                    verify_portable(&package, PortableMode::Full, limits, None).unwrap(),
-                );
+                reports.push(verify_portable(&package, PortableMode::Full, limits, None).unwrap());
                 match (class, representation) {
                     ("complete", _) => {
                         let imported = outputs.path().join(format!("{class}-{extension}-import"));

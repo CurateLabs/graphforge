@@ -31,13 +31,8 @@ fn exported() -> (tempfile::TempDir, PathBuf, PathBuf, String) {
     let plan = plan_complete_portable(&generation, PortableLimits::default()).unwrap();
     let outputs = tempfile::tempdir().unwrap();
     let (expanded, bundle) = write_test_representations(&plan, outputs.path());
-    let report = verify_portable(
-        &bundle,
-        PortableMode::Full,
-        PortableLimits::default(),
-        None,
-    )
-    .unwrap();
+    let report =
+        verify_portable(&bundle, PortableMode::Full, PortableLimits::default(), None).unwrap();
     (outputs, expanded, bundle, report.package_digest)
 }
 

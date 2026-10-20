@@ -19,18 +19,18 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use arrow::array::{FixedSizeBinaryArray, Int64Array};
 use graphforge_api::{
-    CheckpointRequest, GraphForge, OperationId, PortableSelection, PortableExportRequest,
-    PortableImportRequest, PortableVerifyRequest, verify_portable,
+    CheckpointRequest, GraphForge, OperationId, PortableExportRequest, PortableImportRequest,
+    PortableSelection, PortableVerifyRequest, verify_portable,
 };
 use graphforge_core::OntologyMode;
 use graphforge_storage::{
     GRAPH_CAPABILITY_ID, GRAPH_CAPABILITY_VERSION, GRAPH_FILES_FAMILY, GraphFileRole,
-    GraphFilesOpenStrategy, GraphWriter, GraphWriterLimits, PortableGraphSelector,
-    PortableLimits, PortableMode, PortableOutput, PortablePackageClass,
-    PortablePropertyProjection, PortableSelectionProfile, PortableSubsetClosure,
-    PortableSubsetRequest, ProjectCapability, ProjectGenerationRequest, ProjectStageOutcome,
-    TopologyIdentityProbe, UuidIndexKind, capture_graph_files, empty_workspace_participants,
-    resolve_project_generation, stage_project_generation_with_graph_tree,
+    GraphFilesOpenStrategy, GraphWriter, GraphWriterLimits, PortableGraphSelector, PortableLimits,
+    PortableMode, PortableOutput, PortablePackageClass, PortablePropertyProjection,
+    PortableSelectionProfile, PortableSubsetClosure, PortableSubsetRequest, ProjectCapability,
+    ProjectGenerationRequest, ProjectStageOutcome, TopologyIdentityProbe, UuidIndexKind,
+    capture_graph_files, empty_workspace_participants, resolve_project_generation,
+    stage_project_generation_with_graph_tree,
 };
 use sha2::{Digest, Sha256};
 use uuid::Uuid;

@@ -288,28 +288,27 @@ pub mod project_portable_export;
 pub mod project_portable_import;
 
 pub use project_portable_export::{
-    PortableExportLimits, PortableExportPlan, PortableExportProgress,
-    PortableExportReceipt, PortableOutput, export_complete_portable,
-    export_complete_portable_with_allocation, plan_complete_portable,
-    plan_selected_portable, repack_verified_expanded_portable,
+    PortableExportLimits, PortableExportPlan, PortableExportProgress, PortableExportReceipt,
+    PortableOutput, export_complete_portable, export_complete_portable_with_allocation,
+    plan_complete_portable, plan_selected_portable, repack_verified_expanded_portable,
 };
 pub use project_portable_import::{
     NativeResearchValidator, PortableImportCleanupReceipt, PortableImportPhase,
     PortableImportProgress, PortableImportReceipt, PortableSelectiveCandidate,
     PortableStagedCompositionReceipt, consume_selective_portable, import_complete_portable,
-    import_complete_portable_with_allocation,
-    import_complete_portable_with_native_validation, import_complete_portable_with_progress,
-    load_portable_ontology_staging, portable_import_pending, validate_research_package,
+    import_complete_portable_with_allocation, import_complete_portable_with_native_validation,
+    import_complete_portable_with_progress, load_portable_ontology_staging,
+    portable_import_pending, validate_research_package,
 };
 
 pub mod project_portable;
 pub use project_portable::{
-    PortableActivationOverride, PortableActivationProfile, PortableAuthenticity,
-    PortableBridgeSet, PortableCompatibility, PortableCompositionEntry, PortableError,
-    PortableErrorCode, PortableExactIdentity, PortableFileRef, PortableIntegrity,
-    PortableLimits, PortableMode, PortableOntologyComposition, PortableOntologyModule,
-    PortablePackageClass, PortablePackageIndex, PortableReport, PortableRepresentation,
-    materialize_verified_portable, verify_portable,
+    PortableActivationOverride, PortableActivationProfile, PortableAuthenticity, PortableBridgeSet,
+    PortableCompatibility, PortableCompositionEntry, PortableError, PortableErrorCode,
+    PortableExactIdentity, PortableFileRef, PortableIntegrity, PortableLimits, PortableMode,
+    PortableOntologyComposition, PortableOntologyModule, PortablePackageClass,
+    PortablePackageIndex, PortableReport, PortableRepresentation, materialize_verified_portable,
+    verify_portable,
 };
 
 mod project_portable_selection;
@@ -322,9 +321,8 @@ pub use project_portable_selection::{
 pub mod project_portable_subset;
 pub use project_portable_subset::{
     PortableGraphSelector, PortableGraphSubsetMeta, PortablePropertyProjection,
-    PortableSubsetClosure, PortableSubsetPlan, PortableSubsetRequest,
-    plan_graph_subset_portable, portable_graph_data_fingerprint,
-    preview_portable_graph_subset,
+    PortableSubsetClosure, PortableSubsetPlan, PortableSubsetRequest, plan_graph_subset_portable,
+    portable_graph_data_fingerprint, preview_portable_graph_subset,
 };
 
 pub mod portable_bytes;

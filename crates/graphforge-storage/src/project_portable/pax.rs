@@ -216,11 +216,7 @@ mod tests {
         ];
         for text in refused {
             let error = parse(&text).unwrap_err();
-            assert_eq!(
-                error.code,
-                PortableErrorCode::InvalidStructure,
-                "{text:?}"
-            );
+            assert_eq!(error.code, PortableErrorCode::InvalidStructure, "{text:?}");
         }
         assert!(entry_size(0, Some(large)).is_ok());
         for (field, pax) in [(1, Some(large)), (large, Some(large)), (large, None)] {

@@ -55,8 +55,7 @@ fn composition_vector() -> (PortableOntologyComposition, ManifestComponent) {
 #[test]
 fn composition_control_rejects_duplicate_dangling_and_unbounded_closure() {
     let (valid, component) = composition_vector();
-    validate_ontology_composition_contents(&valid, &component, PortableLimits::default())
-        .unwrap();
+    validate_ontology_composition_contents(&valid, &component, PortableLimits::default()).unwrap();
 
     let mut duplicate = valid.clone();
     duplicate.modules.push(duplicate.modules[0].clone());
@@ -82,13 +81,9 @@ fn composition_control_rejects_duplicate_dangling_and_unbounded_closure() {
         .push("future-contract@2".into());
     unsupported.required_features.sort();
     assert_eq!(
-        validate_ontology_composition_contents(
-            &unsupported,
-            &component,
-            PortableLimits::default()
-        )
-        .unwrap_err()
-        .code,
+        validate_ontology_composition_contents(&unsupported, &component, PortableLimits::default())
+            .unwrap_err()
+            .code,
         PortableErrorCode::UnsupportedFuture
     );
 

@@ -6,9 +6,7 @@ use std::sync::atomic::AtomicBool;
 
 use graphforge_core::GfError;
 
-use super::{
-    PortableError, PortableErrorCode, ProjectFileParticipant, storage, storage_or_cancel,
-};
+use super::{PortableError, PortableErrorCode, ProjectFileParticipant, storage, storage_or_cancel};
 
 /// Private spill root for the import-time adjacency build, inside the owned
 /// stage so failure cleanup reclaims it with everything else.
@@ -144,10 +142,7 @@ fn import_edge_files(graph_tree: &Path) -> Result<Vec<(String, PathBuf)>, Portab
         })? {
             let path = entry
                 .map_err(|_| {
-                    PortableError::new(
-                        PortableErrorCode::Io,
-                        "cannot read portable edge tables",
-                    )
+                    PortableError::new(PortableErrorCode::Io, "cannot read portable edge tables")
                 })?
                 .path();
             if path.is_dir() {

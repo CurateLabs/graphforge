@@ -179,18 +179,16 @@ fn read_and_prove_module(
 
     // The module's identity is its domain-separated canonical content digest,
     // independent of the package that carried it and of the file's SHA-256.
-    let parsed: OntologyDoc = serde_json::from_slice(&document).map_err(|error| {
-        DiscoveryPortableError::Participant {
+    let parsed: OntologyDoc =
+        serde_json::from_slice(&document).map_err(|error| DiscoveryPortableError::Participant {
             participant: "ontology module document",
             message: error.to_string(),
-        }
-    })?;
-    let recomputed = module_document_digest(&parsed).map_err(|message| {
-        DiscoveryPortableError::Participant {
+        })?;
+    let recomputed =
+        module_document_digest(&parsed).map_err(|message| DiscoveryPortableError::Participant {
             participant: "ontology module document",
             message,
-        }
-    })?;
+        })?;
     // The recomputed digest is the authority. The id and version comparison is
     // defence in depth and mirrors the portable verifier, which exempts
     // `legacy:` identities (their document carries the authored id, not the

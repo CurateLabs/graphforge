@@ -27,9 +27,8 @@ pub(super) fn validate_with_reader(
     if !report.research_interchange {
         return Ok(None);
     }
-    let registry_id = crate::project_portable_export::planning::portable_participant_id(
-        "research", "registry",
-    );
+    let registry_id =
+        crate::project_portable_export::planning::portable_participant_id("research", "registry");
     let descriptors: Vec<_> = report
         .research_entries
         .iter()

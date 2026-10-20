@@ -1,7 +1,7 @@
 //! Private authority for files emitted by import's adjacency reconstruction.
 use super::{
-    AtomicBool, BTreeMap, File, MaterializedCapture, Path, PortableError, PortableErrorCode,
-    Read, check_cancel,
+    AtomicBool, BTreeMap, File, MaterializedCapture, Path, PortableError, PortableErrorCode, Read,
+    check_cancel,
 };
 use graphforge_core::hash_observation::ArtifactSha256;
 use graphforge_filesystem::StableDirectory;

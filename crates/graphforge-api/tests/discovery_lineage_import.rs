@@ -2,8 +2,7 @@
 
 use graphforge_api::{
     BranchSource, CancellationToken, CreateResearchBranchRequest, ExecuteResearchBranchRequest,
-    ExportResearchRequest, GraphForge, OperationId, PortableImportRequest,
-    ResearchReferenceTarget,
+    ExportResearchRequest, GraphForge, OperationId, PortableImportRequest, ResearchReferenceTarget,
 };
 use uuid::Uuid;
 

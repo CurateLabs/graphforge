@@ -84,8 +84,7 @@ pub fn preview_portable_selection(
     if requested.is_empty()
         && matches!(
             request.profile,
-            PortableSelectionProfile::Custom(_)
-                | PortableSelectionProfile::OntologyComposition(_)
+            PortableSelectionProfile::Custom(_) | PortableSelectionProfile::OntologyComposition(_)
         )
     {
         return Err(incompatible("selection matched no portable components"));

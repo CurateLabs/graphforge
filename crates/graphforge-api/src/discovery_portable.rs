@@ -6,9 +6,7 @@
 //! result is constructed only after both authorities agree.
 
 use crate::{PortableVerifyRequest, verify_portable};
-use graphforge_core::portable::{
-    PortableError, PortableLimits, PortableMode, PortableReport,
-};
+use graphforge_core::portable::{PortableError, PortableLimits, PortableMode, PortableReport};
 use graphforge_discovery::{
     DiscoveryError, DiscoveryLimits, DiscoveryManifest, RefSet, RepositoryIdentity,
 };
@@ -57,10 +55,7 @@ impl fmt::Display for DiscoveryPortableError {
         match self {
             Self::Discovery(error) => write!(formatter, "{error}"),
             Self::ReferenceMismatch(kind) => {
-                write!(
-                    formatter,
-                    "discovery portable reference mismatch: {kind:?}"
-                )
+                write!(formatter, "discovery portable reference mismatch: {kind:?}")
             }
             Self::Portable(error) => write!(formatter, "{error}"),
             Self::Participant {
@@ -126,9 +121,7 @@ pub(crate) fn bind_discovery(
     }
     refs.validate_manifest(&manifest).map_err(|error| {
         if error.field == Some("immutable_version") || error.field == Some("resolved_ref") {
-            DiscoveryPortableError::ReferenceMismatch(
-                DiscoveryPortableMismatch::ImmutableVersion,
-            )
+            DiscoveryPortableError::ReferenceMismatch(DiscoveryPortableMismatch::ImmutableVersion)
         } else {
             DiscoveryPortableError::Discovery(error)
         }

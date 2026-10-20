@@ -120,9 +120,7 @@ fn malformed_native_definition_is_refused_by_selected_export_but_can_be_omitted(
         PortableLimits::default(),
     )
     .unwrap();
-    assert!(
-        plan_selected_portable(&generation, &selection, PortableLimits::default()).is_ok()
-    );
+    assert!(plan_selected_portable(&generation, &selection, PortableLimits::default()).is_ok());
 }
 
 #[test]
@@ -220,13 +218,8 @@ fn authenticated_packages_refuse_invalid_saved_queries_before_destination_admiss
         let (expanded, bundle) = write_test_representations(&plan, outputs.path());
         for source in [&expanded, &bundle] {
             assert!(
-                verify_portable(
-                    source,
-                    PortableMode::Full,
-                    PortableLimits::default(),
-                    None
-                )
-                .is_err(),
+                verify_portable(source, PortableMode::Full, PortableLimits::default(), None)
+                    .is_err(),
                 "{case}"
             );
             let root = tempfile::tempdir().unwrap();

@@ -119,11 +119,7 @@ impl<'a> InventoryCheck<'a> {
 }
 
 fn structure(detail: &'static str) -> PortableError {
-    PortableError::at(
-        PortableErrorCode::InvalidStructure,
-        INVENTORY_PATH,
-        detail,
-    )
+    PortableError::at(PortableErrorCode::InvalidStructure, INVENTORY_PATH, detail)
 }
 
 fn mismatch() -> PortableError {

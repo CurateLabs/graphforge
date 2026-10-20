@@ -16,8 +16,8 @@ use graphforge_api::{
 };
 #[cfg(feature = "portable")]
 use graphforge_api::{
-    PortableSelection, PortableExportRequest, PortableImportRequest, PortableLimits,
-    PortableOutput, PortableSelectionProfile,
+    PortableExportRequest, PortableImportRequest, PortableLimits, PortableOutput,
+    PortableSelection, PortableSelectionProfile,
 };
 use parquet::arrow::ArrowWriter;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;

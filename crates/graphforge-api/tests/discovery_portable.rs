@@ -1,8 +1,8 @@
 //! End-to-end discovery selection into the storage-owned portable verifier.
 
 use graphforge_api::{
-    DiscoveryPortableError, DiscoveryPortableMismatch, DiscoveryPortableRequest,
-    PortableErrorCode, PortableLimits, PortableMode, verify_discovered_portable,
+    DiscoveryPortableError, DiscoveryPortableMismatch, DiscoveryPortableRequest, PortableErrorCode,
+    PortableLimits, PortableMode, verify_discovered_portable,
 };
 use graphforge_discovery::{
     DISCOVERY_FORMAT, DiscoveryLimits, DiscoveryManifest, ObjectDescriptor, PORTABLE_V2_FORMAT,

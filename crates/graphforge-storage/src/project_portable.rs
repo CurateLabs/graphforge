@@ -373,14 +373,9 @@ fn read_bounded_file(path: &Path, limit: u64, entry: &str) -> Result<Vec<u8>, Po
             "control bound",
         ));
     }
-    let mut file =
-        crate::project_portable_export::open_source_no_follow(path).map_err(|_| {
-            PortableError::at(
-                PortableErrorCode::InvalidStructure,
-                entry,
-                "unsafe control",
-            )
-        })?;
+    let mut file = crate::project_portable_export::open_source_no_follow(path).map_err(|_| {
+        PortableError::at(PortableErrorCode::InvalidStructure, entry, "unsafe control")
+    })?;
     let mut bytes = Vec::new();
     std::io::Read::by_ref(&mut file)
         .take(limit.saturating_add(1))
@@ -630,10 +625,7 @@ fn read_unhashed_payload(
     })?;
     let mut bytes = vec![0; length];
     input.read_exact(&mut bytes).map_err(|_| {
-        PortableError::new(
-            PortableErrorCode::InvalidStructure,
-            "truncated PAX payload",
-        )
+        PortableError::new(PortableErrorCode::InvalidStructure, "truncated PAX payload")
     })?;
     skip_padding(input, length as u64)?;
     Ok(bytes)
@@ -771,9 +763,7 @@ fn walk(
     let mut children = fs::read_dir(dir)
         .map_err(|_| PortableError::new(PortableErrorCode::Io, "cannot read directory"))?
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| {
-            PortableError::new(PortableErrorCode::Io, "cannot read directory entry")
-        })?;
+        .map_err(|_| PortableError::new(PortableErrorCode::Io, "cannot read directory entry"))?;
     children.sort_by_key(std::fs::DirEntry::file_name);
     for child in children {
         check_cancel(cancelled)?;
@@ -783,13 +773,9 @@ fn walk(
         let relative = child
             .path()
             .strip_prefix(root)
-            .map_err(|_| {
-                PortableError::new(PortableErrorCode::InvalidPath, "entry escaped root")
-            })?
+            .map_err(|_| PortableError::new(PortableErrorCode::InvalidPath, "entry escaped root"))?
             .to_str()
-            .ok_or_else(|| {
-                PortableError::new(PortableErrorCode::InvalidPath, "non-UTF-8 path")
-            })?
+            .ok_or_else(|| PortableError::new(PortableErrorCode::InvalidPath, "non-UTF-8 path"))?
             .replace(std::path::MAIN_SEPARATOR, "/");
         validate_path(&relative, limits.max_path_bytes)?;
         if ty.is_symlink() || (!ty.is_file() && !ty.is_dir()) {
@@ -859,9 +845,9 @@ fn verify_bundle(
                 .map_err(|_| PortableError::new(PortableErrorCode::Io, "bundle read"))?
                 != 0
             {
-                let current = file.metadata().map_err(|_| {
-                    PortableError::new(PortableErrorCode::Io, "bundle metadata")
-                })?;
+                let current = file
+                    .metadata()
+                    .map_err(|_| PortableError::new(PortableErrorCode::Io, "bundle metadata"))?;
                 if current.len() != before.len() || modified(&current) != modified(&before) {
                     return Err(PortableError::new(
                         PortableErrorCode::ConcurrentMutation,
@@ -987,16 +973,10 @@ fn verify_bundle(
     }
     validate_path_set(&entries.iter().map(|e| e.path.clone()).collect::<Vec<_>>())?;
     let after = file.metadata().map_err(|_| {
-        PortableError::new(
-            PortableErrorCode::ConcurrentMutation,
-            "bundle disappeared",
-        )
+        PortableError::new(PortableErrorCode::ConcurrentMutation, "bundle disappeared")
     })?;
     let named = fs::symlink_metadata(path).map_err(|_| {
-        PortableError::new(
-            PortableErrorCode::ConcurrentMutation,
-            "bundle disappeared",
-        )
+        PortableError::new(PortableErrorCode::ConcurrentMutation, "bundle disappeared")
     })?;
     if !same_identity(&after, &named)
         || !same_identity(&before, &after)
@@ -1130,10 +1110,7 @@ pub(crate) fn canonical_json(value: &Value) -> Result<Vec<u8>, PortableError> {
             Value::Bool(value) => output.extend_from_slice(if *value { b"true" } else { b"false" }),
             Value::Number(value) => output.extend(value.to_string().bytes()),
             Value::String(value) => output.extend(serde_json::to_vec(value).map_err(|_| {
-                PortableError::new(
-                    PortableErrorCode::InvalidStructure,
-                    "JSON canonicalization",
-                )
+                PortableError::new(PortableErrorCode::InvalidStructure, "JSON canonicalization")
             })?),
             Value::Array(values) => {
                 output.push(b'[');
@@ -1425,9 +1402,9 @@ fn enforce_length(
             "entry size",
         ));
     }
-    *total = total.checked_add(length).ok_or_else(|| {
-        PortableError::new(PortableErrorCode::LimitExceeded, "total overflow")
-    })?;
+    *total = total
+        .checked_add(length)
+        .ok_or_else(|| PortableError::new(PortableErrorCode::LimitExceeded, "total overflow"))?;
     if *total > limits.max_total_bytes {
         return Err(PortableError::new(
             PortableErrorCode::LimitExceeded,
@@ -1509,9 +1486,7 @@ fn hash_file(
         check_cancel(cancelled)?;
         let n = f
             .read(&mut b[..usize::try_from(left.min(buffer as u64)).unwrap()])
-            .map_err(|_| {
-                PortableError::at(PortableErrorCode::Io, entry, "cannot read entry")
-            })?;
+            .map_err(|_| PortableError::at(PortableErrorCode::Io, entry, "cannot read entry"))?;
         if n == 0 {
             return Err(PortableError::at(
                 PortableErrorCode::ConcurrentMutation,
@@ -1535,11 +1510,7 @@ fn hash_file(
         left -= n as u64;
     }
     let after = f.metadata().map_err(|_| {
-        PortableError::at(
-            PortableErrorCode::Io,
-            entry,
-            "cannot re-inspect open entry",
-        )
+        PortableError::at(PortableErrorCode::Io, entry, "cannot re-inspect open entry")
     })?;
     if !same_identity(&before, &after)
         || before.len() != after.len()
@@ -2054,8 +2025,7 @@ mod tests {
             max_entries: 2,
             ..PortableLimits::default()
         };
-        let error =
-            verify_portable(root.path(), PortableMode::Full, limits, None).unwrap_err();
+        let error = verify_portable(root.path(), PortableMode::Full, limits, None).unwrap_err();
         assert_eq!(error.code, PortableErrorCode::LimitExceeded);
     }
 

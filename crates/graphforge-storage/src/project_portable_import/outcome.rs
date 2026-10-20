@@ -128,11 +128,8 @@ pub(super) fn storage(error: &GfError) -> PortableError {
             "import operation identity conflicts with its original request",
         );
     }
-    PortableError::new(
-        PortableErrorCode::Io,
-        "portable import publication failed",
-    )
-    .with_cause(crate::portable_cause::sanitized_cause(&error.to_string()))
+    PortableError::new(PortableErrorCode::Io, "portable import publication failed")
+        .with_cause(crate::portable_cause::sanitized_cause(&error.to_string()))
 }
 
 pub(super) fn with_io_context(
@@ -150,10 +147,7 @@ pub(super) fn with_io_context(
     error
 }
 
-pub(super) fn storage_or_cancel(
-    error: &GfError,
-    cancelled: Option<&AtomicBool>,
-) -> PortableError {
+pub(super) fn storage_or_cancel(error: &GfError, cancelled: Option<&AtomicBool>) -> PortableError {
     if cancelled.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed)) {
         PortableError::new(PortableErrorCode::Cancelled, "verification cancelled")
     } else {

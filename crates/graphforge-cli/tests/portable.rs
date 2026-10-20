@@ -311,8 +311,8 @@ fn portable_export_verify_and_import_round_trip() {
 #[test]
 fn portable_facade_and_same_binary_preserve_complete_receipts() {
     use graphforge_api::{
-        GraphForge, PortableSelection, PortableExportRequest, PortableLimits, PortableMode,
-        PortableOutput, PortableSelectionPreviewRequest, PortableSelectionProfile,
+        GraphForge, PortableExportRequest, PortableLimits, PortableMode, PortableOutput,
+        PortableSelection, PortableSelectionPreviewRequest, PortableSelectionProfile,
         PortableSelectionRequest, PortableVerifyRequest,
     };
     let root = TempDir::new().unwrap();
@@ -437,9 +437,7 @@ fn portable_facade_and_same_binary_preserve_complete_receipts() {
                 cli_package,
                 serde_json::to_value(exported.receipt()).unwrap()
             );
-            let denied = graph
-                .export_portable(&request, None, |_| {})
-                .unwrap_err();
+            let denied = graph.export_portable(&request, None, |_| {}).unwrap_err();
             assert_eq!(denied.code, graphforge_api::PortableErrorCode::Io);
             drop(graph);
             if package.is_dir() {
@@ -461,8 +459,7 @@ fn shared_verification_golden_matches_real_facade_and_cli() {
     fs::copy(&fixture, &package).unwrap();
     assert_eq!(fs::read(&package).unwrap(), fs::read(&fixture).unwrap());
     let expected: Value = serde_json::from_slice(
-        &fs::read(root.join("tests/fixtures/portable/facade-verification-receipts.json"))
-            .unwrap(),
+        &fs::read(root.join("tests/fixtures/portable/facade-verification-receipts.json")).unwrap(),
     )
     .unwrap();
     for (key, flag, mode) in [

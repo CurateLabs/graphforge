@@ -68,8 +68,7 @@ fn complete_research_roundtrip_preserves_version_and_historical_genealogy() {
     };
     let cancelled = CancellationToken::new();
     cancelled.cancel();
-    let error =
-        GraphForge::import_portable(&target, &import, Some(cancelled.flag())).unwrap_err();
+    let error = GraphForge::import_portable(&target, &import, Some(cancelled.flag())).unwrap_err();
     assert_eq!(
         error.code,
         graphforge_core::portable::PortableErrorCode::Cancelled

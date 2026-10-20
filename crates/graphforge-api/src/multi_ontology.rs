@@ -1629,10 +1629,7 @@ mod tests {
                 "composition.resolution_explain",
                 "GraphForge.explain_ontology_resolution",
             ),
-            (
-                "portable.inspect",
-                "crate.verify_portable[structure_only]",
-            ),
+            ("portable.inspect", "crate.verify_portable[structure_only]"),
             ("portable.verify", "crate.verify_portable[full]"),
             ("portable.export", "GraphForge.export_portable"),
             ("portable.import", "GraphForge.import_portable"),

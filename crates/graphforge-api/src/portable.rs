@@ -233,10 +233,8 @@ pub fn verify_portable(
 pub fn publish_portable_oci(
     request: &PortableOciPublishFacadeRequest,
     cancelled: Option<&AtomicBool>,
-) -> Result<
-    graphforge_core::portable::PortableOciReference,
-    graphforge_core::portable::PortableError,
-> {
+) -> Result<graphforge_core::portable::PortableOciReference, graphforge_core::portable::PortableError>
+{
     let client = graphforge_portable_oci::HttpOciRegistry::new(
         &request.registry,
         request.credential.as_deref(),
@@ -292,10 +290,8 @@ pub fn publish_portable_oci_with_registry(
     registry: &dyn graphforge_portable_oci::PortableOciRegistry,
     request: &crate::portable_oci::PortableOciPublishRequest<'_>,
     cancelled: Option<&AtomicBool>,
-) -> Result<
-    graphforge_core::portable::PortableOciReference,
-    graphforge_core::portable::PortableError,
-> {
+) -> Result<graphforge_core::portable::PortableOciReference, graphforge_core::portable::PortableError>
+{
     crate::portable_oci::publish_portable_oci(registry, request, cancelled)
 }
 
@@ -401,11 +397,7 @@ impl GraphForge {
                 subset,
                 request.limits,
             )?;
-            graphforge_storage::plan_graph_subset_portable(
-                &generation,
-                &preview,
-                request.limits,
-            )?
+            graphforge_storage::plan_graph_subset_portable(&generation, &preview, request.limits)?
         } else {
             let selection = graphforge_storage::preview_portable_selection(
                 &generation,
@@ -1213,8 +1205,7 @@ mod tests {
         let before_fingerprint = logical_fingerprint(&before.batches);
         let limits = graphforge_core::portable::PortableLimits::default();
         let graph_fingerprint =
-            graphforge_storage::portable_graph_data_fingerprint(&reopened.dir(), limits)
-                .unwrap();
+            graphforge_storage::portable_graph_data_fingerprint(&reopened.dir(), limits).unwrap();
         let package = root.path().join("lifecycle.gfpb");
         let exported = reopened
             .export_portable(
@@ -1276,8 +1267,7 @@ mod tests {
         );
         assert_eq!(logical_fingerprint(&after.batches), before_fingerprint);
         assert_eq!(
-            graphforge_storage::portable_graph_data_fingerprint(&imported.dir(), limits)
-                .unwrap(),
+            graphforge_storage::portable_graph_data_fingerprint(&imported.dir(), limits).unwrap(),
             graph_fingerprint
         );
         let imported_inventory =

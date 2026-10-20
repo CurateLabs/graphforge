@@ -2,10 +2,10 @@
 //! real durable Projects and real exports.
 
 use graphforge_api::{
-    DiscoveryOntologyModuleRequest, DiscoveryPortableError, DiscoveryPortableMismatch,
-    GraphForge, ModuleAdoptionRequest, OntologyAuthorityExpectation, OntologyModuleId,
-    PortableSelection, PortableErrorCode, PortableExportRequest, PortableLimits,
-    PortableOutput, PortableSelectionProfile, ResolvedOntologyModule, WriteContext,
+    DiscoveryOntologyModuleRequest, DiscoveryPortableError, DiscoveryPortableMismatch, GraphForge,
+    ModuleAdoptionRequest, OntologyAuthorityExpectation, OntologyModuleId, PortableErrorCode,
+    PortableExportRequest, PortableLimits, PortableOutput, PortableSelection,
+    PortableSelectionProfile, ResolvedOntologyModule, WriteContext,
     resolve_discovered_ontology_module,
 };
 use graphforge_core::portable::PortableExactIdentity;
@@ -317,8 +317,7 @@ fn expanded_and_bundle_representations_resolve_identically() {
         project_adopting(&roots.path().join("project"), &module_document(), 8_300);
     let bundle = roots.path().join("module.gfpb");
     let expanded = roots.path().join("module.gfproject");
-    let bundled =
-        export_module_package(&graph, &exact_id, bundle.clone(), PortableOutput::Bundle);
+    let bundled = export_module_package(&graph, &exact_id, bundle.clone(), PortableOutput::Bundle);
     let directory = export_module_package(
         &graph,
         &exact_id,

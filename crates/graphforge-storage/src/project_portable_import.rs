@@ -490,9 +490,8 @@ fn materialize_owned_import(
         allocation,
     )?;
     let mut identities = std::collections::BTreeMap::new();
-    let owner_file = fs::File::open(&owner).map_err(|_| {
-        PortableError::new(PortableErrorCode::Io, "cannot open import ownership")
-    })?;
+    let owner_file = fs::File::open(&owner)
+        .map_err(|_| PortableError::new(PortableErrorCode::Io, "cannot open import ownership"))?;
     record_import_file_identity(&owner_file, &mut identities)?;
     if let Some(allocation) = allocation {
         allocation
@@ -628,10 +627,7 @@ fn cleanup_import_materialization(
             )
         })?;
         let directory = parent.open_child_directory(name).map_err(|_| {
-            PortableError::new(
-                PortableErrorCode::Io,
-                "cannot authenticate import staging",
-            )
+            PortableError::new(PortableErrorCode::Io, "cannot authenticate import staging")
         })?;
         if directory.identity() != expected_stage_identity {
             return Err(PortableError::new(
@@ -679,10 +675,7 @@ fn cleanup_import_owner(
             PortableError::new(PortableErrorCode::Io, "cannot open import owner parent")
         })?;
         let name = owner.file_name().ok_or_else(|| {
-            PortableError::new(
-                PortableErrorCode::InvalidPath,
-                "invalid import owner path",
-            )
+            PortableError::new(PortableErrorCode::InvalidPath, "invalid import owner path")
         })?;
         let file = parent.open_child_file(name).map_err(|_| {
             PortableError::new(PortableErrorCode::Io, "cannot authenticate import owner")
@@ -830,10 +823,7 @@ fn claim_stage(
                 .map_err(|error| storage(&error))?;
         } else {
             fs::remove_dir_all(stage).map_err(|_| {
-                PortableError::new(
-                    PortableErrorCode::Io,
-                    "owned import staging is unavailable",
-                )
+                PortableError::new(PortableErrorCode::Io, "owned import staging is unavailable")
             })?;
         }
         owned_retry = true;
@@ -975,10 +965,7 @@ fn import_materialized(
             })?
             .to_str()
             .ok_or_else(|| {
-                PortableError::new(
-                    PortableErrorCode::InvalidPath,
-                    "non UTF-8 participant path",
-                )
+                PortableError::new(PortableErrorCode::InvalidPath, "non UTF-8 participant path")
             })?
             .replace(std::path::MAIN_SEPARATOR, "/");
         let capture = captures.get(&relative).ok_or_else(|| {
@@ -1627,13 +1614,7 @@ fn build_staged_composition(
     report: &PortableReport,
     limits: PortableLimits,
     allocation: Option<&crate::StorageAllocationOperation>,
-) -> Result<
-    (
-        CapturedCompositionControl,
-        PortableStagedCompositionReceipt,
-    ),
-    PortableError,
-> {
+) -> Result<(CapturedCompositionControl, PortableStagedCompositionReceipt), PortableError> {
     let control = report.ontology_composition.as_ref().ok_or_else(|| {
         PortableError::new(
             PortableErrorCode::Incompatible,
@@ -1829,20 +1810,13 @@ fn resolve_staged_bridge_ids(
                 })
                 .cloned()
                 .ok_or_else(|| {
-                    PortableError::new(
-                        PortableErrorCode::Incompatible,
-                        "staged bridge identity",
-                    )
+                    PortableError::new(PortableErrorCode::Incompatible, "staged bridge identity")
                 })
         })
         .collect()
 }
 
-fn read_bounded_payload(
-    path: &Path,
-    limit: u64,
-    context: &str,
-) -> Result<Vec<u8>, PortableError> {
+fn read_bounded_payload(path: &Path, limit: u64, context: &str) -> Result<Vec<u8>, PortableError> {
     let metadata = fs::symlink_metadata(path).map_err(|_| {
         PortableError::at(
             PortableErrorCode::InvalidStructure,
@@ -1857,14 +1831,9 @@ fn read_bounded_payload(
             "payload bound",
         ));
     }
-    let mut file =
-        crate::project_portable_export::open_source_no_follow(path).map_err(|_| {
-            PortableError::at(
-                PortableErrorCode::InvalidStructure,
-                context,
-                "payload open",
-            )
-        })?;
+    let mut file = crate::project_portable_export::open_source_no_follow(path).map_err(|_| {
+        PortableError::at(PortableErrorCode::InvalidStructure, context, "payload open")
+    })?;
     let mut bytes = Vec::new();
     std::io::Read::by_ref(&mut file)
         .take(limit.saturating_add(1))

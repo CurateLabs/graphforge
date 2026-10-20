@@ -10,13 +10,8 @@ fn assert_refusal_in_both_forms(
     let outputs = tempfile::tempdir().unwrap();
     let (expanded, bundle) = write_test_representations(plan, outputs.path());
     for path in [&expanded, &bundle] {
-        let error = verify_portable(
-            path,
-            PortableMode::Full,
-            PortableLimits::default(),
-            None,
-        )
-        .unwrap_err();
+        let error =
+            verify_portable(path, PortableMode::Full, PortableLimits::default(), None).unwrap_err();
         assert_eq!(error.code, code, "{detail}: {error}");
         assert_eq!(error.to_string(), format!("portable {code:?}: {detail}"));
         assert_eq!(error.entry.as_deref(), entry);
@@ -59,11 +54,7 @@ fn authenticated_manifest_refuses_invalid_authority_and_selection() {
             }
             "dangling" => {
                 manifest["components"][0]["required_dependencies"] = json!(["missing-component"]);
-                (
-                    PortableErrorCode::Incompatible,
-                    "dependency closure",
-                    None,
-                )
+                (PortableErrorCode::Incompatible, "dependency closure", None)
             }
             "cycle" => {
                 let first = manifest["components"][0]["participant_id"].clone();
@@ -118,11 +109,7 @@ fn authenticated_manifest_refuses_invalid_authority_and_selection() {
             }
             "component-identity" => {
                 manifest["components"][0]["participant_id"] = json!("UPPERCASE");
-                (
-                    PortableErrorCode::Incompatible,
-                    "component identity",
-                    None,
-                )
+                (PortableErrorCode::Incompatible, "component identity", None)
             }
             "descriptor" => {
                 let file = &mut manifest["components"][0]["files"][0];
@@ -213,11 +200,7 @@ fn authenticated_composition_refuses_invalid_activation_and_identity() {
             "activation-subject" => {
                 control["activation_profile"]["overrides"][0]["subject"]["id"] =
                     json!("https://graphforge.dev/bridge/missing");
-                (
-                    PortableErrorCode::Incompatible,
-                    "activation closure",
-                    None,
-                )
+                (PortableErrorCode::Incompatible, "activation closure", None)
             }
             "activation-duplicate" => {
                 let overrides = control["activation_profile"]["overrides"]

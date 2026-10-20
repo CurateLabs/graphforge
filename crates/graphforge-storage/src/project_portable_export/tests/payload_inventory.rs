@@ -94,10 +94,7 @@ fn export(
     )
 }
 
-fn verify(
-    package: &Path,
-    limits: PortableExportLimits,
-) -> Result<PortableReport, PortableError> {
+fn verify(package: &Path, limits: PortableExportLimits) -> Result<PortableReport, PortableError> {
     crate::verify_portable(package, crate::PortableMode::Full, limits, None)
 }
 
@@ -192,10 +189,7 @@ fn a_payload_inventory_over_the_tag_file_limit_exports_verifies_and_imports() {
 
     let bundle_report = verify(&bundle, limits()).unwrap();
     let expanded_report = verify(&expanded, limits()).unwrap();
-    assert_eq!(
-        bundle_report.representation,
-        PortableRepresentation::Bundle
-    );
+    assert_eq!(bundle_report.representation, PortableRepresentation::Bundle);
     assert_eq!(bundle_report.package_digest, expanded_report.package_digest);
     assert_eq!(bundle_report.entry_count, expanded_report.entry_count);
     // Every planned file, the semantic manifest and four tag files.

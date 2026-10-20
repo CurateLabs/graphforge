@@ -31,10 +31,7 @@ fn capture_graph_sources(
             // scanner/writer capture. Its generic installer keeps genuine SHA.
             let length = fs::metadata(&source)
                 .map_err(|_| {
-                    PortableError::new(
-                        PortableErrorCode::Io,
-                        "cannot inspect untrusted graph file",
-                    )
+                    PortableError::new(PortableErrorCode::Io, "cannot inspect untrusted graph file")
                 })?
                 .len();
             let input = crate::project_portable_export::open_source_no_follow(&source)?;
@@ -49,10 +46,7 @@ fn capture_graph_sources(
             let mut buffer = vec![0; 64 * 1024];
             loop {
                 let count = input.read(&mut buffer).map_err(|_| {
-                    PortableError::new(
-                        PortableErrorCode::Io,
-                        "cannot read untrusted graph file",
-                    )
+                    PortableError::new(PortableErrorCode::Io, "cannot read untrusted graph file")
                 })?;
                 if count == 0 {
                     break;
