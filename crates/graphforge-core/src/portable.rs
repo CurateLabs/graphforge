@@ -45,7 +45,7 @@ pub struct PortableLimits {
 /// digest bytes, 186 bytes plus the path. The S26 Graph500 project's records
 /// average about 320 bytes (21,531 files, 6.9 MB), so 512 bytes admits paths
 /// that average up to 326 bytes, nearly twice S26's 169.
-pub const PORTABLE_V2_MANIFEST_BYTES_PER_ENTRY: u64 = 512;
+pub const PORTABLE_MANIFEST_BYTES_PER_ENTRY: u64 = 512;
 /// Most graph files one project holds: the storage graph-manifest default
 /// (`GraphManifestLimits::max_entries`), the largest graph a package can carry.
 const PRODUCER_MAX_GRAPH_FILES: u64 = 100_000;
@@ -59,7 +59,7 @@ impl PortableLimits {
     #[must_use]
     pub fn semantic_manifest_bound(&self, entries: u64) -> u64 {
         self.max_manifest_bytes
-            .saturating_add(entries.saturating_mul(PORTABLE_V2_MANIFEST_BYTES_PER_ENTRY))
+            .saturating_add(entries.saturating_mul(PORTABLE_MANIFEST_BYTES_PER_ENTRY))
             .min(self.max_semantic_manifest_bytes)
     }
 }
@@ -75,7 +75,7 @@ impl Default for PortableLimits {
             // 100,000 graph files x 512 bytes = 51,200,000, rounded up to
             // 64 MiB: a manifest for the largest graph a project holds fits.
             max_semantic_manifest_bytes: (PRODUCER_MAX_GRAPH_FILES
-                * PORTABLE_V2_MANIFEST_BYTES_PER_ENTRY)
+                * PORTABLE_MANIFEST_BYTES_PER_ENTRY)
                 .next_power_of_two(),
             max_tag_manifest_bytes: 4 * 1024 * 1024,
             max_path_bytes: 4096,
@@ -796,14 +796,14 @@ mod limit_tests {
         let limits = PortableLimits::default();
         // The per-entry semantic manifest budget is one record plus its path.
         assert_eq!(longest_record_without_path(), 186);
-        let path_budget = PORTABLE_V2_MANIFEST_BYTES_PER_ENTRY - longest_record_without_path();
+        let path_budget = PORTABLE_MANIFEST_BYTES_PER_ENTRY - longest_record_without_path();
         assert_eq!(path_budget, 326);
         // Controls that do not grow with the entry count keep 16 MiB; the
         // semantic manifest ceiling holds the largest graph a project holds.
         assert_eq!(limits.max_manifest_bytes, 16 * 1024 * 1024);
         assert_eq!(limits.max_semantic_manifest_bytes, 64 * 1024 * 1024);
         assert!(
-            PRODUCER_MAX_GRAPH_FILES * PORTABLE_V2_MANIFEST_BYTES_PER_ENTRY
+            PRODUCER_MAX_GRAPH_FILES * PORTABLE_MANIFEST_BYTES_PER_ENTRY
                 <= limits.max_semantic_manifest_bytes
         );
         // S26 Graph500: 21,535 entries and a 6,874,538-byte manifest whose
@@ -817,7 +817,7 @@ mod limit_tests {
         assert_eq!(limits.semantic_manifest_bound(0), limits.max_manifest_bytes);
         assert_eq!(
             limits.semantic_manifest_bound(1),
-            limits.max_manifest_bytes + PORTABLE_V2_MANIFEST_BYTES_PER_ENTRY
+            limits.max_manifest_bytes + PORTABLE_MANIFEST_BYTES_PER_ENTRY
         );
         assert_eq!(
             limits.semantic_manifest_bound(limits.max_entries),

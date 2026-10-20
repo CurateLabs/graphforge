@@ -2797,14 +2797,14 @@ mod tests {
                 .arg("--exact")
                 .arg(HELPER)
                 .arg("--nocapture")
-                .env("GRAPHFORGE_PORTABLE_V2_CRASH_PACKAGE", &package)
-                .env("GRAPHFORGE_PORTABLE_V2_CRASH_TARGET", &target)
+                .env("GRAPHFORGE_PORTABLE_CRASH_PACKAGE", &package)
+                .env("GRAPHFORGE_PORTABLE_CRASH_TARGET", &target)
                 .env(
-                    "GRAPHFORGE_PORTABLE_V2_CRASH_TRANSACTION",
+                    "GRAPHFORGE_PORTABLE_CRASH_TRANSACTION",
                     transaction.to_string(),
                 )
                 .env(
-                    "GRAPHFORGE_PORTABLE_V2_CRASH_GENERATION",
+                    "GRAPHFORGE_PORTABLE_CRASH_GENERATION",
                     generation.to_string(),
                 )
                 .env("GRAPHFORGE_PROJECT_FAILPOINTS", COOKIE)
@@ -2919,15 +2919,15 @@ mod tests {
 
     #[test]
     fn subprocess_crash_import() {
-        let Ok(package) = std::env::var("GRAPHFORGE_PORTABLE_V2_CRASH_PACKAGE") else {
+        let Ok(package) = std::env::var("GRAPHFORGE_PORTABLE_CRASH_PACKAGE") else {
             return;
         };
-        let target = std::env::var("GRAPHFORGE_PORTABLE_V2_CRASH_TARGET").unwrap();
+        let target = std::env::var("GRAPHFORGE_PORTABLE_CRASH_TARGET").unwrap();
         let transaction =
-            Uuid::parse_str(&std::env::var("GRAPHFORGE_PORTABLE_V2_CRASH_TRANSACTION").unwrap())
+            Uuid::parse_str(&std::env::var("GRAPHFORGE_PORTABLE_CRASH_TRANSACTION").unwrap())
                 .unwrap();
         let generation =
-            Uuid::parse_str(&std::env::var("GRAPHFORGE_PORTABLE_V2_CRASH_GENERATION").unwrap())
+            Uuid::parse_str(&std::env::var("GRAPHFORGE_PORTABLE_CRASH_GENERATION").unwrap())
                 .unwrap();
         let _ = import_complete_portable(
             package,
