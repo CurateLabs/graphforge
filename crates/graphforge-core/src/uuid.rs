@@ -34,13 +34,6 @@ pub fn new_v5(namespace: &Uuid, name: &[u8]) -> Uuid {
     Uuid::new_v5(namespace, name)
 }
 
-/// Derive the portable-v1 imported generation from its caller-owned operation.
-/// The versioned name is a persisted compatibility contract.
-#[must_use]
-pub fn portable_v1_import_generation(operation: &Uuid) -> Uuid {
-    new_v5(operation, b"graphforge-portable-import-generation/1")
-}
-
 /// Derive the streaming portable imported generation from its caller-owned operation.
 /// The versioned name is a persisted compatibility contract.
 #[must_use]
@@ -212,10 +205,6 @@ mod tests {
         let version_b = format!("sha256:{}", "b".repeat(64));
         let vectors = [
             (
-                portable_v1_import_generation(&operation),
-                "02abd337-e93c-56a3-bf8f-dadbb5b1e8d5",
-            ),
-            (
                 portable_import_generation(&operation),
                 "167a58d3-52f2-533e-b3c4-01d743d7537d",
             ),
@@ -323,10 +312,6 @@ mod tests {
             assert!(unique.insert(actual), "derivation domains collided");
         }
         let other_operation = Uuid::from_bytes([7; 16]);
-        assert_ne!(
-            portable_v1_import_generation(&operation),
-            portable_v1_import_generation(&other_operation)
-        );
         assert_ne!(
             portable_import_generation(&operation),
             portable_import_generation(&other_operation)

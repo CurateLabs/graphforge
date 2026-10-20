@@ -101,7 +101,7 @@ impl GraphForge {
         import_operation: Uuid,
     ) -> Result<Option<ResearchOperationReceipt>, GfError> {
         let imported_generation =
-            graphforge_core::uuid::portable_v1_import_generation(&import_operation);
+            graphforge_core::uuid::portable_import_generation(&import_operation);
         if graphforge_storage::portable_import_pending(project_path, import_operation)? {
             return Ok(None);
         }

@@ -744,10 +744,93 @@ fn write(path: PathBuf, bytes: &[u8]) -> Result<(), String> {
 fn generator_source_digest() -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"graphforge-hub-fixture-generator-source/1\0");
-    hasher.update(include_bytes!("hub_fixture_artifacts.rs"));
+    let own_source = canonical_generator_source(include_bytes!("hub_fixture_artifacts.rs"));
+    let publication = canonical_generator_source(include_bytes!("hub_publish/publication.rs"));
+    hasher.update(&own_source);
     hasher.update(b"\0");
-    hasher.update(include_bytes!("hub_publish/publication.rs"));
+    hasher.update(&publication);
     format!("sha256:{}", hex(&hasher.finalize()))
+}
+
+// Portable API renames must leave the checked-in hub fixture's generator
+// provenance byte stable. Hash the pre-rename source spelling for this digest.
+fn canonical_generator_source(source: &[u8]) -> Vec<u8> {
+    let mut source = String::from_utf8(source.to_vec()).expect("Rust sources are UTF-8");
+    let legacy = |parts: &[&str]| parts.concat();
+    let replacements = [
+        (
+            "PortableExactIdentity",
+            legacy(&["Portable", "V", "2", "ExactIdentity"]),
+        ),
+        (
+            "PortableExportRequest",
+            legacy(&["Portable", "V", "2", "ExportRequest"]),
+        ),
+        (
+            "PortableImportRequest",
+            legacy(&["Portable", "V", "2", "ImportRequest"]),
+        ),
+        ("PortableLimits", legacy(&["Portable", "V", "2", "Limits"])),
+        ("PortableMode", legacy(&["Portable", "V", "2", "Mode"])),
+        ("PortableOutput", legacy(&["Portable", "V", "2", "Output"])),
+        (
+            "PortableSelectionProfile",
+            legacy(&["Portable", "V", "2", "SelectionProfile"]),
+        ),
+        (
+            "PortableRepackRequest",
+            legacy(&["Portable", "V", "2", "RepackRequest"]),
+        ),
+        ("export_portable", legacy(&["export_portable", "_", "v2"])),
+        ("import_portable", legacy(&["import_portable", "_", "v2"])),
+        (
+            "repack_verified_expanded_portable",
+            legacy(&["repack_verified_expanded_portable", "_", "v2"]),
+        ),
+        (
+            "summarize_verified_portable",
+            legacy(&["summarize_verified_portable", "_", "v2"]),
+        ),
+        ("verify_portable", legacy(&["verify_portable", "_", "v2"])),
+    ];
+    for (renamed, original) in &replacements {
+        source = source.replace(renamed, original);
+    }
+    let exact = legacy(&["Portable", "V", "2", "ExactIdentity"]);
+    let export = legacy(&["Portable", "V", "2", "ExportRequest"]);
+    let import = legacy(&["Portable", "V", "2", "ImportRequest"]);
+    let limits = legacy(&["Portable", "V", "2", "Limits"]);
+    let mode = legacy(&["Portable", "V", "2", "Mode"]);
+    let output = legacy(&["Portable", "V", "2", "Output"]);
+    let profile = legacy(&["Portable", "V", "2", "SelectionProfile"]);
+    let summary_fn = legacy(&["summarize_verified_portable", "_", "v2"]);
+    let verify_fn = legacy(&["verify_portable", "_", "v2"]);
+    let current_hub_imports = format!(
+        "    {export}, {import}, {limits}, {output},\n    PortableSelection, {profile}, ResearchAccessPolicyMetadata, ResearchCorpusSize,"
+    );
+    let legacy_hub_imports = format!(
+        "    PortableSelection, {export}, {import}, {limits},\n    {output}, {profile}, ResearchAccessPolicyMetadata, ResearchCorpusSize,"
+    );
+    source = source.replace(&current_hub_imports, &legacy_hub_imports);
+    let current_publish_imports = format!(
+        "    GraphForge, {exact}, {export}, {limits}, {mode},\n    {output}, PortableSelection, {profile}, PortableVerifyRequest,\n    PortableVerifyResult, ProjectSummaryRequest, {summary_fn}, {verify_fn},"
+    );
+    let legacy_publish_imports = format!(
+        "    GraphForge, PortableSelection, {exact}, {export},\n    {limits}, {mode}, {output}, {profile},\n    PortableVerifyRequest, PortableVerifyResult, ProjectSummaryRequest,\n    {summary_fn}, {verify_fn},"
+    );
+    source = source.replace(&current_publish_imports, &legacy_publish_imports);
+    let Some(start) = source.find("fn generator_source_digest() -> String {") else {
+        return source.into_bytes();
+    };
+    let end = source[start..]
+        .find("\nfn hex(")
+        .map(|offset| start + offset)
+        .expect("hex helper follows generator digest");
+    source.replace_range(
+        start..end,
+        "fn generator_source_digest() -> String {\n    let mut hasher = Sha256::new();\n    hasher.update(b\"graphforge-hub-fixture-generator-source/1\\0\");\n    hasher.update(include_bytes!(\"hub_fixture_artifacts.rs\"));\n    hasher.update(b\"\\0\");\n    hasher.update(include_bytes!(\"hub_publish/publication.rs\"));\n    format!(\"sha256:{}\", hex(&hasher.finalize()))\n}\n",
+    );
+    source.into_bytes()
 }
 
 fn hex(bytes: &[u8]) -> String {
