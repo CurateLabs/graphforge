@@ -9,9 +9,9 @@ with current IDs nor a new run using retired IDs validates.
 
 from __future__ import annotations
 
-import re
 from collections.abc import Mapping
 from dataclasses import dataclass
+import re
 from typing import Any
 
 

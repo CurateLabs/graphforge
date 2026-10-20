@@ -30,7 +30,9 @@ def synthetic_s18(target: Path, *, commit: str, retired_ids: bool) -> Path:
         text = path.read_text(encoding="utf-8").replace(RECORDED_COMMIT, commit)
         if not retired_ids:
             for family in ("export", "import", "verify"):
-                text = text.replace(f"graphforge-portable-{family}/2", f"graphforge-portable-{family}/1")
+                text = text.replace(
+                    f"graphforge-portable-{family}/2", f"graphforge-portable-{family}/1"
+                )
         path.write_text(text, encoding="utf-8")
     result_path = target / "s18-result.json"
     result = json.loads(result_path.read_text(encoding="utf-8"))
@@ -52,7 +54,9 @@ class RecordedEvidenceContractTests(unittest.TestCase):
         return synthetic_s18(directory, **kwargs)  # type: ignore[arg-type]
 
     def test_recorded_bundle_validates_against_its_own_era(self) -> None:
-        self.assertEqual(contracts.contracts_for_commit(RECORDED_COMMIT).export, "graphforge-portable-export/2")
+        self.assertEqual(
+            contracts.contracts_for_commit(RECORDED_COMMIT).export, "graphforge-portable-export/2"
+        )
         self.assertTrue(validate_native_bundle(BUNDLE)["complete"])
 
     def test_recorded_commit_with_current_ids_is_refused(self) -> None:
@@ -70,9 +74,11 @@ class RecordedEvidenceContractTests(unittest.TestCase):
         self.read(self.synthetic(commit=RECORDED_COMMIT, retired_ids=True))
 
     def test_without_the_mapping_the_recorded_bundle_is_refused(self) -> None:
-        with mock.patch.object(contracts, "RECORDED_EVIDENCE_CONTRACTS", {}):
-            with self.assertRaisesRegex(NativeBundleError, "not those emitted"):
-                validate_native_bundle(BUNDLE)
+        with (
+            mock.patch.object(contracts, "RECORDED_EVIDENCE_CONTRACTS", {}),
+            self.assertRaisesRegex(NativeBundleError, "not those emitted"),
+        ):
+            validate_native_bundle(BUNDLE)
 
 
 if __name__ == "__main__":
