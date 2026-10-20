@@ -1416,6 +1416,20 @@ fn import_committed(staging: &CloneStaging, operation: &OperationId) -> bool {
         .is_ok_and(|identity| identity.generation_uuid == expected)
 }
 
+/// An import that did not commit leaves nothing worth keeping; the rerun
+/// starts from an empty target. A committed one stays, and the rerun replays
+/// it. That holds whether the failure came after the commit (the error carries
+/// the commit) or before anything was written in this run, as when a replay of
+/// an earlier committed run is refused for lack of space: the staged project
+/// is then the committed one, and it must survive the refusal.
+fn discards_failed_import(
+    staging: &CloneStaging,
+    operation: &OperationId,
+    error: &graphforge_api::PortableError,
+) -> bool {
+    error.committed_import.is_none() && !import_committed(staging, operation)
+}
+
 /// Remove research validation scratch an interrupted run left in the staging
 /// directory; it never outlives the run that created it.
 fn remove_stale_scratch(staging: &CloneStaging) -> Result<(), graphforge_api::GfError> {
@@ -2284,11 +2298,8 @@ fn clone_into_staging(
                 Some(cancelled),
             )
             .map_err(|error| {
-                // An import that did not commit leaves nothing worth
-                // keeping; the rerun starts from an empty target. A committed
-                // one stays, and the rerun replays it.
                 if research_context.is_none()
-                    && error.committed_import.is_none()
+                    && discards_failed_import(staging, &operation_id, &error)
                     && let Err(cleanup) = clear_import_target(staging)
                 {
                     return graphforge_api::GfError::Storage(format!(

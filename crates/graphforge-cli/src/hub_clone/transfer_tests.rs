@@ -980,3 +980,33 @@ fn a_prior_stage_reduces_clones_budget_by_what_removing_it_frees_and_no_more() {
     admitted(budget - credit).unwrap();
     assert!(admitted(budget - credit - 1).is_err());
 }
+
+#[test]
+fn a_refused_replay_keeps_the_project_an_earlier_run_committed() {
+    let (_, _, fixture) = helper_fixture();
+    let operation = clone_operation(
+        &RepositoryIdentity::parse("openalex/openalex").unwrap(),
+        &format!("sha256:{}", "a".repeat(64)),
+        None,
+    );
+    // Refused before it wrote anything, so the error carries no commit.
+    let refusal = graphforge_api::PortableError::new(
+        PortableErrorCode::InsufficientSpace,
+        "insufficient disk space for import",
+    );
+    // A run killed after its import committed leaves the committed project.
+    let root = tempfile::tempdir().unwrap();
+    let committed = root.path().join("committed");
+    let child = clone_in_child(fixture.path(), &committed, "clone.before_install");
+    assert_eq!(child.status.code(), Some(CLONE_FAILPOINT_EXIT));
+    let staging = acquire_staging(&committed).unwrap();
+    assert!(import_committed(&staging, &operation));
+    assert!(
+        !discards_failed_import(&staging, &operation, &refusal),
+        "the refusal would clear the committed project"
+    );
+    drop(staging);
+    // Staging that holds no committed project is discarded as before.
+    let fresh = acquire_staging(&root.path().join("fresh")).unwrap();
+    assert!(discards_failed_import(&fresh, &operation, &refusal));
+}

@@ -184,9 +184,25 @@ impl Transport for PhaseTransport {
 }
 
 #[test]
-fn between_the_download_and_the_import_the_package_is_read_exactly_once() {
+fn between_the_download_and_the_import_the_package_is_verified_and_nothing_more() {
     let (bundle, package_digest) = bundle_of_nodes(20_000);
     let length = bundle.len() as u64;
+    // What one full verification of this package reads, measured on its own.
+    // The verifier's cost belongs to the verifier (it has grown before, and
+    // will again); the clone must add nothing to it.
+    let alone = tempfile::tempdir().unwrap();
+    let path = alone.path().join("package.gfpb");
+    std::fs::write(&path, &bundle).unwrap();
+    let before = bytes_read();
+    graphforge_storage::verify_portable(
+        &path,
+        graphforge_api::PortableMode::Full,
+        PortableLimits::default(),
+        None,
+    )
+    .unwrap();
+    let verifier_alone = bytes_read() - before;
+    assert!(verifier_alone >= length, "{verifier_alone}");
     let marks = Marks::default();
     let (refs, manifest) = clone_documents(&bundle, &package_digest, &[]);
     let transport = PhaseTransport {
@@ -216,15 +232,17 @@ fn between_the_download_and_the_import_the_package_is_read_exactly_once() {
     mark(&marks, "end");
     let marks = marks.lock().unwrap();
     let at = |label: &str| marks.iter().find(|(name, _)| *name == label).unwrap().1;
-    // The transfer ends with every byte hashed; the one pass that follows,
-    // before the import starts, is the verifier's.
+    // The transfer ends with every byte hashed; what follows, before the
+    // import starts, is one verification and no digest pass.
     let verification = at("import_start") - at("transfer_end");
     let import = at("end") - at("import_start");
-    println!("PHASES length={length} verification={verification} import={import}");
+    println!(
+        "PHASES length={length} verifier_alone={verifier_alone} verification={verification} import={import}"
+    );
     assert!(
-        (length..=length + CONTROL_READ_SLACK).contains(&verification),
+        (verifier_alone..=verifier_alone + CONTROL_READ_SLACK).contains(&verification),
         "{verification} bytes were read between the download and the import of a \
-         {length}-byte package"
+         {length}-byte package whose verification alone reads {verifier_alone}"
     );
     assert!(import >= length, "the import reads the package: {import}");
 }
