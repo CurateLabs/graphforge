@@ -210,6 +210,34 @@ pub(crate) fn scan_stream(
     Ok(StreamScan { report, spill })
 }
 
+/// The entry and byte census of a bundle: the one rule the preflight and the
+/// scan share. Only regular entries count; PAX headers carry paths and sizes
+/// for the entry that follows and are bounded by `max_path_bytes`.
+#[derive(Default)]
+struct Census {
+    entries: u64,
+    total: u64,
+}
+
+impl Census {
+    fn admit(
+        &mut self,
+        path: &str,
+        size: u64,
+        limits: PortableLimits,
+    ) -> Result<(), PortableError> {
+        self.entries = self.entries.saturating_add(1);
+        if self.entries > limits.max_entries {
+            return Err(PortableError::at(
+                PortableErrorCode::LimitExceeded,
+                path,
+                "entry count",
+            ));
+        }
+        enforce_length(path, size, &mut self.total, limits)
+    }
+}
+
 fn preflight(
     source: &Path,
     limits: PortableLimits,
@@ -515,15 +543,15 @@ fn preflight_bundle(
     let mut admitted_manifest = None;
     let mut pending_composition: Option<Vec<u8>> = None;
     let mut admitted_composition = false;
-    let mut entries = 0_u64;
-    let mut regular_entries = 0_u64;
-    let mut total = 0_u64;
+    let mut census = Census::default();
+    let mut first_header = true;
     loop {
         check_cancel(cancelled)?;
         let mut header = [0_u8; 512];
         // Reject the retired format signature before materialization or target admission.
         // This is not a decoder or compatibility path.
-        if entries == 0 {
+        if first_header {
+            first_header = false;
             input.read_exact(&mut header[..16]).map_err(|_| {
                 PortableError::new(PortableErrorCode::InvalidStructure, "truncated bundle")
             })?;
@@ -552,24 +580,6 @@ fn preflight_bundle(
         } else {
             pax::entry_size(field_size, pending_size)?
         };
-        entries = entries.checked_add(1).ok_or_else(|| {
-            PortableError::new(PortableErrorCode::LimitExceeded, "bundle entry count")
-        })?;
-        if entries > limits.max_entries {
-            return Err(PortableError::new(
-                PortableErrorCode::LimitExceeded,
-                "bundle entry count",
-            ));
-        }
-        total = total.checked_add(size).ok_or_else(|| {
-            PortableError::new(PortableErrorCode::LimitExceeded, "bundle total bytes")
-        })?;
-        if total > limits.max_total_bytes {
-            return Err(PortableError::new(
-                PortableErrorCode::LimitExceeded,
-                "bundle total bytes",
-            ));
-        }
         if header[156] == b'x' {
             if pending_pax.is_some() {
                 return Err(PortableError::new(
@@ -588,12 +598,12 @@ fn preflight_bundle(
             continue;
         }
         let entry = pending_pax.take().map_or(raw_path, |records| records.path);
-        regular_entries += 1;
+        census.admit(&entry, size, limits)?;
         if entry == MANIFEST_PATH || entry == ONTOLOGY_COMPOSITION_PATH {
             // Canonical order puts every component entry before the semantic
             // manifest and only the two tag manifests after it, so the entries
             // seen so far, plus two, are the package's entries.
-            let semantic_bound = limits.semantic_manifest_bound(regular_entries.saturating_add(2));
+            let semantic_bound = limits.semantic_manifest_bound(census.entries.saturating_add(2));
             let cap = if entry == MANIFEST_PATH {
                 admit_semantic_manifest_length(size, semantic_bound)?;
                 semantic_bound
@@ -981,8 +991,8 @@ fn read_bundle<R: Read + ?Sized>(
     let mut transport = StreamHash::new(
         written.and_then(crate::project_portable_export::WrittenPackage::bundle_identity),
     );
-    let mut entries = Vec::new();
-    let mut total = 0u64;
+    let mut entries: Vec<Entry> = Vec::new();
+    let mut census = Census::default();
     let mut inventory_verdict = None;
     let mut pending_pax: Option<(pax::PaxHeader, String)> = None;
     let mut retained_pool = limits.max_retained_control_bytes;
@@ -1088,7 +1098,20 @@ fn read_bundle<R: Read + ?Sized>(
         };
         verify_canonical_header_path(&header, &entry_path, used_pax)?;
         validate_path(&entry_path, limits.max_path_bytes)?;
-        enforce_length(&entry_path, size, &mut total, limits)?;
+        // Canonical order is strictly increasing, which also refuses a
+        // duplicate. It is enforced before the entry is read so that a
+        // repeated path can never be retained twice.
+        if entries
+            .last()
+            .is_some_and(|previous| previous.path >= entry_path)
+        {
+            return Err(PortableError::at(
+                PortableErrorCode::InvalidStructure,
+                &entry_path,
+                "bundle entries are not canonical order",
+            ));
+        }
+        census.admit(&entry_path, size, limits)?;
         let offset = position;
         position = position.saturating_add(size.saturating_add((512 - size % 512) % 512));
         let mut check = (entry_path == inventory::INVENTORY_PATH)
@@ -1127,23 +1150,11 @@ fn read_bundle<R: Read + ?Sized>(
             offset: Some(offset),
             source_metadata: None,
         });
-        if entries.len() as u64 > limits.max_entries {
-            return Err(PortableError::new(
-                PortableErrorCode::LimitExceeded,
-                "entry count",
-            ));
-        }
     }
     if pending_pax.is_some() {
         return Err(PortableError::new(
             PortableErrorCode::InvalidStructure,
             "orphan PAX header",
-        ));
-    }
-    if entries.windows(2).any(|w| w[0].path >= w[1].path) {
-        return Err(PortableError::new(
-            PortableErrorCode::InvalidStructure,
-            "bundle entries are not canonical order",
         ));
     }
     validate_path_set(&entries.iter().map(|e| e.path.clone()).collect::<Vec<_>>())?;
@@ -2382,7 +2393,7 @@ mod tests {
 
     /// The fixture package as a bundle whose ontology payload is carried by
     /// a local PAX header with `records` and the given ustar `size` field.
-    fn bundle_with_pax_entry(records: &str, size_field: u64) -> tempfile::NamedTempFile {
+    pub(super) fn bundle_with_pax_entry(records: &str, size_field: u64) -> tempfile::NamedTempFile {
         const PAX_PATH: &str = "data/components/ontology/core-ontology/ontology.json";
         let root = package();
         let mut paths = Vec::new();

@@ -202,3 +202,153 @@ fn walk_files(dir: &Path) -> Vec<std::path::PathBuf> {
     }
     files
 }
+
+/// A `Read` that builds its bytes one part at a time and records how much was
+/// consumed and the largest single read request, so a test can tell a bounded
+/// streaming reader from one that buffers its input.
+struct Generated {
+    parts: Box<dyn Iterator<Item = Vec<u8>>>,
+    current: Cursor<Vec<u8>>,
+    consumed: std::rc::Rc<std::cell::Cell<u64>>,
+    largest_request: std::rc::Rc<std::cell::Cell<usize>>,
+}
+
+impl Generated {
+    fn new(parts: impl Iterator<Item = Vec<u8>> + 'static) -> (Self, GeneratedStats) {
+        let consumed = std::rc::Rc::new(std::cell::Cell::new(0));
+        let largest_request = std::rc::Rc::new(std::cell::Cell::new(0));
+        let stats = GeneratedStats {
+            consumed: consumed.clone(),
+            largest_request: largest_request.clone(),
+        };
+        (
+            Self {
+                parts: Box::new(parts),
+                current: Cursor::new(Vec::new()),
+                consumed,
+                largest_request,
+            },
+            stats,
+        )
+    }
+}
+
+struct GeneratedStats {
+    consumed: std::rc::Rc<std::cell::Cell<u64>>,
+    largest_request: std::rc::Rc<std::cell::Cell<usize>>,
+}
+
+impl Read for Generated {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.largest_request
+            .set(self.largest_request.get().max(buf.len()));
+        loop {
+            let count = self.current.read(buf)?;
+            if count > 0 || buf.is_empty() {
+                self.consumed.set(self.consumed.get() + count as u64);
+                return Ok(count);
+            }
+            match self.parts.next() {
+                Some(part) => self.current = Cursor::new(part),
+                None => return Ok(0),
+            }
+        }
+    }
+}
+
+const MIB: usize = 1024 * 1024;
+
+#[test]
+fn a_repeated_fixed_control_is_refused_at_its_second_occurrence() {
+    // Fixed controls are kept outside the shared pool, so only canonical
+    // order stops a stream of them from growing memory with its length.
+    let parts = (0..64)
+        .map(|_| super::tests::tar_entry("bag-info.txt", &vec![0; MIB]))
+        .chain(std::iter::once(vec![0; 1024]));
+    let (mut reader, stats) = Generated::new(parts);
+    let limits = PortableLimits {
+        max_retained_control_bytes: 0,
+        ..PortableLimits::default()
+    };
+    let error = verify_portable_stream(&mut reader, limits, None).unwrap_err();
+    assert_eq!(error.code, PortableErrorCode::InvalidStructure);
+    assert_eq!(error.entry.as_deref(), Some("bag-info.txt"));
+    // The first occurrence was read; the second was refused at its header.
+    assert!(
+        stats.consumed.get() < (MIB + 4096) as u64,
+        "read {} bytes before refusing the second occurrence",
+        stats.consumed.get()
+    );
+}
+
+#[test]
+fn the_stream_entry_point_does_not_buffer_its_input() {
+    // 128 MiB of entries that no semantic read needs, far beyond a 1 KiB pool,
+    // then a header that is not a tar header. A reader that buffered the input
+    // would consume all of it before it noticed.
+    let parts = (0..64)
+        .map(|index| {
+            super::tests::tar_entry(
+                &format!("data/components/graph-data/graph-tree/part-{index:03}.bin"),
+                &vec![0; 2 * MIB],
+            )
+        })
+        .take(3)
+        .chain(std::iter::once(vec![0xff; 512]))
+        .chain((3..64).map(|index| {
+            super::tests::tar_entry(
+                &format!("data/components/graph-data/graph-tree/part-{index:03}.bin"),
+                &vec![0; 2 * MIB],
+            )
+        }));
+    let (mut reader, stats) = Generated::new(parts);
+    let limits = PortableLimits {
+        max_retained_control_bytes: 1024,
+        ..PortableLimits::default()
+    };
+    let error = verify_portable_stream(&mut reader, limits, None).unwrap_err();
+    assert_eq!(error.code, PortableErrorCode::InvalidStructure);
+    assert!(
+        stats.consumed.get() <= (3 * (2 * MIB + 512) + 1024) as u64,
+        "read {} bytes of a 128 MiB stream before the fault",
+        stats.consumed.get()
+    );
+    // Every read is a header or one bounded copy buffer.
+    assert!(
+        stats.largest_request.get() <= limits.copy_buffer_bytes.max(512),
+        "a single read asked for {} bytes",
+        stats.largest_request.get()
+    );
+}
+
+#[test]
+fn pax_headers_do_not_count_against_entry_or_byte_limits_on_either_path() {
+    const PAX_PATH: &str = "data/components/ontology/core-ontology/ontology.json";
+    let path = pax::record("path", PAX_PATH);
+    let _limit = pax::test_seam::lower_ustar_size_limit(1);
+    let records = format!("{path}{}", pax::record("size", "2"));
+    let bundle = fs::read(super::tests::bundle_with_pax_entry(&records, 0).path()).unwrap();
+    let report = assert_stream_equals_file(&bundle);
+    assert_eq!(report.representation, PortableRepresentation::Bundle);
+    let regular = report.entry_count;
+    let bytes = report.payload_bytes;
+    let at = |max_entries, max_total_bytes| PortableLimits {
+        max_entries,
+        max_total_bytes,
+        ..PortableLimits::default()
+    };
+    // The census is the regular entries and their bytes, with or without PAX.
+    let admitted = at(regular, bytes);
+    let from_file = by_file(&bundle, admitted).unwrap();
+    let from_stream = by_stream(&bundle, admitted).unwrap();
+    assert_eq!(sans_source(&from_file), sans_source(&from_stream));
+    for refused in [
+        at(regular - 1, PortableLimits::default().max_total_bytes),
+        at(PortableLimits::default().max_entries, bytes - 1),
+    ] {
+        let file = by_file(&bundle, refused).unwrap_err();
+        let stream = by_stream(&bundle, refused).unwrap_err();
+        assert_eq!(file.code, PortableErrorCode::LimitExceeded);
+        assert_eq!(stream.code, file.code);
+    }
+}
