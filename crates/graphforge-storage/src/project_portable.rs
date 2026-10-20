@@ -1370,9 +1370,10 @@ fn bag_agent(bytes: &[u8]) -> Option<&[u8]> {
     line.strip_prefix(b"Bag-Software-Agent: ")
 }
 
-/// A GraphForge producer revision other than this one (an agent that extends the
-/// current agent name) wrote the package: refuse it as incompatible before the exact
-/// tag comparison can call it tampered. Any other deviation is left to that comparison.
+/// Another GraphForge producer revision wrote the package when its agent is exactly the
+/// current agent name followed by `-<token>` (non-empty, no whitespace): refuse it as
+/// incompatible before the exact tag comparison can call it tampered. Any other
+/// deviation, including stray whitespace or a carriage return, is left to that comparison.
 fn refuse_other_producer_revision(
     map: &BTreeMap<&str, &Entry>,
     path: &str,
@@ -1388,7 +1389,11 @@ fn refuse_other_producer_revision(
     else {
         return Ok(());
     };
-    if agent != current && agent.starts_with(current) {
+    let revision = agent
+        .strip_prefix(current)
+        .and_then(|rest| rest.strip_prefix(b"-"));
+    if revision.is_some_and(|token| !token.is_empty() && !token.iter().any(u8::is_ascii_whitespace))
+    {
         return Err(PortableError::at(
             PortableErrorCode::Incompatible,
             path,
@@ -2134,6 +2139,12 @@ mod tests {
         }
         // Any other deviation from the current tag stays a digest mismatch.
         for tag in [
+            "Bag-Software-Agent: GraphForge portable\r\nBagging-Date: 1970-01-01\n",
+            "Bag-Software-Agent: GraphForge portable \nBagging-Date: 1970-01-01\n",
+            "Bag-Software-Agent: GraphForge portable-x \nBagging-Date: 1970-01-01\n",
+            "Bag-Software-Agent: GraphForge portable-\nBagging-Date: 1970-01-01\n",
+            "Bag-Software-Agent: GraphForge portable-x\r\nBagging-Date: 1970-01-01\n",
+            "Bag-Software-Agent: GraphForge portables\nBagging-Date: 1970-01-01\n",
             "Bag-Software-Agent: other\nBagging-Date: 1970-01-01\n",
             "Bag-Software-Agent: GraphForge portable\nBagging-Date: 1971-01-01\n",
         ] {
