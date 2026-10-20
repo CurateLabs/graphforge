@@ -185,6 +185,13 @@ impl BatchBuilder {
         }
     }
 
+    /// The merge has built its last output.
+    pub(super) fn finish(&self) {
+        if let Some(copy) = &self.copy {
+            copy.release_working_set();
+        }
+    }
+
     pub(super) fn attach_copy(
         &mut self,
         copy: Arc<CopyAdmission>,

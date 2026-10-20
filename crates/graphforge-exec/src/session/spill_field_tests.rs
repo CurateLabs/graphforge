@@ -154,15 +154,12 @@ async fn escaped_field(can_spill: bool, termination: usize) -> Result<()> {
         let p = MemoryConsumer::new("independent fixed-output refusal").register(&pool);
         p.try_grow(LIMIT - pool.reserved())?;
         pressure = Some(p);
-        let error = stream
-            .next()
-            .await
-            .unwrap()
-            .expect_err("next fresh output needs additional authority");
-        assert!(matches!(
-            error.find_root(),
-            datafusion::common::DataFusionError::ResourcesExhausted(_)
-        ));
+        // The pool is full: the remaining fresh outputs are served from the
+        // working set the merge admitted at file selection.
+        while let Some(batch) = stream.next().await {
+            check(&batch?, &mut expected);
+        }
+        assert_eq!(expected, 2 * ROWS);
         assert!(stream.next().await.is_none());
     } else if termination == 0 {
         while let Some(batch) = stream.next().await {
@@ -215,7 +212,8 @@ async fn spill_admission_fixed_field_funds_multiple_fresh_outputs_through_eof() 
     escaped_field(false, 0).await
 }
 #[tokio::test]
-async fn spill_admission_fixed_field_error_retires_data_before_escaped_outputs() -> Result<()> {
+async fn spill_admission_fixed_field_serves_fresh_outputs_from_its_working_set_under_a_full_pool()
+-> Result<()> {
     escaped_field(false, 1).await
 }
 #[tokio::test]

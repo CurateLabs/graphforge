@@ -508,14 +508,19 @@ fn a_consumer_that_cannot_spill_is_not_charged_for_a_loan() {
 }
 
 /// The floors together never pass half the pool, however many aggregates have
-/// spilled; the consumers that can spill get the rest less the last floor.
+/// spilled; the floor kept for the readers of spilled data is one of them, and
+/// the consumers that can spill get the rest.
 #[test]
 fn the_floors_together_stay_within_half_the_pool() {
-    for (spillers, others_get) in [(1, 44), (2, 34), (3, 24), (4, 22), (8, 22), (16, 22)] {
+    for spillers in [1, 2, 3, 4, 8, 16] {
         let pool = query_pool(64 * MIB);
         let _spilled: Vec<_> = (0..spillers).map(|n| spilled(&pool, n)).collect();
         let repartition = exchange(&pool, 0);
-        repartition.try_grow(others_get * MIB).unwrap();
+        // One floor for each spilled aggregate and one for the readers.
+        let floor = SPILLER_FLOOR_BYTES.min(32 * MIB / (spillers + 1));
+        let others_get = 64 * MIB - (spillers + 1) * floor;
+        assert!(others_get >= 32 * MIB, "{spillers} spilled aggregates");
+        repartition.try_grow(others_get).unwrap();
         assert!(
             is_refused(repartition.try_grow(1)),
             "{spillers} spilled aggregates"

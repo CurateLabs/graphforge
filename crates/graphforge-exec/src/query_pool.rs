@@ -92,10 +92,12 @@
 //! within a batch of the limit left an exchange's reader 95 KiB for a 398 KiB
 //! batch, #2173).
 //!
-//! The consumers that can spill are therefore admitted only while one floor
-//! ([`SPILLER_FLOOR_BYTES`], lowered to half the pool) of the pool remains
-//! unreserved, on top of the unfilled floors of the spilled aggregates. A
-//! consumer that cannot spill sees the whole pool, and takes that floor.
+//! The consumers that can spill are therefore admitted only while one more
+//! floor of the pool remains unreserved, on top of the unfilled floors of the
+//! spilled aggregates. A consumer that cannot spill sees the whole pool, and
+//! takes that floor. The floors, that one among them, are
+//! [`SPILLER_FLOOR_BYTES`] each, lowered so that all of them together stay
+//! within half the pool.
 //!
 //! # The headroom of the sorts
 //!
@@ -251,11 +253,11 @@ impl QueryMemoryPool {
         }
     }
 
-    /// The bytes the pool reserves for each of `spillers` aggregates: the
-    /// floors together never pass half the pool, so the other consumers keep
-    /// the rest.
+    /// The bytes the pool reserves for each of `spillers` aggregates, and for
+    /// the readers of spilled data besides: these floors together never pass
+    /// half the pool, so the other consumers keep the rest.
     fn floor(&self, spillers: usize) -> usize {
-        SPILLER_FLOOR_BYTES.min(self.pool_size / 2 / spillers.max(1))
+        SPILLER_FLOOR_BYTES.min(self.pool_size / 2 / (spillers + 1))
     }
 
     /// The bytes lent to the spillers, which the reserved total counts beyond
@@ -359,8 +361,8 @@ impl MemoryPool for QueryMemoryPool {
                 state.reserved,
                 self.unfilled_floors_except(&state, id)
                     .saturating_add(self.headroom(reservation, &state))
-                    // The last floor stays with the readers of spilled data.
-                    .saturating_add(self.floor(1)),
+                    // One more floor stays with the readers of spilled data.
+                    .saturating_add(self.floor(state.spillers.len())),
             )
         } else {
             (state.reserved.saturating_sub(Self::lent(&state)), 0)

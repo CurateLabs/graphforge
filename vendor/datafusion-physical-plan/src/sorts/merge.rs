@@ -514,6 +514,7 @@ impl<C: CursorValues> SortPreservingMergeStream<C> {
             }
 
             let stream_idx = self.loser_tree[0];
+            let exhausted = self.cursors[stream_idx].is_none();
             if self.advance_cursors(stream_idx) {
                 self.loser_tree_adjusted = false;
                 self.in_progress.push_row(stream_idx);
@@ -527,7 +528,12 @@ impl<C: CursorValues> SortPreservingMergeStream<C> {
                 }
             }
 
-            return Poll::Ready(self.emit_in_progress_batch().transpose());
+            let batch = self.emit_in_progress_batch();
+            if exhausted && self.in_progress.is_empty() {
+                // Every input is exhausted and the last output is built.
+                self.in_progress.finish();
+            }
+            return Poll::Ready(batch.transpose());
         }
     }
 

@@ -287,6 +287,18 @@ impl CopyAdmission {
         self.observe(&state);
         Ok(())
     }
+    /// The last output of the merge has been built: its copies have no further
+    /// use for the working set, and the outputs keep only their own bytes.
+    pub(super) fn release_working_set(&self) {
+        let _transition = od::Transition::begin();
+        let mut state = self.state.lock().unwrap();
+        state.floor = 0;
+        if !state.active && !state.preparing {
+            let excess = state.authority.size().saturating_sub(self.retained(&state));
+            state.authority.shrink(excess);
+        }
+        self.observe(&state);
+    }
     /// The wrapper must destroy inner cursor/GC/failed-phase data first. The
     /// merge is over: the escaped outputs keep only their own bytes.
     pub(super) fn retire(&self) {

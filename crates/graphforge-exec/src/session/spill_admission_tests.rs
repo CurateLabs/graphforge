@@ -858,16 +858,21 @@ async fn copy_phase_merge(refuse_next_copy: bool) -> Result<()> {
             }
         }).await.expect("real IPC reader reaches admission");
     }
+    // Paused, the merge holds what it admitted at file selection: the buffers
+    // of its readers (half of `prepaid`), the working set of its copies (the
+    // other half: twice the reserved bytes of the largest batch pair) and the
+    // bytes of its constructors, which are less than a batch.
     assert!(
-        pool.reserved() < prepaid,
-        "idle copy scratch must be released while the admitted reader is paused"
+        (prepaid..prepaid + maximum).contains(&pool.reserved()),
+        "the merge holds its readers and its copy working set, no more: held={} prepaid={prepaid}",
+        pool.reserved()
     );
     drop(release);
     let first = stream.next().await.unwrap()?;
     assert_eq!(first.num_rows(), ROWS);
     assert!(
-        observed.restored.load(std::sync::atomic::Ordering::Acquire),
-        "a real copy phase must fallibly reacquire its admitted workspace"
+        !observed.restored.load(std::sync::atomic::Ordering::Acquire),
+        "a real copy phase draws on its admitted workspace and asks the pool for nothing"
     );
     let alias = first.column(1).slice(0, 1);
     let alias_capacity = alias.to_data().buffers()[1].capacity();
@@ -898,19 +903,16 @@ async fn copy_phase_merge(refuse_next_copy: bool) -> Result<()> {
     check(&first, &mut expected);
     drop(first);
     if refuse_next_copy {
+        // The pool is full: the next copy is served from the admitted workspace.
         let pressure = MemoryConsumer::new("independent copy pressure").register(&pool);
         pressure.try_grow(LIMIT - pool.reserved())?;
-        let error = stream
-            .next()
-            .await
-            .unwrap()
-            .expect_err("unavailable copy workspace must refuse before interleave");
+        while let Some(batch) = stream.next().await {
+            check(&batch?, &mut expected);
+        }
+        assert_eq!(expected, 2 * ROWS);
         assert!(
-            matches!(
-                error.find_root(),
-                datafusion::common::DataFusionError::ResourcesExhausted(_)
-            ),
-            "{error}"
+            !observed.restored.load(std::sync::atomic::Ordering::Acquire),
+            "a full pool is never asked for the next copy"
         );
         drop(stream);
         drop(pressure);
@@ -946,13 +948,13 @@ async fn copy_phase_merge(refuse_next_copy: bool) -> Result<()> {
 }
 
 #[tokio::test]
-async fn spill_admission_merge_releases_idle_copy_scratch_and_preserves_fresh_output_aliases()
+async fn spill_admission_merge_holds_its_admitted_copy_workspace_and_preserves_fresh_output_aliases()
 -> Result<()> {
     copy_phase_merge(false).await
 }
 
 #[tokio::test]
-async fn spill_admission_merge_copy_reacquisition_refuses_and_cleans_up_with_alias_alive()
+async fn spill_admission_merge_serves_copies_from_its_admitted_workspace_under_a_full_pool_with_alias_alive()
 -> Result<()> {
     copy_phase_merge(true).await
 }
