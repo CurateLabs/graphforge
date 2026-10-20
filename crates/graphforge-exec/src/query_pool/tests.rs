@@ -16,7 +16,7 @@ const MIB: usize = 1024 * 1024;
 
 fn aggregate(pool: &Arc<dyn MemoryPool>, partition: usize) -> MemoryReservation {
     MemoryConsumer::new(format!(
-        "{AGGREGATE_CONSUMER_PREFIX}[{partition}] (max(a.pad))"
+        "{AGGREGATE_CONSUMER_PREFIX}{partition}] (max(a.pad))"
     ))
     .with_can_spill(true)
     .register(pool)
@@ -106,7 +106,11 @@ fn a_spilling_aggregate_reserves_the_memory_it_released_whatever_the_sibling_too
     // The sort of the 30 MiB emitted is a quarter larger.
     spilling.try_grow(36 * MIB).unwrap();
     assert_eq!(pool.reserved(), 80 * MIB);
+    // An aggregate that has not spilled and holds nothing sees the pool less
+    // the loan, as a consumer that cannot spill does: its first batch is
+    // admitted; from then on the floors keep it short.
     let other = aggregate(&pool, 2);
+    other.try_grow(MIB).unwrap();
     assert!(is_refused(other.try_grow(MIB)));
 }
 
@@ -1204,4 +1208,61 @@ async fn a_spilled_aggregate_admits_its_minimum_pass_in_one_request() {
         first.bytes > 10 * MIB,
         "state bound and narrowest pass in one request: {asked:?}"
     );
+}
+
+/// The pool state of `stress-fixb/run-13.log` (#2173, round 3): two partial
+/// aggregates that emitted early and keep what their emptied hash tables
+/// retain, a final aggregate still growing its first state, the exchange and
+/// its spill writer, 38.1 MiB in all. The other final aggregate has never
+/// held a byte: its first state and the restart of its empty state (64 B, the
+/// size of its group ordering) are served within the limit of the pool, as a
+/// consumer that cannot spill is, because a refusal fails its query the same
+/// way: it has nothing to spill. From its next request on the floors apply.
+#[test]
+fn an_aggregate_that_has_not_spilled_is_served_its_first_state_within_the_pool_alone() {
+    let pool = query_pool(64 * MIB);
+    let partials = [aggregate(&pool, 0), aggregate(&pool, 1)];
+    for partial in &partials {
+        partial.try_grow(15_138_880).unwrap();
+        partial.shrink(13_238_272);
+    }
+    let busy = aggregate(&pool, 0);
+    busy.try_grow(32_296_140).unwrap();
+    let exchanges = [exchange(&pool, 0), exchange(&pool, 1)];
+    exchanges[0].try_grow(1_835_418).unwrap();
+    exchanges[1].try_grow(957_415).unwrap();
+    let writer = reader(&pool);
+    writer.try_grow(1_060_557).unwrap();
+    assert_eq!(pool.reserved(), 39_950_746);
+    // The first state of the late final aggregate: one batch of groups with
+    // the sort headroom. Served; the floors apply from the next request.
+    let late = aggregate(&pool, 1);
+    late.try_grow(2_031_616).unwrap();
+    assert!(is_refused(late.try_grow(MIB)));
+    // What it spills enters it into the map, and its restart is within its floor.
+    late.shrink(2_031_616);
+    late.try_grow(64).unwrap();
+    // An aggregate whose first state was refused spilled nothing and asks for
+    // its empty state, 64 B, from nothing: run-13's request, served the same way.
+    let emptied = aggregate(&pool, 1);
+    emptied.try_grow(64).unwrap();
+    assert!(is_refused(emptied.try_grow(2_031_552)));
+}
+
+/// A partial aggregate emits early and never merges: its emit is a bulk shrink
+/// like a spill's, but it gets no floor and no loan. The exchange beside it is
+/// admitted up to the pool less the readers' reserve and what the partial
+/// keeps, and the partial's own request past the free memory is refused.
+#[test]
+fn a_partial_aggregate_holds_no_floor_and_takes_no_loan() {
+    let pool = query_pool(64 * MIB);
+    let partial = MemoryConsumer::new("GroupedHashAggregateStream(partial)[0] (max(a.pad))")
+        .with_can_spill(true)
+        .register(&pool);
+    partial.try_grow(15_138_880).unwrap();
+    partial.shrink(13_238_272);
+    let exchange = exchange(&pool, 0);
+    exchange.try_grow(64 * MIB - 10 * MIB - 1_900_608).unwrap();
+    assert!(is_refused(exchange.try_grow(1)));
+    assert!(is_refused(partial.try_grow(MIB)));
 }

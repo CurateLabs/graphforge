@@ -576,7 +576,6 @@ impl GroupedHashAggregateStream {
             })
             .collect::<Vec<_>>()
             .join(", ");
-        let name = format!("GroupedHashAggregateStream[{partition}] ({agg_fn_names})");
         let group_ordering = GroupOrdering::try_new(&agg.input_order_mode)?;
         let oom_mode = match (agg.mode, &group_ordering) {
             // In partial aggregation mode, always prefer to emit incomplete results early.
@@ -597,6 +596,19 @@ impl GroupedHashAggregateStream {
             // This mode will also be used if the `DiskManager` is not configured to allow spilling
             // to disk.
             _ => OutOfMemoryMode::ReportError,
+        };
+        // The pool keeps a floor and a loan for the aggregates that spill and
+        // merge, and tells them apart by this name: an aggregate that emits
+        // early instead never merges, so its name says so.
+        let name = match oom_mode {
+            OutOfMemoryMode::EmitEarly => {
+                format!(
+                    "GroupedHashAggregateStream(partial)[{partition}] ({agg_fn_names})"
+                )
+            }
+            OutOfMemoryMode::Spill | OutOfMemoryMode::ReportError => {
+                format!("GroupedHashAggregateStream[{partition}] ({agg_fn_names})")
+            }
         };
 
         let group_values = new_group_values(group_schema, &group_ordering)?;

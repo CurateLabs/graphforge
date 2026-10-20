@@ -57,7 +57,10 @@
 //! partition busy and the other idle).
 //!
 //! The pool therefore reserves a floor for every aggregate that has spilled,
-//! from its first spill until it unregisters: the other consumers that can
+//! from its first spill until it unregisters (an aggregate that spills and
+//! merges is told by its name, `GroupedHashAggregateStream[..]`; a partial
+//! aggregate emits early instead of spilling, never merges, and is named
+//! `GroupedHashAggregateStream(partial)[..]`, so it gets no floor and no loan): the other consumers that can
 //! spill are admitted only while the reserved total plus the unfilled floors of
 //! the others stays within the pool, and a request that keeps the aggregate
 //! within its own floor is always admitted. An exchange or a sibling that is
@@ -72,15 +75,19 @@
 //! groups reserves a few bytes when the first of them arrives, and with the
 //! floors kept from it that request failed while the pool had megabytes free.
 //! It sees the limit of the pool alone, as on DataFusion's greedy pool, and the
-//! loans do not count against it: a loan has the reserved total past the limit
+//! loans do not count against it. A spilling aggregate that has not spilled and
+//! holds nothing is served the same way for the request that admits its state:
+//! there is nothing for it to spill, so a refusal would fail its query too, and
+//! the floors apply from its next request on. The loans do not count against
+//! such a consumer either: a loan has the reserved total past the limit
 //! for the length of a sort, and an ungrouped aggregate that asked for no bytes
 //! at all was refused in that window (a request for no bytes is always served).
 //! If it takes memory a floor or a loan was reserved from, the aggregate that
 //! owns it still has it, so the pool then passes its limit by that much.
 //!
 //! The floor is a minimum, not an exact bound. The narrowest pass needs two
-//! streams of one batch each and the copies' working set, and a batch holds the groups of one emit: an aggregate
-//! whose groups are far larger than a quarter of the floor, such as one
+//! streams of one batch each and the copies' working set, and a batch holds the
+//! groups of one emit: an aggregate whose groups are far larger than a quarter of the floor, such as one
 //! `collect(DISTINCT ...)` of tens of megabytes in one group, merges with the
 //! free memory and the loan, as it did before the floor, and fails when the pool
 //! has neither.
@@ -141,8 +148,12 @@ use datafusion::execution::memory_pool::{
 };
 
 /// DataFusion's name prefix for the memory consumer of a grouped hash
-/// aggregate, the only spillable consumer that reserves memory to spill.
-pub(crate) const AGGREGATE_CONSUMER_PREFIX: &str = "GroupedHashAggregateStream";
+/// aggregate that spills and merges, the only spillable consumer that
+/// reserves memory to spill. The prefix includes the bracket so that a
+/// partial aggregate, which emits early instead of spilling and is named
+/// `GroupedHashAggregateStream(partial)[..]`, is not matched: it never merges,
+/// so it gets no floor and no loan.
+pub(crate) const AGGREGATE_CONSUMER_PREFIX: &str = "GroupedHashAggregateStream[";
 
 /// DataFusion's name prefix for the memory consumer of one partition of a sort.
 /// The prefix includes the bracket so that the merge reservation of the sort,
@@ -355,12 +366,22 @@ impl MemoryPool for QueryMemoryPool {
         }
         let mut state = self.locked();
         let id = reservation.consumer().id();
+        // An aggregate that has not spilled and holds nothing has nothing to
+        // spill: its state was never admitted, so a refusal fails its query as
+        // it fails a consumer that cannot spill (the spill releases nothing,
+        // and the restart of its empty state is refused the same way). Its
+        // first request sees the limit of the pool alone, as that consumer's
+        // requests do; the floors apply from its next request on. An aggregate
+        // that has spilled holds a floor and a loan for its restart instead.
+        let first_state = Self::is_spilling_aggregate(reservation.consumer())
+            && !state.spillers.contains_key(&id)
+            && reservation.size() == 0;
         // A consumer that can spill recovers from a refusal by spilling, so
         // the floors are kept from it. One that cannot spill fails its query
         // on a refusal, so it is refused only at the limit of the pool, which
         // the loans do not count against: they are bytes the pool stopped
         // counting and took back, and they are repaid within a spill.
-        let (reserved, others) = if reservation.consumer().can_spill() {
+        let (reserved, others) = if reservation.consumer().can_spill() && !first_state {
             (
                 state.reserved,
                 self.unfilled_floors_except(&state, id)
