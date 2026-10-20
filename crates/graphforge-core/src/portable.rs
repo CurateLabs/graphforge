@@ -154,6 +154,107 @@ pub struct PortableReport {
     pub ontology_composition_entries: Vec<PortableCompositionEntry>,
 }
 
+/// The disk an import holds, at its peak, on the volume beside its target.
+///
+/// Counted from the import's copy protocol, not from a ratio of the package:
+///
+/// 1. The verified payload is extracted into a private stage beside the
+///    target: one copy of every file. A package that carries an ontology
+///    composition also gets two generated controls (the staged candidate and
+///    the composition authority), each a re-encoding of the authored ontology
+///    documents, written into the stage.
+/// 2. A research package is validated before anything is published. Its
+///    research files are installed into a validation object store (a second
+///    copy of those files), and each archived Version is rebuilt into its own
+///    object store (at most a third). Both are removed before publication.
+/// 3. The payload and the generated controls are published into the target:
+///    a second copy of every file, while the stage still exists.
+///
+/// The stage is held throughout, so the peak is the stage plus the larger of
+/// phases 2 and 3. Each file also occupies whole filesystem blocks in every
+/// copy that is live at once, and a project's own bookkeeping (manifests,
+/// journals, locks) adds a small fixed amount. The package being imported is
+/// not counted: it is the caller's, and a clone adds its download.
+///
+/// An import of a package that carries no adjacency index also derives one,
+/// which is not modelled here: its edge sort spills far more than the index it
+/// writes (#1770).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PortableImportFootprint {
+    /// Bytes of every file the package extracts.
+    pub payload_bytes: u64,
+    /// Bytes of the files in the research component.
+    pub research_bytes: u64,
+    /// Bytes of the controls the import generates from the package's ontology
+    /// composition, which its stage and the published project both keep.
+    pub generated_bytes: u64,
+    /// Number of files the package extracts.
+    pub entries: u64,
+}
+
+impl PortableImportFootprint {
+    /// Bytes a project's own bookkeeping needs beyond its payload.
+    pub const FIXED_BYTES: u64 = 1024 * 1024;
+    /// Filesystem allocation unit a file is rounded up to.
+    pub const BLOCK_BYTES: u64 = 4096;
+    /// Smallest bundle member that extracts to an allocated file: a header
+    /// block and one block of content.
+    const MIN_ALLOCATING_ENTRY_BYTES: u64 = 1024;
+
+    /// What a package of `length` bytes may extract, when only its length is
+    /// known: every byte of a research package may be research content, every
+    /// allocating file occupies at least a header and a content block of the
+    /// bundle (bounded by the entry limit), and each generated composition
+    /// control is bounded by the manifest limit and by the package itself.
+    #[must_use]
+    pub fn of_package_length(length: u64, research: bool) -> Self {
+        let limits = PortableLimits::default();
+        Self {
+            payload_bytes: length,
+            research_bytes: if research { length } else { 0 },
+            generated_bytes: 2 * length.min(limits.max_manifest_bytes),
+            entries: (length / Self::MIN_ALLOCATING_ENTRY_BYTES).min(limits.max_entries),
+        }
+    }
+
+    /// The most bytes the import holds beside its target at once.
+    #[must_use]
+    pub fn peak_bytes(&self) -> u64 {
+        let stage = self.stage_bytes();
+        let published = stage;
+        let validation = self.research_bytes.saturating_mul(2);
+        // Stage and published copy are live together; a research package
+        // also holds a validation store and a Version store.
+        let live_copies = if self.research_bytes == 0 { 2 } else { 3 };
+        self.rounding(live_copies)
+            .saturating_add(Self::FIXED_BYTES)
+            .saturating_add(stage)
+            .saturating_add(published.max(validation))
+    }
+
+    /// The most bytes a replay holds beside its target: an import whose
+    /// transaction already committed extracts and validates the package again
+    /// but publishes nothing, so it never holds the published copy.
+    #[must_use]
+    pub fn replay_peak_bytes(&self) -> u64 {
+        let live_copies = if self.research_bytes == 0 { 1 } else { 3 };
+        self.rounding(live_copies)
+            .saturating_add(Self::FIXED_BYTES)
+            .saturating_add(self.stage_bytes())
+            .saturating_add(self.research_bytes.saturating_mul(2))
+    }
+
+    fn stage_bytes(&self) -> u64 {
+        self.payload_bytes.saturating_add(self.generated_bytes)
+    }
+
+    fn rounding(&self, live_copies: u64) -> u64 {
+        self.entries
+            .saturating_mul(Self::BLOCK_BYTES)
+            .saturating_mul(live_copies)
+    }
+}
+
 /// An authenticated file in the versioned research component.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct PortableResearchEntry {
@@ -243,6 +344,11 @@ pub enum PortableErrorCode {
     Incompatible,
     DigestMismatch,
     ConcurrentMutation,
+    /// The target's filesystem cannot provide the durable publication
+    /// contract (`GF_UNSUPPORTED_FILESYSTEM`).
+    UnsupportedFilesystem,
+    /// The volume beside the target cannot hold the import's peak.
+    InsufficientSpace,
 }
 
 #[derive(Debug)]

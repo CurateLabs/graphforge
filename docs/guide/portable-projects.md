@@ -290,13 +290,26 @@ redirects. See the CLI reference above for requirements.
 ### Large projects
 
 **Disk space.** Clone needs free space on the destination's filesystem, not in
-the system temporary directory: the package itself plus about 2.25 times the
-package for the import's transient peak, roughly 3.25 times the package in all
-(less whatever a previous run already downloaded or staged for the import; a
-rerun after the import committed needs only about one more package length). Clone checks this, and that
-the filesystem is admissible (`ext4`, `xfs`, `btrfs`, APFS, or NTFS), before it
-downloads anything. When the import finishes, the staging directory and the
-package are removed and only the project remains.
+the system temporary directory: the package itself, plus the import's peak. The
+import extracts the payload into a private stage and then publishes a second
+copy of it into the project while the stage still exists, so a project package
+needs about two more payload lengths. A research package is also validated
+before it is published: its research files are copied into a validation store
+and each archived Version is rebuilt, so it may need up to three payload lengths
+for the import. A package that carries an ontology composition also writes
+two generated controls, each about the size of its authored ontologies, into the
+stage and again into the project. A package without an adjacency index spills additionally while
+the import derives one, which this estimate does not cover. Less is needed for
+whatever a previous run already downloaded or staged for the import; a rerun
+after the import committed needs only about one more package length. Clone
+checks this, and that the filesystem is admissible (`ext4`, `xfs`, `btrfs`,
+APFS, or NTFS), before it
+downloads anything. An import of a package you already hold makes the same two
+checks before it extracts a byte. It refuses with `GF_UNSUPPORTED_FILESYSTEM`
+(diagnostic `storage.unsupported_filesystem`), or with `GF_STORAGE` (diagnostic
+`storage.insufficient_space`, whose message gives the free and needed bytes);
+the CLI exits with status 3 for both. When the import finishes,
+the staging directory and the package are removed and only the project remains.
 
 **Interruptions and resume.** Rerun the same command. A network stall is
 detected when no bytes arrive for a minute; each phase of a request has its own

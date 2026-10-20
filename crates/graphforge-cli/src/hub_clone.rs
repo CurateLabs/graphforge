@@ -13,7 +13,8 @@ use graphforge_api::{
     verify_discovered_portable, verify_discovered_research_version,
 };
 use graphforge_api::{
-    GraphForge, OperationId, PortableImportRequest, PortableLimits, PortableMode,
+    GraphForge, OperationId, PortableImportFootprint, PortableImportRequest, PortableLimits,
+    PortableMode,
 };
 use graphforge_discovery::{
     DiscoveryError, DiscoveryErrorCode, DiscoveryLimits, DiscoveryManifest, ObjectDescriptor,
@@ -24,7 +25,7 @@ use std::collections::BTreeMap;
 use std::fmt::Debug;
 use std::fmt::Write as _;
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Read, Write};
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
@@ -34,7 +35,7 @@ use url::Url;
 
 use crate::hub_http::{
     DiscoveryCredentials, HttpResponse, HttpTransport, MAX_METADATA_BYTES, RETRY_POLICY,
-    RetryPolicy, Transport, endpoint, fetch_discovery_with_attempts, fetch_once,
+    RetryPolicy, RunningDigest, Transport, endpoint, fetch_discovery_with_attempts, fetch_once,
     fetch_with_attempts, hash_reader, limit_error, network, parse_input_at, read_bounded, storage,
     validate_url, validation,
 };
@@ -774,6 +775,7 @@ fn download(
         &mut DownloadReport::default(),
         &mut DownloadControl::quiet(&TEST_RETRY_POLICY),
     )
+    .map(|(report, _)| report)
 }
 
 /// Retry policy for in-process tests: production attempt count, no waiting.
@@ -824,13 +826,20 @@ fn cancelled_error() -> graphforge_api::GfError {
 /// partial file, read to the object length. The complete file must match the
 /// declared length and digest.
 #[allow(clippy::too_many_lines)]
+/// Download `object` into `partial`, resuming what is already there, and
+/// return the report with the object's verified `sha256:` digest.
+///
+/// The digest is computed once, as the bytes arrive. A resumed or already
+/// complete partial is read once to seed it; a fresh download is never read
+/// back. Verification and import compare their own transport digests with
+/// the returned one, so the package is not hashed again just to recompute it.
 fn download_with_progress(
     transport: &dyn Transport,
     object: &ObjectDescriptor,
     partial: &Path,
     report: &mut DownloadReport,
     control: &mut DownloadControl<'_>,
-) -> Result<DownloadReport, graphforge_api::GfError> {
+) -> Result<(DownloadReport, String), graphforge_api::GfError> {
     let checkpoint = partial.with_extension("resume.json");
     if object.length > MAX_OBJECT_BYTES {
         return Err(limit_error("object exceeds the clone byte bound"));
@@ -870,6 +879,7 @@ fn download_with_progress(
     let mut failures = 0_u32;
     let mut high_water = offset;
     let mut buffer = vec![0_u8; 64 * 1024].into_boxed_slice();
+    let mut digest = StreamedDigest::default();
     control.report(offset, object.length);
     while offset < object.length {
         if control.cancelled.load(Ordering::Relaxed) {
@@ -940,6 +950,7 @@ fn download_with_progress(
                     }
                 }
                 first_request = false;
+                digest.cover(partial, offset)?;
                 let mut file = open_partial_nofollow(partial, append).map_err(storage)?;
                 let mut interrupted = None;
                 loop {
@@ -959,6 +970,7 @@ fn download_with_progress(
                         .filter(|next| *next <= object.length)
                         .ok_or_else(|| limit_error("object exceeds declared size"))?;
                     file.write_all(&buffer[..read]).map_err(storage)?;
+                    digest.push(&buffer[..read]);
                     offset = next;
                     report.transferred_bytes = report.transferred_bytes.saturating_add(read as u64);
                     control.report(offset, object.length);
@@ -992,22 +1004,78 @@ fn download_with_progress(
         }
         std::thread::sleep(wait);
     }
-    let mut file = open_read_nofollow(partial).map_err(storage)?;
-    let length = file.metadata().map_err(storage)?.len();
+    let length = open_read_nofollow(partial)
+        .and_then(|file| file.metadata())
+        .map_err(storage)?
+        .len();
     if length != object.length {
         return Err(validation(
             "hub.interrupted",
             "download is incomplete; rerun to resume",
         ));
     }
-    file.seek(SeekFrom::Start(0)).map_err(storage)?;
-    let actual = hash_reader(&mut file)?;
+    digest.cover(partial, length)?;
+    let actual = digest.finish();
     if actual != object.digest.0 {
         let _ = std::fs::remove_file(partial);
         let _ = std::fs::remove_file(&checkpoint);
         return Err(validation("hub.integrity", "download digest mismatch"));
     }
-    Ok(*report)
+    Ok((*report, actual))
+}
+
+/// The verifier read the package it was given and reports the transport
+/// digest of what it saw; that must be the digest the download streamed, so
+/// one hash of the package vouches for every later reader.
+fn require_downloaded_bytes(
+    verified: Option<&str>,
+    downloaded: &str,
+) -> Result<(), graphforge_api::GfError> {
+    if verified == Some(downloaded) {
+        return Ok(());
+    }
+    Err(validation(
+        "hub.integrity",
+        "package bytes differ from the downloaded object",
+    ))
+}
+
+/// The digest of the partial file's first `covered` bytes, kept current as
+/// bytes are appended so a finished download is never read back to hash it.
+#[derive(Default)]
+struct StreamedDigest {
+    hash: Option<RunningDigest>,
+    covered: u64,
+}
+
+impl StreamedDigest {
+    fn push(&mut self, bytes: &[u8]) {
+        let hash = self.hash.get_or_insert_with(RunningDigest::new);
+        hash.update(bytes);
+        self.covered += bytes.len() as u64;
+    }
+
+    /// Make the digest cover exactly the first `length` bytes of `partial`.
+    /// Bytes already streamed through it are not read again; anything else (a
+    /// resumed prefix, or a restart that discarded the file) is read once.
+    fn cover(&mut self, partial: &Path, length: u64) -> Result<(), graphforge_api::GfError> {
+        if self.covered != length || self.hash.is_none() {
+            let mut hash = RunningDigest::new();
+            let file = open_read_nofollow(partial);
+            match file {
+                Ok(file) => hash.absorb(&mut file.take(length))?,
+                Err(error) if length == 0 && error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(storage(error)),
+            }
+            self.hash = Some(hash);
+            self.covered = length;
+        }
+        Ok(())
+    }
+
+    fn finish(self) -> String {
+        self.hash.unwrap_or_else(RunningDigest::new).finish()
+    }
 }
 
 fn discard_partial(partial: &Path, checkpoint: &Path) -> Result<(), graphforge_api::GfError> {
@@ -1249,38 +1317,62 @@ fn human_bytes(bytes: u64) -> String {
 }
 
 /// Free space a clone still needs beside the destination: the rest of the
-/// download plus whatever part of the import's transient peak is not already
-/// staged. The import was measured at 2.20-2.22x the package
-/// (`observed_transient_peak_allocated_bytes`); 2.25x keeps a margin.
+/// download plus whatever part of the import's peak is not already credited.
+/// The import's peak is [`PortableImportFootprint::peak_bytes`], counted from
+/// its copy protocol and pinned against measured imports. Only the package's
+/// length is known before the download, so a research clone assumes all of it
+/// is research content and the file count is bounded by the smallest bundle
+/// member that allocates.
 ///
-/// Bytes an earlier run staged for the import (its target, its private
-/// stage) count toward that peak: the import either reuses them (a resumed or
-/// replayed import) or removes them before writing anew (another operation,
-/// a retry from scratch), so they are space the import already holds.
+/// The credit is the import's own (`portable_import_held_bytes`): what
+/// removing the stage an interrupted attempt of this operation left would
+/// actually free. Nothing else an earlier run staged is credited.
 ///
-/// An import that already committed only replays: it materializes the package
-/// once more (at most its length) and rewrites nothing in the project.
-fn required_space(length: u64, downloaded: u64, staged_import: u64, committed: bool) -> u64 {
+/// An import that already committed only replays: it extracts and validates
+/// the package again and publishes nothing, so it needs
+/// [`PortableImportFootprint::replay_peak_bytes`].
+fn required_space(
+    length: u64,
+    downloaded: u64,
+    staged_import: u64,
+    committed: bool,
+    research: bool,
+) -> u64 {
+    let footprint = PortableImportFootprint::of_package_length(length, research);
     let import_peak = if committed {
-        u128::from(length)
+        footprint.replay_peak_bytes()
     } else {
-        (u128::from(length) * 9).div_ceil(4)
+        footprint.peak_bytes()
     };
-    let import = import_peak.saturating_sub(u128::from(staged_import));
-    u64::try_from(u128::from(length.saturating_sub(downloaded)) + import).unwrap_or(u64::MAX)
+    let import = import_peak.saturating_sub(staged_import);
+    length.saturating_sub(downloaded).saturating_add(import)
 }
 
 fn check_free_space(
     staging: &CloneStaging,
     length: u64,
     committed: bool,
+    research: bool,
+    operation: &OperationId,
     available: fn(&Path) -> std::io::Result<u64>,
 ) -> Result<(), graphforge_api::GfError> {
     let downloaded = std::fs::symlink_metadata(&staging.partial)
         .ok()
         .filter(std::fs::Metadata::is_file)
         .map_or(0, |metadata| metadata.len().min(length));
-    let required = required_space(length, downloaded, staged_import_bytes(staging), committed);
+    let required = required_space(
+        length,
+        downloaded,
+        // The import's own credit for a retry of this operation: what removing
+        // its interrupted stage actually frees.
+        graphforge_api::portable_import_held_bytes(
+            &staging.project,
+            operation,
+            PortableLimits::default(),
+        ),
+        committed,
+        research,
+    );
     let available = available(&staging.root).map_err(storage)?;
     if available < required {
         return Err(graphforge_api::GfError::Storage(format!(
@@ -1291,56 +1383,6 @@ fn check_free_space(
         )));
     }
     Ok(())
-}
-
-/// Bytes in regular files under the staging directory other than the download,
-/// its checkpoint, and the small control files; each hard-linked file once.
-fn staged_import_bytes(staging: &CloneStaging) -> u64 {
-    fn visit(directory: &Path, seen: &mut std::collections::BTreeSet<(u64, u64)>, total: &mut u64) {
-        let Ok(entries) = std::fs::read_dir(directory) else {
-            return;
-        };
-        for entry in entries.flatten() {
-            let Ok(metadata) = std::fs::symlink_metadata(entry.path()) else {
-                continue;
-            };
-            if metadata.is_dir() {
-                visit(&entry.path(), seen, total);
-            } else if metadata.is_file() {
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::MetadataExt as _;
-                    if !seen.insert((metadata.dev(), metadata.ino())) {
-                        continue;
-                    }
-                }
-                *total = total.saturating_add(metadata.len());
-            }
-        }
-    }
-    let skip = [
-        staging.partial.clone(),
-        staging.partial.with_extension("resume.json"),
-    ];
-    let mut seen = std::collections::BTreeSet::new();
-    let mut total = 0_u64;
-    let Ok(entries) = std::fs::read_dir(&staging.root) else {
-        return 0;
-    };
-    for entry in entries.flatten() {
-        if skip.contains(&entry.path()) {
-            continue;
-        }
-        let Ok(metadata) = std::fs::symlink_metadata(entry.path()) else {
-            continue;
-        };
-        if metadata.is_dir() {
-            visit(&entry.path(), &mut seen, &mut total);
-        } else if metadata.is_file() {
-            total = total.saturating_add(metadata.len());
-        }
-    }
-    total
 }
 
 /// The import operation of one clone: a Project-package clone keeps its
@@ -1661,9 +1703,13 @@ fn import_error(error: &graphforge_api::PortableError) -> graphforge_api::GfErro
         let _ = write!(message, " (cause: {cause})");
     }
     match error.code {
-        PortableErrorCode::Io | PortableErrorCode::Cancelled => {
-            graphforge_api::GfError::Storage(message)
-        }
+        PortableErrorCode::UnsupportedFilesystem => graphforge_api::GfError::Project {
+            code: graphforge_api::ProjectErrorCode::UnsupportedFilesystem,
+            message,
+        },
+        PortableErrorCode::Io
+        | PortableErrorCode::Cancelled
+        | PortableErrorCode::InsufficientSpace => graphforge_api::GfError::Storage(message),
         _ => graphforge_api::GfError::Validation(message),
     }
 }
@@ -1681,6 +1727,8 @@ fn portable_code(code: PortableErrorCode) -> &'static str {
         PortableErrorCode::Incompatible => "hub.package.incompatible",
         PortableErrorCode::DigestMismatch => "hub.package.digest_mismatch",
         PortableErrorCode::ConcurrentMutation => "hub.package.concurrent_mutation",
+        PortableErrorCode::UnsupportedFilesystem => "GF_UNSUPPORTED_FILESYSTEM",
+        PortableErrorCode::InsufficientSpace => "hub.insufficient_space",
     }
 }
 
@@ -2042,6 +2090,8 @@ fn clone_into_staging(
         staging,
         object.length,
         import_committed(staging, &planned),
+        research_context.is_some(),
+        &planned,
         env.available_space,
     )?;
     let partial = staging.partial.clone();
@@ -2066,7 +2116,7 @@ fn clone_into_staging(
                 ..
             } = env;
             let mut report_bytes = |done, total| progress.bytes(done, total);
-            let report = download_with_progress(
+            let (report, digest) = download_with_progress(
                 transport,
                 &object,
                 &partial,
@@ -2077,7 +2127,7 @@ fn clone_into_staging(
                     progress: Some(&mut report_bytes),
                 },
             )?;
-            Ok((report, Some(report.transferred_bytes), None))
+            Ok(((report, digest), Some(report.transferred_bytes), None))
         },
     );
     if let Some(stage) = profile.stages.last_mut() {
@@ -2085,7 +2135,7 @@ fn clone_into_staging(
         stage.bytes = Some(download_progress.transferred_bytes);
         stage.resumed_bytes = Some(download_progress.resumed_bytes);
     }
-    let download = download_result?;
+    let (download, download_digest) = download_result?;
     clone_failpoint("clone.after_download");
     let portable_limits = PortableLimits::default();
     profile.handoff(
@@ -2105,20 +2155,25 @@ fn clone_into_staging(
         || {
             delays.clock.wait(delays.verification);
             let outcome = if let Some(context) = &research_context {
-                verify_discovered_research_version(&DiscoveryResearchVersionRequest {
-                    manifest_json: manifest_bytes,
-                    refs_json: refs_bytes,
-                    lineage_json: &context.lineage_bytes,
-                    expected_repository: identity,
-                    version_uuid: &context.version_uuid,
-                    package: &partial,
-                    discovery_limits: limits,
-                    portable_limits,
-                    mode: PortableMode::Full,
-                    cancelled: Some(cancelled),
-                    scratch: Some(&staging.root),
-                })
-                .map_err(research_version_error)?;
+                let verified_research =
+                    verify_discovered_research_version(&DiscoveryResearchVersionRequest {
+                        manifest_json: manifest_bytes,
+                        refs_json: refs_bytes,
+                        lineage_json: &context.lineage_bytes,
+                        expected_repository: identity,
+                        version_uuid: &context.version_uuid,
+                        package: &partial,
+                        discovery_limits: limits,
+                        portable_limits,
+                        mode: PortableMode::Full,
+                        cancelled: Some(cancelled),
+                        scratch: Some(&staging.root),
+                    })
+                    .map_err(research_version_error)?;
+                require_downloaded_bytes(
+                    verified_research.report.transport_digest.as_deref(),
+                    &download_digest,
+                )?;
                 (
                     manifest.immutable_version.0.clone(),
                     Some(context.version_uuid.clone()),
@@ -2136,6 +2191,10 @@ fn clone_into_staging(
                     cancelled: Some(cancelled),
                 })
                 .map_err(portable_error)?;
+                require_downloaded_bytes(
+                    accepted.report.transport_digest.as_deref(),
+                    &download_digest,
+                )?;
                 (accepted.immutable_version, None, None)
             };
             Ok((outcome, Some(object.length), None))
@@ -2480,6 +2539,8 @@ fn portable_error(error: DiscoveryPortableError) -> graphforge_api::GfError {
         ),
     }
 }
+#[cfg(test)]
+mod download_digest_tests;
 #[cfg(test)]
 mod listing_tests;
 #[cfg(test)]

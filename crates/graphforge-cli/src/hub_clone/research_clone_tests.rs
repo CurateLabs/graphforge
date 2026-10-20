@@ -191,13 +191,27 @@ struct Published {
     project_package: (PortablePackageReference, Vec<u8>),
 }
 
-#[allow(clippy::too_many_lines)]
 fn publish_history() -> Published {
+    publish_history_with_padding(0)
+}
+
+/// [`publish_history`] over a graph that also holds `padding` nodes of about
+/// 200 bytes each, which every published Version carries.
+#[allow(clippy::too_many_lines)]
+fn publish_history_with_padding(padding: u32) -> Published {
     let cancellation = CancellationToken::new();
     let root = tempfile::tempdir().unwrap();
     // The origin Project: one retained Version to fork from.
     let mut origin = GraphForge::new(root.path().join("origin").to_str()).unwrap();
     origin.execute("CREATE (:Item {score:0})").unwrap();
+    if padding > 0 {
+        origin
+            .execute(&format!(
+                "UNWIND range(1, {padding}) AS i CREATE (:Pad {{id: i, body: '{}'}})",
+                "x".repeat(200)
+            ))
+            .unwrap();
+    }
     let origin_version = Uuid::now_v7();
     create_branch(
         &mut origin,
@@ -1509,4 +1523,110 @@ fn forged_project_boundary_anchor_is_not_native_history_authority() {
         assert!(clone_into(&hub, &destination, Some("main"), None).is_err());
         assert!(!destination.exists());
     }
+}
+
+/// Allocated bytes (blocks, each hard-linked file once) under `root`.
+#[cfg(unix)]
+fn allocated_bytes(root: &Path) -> u64 {
+    use std::os::unix::fs::MetadataExt as _;
+    fn visit(directory: &Path, seen: &mut BTreeSet<(u64, u64)>, total: &mut u64) {
+        let Ok(entries) = std::fs::read_dir(directory) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let Ok(metadata) = std::fs::symlink_metadata(entry.path()) else {
+                continue;
+            };
+            if metadata.is_dir() {
+                visit(&entry.path(), seen, total);
+            } else if metadata.is_file() && seen.insert((metadata.dev(), metadata.ino())) {
+                *total += metadata.blocks() * 512;
+            }
+        }
+    }
+    let mut total = 0;
+    visit(root, &mut BTreeSet::new(), &mut total);
+    total
+}
+
+/// The budget a research clone checks before it downloads bounds the disk the
+/// clone holds beside its destination, measured from outside by sampling every
+/// allocated block of the clone's parent directory: the downloaded package, the
+/// import's stage, the validation object store and the rebuilt Version's
+/// object store, each live at once.
+///
+/// The footprint read from the package's own controls bounds the same peak and
+/// exceeds what the clone held by no more than its two declared allowances
+/// (the fixed bookkeeping bytes and the block rounding of three live copies of
+/// every file); a research fixture is too small to bound it by a percentage,
+/// because its project bookkeeping is a large part of what it holds. The
+/// production budget knows only the package's length, so it must never be
+/// below that exact footprint.
+#[cfg(unix)]
+#[test]
+fn the_budget_bounds_the_measured_peak_of_a_research_clone() {
+    let published = publish_history_with_padding(800);
+    let lineage = published
+        .fork
+        .build_research_lineage_for_discovery(
+            &lineage_request(&published),
+            &CancellationToken::new(),
+        )
+        .unwrap();
+    let hub = serve(&published, &lineage);
+    let (_, bundle) = &published.packages[&published.main_head];
+    let package = tempfile::tempdir().unwrap();
+    std::fs::write(package.path().join("head.gfpb"), bundle).unwrap();
+    let footprint = graphforge_storage::portable_import_footprint(
+        package.path().join("head.gfpb"),
+        PortableLimits::default(),
+        None,
+    )
+    .unwrap();
+    assert!(footprint.research_bytes > 0, "{footprint:?}");
+
+    let root = tempfile::tempdir().unwrap();
+    let stop = std::sync::Arc::new(AtomicBool::new(false));
+    let flag = std::sync::Arc::clone(&stop);
+    let watched = root.path().to_path_buf();
+    let sampler = std::thread::spawn(move || {
+        let mut peak = 0;
+        while !flag.load(Ordering::Relaxed) {
+            peak = peak.max(allocated_bytes(&watched));
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        peak
+    });
+    clone_into(&hub, &root.path().join("head"), Some("main"), None).unwrap();
+    stop.store(true, Ordering::Relaxed);
+    let observed = sampler.join().unwrap();
+    // The clone's parent holds the download as well as the import.
+    let length = bundle.len() as u64;
+    let exact = length + footprint.peak_bytes();
+    let budget = required_space(length, 0, 0, false, true);
+    println!(
+        "research clone: package={length} payload={} research={} generated={} entries={} observed={observed} exact={exact} budget={budget}",
+        footprint.payload_bytes,
+        footprint.research_bytes,
+        footprint.generated_bytes,
+        footprint.entries
+    );
+    assert!(
+        observed <= budget,
+        "a research clone held {observed} bytes, more than the {budget} it budgets"
+    );
+    assert!(
+        budget >= exact,
+        "the budget {budget} is below the package's own footprint {exact}"
+    );
+    assert!(
+        observed <= exact,
+        "observed {observed} exceeds footprint {exact}"
+    );
+    let allowances = PortableImportFootprint::FIXED_BYTES
+        + 3 * footprint.entries * PortableImportFootprint::BLOCK_BYTES;
+    assert!(
+        exact <= observed + allowances,
+        "the footprint {exact} exceeds the measured {observed} by more than the {allowances} allowed"
+    );
 }
