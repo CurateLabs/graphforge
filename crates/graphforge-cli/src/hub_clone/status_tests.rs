@@ -423,15 +423,22 @@ fn a_two_digit_rfc_850_year_follows_the_fifty_year_rule_from_now() {
     // 2026-10-20T00:00:00Z
     let now = 1_792_454_400;
     let at = |value: &str| retry_after_seconds(value, now);
-    // 2070-11-06T08:50:37Z and 2076-11-06T08:50:37Z are within 50 years of 2026.
+    // 2070-11-06T08:50:37Z is within 50 years of now.
     assert_eq!(
         at("Thursday, 06-Nov-70 08:50:37 GMT"),
         Some(3_182_489_437 - now)
     );
+    // The limit is now's civil date plus 50 years, 2076-10-20T00:00:00Z: that
+    // instant is not "more than" 50 years ahead, so it is 2076.
     assert_eq!(
-        at("Thursday, 06-Nov-76 08:50:37 GMT"),
-        Some(3_371_878_237 - now)
+        at("Tuesday, 20-Oct-76 00:00:00 GMT"),
+        Some(3370377600 - now)
     );
+    // A second later, or a day later, is in 1976 and so in the past; so is
+    // 2076-11-06.
+    assert_eq!(at("Tuesday, 20-Oct-76 00:00:01 GMT"), None);
+    assert_eq!(at("Wednesday, 21-Oct-76 00:00:00 GMT"), None);
+    assert_eq!(at("Thursday, 06-Nov-76 08:50:37 GMT"), None);
     // 2077 would be 51 years ahead, so it is 1977: in the past, no wait.
     assert_eq!(at("Thursday, 06-Nov-77 08:50:37 GMT"), None);
     // 2069 and 2000 are both in range; 2025 is the past.

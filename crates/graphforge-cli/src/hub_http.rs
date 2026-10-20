@@ -745,45 +745,57 @@ fn http_date_unix(value: &str, now: u64) -> Option<u64> {
             .position(|name| *name == lower)
             .map(|m| m as u64 + 1)
     };
+    // `Err(yy)` is an RFC 850 two-digit year, resolved against `now` below.
     let (day, month, year, clock) = match tokens[..] {
         // IMF-fixdate and RFC 850 share a shape: day, month, year, clock, zone.
         [_, day, month, year, h, m, s, zone] if zone.eq_ignore_ascii_case("GMT") => {
             let year = match year.len() {
-                4 => number(year)?,
-                2 => two_digit_year(number(year)?, now)?,
+                4 => Ok(number(year)?),
+                2 => Err(number(year)?),
                 _ => return None,
             };
             (number(day)?, month_number(month)?, year, [h, m, s])
         }
-        [_, month, day, h, m, s, year] if year.len() == 4 => {
-            (number(day)?, month_number(month)?, number(year)?, [h, m, s])
-        }
+        [_, month, day, h, m, s, year] if year.len() == 4 => (
+            number(day)?,
+            month_number(month)?,
+            Ok(number(year)?),
+            [h, m, s],
+        ),
         _ => return None,
     };
     let [h, m, s] = clock.map(number);
     let (h, m, s) = (h?, m?, s?);
-    if !(1970..=9999).contains(&year) || h > 23 || m > 59 || s > 60 {
+    if h > 23 || m > 59 || s > 60 {
         return None;
     }
-    if !(1..=days_in_month(year, month)).contains(&day) {
-        return None;
+    let instant = |year: u64| {
+        if !(1970..=9999).contains(&year) || !(1..=days_in_month(year, month)).contains(&day) {
+            return None;
+        }
+        days_from_civil(year, month, day)?
+            .checked_mul(86_400)?
+            .checked_add(h * 3600 + m * 60 + s)
+    };
+    match year {
+        Ok(year) => instant(year),
+        Err(yy) => {
+            // RFC 9110 §5.6.7: an instant more than 50 years after `now` (its
+            // civil date plus 50 years, same month, day and time) is read in
+            // the previous century.
+            let (current, now_month, now_day) = civil_date(now / 86_400)?;
+            let limit = days_from_civil(current.checked_add(50)?, now_month, now_day)?
+                .checked_mul(86_400)?
+                .checked_add(now % 86_400)?;
+            let candidate = current / 100 * 100 + yy;
+            let this_century = instant(candidate)?;
+            if this_century > limit {
+                instant(candidate.checked_sub(100)?)
+            } else {
+                Some(this_century)
+            }
+        }
     }
-    days_from_civil(year, month, day)?
-        .checked_mul(86_400)?
-        .checked_add(h * 3600 + m * 60 + s)
-}
-
-/// RFC 9110 §5.6.7: a two-digit year that appears to be more than 50 years
-/// after the current year is the most recent past year with the same last two
-/// digits.
-fn two_digit_year(yy: u64, now: u64) -> Option<u64> {
-    let current = civil_year(now / 86_400)?;
-    let candidate = current / 100 * 100 + yy;
-    Some(if candidate > current + 50 {
-        candidate.checked_sub(100)?
-    } else {
-        candidate
-    })
 }
 
 fn days_in_month(year: u64, month: u64) -> u64 {
@@ -814,16 +826,19 @@ fn days_from_civil(year: u64, month: u64, day: u64) -> Option<u64> {
         .checked_sub(719_468)
 }
 
-/// The Gregorian year of `days` since 1970-01-01 (after Howard Hinnant).
-fn civil_year(days: u64) -> Option<u64> {
+/// The Gregorian (year, month, day) of `days` since 1970-01-01 (after Howard
+/// Hinnant).
+fn civil_date(days: u64) -> Option<(u64, u64, u64)> {
     let z = days.checked_add(719_468)?;
     let era = z / 146_097;
     let doe = z - era * 146_097;
     let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
     let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
     let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
     let year = era.checked_mul(400)?.checked_add(yoe)?;
-    Some(if mp >= 10 { year + 1 } else { year })
+    Some((if month <= 2 { year + 1 } else { year }, month, day))
 }
 
 /// What an unsuccessful Hub status means to the caller. The class decides both
