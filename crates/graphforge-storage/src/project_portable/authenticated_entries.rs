@@ -6,6 +6,20 @@ use super::{
     has_multiple_links, hex, modified, research, same_identity, semantic_validation,
 };
 
+/// Where a semantic read finds an entry whose bytes the scan did not retain.
+/// Nothing is ever read back from the bundle being scanned.
+#[derive(Clone, Copy)]
+pub(super) enum Reopen<'a> {
+    /// An expanded package: every entry is a file under this directory.
+    Directory(&'a Path),
+    /// A bundle: only the research files, which the scan copied to this stage.
+    Bundle(Option<&'a Path>),
+    /// A bundle file served by [`super::PortablePackageIndex`]: random-access
+    /// reads of an already scanned package at the offsets the scan recorded.
+    /// Verification never uses this.
+    Indexed(&'a Path),
+}
+
 /// Authentication for untrusted bytes, or corruption refusal against evidence
 /// privately captured while this process wrote the exact canonical output.
 pub(super) enum StreamHash {
@@ -50,7 +64,7 @@ impl StreamHash {
 }
 
 pub(super) fn validate_semantics(
-    source: &Path,
+    source: Reopen<'_>,
     entries: &[Entry],
     report: &PortableReport,
     limits: PortableLimits,
@@ -88,7 +102,7 @@ pub(super) fn validate_semantics(
 }
 
 pub(super) fn read(
-    source: &Path,
+    source: Reopen<'_>,
     entries: &[Entry],
     path: &str,
     bound: u64,
@@ -115,10 +129,24 @@ pub(super) fn read(
     if let Some(bytes) = &entry.bytes {
         return Ok(bytes.clone());
     }
-    let input_path = if entry.offset.is_some() {
-        source.to_path_buf()
-    } else {
-        source.join(path)
+    let input_path = match source {
+        Reopen::Directory(root) => root.join(path),
+        Reopen::Indexed(bundle) => bundle.to_path_buf(),
+        Reopen::Bundle(Some(stage)) if path.starts_with(research::NAMESPACE) => stage.join(path),
+        Reopen::Bundle(None) if path.starts_with(research::NAMESPACE) => {
+            return Err(PortableError::at(
+                PortableErrorCode::Io,
+                path,
+                "cannot create research validation scratch",
+            ));
+        }
+        Reopen::Bundle(_) => {
+            return Err(PortableError::at(
+                PortableErrorCode::LimitExceeded,
+                path,
+                "retained control budget",
+            ));
+        }
     };
     let mut file =
         crate::project_portable_export::open_source_no_follow(&input_path).map_err(|_| {
@@ -138,7 +166,7 @@ pub(super) fn read(
             "hard-linked control",
         ));
     }
-    if let Some(offset) = entry.offset {
+    if let (Reopen::Indexed(_), Some(offset)) = (source, entry.offset) {
         file.seek(SeekFrom::Start(offset))
             .map_err(|_| PortableError::at(PortableErrorCode::Io, path, "cannot seek control"))?;
     } else if before.len() != entry.length {
@@ -187,7 +215,7 @@ pub(super) fn read(
 
 /// Native admission uses authenticated runtime identities rather than payload paths.
 fn validate_saved_queries(
-    source: &Path,
+    source: Reopen<'_>,
     entries: &[Entry],
     limits: PortableLimits,
     cancelled: Option<&AtomicBool>,

@@ -13,7 +13,7 @@ pub(crate) use materialization::{
 };
 mod authenticated_entries;
 mod inventory;
-use authenticated_entries::StreamHash;
+use authenticated_entries::{Reopen, StreamHash};
 mod participant_files;
 pub(crate) mod pax;
 pub use participant_files::{PortableFileRef, PortablePackageIndex};
@@ -44,6 +44,8 @@ pub(crate) const RUNTIME_MAP_PATH: &str =
 pub(crate) const ONTOLOGY_COMPOSITION_PATH: &str =
     "data/components/compatibility/graphforge-ontology-composition/composition.json";
 const BAGIT: &[u8] = b"BagIt-Version: 1.0\nTag-File-Character-Encoding: UTF-8\n";
+/// First bytes of the retired experimental project format.
+const RETIRED_PROJECT_SIGNATURE: &[u8; 16] = b"graphforge-exp\0\n";
 const BAG_INFO: &[u8] = b"Bag-Software-Agent: GraphForge portable-v2\nBagging-Date: 1970-01-01\n";
 
 pub use graphforge_core::portable::*;
@@ -147,6 +149,7 @@ struct Entry {
     length: u64,
     digest: [u8; 32],
     bytes: Option<Vec<u8>>,
+    /// Where a bundle entry's payload starts, for [`PortablePackageIndex`] reads.
     offset: Option<u64>,
     source_metadata: Option<fs::Metadata>,
 }
@@ -160,6 +163,50 @@ pub fn verify_portable(
 ) -> Result<PortableReport, PortableError> {
     preflight(source.as_ref(), limits, cancelled)?;
     scan(source.as_ref(), mode, limits, cancelled, None, None)
+}
+
+/// Verify a canonical bundle read once from a sequential reader, in `Full`
+/// mode, without any path, size or file identity.
+///
+/// Memory is bounded by the limits and `max_retained_control_bytes`, whatever
+/// the package size. A package with research files stages those files in a
+/// private directory in the system temporary directory; no other package
+/// writes anything. The verdict is the one [`verify_portable`] gives the same
+/// bytes in a file, apart from the report's `source`.
+pub fn verify_portable_stream(
+    source: &mut dyn Read,
+    limits: PortableLimits,
+    cancelled: Option<&AtomicBool>,
+) -> Result<PortableReport, PortableError> {
+    scan_stream(source, limits, cancelled, None).map(|scan| scan.report)
+}
+
+/// A bundle verified in one pass, with the stage that holds its research files.
+pub(crate) struct StreamScan {
+    pub(crate) report: PortableReport,
+    pub(crate) spill: research::Spill,
+}
+
+pub(crate) fn scan_stream(
+    source: &mut dyn Read,
+    limits: PortableLimits,
+    cancelled: Option<&AtomicBool>,
+    scratch: Option<&Path>,
+) -> Result<StreamScan, PortableError> {
+    check_cancel(cancelled)?;
+    let mut spill = research::Spill::new(scratch);
+    let scan = read_bundle(source, limits, cancelled, spill.sink(), None, || {
+        PortableError::new(PortableErrorCode::InvalidStructure, "trailing bytes")
+    })?;
+    let (report, entries) = finish_bundle(scan, PortableMode::Full, limits, PortableSource::Stream)?;
+    authenticated_entries::validate_semantics(
+        Reopen::Bundle(spill.stage()),
+        &entries,
+        &report,
+        limits,
+        cancelled,
+    )?;
+    Ok(StreamScan { report, spill })
 }
 
 fn preflight(
@@ -218,10 +265,27 @@ fn scan_entries(
 ) -> Result<(PortableReport, Vec<Entry>), PortableError> {
     let metadata = fs::symlink_metadata(source)
         .map_err(|_| PortableError::new(PortableErrorCode::Io, "source unavailable"))?;
+    // A bundle is read once. The research files that validation reads back
+    // by digest go to a stage: the importer's own, or a private one.
+    let import_stage = sink
+        .as_ref()
+        .map(|sink| sink.destination().to_path_buf());
+    let mut spill = (metadata.is_file() && sink.is_none() && mode == PortableMode::Full)
+        .then(|| research::Spill::new(None));
     let (report, entries) = if metadata.is_dir() {
         verify_expanded(source, mode, limits, cancelled, sink, written)
     } else if metadata.is_file() {
-        verify_bundle(source, mode, limits, cancelled, sink, written)
+        match sink {
+            Some(sink) => verify_bundle(source, mode, limits, cancelled, Some(sink), written),
+            None => verify_bundle(
+                source,
+                mode,
+                limits,
+                cancelled,
+                spill.as_mut().and_then(research::Spill::sink),
+                written,
+            ),
+        }
     } else {
         return Err(PortableError::new(
             PortableErrorCode::InvalidStructure,
@@ -235,7 +299,16 @@ fn scan_entries(
         ));
     }
     if mode == PortableMode::Full {
-        authenticated_entries::validate_semantics(source, &entries, &report, limits, cancelled)?;
+        let reopen = if metadata.is_dir() {
+            Reopen::Directory(source)
+        } else {
+            Reopen::Bundle(
+                import_stage
+                    .as_deref()
+                    .or_else(|| spill.as_ref().and_then(research::Spill::stage)),
+            )
+        };
+        authenticated_entries::validate_semantics(reopen, &entries, &report, limits, cancelled)?;
     }
     let after = fs::symlink_metadata(source).map_err(|_| {
         PortableError::new(
@@ -455,7 +528,7 @@ fn preflight_bundle(
             input.read_exact(&mut header[..16]).map_err(|_| {
                 PortableError::new(PortableErrorCode::InvalidStructure, "truncated bundle")
             })?;
-            if &header[..16] == b"graphforge-exp\0\n" {
+            if header[..16] == RETIRED_PROJECT_SIGNATURE[..] {
                 return Err(PortableError::new(
                     PortableErrorCode::UnsupportedProjectFormat,
                     "unsupported project format",
@@ -599,7 +672,7 @@ pub(crate) struct VerifiedMaterialization {
     pub(crate) captures: BTreeMap<String, MaterializedCapture>,
 }
 
-fn skip_padding(input: &mut File, length: u64) -> Result<(), PortableError> {
+fn skip_padding(input: &mut impl Read, length: u64) -> Result<(), PortableError> {
     let padding = (512 - length % 512) % 512;
     let mut bytes = [0u8; 512];
     input
@@ -610,7 +683,7 @@ fn skip_padding(input: &mut File, length: u64) -> Result<(), PortableError> {
     Ok(())
 }
 fn read_unhashed_payload(
-    input: &mut File,
+    input: &mut impl Read,
     length: u64,
     limit: usize,
 ) -> Result<Vec<u8>, PortableError> {
@@ -716,6 +789,7 @@ fn verify_expanded(
     let report = validate_package(
         &entries,
         PortableRepresentation::Expanded,
+        PortableSource::File,
         mode,
         limits,
         Some(transport),
@@ -800,13 +874,12 @@ fn walk(
     Ok(())
 }
 
-#[allow(clippy::too_many_lines)]
 fn verify_bundle(
     path: &Path,
     mode: PortableMode,
     limits: PortableLimits,
     cancelled: Option<&AtomicBool>,
-    mut sink: Option<&mut materialization::CopySink<'_>>,
+    sink: Option<&mut materialization::CopySink<'_>>,
     written: Option<&crate::project_portable_export::WrittenPackage>,
 ) -> Result<(PortableReport, Vec<Entry>), PortableError> {
     let before = fs::metadata(path)
@@ -819,6 +892,88 @@ fn verify_bundle(
     }
     let mut file = crate::project_portable_export::open_source_no_follow(path)
         .map_err(|_| PortableError::new(PortableErrorCode::Io, "cannot open bundle"))?;
+    // Bytes after the end blocks are trailing bytes unless the file itself
+    // changed while it was read.
+    let probe = file
+        .try_clone()
+        .map_err(|_| PortableError::new(PortableErrorCode::Io, "bundle metadata"))?;
+    let scan = read_bundle(&mut file, limits, cancelled, sink, written, || {
+        match probe.metadata() {
+            Err(_) => PortableError::new(PortableErrorCode::Io, "bundle metadata"),
+            Ok(current)
+                if current.len() != before.len() || modified(&current) != modified(&before) =>
+            {
+                PortableError::new(
+                    PortableErrorCode::ConcurrentMutation,
+                    "bundle changed during copy",
+                )
+            }
+            Ok(_) => PortableError::new(PortableErrorCode::InvalidStructure, "trailing bytes"),
+        }
+    })?;
+    let after = file.metadata().map_err(|_| {
+        PortableError::new(PortableErrorCode::ConcurrentMutation, "bundle disappeared")
+    })?;
+    let named = fs::symlink_metadata(path).map_err(|_| {
+        PortableError::new(PortableErrorCode::ConcurrentMutation, "bundle disappeared")
+    })?;
+    if !same_identity(&after, &named)
+        || !same_identity(&before, &after)
+        || before.len() != after.len()
+        || modified(&before) != modified(&after)
+    {
+        return Err(PortableError::new(
+            PortableErrorCode::ConcurrentMutation,
+            "bundle changed",
+        ));
+    }
+    finish_bundle(scan, mode, limits, PortableSource::File)
+}
+
+/// What a single pass over a bundle leaves behind.
+struct BundleScan {
+    entries: Vec<Entry>,
+    transport_digest: String,
+    inventory: Option<inventory::InventoryVerdict>,
+}
+
+fn finish_bundle(
+    scan: BundleScan,
+    mode: PortableMode,
+    limits: PortableLimits,
+    source: PortableSource,
+) -> Result<(PortableReport, Vec<Entry>), PortableError> {
+    let report = validate_package(
+        &scan.entries,
+        PortableRepresentation::Bundle,
+        source,
+        mode,
+        limits,
+        Some(scan.transport_digest),
+        scan.inventory,
+    )?;
+    Ok((report, scan.entries))
+}
+
+/// The one pass over a canonical bundle, from a file or from any sequential
+/// reader: it hashes every byte, checks every header and retains only what
+/// later semantic reads need, within `max_retained_control_bytes`.
+/// `on_trailing_bytes` names the fault when bytes follow the end blocks.
+#[allow(clippy::too_many_lines)]
+fn read_bundle<R: Read + ?Sized>(
+    reader: &mut R,
+    limits: PortableLimits,
+    cancelled: Option<&AtomicBool>,
+    mut sink: Option<&mut materialization::CopySink<'_>>,
+    written: Option<&crate::project_portable_export::WrittenPackage>,
+    on_trailing_bytes: impl FnOnce() -> PortableError,
+) -> Result<BundleScan, PortableError> {
+    if limits.copy_buffer_bytes == 0 {
+        return Err(PortableError::new(
+            PortableErrorCode::LimitExceeded,
+            "copy buffer is zero",
+        ));
+    }
     let mut transport = StreamHash::new(
         written.and_then(crate::project_portable_export::WrittenPackage::bundle_identity),
     );
@@ -826,13 +981,30 @@ fn verify_bundle(
     let mut total = 0u64;
     let mut inventory_verdict = None;
     let mut pending_pax: Option<(pax::PaxHeader, String)> = None;
+    let mut retained_pool = limits.max_retained_control_bytes;
+    // Bytes consumed so far; payload offsets are counted, never asked of the reader.
+    let mut position = 0u64;
     loop {
         check_cancel(cancelled)?;
         let mut header = [0u8; 512];
-        read_exact_hash(&mut file, &mut header, &mut transport, "bundle header")?;
+        // Reject the retired format signature before any entry is admitted.
+        // This is not a decoder or compatibility path.
+        if entries.is_empty() && pending_pax.is_none() {
+            read_exact_hash(reader, &mut header[..16], &mut transport, "bundle header")?;
+            if header[..16] == RETIRED_PROJECT_SIGNATURE[..] {
+                return Err(PortableError::new(
+                    PortableErrorCode::UnsupportedProjectFormat,
+                    "unsupported project format",
+                ));
+            }
+            read_exact_hash(reader, &mut header[16..], &mut transport, "bundle header")?;
+        } else {
+            read_exact_hash(reader, &mut header, &mut transport, "bundle header")?;
+        }
+        position = position.saturating_add(512);
         if header == [0; 512] {
             let mut second = [1u8; 512];
-            read_exact_hash(&mut file, &mut second, &mut transport, "second end block")?;
+            read_exact_hash(reader, &mut second, &mut transport, "second end block")?;
             if second != [0; 512] {
                 return Err(PortableError::new(
                     PortableErrorCode::InvalidStructure,
@@ -840,24 +1012,12 @@ fn verify_bundle(
                 ));
             }
             let mut extra = [0u8; 1];
-            if file
+            if reader
                 .read(&mut extra)
                 .map_err(|_| PortableError::new(PortableErrorCode::Io, "bundle read"))?
                 != 0
             {
-                let current = file
-                    .metadata()
-                    .map_err(|_| PortableError::new(PortableErrorCode::Io, "bundle metadata"))?;
-                if current.len() != before.len() || modified(&current) != modified(&before) {
-                    return Err(PortableError::new(
-                        PortableErrorCode::ConcurrentMutation,
-                        "bundle changed during copy",
-                    ));
-                }
-                return Err(PortableError::new(
-                    PortableErrorCode::InvalidStructure,
-                    "trailing bytes",
-                ));
+                return Err(on_trailing_bytes());
             }
             break;
         }
@@ -874,12 +1034,13 @@ fn verify_bundle(
                 ));
             }
             let bytes = read_payload(
-                &mut file,
+                reader,
                 size,
                 &mut transport,
                 limits.max_path_bytes + pax::PAX_RECORD_OVERHEAD_BYTES,
                 cancelled,
             )?;
+            position = position.saturating_add(size.saturating_add((512 - size % 512) % 512));
             let text = std::str::from_utf8(&bytes).map_err(|_| {
                 PortableError::new(PortableErrorCode::InvalidPath, "PAX path is not UTF-8")
             })?;
@@ -924,17 +1085,26 @@ fn verify_bundle(
         verify_canonical_header_path(&header, &entry_path, used_pax)?;
         validate_path(&entry_path, limits.max_path_bytes)?;
         enforce_length(&entry_path, size, &mut total, limits)?;
-        let offset = file
-            .stream_position()
-            .map_err(|_| PortableError::new(PortableErrorCode::Io, "bundle position"))?;
+        let offset = position;
+        position = position.saturating_add(size.saturating_add((512 - size % 512) % 512));
         let mut check = (entry_path == inventory::INVENTORY_PATH)
             .then(|| inventory::InventoryCheck::new(&entries, limits.max_path_bytes));
+        // Fixed controls are always kept (and refused when over their bound).
+        // Documents read after the scan share a pool; one that does not fit
+        // is hashed and not kept, and a later read of it is refused.
+        let retain_limit = retained_limit(&entry_path, limits, entries.len() as u64 + 3).or_else(|| {
+            let cap = pooled_limit(&entry_path, limits)?;
+            (size <= cap && size <= retained_pool).then(|| {
+                retained_pool -= size;
+                size
+            })
+        });
         let (digest, bytes) = hash_payload(
-            &mut file,
+            reader,
             size,
             &mut transport,
             limits.copy_buffer_bytes,
-            retained_limit(&entry_path, limits, entries.len() as u64 + 3),
+            retain_limit,
             check.as_mut(),
             cancelled,
             &entry_path,
@@ -972,36 +1142,17 @@ fn verify_bundle(
         ));
     }
     validate_path_set(&entries.iter().map(|e| e.path.clone()).collect::<Vec<_>>())?;
-    let after = file.metadata().map_err(|_| {
-        PortableError::new(PortableErrorCode::ConcurrentMutation, "bundle disappeared")
-    })?;
-    let named = fs::symlink_metadata(path).map_err(|_| {
-        PortableError::new(PortableErrorCode::ConcurrentMutation, "bundle disappeared")
-    })?;
-    if !same_identity(&after, &named)
-        || !same_identity(&before, &after)
-        || before.len() != after.len()
-        || modified(&before) != modified(&after)
-    {
-        return Err(PortableError::new(
-            PortableErrorCode::ConcurrentMutation,
-            "bundle changed",
-        ));
-    }
-    let report = validate_package(
-        &entries,
-        PortableRepresentation::Bundle,
-        mode,
-        limits,
-        Some(hex(&transport.finish()?)),
-        inventory_verdict,
-    )?;
-    Ok((report, entries))
+    Ok(BundleScan {
+        entries,
+        transport_digest: hex(&transport.finish()?),
+        inventory: inventory_verdict,
+    })
 }
 
 fn validate_package(
     entries: &[Entry],
     representation: PortableRepresentation,
+    source: PortableSource,
     mode: PortableMode,
     limits: PortableLimits,
     transport: Option<String>,
@@ -1068,6 +1219,7 @@ fn validate_package(
             .any(|component| component.kind == "research"),
         contract: "graphforge-portable-verify/2",
         representation,
+        source,
         package_digest: manifest.package_digest.clone(),
         package_class: package_class(&manifest.package_class)?,
         component_count: manifest.components.len() as u64,
@@ -1594,7 +1746,7 @@ fn validate_path_set(paths: &[String]) -> Result<(), PortableError> {
     Ok(())
 }
 fn read_exact_hash(
-    r: &mut File,
+    r: &mut (impl Read + ?Sized),
     b: &mut [u8],
     h: &mut StreamHash,
     detail: &'static str,
@@ -1702,7 +1854,7 @@ fn verify_header(h: &[u8; 512]) -> Result<(), PortableError> {
     Ok(())
 }
 fn read_payload(
-    r: &mut File,
+    r: &mut (impl Read + ?Sized),
     size: u64,
     h: &mut StreamHash,
     max: usize,
@@ -1731,7 +1883,7 @@ fn read_payload(
     reason = "canonical member authentication carries transport, bounded copy and private writer evidence"
 )]
 fn hash_payload(
-    reader: &mut File,
+    reader: &mut (impl Read + ?Sized),
     size: u64,
     transport_hash: &mut StreamHash,
     buffer: usize,
@@ -1793,7 +1945,11 @@ fn hash_payload(
     }
     Ok((digest, kept))
 }
-fn read_padding(r: &mut File, size: u64, h: &mut StreamHash) -> Result<(), PortableError> {
+fn read_padding(
+    r: &mut (impl Read + ?Sized),
+    size: u64,
+    h: &mut StreamHash,
+) -> Result<(), PortableError> {
     let n = (512 - size % 512) % 512;
     let mut p = vec![0; n as usize];
     read_exact_hash(r, &mut p, h, "truncated padding")?;
@@ -1836,6 +1992,20 @@ fn retained_limit(path: &str, limits: PortableLimits, package_entries: u64) -> O
         "bagit.txt" | "bag-info.txt" | "tagmanifest-sha256.txt" => {
             Some(limits.max_tag_manifest_bytes)
         }
+        _ => None,
+    }
+}
+
+/// Per-entry bound on a document that is kept from the shared retention pool
+/// (`max_retained_control_bytes`) because Full verification reads it after the
+/// scan: ontology modules and compatibility controls, ontology bridges, and
+/// saved-query settings. Research files are staged on disk instead, and
+/// everything else is only hashed.
+fn pooled_limit(path: &str, limits: PortableLimits) -> Option<u64> {
+    let kind = path.strip_prefix("data/components/")?.split('/').next()?;
+    match kind {
+        "ontology" | "schema" | "compatibility" => Some(limits.max_manifest_bytes),
+        "settings" => Some(crate::MAX_WORKSPACE_SAVED_QUERIES_BYTES as u64),
         _ => None,
     }
 }

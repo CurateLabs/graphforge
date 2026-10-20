@@ -33,6 +33,15 @@ pub struct PortableLimits {
     /// `manifest-sha256.txt`, has one row per `data/` entry; writer and reader
     /// stream it, and it is bounded by `max_entries` and `max_path_bytes`.
     pub max_tag_manifest_bytes: u64,
+    /// Bytes the single-pass bundle reader may hold at once for the control
+    /// documents Full verification reads after a payload has streamed past:
+    /// ontology modules, bridge documents and saved-query definitions. It is a
+    /// pool shared by those entries and is separate from the manifest, runtime
+    /// map, composition control and tag files above. A document that does not
+    /// fit is hashed but not retained; Full verification that then needs it
+    /// fails with `LimitExceeded` at that entry. The same rule governs bundles
+    /// read from a file and from a stream.
+    pub max_retained_control_bytes: u64,
     /// UTF-8 bytes in one portable path.
     pub max_path_bytes: usize,
     /// Bytes in the streaming copy buffer.
@@ -78,6 +87,7 @@ impl Default for PortableLimits {
                 * PORTABLE_MANIFEST_BYTES_PER_ENTRY)
                 .next_power_of_two(),
             max_tag_manifest_bytes: 4 * 1024 * 1024,
+            max_retained_control_bytes: 256 * 1024 * 1024,
             max_path_bytes: 4096,
             copy_buffer_bytes: 1024 * 1024,
         }
@@ -95,6 +105,16 @@ pub enum PortableMode {
 pub enum PortableRepresentation {
     Expanded,
     Bundle,
+}
+
+/// How the verified bytes were read. The verdict does not depend on it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PortableSource {
+    /// A path on the local filesystem: a bundle file or an expanded directory.
+    File,
+    /// A sequential reader with no path, size or identity.
+    Stream,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -139,6 +159,7 @@ pub struct PortableReport {
     pub research_entries: Vec<PortableResearchEntry>,
     pub contract: &'static str,
     pub representation: PortableRepresentation,
+    pub source: PortableSource,
     pub package_digest: String,
     pub package_class: PortablePackageClass,
     pub component_count: u64,

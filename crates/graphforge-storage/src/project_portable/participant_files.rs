@@ -11,7 +11,7 @@
 
 use super::{
     AtomicBool, ControlSha256, Digest, Entry, MANIFEST_PATH, Manifest, Path, PortableError,
-    PortableErrorCode, PortableLimits, PortableMode, RUNTIME_MAP_PATH, authenticated_entries,
+    PortableErrorCode, PortableLimits, PortableMode, RUNTIME_MAP_PATH, Reopen, authenticated_entries,
     constant_time_eq, decode_runtime_map, hex, parse_manifest, preflight, read_entry_bytes,
     scan_entries,
 };
@@ -95,6 +95,14 @@ impl PortablePackageIndex {
             manifest,
             limits,
         })
+    }
+
+    fn reopen(&self) -> Reopen<'_> {
+        if self.entries.iter().any(|entry| entry.offset.is_some()) {
+            Reopen::Indexed(&self.source)
+        } else {
+            Reopen::Directory(&self.source)
+        }
     }
 
     /// Count the authenticated manifest's components by `kind`.
@@ -216,7 +224,7 @@ impl PortablePackageIndex {
             ));
         }
         let bytes =
-            authenticated_entries::read(&self.source, &self.entries, &file.path, bound, cancelled)?;
+            authenticated_entries::read(self.reopen(), &self.entries, &file.path, bound, cancelled)?;
         let digest = hex(&<[u8; 32]>::from(ControlSha256::digest(&bytes)));
         if bytes.len() as u64 != file.length
             || !constant_time_eq(digest.as_bytes(), file.sha256.as_bytes())

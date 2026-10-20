@@ -222,15 +222,12 @@ pub(crate) fn materialize_verified_portable_observed(
     preflight(source.as_ref(), limits, cancelled)?;
     fs::create_dir(destination)
         .map_err(|_| PortableError::new(PortableErrorCode::Io, "cannot create materialization"))?;
-    let mut sink = CopySink {
-        destination,
-        observed: &mut observed,
-        routes: BTreeSet::new(),
+    let mut sink = CopySink::new(
+        destination.to_owned(),
+        COMPONENT_NAMESPACE,
+        Some(&mut observed),
         track_removals,
-        bytes: 0,
-        operations: 0,
-        captures: BTreeMap::new(),
-    };
+    );
     let result = (|| {
         let report = scan(
             source.as_ref(),
@@ -243,10 +240,7 @@ pub(crate) fn materialize_verified_portable_observed(
         // Refuse a successful write whose physical bytes changed before the
         // private directory becomes available. This is a checksum readback of
         // writer-owned output, not another authentication of the source.
-        for (relative, capture) in &sink.captures {
-            capture.authenticate(&destination.join(relative), cancelled)?;
-        }
-        sync_materialized_tree(destination)?;
+        sink.authenticate_and_sync(cancelled)?;
         Ok(VerifiedMaterialization {
             report,
             application_read_bytes: sink.bytes,
@@ -256,10 +250,10 @@ pub(crate) fn materialize_verified_portable_observed(
     })();
     if result.is_err() {
         let _ = fs::remove_dir_all(destination);
-        for path in &sink.routes {
-            if matches!(fs::symlink_metadata(path), Err(error) if error.kind() == std::io::ErrorKind::NotFound)
+        for path in std::mem::take(&mut sink.routes) {
+            if matches!(fs::symlink_metadata(&path), Err(error) if error.kind() == std::io::ErrorKind::NotFound)
             {
-                let _ = (sink.observed)(path, None);
+                let _ = sink.observe(&path, None);
             }
         }
     }
@@ -268,18 +262,66 @@ pub(crate) fn materialize_verified_portable_observed(
 
 type EntryObserver<'a> = dyn FnMut(&Path, Option<&File>) -> Result<(), PortableError> + 'a;
 
+/// Every component file an import stages.
+const COMPONENT_NAMESPACE: &str = "data/components/";
+
 pub(super) struct CopySink<'a> {
-    destination: &'a Path,
-    observed: &'a mut EntryObserver<'a>,
+    destination: std::path::PathBuf,
+    /// Only entries whose path starts with this prefix are copied.
+    namespace: &'static str,
+    observed: Option<&'a mut EntryObserver<'a>>,
     routes: BTreeSet<std::path::PathBuf>,
     track_removals: bool,
     bytes: u64,
     operations: u64,
     captures: BTreeMap<String, MaterializedCapture>,
 }
-impl CopySink<'_> {
+impl<'a> CopySink<'a> {
+    pub(super) fn new(
+        destination: std::path::PathBuf,
+        namespace: &'static str,
+        observed: Option<&'a mut EntryObserver<'a>>,
+        track_removals: bool,
+    ) -> Self {
+        Self {
+            destination,
+            namespace,
+            observed,
+            routes: BTreeSet::new(),
+            track_removals,
+            bytes: 0,
+            operations: 0,
+            captures: BTreeMap::new(),
+        }
+    }
+    pub(super) fn destination(&self) -> &Path {
+        &self.destination
+    }
+    pub(super) fn captures(&self) -> &BTreeMap<String, MaterializedCapture> {
+        &self.captures
+    }
+    fn observe(&mut self, path: &Path, file: Option<&File>) -> Result<(), PortableError> {
+        match &mut self.observed {
+            Some(observed) => observed(path, file),
+            None => Ok(()),
+        }
+    }
+    /// Read back every copied file against the checksum captured while it was
+    /// written, then sync the staged tree.
+    pub(super) fn authenticate_and_sync(
+        &self,
+        cancelled: Option<&AtomicBool>,
+    ) -> Result<(), PortableError> {
+        for (relative, capture) in &self.captures {
+            capture.authenticate(&self.destination.join(relative), cancelled)?;
+        }
+        if self.destination.exists() {
+            sync_materialized_tree(&self.destination)?;
+        }
+        Ok(())
+    }
     pub(super) fn open(&mut self, relative: &str) -> Result<Option<File>, PortableError> {
-        if !relative.starts_with("data/components/") {
+        if !relative.starts_with(self.namespace) {
             return Ok(None);
         }
         let path = self.destination.join(relative);
@@ -300,7 +342,7 @@ impl CopySink<'_> {
         if self.track_removals {
             self.routes.insert(path.clone());
         }
-        (self.observed)(&path, Some(&file))?;
+        self.observe(&path, Some(&file))?;
         Ok(Some(file))
     }
     pub(super) fn write(
@@ -312,7 +354,7 @@ impl CopySink<'_> {
         let result = file
             .write_all(bytes)
             .map_err(|_| PortableError::at(PortableErrorCode::Io, relative, "cannot copy entry"));
-        let refreshed = (self.observed)(&self.destination.join(relative), Some(file));
+        let refreshed = self.observe(&self.destination.join(relative), Some(file));
         result?;
         refreshed?;
         self.bytes = self.bytes.saturating_add(bytes.len() as u64);
@@ -329,7 +371,7 @@ impl CopySink<'_> {
     ) -> Result<(), PortableError> {
         let result = crate::durable_commit::seal_file(&file)
             .map_err(|_| PortableError::at(PortableErrorCode::Io, relative, "cannot sync entry"));
-        let refreshed = (self.observed)(&self.destination.join(relative), Some(&file));
+        let refreshed = self.observe(&self.destination.join(relative), Some(&file));
         result?;
         refreshed?;
         let identity = graphforge_filesystem::file_identity(&file).map_err(|_| {
@@ -382,7 +424,7 @@ impl CopySink<'_> {
                 "materialized file changed after writer close",
             ));
         }
-        (self.observed)(&path, Some(&file))?;
+        self.observe(&path, Some(&file))?;
         let allocated_bytes = graphforge_filesystem::file_space_usage(&file)
             .map_err(|_| {
                 PortableError::at(

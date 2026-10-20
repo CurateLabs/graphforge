@@ -3,9 +3,74 @@ use super::{PortableError, PortableErrorCode, PortableLimits};
 use crate::research_versions::{ResearchRegistry, interchange::portable};
 use std::{collections::BTreeMap, path::Path, sync::atomic::AtomicBool};
 
+/// Every file of the research component lives here. Research validation reads
+/// no other path, so a bundle read in one pass stages exactly this prefix.
+pub(super) const NAMESPACE: &str = "data/components/research/";
 const PREFIX: &str = "data/components/research/research-content/";
 
 type ResearchArchive = (ResearchRegistry, BTreeMap<String, u64>);
+
+/// Private stage holding the research files of a bundle that is read once and
+/// never re-read. Research validation reads a registry and then objects chosen
+/// by digest from the registry, and canonical order puts the objects first, so
+/// the files cannot be kept in memory; they are staged on disk instead. A
+/// package without research files stages nothing.
+pub(crate) struct Spill {
+    /// Holds the private directory; dropping it removes the stage.
+    _owner: Option<tempfile::TempDir>,
+    sink: Option<super::materialization::CopySink<'static>>,
+}
+
+impl Spill {
+    /// `scratch` is the directory that holds the stage, or the system
+    /// temporary directory. A directory that cannot be created is reported
+    /// only by a package that has research files to stage.
+    pub(super) fn new(scratch: Option<&Path>) -> Self {
+        let parent = scratch.map_or_else(std::env::temp_dir, Path::to_path_buf);
+        match tempfile::Builder::new()
+            .prefix(".graphforge-research-validation-")
+            .tempdir_in(parent)
+        {
+            Ok(owner) => {
+                let sink = super::materialization::CopySink::new(
+                    owner.path().join("verified"),
+                    NAMESPACE,
+                    None,
+                    false,
+                );
+                Self {
+                    _owner: Some(owner),
+                    sink: Some(sink),
+                }
+            }
+            Err(_) => Self {
+                _owner: None,
+                sink: None,
+            },
+        }
+    }
+    pub(super) fn sink(&mut self) -> Option<&mut super::materialization::CopySink<'static>> {
+        self.sink.as_mut()
+    }
+    pub(super) fn stage(&self) -> Option<&Path> {
+        self.sink.as_ref().map(|sink| sink.destination())
+    }
+    /// Authenticate the staged files and return the stage with the captures
+    /// that bind them. The stage lives as long as `self`.
+    pub(crate) fn authenticated(
+        &self,
+        cancelled: Option<&AtomicBool>,
+    ) -> Result<(&Path, &BTreeMap<String, super::MaterializedCapture>), PortableError> {
+        let sink = self.sink.as_ref().ok_or_else(|| {
+            PortableError::new(
+                PortableErrorCode::Io,
+                "cannot create research validation scratch",
+            )
+        })?;
+        sink.authenticate_and_sync(cancelled)?;
+        Ok((sink.destination(), sink.captures()))
+    }
+}
 
 pub(crate) fn validate_stage(
     stage: &Path,
@@ -38,6 +103,9 @@ pub(super) fn validate_with_reader(
         return Err(invalid());
     }
     let descriptor = descriptors[0];
+    if !descriptor.path.starts_with(NAMESPACE) {
+        return Err(invalid());
+    }
     let bytes = read(
         &descriptor.path,
         crate::research_versions::MAX_REGISTRY_BYTES as u64,
