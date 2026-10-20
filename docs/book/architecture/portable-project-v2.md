@@ -426,10 +426,13 @@ and manifest documents stay buffered under the 10 MiB response bound.
 
 Over HTTP a layer moves as a sequence of requests: OCI chunked upload sessions
 (`PATCH` with `Content-Range`, then a digest-verified `PUT`) and ranged `GET`s,
-8 MiB each by default (`HttpOciTransfer`). Each request carries its own
-60-second timeout instead of one deadline for the whole transfer, so a long
-transfer completes as long as every request does. Pull requires the registry
-to honour `Range`. An interrupted push or pull is not resumed: the registry
+8 MiB each by default (`HttpOciTransfer`). There is no deadline on a request or
+a transfer. Connecting, waiting for response headers, and every socket read or
+write must each make progress within the idle timeout (60 seconds by default),
+so a long transfer completes while bytes keep moving and a stalled one fails.
+Pull uses `Range`; a registry that ignores it and answers 200 is streamed whole,
+bounded by the manifest's declared size, and a `Content-Range` that contradicts
+that size is refused. An interrupted push or pull is not resumed: the registry
 admits a blob only on the final digest-verified `PUT`, and a pull removes its
 staging file, so a rerun starts clean and no partial package is admitted.
 
