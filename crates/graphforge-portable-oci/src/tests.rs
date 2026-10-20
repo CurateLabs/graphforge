@@ -200,6 +200,8 @@ struct Faults {
     drop_patch: usize,
     /// Close the connection halfway through the n-th (1-based) ranged GET body.
     drop_range: usize,
+    /// Answer ranged GETs with a chunked body that ends cleanly at half length.
+    short_range: bool,
     /// Answer ranged GETs with the whole blob and 200.
     ignore_range: bool,
     /// Sleep before answering every PATCH and ranged GET.
@@ -296,6 +298,16 @@ impl LoopbackRegistry {
                             first + part.len() - 1,
                             blob.len()
                         );
+                        if faults.short_range {
+                            let half = part.len() / 2;
+                            let _ = write!(
+                                stream,
+                                "HTTP/1.1 206 Partial Content\r\n{extra}Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n{half:x}\r\n"
+                            );
+                            let _ = stream.write_all(&part[..half]);
+                            let _ = stream.write_all(b"\r\n0\r\n\r\n");
+                            continue;
+                        }
                         if range_count == faults.drop_range {
                             let _ = write!(
                                 stream,
@@ -513,6 +525,23 @@ fn an_interrupted_pull_fails_typed_and_a_rerun_completes() {
     assert!(drain(&mut stream).is_err());
     let mut stream = client.get_blob_stream("repo", &digest, size).unwrap();
     assert_eq!(drain(&mut stream).unwrap(), (digest, size));
+}
+
+#[test]
+fn a_range_answer_that_ends_cleanly_but_short_is_an_error() {
+    let layer = pattern(3 * 64 * 1024);
+    let digest = digest_sha256(&layer);
+    let server = LoopbackRegistry::start(Faults {
+        short_range: true,
+        ..Faults::default()
+    });
+    let client = server.client(SMALL_CHUNKS);
+    let size = layer.len() as u64;
+    client
+        .put_blob_stream("repo", &digest, size, &mut layer.as_slice())
+        .unwrap();
+    let mut stream = client.get_blob_stream("repo", &digest, size).unwrap();
+    assert!(drain(&mut stream).is_err());
 }
 
 #[test]
