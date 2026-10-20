@@ -468,6 +468,7 @@ fn research_ref_without_lineage_stops_before_project_download() {
         "package":{
             "format":"graphforge-project/2",
             "package_digest":format!("sha256:{}", "b".repeat(64)),
+            "producing_core_version":"0.6.0",
             "object_digest":format!("sha256:{}", "c".repeat(64))
         },
         "requirements":[{"capability":"portable-v2","major":1}],"capabilities":[],
@@ -525,6 +526,7 @@ fn unsupported_future_manifest_stops_before_object_access() {
         "package":{
             "format":"graphforge-project/2",
             "package_digest":format!("sha256:{}", "b".repeat(64)),
+            "producing_core_version":"0.6.0",
             "object_digest":format!("sha256:{}", "c".repeat(64))
         },
         "requirements":[],"capabilities":[],
@@ -603,7 +605,7 @@ pub(super) fn clone_documents(
         "format":"graphforge-discovery/1","version":{"major":1,"minor":0},
         "repository":repository,"default_ref":"main","resolved_ref":"main",
         "immutable_version":immutable,
-        "package":{"format":"graphforge-project/2","package_digest":package_digest,"object_digest":object_digest},
+        "package":{"format":"graphforge-project/2","package_digest":package_digest,"producing_core_version":graphforge_api::GRAPHFORGE_VERSION,"object_digest":object_digest},
         "requirements":[{"capability":"portable-v2","major":1}],"capabilities":[{"capability":"range-requests","major":1}],
         "objects":objects
     })).unwrap();
