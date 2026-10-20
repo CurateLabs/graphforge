@@ -18,11 +18,7 @@ fn flat_plain_bytes_release_transition_page_admission_only_while_idle() {
     let values = (0..ROWS)
         .map(|row| format!("{row}{}", "x".repeat(32 * 1024)))
         .collect::<Vec<_>>();
-    for (encoding, repeated) in [
-        (Encoding::PLAIN, false),
-        (Encoding::DELTA_LENGTH_BYTE_ARRAY, false),
-        (Encoding::PLAIN, true),
-    ] {
+    for (encoding, repeated) in [(Encoding::PLAIN, false), (Encoding::PLAIN, true)] {
         let values: ArrayRef = if repeated {
             let mut lists = ListBuilder::new(StringBuilder::new());
             for value in &values {
@@ -742,4 +738,176 @@ fn page_audit_rejects_cumulative_pages_larger_than_column_footer() {
             .contains("page bytes exceed column uncompressed size"),
         "{error}"
     );
+}
+
+/// Records the farthest byte any admission read touched.
+#[derive(Debug)]
+struct RecordingRead {
+    file: File,
+    farthest: AtomicU64,
+}
+
+impl PropertyRead for RecordingRead {
+    fn read_at(&self, buffer: &mut [u8], offset: u64) -> std::io::Result<usize> {
+        let read = self.file.read_at(buffer, offset)?;
+        self.farthest
+            .fetch_max(offset + read as u64, Ordering::Relaxed);
+        Ok(read)
+    }
+    fn length(&self) -> std::io::Result<u64> {
+        self.file.length()
+    }
+}
+
+fn single_column_file(
+    array: ArrayRef,
+    encoding: parquet::basic::Encoding,
+) -> (File, parquet::file::metadata::ParquetMetaData) {
+    let schema = Arc::new(Schema::new(vec![Field::new(
+        "value",
+        array.data_type().clone(),
+        false,
+    )]));
+    let rows = array.len();
+    let batch = RecordBatch::try_new(Arc::clone(&schema), vec![array]).unwrap();
+    let file = tempfile::tempfile().unwrap();
+    let properties = crate::permanent_parquet::writer_properties()
+        .set_compression(parquet::basic::Compression::UNCOMPRESSED)
+        .set_dictionary_enabled(false)
+        .set_encoding(encoding)
+        .set_write_batch_size(rows)
+        .set_max_row_group_row_count(Some(rows))
+        .build();
+    let mut writer =
+        ArrowWriter::try_new(file.try_clone().unwrap(), schema, Some(properties)).unwrap();
+    writer.write(&batch).unwrap();
+    writer.close().unwrap();
+    let metadata = ParquetRecordBatchReaderBuilder::try_new(file.try_clone().unwrap())
+        .unwrap()
+        .metadata()
+        .as_ref()
+        .clone();
+    (file, metadata)
+}
+
+fn admit_recorded(
+    file: File,
+    metadata: &parquet::file::metadata::ParquetMetaData,
+    include_codec: bool,
+) -> (Result<ParquetDecoderMemory, GfError>, u64) {
+    let recorder = RecordingRead {
+        file,
+        farthest: AtomicU64::new(0),
+    };
+    let admitted = parquet_resource_admission(
+        metadata,
+        PropertyOverlayLimits::default(),
+        &recorder,
+        &ReadCounts::new(false),
+        None,
+        2,
+        include_codec,
+        corrupt,
+    );
+    (admitted, recorder.farthest.load(Ordering::Relaxed))
+}
+
+fn strings(rows: usize) -> ArrayRef {
+    Arc::new(StringArray::from_iter_values(
+        (0..rows).map(|row| format!("{row}{}", "x".repeat(32 * 1024))),
+    ))
+}
+
+#[test]
+fn unfunded_value_encoding_is_refused_before_any_page_body_is_read() {
+    use parquet::basic::Encoding;
+    for encoding in [
+        Encoding::DELTA_LENGTH_BYTE_ARRAY,
+        Encoding::DELTA_BYTE_ARRAY,
+    ] {
+        let (file, metadata) = single_column_file(strings(3), encoding);
+        let column = metadata.row_group(0).column(0);
+        assert!(column.encodings().any(|declared| declared == encoding));
+        let start = u64::try_from(column.data_page_offset()).unwrap();
+        let body = u64::try_from(column.compressed_size()).unwrap();
+        for include_codec in [false, true] {
+            let (admitted, farthest) =
+                admit_recorded(file.try_clone().unwrap(), &metadata, include_codec);
+            let Err(GfError::Project { code, message }) = admitted else {
+                panic!("{encoding:?} must be refused");
+            };
+            assert_eq!(code, graphforge_core::ProjectErrorCode::ResourceLimit);
+            assert!(
+                message.contains("outside the funded decoder profile"),
+                "{message}"
+            );
+            // Only the first page header was read: the page body, where the
+            // delta decoder would allocate from its embedded count, was not.
+            assert!(
+                farthest - start < body / 2,
+                "{encoding:?}: read {} of {body} chunk bytes",
+                farthest - start
+            );
+        }
+    }
+}
+
+#[test]
+fn footer_declaring_plain_cannot_hide_unfunded_pages() {
+    use parquet::basic::Encoding;
+    use parquet::file::metadata::{ParquetMetaData, RowGroupMetaData};
+    let (file, metadata) = single_column_file(strings(3), Encoding::DELTA_LENGTH_BYTE_ARRAY);
+    let group = metadata.row_group(0);
+    let honest = group.column(0).clone();
+    let lying = honest
+        .clone()
+        .into_builder()
+        .set_encodings(vec![Encoding::PLAIN, Encoding::RLE])
+        .build()
+        .unwrap();
+    assert!(
+        lying
+            .encodings()
+            .all(|declared| matches!(declared, Encoding::PLAIN | Encoding::RLE))
+    );
+    let group = RowGroupMetaData::builder(group.schema_descr_ptr())
+        .set_num_rows(group.num_rows())
+        .set_total_byte_size(group.total_byte_size())
+        .set_column_metadata(vec![lying])
+        .build()
+        .unwrap();
+    let metadata = ParquetMetaData::new(metadata.file_metadata().clone(), vec![group]);
+    let (admitted, _) = admit_recorded(file, &metadata, true);
+    let Err(GfError::Project { code, message }) = admitted else {
+        panic!("a lying footer must not admit DELTA_LENGTH_BYTE_ARRAY pages");
+    };
+    assert_eq!(code, graphforge_core::ProjectErrorCode::ResourceLimit);
+    assert!(message.contains("page encoding"), "{message}");
+}
+
+#[test]
+fn funded_value_encodings_are_admitted() {
+    use arrow::array::{Float64Array, Int64Array};
+    use parquet::basic::Encoding;
+    let cases: [(ArrayRef, Encoding); 5] = [
+        (strings(3), Encoding::PLAIN),
+        (
+            Arc::new(Int64Array::from_iter_values(0..64)),
+            Encoding::DELTA_BINARY_PACKED,
+        ),
+        (
+            Arc::new(Float64Array::from_iter_values((0..64).map(f64::from))),
+            Encoding::BYTE_STREAM_SPLIT,
+        ),
+        (Arc::new(BooleanArray::from(vec![true; 64])), Encoding::RLE),
+        (
+            Arc::new(Int64Array::from_iter_values(0..64)),
+            Encoding::PLAIN,
+        ),
+    ];
+    for (array, encoding) in cases {
+        let (file, metadata) = single_column_file(array, encoding);
+        let (admitted, _) = admit_recorded(file, &metadata, true);
+        assert!(admitted.is_ok(), "{encoding:?}: {:?}", admitted.err());
+    }
 }

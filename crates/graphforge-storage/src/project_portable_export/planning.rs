@@ -17,7 +17,6 @@ use graphforge_core::hash_observation::{ContractSha256, ControlSha256 as Sha256,
 use serde::Serialize;
 use sha2::Digest;
 use std::io::Read;
-use unicode_normalization::UnicodeNormalization;
 
 impl PortableExportPlan {
     /// Replace whole-graph tree payload with a projected subset staging tree.
@@ -1250,13 +1249,7 @@ fn parse_sha256(value: &str) -> Result<[u8; 32], ExportError> {
 }
 
 fn valid_path(p: &str) -> Result<(), ExportError> {
-    if p.len() > 4096
-        || p.starts_with('/')
-        || p.contains('\\')
-        || p.bytes().any(|b| b < 32 || b == 127)
-        || p.split('/').any(|x| x.is_empty() || x == "." || x == "..")
-        || p.nfc().ne(p.chars())
-    {
+    if crate::project_portable::path_violation(p, 4096).is_some() {
         return Err(err("GF_INVALID_PORTABLE_PATH", "invalid path"));
     }
     Ok(())
@@ -1265,7 +1258,7 @@ fn collisions(f: &[PlannedFile]) -> Result<(), ExportError> {
     let mut a = BTreeSet::new();
     let mut b = BTreeSet::new();
     for x in f {
-        if !a.insert(&x.path) || !b.insert(x.path.to_lowercase()) {
+        if !a.insert(&x.path) || !b.insert(crate::project_portable::path_collision_key(&x.path)) {
             return Err(err("GF_DUPLICATE_PORTABLE_PATH", "path collision"));
         }
     }
