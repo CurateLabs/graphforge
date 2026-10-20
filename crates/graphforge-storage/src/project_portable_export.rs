@@ -2040,9 +2040,7 @@ mod tests {
                     let bytes = std::fs::read(&destination).unwrap();
                     crate::project_portable::stream_tests::assert_stream_equals_file(&bytes);
                     if index == 0 {
-                        crate::project_portable::stream_tests::assert_pool_bounds_retention(
-                            &bytes,
-                        );
+                        crate::project_portable::stream_tests::assert_pool_bounds_retention(&bytes);
                         crate::project_portable::stream_tests::assert_truncations_alike(&bytes);
                     }
                 }

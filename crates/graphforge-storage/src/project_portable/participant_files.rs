@@ -11,9 +11,9 @@
 
 use super::{
     AtomicBool, ControlSha256, Digest, Entry, MANIFEST_PATH, Manifest, Path, PortableError,
-    PortableErrorCode, PortableLimits, PortableMode, RUNTIME_MAP_PATH, Reopen, authenticated_entries,
-    constant_time_eq, decode_runtime_map, hex, parse_manifest, preflight, read_entry_bytes,
-    scan_entries,
+    PortableErrorCode, PortableLimits, PortableMode, RUNTIME_MAP_PATH, Reopen,
+    authenticated_entries, constant_time_eq, decode_runtime_map, hex, parse_manifest, preflight,
+    read_entry_bytes, scan_entries,
 };
 use graphforge_core::portable::PortableParticipantId;
 use std::collections::BTreeMap;
@@ -223,8 +223,13 @@ impl PortablePackageIndex {
                 "file exceeds the read bound",
             ));
         }
-        let bytes =
-            authenticated_entries::read(self.reopen(), &self.entries, &file.path, bound, cancelled)?;
+        let bytes = authenticated_entries::read(
+            self.reopen(),
+            &self.entries,
+            &file.path,
+            bound,
+            cancelled,
+        )?;
         let digest = hex(&<[u8; 32]>::from(ControlSha256::digest(&bytes)));
         if bytes.len() as u64 != file.length
             || !constant_time_eq(digest.as_bytes(), file.sha256.as_bytes())

@@ -85,7 +85,10 @@ fn truncated_bundles_fail_alike_from_a_file_and_a_stream() {
 /// and before the end blocks: file and stream refuse every cut alike.
 pub(crate) fn assert_truncations_alike(bytes: &[u8]) {
     let all = entries(bytes);
-    let end = all.last().map(|(at, size)| at + 512 + size.div_ceil(512) * 512).unwrap();
+    let end = all
+        .last()
+        .map(|(at, size)| at + 512 + size.div_ceil(512) * 512)
+        .unwrap();
     assert_eq!(bytes.len(), end + 1024);
     let (at, size) = *all
         .iter()
@@ -114,7 +117,12 @@ fn trailing_bytes_and_the_retired_signature_are_refused_from_a_stream() {
     trailing.push(7);
     let stream = by_stream(&trailing, PortableLimits::default()).unwrap_err();
     assert_eq!(stream.code, PortableErrorCode::InvalidStructure);
-    assert_eq!(by_file(&trailing, PortableLimits::default()).unwrap_err().code, stream.code);
+    assert_eq!(
+        by_file(&trailing, PortableLimits::default())
+            .unwrap_err()
+            .code,
+        stream.code
+    );
     let mut retired = ontology_only_bundle();
     retired[..16].copy_from_slice(RETIRED_PROJECT_SIGNATURE);
     for result in [
@@ -166,7 +174,13 @@ pub(crate) fn assert_pool_bounds_retention(bytes: &[u8]) {
 fn a_package_without_research_files_writes_no_stage() {
     let scratch = tempfile::tempdir().unwrap();
     let mut source = Cursor::new(ontology_only_bundle());
-    let scan = scan_stream(&mut source, PortableLimits::default(), None, Some(scratch.path())).unwrap();
+    let scan = scan_stream(
+        &mut source,
+        PortableLimits::default(),
+        None,
+        Some(scratch.path()),
+    )
+    .unwrap();
     assert!(!scan.report.research_interchange);
     let staged = fs::read_dir(scratch.path())
         .unwrap()

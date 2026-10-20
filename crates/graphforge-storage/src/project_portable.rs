@@ -198,7 +198,8 @@ pub(crate) fn scan_stream(
     let scan = read_bundle(source, limits, cancelled, spill.sink(), None, || {
         PortableError::new(PortableErrorCode::InvalidStructure, "trailing bytes")
     })?;
-    let (report, entries) = finish_bundle(scan, PortableMode::Full, limits, PortableSource::Stream)?;
+    let (report, entries) =
+        finish_bundle(scan, PortableMode::Full, limits, PortableSource::Stream)?;
     authenticated_entries::validate_semantics(
         Reopen::Bundle(spill.stage()),
         &entries,
@@ -267,9 +268,7 @@ fn scan_entries(
         .map_err(|_| PortableError::new(PortableErrorCode::Io, "source unavailable"))?;
     // A bundle is read once. The research files that validation reads back
     // by digest go to a stage: the importer's own, or a private one.
-    let import_stage = sink
-        .as_ref()
-        .map(|sink| sink.destination().to_path_buf());
+    let import_stage = sink.as_ref().map(|sink| sink.destination().to_path_buf());
     let mut spill = (metadata.is_file() && sink.is_none() && mode == PortableMode::Full)
         .then(|| research::Spill::new(None));
     let (report, entries) = if metadata.is_dir() {
@@ -897,8 +896,13 @@ fn verify_bundle(
     let probe = file
         .try_clone()
         .map_err(|_| PortableError::new(PortableErrorCode::Io, "bundle metadata"))?;
-    let scan = read_bundle(&mut file, limits, cancelled, sink, written, || {
-        match probe.metadata() {
+    let scan = read_bundle(
+        &mut file,
+        limits,
+        cancelled,
+        sink,
+        written,
+        || match probe.metadata() {
             Err(_) => PortableError::new(PortableErrorCode::Io, "bundle metadata"),
             Ok(current)
                 if current.len() != before.len() || modified(&current) != modified(&before) =>
@@ -909,8 +913,8 @@ fn verify_bundle(
                 )
             }
             Ok(_) => PortableError::new(PortableErrorCode::InvalidStructure, "trailing bytes"),
-        }
-    })?;
+        },
+    )?;
     let after = file.metadata().map_err(|_| {
         PortableError::new(PortableErrorCode::ConcurrentMutation, "bundle disappeared")
     })?;
@@ -1092,13 +1096,14 @@ fn read_bundle<R: Read + ?Sized>(
         // Fixed controls are always kept (and refused when over their bound).
         // Documents read after the scan share a pool; one that does not fit
         // is hashed and not kept, and a later read of it is refused.
-        let retain_limit = retained_limit(&entry_path, limits, entries.len() as u64 + 3).or_else(|| {
-            let cap = pooled_limit(&entry_path, limits)?;
-            (size <= cap && size <= retained_pool).then(|| {
-                retained_pool -= size;
-                size
-            })
-        });
+        let retain_limit =
+            retained_limit(&entry_path, limits, entries.len() as u64 + 3).or_else(|| {
+                let cap = pooled_limit(&entry_path, limits)?;
+                (size <= cap && size <= retained_pool).then(|| {
+                    retained_pool -= size;
+                    size
+                })
+            });
         let (digest, bytes) = hash_payload(
             reader,
             size,

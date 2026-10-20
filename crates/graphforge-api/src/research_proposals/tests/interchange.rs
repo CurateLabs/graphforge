@@ -180,6 +180,116 @@ fn fixture(root: &std::path::Path) -> (GraphForge, SubmitResearchProposalRequest
     (graph, proposal)
 }
 
+/// A research bundle read as a stream gets the verdict the file path gives: the
+/// same native owner checks, the same report apart from `source`.
+#[test]
+fn research_bundle_streams_to_the_file_verdict() {
+    let directory = tempfile::tempdir().unwrap();
+    let (graph, proposal) = fixture(&directory.path().join("source"));
+    let projection = Uuid::now_v7();
+    let node = proposal.fields[0].object_uuid;
+    let package = directory.path().join("selected.gfpb");
+    graph
+        .export_research(
+            &ExportResearchRequest {
+                version_uuid: proposal.source_version_uuid,
+                output: package.clone(),
+                bundled: true,
+                projection: Some(ResearchExportProjection {
+                    version_uuid: projection,
+                    frozen_ipc: proposal.frozen_ipc.clone(),
+                    fields: ["$object", "$labels", "property:score", "property:deferred"]
+                        .into_iter()
+                        .map(|field| ResearchFieldIdentity {
+                            object_kind: "node".into(),
+                            object_uuid: node,
+                            field: field.into(),
+                        })
+                        .collect(),
+                    created_at: 9,
+                }),
+            },
+            &CancellationToken::new(),
+        )
+        .unwrap();
+    let limits = graphforge_core::portable::PortableLimits::default();
+    let file = crate::verify_portable(
+        &PortableVerifyRequest {
+            input: package.clone(),
+            mode: graphforge_core::portable::PortableMode::Full,
+            limits,
+        },
+        None,
+    )
+    .unwrap();
+    assert!(file.research_interchange);
+    let scratch = tempfile::tempdir().unwrap();
+    let mut native_runs = 0;
+    let stream = stream_with_validator(scratch.path(), &package, limits, &mut native_runs);
+    assert!(native_runs > 0, "native research validation must run");
+    assert_eq!(file.source, graphforge_core::portable::PortableSource::File);
+    assert_eq!(
+        stream.source,
+        graphforge_core::portable::PortableSource::Stream
+    );
+    let strip = |report: &graphforge_core::portable::PortableReport| {
+        let mut value = serde_json::to_value(report).unwrap();
+        value.as_object_mut().unwrap().remove("source").unwrap();
+        value
+    };
+    assert_eq!(strip(&file), strip(&stream));
+    // The private stage is gone once the verdict is returned.
+    assert_eq!(std::fs::read_dir(scratch.path()).unwrap().count(), 0);
+    // A changed research object is refused alike from a file and a stream.
+    let mut bytes = std::fs::read(&package).unwrap();
+    let name = b"research-content/";
+    let header = bytes
+        .windows(name.len())
+        .position(|window| window == name)
+        .unwrap();
+    let header = header - header % 512;
+    bytes[header + 512] ^= 1;
+    let tampered = directory.path().join("tampered.gfpb");
+    std::fs::write(&tampered, &bytes).unwrap();
+    let by_file = crate::verify_portable(
+        &PortableVerifyRequest {
+            input: tampered,
+            mode: graphforge_core::portable::PortableMode::Full,
+            limits,
+        },
+        None,
+    )
+    .unwrap_err();
+    let by_stream =
+        crate::verify_portable_stream(&mut std::io::Cursor::new(bytes), limits, None).unwrap_err();
+    assert_eq!(by_file.code, by_stream.code);
+    assert_eq!(by_file.entry, by_stream.entry);
+}
+
+fn stream_with_validator(
+    scratch: &std::path::Path,
+    package: &std::path::Path,
+    limits: graphforge_core::portable::PortableLimits,
+    runs: &mut usize,
+) -> graphforge_core::portable::PortableReport {
+    let mut reader = std::io::BufReader::new(std::fs::File::open(package).unwrap());
+    let mut count =
+        |generation: &graphforge_storage::ResolvedProjectGeneration,
+         version: &graphforge_storage::research_versions::ResearchVersionRecord,
+         registry: &graphforge_storage::research_versions::ResearchRegistry| {
+            *runs += 1;
+            crate::research_interchange::validation::validate(generation, version, registry)
+        };
+    graphforge_storage::validate_research_package_stream(
+        &mut reader,
+        Some(scratch),
+        limits,
+        None,
+        &mut count,
+    )
+    .unwrap()
+}
+
 fn export_selected(
     graph: &GraphForge,
     proposal: &SubmitResearchProposalRequest,
