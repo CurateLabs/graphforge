@@ -199,6 +199,21 @@ pub struct PortableExportFacadeResult {
     pub allocation_physical_objects: u64,
 }
 
+/// Bytes the retry of an import operation into `project_root` frees by removing
+/// the stage an interrupted attempt of that operation left beside it.
+///
+/// This is the one credit both a clone's pre-download budget and the import's
+/// own admission use: only a stage whose ownership marker names the operation,
+/// only regular files with a single link, each at its actual allocation.
+#[must_use]
+pub fn portable_import_held_bytes(
+    project_root: &Path,
+    operation_id: &OperationId,
+    limits: graphforge_core::portable::PortableLimits,
+) -> u64 {
+    graphforge_storage::portable_import_held_bytes(project_root, operation_id.0, limits)
+}
+
 /// Verify portable content without admitting or mutating a destination Project.
 /// Research archives additionally run native owner checks in disposable private views.
 pub fn verify_portable(

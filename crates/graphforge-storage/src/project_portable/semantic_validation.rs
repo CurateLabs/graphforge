@@ -503,6 +503,20 @@ pub(super) fn validate_ontology_composition(
     Ok((Some(control), entries))
 }
 
+/// The manifest components whose single file is an authored composition input:
+/// an ontology module or a bridge set. These are exactly the entries
+/// [`validate_ontology_component_descriptors`] reports, which the import reads
+/// back to build the staged composition candidate and the composition
+/// authority, so a generated control re-encodes them and nothing else.
+const ONTOLOGY_MODULE_COMPONENT: (&str, &str) = ("ontology", "ontology-module-");
+const ONTOLOGY_BRIDGE_COMPONENT: (&str, &str) = ("schema", "ontology-bridge-");
+
+pub(super) fn is_composition_input(kind: &str, participant_id: &str) -> bool {
+    [ONTOLOGY_MODULE_COMPONENT, ONTOLOGY_BRIDGE_COMPONENT]
+        .into_iter()
+        .any(|(input_kind, prefix)| kind == input_kind && participant_id.starts_with(prefix))
+}
+
 fn validate_ontology_component_descriptors(
     control: &PortableOntologyComposition,
     manifest: &Manifest,
@@ -518,10 +532,11 @@ fn validate_ontology_component_descriptors(
                 content_digest: module.content_digest.clone(),
             };
             (
-                "ontology",
+                ONTOLOGY_MODULE_COMPONENT.0,
                 identity,
                 format!(
-                    "ontology-module-{}",
+                    "{}{}",
+                    ONTOLOGY_MODULE_COMPONENT.1,
                     module.content_digest.trim_start_matches("sha256:")
                 ),
                 "module.json",
@@ -535,10 +550,11 @@ fn validate_ontology_component_descriptors(
                 content_digest: bridge.content_digest.clone(),
             };
             (
-                "schema",
+                ONTOLOGY_BRIDGE_COMPONENT.0,
                 identity,
                 format!(
-                    "ontology-bridge-{}",
+                    "{}{}",
+                    ONTOLOGY_BRIDGE_COMPONENT.1,
                     bridge.content_digest.trim_start_matches("sha256:")
                 ),
                 "bridge.json",

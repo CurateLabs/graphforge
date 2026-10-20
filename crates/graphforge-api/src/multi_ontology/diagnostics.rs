@@ -114,8 +114,28 @@ pub(super) fn portable_error(error: graphforge_storage::PortableError) -> GfErro
     // path-free detail (the optional entry is never rendered). Preserve that
     // typed producer diagnosis instead of collapsing every storage failure to
     // the same generic interchange message.
-    let diagnostic_message = bounded_text(&error.to_string());
+    let mut diagnostic_message = error.to_string();
+    // A refusal before extraction is only actionable with its numbers and
+    // probe classes; the cause is sanitized and path-free.
+    if matches!(
+        error.code,
+        PortableErrorCode::UnsupportedFilesystem | PortableErrorCode::InsufficientSpace
+    ) && let Some(cause) = &error.cause
+    {
+        diagnostic_message = format!("{diagnostic_message}: {cause}");
+    }
+    let diagnostic_message = bounded_text(&diagnostic_message);
     let (outer, diagnostic, remediation) = match error.code {
+        PortableErrorCode::UnsupportedFilesystem => (
+            "GF_UNSUPPORTED_FILESYSTEM",
+            "storage.unsupported_filesystem",
+            "import onto a local ext4, xfs, btrfs, APFS, or NTFS volume",
+        ),
+        PortableErrorCode::InsufficientSpace => (
+            "GF_STORAGE",
+            "storage.insufficient_space",
+            "free space beside the target or import onto a larger volume",
+        ),
         PortableErrorCode::Cancelled => (
             "GF_CANCELLED",
             "lifecycle.cancelled",
