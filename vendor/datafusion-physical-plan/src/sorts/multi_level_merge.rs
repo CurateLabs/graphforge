@@ -414,7 +414,14 @@ impl MultiLevelMergeBuilder {
                         Some(authority_piece.transfer_to(
                             self.diagnostic.id(),
                             od::Kind::Copy as u64,
-                            || CopyAdmission::preparing(authority, metadata, capability, working_set),
+                            || {
+                                CopyAdmission::preparing(
+                                    authority,
+                                    metadata,
+                                    capability,
+                                    working_set,
+                                )
+                            },
                         )?)
                     }
                 } else {
@@ -644,10 +651,9 @@ impl MultiLevelMergeBuilder {
                     streams,
                     self.expr.len(),
                 )?,
-                super::merge::SortPreservingMergeStream::<super::cursor::RowValues>::constructor_bound(
-                    streams,
-                    self.batch_size,
-                )?,
+                super::merge::SortPreservingMergeStream::<
+                    super::cursor::RowValues,
+                >::constructor_bound(streams, self.batch_size)?,
             ),
             CopyCapability::PrimitiveField => {
                 // An empty supplied Vec can retain capacity.
