@@ -657,6 +657,7 @@ mod tests {
         let registry = FaultyDownload {
             registry,
             corrupt: false,
+            corrupt_config: false,
             referrer_error: true,
             cancel: None,
         };
@@ -1028,7 +1029,8 @@ mod tests {
                 .unwrap();
         let registry2 = FaultyDownload {
             registry: registry2,
-            corrupt: true,
+            corrupt: false,
+            corrupt_config: true,
             referrer_error: false,
             cancel: None,
         };
@@ -1135,6 +1137,7 @@ mod tests {
             let registry = FaultyDownload {
                 registry,
                 corrupt,
+                corrupt_config: false,
                 referrer_error: false,
                 cancel: cancel.clone(),
             };
@@ -1157,6 +1160,10 @@ mod tests {
                     PortableV2ErrorCode::Cancelled
                 }
             );
+            if corrupt {
+                // The layer's own digest refuses it before verification could.
+                assert!(error.to_string().contains("layer blob digest mismatch"));
+            }
             assert!(!destination.exists());
             assert!(!stage.exists());
         }
@@ -1364,7 +1371,10 @@ impl std::fmt::Debug for PortableV2OciPullRequest<'_> {
 #[cfg(test)]
 struct FaultyDownload {
     registry: MemoryOciRegistry,
+    /// Flips the first byte of the layer stream.
     corrupt: bool,
+    /// Flips the first byte of the config blob.
+    corrupt_config: bool,
     referrer_error: bool,
     /// Raised by the first read of the layer stream.
     cancel: Option<std::sync::Arc<AtomicBool>>,
@@ -1433,7 +1443,7 @@ impl PortableV2OciRegistry for FaultyDownload {
     }
     fn get_blob(&self, r: &str, d: &str) -> Result<Vec<u8>, PortableV2Error> {
         let mut b = self.registry.get_blob(r, d)?;
-        if self.corrupt
+        if self.corrupt_config
             && let Some(first) = b.first_mut()
         {
             *first ^= 0xff;
