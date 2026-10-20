@@ -5,12 +5,15 @@
 GraphForge records items and their connections: for example, which paper cites
 another, or which interview excerpt informed a finding. You can ask questions
 about those connections and keep the evidence behind an answer. It runs on your
-computer. The primary audience is a nontechnical analyst working with an agent;
-technical users can also write their own code.
+computer. The core audience is a nontechnical analyst working with an agent;
+v0.6.0 initially serves technical analysts and integrators more completely.
+[Who GraphForge is for](guide/audience-and-fit.md) names two jobs it completes
+today and when an embedded engine does not fit.
 
-These docs target **v0.6.0**. [Installation](guide/installation.md) explains
-release availability and setup. Before v1.0.0, only supported current-format
-projects can be opened; backward compatibility and migration are not guaranteed.
+These docs target **v0.6.0**, which is pre-v1. [Installation](guide/installation.md)
+explains release availability, setup, [platforms and limits](guide/installation.md#status-and-limits).
+Only supported current-format projects can be opened; backward compatibility
+and migration are not guaranteed.
 
 ## Basic: understand and use a graph
 
@@ -73,8 +76,10 @@ work you intend to keep.
 Architecture and implementation contracts are specialist references, outside
 the Basic and Advanced learning paths.
 
-For help, use [GitHub Discussions](https://github.com/CurateLabs/graphforge/discussions).
-For a bug, include your package version, OS, storage mode, smallest reproducing
-query, expected result, and actual result in a
-[GitHub issue](https://github.com/CurateLabs/graphforge/issues/new/choose).
+Measured scale, with its workload, host, and limits, is in
+[claims and evidence](reference/scale-limits.md#claims-and-their-evidence).
+For help, see [Get help and report a problem](community/support.md): ask in
+[GitHub Discussions](https://github.com/CurateLabs/graphforge/discussions), or
+file a [GitHub issue](https://github.com/CurateLabs/graphforge/issues/new/choose)
+with a minimal reproduction.
 GraphForge is available under the [Apache License 2.0](legal/licensing.md).

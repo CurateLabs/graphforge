@@ -14,6 +14,49 @@ does not guarantee backward compatibility, legacy APIs, or project migration.
 Use matching engine, bindings, CLI, and skills versions. Keep original source
 data and reproducible construction code when changing versions.
 
+## Status and limits
+
+Read this before you choose durable storage or build an integration. See also
+[Who GraphForge is for](audience-and-fit.md).
+
+- **Pre-v1.** APIs and project formats can change without notice before
+  v1.0.0. There is no backward-compatibility, legacy-API, or migration
+  guarantee; a project written by another version may be refused with
+  `GF_UNSUPPORTED_PROJECT_FORMAT`. GraphForge opens only supported
+  current-format projects ([compatibility contract](../book/architecture/project-format-compatibility.md)).
+  Detecting and warning about data from a different Core version is tracked in
+  [#1936](https://github.com/CurateLabs/graphforge/issues/1936); do not assume
+  it exists in the version you install. Keep original source data and
+  construction code so you can rebuild.
+- **Current-format interchange is separate.** [Portable export, verify, and
+  import](portable-projects.md) is a supported workflow for current-format
+  projects. It is not a migration path from older versions.
+- **Prebuilt packages.** The release workflow builds the Python wheel for
+  Linux x86-64 (glibc 2.17 or newer), macOS on Apple silicon, and Windows
+  x86-64. It builds Node packages for macOS (x86-64 and arm64), Linux
+  (x86-64 and arm64, glibc), and Windows x86-64. Other platforms need a
+  [source build](#build-from-source).
+- **Durable storage** needs an [admitted local filesystem](#durable-storage)
+  (Linux: ext4, xfs, or btrfs). Otherwise it fails with
+  `GF_UNSUPPORTED_FILESYSTEM`. In-memory projects (`GraphForge()`) run the full
+  engine on any platform with a native package.
+- **Prerequisites.** Python 3.10+ or Node.js 20+; a Rust toolchain only for a
+  source build or `cargo install`.
+- **Crates.io builds lack two DataFusion fixes.** `cargo install graphforge-cli`
+  and other crates.io builds compile against stock DataFusion 54.1. The Python
+  wheel and the Node packages (including their `gf` CLI) carry two fixes that
+  crates.io builds do not: a hang when a query spills under memory pressure
+  ([apache/datafusion#24883](https://github.com/apache/datafusion/issues/24883))
+  and a planning error when a join's keys read fields of one struct
+  ([#2084](https://github.com/CurateLabs/graphforge/issues/2084)). Prefer the
+  wheel or npm package unless you need the Rust crates. Do not expect
+  workspace and registry builds to behave identically.
+- **Measured scale is workload-specific.** No universal size or latency promise
+  exists. The 1,000,000 edges/s ingest target is **not met**. See
+  [claims and evidence](../reference/scale-limits.md#claims-and-their-evidence).
+- **Unaudited benchmarks.** GDC suite results are engineering observations, not
+  audited results, and include failed and incomplete suites.
+
 ## Python
 
 Use Python 3.10 or newer in an isolated environment:
@@ -133,6 +176,5 @@ validation environment.
 
 Record your OS/architecture, Python or Node version, selected package version,
 and the complete installation error. For storage failures, also record the
-filesystem and whether you used a path or memory-only instance. Ask in
-[Discussions](https://github.com/CurateLabs/graphforge/discussions) or open a
-[minimal bug report](https://github.com/CurateLabs/graphforge/issues/new/choose).
+filesystem and whether you used a path or memory-only instance. Then follow
+[Get help and report a problem](../community/support.md).
