@@ -81,6 +81,22 @@
 //! free memory and the loan, as it did before the floor, and fails when the pool
 //! has neither.
 //!
+//! # The floor kept for the readers of spilled data
+//!
+//! A consumer that spills recovers from a refusal by writing, and a consumer
+//! that reads back what was spilled cannot: the replay of a batch an exchange
+//! spilled, the decoder of a spill file and the encoder of a spill each ask the
+//! pool as a consumer that cannot spill, and a refusal fails the query. Left
+//! alone, the consumers that can spill fill the pool to its last byte, and the
+//! first reader to come after them is refused (an aggregate that had grown to
+//! within a batch of the limit left an exchange's reader 95 KiB for a 398 KiB
+//! batch, #2173).
+//!
+//! The consumers that can spill are therefore admitted only while one floor
+//! ([`SPILLER_FLOOR_BYTES`], lowered to half the pool) of the pool remains
+//! unreserved, on top of the unfilled floors of the spilled aggregates. A
+//! consumer that cannot spill sees the whole pool, and takes that floor.
+//!
 //! # The headroom of the sorts
 //!
 //! A sort buffers its input until the pool refuses it, so left alone it holds
@@ -342,7 +358,9 @@ impl MemoryPool for QueryMemoryPool {
             (
                 state.reserved,
                 self.unfilled_floors_except(&state, id)
-                    .saturating_add(self.headroom(reservation, &state)),
+                    .saturating_add(self.headroom(reservation, &state))
+                    // The last floor stays with the readers of spilled data.
+                    .saturating_add(self.floor(1)),
             )
         } else {
             (state.reserved.saturating_sub(Self::lent(&state)), 0)
