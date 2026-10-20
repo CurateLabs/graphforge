@@ -45,14 +45,6 @@ pub(crate) const ONTOLOGY_COMPOSITION_PATH: &str =
     "data/components/compatibility/graphforge-ontology-composition/composition.json";
 const BAGIT: &[u8] = b"BagIt-Version: 1.0\nTag-File-Character-Encoding: UTF-8\n";
 const BAG_INFO: &[u8] = b"Bag-Software-Agent: GraphForge portable\nBagging-Date: 1970-01-01\n";
-/// The tag written by producers before the identifier rename. It is recognised only
-/// to refuse such a package as an older producer's; it is never a valid tag.
-const RETIRED_BAG_INFO: &[u8] = concat!(
-    "Bag-Software-Agent: GraphForge portable-",
-    "v2",
-    "\nBagging-Date: 1970-01-01\n"
-)
-.as_bytes();
 
 pub use graphforge_core::portable::*;
 
@@ -1017,7 +1009,7 @@ fn validate_package(
 ) -> Result<PortableReport, PortableError> {
     let map: BTreeMap<_, _> = entries.iter().map(|e| (e.path.as_str(), e)).collect();
     require_exact(&map, "bagit.txt", BAGIT)?;
-    refuse_retired_producer_tag(&map, "bag-info.txt", RETIRED_BAG_INFO)?;
+    refuse_other_producer_revision(&map, "bag-info.txt", BAG_INFO)?;
     require_exact(&map, "bag-info.txt", BAG_INFO)?;
     let manifest_entry = map.get(MANIFEST_PATH).ok_or_else(|| {
         PortableError::at(
@@ -1371,20 +1363,35 @@ fn expanded_transport(entries: &[Entry]) -> Result<String, PortableError> {
     Ok(hex(&hash.finalize()))
 }
 
-/// A package whose tag equals the retired producer tag came from an older producer:
-/// refuse it as incompatible before the exact comparison can call it tampered.
-fn refuse_retired_producer_tag(
+/// The `Bag-Software-Agent` value of a `bag-info.txt`: the remainder of its first line.
+fn bag_agent(bytes: &[u8]) -> Option<&[u8]> {
+    let line = bytes.split(|byte| *byte == b'\n').next()?;
+    line.strip_prefix(b"Bag-Software-Agent: ")
+}
+
+/// A GraphForge producer revision other than this one (an agent that extends the
+/// current agent name) wrote the package: refuse it as incompatible before the exact
+/// tag comparison can call it tampered. Any other deviation is left to that comparison.
+fn refuse_other_producer_revision(
     map: &BTreeMap<&str, &Entry>,
     path: &str,
-    retired: &[u8],
+    current: &[u8],
 ) -> Result<(), PortableError> {
-    if map.get(path).is_some_and(|e| {
-        e.length == retired.len() as u64 && e.digest == ControlSha256::digest(retired)[..]
-    }) {
+    let Some(current) = bag_agent(current) else {
+        return Ok(());
+    };
+    let Some(agent) = map
+        .get(path)
+        .and_then(|entry| entry.bytes.as_deref())
+        .and_then(bag_agent)
+    else {
+        return Ok(());
+    };
+    if agent != current && agent.starts_with(current) {
         return Err(PortableError::at(
             PortableErrorCode::Incompatible,
             path,
-            "package was written by an older producer",
+            "package was written by a different GraphForge producer revision",
         ));
     }
     Ok(())
@@ -2002,28 +2009,37 @@ mod tests {
     }
 
     #[test]
-    fn package_with_the_retired_producer_tag_is_incompatible_not_tampered() {
+    fn package_from_another_producer_revision_is_incompatible_not_tampered() {
         let root = package();
-        for mode in [PortableMode::Full, PortableMode::StructureOnly] {
-            fs::write(root.path().join("bag-info.txt"), RETIRED_BAG_INFO).unwrap();
-            let error =
-                verify_portable(root.path(), mode, PortableLimits::default(), None).unwrap_err();
-            assert_eq!(error.code, PortableErrorCode::Incompatible);
+        let current = String::from_utf8(BAG_INFO.to_vec()).unwrap();
+        let older = current.replace(
+            "GraphForge portable\n",
+            &format!("GraphForge portable-{}\n", "v2"),
+        );
+        let unrelated = current.replace("GraphForge portable\n", "GraphForge portable-x\n");
+        for tag in [older, unrelated] {
+            for mode in [PortableMode::Full, PortableMode::StructureOnly] {
+                fs::write(root.path().join("bag-info.txt"), &tag).unwrap();
+                let error = verify_portable(root.path(), mode, PortableLimits::default(), None)
+                    .unwrap_err();
+                assert_eq!(error.code, PortableErrorCode::Incompatible, "{tag:?}");
+            }
         }
         // Any other deviation from the current tag stays a digest mismatch.
-        fs::write(
-            root.path().join("bag-info.txt"),
-            b"Bag-Software-Agent: other\nBagging-Date: 1970-01-01\n",
-        )
-        .unwrap();
-        let error = verify_portable(
-            root.path(),
-            PortableMode::StructureOnly,
-            PortableLimits::default(),
-            None,
-        )
-        .unwrap_err();
-        assert_eq!(error.code, PortableErrorCode::DigestMismatch);
+        for tag in [
+            "Bag-Software-Agent: other\nBagging-Date: 1970-01-01\n",
+            "Bag-Software-Agent: GraphForge portable\nBagging-Date: 1971-01-01\n",
+        ] {
+            fs::write(root.path().join("bag-info.txt"), tag).unwrap();
+            let error = verify_portable(
+                root.path(),
+                PortableMode::StructureOnly,
+                PortableLimits::default(),
+                None,
+            )
+            .unwrap_err();
+            assert_eq!(error.code, PortableErrorCode::DigestMismatch, "{tag:?}");
+        }
     }
 
     #[test]
