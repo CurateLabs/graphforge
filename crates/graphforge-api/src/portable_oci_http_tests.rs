@@ -3,8 +3,8 @@ use super::*;
 use crate::portable::{PortableSelection, PortableV2ExportRequest, PortableV2ImportRequest};
 use crate::{GraphForge, OperationId};
 use arrow::array::Array;
-use graphforge_storage::{PortableV2Output, PortableV2SelectionProfile};
 use graphforge_ir::IrLiteral;
+use graphforge_storage::{PortableV2Output, PortableV2SelectionProfile};
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -377,7 +377,10 @@ fn a_bundle_far_larger_than_the_response_bound_publishes_and_pulls_over_http() {
     assert_eq!(
         server
             .registry
-            .get_blob("tests/portable", &graphforge_portable_oci::digest_sha256(&bytes))
+            .get_blob(
+                "tests/portable",
+                &graphforge_portable_oci::digest_sha256(&bytes)
+            )
             .unwrap(),
         bytes
     );
@@ -402,10 +405,25 @@ fn an_interrupted_http_push_admits_no_package_and_a_rerun_completes() {
             .code,
         PortableV2ErrorCode::Io
     );
-    assert!(!server.registry.blob_exists("tests/portable", &layer).unwrap());
-    assert!(server.registry.get_manifest("tests/portable", "latest").is_err());
+    assert!(
+        !server
+            .registry
+            .blob_exists("tests/portable", &layer)
+            .unwrap()
+    );
+    assert!(
+        server
+            .registry
+            .get_manifest("tests/portable", "latest")
+            .is_err()
+    );
     let published = publish_over_http(&server, &package, Some("latest")).unwrap();
-    assert!(server.registry.blob_exists("tests/portable", &layer).unwrap());
+    assert!(
+        server
+            .registry
+            .blob_exists("tests/portable", &layer)
+            .unwrap()
+    );
     let destination = dir.path().join("pulled.gfpb");
     pull_over_http(&server, &published.oci_manifest_digest, &destination).unwrap();
 }

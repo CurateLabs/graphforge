@@ -7,9 +7,9 @@ use graphforge_core::portable::{
     PortableV2OciSignatureState, PortableV2Representation,
 };
 use graphforge_portable_oci::{
-    CONFIG_CONTRACT, OCI_ARTIFACT_TYPE, OCI_CONFIG_MEDIA_TYPE, OCI_LAYER_MEDIA_TYPE,
-    OCI_MANIFEST_MEDIA_TYPE, OciConfig, OciDescriptor, OciManifest, PortableV2OciRegistry,
-    DigestingReader, attach_signature_referrer, authenticity_error, check_cancelled,
+    CONFIG_CONTRACT, DigestingReader, OCI_ARTIFACT_TYPE, OCI_CONFIG_MEDIA_TYPE,
+    OCI_LAYER_MEDIA_TYPE, OCI_MANIFEST_MEDIA_TYPE, OciConfig, OciDescriptor, OciManifest,
+    PortableV2OciRegistry, attach_signature_referrer, authenticity_error, check_cancelled,
     digest_reader, digest_sha256, evaluate_signature_state, package_class_str, validate_digest,
     validate_reference, validate_repository,
 };
@@ -136,9 +136,8 @@ pub(crate) fn publish_portable_v2_oci_with_progress(
         };
         let identity = digest_reader(&mut source, request.limits.copy_buffer_bytes);
         check_cancelled(cancelled)?;
-        identity.map_err(|_| {
-            PortableV2Error::new(PortableV2ErrorCode::Io, "failed to read package")
-        })?
+        identity
+            .map_err(|_| PortableV2Error::new(PortableV2ErrorCode::Io, "failed to read package"))?
     };
     if layer_size > max_layer_bytes {
         return Err(PortableV2Error::new(
@@ -180,12 +179,8 @@ pub(crate) fn publish_portable_v2_oci_with_progress(
             inner: open_package_file(request.package_path, &report)?.take(layer_size),
             cancelled,
         };
-        let uploaded = registry.put_blob_stream(
-            request.repository,
-            &layer_digest,
-            layer_size,
-            &mut source,
-        );
+        let uploaded =
+            registry.put_blob_stream(request.repository, &layer_digest, layer_size, &mut source);
         check_cancelled(cancelled)?;
         uploaded?;
         bytes_transferred += layer_size;
@@ -1089,7 +1084,10 @@ mod tests {
             subject: None,
         })
         .unwrap();
-        assert_eq!(published.oci_manifest_digest, digest_sha256(&manifest_bytes));
+        assert_eq!(
+            published.oci_manifest_digest,
+            digest_sha256(&manifest_bytes)
+        );
         let (_, stored) = registry
             .get_manifest("tests/portable", &published.oci_manifest_digest)
             .unwrap();
@@ -1126,7 +1124,10 @@ mod tests {
         let out = tempdir().unwrap();
         let destination = out.path().join("pull.gfpb");
         let stage = out.path().join(".pull.gfpb.oci.partial");
-        for (corrupt, cancel) in [(true, None), (false, Some(std::sync::Arc::new(AtomicBool::new(false))))] {
+        for (corrupt, cancel) in [
+            (true, None),
+            (false, Some(std::sync::Arc::new(AtomicBool::new(false)))),
+        ] {
             let registry = MemoryOciRegistry::default();
             let reference =
                 publish_portable_v2_oci(&registry, &publish_req(&bundle, None, None, None), None)

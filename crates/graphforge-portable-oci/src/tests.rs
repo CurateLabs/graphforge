@@ -246,8 +246,8 @@ impl LoopbackRegistry {
                             .map(|(_, value)| value.trim().to_owned())
                     })
                 };
-                let length: usize = header("content-length")
-                    .map_or(0, |value| value.parse().unwrap());
+                let length: usize =
+                    header("content-length").map_or(0, |value| value.parse().unwrap());
                 let respond = |stream: &mut TcpStream, status: &str, extra: &str, body: &[u8]| {
                     let _ = write!(
                         stream,
@@ -532,14 +532,24 @@ fn a_stream_that_does_not_match_its_digest_or_size_is_never_finalized() {
     );
     assert_eq!(
         client
-            .put_blob_stream("repo", &digest, layer.len() as u64 + 1, &mut layer.as_slice())
+            .put_blob_stream(
+                "repo",
+                &digest,
+                layer.len() as u64 + 1,
+                &mut layer.as_slice()
+            )
             .unwrap_err()
             .code,
         PortableV2ErrorCode::Io
     );
     assert_eq!(
         client
-            .put_blob_stream("repo", &digest, layer.len() as u64 - 1, &mut layer.as_slice())
+            .put_blob_stream(
+                "repo",
+                &digest,
+                layer.len() as u64 - 1,
+                &mut layer.as_slice()
+            )
             .unwrap_err()
             .code,
         PortableV2ErrorCode::Io

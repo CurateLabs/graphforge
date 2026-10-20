@@ -10,8 +10,8 @@ use serde::{Deserialize, Serialize};
 use sha2::Digest;
 use std::collections::BTreeMap;
 use std::io::Read;
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 /// Artifact type for a GraphForge portable-v2 package in an OCI registry.
 pub const OCI_ARTIFACT_TYPE: &str = "application/vnd.graphforge.project.v2";
@@ -197,11 +197,14 @@ impl PortableV2OciRegistry for MemoryOciRegistry {
         digest: &str,
         _size: u64,
     ) -> Result<Box<dyn Read + 'a>, PortableV2Error> {
-        Ok(Box::new(std::io::Cursor::new(self.stored_blob(repository, digest)?)))
+        Ok(Box::new(std::io::Cursor::new(
+            self.stored_blob(repository, digest)?,
+        )))
     }
 
     fn get_blob(&self, repository: &str, digest: &str) -> Result<Vec<u8>, PortableV2Error> {
-        self.stored_blob(repository, digest).map(|blob| blob.to_vec())
+        self.stored_blob(repository, digest)
+            .map(|blob| blob.to_vec())
     }
 
     fn blob_exists(&self, repository: &str, digest: &str) -> Result<bool, PortableV2Error> {
@@ -805,9 +808,7 @@ impl RangedBlobReader<'_> {
                 .headers()
                 .get("Content-Range")
                 .and_then(|value| value.to_str().ok())
-                .is_some_and(|value| {
-                    value.starts_with(&format!("bytes {}-{last}/", self.offset))
-                });
+                .is_some_and(|value| value.starts_with(&format!("bytes {}-{last}/", self.offset)));
         // A registry that ignores `Range` may answer 200 with the whole blob;
         // that is acceptable only when the whole blob is a single request.
         let whole = status == 200 && self.offset == 0 && length == self.size;
@@ -832,7 +833,9 @@ impl Read for RangedBlobReader<'_> {
                 return Ok(0);
             }
             if let Some((body, remaining)) = &mut self.range {
-                let want = buf.len().min(usize::try_from(*remaining).unwrap_or(usize::MAX));
+                let want = buf
+                    .len()
+                    .min(usize::try_from(*remaining).unwrap_or(usize::MAX));
                 let read = body.read(&mut buf[..want])?;
                 if read == 0 {
                     return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof));
@@ -866,7 +869,9 @@ impl<R: Read> Read for ExactChunk<'_, R> {
         if self.remaining == 0 {
             return Ok(0);
         }
-        let want = buf.len().min(usize::try_from(self.remaining).unwrap_or(usize::MAX));
+        let want = buf
+            .len()
+            .min(usize::try_from(self.remaining).unwrap_or(usize::MAX));
         let read = self.inner.read(&mut buf[..want])?;
         if read == 0 {
             return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof));
@@ -895,7 +900,10 @@ impl<R: Read> DigestingReader<R> {
     /// The `sha256:<hex>` digest and length of the bytes read so far.
     #[must_use]
     pub fn finish(self) -> (String, u64) {
-        (format!("sha256:{}", encode_hex(self.hasher.finalize())), self.bytes)
+        (
+            format!("sha256:{}", encode_hex(self.hasher.finalize())),
+            self.bytes,
+        )
     }
 }
 
