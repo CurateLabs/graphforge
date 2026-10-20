@@ -410,13 +410,19 @@ mod ownership_tests {
         let (credit, permits) = Credit::with_readers(authority, 1, true)?;
         let available = credit.state.lock().unwrap().available;
         let before = pool.reserved();
-        let work =
-            reserve_with_credit(&pool, available - 1, "IPC decode", Some(Arc::clone(&credit)))?;
+        let work = reserve_with_credit(
+            &pool,
+            available - 1,
+            "IPC decode",
+            Some(Arc::clone(&credit)),
+        )?;
         assert_eq!(pool.reserved(), before);
         // One batch short: the remaining byte is lent, the next is not.
         work.try_grow(1)?;
         let refused = work.try_grow(1);
-        let message = refused.expect_err("an exact credit must refuse").to_string();
+        let message = refused
+            .expect_err("an exact credit must refuse")
+            .to_string();
         assert!(
             message.contains("spill reader exceeded its admitted credit"),
             "{message}"
@@ -424,7 +430,8 @@ mod ownership_tests {
         assert_eq!(pool.reserved(), before, "a refusal asked the pool");
         assert_eq!(work.size(), available);
         // A fresh reservation past the bank is refused the same way.
-        let refused = reserve_with_credit(&pool, 1, "IPC decode", Some(Arc::clone(&credit)));
+        let refused =
+            reserve_with_credit(&pool, 1, "IPC decode", Some(Arc::clone(&credit)));
         assert!(refused.is_err());
         assert_eq!(pool.reserved(), before, "a refusal asked the pool");
         drop(work);

@@ -335,17 +335,21 @@ fn ipc_shape(data_type: &DataType) -> Option<(usize, usize)> {
         DataType::Null => Some((1, 0)),
         DataType::Boolean | DataType::FixedSizeBinary(_) => Some((1, 2)),
         data_type if data_type.primitive_width().is_some() => Some((1, 2)),
-        DataType::Utf8 | DataType::LargeUtf8 | DataType::Binary | DataType::LargeBinary => {
-            Some((1, 3))
-        }
+        DataType::Utf8
+        | DataType::LargeUtf8
+        | DataType::Binary
+        | DataType::LargeBinary => Some((1, 3)),
         _ => None,
     }
 }
 fn schema_shape(schema: &Schema) -> Option<(usize, usize)> {
-    schema.fields().iter().try_fold((0, 0), |(nodes, buffers), field| {
-        let (n, b) = ipc_shape(field.data_type())?;
-        Some((nodes + n, buffers + b))
-    })
+    schema
+        .fields()
+        .iter()
+        .try_fold((0, 0), |(nodes, buffers), field| {
+            let (n, b) = ipc_shape(field.data_type())?;
+            Some((nodes + n, buffers + b))
+        })
 }
 /// Layouts whose uncompressed IPC body the decoder aliases without copying
 /// (see `aligned_body_matches`): its payload admission is the body alone.
@@ -394,7 +398,11 @@ fn reader_batch_bound(
         // (body + 2 * decoded) * 2, with the compressed body at most the
         // decoded bytes and a length word per buffer.
         mul(add(mul(body, 3)?, mul(buffers, 24)?)?, 2)?
-    } else if schema.fields().iter().all(|f| aliased_layout(f.data_type())) {
+    } else if schema
+        .fields()
+        .iter()
+        .all(|f| aliased_layout(f.data_type()))
+    {
         body
     } else {
         mul(body, 2)?
@@ -438,7 +446,10 @@ pub fn reader_pass_bound(
     }
     add(
         reader_fixed_bound(schema)?,
-        mul(add(buffer_len, 3)?, reader_batch_bound(schema, max, rows, codec)?)?,
+        mul(
+            add(buffer_len, 3)?,
+            reader_batch_bound(schema, max, rows, codec)?,
+        )?,
     )
     .map(Some)
 }
@@ -479,10 +490,7 @@ pub fn writer_pass_bound(
         // `write_bound`: the append-only encoder Vec grows geometrically, a
         // compressed body has a temporary output of up to twice its raw size.
         let padding = mul(add(buffers, 1)?, 128)?;
-        add(
-            add(mul(add(body, padding)?, 4)?, headers)?,
-            schema_bytes,
-        )?
+        add(add(mul(add(body, padding)?, 4)?, headers)?, schema_bytes)?
     };
     let metadata = add(schema_bytes, mul(nodes, 2048)?)?;
     add(workspace.max(metadata), codec_bound(codec, true)?).map(Some)

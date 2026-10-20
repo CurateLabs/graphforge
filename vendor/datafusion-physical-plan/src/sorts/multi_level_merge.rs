@@ -33,9 +33,9 @@ use datafusion_execution::memory_pool::MemoryReservation;
 
 use crate::sorts::builder::try_grow_reservation_to_at_least;
 use crate::sorts::copy_admission::{CopyAdmission, CopyCapability};
-use crate::spill::admission::Credit;
 use crate::sorts::sort::get_reserved_bytes_for_record_batch_size;
 use crate::sorts::streaming_merge::{SortedSpillFile, StreamingMergeBuilder};
+use crate::spill::admission::Credit;
 use crate::stream::RecordBatchStreamAdapter;
 use datafusion_execution::{RecordBatchStream, SendableRecordBatchStream};
 use datafusion_physical_expr_common::sort_expr::LexOrdering;
@@ -307,8 +307,10 @@ impl MultiLevelMergeBuilder {
                         super::copy_bounds::qualified_columns(&self.schema, &self.expr)?
                     {
                         CopyCapability::Row { encoded_width }
-                    } else if super::copy_bounds::primitive_field(&self.schema, &self.expr)
-                    {
+                    } else if super::copy_bounds::primitive_field(
+                        &self.schema,
+                        &self.expr,
+                    ) {
                         CopyCapability::PrimitiveField
                     } else {
                         CopyCapability::Legacy
@@ -350,12 +352,18 @@ impl MultiLevelMergeBuilder {
                 // selection admitted; the copies keep what remains of the
                 // reservation, and an intermediate spill file its writer's.
                 let exact = crate::spill::admission::bounded_schema(&self.schema);
-                let input_bytes = sorted_spill_files.iter().try_fold(0_usize, |total, spill| {
-                    crate::spill::admission::add(
-                        total,
-                        self.credit_bytes(spill.max_record_batch_memory, buffer_size)?,
-                    )
-                })?;
+                let input_bytes =
+                    sorted_spill_files
+                        .iter()
+                        .try_fold(0_usize, |total, spill| {
+                            crate::spill::admission::add(
+                                total,
+                                self.credit_bytes(
+                                    spill.max_record_batch_memory,
+                                    buffer_size,
+                                )?,
+                            )
+                        })?;
                 memory_piece.refresh(&memory_reservation, self.diagnostic.id());
                 let (input_credit, producers) = if retiring {
                     let input = memory_reservation.split(input_bytes);
@@ -365,13 +373,7 @@ impl MultiLevelMergeBuilder {
                     piece.transfer_to(
                         self.diagnostic.id(),
                         od::Kind::Credit as u64,
-                        || {
-                            Credit::with_readers(
-                                input,
-                                sorted_spill_files.len(),
-                                exact,
-                            )
-                        },
+                        || Credit::with_readers(input, sorted_spill_files.len(), exact),
                     )?
                 } else {
                     (
@@ -584,7 +586,8 @@ impl MultiLevelMergeBuilder {
             let max = spill.max_record_batch_memory;
             let credit = self.credit_bytes(max, buffer_len)?;
             // Size will be the same as the sliced size, bc it is a spilled batch.
-            total_needed += get_reserved_bytes_for_record_batch_size(max, max) * buffer_len;
+            total_needed +=
+                get_reserved_bytes_for_record_batch_size(max, max) * buffer_len;
             if bounded || capability != CopyCapability::Legacy {
                 input_bytes = crate::spill::admission::add(input_bytes, credit)?;
             }
@@ -652,8 +655,8 @@ impl MultiLevelMergeBuilder {
             }
         }
 
-        let writes = number_of_spills_to_read_for_current_phase
-            < self.sorted_spill_files.len();
+        let writes =
+            number_of_spills_to_read_for_current_phase < self.sorted_spill_files.len();
         let spills = self
             .sorted_spill_files
             .drain(..number_of_spills_to_read_for_current_phase)
@@ -664,7 +667,11 @@ impl MultiLevelMergeBuilder {
         } else {
             copy_working_set(largest)?
         };
-        let writer = if writes { self.writer_bytes(largest)? } else { 0 };
+        let writer = if writes {
+            self.writer_bytes(largest)?
+        } else {
+            0
+        };
         Ok((spills, buffer_len, working_set, writer))
     }
 
@@ -710,23 +717,28 @@ impl MultiLevelMergeBuilder {
         files: usize,
         backing: usize,
     ) -> Result<usize> {
-        let (cursor, merge) = match capability {
-            CopyCapability::Row { .. } => (
-                super::stream::RowCursorStream::constructor_bound(
-                    streams,
-                    self.expr.len(),
-                )?,
-                super::merge::SortPreservingMergeStream::<
-                    super::cursor::RowValues,
-                >::constructor_bound(streams, self.batch_size)?,
-            ),
-            CopyCapability::PrimitiveField => {
-                // An empty supplied Vec can retain capacity.
-                // Fund that backing and possible push growth;
-                // Field separately allocates N Fuse slots.
-                let capacity = backing
-                    .max(crate::spill::admission::mul(streams, 2)?.max(4));
-                (
+        let (cursor, merge) =
+            match capability {
+                CopyCapability::Row { .. } => {
+                    (
+                        super::stream::RowCursorStream::constructor_bound(
+                            streams,
+                            self.expr.len(),
+                        )?,
+                        super::merge::SortPreservingMergeStream::<
+                            super::cursor::RowValues,
+                        >::constructor_bound(
+                            streams, self.batch_size
+                        )?,
+                    )
+                }
+                CopyCapability::PrimitiveField => {
+                    // An empty supplied Vec can retain capacity.
+                    // Fund that backing and possible push growth;
+                    // Field separately allocates N Fuse slots.
+                    let capacity =
+                        backing.max(crate::spill::admission::mul(streams, 2)?.max(4));
+                    (
                     super::stream::FieldCursorStream::<arrow::array::Int64Array>::constructor_bound(
                         streams, capacity,
                     )?,
@@ -734,9 +746,9 @@ impl MultiLevelMergeBuilder {
                         super::cursor::ArrayValues<super::cursor::PrimitiveValues<i64>>,
                     >::constructor_bound(streams, self.batch_size)?,
                 )
-            }
-            CopyCapability::Legacy => return Ok(0),
-        };
+                }
+                CopyCapability::Legacy => return Ok(0),
+            };
         crate::spill::admission::add(
             cursor,
             crate::spill::admission::add(
