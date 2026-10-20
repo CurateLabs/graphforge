@@ -1157,12 +1157,10 @@ mod tests {
         let config_bytes = registry
             .get_blob("tests/portable", &manifest.config.digest)
             .unwrap();
-        let retired = String::from_utf8(config_bytes)
-            .unwrap()
-            .replace(
-                CONFIG_CONTRACT,
-                concat!("graphforge-portable-", "v2", "-oci-config/1"),
-            );
+        let retired = String::from_utf8(config_bytes).unwrap().replace(
+            CONFIG_CONTRACT,
+            concat!("graphforge-portable-", "v2", "-oci-config/1"),
+        );
         assert!(!retired.contains(CONFIG_CONTRACT));
         let retired = retired.into_bytes();
         manifest.config.digest = digest_sha256(&retired);

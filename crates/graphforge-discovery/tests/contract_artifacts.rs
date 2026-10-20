@@ -711,7 +711,10 @@ fn corpus() -> Corpus {
             Document::Manifest,
             "duplicate",
             Some("requirements"),
-            |v| v["requirements"] = json!([{"capability":"portable","major":1},{"capability":"portable","major":1}]),
+            |v| {
+                v["requirements"] =
+                    json!([{"capability":"portable","major":1},{"capability":"portable","major":1}])
+            },
         ),
         (
             "invalid-ref-name",
