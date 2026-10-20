@@ -175,7 +175,7 @@ round trip without implicit adoption. Unknown required M9 features fail
 semantic identity. Export/import is bounded, streaming, cancellable, and
 atomic.
 
-Portable encoding is decided by [ADR 0022](../../adr/0022-portable-v2-multi-ontology-compatibility.md)
+Portable encoding is decided by [ADR 0022](../../adr/0022-multi-ontology-compatibility.md)
 (#835): records live in the authenticated compatibility component
 `graphforge-ontology-composition` with media type
 `application/vnd.graphforge.ontology-composition+json` and required capability

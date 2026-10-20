@@ -4,13 +4,13 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-/// Writer and reader admission limits for portable-v2 packages.
+/// Writer and reader admission limits for portable packages.
 ///
 /// Limits that grow with the entry count admit every package a project can
 /// produce (#900): the payload inventory streams, and the semantic manifest
 /// is bounded per package by the entries it actually lists.
 #[derive(Clone, Copy, Debug)]
-pub struct PortableV2Limits {
+pub struct PortableLimits {
     /// Components in the semantic manifest.
     pub max_components: u64,
     /// Regular entries in the package, tag files included.
@@ -50,7 +50,7 @@ pub const PORTABLE_V2_MANIFEST_BYTES_PER_ENTRY: u64 = 512;
 /// (`GraphManifestLimits::max_entries`), the largest graph a package can carry.
 const PRODUCER_MAX_GRAPH_FILES: u64 = 100_000;
 
-impl PortableV2Limits {
+impl PortableLimits {
     /// Largest semantic manifest admitted for a package of `entries` regular
     /// entries, checked before it is parsed: the fixed `max_manifest_bytes`
     /// allowance for components and selection, plus one file-record budget
@@ -64,7 +64,7 @@ impl PortableV2Limits {
     }
 }
 
-impl Default for PortableV2Limits {
+impl Default for PortableLimits {
     fn default() -> Self {
         Self {
             max_components: 10_000,
@@ -85,21 +85,21 @@ impl Default for PortableV2Limits {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum PortableV2Mode {
+pub enum PortableMode {
     StructureOnly,
     Full,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum PortableV2Representation {
+pub enum PortableRepresentation {
     Expanded,
     Bundle,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
-pub enum PortableV2PackageClass {
+pub enum PortablePackageClass {
     Complete,
     OntologyOnly,
     ComponentSelective,
@@ -108,7 +108,7 @@ pub enum PortableV2PackageClass {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum PortableV2Integrity {
+pub enum PortableIntegrity {
     NotChecked,
     Verified,
     Failed,
@@ -116,7 +116,7 @@ pub enum PortableV2Integrity {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum PortableV2Compatibility {
+pub enum PortableCompatibility {
     Supported,
     UnsupportedFuture,
     Failed,
@@ -124,7 +124,7 @@ pub enum PortableV2Compatibility {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum PortableV2Authenticity {
+pub enum PortableAuthenticity {
     NotEvaluated,
     Unsigned,
     Verified,
@@ -132,31 +132,31 @@ pub enum PortableV2Authenticity {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-pub struct PortableV2Report {
+pub struct PortableReport {
     /// Whether full verification includes the registered research interchange component.
     pub research_interchange: bool,
     /// Manifest-authenticated research files for bounded native semantic verification.
-    pub research_entries: Vec<PortableV2ResearchEntry>,
+    pub research_entries: Vec<PortableResearchEntry>,
     pub contract: &'static str,
-    pub representation: PortableV2Representation,
+    pub representation: PortableRepresentation,
     pub package_digest: String,
-    pub package_class: PortableV2PackageClass,
+    pub package_class: PortablePackageClass,
     pub component_count: u64,
     pub entry_count: u64,
     pub payload_bytes: u64,
-    pub integrity: PortableV2Integrity,
-    pub compatibility: PortableV2Compatibility,
-    pub authenticity: PortableV2Authenticity,
+    pub integrity: PortableIntegrity,
+    pub compatibility: PortableCompatibility,
+    pub authenticity: PortableAuthenticity,
     pub transport_digest: Option<String>,
     /// Exact authenticated multi-ontology compatibility control, when present.
-    pub ontology_composition: Option<PortableV2OntologyComposition>,
+    pub ontology_composition: Option<PortableOntologyComposition>,
     /// Authenticated bounded payload entries available to explicit lifecycle consumers.
-    pub ontology_composition_entries: Vec<PortableV2CompositionEntry>,
+    pub ontology_composition_entries: Vec<PortableCompositionEntry>,
 }
 
 /// An authenticated file in the versioned research component.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-pub struct PortableV2ResearchEntry {
+pub struct PortableResearchEntry {
     pub component_id: String,
     pub path: String,
     pub length: u64,
@@ -164,9 +164,9 @@ pub struct PortableV2ResearchEntry {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-pub struct PortableV2CompositionEntry {
+pub struct PortableCompositionEntry {
     pub kind: String,
-    pub identity: PortableV2ExactIdentity,
+    pub identity: PortableExactIdentity,
     pub path: String,
     pub media_type: String,
     pub length: u64,
@@ -176,7 +176,7 @@ pub struct PortableV2CompositionEntry {
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct PortableV2ExactIdentity {
+pub struct PortableExactIdentity {
     pub id: String,
     pub version: String,
     pub content_digest: String,
@@ -184,22 +184,22 @@ pub struct PortableV2ExactIdentity {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct PortableV2ActivationOverride {
+pub struct PortableActivationOverride {
     pub scope: String,
-    pub subject: PortableV2ExactIdentity,
+    pub subject: PortableExactIdentity,
     pub mode: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct PortableV2ActivationProfile {
+pub struct PortableActivationProfile {
     pub profile_default: String,
-    pub overrides: Vec<PortableV2ActivationOverride>,
+    pub overrides: Vec<PortableActivationOverride>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct PortableV2OntologyModule {
+pub struct PortableOntologyModule {
     pub ontology_id: String,
     pub version: String,
     pub content_digest: String,
@@ -209,21 +209,21 @@ pub struct PortableV2OntologyModule {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct PortableV2BridgeSet {
+pub struct PortableBridgeSet {
     pub bridge_id: String,
     pub version: String,
     pub content_digest: String,
-    pub source_modules: Vec<PortableV2ExactIdentity>,
-    pub target_modules: Vec<PortableV2ExactIdentity>,
+    pub source_modules: Vec<PortableExactIdentity>,
+    pub target_modules: Vec<PortableExactIdentity>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct PortableV2OntologyComposition {
+pub struct PortableOntologyComposition {
     pub contract: String,
-    pub activation_profile: PortableV2ActivationProfile,
-    pub modules: Vec<PortableV2OntologyModule>,
-    pub bridge_sets: Vec<PortableV2BridgeSet>,
+    pub activation_profile: PortableActivationProfile,
+    pub modules: Vec<PortableOntologyModule>,
+    pub bridge_sets: Vec<PortableBridgeSet>,
     pub required_features: Vec<String>,
     pub optional_features: Vec<String>,
     pub composition_digest: String,
@@ -231,7 +231,7 @@ pub struct PortableV2OntologyComposition {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum PortableV2ErrorCode {
+pub enum PortableErrorCode {
     Cancelled,
     LimitExceeded,
     Io,
@@ -246,10 +246,10 @@ pub enum PortableV2ErrorCode {
 }
 
 #[derive(Debug)]
-pub struct PortableV2Error {
+pub struct PortableError {
     /// Authenticated committed import, even when acknowledgement or cleanup failed.
-    pub committed_import: Option<Box<PortableV2CommittedImport>>,
-    pub code: PortableV2ErrorCode,
+    pub committed_import: Option<Box<PortableCommittedImport>>,
+    pub code: PortableErrorCode,
     pub entry: Option<String>,
     detail: &'static str,
     /// The sanitized underlying cause of an I/O failure: the platform error
@@ -269,10 +269,10 @@ pub struct PortableV2Error {
     pub recovery_reauthentication_read_calls: u64,
 }
 
-impl PortableV2Error {
+impl PortableError {
     /// Construct a sanitized package-level failure without a host path or payload value.
     #[must_use]
-    pub fn new(code: PortableV2ErrorCode, detail: &'static str) -> Self {
+    pub fn new(code: PortableErrorCode, detail: &'static str) -> Self {
         Self {
             committed_import: None,
             code,
@@ -285,7 +285,7 @@ impl PortableV2Error {
         }
     }
     #[must_use]
-    pub fn at(code: PortableV2ErrorCode, entry: &str, detail: &'static str) -> Self {
+    pub fn at(code: PortableErrorCode, entry: &str, detail: &'static str) -> Self {
         Self {
             committed_import: None,
             code,
@@ -323,7 +323,7 @@ impl PortableV2Error {
 
     /// Attach exact publication evidence without claiming successful staging cleanup.
     #[must_use]
-    pub fn with_committed_import(mut self, receipt: PortableV2CommittedImport) -> Self {
+    pub fn with_committed_import(mut self, receipt: PortableCommittedImport) -> Self {
         self.committed_import = Some(Box::new(receipt));
         self
     }
@@ -331,15 +331,15 @@ impl PortableV2Error {
 
 /// Payload-free receipt evidence for an import whose CURRENT replacement committed.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct PortableV2CommittedImport {
+pub struct PortableCommittedImport {
     pub operation_uuid: uuid::Uuid,
     pub generation_uuid: uuid::Uuid,
     pub generation_manifest_sha256: [u8; 32],
     pub package_digest: String,
 }
-impl fmt::Display for PortableV2Error {
+impl fmt::Display for PortableError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "portable-v2 {:?}: {}", self.code, self.detail)?;
+        write!(f, "portable {:?}: {}", self.code, self.detail)?;
         if let Some(receipt) = &self.committed_import {
             write!(
                 f,
@@ -350,11 +350,11 @@ impl fmt::Display for PortableV2Error {
         Ok(())
     }
 }
-impl std::error::Error for PortableV2Error {}
-impl From<crate::GfError> for PortableV2Error {
+impl std::error::Error for PortableError {}
+impl From<crate::GfError> for PortableError {
     fn from(_: crate::GfError) -> Self {
         Self::new(
-            PortableV2ErrorCode::Incompatible,
+            PortableErrorCode::Incompatible,
             "pinned project generation is not exportable",
         )
     }
@@ -363,7 +363,7 @@ impl From<crate::GfError> for PortableV2Error {
 use std::path::PathBuf;
 /// Digest-pinned OCI reference returned after a successful publish.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-pub struct PortableV2OciReference {
+pub struct PortableOciReference {
     /// Registry host (no credentials).
     pub registry: String,
     /// Repository path inside the registry.
@@ -373,7 +373,7 @@ pub struct PortableV2OciReference {
     /// Authoritative GraphForge package digest (`sha256:…`).
     pub package_digest: String,
     /// Package class carried in the config blob.
-    pub package_class: PortableV2PackageClass,
+    pub package_class: PortablePackageClass,
     /// Optional mutable tag that was also written; never used as identity.
     pub tag: Option<String>,
     /// Bytes uploaded across config + layer + manifest.
@@ -384,20 +384,20 @@ pub struct PortableV2OciReference {
 
 /// Sanitized receipt after a successful pull + local verification.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-pub struct PortableV2OciPullReceipt {
+pub struct PortableOciPullReceipt {
     /// Digest-pinned reference that was resolved.
-    pub reference: PortableV2OciReference,
+    pub reference: PortableOciReference,
     /// Destination path written after verification.
     pub destination: PathBuf,
     /// Local verifier report for the pulled package.
-    pub report: PortableV2Report,
+    pub report: PortableReport,
     /// Signature evaluation outcome (distinct from integrity).
-    pub signature_state: PortableV2OciSignatureState,
+    pub signature_state: PortableOciSignatureState,
 }
 
 /// Optional authenticity policy for referrer/signature attachments.
 #[derive(Clone, Default, Eq, PartialEq)]
-pub struct PortableV2OciAuthenticityPolicy {
+pub struct PortableOciAuthenticityPolicy {
     /// When set, unsigned content is integrity-valid but authenticity-absent.
     pub require_named_signer: Option<String>,
     /// Caller-owned verification key material. Never logged or persisted.
@@ -407,7 +407,7 @@ pub struct PortableV2OciAuthenticityPolicy {
 /// Explicit signature states. Never reused as integrity outcomes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum PortableV2OciSignatureState {
+pub enum PortableOciSignatureState {
     /// Signature present, signer matches policy, MAC verifies.
     Valid,
     /// Signature present but MAC verification failed.
@@ -421,7 +421,7 @@ pub enum PortableV2OciSignatureState {
 /// Progress phases for sanitized observability (no credentials or bodies).
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum PortableV2OciPhase {
+pub enum PortableOciPhase {
     VerifyLocal,
     UploadBlob,
     UploadManifest,
@@ -435,9 +435,9 @@ pub enum PortableV2OciPhase {
 
 /// Sanitized progress event.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-pub struct PortableV2OciProgress {
+pub struct PortableOciProgress {
     /// Current phase.
-    pub phase: PortableV2OciPhase,
+    pub phase: PortableOciPhase,
     /// Cumulative bytes moved in this operation.
     pub bytes_transferred: u64,
     /// Optional blob/manifest digest under consideration.
@@ -446,7 +446,7 @@ pub struct PortableV2OciProgress {
 
 /// Caller-owned material used to attach an OCI signature referrer on publish.
 #[derive(Clone, Eq, PartialEq)]
-pub struct PortableV2OciSignatureMaterial {
+pub struct PortableOciSignatureMaterial {
     /// Signer identity recorded in the attachment.
     pub signer: String,
     /// Key identifier (not secret material).
@@ -455,18 +455,18 @@ pub struct PortableV2OciSignatureMaterial {
     pub secret: Vec<u8>,
 }
 
-impl std::fmt::Debug for PortableV2OciAuthenticityPolicy {
+impl std::fmt::Debug for PortableOciAuthenticityPolicy {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("PortableV2OciAuthenticityPolicy")
+        f.debug_struct("PortableOciAuthenticityPolicy")
             .field("require_named_signer", &self.require_named_signer)
             .field("verification_key", &"[REDACTED]")
             .finish()
     }
 }
 
-impl std::fmt::Debug for PortableV2OciSignatureMaterial {
+impl std::fmt::Debug for PortableOciSignatureMaterial {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("PortableV2OciSignatureMaterial")
+        f.debug_struct("PortableOciSignatureMaterial")
             .field("signer", &self.signer)
             .field("key_id", &self.key_id)
             .field("secret", &"[REDACTED]")
@@ -476,7 +476,7 @@ impl std::fmt::Debug for PortableV2OciSignatureMaterial {
 
 /// Stable semantic participant identity. Runtime catalog IDs and host paths are never selectors.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
-pub struct PortableV2ParticipantId {
+pub struct PortableParticipantId {
     /// Owning portable capability contract.
     pub capability_id: String,
     /// Stable record-family contract.
@@ -485,7 +485,7 @@ pub struct PortableV2ParticipantId {
 
 /// Built-in deterministic selection profiles.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum PortableV2SelectionProfile {
+pub enum PortableSelectionProfile {
     /// Every committed participant and graph-tree payload.
     Complete,
     /// Authored/adopted ontology plus required schema participants.
@@ -497,17 +497,17 @@ pub enum PortableV2SelectionProfile {
     /// Closed-schema portable settings only.
     Settings,
     /// Explicit stable identities.
-    Custom(Vec<PortableV2ParticipantId>),
+    Custom(Vec<PortableParticipantId>),
     /// Exact projected ontology module or bridge identities. The immutable
     /// preview exposes the complete emitted composition closure.
-    OntologyComposition(Vec<PortableV2ExactIdentity>),
+    OntologyComposition(Vec<PortableExactIdentity>),
 }
 
 /// Selection planning request.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PortableV2SelectionRequest {
+pub struct PortableSelectionRequest {
     /// Requested built-in or custom profile.
-    pub profile: PortableV2SelectionProfile,
+    pub profile: PortableSelectionProfile,
     /// Refuse any automatically required dependency instead of widening visibly.
     pub strict: bool,
 }
@@ -515,7 +515,7 @@ pub struct PortableV2SelectionRequest {
 /// Stable reason for inclusion/exclusion.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
-pub enum PortableV2SelectionReason {
+pub enum PortableSelectionReason {
     /// Directly requested by profile or exact identity.
     Requested,
     /// Required ontology/schema closure.
@@ -528,13 +528,13 @@ pub enum PortableV2SelectionReason {
 
 /// Content-free preview row.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-pub struct PortableV2SelectionEntry {
+pub struct PortableSelectionEntry {
     /// Stable semantic identity.
-    pub identity: PortableV2ParticipantId,
+    pub identity: PortableParticipantId,
     /// Canonical component kind.
     pub kind: String,
     /// Stable selection reason.
-    pub reason: PortableV2SelectionReason,
+    pub reason: PortableSelectionReason,
     /// Exact committed payload bytes.
     pub estimated_bytes: u64,
     /// Manifest row count.
@@ -543,22 +543,22 @@ pub struct PortableV2SelectionEntry {
 
 /// Exact ontology module or bridge emitted by composition projection.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-pub struct PortableV2ProjectedSelectionEntry {
+pub struct PortableProjectedSelectionEntry {
     /// Projected component kind (`ontology` or `schema`).
     pub kind: String,
     /// Exact semantic identity addressable by callers.
-    pub identity: PortableV2ExactIdentity,
+    pub identity: PortableExactIdentity,
     /// Stable component identity used by the portable manifest.
     pub participant_id: String,
     /// Whether this exact identity was directly requested or closure-added.
-    pub reason: PortableV2SelectionReason,
+    pub reason: PortableSelectionReason,
     /// Exact canonical projected payload bytes.
     pub estimated_bytes: u64,
 }
 
 /// Immutable deterministic preview consumed by both export representations.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-pub struct PortableV2SelectionPlan {
+pub struct PortableSelectionPlan {
     /// Pinned source generation identity.
     pub source_generation_uuid: String,
     /// Pinned source generation manifest identity.
@@ -566,11 +566,11 @@ pub struct PortableV2SelectionPlan {
     /// Portable package class token.
     pub package_class: String,
     /// Included participants in canonical identity order.
-    pub included: Vec<PortableV2SelectionEntry>,
+    pub included: Vec<PortableSelectionEntry>,
     /// Excluded participants in canonical identity order.
-    pub excluded: Vec<PortableV2SelectionEntry>,
+    pub excluded: Vec<PortableSelectionEntry>,
     /// Exact projected ontology closure in canonical identity order.
-    pub projected: Vec<PortableV2ProjectedSelectionEntry>,
+    pub projected: Vec<PortableProjectedSelectionEntry>,
     /// Explicit redaction reason codes; values are never retained.
     pub redactions: Vec<String>,
     /// Required portable capability contracts.
@@ -582,7 +582,7 @@ pub struct PortableV2SelectionPlan {
     include_graph_tree: bool,
 }
 
-impl PortableV2SelectionPlan {
+impl PortableSelectionPlan {
     /// Construct a passive preview; this does not authorize storage execution.
     #[must_use]
     #[allow(clippy::too_many_arguments)]
@@ -590,9 +590,9 @@ impl PortableV2SelectionPlan {
         source_generation_uuid: String,
         source_manifest_sha256: String,
         package_class: String,
-        included: Vec<PortableV2SelectionEntry>,
-        excluded: Vec<PortableV2SelectionEntry>,
-        projected: Vec<PortableV2ProjectedSelectionEntry>,
+        included: Vec<PortableSelectionEntry>,
+        excluded: Vec<PortableSelectionEntry>,
+        projected: Vec<PortableProjectedSelectionEntry>,
         redactions: Vec<String>,
         required_capabilities: Vec<String>,
         estimated_payload_bytes: u64,
@@ -633,7 +633,7 @@ impl PortableV2SelectionPlan {
 
 /// Stable UUID selector for one pinned generation.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
-pub struct PortableV2GraphSelector {
+pub struct PortableGraphSelector {
     /// Ordered node UUIDs (hyphenated).
     pub node_uuids: Vec<String>,
     /// Ordered edge UUIDs (hyphenated).
@@ -643,7 +643,7 @@ pub struct PortableV2GraphSelector {
 /// Portable-v2 on-wire closure tokens.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
-pub enum PortableV2SubsetClosure {
+pub enum PortableSubsetClosure {
     /// Selected nodes plus edges whose endpoints are both selected.
     InducedEdges,
     /// Selected edges plus both endpoint nodes.
@@ -652,25 +652,25 @@ pub enum PortableV2SubsetClosure {
 
 /// Property projection/redaction for subset packages.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
-pub struct PortableV2PropertyProjection {
+pub struct PortablePropertyProjection {
     /// Property field names excluded from payloads.
     pub exclude: Vec<String>,
 }
 
 /// Subset planning request.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PortableV2SubsetRequest {
+pub struct PortableSubsetRequest {
     /// Stable UUID selector.
-    pub selector: PortableV2GraphSelector,
+    pub selector: PortableGraphSelector,
     /// Closure mode.
-    pub closure: PortableV2SubsetClosure,
+    pub closure: PortableSubsetClosure,
     /// Property projection.
-    pub projection: PortableV2PropertyProjection,
+    pub projection: PortablePropertyProjection,
 }
 
 /// Content-free graph-subset receipt retained in the semantic manifest.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-pub struct PortableV2GraphSubsetMeta {
+pub struct PortableGraphSubsetMeta {
     /// Canonical content-free selector digest token.
     pub selector: String,
     /// On-wire closure token.
@@ -679,11 +679,11 @@ pub struct PortableV2GraphSubsetMeta {
 
 /// Immutable subset preview consumed by planning and export.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-pub struct PortableV2SubsetPreview {
+pub struct PortableSubsetPreview {
     /// Component selection consumed by the exporter.
-    pub selection: PortableV2SelectionPlan,
+    pub selection: PortableSelectionPlan,
     /// Graph-subset metadata emitted into the semantic manifest.
-    pub graph_subset: PortableV2GraphSubsetMeta,
+    pub graph_subset: PortableGraphSubsetMeta,
     /// Resolved node count after closure.
     pub selected_node_count: u64,
     /// Resolved edge count after closure.
@@ -698,7 +698,7 @@ pub struct PortableV2SubsetPreview {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 /// Portable-v2 transport representation.
-pub enum PortableV2Output {
+pub enum PortableOutput {
     /// Closed BagIt-compatible directory.
     Expanded,
     /// Canonical uncompressed PAX/ustar stream.
@@ -706,7 +706,7 @@ pub enum PortableV2Output {
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 /// Aggregate content-free progress observation.
-pub struct PortableV2ExportProgress {
+pub struct PortableExportProgress {
     /// Fully emitted entries.
     pub entries_completed: usize,
     /// Emitted source payload bytes.
@@ -723,17 +723,17 @@ mod preview_wire_tests {
 
     #[test]
     fn moved_preview_contract_keeps_private_serialized_graph_decision() {
-        let plan = PortableV2SelectionPlan::new(
+        let plan = PortableSelectionPlan::new(
             "generation".into(),
             "manifest".into(),
             "graph-data-subset".into(),
-            vec![PortableV2SelectionEntry {
-                identity: PortableV2ParticipantId {
+            vec![PortableSelectionEntry {
+                identity: PortableParticipantId {
                     capability_id: "graph@1".into(),
                     record_family_id: "files@1".into(),
                 },
                 kind: "graph-data".into(),
-                reason: PortableV2SelectionReason::Requested,
+                reason: PortableSelectionReason::Requested,
                 estimated_bytes: 7,
                 row_count: 2,
             }],
@@ -753,9 +753,9 @@ mod preview_wire_tests {
             "estimated_payload_bytes":7,"selection_fingerprint":"selection","include_graph_tree":false
         });
         assert_eq!(serde_json::to_value(&plan).unwrap(), expected);
-        let subset = PortableV2SubsetPreview {
+        let subset = PortableSubsetPreview {
             selection: plan,
-            graph_subset: PortableV2GraphSubsetMeta {
+            graph_subset: PortableGraphSubsetMeta {
                 selector: "selector".into(),
                 closure: "referential".into(),
             },
@@ -793,7 +793,7 @@ mod limit_tests {
 
     #[test]
     fn default_limits_admit_every_package_a_project_can_produce() {
-        let limits = PortableV2Limits::default();
+        let limits = PortableLimits::default();
         // The per-entry semantic manifest budget is one record plus its path.
         assert_eq!(longest_record_without_path(), 186);
         let path_budget = PORTABLE_V2_MANIFEST_BYTES_PER_ENTRY - longest_record_without_path();

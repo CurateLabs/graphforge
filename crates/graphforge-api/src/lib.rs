@@ -187,7 +187,7 @@ pub use ontology_composition_lifecycle::{
 #[cfg(all(feature = "discovery", feature = "portable"))]
 mod discovery_ontology_module;
 #[cfg(all(feature = "discovery", feature = "portable"))]
-mod discovery_portable_v2;
+mod discovery_portable;
 #[cfg(all(feature = "discovery", feature = "portable"))]
 mod discovery_project_summary;
 #[cfg(all(feature = "discovery", feature = "research"))]
@@ -201,12 +201,12 @@ pub use discovery_ontology_module::{
     DiscoveryOntologyModuleRequest, ResolvedOntologyModule, resolve_discovered_ontology_module,
 };
 #[cfg(all(feature = "discovery", feature = "portable"))]
-pub use discovery_portable_v2::{
-    DiscoveredPortableV2, DiscoveryPortableV2Error, DiscoveryPortableV2Mismatch,
-    DiscoveryPortableV2Request, verify_discovered_portable_v2,
+pub use discovery_portable::{
+    DiscoveredPortable, DiscoveryPortableError, DiscoveryPortableMismatch,
+    DiscoveryPortableRequest, verify_discovered_portable,
 };
 #[cfg(all(feature = "discovery", feature = "portable"))]
-pub use discovery_project_summary::{ProjectSummaryRequest, summarize_verified_portable_v2};
+pub use discovery_project_summary::{ProjectSummaryRequest, summarize_verified_portable};
 #[cfg(all(feature = "discovery", feature = "research"))]
 pub use discovery_research_lineage::{
     BuildResearchLineageRequest, build_research_lineage_from_registry,
@@ -336,34 +336,34 @@ mod workspace_ontology;
 mod write_modes;
 
 pub use graphforge_core::portable::{
-    PortableV2Authenticity, PortableV2Compatibility, PortableV2Error, PortableV2ErrorCode,
-    PortableV2ExactIdentity, PortableV2ExportProgress, PortableV2GraphSelector,
-    PortableV2GraphSubsetMeta, PortableV2Integrity, PortableV2Limits, PortableV2Mode,
-    PortableV2Output, PortableV2PackageClass, PortableV2ParticipantId,
-    PortableV2PropertyProjection, PortableV2Representation, PortableV2SelectionEntry,
-    PortableV2SelectionPlan, PortableV2SelectionProfile, PortableV2SelectionReason,
-    PortableV2SelectionRequest, PortableV2SubsetClosure,
-    PortableV2SubsetPreview as PortableV2SubsetPlan, PortableV2SubsetRequest,
+    PortableAuthenticity, PortableCompatibility, PortableError, PortableErrorCode,
+    PortableExactIdentity, PortableExportProgress, PortableGraphSelector,
+    PortableGraphSubsetMeta, PortableIntegrity, PortableLimits, PortableMode,
+    PortableOutput, PortablePackageClass, PortableParticipantId,
+    PortablePropertyProjection, PortableRepresentation, PortableSelectionEntry,
+    PortableSelectionPlan, PortableSelectionProfile, PortableSelectionReason,
+    PortableSelectionRequest, PortableSubsetClosure,
+    PortableSubsetPreview as PortableSubsetPlan, PortableSubsetRequest,
 };
 pub use graphforge_core::storage_receipt::{
     ArtifactCategory, ArtifactStorageTotals, StorageAttributionReceipt,
 };
 /// Finite portable export budgets.
-pub type PortableV2ExportLimits = PortableV2Limits;
+pub type PortableExportLimits = PortableLimits;
 pub use graphforge_storage::{
-    PortableV2FileRef, PortableV2PackageIndex, SemanticMigrationOperation,
+    PortableFileRef, PortablePackageIndex, SemanticMigrationOperation,
     WorkspaceOntologyComposition, WorkspacePortableOntologyStaging,
 };
 #[cfg(feature = "portable")]
 #[cfg(feature = "portable")]
 pub use portable::{
-    PortableSelection, PortableV2ExportFacadeResult, PortableV2ExportReceiptView,
-    PortableV2ExportRequest, PortableV2ImportRequest, PortableV2ImportResult,
-    PortableV2OciPublishFacadeRequest, PortableV2OciPullFacadeRequest, PortableV2RepackRequest,
-    PortableV2RepackResult, PortableV2SelectionPreviewRequest, PortableV2SubsetPreviewRequest,
-    PortableVerifyRequest, PortableVerifyResult, publish_portable_v2_oci,
-    publish_portable_v2_oci_with_registry, pull_portable_v2_oci,
-    pull_portable_v2_oci_with_registry, repack_verified_expanded_portable_v2, verify_portable_v2,
+    PortableSelection, PortableExportFacadeResult, PortableExportReceiptView,
+    PortableExportRequest, PortableImportRequest, PortableImportResult,
+    PortableOciPublishFacadeRequest, PortableOciPullFacadeRequest, PortableRepackRequest,
+    PortableRepackResult, PortableSelectionPreviewRequest, PortableSubsetPreviewRequest,
+    PortableVerifyRequest, PortableVerifyResult, publish_portable_oci,
+    publish_portable_oci_with_registry, pull_portable_oci,
+    pull_portable_oci_with_registry, repack_verified_expanded_portable, verify_portable,
 };
 pub use repository::{
     GitProvenance, InfraCapabilityCompatibility, InfraNotChecked, InfraPlan, InfraStaticValidity,
@@ -397,7 +397,7 @@ pub use graphforge_core::embedding_options::{
 pub use graphforge_core::manifest::{MANIFEST_FILE, ONTOLOGY_FILE, ProjectManifest};
 pub use graphforge_core::uuid::{
     hub_clone_operation, hub_publish_operation, hub_research_clone_operation,
-    portable_v2_import_generation,
+    portable_import_generation,
 };
 pub use graphforge_core::{
     AlgorithmError, AnalyzeOptions, ApiErrorCode, ClusterOptions, ClusteringNormalization,
@@ -2879,14 +2879,14 @@ mod portable_oci;
 
 #[cfg(feature = "portable")]
 pub use graphforge_core::portable::{
-    PortableV2OciAuthenticityPolicy, PortableV2OciPhase, PortableV2OciProgress,
-    PortableV2OciPullReceipt, PortableV2OciReference, PortableV2OciSignatureMaterial,
-    PortableV2OciSignatureState,
+    PortableOciAuthenticityPolicy, PortableOciPhase, PortableOciProgress,
+    PortableOciPullReceipt, PortableOciReference, PortableOciSignatureMaterial,
+    PortableOciSignatureState,
 };
 #[cfg(feature = "portable")]
-pub use graphforge_portable_oci::{HttpOciRegistry, MemoryOciRegistry, PortableV2OciRegistry};
+pub use graphforge_portable_oci::{HttpOciRegistry, MemoryOciRegistry, PortableOciRegistry};
 #[cfg(feature = "portable")]
-pub use portable_oci::{PortableV2OciPublishRequest, PortableV2OciPullRequest};
+pub use portable_oci::{PortableOciPublishRequest, PortableOciPullRequest};
 
 #[cfg(feature = "portable")]
 mod allocation_diagnostics;

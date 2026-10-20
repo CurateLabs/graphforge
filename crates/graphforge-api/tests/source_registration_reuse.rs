@@ -4,8 +4,8 @@ use std::collections::BTreeMap;
 
 use graphforge_api::{
     ArtifactKind, ArtifactPayloadRequest, CapabilityId, DerivationInput, DerivationSubjectKind,
-    EnableCapabilityRequest, GraphForge, OperationId, PortableSelection, PortableV2ExportRequest,
-    PortableV2ImportRequest, RegisterArtifactRequest, RegisterSourceRequest,
+    EnableCapabilityRequest, GraphForge, OperationId, PortableSelection, PortableExportRequest,
+    PortableImportRequest, RegisterArtifactRequest, RegisterSourceRequest,
     SetPreferredArtifactRequest, SourceKind, WriteContext,
 };
 use graphforge_storage::concurrency_attribution::{RegionCapture, RegionSnapshot};
@@ -273,26 +273,26 @@ fn source_registration_cost(count: usize) {
     assert_eq!(participant_contents(root), after);
     let package = root.join("roundtrip.gfp");
     reopened
-        .export_portable_v2(
-            &PortableV2ExportRequest {
+        .export_portable(
+            &PortableExportRequest {
                 selection: PortableSelection::Current,
                 output_path: package.clone(),
-                representation: graphforge_api::PortableV2Output::Bundle,
-                profile: graphforge_api::PortableV2SelectionProfile::Complete,
+                representation: graphforge_api::PortableOutput::Bundle,
+                profile: graphforge_api::PortableSelectionProfile::Complete,
                 subset: None,
-                limits: graphforge_api::PortableV2Limits::default(),
+                limits: graphforge_api::PortableLimits::default(),
             },
             None,
             |_| {},
         )
         .unwrap();
     let import_root = TempDir::new().unwrap();
-    GraphForge::import_portable_v2(
+    GraphForge::import_portable(
         import_root.path(),
-        &PortableV2ImportRequest {
+        &PortableImportRequest {
             input: package,
             operation_id: OperationId(Uuid::now_v7()),
-            limits: graphforge_api::PortableV2Limits::default(),
+            limits: graphforge_api::PortableLimits::default(),
         },
         None,
     )

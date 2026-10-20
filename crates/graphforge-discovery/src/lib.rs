@@ -3,7 +3,7 @@
 //! This crate owns the untrusted JSON boundary shared by Hub servers and native
 //! GraphForge clients. It deliberately contains no HTTP client, storage backend,
 //! authentication, billing, or portable-project verifier. A discovery manifest
-//! names a portable-v2 package; `graphforge-storage` remains the authority that
+//! names a portable package; `graphforge-storage` remains the authority that
 //! verifies the downloaded package's integrity, compatibility, and authenticity.
 //! Redirect bounds, HTTPS retention across redirects, and caller-configured host
 //! policy belong to the transport/client adapter. This crate only admits each
@@ -49,7 +49,7 @@ use url::Url;
 pub const DISCOVERY_FORMAT: &str = "graphforge-discovery/1";
 /// Portable project format referenced by discovery v1.
 pub const PORTABLE_V2_FORMAT: &str = "graphforge-project/2";
-/// Media type of the immutable portable-v2 package object selected by discovery.
+/// Media type of the immutable portable package object selected by discovery.
 pub const PORTABLE_V2_MEDIA_TYPE: &str = "application/vnd.graphforge.project";
 /// Project summary document format emitted and accepted by this release.
 pub const PROJECT_SUMMARY_FORMAT: &str = "graphforge-project-summary/1";
@@ -343,7 +343,7 @@ pub struct ProtocolCapability {
     pub major: u16,
 }
 
-/// Reference to the semantic portable-v2 package verified after download.
+/// Reference to the semantic portable package verified after download.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PortablePackageReference {
@@ -353,7 +353,7 @@ pub struct PortablePackageReference {
     pub package_digest: Sha256Digest,
     /// Transport object digest selecting exactly one entry from `objects`.
     ///
-    /// This is the digest of downloaded bytes, not the semantic portable-v2
+    /// This is the digest of downloaded bytes, not the semantic portable
     /// package digest above.
     pub object_digest: Sha256Digest,
 }
@@ -395,7 +395,7 @@ pub struct OntologyModuleDescriptor {
     pub version: String,
     /// Canonical content digest identifying this exact module.
     pub content_digest: Sha256Digest,
-    /// Optional portable-v2 package containing exactly this module.
+    /// Optional portable package containing exactly this module.
     ///
     /// Its `package_digest` identifies that package and legitimately differs
     /// between publishing Projects; it never substitutes for `content_digest`.
@@ -467,7 +467,7 @@ pub struct DiscoveryManifest {
     pub resolved_ref: String,
     /// Immutable repository-version identity.
     pub immutable_version: Sha256Digest,
-    /// Semantic portable-v2 package identity.
+    /// Semantic portable package identity.
     pub package: PortablePackageReference,
     /// Optional Project summary document reference. Clone consumers ignore it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -756,7 +756,7 @@ impl DiscoveryManifest {
     /// Return the descriptor and transport object of one exact ontology module.
     ///
     /// The module must be advertised with a per-module package; its object must
-    /// be a portable-v2 object other than the Project package object.
+    /// be a portable object other than the Project package object.
     pub fn ontology_module_object(
         &self,
         identity: &ExactIdentity,
@@ -1087,7 +1087,7 @@ impl DiscoveryManifest {
         Ok(())
     }
 
-    /// Return the uniquely selected portable-v2 transport object.
+    /// Return the uniquely selected portable transport object.
     ///
     /// Callers use this only after manifest validation and therefore never
     /// guess by inventory position, location host, or media type.

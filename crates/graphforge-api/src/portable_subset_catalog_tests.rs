@@ -2,15 +2,15 @@
 
 use arrow::util::display::array_value_to_string;
 use graphforge_core::portable::{
-    PortableV2GraphSelector, PortableV2Limits, PortableV2Mode, PortableV2Output,
-    PortableV2PropertyProjection, PortableV2SelectionProfile, PortableV2SubsetClosure,
-    PortableV2SubsetRequest,
+    PortableGraphSelector, PortableLimits, PortableMode, PortableOutput,
+    PortablePropertyProjection, PortableSelectionProfile, PortableSubsetClosure,
+    PortableSubsetRequest,
 };
 use uuid::Uuid;
 
 use crate::{
-    GraphForge, OperationId, PortableSelection, PortableV2ExportRequest, PortableV2ImportRequest,
-    PortableVerifyRequest, verify_portable_v2,
+    GraphForge, OperationId, PortableSelection, PortableExportRequest, PortableImportRequest,
+    PortableVerifyRequest, verify_portable,
 };
 
 fn rows(graph: &GraphForge, query: &str) -> Vec<Vec<String>> {
@@ -32,15 +32,15 @@ fn rows(graph: &GraphForge, query: &str) -> Vec<Vec<String>> {
 
 #[test]
 fn sparse_catalog_expanded_export_verify() {
-    round_trip(PortableV2Output::Expanded);
+    round_trip(PortableOutput::Expanded);
 }
 
 #[test]
 fn sparse_catalog_bundle_export_verify() {
-    round_trip(PortableV2Output::Bundle);
+    round_trip(PortableOutput::Bundle);
 }
 
-fn round_trip(representation: PortableV2Output) {
+fn round_trip(representation: PortableOutput) {
     let root = tempfile::tempdir().unwrap();
     let source = root.path().join("source");
     let graph = GraphForge::new(source.to_str()).unwrap();
@@ -73,22 +73,22 @@ fn round_trip(representation: PortableV2Output) {
         .unwrap();
     let selected_uuid = Uuid::from_slice(ids.value(0)).unwrap();
     let generation = graph.generation_for_read().unwrap().generation_uuid();
-    let limits = PortableV2Limits::default();
+    let limits = PortableLimits::default();
     let package = root.path().join("package");
     let exported = graph
-        .export_portable_v2(
-            &PortableV2ExportRequest {
+        .export_portable(
+            &PortableExportRequest {
                 selection: PortableSelection::Current,
                 output_path: package.clone(),
                 representation,
-                profile: PortableV2SelectionProfile::Complete,
-                subset: Some(PortableV2SubsetRequest {
-                    selector: PortableV2GraphSelector {
+                profile: PortableSelectionProfile::Complete,
+                subset: Some(PortableSubsetRequest {
+                    selector: PortableGraphSelector {
                         node_uuids: vec![],
                         edge_uuids: vec![selected_uuid.to_string()],
                     },
-                    closure: PortableV2SubsetClosure::Referential,
-                    projection: PortableV2PropertyProjection { exclude: vec![] },
+                    closure: PortableSubsetClosure::Referential,
+                    projection: PortablePropertyProjection { exclude: vec![] },
                 }),
                 limits,
             },
@@ -96,10 +96,10 @@ fn round_trip(representation: PortableV2Output) {
             |_| {},
         )
         .unwrap();
-    let verified = verify_portable_v2(
+    let verified = verify_portable(
         &PortableVerifyRequest {
             input: package.clone(),
-            mode: PortableV2Mode::Full,
+            mode: PortableMode::Full,
             limits,
         },
         None,
@@ -107,9 +107,9 @@ fn round_trip(representation: PortableV2Output) {
     .unwrap();
     assert_eq!(verified.package_digest, exported.package_digest);
     let target = root.path().join("imported");
-    let error = GraphForge::import_portable_v2(
+    let error = GraphForge::import_portable(
         &target,
-        &PortableV2ImportRequest {
+        &PortableImportRequest {
             input: package,
             operation_id: OperationId(Uuid::new_v4()),
             limits,
@@ -119,7 +119,7 @@ fn round_trip(representation: PortableV2Output) {
     .unwrap_err();
     assert_eq!(
         error.code,
-        graphforge_core::portable::PortableV2ErrorCode::Incompatible
+        graphforge_core::portable::PortableErrorCode::Incompatible
     );
     assert!(
         error

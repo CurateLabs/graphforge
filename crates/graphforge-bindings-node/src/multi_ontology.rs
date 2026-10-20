@@ -396,7 +396,7 @@ impl Task for MultiOntologyMutationTask {
             }
             Mutation::AdoptPortable(authority) => graph.adopt_portable_ontology_staging(
                 &authority,
-                graphforge_api::PortableV2Limits::default(),
+                graphforge_api::PortableLimits::default(),
                 cancellation,
             ),
         })
@@ -921,7 +921,7 @@ impl GraphForge {
     pub fn portable_ontology_staging(&self) -> Result<Value> {
         encode(
             self.open_guard()?
-                .portable_ontology_staging(graphforge_api::PortableV2Limits::default())
+                .portable_ontology_staging(graphforge_api::PortableLimits::default())
                 .map_err(|error| to_multi_napi_err(&error))?,
             "portable ontology staging",
         )

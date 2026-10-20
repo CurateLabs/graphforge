@@ -1,6 +1,6 @@
-//! Publisher-side derivation of a Project summary from a verified portable-v2 package.
+//! Publisher-side derivation of a Project summary from a verified portable package.
 //!
-//! One function, [`summarize_verified_portable_v2`], is the only producer of
+//! One function, [`summarize_verified_portable`], is the only producer of
 //! summary bytes: the package is fully verified first, then only the
 //! `workspace/research_metadata` and `workspace/configuration` participants are
 //! read, through the storage-owned authenticated reader. Publishers and
@@ -9,11 +9,11 @@
 //! Local paths, Project identity, and anything outside the verified package are
 //! never consulted.
 
-use crate::discovery_portable_v2::DiscoveryPortableV2Error;
-use crate::{PortableVerifyRequest, verify_portable_v2};
+use crate::discovery_portable::DiscoveryPortableError;
+use crate::{PortableVerifyRequest, verify_portable};
 use graphforge_core::portable::{
-    PortableV2Limits, PortableV2Mode, PortableV2OntologyComposition, PortableV2PackageClass,
-    PortableV2ParticipantId,
+    PortableLimits, PortableMode, PortableOntologyComposition, PortablePackageClass,
+    PortableParticipantId,
 };
 use graphforge_discovery::{
     BridgeSetDescriptor, DiscoveryLimits, PORTABLE_V2_FORMAT, PROJECT_SUMMARY_CAPABILITY,
@@ -23,7 +23,7 @@ use graphforge_discovery::{
     SummaryPackageReference, SummaryTemporalCoverage,
 };
 use graphforge_storage::{
-    MAX_WORKSPACE_RESEARCH_METADATA_BYTES, PortableV2PackageIndex, ResearchAccessPolicyMetadata,
+    MAX_WORKSPACE_RESEARCH_METADATA_BYTES, PortablePackageIndex, ResearchAccessPolicyMetadata,
     ResearchCorpusSize, ResearchGeographicCoverage, ResearchTemporalCoverage,
     WORKSPACE_CAPABILITY_ID, WORKSPACE_CONFIGURATION_FAMILY, WORKSPACE_RESEARCH_METADATA_FAMILY,
     WorkspaceConfiguration, WorkspaceOntologyMode, WorkspaceResearchMetadata,
@@ -38,17 +38,17 @@ pub struct ProjectSummaryRequest<'a> {
     pub repository: &'a RepositoryIdentity,
     /// Immutable repository version the summary describes.
     pub immutable_version: &'a Sha256Digest,
-    /// Complete portable-v2 bundle file or expanded directory.
+    /// Complete portable bundle file or expanded directory.
     pub package: &'a Path,
     /// Bounds applied while validating the produced summary.
     pub discovery_limits: DiscoveryLimits,
-    /// Bounds applied by the portable-v2 verifier and package reader.
-    pub portable_limits: PortableV2Limits,
+    /// Bounds applied by the portable verifier and package reader.
+    pub portable_limits: PortableLimits,
     /// Optional cooperative cancellation signal.
     pub cancelled: Option<&'a AtomicBool>,
 }
 
-/// Fully verify a portable-v2 package, then derive its validated [`ProjectSummary`].
+/// Fully verify a portable package, then derive its validated [`ProjectSummary`].
 ///
 /// Absent `workspace/research_metadata` yields empty metadata and absent
 /// `workspace/configuration` yields ontology mode `none`. Counts are the
@@ -57,28 +57,28 @@ pub struct ProjectSummaryRequest<'a> {
 ///
 /// # Errors
 /// Returns the portable verifier's error for any package defect,
-/// [`DiscoveryPortableV2Error::Participant`] when a read participant is not a
+/// [`DiscoveryPortableError::Participant`] when a read participant is not a
 /// valid canonical record, and a discovery error when the derived document
 /// fails summary validation.
-pub fn summarize_verified_portable_v2(
+pub fn summarize_verified_portable(
     request: &ProjectSummaryRequest<'_>,
-) -> Result<ProjectSummary, DiscoveryPortableV2Error> {
-    let report = verify_portable_v2(
+) -> Result<ProjectSummary, DiscoveryPortableError> {
+    let report = verify_portable(
         &PortableVerifyRequest {
             input: request.package.to_path_buf(),
-            mode: PortableV2Mode::Full,
+            mode: PortableMode::Full,
             limits: request.portable_limits,
         },
         request.cancelled,
     )
-    .map_err(DiscoveryPortableV2Error::Portable)?;
-    let index = PortableV2PackageIndex::open(
+    .map_err(DiscoveryPortableError::Portable)?;
+    let index = PortablePackageIndex::open(
         request.package,
         &report.package_digest,
         request.portable_limits,
         request.cancelled,
     )
-    .map_err(DiscoveryPortableV2Error::Portable)?;
+    .map_err(DiscoveryPortableError::Portable)?;
 
     let (metadata, ontology_mode) = read_workspace_records(&index, request)?;
     let components = index.component_kind_counts();
@@ -111,7 +111,7 @@ pub fn summarize_verified_portable_v2(
     };
     summary
         .validate(request.discovery_limits)
-        .map_err(DiscoveryPortableV2Error::Discovery)?;
+        .map_err(DiscoveryPortableError::Discovery)?;
     Ok(summary)
 }
 
@@ -120,11 +120,11 @@ pub fn summarize_verified_portable_v2(
 /// Absent research metadata is empty metadata; absent configuration is ontology
 /// mode `none`.
 fn read_workspace_records(
-    index: &PortableV2PackageIndex,
+    index: &PortablePackageIndex,
     request: &ProjectSummaryRequest<'_>,
-) -> Result<(WorkspaceResearchMetadata, &'static str), DiscoveryPortableV2Error> {
+) -> Result<(WorkspaceResearchMetadata, &'static str), DiscoveryPortableError> {
     let read_participant = |family: &'static str, max_bytes: u64| {
-        let participant = PortableV2ParticipantId {
+        let participant = PortableParticipantId {
             capability_id: WORKSPACE_CAPABILITY_ID.into(),
             record_family_id: family.into(),
         };
@@ -134,14 +134,14 @@ fn read_workspace_records(
                 file.map(|file| index.read(&file, max_bytes, request.cancelled))
                     .transpose()
             })
-            .map_err(DiscoveryPortableV2Error::Portable)
+            .map_err(DiscoveryPortableError::Portable)
     };
     let metadata = match read_participant(
         WORKSPACE_RESEARCH_METADATA_FAMILY,
         MAX_WORKSPACE_RESEARCH_METADATA_BYTES as u64,
     )? {
         Some(bytes) => WorkspaceResearchMetadata::from_canonical_json(&bytes).map_err(|error| {
-            DiscoveryPortableV2Error::Participant {
+            DiscoveryPortableError::Participant {
                 participant: "workspace/research_metadata",
                 message: error.to_string(),
             }
@@ -154,7 +154,7 @@ fn read_workspace_records(
     )? {
         Some(bytes) => ontology_mode_label(
             WorkspaceConfiguration::from_canonical_json(&bytes)
-                .map_err(|error| DiscoveryPortableV2Error::Participant {
+                .map_err(|error| DiscoveryPortableError::Participant {
                     participant: "workspace/configuration",
                     message: error.to_string(),
                 })?
@@ -166,7 +166,7 @@ fn read_workspace_records(
 }
 
 /// Mirror the verified composition control in the summary's `sha256:` form.
-fn composition_facts(composition: &PortableV2OntologyComposition) -> SummaryOntologyComposition {
+fn composition_facts(composition: &PortableOntologyComposition) -> SummaryOntologyComposition {
     SummaryOntologyComposition {
         composition_digest: Sha256Digest(composition.composition_digest.clone()),
         modules: composition
@@ -295,11 +295,11 @@ const fn ontology_mode_label(mode: WorkspaceOntologyMode) -> &'static str {
 }
 
 /// Portable package class to the summary's closed label set.
-const fn package_class_label(class: PortableV2PackageClass) -> &'static str {
+const fn package_class_label(class: PortablePackageClass) -> &'static str {
     match class {
-        PortableV2PackageClass::Complete => "complete",
-        PortableV2PackageClass::OntologyOnly => "ontology-only",
-        PortableV2PackageClass::ComponentSelective => "component-selective",
-        PortableV2PackageClass::GraphDataSubset => "graph-data-subset",
+        PortablePackageClass::Complete => "complete",
+        PortablePackageClass::OntologyOnly => "ontology-only",
+        PortablePackageClass::ComponentSelective => "component-selective",
+        PortablePackageClass::GraphDataSubset => "graph-data-subset",
     }
 }

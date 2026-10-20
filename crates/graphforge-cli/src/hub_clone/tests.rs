@@ -610,7 +610,7 @@ pub(super) fn clone_documents(
     (refs, manifest)
 }
 
-/// A real complete portable-v2 bundle of an empty project and its
+/// A real complete portable bundle of an empty project and its
 /// semantic package digest.
 pub(super) fn real_bundle() -> (Vec<u8>, String) {
     let root = tempfile::tempdir().unwrap();
@@ -618,20 +618,20 @@ pub(super) fn real_bundle() -> (Vec<u8>, String) {
     std::fs::create_dir(&source).unwrap();
     GraphForge::new(source.to_str()).unwrap();
     let generation = graphforge_storage::resolve_project_generation(&source).unwrap();
-    let limits = PortableV2Limits::default();
-    let plan = graphforge_storage::plan_complete_portable_v2(&generation, limits).unwrap();
+    let limits = PortableLimits::default();
+    let plan = graphforge_storage::plan_complete_portable(&generation, limits).unwrap();
     let bundle_path = root.path().join("complete.gfpb");
-    graphforge_storage::export_complete_portable_v2(
+    graphforge_storage::export_complete_portable(
         &plan,
         &bundle_path,
-        graphforge_storage::PortableV2Output::Bundle,
+        graphforge_storage::PortableOutput::Bundle,
         limits,
         &AtomicBool::new(false),
         |_| {},
     )
     .unwrap();
     let report =
-        graphforge_storage::verify_portable_v2(&bundle_path, PortableV2Mode::Full, limits, None)
+        graphforge_storage::verify_portable(&bundle_path, PortableMode::Full, limits, None)
             .unwrap();
     (std::fs::read(&bundle_path).unwrap(), report.package_digest)
 }
@@ -925,13 +925,13 @@ fn both_identity_forms_import_and_reopen_the_same_real_project() {
     std::fs::create_dir(&source).unwrap();
     GraphForge::new(source.to_str()).unwrap();
     let generation = graphforge_storage::resolve_project_generation(&source).unwrap();
-    let limits = PortableV2Limits::default();
-    let plan = graphforge_storage::plan_complete_portable_v2(&generation, limits).unwrap();
+    let limits = PortableLimits::default();
+    let plan = graphforge_storage::plan_complete_portable(&generation, limits).unwrap();
     let bundle_path = root.path().join("complete.gfpb");
-    graphforge_storage::export_complete_portable_v2(
+    graphforge_storage::export_complete_portable(
         &plan,
         &bundle_path,
-        graphforge_storage::PortableV2Output::Bundle,
+        graphforge_storage::PortableOutput::Bundle,
         limits,
         &AtomicBool::new(false),
         |_| {},
@@ -939,7 +939,7 @@ fn both_identity_forms_import_and_reopen_the_same_real_project() {
     .unwrap();
     let bundle = std::fs::read(&bundle_path).unwrap();
     let report =
-        graphforge_storage::verify_portable_v2(&bundle_path, PortableV2Mode::Full, limits, None)
+        graphforge_storage::verify_portable(&bundle_path, PortableMode::Full, limits, None)
             .unwrap();
 
     let mut fail_open_results = Vec::new();
@@ -1149,13 +1149,13 @@ fn measure_clone_wall_time() {
     std::fs::create_dir(&source).unwrap();
     GraphForge::new(source.to_str()).unwrap();
     let generation = graphforge_storage::resolve_project_generation(&source).unwrap();
-    let limits = PortableV2Limits::default();
-    let plan = graphforge_storage::plan_complete_portable_v2(&generation, limits).unwrap();
+    let limits = PortableLimits::default();
+    let plan = graphforge_storage::plan_complete_portable(&generation, limits).unwrap();
     let bundle_path = root.path().join("complete.gfpb");
-    graphforge_storage::export_complete_portable_v2(
+    graphforge_storage::export_complete_portable(
         &plan,
         &bundle_path,
-        graphforge_storage::PortableV2Output::Bundle,
+        graphforge_storage::PortableOutput::Bundle,
         limits,
         &AtomicBool::new(false),
         |_| {},
@@ -1163,7 +1163,7 @@ fn measure_clone_wall_time() {
     .unwrap();
     let bundle = std::fs::read(&bundle_path).unwrap();
     let report =
-        graphforge_storage::verify_portable_v2(&bundle_path, PortableV2Mode::Full, limits, None)
+        graphforge_storage::verify_portable(&bundle_path, PortableMode::Full, limits, None)
             .unwrap();
 
     let runtime = TelemetryRuntime::default();

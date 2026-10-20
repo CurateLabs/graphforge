@@ -2788,8 +2788,8 @@ fn reference_hub_revalidates_unsafe_images_even_when_client_admission_is_bypasse
 #[test]
 fn opaque_workbench_file_cannot_be_selected_as_native_package_data() {
     use graphforge_api::{
-        PortableV2ErrorCode, PortableV2Limits, PortableV2ParticipantId, PortableV2SelectionProfile,
-        PortableV2SelectionRequest,
+        PortableErrorCode, PortableLimits, PortableParticipantId, PortableSelectionProfile,
+        PortableSelectionRequest,
     };
     let history = history();
     std::fs::write(
@@ -2799,19 +2799,19 @@ fn opaque_workbench_file_cannot_be_selected_as_native_package_data() {
     .unwrap();
     let error = history
         .graph
-        .preview_portable_v2_selection(&graphforge_api::PortableV2SelectionPreviewRequest {
+        .preview_portable_selection(&graphforge_api::PortableSelectionPreviewRequest {
             selection: graphforge_api::PortableSelection::Current,
-            request: PortableV2SelectionRequest {
-                profile: PortableV2SelectionProfile::Custom(vec![PortableV2ParticipantId {
+            request: PortableSelectionRequest {
+                profile: PortableSelectionProfile::Custom(vec![PortableParticipantId {
                     capability_id: "opaque-files".into(),
                     record_family_id: "notebook.ipynb".into(),
                 }]),
                 strict: true,
             },
-            limits: PortableV2Limits::default(),
+            limits: PortableLimits::default(),
         })
         .unwrap_err();
-    assert_eq!(error.code, PortableV2ErrorCode::Incompatible);
+    assert_eq!(error.code, PortableErrorCode::Incompatible);
     assert!(
         error
             .to_string()

@@ -493,11 +493,11 @@ for x in entries:
     ):
         role = "contract_identity"
         reason = "Constant graph/nodes schema descriptor defines schema fingerprint."
-    if path.endswith("/project_portable_v2.rs") and fn == "verify_bundle" and x["form"] == "digest":
+    if path.endswith("/project_portable.rs") and fn == "verify_bundle" and x["form"] == "digest":
         role = "contract_identity"
         reason = "PAX path text derives canonical header suffix; does not authenticate payload."
     if (
-        path.endswith("/project_portable_v2_export/transport.rs")
+        path.endswith("/project_portable_export/transport.rs")
         and fn == "expanded"
         and x["form"] == "new"
     ):
@@ -506,13 +506,13 @@ for x in entries:
             "Ordered already-computed entry path/length/digest metadata and "
             "tagmanifest define transport identity."
         )
-    if path.endswith("/project_portable_v2_export/transport.rs") and x["symbol"] == "ControlSha256":
+    if path.endswith("/project_portable_export/transport.rs") and x["symbol"] == "ControlSha256":
         role = "control_authentication"
         reason = (
             "Explicit ControlSha256 consumes bounded resident canonical portable control/tag bytes."
         )
     if (
-        path.endswith("/project_portable_v2_export/transport.rs")
+        path.endswith("/project_portable_export/transport.rs")
         and x["role_by_explicit_type"] == "portable_authentication"
     ):
         role = "portable_authentication"
@@ -617,19 +617,19 @@ for c in d["delegate_candidates"]:
         )
     elif (
         name == "digest"
-        and p == "crates/graphforge-storage/src/project_portable_v2_export.rs"
+        and p == "crates/graphforge-storage/src/project_portable_export.rs"
         and re.search(r"\bwritten\s*\.\s*digest\s*\(", text)
     ):
-        target = ("crates/graphforge-storage/src/project_portable_v2_export/transport.rs", "digest")
+        target = ("crates/graphforge-storage/src/project_portable_export/transport.rs", "digest")
         role = "producer_delegate"
         kind = "stored_digest_getter"
         reason = (
             "Privately written package accessor returns captured digest bytes; "
             "pinned getter adds no SHA pass."
         )
-    elif name == "hash_file" and p == "crates/graphforge-storage/src/project_portable_v2.rs":
+    elif name == "hash_file" and p == "crates/graphforge-storage/src/project_portable.rs":
         target = (
-            "crates/graphforge-storage/src/project_portable_v2/authenticated_entries.rs",
+            "crates/graphforge-storage/src/project_portable/authenticated_entries.rs",
             "new",
         )
         role = "portable_authentication"
@@ -643,9 +643,9 @@ for c in d["delegate_candidates"]:
         kind = "same_file_producer_function"
         reason = "Actual producer function is defined in the caller source module."
     elif name == "fingerprint":
-        if "/project_portable_v2_subset.rs" in p:
+        if "/project_portable_subset.rs" in p:
             target = (
-                "crates/graphforge-storage/src/project_portable_v2_selection.rs",
+                "crates/graphforge-storage/src/project_portable_selection.rs",
                 "fingerprint",
             )
         else:

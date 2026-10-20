@@ -20,20 +20,20 @@ pub enum PortableSelection {
     Checkpoint(String),
 }
 
-/// Verification-first portable-v2 complete-project import request.
+/// Verification-first portable complete-project import request.
 #[derive(Clone, Debug)]
-pub struct PortableV2ImportRequest {
+pub struct PortableImportRequest {
     /// Expanded package directory or canonical `.gfpb` bundle.
     pub input: PathBuf,
     /// Caller-owned idempotency identity.
     pub operation_id: OperationId,
     /// Caller-selected finite verifier and streaming limits.
-    pub limits: graphforge_core::portable::PortableV2Limits,
+    pub limits: graphforge_core::portable::PortableLimits,
 }
 
-/// Stable Rust-owned portable-v2 import result.
+/// Stable Rust-owned portable import result.
 #[derive(Clone, Debug)]
-pub struct PortableV2ImportResult {
+pub struct PortableImportResult {
     /// Canonical semantic package identity.
     pub package_digest: String,
     /// Representation-specific transport identity.
@@ -61,9 +61,9 @@ pub struct PortableV2ImportResult {
     pub observed_transient_peak_allocated_bytes: u64,
 }
 
-/// Publish a verified local portable-v2 package to an OCI registry.
+/// Publish a verified local portable package to an OCI registry.
 #[derive(Clone)]
-pub struct PortableV2OciPublishFacadeRequest {
+pub struct PortableOciPublishFacadeRequest {
     /// Verified local package path (bundle).
     pub package_path: PathBuf,
     /// Registry host without scheme or credentials.
@@ -73,20 +73,20 @@ pub struct PortableV2OciPublishFacadeRequest {
     /// Optional mutable tag.
     pub tag: Option<String>,
     /// Verifier limits.
-    pub limits: graphforge_core::portable::PortableV2Limits,
+    pub limits: graphforge_core::portable::PortableLimits,
     /// Authenticity policy applied after transport.
-    pub authenticity: graphforge_core::portable::PortableV2OciAuthenticityPolicy,
+    pub authenticity: graphforge_core::portable::PortableOciAuthenticityPolicy,
     /// Optional signature material attached as an OCI referrer.
-    pub signature: Option<graphforge_core::portable::PortableV2OciSignatureMaterial>,
+    pub signature: Option<graphforge_core::portable::PortableOciSignatureMaterial>,
     /// Use plain HTTP (local disposable registries only).
     pub insecure_http: bool,
     /// Caller-owned credential; never logged or persisted.
     pub credential: Option<String>,
 }
 
-/// Pull a digest-pinned portable-v2 package from an OCI registry.
+/// Pull a digest-pinned portable package from an OCI registry.
 #[derive(Clone)]
-pub struct PortableV2OciPullFacadeRequest {
+pub struct PortableOciPullFacadeRequest {
     /// Registry host without scheme or credentials.
     pub registry: String,
     /// Repository path.
@@ -98,71 +98,71 @@ pub struct PortableV2OciPullFacadeRequest {
     /// Destination path for the verified package.
     pub destination: PathBuf,
     /// Verifier limits.
-    pub limits: graphforge_core::portable::PortableV2Limits,
+    pub limits: graphforge_core::portable::PortableLimits,
     /// Authenticity policy.
-    pub authenticity: graphforge_core::portable::PortableV2OciAuthenticityPolicy,
+    pub authenticity: graphforge_core::portable::PortableOciAuthenticityPolicy,
     /// Use plain HTTP (local disposable registries only).
     pub insecure_http: bool,
     /// Caller-owned credential; never logged or persisted.
     pub credential: Option<String>,
 }
 
-/// Read-only portable-v2 verification request.
+/// Read-only portable verification request.
 #[derive(Clone, Debug)]
 pub struct PortableVerifyRequest {
     /// Expanded package directory or canonical `.gfpb` bundle.
     pub input: PathBuf,
     /// Full content verification or honest structure-only inspection.
-    pub mode: graphforge_core::portable::PortableV2Mode,
+    pub mode: graphforge_core::portable::PortableMode,
     /// Caller-selected finite resource limits.
-    pub limits: graphforge_core::portable::PortableV2Limits,
+    pub limits: graphforge_core::portable::PortableLimits,
 }
 
-/// Stable Rust-owned portable-v2 verification report.
-pub type PortableVerifyResult = graphforge_core::portable::PortableV2Report;
+/// Stable Rust-owned portable verification report.
+pub type PortableVerifyResult = graphforge_core::portable::PortableReport;
 
 /// Portable-v2 selection preview request against a pinned generation.
 #[derive(Clone, Debug)]
-pub struct PortableV2SelectionPreviewRequest {
+pub struct PortableSelectionPreviewRequest {
     /// Current or named-checkpoint selection.
     pub selection: PortableSelection,
     /// Selection profile / custom identities.
-    pub request: graphforge_core::portable::PortableV2SelectionRequest,
+    pub request: graphforge_core::portable::PortableSelectionRequest,
     /// Caller-selected finite resource limits.
-    pub limits: graphforge_core::portable::PortableV2Limits,
+    pub limits: graphforge_core::portable::PortableLimits,
 }
 
 /// Portable-v2 graph-subset preview request against a pinned generation.
 #[derive(Clone, Debug)]
-pub struct PortableV2SubsetPreviewRequest {
+pub struct PortableSubsetPreviewRequest {
     /// Current or named-checkpoint selection.
     pub selection: PortableSelection,
     /// Graph-subset selector and closure.
-    pub request: graphforge_core::portable::PortableV2SubsetRequest,
+    pub request: graphforge_core::portable::PortableSubsetRequest,
     /// Caller-selected finite resource limits.
-    pub limits: graphforge_core::portable::PortableV2Limits,
+    pub limits: graphforge_core::portable::PortableLimits,
 }
 
 /// Portable-v2 export request (expanded directory or canonical bundle).
 #[derive(Clone, Debug)]
-pub struct PortableV2ExportRequest {
+pub struct PortableExportRequest {
     /// Current or named-checkpoint selection.
     pub selection: PortableSelection,
     /// Destination path (new file or directory). Existing paths are rejected.
     pub output_path: PathBuf,
     /// Expanded directory or canonical `.gfpb` bundle.
-    pub representation: graphforge_core::portable::PortableV2Output,
+    pub representation: graphforge_core::portable::PortableOutput,
     /// Component selection profile. Ignored when `subset` is `Some`.
-    pub profile: graphforge_core::portable::PortableV2SelectionProfile,
+    pub profile: graphforge_core::portable::PortableSelectionProfile,
     /// Optional graph/data subset. When set, exports `graph-data-subset`.
-    pub subset: Option<graphforge_core::portable::PortableV2SubsetRequest>,
+    pub subset: Option<graphforge_core::portable::PortableSubsetRequest>,
     /// Caller-selected finite planner and streaming limits.
-    pub limits: graphforge_core::portable::PortableV2Limits,
+    pub limits: graphforge_core::portable::PortableLimits,
 }
 
-/// Stable portable-v2 export receipt for bindings and CLI JSON.
+/// Stable portable export receipt for bindings and CLI JSON.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-pub struct PortableV2ExportFacadeResult {
+pub struct PortableExportFacadeResult {
     /// Contract name.
     pub contract: &'static str,
     /// Source selector kind.
@@ -199,13 +199,13 @@ pub struct PortableV2ExportFacadeResult {
     pub allocation_physical_objects: u64,
 }
 
-/// Verify portable-v2 content without admitting or mutating a destination Project.
+/// Verify portable content without admitting or mutating a destination Project.
 /// Research archives additionally run native owner checks in disposable private views.
-pub fn verify_portable_v2(
+pub fn verify_portable(
     request: &PortableVerifyRequest,
     cancelled: Option<&AtomicBool>,
-) -> Result<PortableVerifyResult, graphforge_core::portable::PortableV2Error> {
-    let report = graphforge_storage::verify_portable_v2(
+) -> Result<PortableVerifyResult, graphforge_core::portable::PortableError> {
+    let report = graphforge_storage::verify_portable(
         &request.input,
         request.mode,
         request.limits,
@@ -221,30 +221,30 @@ pub fn verify_portable_v2(
             &mut crate::research_interchange::validation::validate,
         );
         #[cfg(not(feature = "research"))]
-        return Err(graphforge_core::portable::PortableV2Error::new(
-            graphforge_core::portable::PortableV2ErrorCode::Incompatible,
+        return Err(graphforge_core::portable::PortableError::new(
+            graphforge_core::portable::PortableErrorCode::Incompatible,
             "research package validation requires the `research` feature",
         ));
     }
     Ok(report)
 }
 
-/// Publish a verified portable-v2 package through an OCI Distribution registry.
-pub fn publish_portable_v2_oci(
-    request: &PortableV2OciPublishFacadeRequest,
+/// Publish a verified portable package through an OCI Distribution registry.
+pub fn publish_portable_oci(
+    request: &PortableOciPublishFacadeRequest,
     cancelled: Option<&AtomicBool>,
 ) -> Result<
-    graphforge_core::portable::PortableV2OciReference,
-    graphforge_core::portable::PortableV2Error,
+    graphforge_core::portable::PortableOciReference,
+    graphforge_core::portable::PortableError,
 > {
     let client = graphforge_portable_oci::HttpOciRegistry::new(
         &request.registry,
         request.credential.as_deref(),
         request.insecure_http,
     )?;
-    crate::portable_oci::publish_portable_v2_oci(
+    crate::portable_oci::publish_portable_oci(
         &client,
-        &crate::portable_oci::PortableV2OciPublishRequest {
+        &crate::portable_oci::PortableOciPublishRequest {
             package_path: &request.package_path,
             registry: &request.registry,
             repository: &request.repository,
@@ -258,22 +258,22 @@ pub fn publish_portable_v2_oci(
     )
 }
 
-/// Pull and verify a portable-v2 package from an OCI Distribution registry.
-pub fn pull_portable_v2_oci(
-    request: &PortableV2OciPullFacadeRequest,
+/// Pull and verify a portable package from an OCI Distribution registry.
+pub fn pull_portable_oci(
+    request: &PortableOciPullFacadeRequest,
     cancelled: Option<&AtomicBool>,
 ) -> Result<
-    graphforge_core::portable::PortableV2OciPullReceipt,
-    graphforge_core::portable::PortableV2Error,
+    graphforge_core::portable::PortableOciPullReceipt,
+    graphforge_core::portable::PortableError,
 > {
     let client = graphforge_portable_oci::HttpOciRegistry::new(
         &request.registry,
         request.credential.as_deref(),
         request.insecure_http,
     )?;
-    crate::portable_oci::pull_portable_v2_oci(
+    crate::portable_oci::pull_portable_oci(
         &client,
-        &crate::portable_oci::PortableV2OciPullRequest {
+        &crate::portable_oci::PortableOciPullRequest {
             registry: &request.registry,
             repository: &request.repository,
             reference: &request.reference,
@@ -288,27 +288,27 @@ pub fn pull_portable_v2_oci(
 }
 
 /// Publish/pull against an injected registry backend (local conformance / tests).
-pub fn publish_portable_v2_oci_with_registry(
-    registry: &dyn graphforge_portable_oci::PortableV2OciRegistry,
-    request: &crate::portable_oci::PortableV2OciPublishRequest<'_>,
+pub fn publish_portable_oci_with_registry(
+    registry: &dyn graphforge_portable_oci::PortableOciRegistry,
+    request: &crate::portable_oci::PortableOciPublishRequest<'_>,
     cancelled: Option<&AtomicBool>,
 ) -> Result<
-    graphforge_core::portable::PortableV2OciReference,
-    graphforge_core::portable::PortableV2Error,
+    graphforge_core::portable::PortableOciReference,
+    graphforge_core::portable::PortableError,
 > {
-    crate::portable_oci::publish_portable_v2_oci(registry, request, cancelled)
+    crate::portable_oci::publish_portable_oci(registry, request, cancelled)
 }
 
 /// Pull against an injected registry backend (local conformance / tests).
-pub fn pull_portable_v2_oci_with_registry(
-    registry: &dyn graphforge_portable_oci::PortableV2OciRegistry,
-    request: &crate::portable_oci::PortableV2OciPullRequest<'_>,
+pub fn pull_portable_oci_with_registry(
+    registry: &dyn graphforge_portable_oci::PortableOciRegistry,
+    request: &crate::portable_oci::PortableOciPullRequest<'_>,
     cancelled: Option<&AtomicBool>,
 ) -> Result<
-    graphforge_core::portable::PortableV2OciPullReceipt,
-    graphforge_core::portable::PortableV2Error,
+    graphforge_core::portable::PortableOciPullReceipt,
+    graphforge_core::portable::PortableError,
 > {
-    crate::portable_oci::pull_portable_v2_oci(registry, request, cancelled)
+    crate::portable_oci::pull_portable_oci(registry, request, cancelled)
 }
 
 impl GraphForge {
@@ -343,38 +343,38 @@ impl GraphForge {
         }
     }
 
-    /// Preview one content-free portable-v2 component selection.
-    pub fn preview_portable_v2_selection(
+    /// Preview one content-free portable component selection.
+    pub fn preview_portable_selection(
         &self,
-        request: &PortableV2SelectionPreviewRequest,
+        request: &PortableSelectionPreviewRequest,
     ) -> Result<
-        graphforge_core::portable::PortableV2SelectionPlan,
-        graphforge_core::portable::PortableV2Error,
+        graphforge_core::portable::PortableSelectionPlan,
+        graphforge_core::portable::PortableError,
     > {
         let (generation, _, _) = self
             .resolve_portable_generation(&request.selection)
             .map_err(portable_resolve_err)?;
-        graphforge_storage::preview_portable_v2_selection(
+        graphforge_storage::preview_portable_selection(
             &generation,
             &request.request,
             request.limits,
         )
     }
 
-    /// Preview one content-free portable-v2 graph-data subset.
-    pub fn preview_portable_v2_graph_subset(
+    /// Preview one content-free portable graph-data subset.
+    pub fn preview_portable_graph_subset(
         &self,
-        request: &PortableV2SubsetPreviewRequest,
-    ) -> Result<crate::PortableV2SubsetPlan, graphforge_core::portable::PortableV2Error> {
+        request: &PortableSubsetPreviewRequest,
+    ) -> Result<crate::PortableSubsetPlan, graphforge_core::portable::PortableError> {
         let (generation, _, _) = self
             .resolve_portable_generation(&request.selection)
             .map_err(portable_resolve_err)?;
-        graphforge_storage::preview_portable_v2_graph_subset(
+        graphforge_storage::preview_portable_graph_subset(
             &generation,
             &request.request,
             request.limits,
         )
-        .map(|plan| crate::PortableV2SubsetPlan {
+        .map(|plan| crate::PortableSubsetPlan {
             selection: plan.selection,
             graph_subset: plan.graph_subset,
             selected_node_count: plan.selected_node_count,
@@ -385,41 +385,41 @@ impl GraphForge {
         })
     }
 
-    /// Export one pinned generation as an expanded or bundled portable-v2 package.
-    pub fn export_portable_v2(
+    /// Export one pinned generation as an expanded or bundled portable package.
+    pub fn export_portable(
         &self,
-        request: &PortableV2ExportRequest,
+        request: &PortableExportRequest,
         cancelled: Option<&AtomicBool>,
-        progress: impl FnMut(graphforge_core::portable::PortableV2ExportProgress),
-    ) -> Result<PortableV2ExportFacadeResult, graphforge_core::portable::PortableV2Error> {
+        progress: impl FnMut(graphforge_core::portable::PortableExportProgress),
+    ) -> Result<PortableExportFacadeResult, graphforge_core::portable::PortableError> {
         let (generation, source, checkpoint) = self
             .resolve_portable_generation(&request.selection)
             .map_err(portable_resolve_err)?;
         let plan = if let Some(subset) = &request.subset {
-            let preview = graphforge_storage::preview_portable_v2_graph_subset(
+            let preview = graphforge_storage::preview_portable_graph_subset(
                 &generation,
                 subset,
                 request.limits,
             )?;
-            graphforge_storage::plan_graph_subset_portable_v2(
+            graphforge_storage::plan_graph_subset_portable(
                 &generation,
                 &preview,
                 request.limits,
             )?
         } else {
-            let selection = graphforge_storage::preview_portable_v2_selection(
+            let selection = graphforge_storage::preview_portable_selection(
                 &generation,
-                &graphforge_core::portable::PortableV2SelectionRequest {
+                &graphforge_core::portable::PortableSelectionRequest {
                     profile: request.profile.clone(),
                     strict: false,
                 },
                 request.limits,
             )?;
-            graphforge_storage::plan_selected_portable_v2(&generation, &selection, request.limits)?
+            graphforge_storage::plan_selected_portable(&generation, &selection, request.limits)?
         };
         let default_cancelled = AtomicBool::new(false);
         let cancelled = cancelled.unwrap_or(&default_cancelled);
-        let receipt = graphforge_storage::export_complete_portable_v2_with_allocation(
+        let receipt = graphforge_storage::export_complete_portable_with_allocation(
             &plan,
             &request.output_path,
             request.representation,
@@ -428,7 +428,7 @@ impl GraphForge {
             progress,
             self.allocation_operation.as_ref(),
         )?;
-        Ok(PortableV2ExportFacadeResult {
+        Ok(PortableExportFacadeResult {
             contract: "graphforge-portable-export/2",
             source,
             checkpoint,
@@ -438,8 +438,8 @@ impl GraphForge {
             entry_count: receipt.entry_count,
             payload_bytes: receipt.payload_bytes,
             representation: match receipt.output {
-                graphforge_core::portable::PortableV2Output::Expanded => "expanded",
-                graphforge_core::portable::PortableV2Output::Bundle => "bundle",
+                graphforge_core::portable::PortableOutput::Expanded => "expanded",
+                graphforge_core::portable::PortableOutput::Bundle => "bundle",
             },
             selection_fingerprint: receipt.selection_fingerprint,
             output: request.output_path.clone(),
@@ -449,23 +449,23 @@ impl GraphForge {
         })
     }
 
-    /// Verify and atomically import a complete portable-v2 package.
-    pub fn import_portable_v2(
+    /// Verify and atomically import a complete portable package.
+    pub fn import_portable(
         project_root: &Path,
-        request: &PortableV2ImportRequest,
+        request: &PortableImportRequest,
         cancelled: Option<&AtomicBool>,
-    ) -> Result<PortableV2ImportResult, graphforge_core::portable::PortableV2Error> {
-        Self::import_portable_v2_with_allocation(project_root, request, cancelled, None)
+    ) -> Result<PortableImportResult, graphforge_core::portable::PortableError> {
+        Self::import_portable_with_allocation(project_root, request, cancelled, None)
     }
 
-    pub(crate) fn import_portable_v2_with_allocation(
+    pub(crate) fn import_portable_with_allocation(
         project_root: &Path,
-        request: &PortableV2ImportRequest,
+        request: &PortableImportRequest,
         cancelled: Option<&AtomicBool>,
         allocation: Option<&graphforge_storage::StorageAllocationOperation>,
-    ) -> Result<PortableV2ImportResult, graphforge_core::portable::PortableV2Error> {
+    ) -> Result<PortableImportResult, graphforge_core::portable::PortableError> {
         let generation_uuid =
-            graphforge_core::uuid::portable_v2_import_generation(&request.operation_id.0);
+            graphforge_core::uuid::portable_import_generation(&request.operation_id.0);
         #[cfg(feature = "research")]
         let mut validator = crate::research_interchange::validation::validate;
         #[cfg(not(feature = "research"))]
@@ -477,7 +477,7 @@ impl GraphForge {
                     "research package validation requires the `research` feature",
                 ))
             };
-        let receipt = graphforge_storage::import_complete_portable_v2_with_native_validation(
+        let receipt = graphforge_storage::import_complete_portable_with_native_validation(
             &request.input,
             project_root,
             request.operation_id.0,
@@ -489,15 +489,15 @@ impl GraphForge {
             allocation,
             &mut validator,
         )?;
-        let committed = graphforge_core::portable::PortableV2CommittedImport {
+        let committed = graphforge_core::portable::PortableCommittedImport {
             operation_uuid: receipt.publication.transaction_uuid,
             generation_uuid: receipt.publication.generation_uuid,
             generation_manifest_sha256: receipt.publication.generation_manifest_sha256,
             package_digest: receipt.package_digest.clone(),
         };
         let root = project_root.to_str().ok_or_else(|| {
-            graphforge_core::portable::PortableV2Error::new(
-                graphforge_core::portable::PortableV2ErrorCode::InvalidPath,
+            graphforge_core::portable::PortableError::new(
+                graphforge_core::portable::PortableErrorCode::InvalidPath,
                 "invalid project path",
             )
             .with_committed_import(committed.clone())
@@ -509,20 +509,20 @@ impl GraphForge {
             None => Self::new(Some(root)),
         }
         .map_err(|_| {
-            graphforge_core::portable::PortableV2Error::new(
-                graphforge_core::portable::PortableV2ErrorCode::Io,
+            graphforge_core::portable::PortableError::new(
+                graphforge_core::portable::PortableErrorCode::Io,
                 "imported project did not reopen",
             )
             .with_committed_import(committed.clone())
         })?;
         if reopened.resolved_generation.generation_uuid() != receipt.publication.generation_uuid {
-            return Err(graphforge_core::portable::PortableV2Error::new(
-                graphforge_core::portable::PortableV2ErrorCode::Io,
+            return Err(graphforge_core::portable::PortableError::new(
+                graphforge_core::portable::PortableErrorCode::Io,
                 "imported generation did not reopen",
             )
             .with_committed_import(committed));
         }
-        Ok(PortableV2ImportResult {
+        Ok(PortableImportResult {
             package_digest: receipt.package_digest,
             transport_digest: receipt.transport_digest,
             generation_uuid: receipt.publication.generation_uuid,
@@ -540,9 +540,9 @@ impl GraphForge {
     }
 }
 
-fn portable_resolve_err(_error: GfError) -> graphforge_core::portable::PortableV2Error {
-    graphforge_core::portable::PortableV2Error::new(
-        graphforge_core::portable::PortableV2ErrorCode::Io,
+fn portable_resolve_err(_error: GfError) -> graphforge_core::portable::PortableError {
+    graphforge_core::portable::PortableError::new(
+        graphforge_core::portable::PortableErrorCode::Io,
         "pinned project generation is not exportable",
     )
 }
@@ -614,19 +614,19 @@ mod tests {
                 std::fs::create_dir(&target).unwrap();
                 std::fs::write(target.join("sentinel"), b"unchanged").unwrap();
             }
-            let error = GraphForge::import_portable_v2(
+            let error = GraphForge::import_portable(
                 &target,
-                &PortableV2ImportRequest {
+                &PortableImportRequest {
                     input: source.clone(),
                     operation_id: OperationId(Uuid::new_v4()),
-                    limits: crate::PortableV2Limits::default(),
+                    limits: crate::PortableLimits::default(),
                 },
                 None,
             )
             .unwrap_err();
             assert_eq!(
                 error.code,
-                crate::PortableV2ErrorCode::UnsupportedProjectFormat
+                crate::PortableErrorCode::UnsupportedProjectFormat
             );
             assert_eq!(
                 crate::MultiOntologyError::from(error).code,
@@ -645,21 +645,21 @@ mod tests {
     }
 
     #[test]
-    fn portable_v2_verification_facade_preserves_typed_cancellation() {
+    fn portable_verification_facade_preserves_typed_cancellation() {
         let source = tempfile::tempdir().unwrap();
         let cancelled = AtomicBool::new(true);
-        let error = verify_portable_v2(
+        let error = verify_portable(
             &PortableVerifyRequest {
                 input: source.path().to_path_buf(),
-                mode: graphforge_core::portable::PortableV2Mode::Full,
-                limits: graphforge_core::portable::PortableV2Limits::default(),
+                mode: graphforge_core::portable::PortableMode::Full,
+                limits: graphforge_core::portable::PortableLimits::default(),
             },
             Some(&cancelled),
         )
         .unwrap_err();
         assert_eq!(
             error.code,
-            graphforge_core::portable::PortableV2ErrorCode::Cancelled
+            graphforge_core::portable::PortableErrorCode::Cancelled
         );
         assert!(source.path().read_dir().unwrap().next().is_none());
     }
@@ -680,14 +680,14 @@ mod tests {
         let bundle = source.path().join("portable.gfpb");
 
         let exported = graph
-            .export_portable_v2(
-                &PortableV2ExportRequest {
+            .export_portable(
+                &PortableExportRequest {
                     selection: PortableSelection::Current,
                     output_path: bundle.clone(),
-                    representation: crate::PortableV2Output::Bundle,
-                    profile: crate::PortableV2SelectionProfile::Complete,
+                    representation: crate::PortableOutput::Bundle,
+                    profile: crate::PortableSelectionProfile::Complete,
                     subset: None,
-                    limits: crate::PortableV2Limits::default(),
+                    limits: crate::PortableLimits::default(),
                 },
                 None,
                 |_| {},
@@ -699,12 +699,12 @@ mod tests {
         assert_eq!(exported.output, bundle);
 
         let target = source.path().join("imported");
-        let imported = GraphForge::import_portable_v2(
+        let imported = GraphForge::import_portable(
             &target,
-            &PortableV2ImportRequest {
+            &PortableImportRequest {
                 input: exported.output,
                 operation_id: OperationId(Uuid::new_v4()),
-                limits: crate::PortableV2Limits::default(),
+                limits: crate::PortableLimits::default(),
             },
             None,
         )
@@ -724,12 +724,12 @@ mod tests {
         let source = root.path().join("source");
         std::fs::create_dir(&source).unwrap();
         let graph = GraphForge::new(source.to_str()).unwrap();
-        let limits = graphforge_core::portable::PortableV2Limits::default();
+        let limits = graphforge_core::portable::PortableLimits::default();
         let preview = graph
-            .preview_portable_v2_selection(&PortableV2SelectionPreviewRequest {
+            .preview_portable_selection(&PortableSelectionPreviewRequest {
                 selection: PortableSelection::Current,
-                request: graphforge_core::portable::PortableV2SelectionRequest {
-                    profile: graphforge_core::portable::PortableV2SelectionProfile::Complete,
+                request: graphforge_core::portable::PortableSelectionRequest {
+                    profile: graphforge_core::portable::PortableSelectionProfile::Complete,
                     strict: false,
                 },
                 limits,
@@ -739,12 +739,12 @@ mod tests {
         let expanded = root.path().join("expanded");
         let bundle = root.path().join("complete.gfpb");
         let expanded_export = graph
-            .export_portable_v2(
-                &PortableV2ExportRequest {
+            .export_portable(
+                &PortableExportRequest {
                     selection: PortableSelection::Current,
                     output_path: expanded.clone(),
-                    representation: graphforge_core::portable::PortableV2Output::Expanded,
-                    profile: graphforge_core::portable::PortableV2SelectionProfile::Complete,
+                    representation: graphforge_core::portable::PortableOutput::Expanded,
+                    profile: graphforge_core::portable::PortableSelectionProfile::Complete,
                     subset: None,
                     limits,
                 },
@@ -753,12 +753,12 @@ mod tests {
             )
             .unwrap();
         let bundle_export = graph
-            .export_portable_v2(
-                &PortableV2ExportRequest {
+            .export_portable(
+                &PortableExportRequest {
                     selection: PortableSelection::Current,
                     output_path: bundle.clone(),
-                    representation: graphforge_core::portable::PortableV2Output::Bundle,
-                    profile: graphforge_core::portable::PortableV2SelectionProfile::Complete,
+                    representation: graphforge_core::portable::PortableOutput::Bundle,
+                    profile: graphforge_core::portable::PortableSelectionProfile::Complete,
                     subset: None,
                     limits,
                 },
@@ -771,10 +771,10 @@ mod tests {
             expanded_export.selection_fingerprint,
             preview.selection_fingerprint
         );
-        let verified = verify_portable_v2(
+        let verified = verify_portable(
             &PortableVerifyRequest {
                 input: bundle,
-                mode: graphforge_core::portable::PortableV2Mode::Full,
+                mode: graphforge_core::portable::PortableMode::Full,
                 limits,
             },
             None,
@@ -782,19 +782,19 @@ mod tests {
         .unwrap();
         assert_eq!(verified.package_digest, bundle_export.package_digest);
         let subset_error = graph
-            .preview_portable_v2_graph_subset(&PortableV2SubsetPreviewRequest {
+            .preview_portable_graph_subset(&PortableSubsetPreviewRequest {
                 selection: PortableSelection::Current,
-                request: graphforge_core::portable::PortableV2SubsetRequest {
-                    selector: graphforge_core::portable::PortableV2GraphSelector::default(),
-                    closure: graphforge_core::portable::PortableV2SubsetClosure::InducedEdges,
-                    projection: graphforge_core::portable::PortableV2PropertyProjection::default(),
+                request: graphforge_core::portable::PortableSubsetRequest {
+                    selector: graphforge_core::portable::PortableGraphSelector::default(),
+                    closure: graphforge_core::portable::PortableSubsetClosure::InducedEdges,
+                    projection: graphforge_core::portable::PortablePropertyProjection::default(),
                 },
                 limits,
             })
             .unwrap_err();
         assert_eq!(
             subset_error.code,
-            graphforge_core::portable::PortableV2ErrorCode::Incompatible
+            graphforge_core::portable::PortableErrorCode::Incompatible
         );
         assert!(
             subset_error
@@ -811,13 +811,13 @@ mod tests {
         std::fs::create_dir(&source).unwrap();
         GraphForge::new(source.to_str()).unwrap();
         let generation = graphforge_storage::resolve_project_generation(&source).unwrap();
-        let limits = graphforge_core::portable::PortableV2Limits::default();
-        let plan = graphforge_storage::plan_complete_portable_v2(&generation, limits).unwrap();
+        let limits = graphforge_core::portable::PortableLimits::default();
+        let plan = graphforge_storage::plan_complete_portable(&generation, limits).unwrap();
         let package = root.path().join("complete.gfpb");
-        graphforge_storage::export_complete_portable_v2(
+        graphforge_storage::export_complete_portable(
             &plan,
             &package,
-            graphforge_core::portable::PortableV2Output::Bundle,
+            graphforge_core::portable::PortableOutput::Bundle,
             limits,
             &AtomicBool::new(false),
             |_| {},
@@ -825,9 +825,9 @@ mod tests {
         .unwrap();
 
         let target = root.path().join("target");
-        let imported = GraphForge::import_portable_v2(
+        let imported = GraphForge::import_portable(
             &target,
-            &PortableV2ImportRequest {
+            &PortableImportRequest {
                 input: package,
                 operation_id: OperationId(Uuid::new_v4()),
                 limits,
@@ -1211,18 +1211,18 @@ mod tests {
             crate::canonical_arrow::result_fingerprint(&logical).unwrap()
         };
         let before_fingerprint = logical_fingerprint(&before.batches);
-        let limits = graphforge_core::portable::PortableV2Limits::default();
+        let limits = graphforge_core::portable::PortableLimits::default();
         let graph_fingerprint =
-            graphforge_storage::portable_v2_graph_data_fingerprint(&reopened.dir(), limits)
+            graphforge_storage::portable_graph_data_fingerprint(&reopened.dir(), limits)
                 .unwrap();
         let package = root.path().join("lifecycle.gfpb");
         let exported = reopened
-            .export_portable_v2(
-                &PortableV2ExportRequest {
+            .export_portable(
+                &PortableExportRequest {
                     selection: PortableSelection::Current,
                     output_path: package.clone(),
-                    representation: graphforge_core::portable::PortableV2Output::Bundle,
-                    profile: graphforge_core::portable::PortableV2SelectionProfile::Complete,
+                    representation: graphforge_core::portable::PortableOutput::Bundle,
+                    profile: graphforge_core::portable::PortableSelectionProfile::Complete,
                     subset: None,
                     limits,
                 },
@@ -1230,10 +1230,10 @@ mod tests {
                 |_| {},
             )
             .unwrap();
-        let verified = verify_portable_v2(
+        let verified = verify_portable(
             &PortableVerifyRequest {
                 input: package.clone(),
-                mode: graphforge_core::portable::PortableV2Mode::Full,
+                mode: graphforge_core::portable::PortableMode::Full,
                 limits,
             },
             None,
@@ -1244,9 +1244,9 @@ mod tests {
 
         let imported_path = root.path().join("clean-import");
         assert!(!imported_path.exists());
-        let import = GraphForge::import_portable_v2(
+        let import = GraphForge::import_portable(
             &imported_path,
-            &PortableV2ImportRequest {
+            &PortableImportRequest {
                 input: package,
                 operation_id: OperationId(Uuid::from_u128(9_401)),
                 limits,
@@ -1276,7 +1276,7 @@ mod tests {
         );
         assert_eq!(logical_fingerprint(&after.batches), before_fingerprint);
         assert_eq!(
-            graphforge_storage::portable_v2_graph_data_fingerprint(&imported.dir(), limits)
+            graphforge_storage::portable_graph_data_fingerprint(&imported.dir(), limits)
                 .unwrap(),
             graph_fingerprint
         );
@@ -1316,14 +1316,14 @@ mod tests {
         let output = output_dir.path().join("checkpoint.gfpb");
 
         let exported = graph
-            .export_portable_v2(
-                &PortableV2ExportRequest {
+            .export_portable(
+                &PortableExportRequest {
                     selection: PortableSelection::Checkpoint("Export".into()),
                     output_path: output,
-                    representation: crate::PortableV2Output::Bundle,
-                    profile: crate::PortableV2SelectionProfile::Complete,
+                    representation: crate::PortableOutput::Bundle,
+                    profile: crate::PortableSelectionProfile::Complete,
                     subset: None,
-                    limits: crate::PortableV2Limits::default(),
+                    limits: crate::PortableLimits::default(),
                 },
                 None,
                 |_| {},
@@ -1342,14 +1342,14 @@ mod tests {
         let graph = GraphForge::new(source_path.to_str()).unwrap();
         let bundle = source.path().join("portable.gfpb");
         graph
-            .export_portable_v2(
-                &PortableV2ExportRequest {
+            .export_portable(
+                &PortableExportRequest {
                     selection: PortableSelection::Current,
                     output_path: bundle.clone(),
-                    representation: crate::PortableV2Output::Bundle,
-                    profile: crate::PortableV2SelectionProfile::Complete,
+                    representation: crate::PortableOutput::Bundle,
+                    profile: crate::PortableSelectionProfile::Complete,
                     subset: None,
-                    limits: crate::PortableV2Limits::default(),
+                    limits: crate::PortableLimits::default(),
                 },
                 None,
                 |_| {},
@@ -1360,18 +1360,18 @@ mod tests {
         std::fs::create_dir(&target).unwrap();
         let sentinel = target.join("keep.txt");
         std::fs::write(&sentinel, b"preserve me").unwrap();
-        let error = GraphForge::import_portable_v2(
+        let error = GraphForge::import_portable(
             &target,
-            &PortableV2ImportRequest {
+            &PortableImportRequest {
                 input: bundle,
                 operation_id: OperationId(Uuid::new_v4()),
-                limits: crate::PortableV2Limits::default(),
+                limits: crate::PortableLimits::default(),
             },
             None,
         )
         .unwrap_err();
 
-        assert_eq!(error.code, crate::PortableV2ErrorCode::Io);
+        assert_eq!(error.code, crate::PortableErrorCode::Io);
         assert_eq!(std::fs::read(sentinel).unwrap(), b"preserve me");
     }
 
@@ -1393,14 +1393,14 @@ mod tests {
         let expected = source.workspace_ontology().unwrap();
         let bundle = root.path().join("adopted.gfpb");
         source
-            .export_portable_v2(
-                &PortableV2ExportRequest {
+            .export_portable(
+                &PortableExportRequest {
                     selection: PortableSelection::Current,
                     output_path: bundle.clone(),
-                    representation: crate::PortableV2Output::Bundle,
-                    profile: crate::PortableV2SelectionProfile::Complete,
+                    representation: crate::PortableOutput::Bundle,
+                    profile: crate::PortableSelectionProfile::Complete,
                     subset: None,
-                    limits: crate::PortableV2Limits::default(),
+                    limits: crate::PortableLimits::default(),
                 },
                 None,
                 |_| {},
@@ -1408,12 +1408,12 @@ mod tests {
             .unwrap();
 
         let target_path = root.path().join("imported-adopted");
-        GraphForge::import_portable_v2(
+        GraphForge::import_portable(
             &target_path,
-            &PortableV2ImportRequest {
+            &PortableImportRequest {
                 input: bundle,
                 operation_id: OperationId(Uuid::from_u128(2)),
-                limits: crate::PortableV2Limits::default(),
+                limits: crate::PortableLimits::default(),
             },
             None,
         )
@@ -1438,14 +1438,14 @@ mod tests {
         assert_eq!(source.ontology_mode(), OntologyMode::Advisory);
         let session_bundle = root.path().join("session.gfpb");
         source
-            .export_portable_v2(
-                &PortableV2ExportRequest {
+            .export_portable(
+                &PortableExportRequest {
                     selection: PortableSelection::Current,
                     output_path: session_bundle.clone(),
-                    representation: crate::PortableV2Output::Bundle,
-                    profile: crate::PortableV2SelectionProfile::Complete,
+                    representation: crate::PortableOutput::Bundle,
+                    profile: crate::PortableSelectionProfile::Complete,
                     subset: None,
-                    limits: crate::PortableV2Limits::default(),
+                    limits: crate::PortableLimits::default(),
                 },
                 None,
                 |_| {},
@@ -1453,12 +1453,12 @@ mod tests {
             .unwrap();
 
         let session_target = root.path().join("imported-session");
-        GraphForge::import_portable_v2(
+        GraphForge::import_portable(
             &session_target,
-            &PortableV2ImportRequest {
+            &PortableImportRequest {
                 input: session_bundle,
                 operation_id: OperationId(Uuid::from_u128(3)),
-                limits: crate::PortableV2Limits::default(),
+                limits: crate::PortableLimits::default(),
             },
             None,
         )
@@ -1487,14 +1487,14 @@ mod tests {
             .unwrap();
         let cleared_bundle = root.path().join("cleared.gfpb");
         source
-            .export_portable_v2(
-                &PortableV2ExportRequest {
+            .export_portable(
+                &PortableExportRequest {
                     selection: PortableSelection::Current,
                     output_path: cleared_bundle.clone(),
-                    representation: crate::PortableV2Output::Bundle,
-                    profile: crate::PortableV2SelectionProfile::Complete,
+                    representation: crate::PortableOutput::Bundle,
+                    profile: crate::PortableSelectionProfile::Complete,
                     subset: None,
-                    limits: crate::PortableV2Limits::default(),
+                    limits: crate::PortableLimits::default(),
                 },
                 None,
                 |_| {},
@@ -1502,12 +1502,12 @@ mod tests {
             .unwrap();
 
         let cleared_target = root.path().join("imported-cleared");
-        GraphForge::import_portable_v2(
+        GraphForge::import_portable(
             &cleared_target,
-            &PortableV2ImportRequest {
+            &PortableImportRequest {
                 input: cleared_bundle,
                 operation_id: OperationId(Uuid::from_u128(6)),
-                limits: crate::PortableV2Limits::default(),
+                limits: crate::PortableLimits::default(),
             },
             None,
         )
@@ -1527,13 +1527,13 @@ mod tests {
         std::fs::create_dir(&project).unwrap();
         let _graph = GraphForge::new(project.to_str()).unwrap();
         let generation = graphforge_storage::resolve_project_generation(&project).unwrap();
-        let limits = graphforge_core::portable::PortableV2Limits::default();
-        let plan = graphforge_storage::plan_complete_portable_v2(&generation, limits).unwrap();
+        let limits = graphforge_core::portable::PortableLimits::default();
+        let plan = graphforge_storage::plan_complete_portable(&generation, limits).unwrap();
         let bundle = root.path().join("pkg.gfpb");
-        graphforge_storage::export_complete_portable_v2(
+        graphforge_storage::export_complete_portable(
             &plan,
             &bundle,
-            graphforge_core::portable::PortableV2Output::Bundle,
+            graphforge_core::portable::PortableOutput::Bundle,
             limits,
             &AtomicBool::new(false),
             |_| {},
@@ -1541,15 +1541,15 @@ mod tests {
         .unwrap();
 
         let registry = graphforge_portable_oci::MemoryOciRegistry::default();
-        let published = publish_portable_v2_oci_with_registry(
+        let published = publish_portable_oci_with_registry(
             &registry,
-            &crate::portable_oci::PortableV2OciPublishRequest {
+            &crate::portable_oci::PortableOciPublishRequest {
                 package_path: &bundle,
                 registry: "memory.local",
                 repository: "tests/facade",
                 tag: Some("latest"),
                 limits,
-                authenticity: graphforge_core::portable::PortableV2OciAuthenticityPolicy::default(),
+                authenticity: graphforge_core::portable::PortableOciAuthenticityPolicy::default(),
                 signature: None,
                 credential: None,
             },
@@ -1557,16 +1557,16 @@ mod tests {
         )
         .unwrap();
         let destination = root.path().join("pulled.gfpb");
-        let pulled = pull_portable_v2_oci_with_registry(
+        let pulled = pull_portable_oci_with_registry(
             &registry,
-            &crate::portable_oci::PortableV2OciPullRequest {
+            &crate::portable_oci::PortableOciPullRequest {
                 registry: "memory.local",
                 repository: "tests/facade",
                 reference: &published.oci_manifest_digest,
                 expected_oci_digest: None,
                 destination: &destination,
                 limits,
-                authenticity: graphforge_core::portable::PortableV2OciAuthenticityPolicy::default(),
+                authenticity: graphforge_core::portable::PortableOciAuthenticityPolicy::default(),
                 credential: None,
             },
             None,
@@ -1575,14 +1575,14 @@ mod tests {
         assert_eq!(pulled.report.package_digest, published.package_digest);
         assert_eq!(
             pulled.signature_state,
-            graphforge_core::portable::PortableV2OciSignatureState::Absent
+            graphforge_core::portable::PortableOciSignatureState::Absent
         );
     }
 }
 
-impl std::fmt::Debug for PortableV2OciPublishFacadeRequest {
+impl std::fmt::Debug for PortableOciPublishFacadeRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("PortableV2OciPublishFacadeRequest")
+        f.debug_struct("PortableOciPublishFacadeRequest")
             .field("package_path", &self.package_path)
             .field("registry", &self.registry)
             .field("repository", &self.repository)
@@ -1596,9 +1596,9 @@ impl std::fmt::Debug for PortableV2OciPublishFacadeRequest {
     }
 }
 
-impl std::fmt::Debug for PortableV2OciPullFacadeRequest {
+impl std::fmt::Debug for PortableOciPullFacadeRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("PortableV2OciPullFacadeRequest")
+        f.debug_struct("PortableOciPullFacadeRequest")
             .field("registry", &self.registry)
             .field("repository", &self.repository)
             .field("reference", &self.reference)
@@ -1612,7 +1612,7 @@ impl std::fmt::Debug for PortableV2OciPullFacadeRequest {
     }
 }
 
-impl PortableV2ImportResult {
+impl PortableImportResult {
     /// Qualify durable cleanup and report the ordered peak of claimed staging
     /// plus the lifecycle-admitted destination, excluding pre-admission activity.
     pub fn transient_peak_allocated_bytes(&self) -> Result<u64, GfError> {
@@ -1646,7 +1646,7 @@ impl PortableV2ImportResult {
 /// Identity-free export receipt used by the CLI's established JSON contract.
 /// The facade's own result serialization retains its existing output-path field.
 #[derive(Debug, Serialize)]
-pub struct PortableV2ExportReceiptView<'a> {
+pub struct PortableExportReceiptView<'a> {
     /// Contract name.
     pub contract: &'a str,
     /// Source selector kind.
@@ -1675,11 +1675,11 @@ pub struct PortableV2ExportReceiptView<'a> {
     pub allocation_physical_objects: u64,
 }
 
-impl PortableV2ExportFacadeResult {
+impl PortableExportFacadeResult {
     /// Project the complete established identity-free CLI receipt.
     #[must_use]
-    pub fn receipt(&self) -> PortableV2ExportReceiptView<'_> {
-        PortableV2ExportReceiptView {
+    pub fn receipt(&self) -> PortableExportReceiptView<'_> {
+        PortableExportReceiptView {
             contract: self.contract,
             source: self.source,
             checkpoint: &self.checkpoint,
@@ -1703,18 +1703,18 @@ impl PortableV2ExportFacadeResult {
 
 /// Bounded verified-expanded-package repacking request.
 #[derive(Debug, Clone)]
-pub struct PortableV2RepackRequest {
+pub struct PortableRepackRequest {
     /// Source expanded package; verified before bundle publication.
     pub source: PathBuf,
     /// Exclusive destination bundle path.
     pub destination: PathBuf,
     /// Finite verifier and writer limits.
-    pub limits: graphforge_core::portable::PortableV2Limits,
+    pub limits: graphforge_core::portable::PortableLimits,
 }
 
 /// Passive repacking outcome; contains no plan, lease or private source identity.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PortableV2RepackResult {
+pub struct PortableRepackResult {
     /// Original package generation identity.
     pub generation_uuid: Uuid,
     /// Semantic package identity, preserved byte-for-byte.
@@ -1739,17 +1739,17 @@ pub struct PortableV2RepackResult {
 }
 
 /// Repack a verified expanded package while preserving its semantic manifest.
-pub fn repack_verified_expanded_portable_v2(
-    request: &PortableV2RepackRequest,
+pub fn repack_verified_expanded_portable(
+    request: &PortableRepackRequest,
     cancelled: &AtomicBool,
-) -> Result<PortableV2RepackResult, graphforge_core::portable::PortableV2Error> {
-    let result = graphforge_storage::repack_verified_expanded_portable_v2(
+) -> Result<PortableRepackResult, graphforge_core::portable::PortableError> {
+    let result = graphforge_storage::repack_verified_expanded_portable(
         &request.source,
         &request.destination,
         request.limits,
         cancelled,
     )?;
-    Ok(PortableV2RepackResult {
+    Ok(PortableRepackResult {
         generation_uuid: result.generation_uuid,
         package_digest: result.package_digest,
         transport_digest: result.transport_digest,
@@ -1766,8 +1766,8 @@ pub fn repack_verified_expanded_portable_v2(
 mod facade_boundary_tests {
     use super::*;
     use graphforge_core::portable::{
-        PortableV2GraphSelector, PortableV2PropertyProjection, PortableV2SubsetClosure,
-        PortableV2SubsetRequest,
+        PortableGraphSelector, PortablePropertyProjection, PortableSubsetClosure,
+        PortableSubsetRequest,
     };
 
     #[test]
@@ -1802,23 +1802,23 @@ mod facade_boundary_tests {
             .collect::<Vec<_>>();
         ids.sort();
         assert_eq!(ids.len(), 2);
-        let limits = crate::PortableV2Limits::default();
-        let request = PortableV2SubsetRequest {
-            selector: PortableV2GraphSelector {
+        let limits = crate::PortableLimits::default();
+        let request = PortableSubsetRequest {
+            selector: PortableGraphSelector {
                 node_uuids: ids,
                 edge_uuids: Vec::new(),
             },
-            closure: PortableV2SubsetClosure::InducedEdges,
-            projection: PortableV2PropertyProjection::default(),
+            closure: PortableSubsetClosure::InducedEdges,
+            projection: PortablePropertyProjection::default(),
         };
         let (generation, _, _) = graph
             .resolve_portable_generation(&PortableSelection::Current)
             .unwrap();
         let physical =
-            graphforge_storage::preview_portable_v2_graph_subset(&generation, &request, limits)
+            graphforge_storage::preview_portable_graph_subset(&generation, &request, limits)
                 .unwrap();
         let preview = graph
-            .preview_portable_v2_graph_subset(&PortableV2SubsetPreviewRequest {
+            .preview_portable_graph_subset(&PortableSubsetPreviewRequest {
                 selection: PortableSelection::Current,
                 request: request.clone(),
                 limits,
@@ -1831,12 +1831,12 @@ mod facade_boundary_tests {
         assert_eq!(preview.selected_edge_count, 1);
         let package = root.path().join("subset.gfpb");
         let exported = graph
-            .export_portable_v2(
-                &PortableV2ExportRequest {
+            .export_portable(
+                &PortableExportRequest {
                     selection: PortableSelection::Current,
                     output_path: package.clone(),
-                    representation: crate::PortableV2Output::Bundle,
-                    profile: crate::PortableV2SelectionProfile::Complete,
+                    representation: crate::PortableOutput::Bundle,
+                    profile: crate::PortableSelectionProfile::Complete,
                     subset: Some(request),
                     limits,
                 },
@@ -1845,10 +1845,10 @@ mod facade_boundary_tests {
             )
             .unwrap();
         assert_eq!(exported.selection_fingerprint, preview.subset_fingerprint);
-        let verified = verify_portable_v2(
+        let verified = verify_portable(
             &PortableVerifyRequest {
                 input: package,
-                mode: crate::PortableV2Mode::Full,
+                mode: crate::PortableMode::Full,
                 limits,
             },
             None,
@@ -1857,7 +1857,7 @@ mod facade_boundary_tests {
         assert_eq!(verified.package_digest, exported.package_digest);
         assert_eq!(
             verified.package_class,
-            crate::PortableV2PackageClass::GraphDataSubset
+            crate::PortablePackageClass::GraphDataSubset
         );
     }
 }
@@ -1873,14 +1873,14 @@ mod repack_boundary_tests {
         let graph = GraphForge::new(source.to_str()).unwrap();
         graph.execute("CREATE (:Person {name: 'Ada'})").unwrap();
         let expanded = root.path().join("expanded");
-        let limits = crate::PortableV2Limits::default();
+        let limits = crate::PortableLimits::default();
         let exported = graph
-            .export_portable_v2(
-                &PortableV2ExportRequest {
+            .export_portable(
+                &PortableExportRequest {
                     selection: PortableSelection::Current,
                     output_path: expanded.clone(),
-                    representation: crate::PortableV2Output::Expanded,
-                    profile: crate::PortableV2SelectionProfile::Complete,
+                    representation: crate::PortableOutput::Expanded,
+                    profile: crate::PortableSelectionProfile::Complete,
                     subset: None,
                     limits,
                 },
@@ -1888,22 +1888,22 @@ mod repack_boundary_tests {
                 |_| {},
             )
             .unwrap();
-        let request = PortableV2RepackRequest {
+        let request = PortableRepackRequest {
             source: expanded.clone(),
             destination: root.path().join("bundle.gfpb"),
             limits,
         };
         let repacked =
-            repack_verified_expanded_portable_v2(&request, &AtomicBool::new(false)).unwrap();
+            repack_verified_expanded_portable(&request, &AtomicBool::new(false)).unwrap();
         assert_eq!(
             format!("sha256:{}", hex(repacked.package_digest)),
             exported.package_digest
         );
         assert_eq!(repacked.generation_uuid, exported.generation_uuid);
-        let verified = verify_portable_v2(
+        let verified = verify_portable(
             &PortableVerifyRequest {
                 input: request.destination.clone(),
-                mode: crate::PortableV2Mode::Full,
+                mode: crate::PortableMode::Full,
                 limits,
             },
             None,
@@ -1916,22 +1916,22 @@ mod repack_boundary_tests {
         );
         let before = std::fs::read(&request.destination).unwrap();
         assert_eq!(
-            repack_verified_expanded_portable_v2(&request, &AtomicBool::new(false))
+            repack_verified_expanded_portable(&request, &AtomicBool::new(false))
                 .unwrap_err()
                 .code,
-            crate::PortableV2ErrorCode::Io
+            crate::PortableErrorCode::Io
         );
         assert_eq!(std::fs::read(&request.destination).unwrap(), before);
         std::fs::write(expanded.join("bagit.txt"), b"invalid").unwrap();
-        let invalid_request = PortableV2RepackRequest {
+        let invalid_request = PortableRepackRequest {
             destination: root.path().join("invalid.gfpb"),
             ..request
         };
         assert_eq!(
-            repack_verified_expanded_portable_v2(&invalid_request, &AtomicBool::new(false))
+            repack_verified_expanded_portable(&invalid_request, &AtomicBool::new(false))
                 .unwrap_err()
                 .code,
-            crate::PortableV2ErrorCode::DigestMismatch
+            crate::PortableErrorCode::DigestMismatch
         );
         assert!(!invalid_request.destination.exists());
     }
@@ -1939,7 +1939,7 @@ mod repack_boundary_tests {
     #[test]
     fn import_allocation_qualification_deduplicates_and_requires_durable_cleanup() {
         use std::collections::BTreeMap;
-        let mut result = PortableV2ImportResult {
+        let mut result = PortableImportResult {
             package_digest: "package".into(),
             transport_digest: None,
             generation_uuid: Uuid::nil(),
@@ -1981,7 +1981,7 @@ mod repack_boundary_tests {
     #[test]
     fn import_allocation_qualification_rejects_live_alias_disagreement_and_underreported_peak() {
         use std::collections::BTreeMap;
-        let mut result = PortableV2ImportResult {
+        let mut result = PortableImportResult {
             package_digest: "package".into(),
             transport_digest: None,
             generation_uuid: Uuid::nil(),
@@ -2028,7 +2028,7 @@ mod repack_boundary_tests {
             .unwrap();
         assert_eq!(ordered.peak_allocated_bytes(), 16);
 
-        let result = PortableV2ImportResult {
+        let result = PortableImportResult {
             package_digest: "package".into(),
             transport_digest: None,
             generation_uuid: Uuid::nil(),

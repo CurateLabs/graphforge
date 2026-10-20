@@ -8,7 +8,7 @@ use arrow::array::{Array as _, FixedSizeBinaryArray, Int64Array};
 use graphforge_api::{
     BranchSource, BuildResearchLineageRequest, CancellationToken, CreateResearchBranchRequest,
     ExecuteResearchBranchRequest, ExportResearchRequest, ForkResearchRequest, PortableSelection,
-    PortableV2ExportRequest, PortableV2Output, PortableV2SelectionProfile, ResearchFieldIdentity,
+    PortableExportRequest, PortableOutput, PortableSelectionProfile, ResearchFieldIdentity,
     ResearchReference, ResearchReferenceTarget, SliceMembers, SliceRequest, SliceSelector,
     SliceSource, SubmitResearchProposalRequest, WorkspaceResearchMetadata,
 };
@@ -347,14 +347,14 @@ fn publish_history() -> Published {
     // so the Project package here carries the graph data components. Research
     // clones never fetch it.
     let exported = fork
-        .export_portable_v2(
-            &PortableV2ExportRequest {
+        .export_portable(
+            &PortableExportRequest {
                 selection: PortableSelection::Current,
                 output_path: output.clone(),
-                representation: PortableV2Output::Bundle,
-                profile: PortableV2SelectionProfile::DataComponents,
+                representation: PortableOutput::Bundle,
+                profile: PortableSelectionProfile::DataComponents,
                 subset: None,
-                limits: PortableV2Limits::default(),
+                limits: PortableLimits::default(),
             },
             None,
             |_| {},
@@ -1208,14 +1208,14 @@ fn branchless_lineage_preserves_complete_project_clone_and_corruption_never_down
     graph.execute("CREATE (:Item {score:42})").unwrap();
     let output = root.path().join("complete.gfbundle");
     let exported = graph
-        .export_portable_v2(
-            &PortableV2ExportRequest {
+        .export_portable(
+            &PortableExportRequest {
                 selection: PortableSelection::Current,
                 output_path: output.clone(),
-                representation: PortableV2Output::Bundle,
-                profile: PortableV2SelectionProfile::Complete,
+                representation: PortableOutput::Bundle,
+                profile: PortableSelectionProfile::Complete,
                 subset: None,
-                limits: PortableV2Limits::default(),
+                limits: PortableLimits::default(),
             },
             None,
             |_| {},

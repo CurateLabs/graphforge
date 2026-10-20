@@ -1,13 +1,13 @@
-//! Project summary derivation from verified portable-v2 packages, over real
+//! Project summary derivation from verified portable packages, over real
 //! durable Projects and real exports.
 
 use graphforge_api::{
-    ActivationMode, ActivationProfileChangeRequest, AdoptOntologyRequest, DiscoveryPortableV2Error,
+    ActivationMode, ActivationProfileChangeRequest, AdoptOntologyRequest, DiscoveryPortableError,
     GraphForge, ModuleAdoptionRequest, OntologyAuthorityExpectation, OntologyMode,
-    PortableSelection, PortableV2ExportRequest, PortableV2Limits, PortableV2Mode, PortableV2Output,
-    PortableV2PackageIndex, PortableV2ParticipantId, PortableV2SelectionProfile,
+    PortableSelection, PortableExportRequest, PortableLimits, PortableMode, PortableOutput,
+    PortablePackageIndex, PortableParticipantId, PortableSelectionProfile,
     PortableVerifyRequest, ProjectSummaryRequest, UpdateResearchMetadataRequest,
-    WorkspaceResearchMetadata, WriteContext, summarize_verified_portable_v2, verify_portable_v2,
+    WorkspaceResearchMetadata, WriteContext, summarize_verified_portable, verify_portable,
 };
 use graphforge_discovery::{
     BridgeSetDescriptor, DISCOVERY_FORMAT, DiscoveryErrorCode, DiscoveryLimits, DiscoveryManifest,
@@ -29,7 +29,7 @@ use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 const BAGIT: &[u8] = b"BagIt-Version: 1.0\nTag-File-Character-Encoding: UTF-8\n";
-const BAG_INFO: &[u8] = b"Bag-Software-Agent: GraphForge portable-v2\nBagging-Date: 1970-01-01\n";
+const BAG_INFO: &[u8] = b"Bag-Software-Agent: GraphForge portable\nBagging-Date: 1970-01-01\n";
 const MANIFEST_PATH: &str = "data/graphforge-project.json";
 
 const PRIVATE_COLLABORATOR: &str = "private-collaborator@example.org";
@@ -141,18 +141,18 @@ fn exported_project() -> Exported {
     let bundle = root.path().join("project.gfpb");
     let expanded = root.path().join("project.gfproject");
     for (path, representation) in [
-        (&bundle, PortableV2Output::Bundle),
-        (&expanded, PortableV2Output::Expanded),
+        (&bundle, PortableOutput::Bundle),
+        (&expanded, PortableOutput::Expanded),
     ] {
         graph
-            .export_portable_v2(
-                &PortableV2ExportRequest {
+            .export_portable(
+                &PortableExportRequest {
                     selection: PortableSelection::Current,
                     output_path: path.clone(),
                     representation,
-                    profile: PortableV2SelectionProfile::Complete,
+                    profile: PortableSelectionProfile::Complete,
                     subset: None,
-                    limits: PortableV2Limits::default(),
+                    limits: PortableLimits::default(),
                 },
                 None,
                 |_| {},
@@ -166,23 +166,23 @@ fn exported_project() -> Exported {
     }
 }
 
-fn summarize(package: &Path) -> Result<ProjectSummary, DiscoveryPortableV2Error> {
-    summarize_verified_portable_v2(&ProjectSummaryRequest {
+fn summarize(package: &Path) -> Result<ProjectSummary, DiscoveryPortableError> {
+    summarize_verified_portable(&ProjectSummaryRequest {
         repository: &repository(),
         immutable_version: &marker('a'),
         package,
         discovery_limits: DiscoveryLimits::default(),
-        portable_limits: PortableV2Limits::default(),
+        portable_limits: PortableLimits::default(),
         cancelled: None,
     })
 }
 
-fn report(package: &Path) -> graphforge_core::portable::PortableV2Report {
-    verify_portable_v2(
+fn report(package: &Path) -> graphforge_core::portable::PortableReport {
+    verify_portable(
         &PortableVerifyRequest {
             input: package.to_path_buf(),
-            mode: PortableV2Mode::Full,
-            limits: PortableV2Limits::default(),
+            mode: PortableMode::Full,
+            limits: PortableLimits::default(),
         },
         None,
     )
@@ -207,21 +207,21 @@ fn summary_bytes_are_identical_for_bundle_and_expanded_and_facts_are_verified() 
     let exported = exported_project();
     let repository = repository();
     let immutable_version = marker('a');
-    let from_bundle = summarize_verified_portable_v2(&ProjectSummaryRequest {
+    let from_bundle = summarize_verified_portable(&ProjectSummaryRequest {
         repository: &repository,
         immutable_version: &immutable_version,
         package: &exported.bundle,
         discovery_limits: DiscoveryLimits::default(),
-        portable_limits: PortableV2Limits::default(),
+        portable_limits: PortableLimits::default(),
         cancelled: None,
     })
     .unwrap();
-    let from_directory = summarize_verified_portable_v2(&ProjectSummaryRequest {
+    let from_directory = summarize_verified_portable(&ProjectSummaryRequest {
         repository: &repository,
         immutable_version: &immutable_version,
         package: &exported.expanded,
         discovery_limits: DiscoveryLimits::default(),
-        portable_limits: PortableV2Limits::default(),
+        portable_limits: PortableLimits::default(),
         cancelled: None,
     })
     .unwrap();
@@ -434,7 +434,7 @@ fn summary_binds_to_a_manifest_built_with_discovery_types() {
 fn participantless_package() -> tempfile::TempDir {
     let root = tempfile::tempdir().unwrap();
     let mut value: Value = serde_json::from_str(include_str!(
-        "../../../tests/fixtures/portable-v2/ontology-only.manifest.json"
+        "../../../tests/fixtures/portable/ontology-only.manifest.json"
     ))
     .unwrap();
     value.as_object_mut().unwrap().remove("package_digest");
@@ -513,11 +513,11 @@ fn unknown_required_capability_fails_before_any_package_io() {
     let consume = |summary: &[u8]| -> Result<(), String> {
         ProjectSummary::from_json(summary, DiscoveryLimits::default())
             .map_err(|error| format!("{:?}", error.code))?;
-        verify_portable_v2(
+        verify_portable(
             &PortableVerifyRequest {
                 input: never_created.clone(),
-                mode: PortableV2Mode::Full,
-                limits: PortableV2Limits::default(),
+                mode: PortableMode::Full,
+                limits: PortableLimits::default(),
             },
             None,
         )
@@ -556,14 +556,14 @@ fn ontology_mode_follows_the_persisted_configuration() {
             .expect("adopt ontology");
         let bundle = root.path().join("project.gfpb");
         graph
-            .export_portable_v2(
-                &PortableV2ExportRequest {
+            .export_portable(
+                &PortableExportRequest {
                     selection: PortableSelection::Current,
                     output_path: bundle.clone(),
-                    representation: PortableV2Output::Bundle,
-                    profile: PortableV2SelectionProfile::Complete,
+                    representation: PortableOutput::Bundle,
+                    profile: PortableSelectionProfile::Complete,
                     subset: None,
-                    limits: PortableV2Limits::default(),
+                    limits: PortableLimits::default(),
                 },
                 None,
                 |_| {},
@@ -622,14 +622,14 @@ fn multi_module_activation_profile_sets_the_summary_mode() {
             .expect("change activation profile");
         let bundle = root.path().join("project.gfpb");
         graph
-            .export_portable_v2(
-                &PortableV2ExportRequest {
+            .export_portable(
+                &PortableExportRequest {
                     selection: PortableSelection::Current,
                     output_path: bundle.clone(),
-                    representation: PortableV2Output::Bundle,
-                    profile: PortableV2SelectionProfile::Complete,
+                    representation: PortableOutput::Bundle,
+                    profile: PortableSelectionProfile::Complete,
                     subset: None,
-                    limits: PortableV2Limits::default(),
+                    limits: PortableLimits::default(),
                 },
                 None,
                 |_| {},
@@ -709,14 +709,14 @@ fn replace_package_file(package: &Path, path: &str, bytes: &[u8]) {
 fn malformed_research_metadata_participant_is_a_participant_error() {
     let exported = exported_project();
     let digest = report(&exported.expanded).package_digest;
-    let record = PortableV2PackageIndex::open(
+    let record = PortablePackageIndex::open(
         &exported.expanded,
         &digest,
-        PortableV2Limits::default(),
+        PortableLimits::default(),
         None,
     )
     .unwrap()
-    .participant_file(&PortableV2ParticipantId {
+    .participant_file(&PortableParticipantId {
         capability_id: "workspace".into(),
         record_family_id: "research_metadata".into(),
     })
@@ -730,7 +730,7 @@ fn malformed_research_metadata_participant_is_a_participant_error() {
     assert!(
         matches!(
             &error,
-            DiscoveryPortableV2Error::Participant { participant, .. }
+            DiscoveryPortableError::Participant { participant, .. }
                 if *participant == "workspace/research_metadata"
         ),
         "{error:?}"

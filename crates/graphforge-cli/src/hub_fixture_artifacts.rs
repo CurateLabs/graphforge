@@ -7,10 +7,10 @@ use crate::hub_publish::publication::{
 use graphforge_api::{
     ActivationMode, ActivationProfileChangeRequest, DiscoveryOntologyModuleRequest, GraphForge,
     ModuleAdoptionRequest, OntologyAuthorityExpectation, OntologyDoc, OperationId,
-    PortableSelection, PortableV2ExportRequest, PortableV2ImportRequest, PortableV2Limits,
-    PortableV2Output, PortableV2SelectionProfile, ResearchAccessPolicyMetadata, ResearchCorpusSize,
+    PortableSelection, PortableExportRequest, PortableImportRequest, PortableLimits,
+    PortableOutput, PortableSelectionProfile, ResearchAccessPolicyMetadata, ResearchCorpusSize,
     UpdateResearchMetadataRequest, WorkspaceResearchMetadata, WriteContext,
-    repack_verified_expanded_portable_v2, resolve_discovered_ontology_module,
+    repack_verified_expanded_portable, resolve_discovered_ontology_module,
 };
 use graphforge_discovery::{
     DISCOVERY_FORMAT, DiscoveryLimits, DiscoveryManifest, ExactIdentity, ObjectDescriptor,
@@ -149,7 +149,7 @@ fn fixture_research_metadata() -> WorkspaceResearchMetadata {
 /// tree is built and fully verified beside `destination` and swapped in only
 /// when complete; a failed swap restores the previous tree.
 pub fn rebuild_source(destination: &Path) -> Result<(), String> {
-    let limits = PortableV2Limits::default();
+    let limits = PortableLimits::default();
     let parent = destination
         .parent()
         .ok_or("fixture source destination has no parent directory")?;
@@ -194,12 +194,12 @@ pub fn rebuild_source(destination: &Path) -> Result<(), String> {
         .map_err(err)?;
     let staged = staging.path().join("source");
     graph
-        .export_portable_v2(
-            &PortableV2ExportRequest {
+        .export_portable(
+            &PortableExportRequest {
                 selection: PortableSelection::Current,
                 output_path: staged.clone(),
-                representation: PortableV2Output::Expanded,
-                profile: PortableV2SelectionProfile::Complete,
+                representation: PortableOutput::Expanded,
+                profile: PortableSelectionProfile::Complete,
                 subset: None,
                 limits,
             },
@@ -313,14 +313,14 @@ fn repository_identity() -> RepositoryIdentity {
 )]
 pub fn generate(source: &Path, destination: &Path, location_base: &str) -> Result<(), String> {
     validate_location_base(location_base)?;
-    let limits = PortableV2Limits::default();
+    let limits = PortableLimits::default();
     let source_report = verify_full(source)?;
     let scratch = tempfile::tempdir().map_err(err)?;
     let imported = scratch.path().join("imported");
     let operation_id = OperationId(Uuid::from_u128(0x91f2_1a60_d89e_54e1_9000_0000_0000_0001));
-    GraphForge::import_portable_v2(
+    GraphForge::import_portable(
         &imported,
-        &PortableV2ImportRequest {
+        &PortableImportRequest {
             input: source.to_path_buf(),
             operation_id,
             limits,
@@ -331,8 +331,8 @@ pub fn generate(source: &Path, destination: &Path, location_base: &str) -> Resul
     let imported_project = GraphForge::new(imported.to_str()).map_err(err)?;
     fs::create_dir_all(destination.join("objects")).map_err(err)?;
     let object_path = destination.join(OBJECT_PATH);
-    let exported = repack_verified_expanded_portable_v2(
-        &graphforge_api::PortableV2RepackRequest {
+    let exported = repack_verified_expanded_portable(
+        &graphforge_api::PortableRepackRequest {
             source: source.to_path_buf(),
             destination: object_path.clone(),
             limits,
@@ -342,9 +342,9 @@ pub fn generate(source: &Path, destination: &Path, location_base: &str) -> Resul
     .map_err(err)?;
     let verified = verify_full(&object_path)?;
     let imported_bundle = scratch.path().join("imported-bundle");
-    let bundle_import = GraphForge::import_portable_v2(
+    let bundle_import = GraphForge::import_portable(
         &imported_bundle,
-        &PortableV2ImportRequest {
+        &PortableImportRequest {
             input: object_path.clone(),
             operation_id: OperationId(Uuid::from_u128(0x91f2_1a60_d89e_54e1_9000_0000_0000_0002)),
             limits,
@@ -669,7 +669,7 @@ fn validate_modules(
             module: &identity,
             package: &file,
             discovery_limits: DiscoveryLimits::default(),
-            portable_limits: PortableV2Limits::default(),
+            portable_limits: PortableLimits::default(),
             cancelled: None,
         })
         .map_err(err)?;
@@ -815,7 +815,7 @@ fn tree_digest(root: &Path) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use graphforge_api::{PortableV2Mode, PortableVerifyRequest, verify_portable_v2};
+    use graphforge_api::{PortableMode, PortableVerifyRequest, verify_portable};
 
     fn root() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -914,11 +914,11 @@ mod tests {
         );
         let private_object = tempfile::NamedTempFile::new().unwrap();
         fs::write(private_object.path(), &object).unwrap();
-        let verified = verify_portable_v2(
+        let verified = verify_portable(
             &PortableVerifyRequest {
                 input: private_object.path().to_path_buf(),
-                mode: PortableV2Mode::Full,
-                limits: PortableV2Limits::default(),
+                mode: PortableMode::Full,
+                limits: PortableLimits::default(),
             },
             None,
         )

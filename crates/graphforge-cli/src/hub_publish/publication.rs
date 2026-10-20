@@ -6,10 +6,10 @@
 //! module derives; it never re-derives semantics.
 
 use graphforge_api::{
-    GraphForge, PortableSelection, PortableV2ExactIdentity, PortableV2ExportRequest,
-    PortableV2Limits, PortableV2Mode, PortableV2Output, PortableV2SelectionProfile,
+    GraphForge, PortableSelection, PortableExactIdentity, PortableExportRequest,
+    PortableLimits, PortableMode, PortableOutput, PortableSelectionProfile,
     PortableVerifyRequest, PortableVerifyResult, ProjectSummaryRequest,
-    summarize_verified_portable_v2, verify_portable_v2,
+    summarize_verified_portable, verify_portable,
 };
 use graphforge_discovery::{
     DISCOVERY_FORMAT, DiscoveryLimits, DiscoveryManifest, ObjectDescriptor, OntologyInventory,
@@ -48,11 +48,11 @@ fn hex(bytes: &[u8]) -> String {
 
 /// Fully verify the portable package at `input`.
 pub fn verify_full(input: &Path) -> Result<PortableVerifyResult, DerivationError> {
-    verify_portable_v2(
+    verify_portable(
         &PortableVerifyRequest {
             input: input.to_path_buf(),
-            mode: PortableV2Mode::Full,
-            limits: PortableV2Limits::default(),
+            mode: PortableMode::Full,
+            limits: PortableLimits::default(),
         },
         None,
     )
@@ -133,18 +133,18 @@ pub fn verify_exported_bundle(
 /// Export the current generation of `graph` with `profile` as one verified bundle.
 pub fn export_verified_bundle(
     graph: &GraphForge,
-    profile: PortableV2SelectionProfile,
+    profile: PortableSelectionProfile,
     path: &Path,
 ) -> Result<VerifiedBundle, DerivationError> {
     let receipt = graph
-        .export_portable_v2(
-            &PortableV2ExportRequest {
+        .export_portable(
+            &PortableExportRequest {
                 selection: PortableSelection::Current,
                 output_path: path.to_path_buf(),
-                representation: PortableV2Output::Bundle,
+                representation: PortableOutput::Bundle,
                 profile,
                 subset: None,
-                limits: PortableV2Limits::default(),
+                limits: PortableLimits::default(),
             },
             None,
             |_| {},
@@ -169,12 +169,12 @@ pub fn derive_summary(
     immutable_version: &Sha256Digest,
     package: &Path,
 ) -> Result<DerivedSummary, DerivationError> {
-    let summary = summarize_verified_portable_v2(&ProjectSummaryRequest {
+    let summary = summarize_verified_portable(&ProjectSummaryRequest {
         repository,
         immutable_version,
         package,
         discovery_limits: DiscoveryLimits::default(),
-        portable_limits: PortableV2Limits::default(),
+        portable_limits: PortableLimits::default(),
         cancelled: None,
     })
     .map_err(err)?;
@@ -210,7 +210,7 @@ pub fn export_module_packages(
     for module in composition.map_or(&[][..], |composition| composition.modules.as_slice()) {
         let bundle = export_verified_bundle(
             graph,
-            PortableV2SelectionProfile::OntologyComposition(vec![PortableV2ExactIdentity {
+            PortableSelectionProfile::OntologyComposition(vec![PortableExactIdentity {
                 id: module.id.clone(),
                 version: module.version.clone(),
                 content_digest: module.content_digest.0.clone(),

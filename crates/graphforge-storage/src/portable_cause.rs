@@ -1,4 +1,4 @@
-//! A sanitized rendering of the error behind a portable-v2 I/O failure.
+//! A sanitized rendering of the error behind a portable I/O failure.
 //!
 //! Portable errors keep a stable, path-free `detail`. When the cause of an I/O
 //! failure matters for diagnosis (the platform error kind, and which file of the

@@ -19,16 +19,16 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use arrow::array::{FixedSizeBinaryArray, Int64Array};
 use graphforge_api::{
-    CheckpointRequest, GraphForge, OperationId, PortableSelection, PortableV2ExportRequest,
-    PortableV2ImportRequest, PortableVerifyRequest, verify_portable_v2,
+    CheckpointRequest, GraphForge, OperationId, PortableSelection, PortableExportRequest,
+    PortableImportRequest, PortableVerifyRequest, verify_portable,
 };
 use graphforge_core::OntologyMode;
 use graphforge_storage::{
     GRAPH_CAPABILITY_ID, GRAPH_CAPABILITY_VERSION, GRAPH_FILES_FAMILY, GraphFileRole,
-    GraphFilesOpenStrategy, GraphWriter, GraphWriterLimits, PortableV2GraphSelector,
-    PortableV2Limits, PortableV2Mode, PortableV2Output, PortableV2PackageClass,
-    PortableV2PropertyProjection, PortableV2SelectionProfile, PortableV2SubsetClosure,
-    PortableV2SubsetRequest, ProjectCapability, ProjectGenerationRequest, ProjectStageOutcome,
+    GraphFilesOpenStrategy, GraphWriter, GraphWriterLimits, PortableGraphSelector,
+    PortableLimits, PortableMode, PortableOutput, PortablePackageClass,
+    PortablePropertyProjection, PortableSelectionProfile, PortableSubsetClosure,
+    PortableSubsetRequest, ProjectCapability, ProjectGenerationRequest, ProjectStageOutcome,
     TopologyIdentityProbe, UuidIndexKind, capture_graph_files, empty_workspace_participants,
     resolve_project_generation, stage_project_generation_with_graph_tree,
 };
@@ -213,22 +213,22 @@ fn sharded_graph_uses_ordinary_reopen_query_and_portable_round_trip() {
     assert!(open.files_copied > 0 && open.files_copied < open.files_validated);
     assert_eq!(open.files_copied + open.files_reused, open.files_validated);
 
-    let limits = PortableV2Limits::default();
+    let limits = PortableLimits::default();
     let subset_package = root.path().join("later-edge-subset.gfpb");
     reopened
-        .export_portable_v2(
-            &PortableV2ExportRequest {
+        .export_portable(
+            &PortableExportRequest {
                 selection: PortableSelection::Current,
                 output_path: subset_package.clone(),
-                representation: PortableV2Output::Bundle,
-                profile: PortableV2SelectionProfile::Complete,
-                subset: Some(PortableV2SubsetRequest {
-                    selector: PortableV2GraphSelector {
+                representation: PortableOutput::Bundle,
+                profile: PortableSelectionProfile::Complete,
+                subset: Some(PortableSubsetRequest {
+                    selector: PortableGraphSelector {
                         node_uuids: Vec::new(),
                         edge_uuids: vec![later_edge_uuid.hyphenated().to_string()],
                     },
-                    closure: PortableV2SubsetClosure::Referential,
-                    projection: PortableV2PropertyProjection::default(),
+                    closure: PortableSubsetClosure::Referential,
+                    projection: PortablePropertyProjection::default(),
                 }),
                 limits,
             },
@@ -236,10 +236,10 @@ fn sharded_graph_uses_ordinary_reopen_query_and_portable_round_trip() {
             |_| {},
         )
         .unwrap();
-    let subset_verified = verify_portable_v2(
+    let subset_verified = verify_portable(
         &PortableVerifyRequest {
             input: subset_package,
-            mode: PortableV2Mode::Full,
+            mode: PortableMode::Full,
             limits,
         },
         None,
@@ -247,17 +247,17 @@ fn sharded_graph_uses_ordinary_reopen_query_and_portable_round_trip() {
     .unwrap();
     assert_eq!(
         subset_verified.package_class,
-        PortableV2PackageClass::GraphDataSubset
+        PortablePackageClass::GraphDataSubset
     );
 
     let package = root.path().join("sharded.gfpb");
     let exported = reopened
-        .export_portable_v2(
-            &PortableV2ExportRequest {
+        .export_portable(
+            &PortableExportRequest {
                 selection: PortableSelection::Current,
                 output_path: package.clone(),
-                representation: PortableV2Output::Bundle,
-                profile: PortableV2SelectionProfile::Complete,
+                representation: PortableOutput::Bundle,
+                profile: PortableSelectionProfile::Complete,
                 subset: None,
                 limits,
             },
@@ -266,10 +266,10 @@ fn sharded_graph_uses_ordinary_reopen_query_and_portable_round_trip() {
         )
         .unwrap();
     drop(reopened);
-    let verified = verify_portable_v2(
+    let verified = verify_portable(
         &PortableVerifyRequest {
             input: package.clone(),
-            mode: PortableV2Mode::Full,
+            mode: PortableMode::Full,
             limits,
         },
         None,
@@ -279,9 +279,9 @@ fn sharded_graph_uses_ordinary_reopen_query_and_portable_round_trip() {
 
     let imported_path = root.path().join("clean-import");
     assert!(!imported_path.exists(), "import target must start clean");
-    GraphForge::import_portable_v2(
+    GraphForge::import_portable(
         &imported_path,
-        &PortableV2ImportRequest {
+        &PortableImportRequest {
             input: package,
             operation_id: OperationId(Uuid::from_u128(931)),
             limits,
@@ -472,15 +472,15 @@ fn public_delete_keeps_multishard_index_readers_and_portability_consistent() {
     assert_eq!(source_result.stats.rows_produced, 1);
     let source_fingerprint = result_fingerprint(&source_result);
 
-    let limits = PortableV2Limits::default();
+    let limits = PortableLimits::default();
     let package = root.path().join("deleted-sharded.gfpb");
     let exported = reopened
-        .export_portable_v2(
-            &PortableV2ExportRequest {
+        .export_portable(
+            &PortableExportRequest {
                 selection: PortableSelection::Current,
                 output_path: package.clone(),
-                representation: PortableV2Output::Bundle,
-                profile: PortableV2SelectionProfile::Complete,
+                representation: PortableOutput::Bundle,
+                profile: PortableSelectionProfile::Complete,
                 subset: None,
                 limits,
             },
@@ -489,10 +489,10 @@ fn public_delete_keeps_multishard_index_readers_and_portability_consistent() {
         )
         .unwrap();
     drop(reopened);
-    let verified = verify_portable_v2(
+    let verified = verify_portable(
         &PortableVerifyRequest {
             input: package.clone(),
-            mode: PortableV2Mode::Full,
+            mode: PortableMode::Full,
             limits,
         },
         None,
@@ -501,9 +501,9 @@ fn public_delete_keeps_multishard_index_readers_and_portability_consistent() {
     assert_eq!(verified.package_digest, exported.package_digest);
 
     let imported_path = root.path().join("deleted-clean-import");
-    GraphForge::import_portable_v2(
+    GraphForge::import_portable(
         &imported_path,
-        &PortableV2ImportRequest {
+        &PortableImportRequest {
             input: package,
             operation_id: OperationId(Uuid::from_u128(931_2)),
             limits,
@@ -668,26 +668,26 @@ fn streaming_export_supports_file_backed_generation_and_reopens() {
     graph.execute("CREATE (:Person {name: 'Ada'})").unwrap();
     let output = root.path().join("file-backed.gfpb");
     let exported = graph
-        .export_portable_v2(
-            &PortableV2ExportRequest {
+        .export_portable(
+            &PortableExportRequest {
                 selection: PortableSelection::Current,
                 output_path: output.clone(),
-                representation: graphforge_api::PortableV2Output::Bundle,
-                profile: graphforge_api::PortableV2SelectionProfile::Complete,
+                representation: graphforge_api::PortableOutput::Bundle,
+                profile: graphforge_api::PortableSelectionProfile::Complete,
                 subset: None,
-                limits: graphforge_api::PortableV2Limits::default(),
+                limits: graphforge_api::PortableLimits::default(),
             },
             None,
             |_| {},
         )
         .unwrap();
     let target = root.path().join("imported");
-    let imported = GraphForge::import_portable_v2(
+    let imported = GraphForge::import_portable(
         &target,
-        &PortableV2ImportRequest {
+        &PortableImportRequest {
             input: output,
             operation_id: OperationId(Uuid::now_v7()),
-            limits: graphforge_api::PortableV2Limits::default(),
+            limits: graphforge_api::PortableLimits::default(),
         },
         None,
     )

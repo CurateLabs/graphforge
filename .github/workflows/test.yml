@@ -333,9 +333,9 @@ jobs:
           filesystem_admission::tests::
           durable_commit::windows_allocation_tests::windows_immutable_link_refreshes_native_allocation_and_preserves_reused_temporary
           adjacency::installation::tests::csr_shard_publication_supports_long_windows_paths
-          project_portable_v2_export::tests::destination_replacement_and_source_mutation_fail_closed
-          project_portable_v2_export::tests::canonical_source_path_
-          project_portable_v2_import::tests::authenticated_cleanup_releases_handles_before_removal
+          project_portable_export::tests::destination_replacement_and_source_mutation_fail_closed
+          project_portable_export::tests::canonical_source_path_
+          project_portable_import::tests::authenticated_cleanup_releases_handles_before_removal
           graph_object_store::installation::repair_tests::
           graph_object_store::tests::pure_reads_require_only_existing_digest_namespace_and_never_create
           graph_object_store::tests::read_only_guard_pins_cas_against_gc
@@ -359,7 +359,7 @@ jobs:
           cargo test -p graphforge-storage --features test-failpoints --lib --no-fail-fast --
           project_recovery::tests::subprocess_kill_matrix_never_exposes_a_partial_generation
           project_recovery::tests::injected_operation_errors_report_exact_commit_state
-          project_portable_v2_import::tests::crash_
+          project_portable_import::tests::crash_
           project_certification
 
       # Clone downloads, resumes, and imports into a staged target that one

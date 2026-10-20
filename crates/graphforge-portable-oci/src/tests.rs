@@ -68,7 +68,7 @@ fn foreign_upload_location_never_receives_credentials() {
     let error = client
         .put_blob("repo", &digest_sha256(b"data"), b"data")
         .unwrap_err();
-    assert_eq!(error.code, PortableV2ErrorCode::InvalidPath);
+    assert_eq!(error.code, PortableErrorCode::InvalidPath);
     assert!(!error.to_string().contains("private-token"));
     assert!(
         origin
@@ -102,7 +102,7 @@ fn bounded_manifest_and_blob_responses_keep_typed_errors() {
         } else {
             client.get_blob("repo", &digest_sha256(b"data"))
         };
-        assert_eq!(result.unwrap_err().code, PortableV2ErrorCode::Io);
+        assert_eq!(result.unwrap_err().code, PortableErrorCode::Io);
         server.join().unwrap();
     }
 }
@@ -113,7 +113,7 @@ fn redirects_and_error_bodies_are_not_returned_or_followed() {
         let (host, server) = response_server(format!("HTTP/1.1 {status} Rejected\r\nLocation: http://invalid.example/secret\r\nContent-Length: 19\r\nConnection: close\r\n\r\nsecret server body!").into_bytes());
         let client = HttpOciRegistry::new(&host, Some("user:secret"), true).unwrap();
         let error = client.get_manifest("repo", "latest").unwrap_err();
-        assert_eq!(error.code, PortableV2ErrorCode::InvalidStructure);
+        assert_eq!(error.code, PortableErrorCode::InvalidStructure);
         assert!(!format!("{error:?}").contains("secret"));
         server.join().unwrap();
     }
@@ -122,8 +122,8 @@ fn redirects_and_error_bodies_are_not_returned_or_followed() {
 #[test]
 fn malformed_truncated_and_digest_mismatched_downloads_are_typed() {
     for (body, length, expected) in [
-        (b"bad".as_slice(), 3, PortableV2ErrorCode::DigestMismatch),
-        (b"bad".as_slice(), 10, PortableV2ErrorCode::Io),
+        (b"bad".as_slice(), 3, PortableErrorCode::DigestMismatch),
+        (b"bad".as_slice(), 10, PortableErrorCode::Io),
     ] {
         let mut response =
             format!("HTTP/1.1 200 OK\r\nContent-Length: {length}\r\nConnection: close\r\n\r\n")
@@ -187,7 +187,7 @@ fn control_character_credentials_are_refused_by_the_message_they_report() {
         let Err(error) = HttpOciRegistry::new("registry.invalid", Some(credential), true) else {
             panic!("a control character must be refused");
         };
-        assert_eq!(error.code, PortableV2ErrorCode::InvalidPath);
+        assert_eq!(error.code, PortableErrorCode::InvalidPath);
         assert!(error.to_string().contains("control characters"));
     }
     assert!(HttpOciRegistry::new("registry.invalid", Some("token-second"), true).is_ok());

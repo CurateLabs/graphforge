@@ -88,7 +88,7 @@ async function portableFailure(call) {
     assert.equal(error.code, envelope.code);
     return envelope;
   }
-  assert.fail("expected native portable-v2 failure");
+  assert.fail("expected native portable failure");
 }
 
 function canonical(value) {
@@ -297,7 +297,7 @@ async function runSemantics() {
       true,
     );
     const bridgePortable = join(subject.root, "portable-with-bridge");
-    await forge.exportPortableV2({
+    await forge.exportPortable({
       outputPath: bridgePortable,
       representation: "expanded",
     });
@@ -352,14 +352,14 @@ async function runSemantics() {
 
     const portable = join(subject.root, "portable");
     stage = "portable";
-    await forge.exportPortableV2({
+    await forge.exportPortable({
       outputPath: portable,
       representation: "expanded",
     });
     await assertCompositionReceipt(forge, portable, false);
     injectUnsupportedFeature(portable);
     const unsupported = await portableFailure(() =>
-      GraphForge.verifyPortableV2({
+      GraphForge.verifyPortable({
         input: portable,
         mode: "structure_only",
       }),
@@ -370,7 +370,7 @@ async function runSemantics() {
     const beforeEntries = readdirSync(failedImportRoot);
     const importAuthorityBefore = forge.ontologyAuthorityState();
     const importFailure = await portableFailure(() =>
-      GraphForge.importPortableV2({
+      GraphForge.importPortable({
         projectRoot: failedImportRoot,
         input: portable,
         operationId: randomUUID(),
@@ -519,7 +519,7 @@ test("dependency blocked deletion", async () => {
 });
 
 test("unsupported future portability", async () => {
-  const verifyPortableV2 = "verifyPortableV2";
+  const verifyPortable = "verifyPortable";
   const unsupported_future_version = oracle.expected.unsupported_future_code;
   assert.equal(
     (await semantics()).unsupported.code,
@@ -530,7 +530,7 @@ test("unsupported future portability", async () => {
       .diagnostic_code,
     oracle.expected.unsupported_future_diagnostic,
   );
-  assert.ok(verifyPortableV2);
+  assert.ok(verifyPortable);
 });
 
 test("cancellation", async () => {
@@ -611,7 +611,7 @@ test("packaged clean install", async () => {
 });
 
 async function assertCompositionReceipt(forge, portable, requireBridge) {
-  const verifiedComposition = await GraphForge.verifyPortableV2({
+  const verifiedComposition = await GraphForge.verifyPortable({
     input: portable,
     mode: "full",
   });
@@ -669,7 +669,7 @@ async function assertCompositionReceipt(forge, portable, requireBridge) {
     verifiedComposition.ontologyCompositionEntries,
     expectedEntries,
   );
-  const preview = forge.previewPortableV2Selection({ profile: "complete" });
+  const preview = forge.previewPortableSelection({ profile: "complete" });
   const projected = expectedEntries
     .map((entry) => {
       const length = Number(entry.length);

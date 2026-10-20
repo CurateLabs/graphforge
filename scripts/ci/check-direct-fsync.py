@@ -106,7 +106,7 @@ ALLOWED = {
         "sync_all",
     ): 1,
     (
-        "crates/graphforge-storage/src/project_portable_v2_export.rs",
+        "crates/graphforge-storage/src/project_portable_export.rs",
         "export_failed_partial_write_is_observed_before_cleanup",
         "observed_sync_all",
     ): 1,

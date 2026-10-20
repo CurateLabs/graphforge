@@ -6,15 +6,15 @@ use arrow::array::{Array, FixedSizeBinaryArray, Int64Array, ListArray, StringArr
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use graphforge_core::portable::{
-    PortableV2Limits, PortableV2Mode, PortableV2Output, PortableV2SelectionProfile,
+    PortableLimits, PortableMode, PortableOutput, PortableSelectionProfile,
 };
 use graphforge_storage::TopologyIdentityProbe;
 use uuid::Uuid;
 
 use crate::{
     CONSTRUCTION_EDGE_SCHEMA, CONSTRUCTION_NODE_SCHEMA, GraphConstructionBudgets, GraphForge,
-    OperationId, PortableSelection, PortableV2ExportRequest, PortableV2ImportRequest,
-    PortableVerifyRequest, verify_portable_v2,
+    OperationId, PortableSelection, PortableExportRequest, PortableImportRequest,
+    PortableVerifyRequest, verify_portable,
 };
 
 type NodeRow = (Uuid, Vec<String>);
@@ -321,15 +321,15 @@ fn compact_public_construction_reopens_and_round_trips_exact_graph() {
         (expected_nodes.clone(), expected_edges.clone())
     );
     assert_eq!(ordinals(&graph, &ids), expected_ordinals);
-    let limits = PortableV2Limits::default();
+    let limits = PortableLimits::default();
     let package = root.path().join("graph.gfpb");
     let exported = graph
-        .export_portable_v2(
-            &PortableV2ExportRequest {
+        .export_portable(
+            &PortableExportRequest {
                 selection: PortableSelection::Current,
                 output_path: package.clone(),
-                representation: PortableV2Output::Bundle,
-                profile: PortableV2SelectionProfile::Complete,
+                representation: PortableOutput::Bundle,
+                profile: PortableSelectionProfile::Complete,
                 subset: None,
                 limits,
             },
@@ -337,10 +337,10 @@ fn compact_public_construction_reopens_and_round_trips_exact_graph() {
             |_| {},
         )
         .unwrap();
-    let verified = verify_portable_v2(
+    let verified = verify_portable(
         &PortableVerifyRequest {
             input: package.clone(),
-            mode: PortableV2Mode::Full,
+            mode: PortableMode::Full,
             limits,
         },
         None,
@@ -350,9 +350,9 @@ fn compact_public_construction_reopens_and_round_trips_exact_graph() {
     drop(graph);
     let target = root.path().join("imported");
     assert!(!target.exists());
-    let imported = GraphForge::import_portable_v2(
+    let imported = GraphForge::import_portable(
         &target,
-        &PortableV2ImportRequest {
+        &PortableImportRequest {
             input: package,
             operation_id: OperationId(Uuid::from_u128(100)),
             limits,

@@ -1,4 +1,4 @@
-//! CLI surfaces for portable-v2, OCI promotion, streaming query sinks, and staged ingest (#744).
+//! CLI surfaces for portable, OCI promotion, streaming query sinks, and staged ingest (#744).
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -7,18 +7,18 @@ use std::time::Duration;
 use clap::{Args, Subcommand, ValueEnum};
 use graphforge_api::{
     BulkInputKind, GraphForge, ImportSessionLimits, OperationId, PortableSelection,
-    PortableV2Error, PortableV2ExportRequest, PortableV2ImportRequest, PortableV2Limits,
-    PortableV2Mode, PortableV2OciAuthenticityPolicy, PortableV2OciPublishFacadeRequest,
-    PortableV2OciPullFacadeRequest, PortableV2Output, PortableV2SelectionPreviewRequest,
-    PortableV2SelectionProfile, PortableV2SelectionRequest, PortableVerifyRequest,
-    ResultSinkOptions, publish_portable_v2_oci, pull_portable_v2_oci, verify_portable_v2,
+    PortableError, PortableExportRequest, PortableImportRequest, PortableLimits,
+    PortableMode, PortableOciAuthenticityPolicy, PortableOciPublishFacadeRequest,
+    PortableOciPullFacadeRequest, PortableOutput, PortableSelectionPreviewRequest,
+    PortableSelectionProfile, PortableSelectionRequest, PortableVerifyRequest,
+    ResultSinkOptions, publish_portable_oci, pull_portable_oci, verify_portable,
 };
 use serde_json::Value;
 use uuid::Uuid;
 
 use crate::canonical_uuid;
 
-fn map_portable(error: PortableV2Error) -> crate::CliRuntimeError {
+fn map_portable(error: PortableError) -> crate::CliRuntimeError {
     graphforge_api::MultiOntologyError::from(error).into()
 }
 
@@ -46,9 +46,9 @@ fn selection_flag(
 
 #[derive(Subcommand)]
 pub(crate) enum PortableCommand {
-    /// Preview a content-free portable-v2 component selection.
+    /// Preview a content-free portable component selection.
     Preview(PortablePreviewArgs),
-    /// Inspect or fully verify a portable-v2 package.
+    /// Inspect or fully verify a portable package.
     Verify(PortableVerifyArgs),
     /// Publish a verified package through an OCI Distribution registry.
     PublishOci(PortablePublishOciArgs),
@@ -78,7 +78,7 @@ enum PortableProfile {
     Settings,
 }
 
-impl From<PortableProfile> for PortableV2SelectionProfile {
+impl From<PortableProfile> for PortableSelectionProfile {
     fn from(value: PortableProfile) -> Self {
         match value {
             PortableProfile::Complete => Self::Complete,
@@ -96,7 +96,7 @@ enum PortableFormat {
     Bundle,
 }
 
-impl From<PortableFormat> for PortableV2Output {
+impl From<PortableFormat> for PortableOutput {
     fn from(value: PortableFormat) -> Self {
         match value {
             PortableFormat::Expanded => Self::Expanded,
@@ -111,7 +111,7 @@ enum VerifyMode {
     Full,
 }
 
-impl From<VerifyMode> for PortableV2Mode {
+impl From<VerifyMode> for PortableMode {
     fn from(value: VerifyMode) -> Self {
         match value {
             VerifyMode::Inspect => Self::StructureOnly,
@@ -137,7 +137,7 @@ pub(crate) struct PortablePreviewArgs {
 }
 
 #[derive(Args)]
-pub(crate) struct PortableV2ExportArgs {
+pub(crate) struct PortableExportArgs {
     #[arg(
         long,
         required_unless_present = "checkpoint",
@@ -163,7 +163,7 @@ pub(crate) struct PortableVerifyArgs {
 }
 
 #[derive(Args)]
-pub(crate) struct PortableV2ImportArgs {
+pub(crate) struct PortableImportArgs {
     #[arg(long)]
     input: PathBuf,
     #[arg(long)]
@@ -228,13 +228,13 @@ pub(crate) fn run_portable(
     match command {
         PortableCommand::Preview(args) => {
             let plan = graph
-                .preview_portable_v2_selection(&PortableV2SelectionPreviewRequest {
+                .preview_portable_selection(&PortableSelectionPreviewRequest {
                     selection: selection_flag(args.current, args.checkpoint)?,
-                    request: PortableV2SelectionRequest {
+                    request: PortableSelectionRequest {
                         profile: args.profile.into(),
                         strict: args.strict,
                     },
-                    limits: PortableV2Limits::default(),
+                    limits: PortableLimits::default(),
                 })
                 .map_err(map_portable)?;
             if json {
@@ -264,7 +264,7 @@ pub(crate) fn run_portable(
     Ok(())
 }
 
-fn portable_export_receipt(result: &graphforge_api::PortableV2ExportFacadeResult) -> Value {
+fn portable_export_receipt(result: &graphforge_api::PortableExportFacadeResult) -> Value {
     serde_json::to_value(result.receipt())
         .expect("portable receipt contains serializable scalar values")
 }
@@ -289,11 +289,11 @@ pub(crate) fn run_portable_without_graph(
             .into())
         }
         PortableCommand::Verify(args) => {
-            let report = verify_portable_v2(
+            let report = verify_portable(
                 &PortableVerifyRequest {
                     input: args.input,
                     mode: args.mode.into(),
-                    limits: PortableV2Limits::default(),
+                    limits: PortableLimits::default(),
                 },
                 None,
             )
@@ -312,14 +312,14 @@ pub(crate) fn run_portable_without_graph(
         }
 
         PortableCommand::PublishOci(args) => {
-            let reference = publish_portable_v2_oci(
-                &PortableV2OciPublishFacadeRequest {
+            let reference = publish_portable_oci(
+                &PortableOciPublishFacadeRequest {
                     package_path: args.package,
                     registry: args.registry,
                     repository: args.repository,
                     tag: args.tag,
-                    limits: PortableV2Limits::default(),
-                    authenticity: PortableV2OciAuthenticityPolicy::default(),
+                    limits: PortableLimits::default(),
+                    authenticity: PortableOciAuthenticityPolicy::default(),
                     signature: None,
                     insecure_http: args.insecure_http,
                     credential: oci_credential(std::env::var(OCI_CREDENTIAL_ENV).ok()),
@@ -350,15 +350,15 @@ pub(crate) fn run_portable_without_graph(
             Ok(())
         }
         PortableCommand::PullOci(args) => {
-            let receipt = pull_portable_v2_oci(
-                &PortableV2OciPullFacadeRequest {
+            let receipt = pull_portable_oci(
+                &PortableOciPullFacadeRequest {
                     registry: args.registry,
                     repository: args.repository,
                     reference: args.reference,
                     expected_oci_digest: args.expected_digest,
                     destination: args.destination,
-                    limits: PortableV2Limits::default(),
-                    authenticity: PortableV2OciAuthenticityPolicy::default(),
+                    limits: PortableLimits::default(),
+                    authenticity: PortableOciAuthenticityPolicy::default(),
                     insecure_http: args.insecure_http,
                     credential: oci_credential(std::env::var(OCI_CREDENTIAL_ENV).ok()),
                 },
@@ -388,7 +388,7 @@ pub(crate) fn run_portable_without_graph(
 }
 
 fn import_transient_peak(
-    result: &graphforge_api::PortableV2ImportResult,
+    result: &graphforge_api::PortableImportResult,
 ) -> Result<u64, graphforge_api::GfError> {
     result.transient_peak_allocated_bytes()
 }
@@ -763,7 +763,7 @@ mod lifecycle_storage_tests {
 
     #[test]
     fn portable_export_receipt_exposes_closed_writer_allocation() {
-        let result = graphforge_api::PortableV2ExportFacadeResult {
+        let result = graphforge_api::PortableExportFacadeResult {
             contract: "graphforge-portable-export/2",
             source: "current",
             checkpoint: None,
@@ -794,8 +794,8 @@ mod lifecycle_storage_tests {
         }
     }
 
-    fn import_result() -> graphforge_api::PortableV2ImportResult {
-        graphforge_api::PortableV2ImportResult {
+    fn import_result() -> graphforge_api::PortableImportResult {
+        graphforge_api::PortableImportResult {
             package_digest: format!("sha256:{}", "0".repeat(64)),
             transport_digest: Some(format!("sha256:{}", "1".repeat(64))),
             generation_uuid: Uuid::nil(),
@@ -866,19 +866,19 @@ mod oci_credential_tests {
 
 pub(crate) fn run_export(
     graph: &GraphForge,
-    args: PortableV2ExportArgs,
+    args: PortableExportArgs,
     json: bool,
     output: &mut dyn Write,
 ) -> Result<(), crate::CliRuntimeError> {
     let result = graph
-        .export_portable_v2(
-            &PortableV2ExportRequest {
+        .export_portable(
+            &PortableExportRequest {
                 selection: selection_flag(args.current, args.checkpoint)?,
                 output_path: args.output,
                 representation: args.format.into(),
                 profile: args.profile.into(),
                 subset: None,
-                limits: PortableV2Limits::default(),
+                limits: PortableLimits::default(),
             },
             None,
             |progress| {
@@ -915,19 +915,19 @@ pub(crate) fn run_export(
 
 pub(crate) fn run_import(
     project_root: &std::path::Path,
-    args: PortableV2ImportArgs,
+    args: PortableImportArgs,
     json: bool,
     output: &mut dyn Write,
     allocation: Option<&graphforge_api::StorageAllocationDiagnostics>,
 ) -> Result<(), crate::CliRuntimeError> {
-    let request = PortableV2ImportRequest {
+    let request = PortableImportRequest {
         input: args.input,
         operation_id: OperationId(canonical_uuid(&args.idempotency_key)?),
-        limits: PortableV2Limits::default(),
+        limits: PortableLimits::default(),
     };
     let result = match allocation {
         Some(allocation) => allocation.import(project_root, &request, None),
-        None => GraphForge::import_portable_v2(project_root, &request, None),
+        None => GraphForge::import_portable(project_root, &request, None),
     }
     .map_err(map_portable)?;
     let transient_peak_allocated_bytes = import_transient_peak(&result)?;

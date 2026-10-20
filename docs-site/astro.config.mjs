@@ -407,7 +407,7 @@ export default defineConfig({
                 },
                 {
                   label: '0022 — Multi-ontology semantics in portable project v2',
-                  slug: 'adr/0022-portable-v2-multi-ontology-compatibility',
+                  slug: 'adr/0022-portable-multi-ontology-compatibility',
                 },
                 {
                   label: '0023 — Composable ontology modules and semantic bridges',

@@ -689,20 +689,20 @@ fn legacy_flat_baseline_survives_set_remove_and_reopen() {
         .unwrap();
     drop(parent_generation);
     let generation = crate::resolve_project_generation(project.path()).unwrap();
-    let limits = crate::PortableV2ExportLimits::default();
-    let plan = crate::plan_complete_portable_v2(&generation, limits).unwrap();
+    let limits = crate::PortableExportLimits::default();
+    let plan = crate::plan_complete_portable(&generation, limits).unwrap();
     let package_parent = TempDir::new().unwrap();
     let package = package_parent.path().join("legacy-migration.gfproject");
-    crate::export_complete_portable_v2(
+    crate::export_complete_portable(
         &plan,
         &package,
-        crate::PortableV2Output::Expanded,
+        crate::PortableOutput::Expanded,
         limits,
         &std::sync::atomic::AtomicBool::new(false),
         |_| {},
     )
     .unwrap();
-    crate::verify_portable_v2(&package, crate::PortableV2Mode::Full, limits, None).unwrap();
+    crate::verify_portable(&package, crate::PortableMode::Full, limits, None).unwrap();
     let supported = generation
         .capabilities()
         .into_iter()
@@ -713,7 +713,7 @@ fn legacy_flat_baseline_survives_set_remove_and_reopen() {
         .collect::<Vec<_>>();
     let imported_parent = TempDir::new().unwrap();
     let imported = imported_parent.path().join("clean-import");
-    crate::import_complete_portable_v2(
+    crate::import_complete_portable(
         &package,
         &imported,
         uuid::Uuid::now_v7(),

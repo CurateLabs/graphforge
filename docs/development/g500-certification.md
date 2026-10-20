@@ -122,7 +122,7 @@ breaches.
 
 The same public Rust-facade run performs preflight, target-live generation,
 bounded ingest, CSR construction, source reopen and one/two-hop observations,
-portable-v2 bundle export, full verification, atomic import, imported reopen and
+portable bundle export, full verification, atomic import, imported reopen and
 matching observations, plus representative corruption, cancellation, resource
 limit, and interrupted-finalization drills. Source generation, semantic package,
 transport, and imported generation identities remain distinct and reconciled.

@@ -77,7 +77,7 @@ pub struct CompositionChangePreview {
     pub diagnostics: Vec<CompositionChangeDiagnostic>,
 }
 
-/// Semantic portable-v2 verdict for a candidate composition.
+/// Semantic portable verdict for a candidate composition.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CompositionPortableCompatibility {
@@ -964,7 +964,7 @@ fn portable_receipt(
     candidate: &WorkspaceOntologyComposition,
     canonical_bytes: &[u8],
 ) -> Result<CompositionPortableReceipt, GfError> {
-    let limits = graphforge_storage::PortableV2Limits::default();
+    let limits = graphforge_storage::PortableLimits::default();
     let component_count = candidate
         .modules
         .len()
@@ -978,7 +978,7 @@ fn portable_receipt(
         || byte_count > limits.max_total_bytes
     {
         return Err(GfError::Validation(
-            "ontology composition is not representable within portable-v2 limits".into(),
+            "ontology composition is not representable within portable limits".into(),
         ));
     }
     let mut modules = candidate

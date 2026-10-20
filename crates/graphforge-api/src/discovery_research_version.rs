@@ -2,15 +2,15 @@
 //!
 //! Discovery validates repository, refs, and lineage binding, then names an
 //! expected semantic package digest for one research Version. Package integrity
-//! belongs to the storage-owned portable-v2 verifier; native research validation
-//! of every archived Version runs exactly as in [`crate::verify_portable_v2`].
+//! belongs to the storage-owned portable verifier; native research validation
+//! of every archived Version runs exactly as in [`crate::verify_portable`].
 //! This module additionally requires the verified research registry to carry the
 //! selected Version with the lineage's identity digest and kind, before any
 //! destination exists.
 
-use crate::discovery_portable_v2::DiscoveryPortableV2Mismatch;
+use crate::discovery_portable::DiscoveryPortableMismatch;
 use graphforge_core::portable::{
-    PortableV2Error, PortableV2Limits, PortableV2Mode, PortableV2Report,
+    PortableError, PortableLimits, PortableMode, PortableReport,
 };
 use graphforge_discovery::{
     DiscoveryError, DiscoveryLimits, DiscoveryManifest, LineageVersion, RefSet, RepositoryIdentity,
@@ -26,9 +26,9 @@ pub enum DiscoveryResearchVersionError {
     /// The discovery response itself is invalid or unsupported.
     Discovery(DiscoveryError),
     /// Valid discovery documents disagree with the requested or verified identity.
-    ReferenceMismatch(DiscoveryPortableV2Mismatch),
-    /// The storage-owned portable-v2 verifier rejected the package.
-    Portable(PortableV2Error),
+    ReferenceMismatch(DiscoveryPortableMismatch),
+    /// The storage-owned portable verifier rejected the package.
+    Portable(PortableError),
 }
 
 impl fmt::Display for DiscoveryResearchVersionError {
@@ -57,8 +57,8 @@ pub struct DiscoveredResearchVersion {
     pub version_uuid: String,
     /// Lineage Version metadata bound before package verification.
     pub version: LineageVersion,
-    /// Report produced by the storage-owned portable-v2 verifier.
-    pub report: PortableV2Report,
+    /// Report produced by the storage-owned portable verifier.
+    pub report: PortableReport,
 }
 
 /// Inputs for one verification-first research Version admission attempt.
@@ -73,14 +73,14 @@ pub struct DiscoveryResearchVersionRequest<'a> {
     pub expected_repository: &'a RepositoryIdentity,
     /// Research Version UUID to resolve through lineage.
     pub version_uuid: &'a str,
-    /// Complete downloaded portable-v2 file or expanded directory.
+    /// Complete downloaded portable file or expanded directory.
     pub package: &'a Path,
     /// Bounds applied while parsing discovery documents.
     pub discovery_limits: DiscoveryLimits,
-    /// Bounds applied by the portable-v2 verifier.
-    pub portable_limits: PortableV2Limits,
+    /// Bounds applied by the portable verifier.
+    pub portable_limits: PortableLimits,
     /// Portable verification depth.
-    pub mode: PortableV2Mode,
+    pub mode: PortableMode,
     /// Optional cooperative cancellation signal.
     pub cancelled: Option<&'a AtomicBool>,
     /// Directory in which native research validation materializes the
@@ -103,7 +103,7 @@ pub fn verify_discovered_research_version(
         || &refs.repository != request.expected_repository
     {
         return Err(DiscoveryResearchVersionError::ReferenceMismatch(
-            DiscoveryPortableV2Mismatch::Repository,
+            DiscoveryPortableMismatch::Repository,
         ));
     }
     refs.validate_manifest(&manifest)
@@ -119,7 +119,7 @@ pub fn verify_discovered_research_version(
     let package = version.package.as_ref().expect(
         "research_version_object returns only Versions with an advertised package reference",
     );
-    let report = graphforge_storage::verify_portable_v2(
+    let report = graphforge_storage::verify_portable(
         request.package,
         request.mode,
         request.portable_limits,
@@ -128,14 +128,14 @@ pub fn verify_discovered_research_version(
     .map_err(DiscoveryResearchVersionError::Portable)?;
     if report.package_digest != package.package_digest.0 {
         return Err(DiscoveryResearchVersionError::ReferenceMismatch(
-            DiscoveryPortableV2Mismatch::PackageDigest,
+            DiscoveryPortableMismatch::PackageDigest,
         ));
     }
     // A research Version package must carry research interchange; a package
     // without it cannot prove which Version it holds.
     if !report.research_interchange {
         return Err(DiscoveryResearchVersionError::ReferenceMismatch(
-            DiscoveryPortableV2Mismatch::ResearchVersionIdentity,
+            DiscoveryPortableMismatch::ResearchVersionIdentity,
         ));
     }
     let report = verify_selected_research_version(request, version, &lineage)?;
@@ -154,11 +154,11 @@ fn verify_selected_research_version(
     request: &DiscoveryResearchVersionRequest<'_>,
     expected: &LineageVersion,
     lineage: &ResearchLineage,
-) -> Result<PortableV2Report, DiscoveryResearchVersionError> {
+) -> Result<PortableReport, DiscoveryResearchVersionError> {
     use graphforge_storage::research_versions::{ResearchRegistry, ResearchVersionRecord};
     let selected = uuid::Uuid::parse_str(&expected.version_uuid).map_err(|_| {
         DiscoveryResearchVersionError::ReferenceMismatch(
-            DiscoveryPortableV2Mismatch::ResearchVersionIdentity,
+            DiscoveryPortableMismatch::ResearchVersionIdentity,
         )
     })?;
     let mut matched = None;
@@ -216,7 +216,7 @@ fn verify_selected_research_version(
     .map_err(DiscoveryResearchVersionError::Portable)?;
     if matched != Some(true) {
         return Err(DiscoveryResearchVersionError::ReferenceMismatch(
-            DiscoveryPortableV2Mismatch::ResearchVersionIdentity,
+            DiscoveryPortableMismatch::ResearchVersionIdentity,
         ));
     }
     Ok(report)
@@ -227,10 +227,10 @@ fn verify_selected_research_version(
     _request: &DiscoveryResearchVersionRequest<'_>,
     _expected: &LineageVersion,
     _lineage: &ResearchLineage,
-) -> Result<PortableV2Report, DiscoveryResearchVersionError> {
+) -> Result<PortableReport, DiscoveryResearchVersionError> {
     Err(DiscoveryResearchVersionError::Portable(
-        PortableV2Error::new(
-            graphforge_core::portable::PortableV2ErrorCode::Incompatible,
+        PortableError::new(
+            graphforge_core::portable::PortableErrorCode::Incompatible,
             "research package validation requires the `research` feature",
         ),
     ))
@@ -281,7 +281,7 @@ fn selected_matches(
 fn map_immutable_mismatch(error: DiscoveryError) -> DiscoveryResearchVersionError {
     if error.field == Some("immutable_version") || error.field == Some("resolved_ref") {
         DiscoveryResearchVersionError::ReferenceMismatch(
-            DiscoveryPortableV2Mismatch::ImmutableVersion,
+            DiscoveryPortableMismatch::ImmutableVersion,
         )
     } else {
         DiscoveryResearchVersionError::Discovery(error)

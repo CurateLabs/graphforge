@@ -116,7 +116,7 @@ name = "knowledge_evolution_workflow"
 required-features = ["knowledge", "provenance", "search", "research"]
 
 [[test]]
-name = "discovery_portable_v2"
+name = "discovery_portable"
 required-features = ["discovery", "portable"]
 
 [[test]]

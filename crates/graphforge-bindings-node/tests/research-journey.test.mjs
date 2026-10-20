@@ -551,12 +551,12 @@ class Journey {
       bundled: false,
       projection,
     });
-    const verified = await GraphForge.verifyPortableV2({ input, mode: "full" });
+    const verified = await GraphForge.verifyPortable({ input, mode: "full" });
     assert.equal(verified.packageDigest, exported.package_digest);
     assert.equal(verified.researchInterchange, true);
     const request = { projectRoot, input, operationId: identity() };
-    const first = await GraphForge.importPortableV2(request),
-      replay = await GraphForge.importPortableV2(request);
+    const first = await GraphForge.importPortable(request),
+      replay = await GraphForge.importPortable(request);
     assert.equal(replay.idempotentReplay, true);
     assert.equal(replay.generationUuid, first.generationUuid);
     return new GraphForge(projectRoot);

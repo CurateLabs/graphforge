@@ -53,7 +53,7 @@ fn committed_fork_replays_after_source_version_release_without_resetting_destina
             .fork_research(&changed, &CancellationToken::new())
             .unwrap_err()
             .code,
-        PortableV2ErrorCode::ConcurrentMutation
+        PortableErrorCode::ConcurrentMutation
     );
     let reopened = GraphForge::new(Some(request.target.to_str().unwrap())).unwrap();
     assert_eq!(

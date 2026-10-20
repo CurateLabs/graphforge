@@ -35,8 +35,8 @@ use arrow::record_batch::RecordBatch;
 use graphforge_api::{
     CONSTRUCTION_EDGE_SCHEMA, CONSTRUCTION_NODE_SCHEMA, CancellationToken,
     GraphConstructionBudgets, GraphConstructionSession, GraphForge, OperationId, PortableSelection,
-    PortableV2ExportRequest, PortableV2ImportRequest, PortableV2Limits, PortableV2Mode,
-    PortableV2Output, PortableV2SelectionProfile, PortableVerifyRequest, verify_portable_v2,
+    PortableExportRequest, PortableImportRequest, PortableLimits, PortableMode,
+    PortableOutput, PortableSelectionProfile, PortableVerifyRequest, verify_portable,
 };
 use graphforge_core::{GfError, uuid::Uuid};
 use graphforge_exec::demand::{self, DemandSnapshot};
@@ -570,7 +570,7 @@ fn exact_descriptor_identities(paths: &[PathBuf]) -> BTreeMap<String, u64> {
 const CATEGORY_AUTHORITY_CONTRACT: &str = "graphforge-lifecycle-category-authority/2";
 
 fn portable_export_allocation(
-    receipt: &graphforge_api::PortableV2ExportFacadeResult,
+    receipt: &graphforge_api::PortableExportFacadeResult,
     rung: u64,
     generation_sha256: &str,
     live_nodes: u64,
@@ -3299,7 +3299,7 @@ struct DrillAllocationEvidence {
 
 fn create_bounded_drill_package(
     root: &Path,
-    limits: PortableV2Limits,
+    limits: PortableLimits,
 ) -> (PathBuf, String, DrillAllocationEvidence) {
     let project = root.join("drill-source");
     let package = root.join("drill.gfpb");
@@ -3333,12 +3333,12 @@ fn create_bounded_drill_package(
             .physical_identity_allocated_bytes;
     let expanded = root.join("drill-expanded");
     let expanded_receipt = graph
-        .export_portable_v2(
-            &PortableV2ExportRequest {
+        .export_portable(
+            &PortableExportRequest {
                 selection: PortableSelection::Current,
                 output_path: expanded.clone(),
-                representation: PortableV2Output::Expanded,
-                profile: PortableV2SelectionProfile::Complete,
+                representation: PortableOutput::Expanded,
+                profile: PortableSelectionProfile::Complete,
                 subset: None,
                 limits,
             },
@@ -3346,10 +3346,10 @@ fn create_bounded_drill_package(
             |_| {},
         )
         .expect("export compact drill expanded package");
-    verify_portable_v2(
+    verify_portable(
         &PortableVerifyRequest {
             input: expanded.clone(),
-            mode: PortableV2Mode::Full,
+            mode: PortableMode::Full,
             limits,
         },
         None,
@@ -3360,12 +3360,12 @@ fn create_bounded_drill_package(
     let cancelled = AtomicBool::new(true);
     let cancelled_path = root.join("drill-cancelled.gfpb");
     let cancelled_error = graph
-        .export_portable_v2(
-            &PortableV2ExportRequest {
+        .export_portable(
+            &PortableExportRequest {
                 selection: PortableSelection::Current,
                 output_path: cancelled_path.clone(),
-                representation: PortableV2Output::Bundle,
-                profile: PortableV2SelectionProfile::Complete,
+                representation: PortableOutput::Bundle,
+                profile: PortableSelectionProfile::Complete,
                 subset: None,
                 limits,
             },
@@ -3375,12 +3375,12 @@ fn create_bounded_drill_package(
         .expect_err("cancelled drill export must fail");
     assert!(!cancelled_path.exists());
     let receipt = graph
-        .export_portable_v2(
-            &PortableV2ExportRequest {
+        .export_portable(
+            &PortableExportRequest {
                 selection: PortableSelection::Current,
                 output_path: package.clone(),
-                representation: PortableV2Output::Bundle,
-                profile: PortableV2SelectionProfile::Complete,
+                representation: PortableOutput::Bundle,
+                profile: PortableSelectionProfile::Complete,
                 subset: None,
                 limits,
             },
@@ -3484,7 +3484,7 @@ fn run_integrated_certification_config(
     assert_eq!(certification_profile.runner_label, "required-at-dispatch");
     let certification_envelope = certification_profile.envelope;
     let mut journal = PhaseJournal::new(journal_path, root, certification_envelope);
-    let limits = PortableV2Limits::default();
+    let limits = PortableLimits::default();
     let phase = Instant::now();
     journal.pass("preflight", phase, None);
 
@@ -3724,19 +3724,19 @@ fn run_integrated_certification_config(
 
     let phase = Instant::now();
     let exported = graph
-        .export_portable_v2(
-            &PortableV2ExportRequest {
+        .export_portable(
+            &PortableExportRequest {
                 selection: PortableSelection::Current,
                 output_path: package.clone(),
-                representation: PortableV2Output::Bundle,
-                profile: PortableV2SelectionProfile::Complete,
+                representation: PortableOutput::Bundle,
+                profile: PortableSelectionProfile::Complete,
                 subset: None,
                 limits,
             },
             Some(journal.cancellation()),
             |_| {},
         )
-        .expect("portable-v2 export");
+        .expect("portable export");
     assert_eq!(source_generation, exported.generation_uuid);
     journal.replace_allocation_owner(
         "portable_package",
@@ -3744,30 +3744,30 @@ fn run_integrated_certification_config(
     );
     journal.pass("export", phase, Some(exported.package_digest.clone()));
     let phase = Instant::now();
-    let verified = verify_portable_v2(
+    let verified = verify_portable(
         &PortableVerifyRequest {
             input: package.clone(),
-            mode: PortableV2Mode::Full,
+            mode: PortableMode::Full,
             limits,
         },
         Some(journal.cancellation()),
     )
-    .expect("full portable-v2 verification");
+    .expect("full portable verification");
     assert_eq!(verified.package_digest, exported.package_digest);
     assert_eq!(verified.contract, "graphforge-portable-verify/2");
     journal.pass("verify", phase, Some(verified.package_digest.clone()));
 
     let phase = Instant::now();
-    let imported_receipt = GraphForge::import_portable_v2(
+    let imported_receipt = GraphForge::import_portable(
         &imported,
-        &PortableV2ImportRequest {
+        &PortableImportRequest {
             input: package.clone(),
             operation_id: OperationId(uuidv7(0x745)),
             limits,
         },
         Some(journal.cancellation()),
     )
-    .expect("atomic portable-v2 import");
+    .expect("atomic portable import");
     // Replay the storage-owned operation transitions in their actual order:
     // private materialization coexisted with the published generation until
     // deterministic staging cleanup completed.
@@ -3943,10 +3943,10 @@ fn run_integrated_certification_config(
         "drill_package",
         &exact_descriptor_identities(std::slice::from_ref(&drill_package)),
     );
-    let drill_verified = verify_portable_v2(
+    let drill_verified = verify_portable(
         &PortableVerifyRequest {
             input: drill_package.clone(),
-            mode: PortableV2Mode::Full,
+            mode: PortableMode::Full,
             limits,
         },
         None,
@@ -3968,10 +3968,10 @@ fn run_integrated_certification_config(
         &exact_descriptor_identities(std::slice::from_ref(&corrupt)),
     );
     assert!(
-        verify_portable_v2(
+        verify_portable(
             &PortableVerifyRequest {
                 input: corrupt,
-                mode: PortableV2Mode::Full,
+                mode: PortableMode::Full,
                 limits
             },
             None
@@ -3982,10 +3982,10 @@ fn run_integrated_certification_config(
     let phase = Instant::now();
     let cancelled = AtomicBool::new(true);
     assert!(
-        verify_portable_v2(
+        verify_portable(
             &PortableVerifyRequest {
                 input: drill_package.clone(),
-                mode: PortableV2Mode::Full,
+                mode: PortableMode::Full,
                 limits
             },
             Some(&cancelled)
@@ -3994,15 +3994,15 @@ fn run_integrated_certification_config(
     );
     journal.pass("drill_cancellation", phase, None);
     let phase = Instant::now();
-    let tiny = PortableV2Limits {
+    let tiny = PortableLimits {
         max_entries: 1,
         ..limits
     };
     assert!(
-        verify_portable_v2(
+        verify_portable(
             &PortableVerifyRequest {
                 input: drill_package.clone(),
-                mode: PortableV2Mode::Full,
+                mode: PortableMode::Full,
                 limits: tiny
             },
             None
@@ -4014,7 +4014,7 @@ fn run_integrated_certification_config(
     let interrupted = root.join("interrupted-target");
     let interrupted_operation = uuidv7(0x746);
     let interrupted_generation =
-        graphforge_core::uuid::portable_v2_import_generation(&interrupted_operation);
+        graphforge_core::uuid::portable_import_generation(&interrupted_operation);
     let interrupted_cancelled = AtomicBool::new(false);
     let supported_capabilities = [
         "epistemic",
@@ -4035,7 +4035,7 @@ fn run_integrated_certification_config(
     } else {
         &drill_package
     };
-    let interrupted_error = graphforge_storage::import_complete_portable_v2_with_progress(
+    let interrupted_error = graphforge_storage::import_complete_portable_with_progress(
         recovery_package,
         &interrupted,
         interrupted_operation,
@@ -4044,7 +4044,7 @@ fn run_integrated_certification_config(
         limits,
         Some(&interrupted_cancelled),
         |progress| {
-            if progress.phase == graphforge_storage::PortableV2ImportPhase::Materialized {
+            if progress.phase == graphforge_storage::PortableImportPhase::Materialized {
                 interrupted_cancelled.store(true, Ordering::SeqCst);
             }
         },

@@ -143,7 +143,7 @@ has room for the package plus the import (about 3.25 times the package;
 owner-private, symlink-safe staging directory beside the destination, protected
 by an exclusive process lock. The destination is installed by one atomic
 no-replace rename only after transport size and SHA-256 checks, full
-portable-v2 verification, semantic package identity comparison, import, and
+portable verification, semantic package identity comparison, import, and
 reopen through the GraphForge facade. After a kill, a failed import, or Ctrl-C,
 rerunning the same command resumes or finishes the clone; import failures keep
 their `hub.package.*` code. Byte progress goes to standard error. The
@@ -252,7 +252,7 @@ The fetch applies the same transport rules as `clone`: HTTPS only, no
 credentials, public-network addresses only (rechecked on redirects and DNS),
 and finite response, redirect, connection, and operation limits. The module
 package is also bounded to 64 MiB. The downloaded package must match its
-discovery object digest and length, pass full portable-v2 verification, carry the
+discovery object digest and length, pass full portable verification, carry the
 advertised `package_digest`, and contain the requested module, whose canonical
 content digest is recomputed from the document. Only then is the module document
 written, byte for byte, to `--output`: through a private staging file next to it

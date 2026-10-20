@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 
 use graphforge_api::{
     GraphForge, ModuleAdoptionRequest, OntologyAuthorityExpectation, OntologyModuleId, OperationId,
-    PortableSelection, PortableV2ExactIdentity, PortableV2ExportRequest, PortableV2ImportRequest,
-    PortableV2Limits, PortableV2Output, PortableV2SelectionProfile, WriteContext,
+    PortableSelection, PortableExactIdentity, PortableExportRequest, PortableImportRequest,
+    PortableLimits, PortableOutput, PortableSelectionProfile, WriteContext,
 };
 use graphforge_ontology::OntologyDoc;
 use uuid::Uuid;
@@ -48,20 +48,20 @@ fn source_package(root: &Path) -> (PathBuf, OntologyModuleId) {
         )
         .unwrap();
     let package = root.join("source.gfpb");
-    export(&graph, &package, PortableV2SelectionProfile::Complete);
+    export(&graph, &package, PortableSelectionProfile::Complete);
     (package, candidate.id)
 }
 
-fn export(graph: &GraphForge, path: &Path, profile: PortableV2SelectionProfile) -> String {
+fn export(graph: &GraphForge, path: &Path, profile: PortableSelectionProfile) -> String {
     graph
-        .export_portable_v2(
-            &PortableV2ExportRequest {
+        .export_portable(
+            &PortableExportRequest {
                 selection: PortableSelection::Current,
                 output_path: path.to_path_buf(),
-                representation: PortableV2Output::Bundle,
+                representation: PortableOutput::Bundle,
                 profile,
                 subset: None,
-                limits: PortableV2Limits::default(),
+                limits: PortableLimits::default(),
             },
             None,
             |_| {},
@@ -70,11 +70,11 @@ fn export(graph: &GraphForge, path: &Path, profile: PortableV2SelectionProfile) 
         .package_digest
 }
 
-fn import_request(package: &Path) -> PortableV2ImportRequest {
-    PortableV2ImportRequest {
+fn import_request(package: &Path) -> PortableImportRequest {
+    PortableImportRequest {
         input: package.to_path_buf(),
         operation_id: OperationId(Uuid::from_u128(0x602)),
-        limits: PortableV2Limits::default(),
+        limits: PortableLimits::default(),
     }
 }
 
@@ -95,7 +95,7 @@ fn fresh_root_imports_reopen_with_identical_manifests_and_composition_bundles() 
     let mut bootstrap_manifests = Vec::new();
     let mut packages = Vec::new();
     for (index, target) in targets.iter().enumerate() {
-        let imported = GraphForge::import_portable_v2(target, &request, None).unwrap();
+        let imported = GraphForge::import_portable(target, &request, None).unwrap();
         assert!(!imported.idempotent_replay);
         let generation = graphforge_storage::resolve_project_generation(target).unwrap();
         assert_eq!(generation.generation_uuid(), imported.generation_uuid);
@@ -116,7 +116,7 @@ fn fresh_root_imports_reopen_with_identical_manifests_and_composition_bundles() 
         let digest = export(
             &reopened,
             &output,
-            PortableV2SelectionProfile::OntologyComposition(vec![PortableV2ExactIdentity {
+            PortableSelectionProfile::OntologyComposition(vec![PortableExactIdentity {
                 id: module.ontology_id.clone(),
                 version: module.authored_version.clone(),
                 content_digest: format!("sha256:{}", module.canonical_digest),
@@ -125,7 +125,7 @@ fn fresh_root_imports_reopen_with_identical_manifests_and_composition_bundles() 
         packages.push((digest, fs::read(output).unwrap()));
         drop(reopened_generation);
         drop(reopened);
-        let replay = GraphForge::import_portable_v2(target, &request, None).unwrap();
+        let replay = GraphForge::import_portable(target, &request, None).unwrap();
         assert!(replay.idempotent_replay);
         assert_eq!(replay.generation_uuid, imported.generation_uuid);
         let replayed = graphforge_storage::resolve_project_generation(target).unwrap();
@@ -158,7 +158,7 @@ fn initialized_import_targets_retain_their_original_parent_lineage() {
         let parent_manifest = manifest(&original);
         drop(original);
         drop(graph);
-        GraphForge::import_portable_v2(&target, &request, None).unwrap();
+        GraphForge::import_portable(&target, &request, None).unwrap();
         let reopened = GraphForge::new(target.to_str()).unwrap();
         let generation = graphforge_storage::resolve_project_generation(&target).unwrap();
         assert_eq!(generation.parent_generation_uuid(), Some(parent));

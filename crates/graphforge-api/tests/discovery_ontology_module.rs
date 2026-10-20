@@ -2,13 +2,13 @@
 //! real durable Projects and real exports.
 
 use graphforge_api::{
-    DiscoveryOntologyModuleRequest, DiscoveryPortableV2Error, DiscoveryPortableV2Mismatch,
+    DiscoveryOntologyModuleRequest, DiscoveryPortableError, DiscoveryPortableMismatch,
     GraphForge, ModuleAdoptionRequest, OntologyAuthorityExpectation, OntologyModuleId,
-    PortableSelection, PortableV2ErrorCode, PortableV2ExportRequest, PortableV2Limits,
-    PortableV2Output, PortableV2SelectionProfile, ResolvedOntologyModule, WriteContext,
+    PortableSelection, PortableErrorCode, PortableExportRequest, PortableLimits,
+    PortableOutput, PortableSelectionProfile, ResolvedOntologyModule, WriteContext,
     resolve_discovered_ontology_module,
 };
-use graphforge_core::portable::PortableV2ExactIdentity;
+use graphforge_core::portable::PortableExactIdentity;
 use graphforge_discovery::{
     DISCOVERY_FORMAT, DiscoveryErrorCode, DiscoveryLimits, DiscoveryManifest, ExactIdentity,
     ObjectDescriptor, OntologyInventory, OntologyModuleDescriptor, PORTABLE_V2_FORMAT,
@@ -99,23 +99,23 @@ fn export_module_package(
     graph: &GraphForge,
     exact: &OntologyModuleId,
     output_path: PathBuf,
-    representation: PortableV2Output,
-) -> graphforge_api::PortableV2ExportFacadeResult {
+    representation: PortableOutput,
+) -> graphforge_api::PortableExportFacadeResult {
     graph
-        .export_portable_v2(
-            &PortableV2ExportRequest {
+        .export_portable(
+            &PortableExportRequest {
                 selection: PortableSelection::Current,
                 output_path,
                 representation,
-                profile: PortableV2SelectionProfile::OntologyComposition(vec![
-                    PortableV2ExactIdentity {
+                profile: PortableSelectionProfile::OntologyComposition(vec![
+                    PortableExactIdentity {
                         id: exact.ontology_id.clone(),
                         version: exact.authored_version.clone(),
                         content_digest: format!("sha256:{}", exact.canonical_digest),
                     },
                 ]),
                 subset: None,
-                limits: PortableV2Limits::default(),
+                limits: PortableLimits::default(),
             },
             None,
             |_| {},
@@ -229,7 +229,7 @@ fn resolve(
     discovery: &Discovery,
     exact: &ExactIdentity,
     package: &Path,
-) -> Result<ResolvedOntologyModule, DiscoveryPortableV2Error> {
+) -> Result<ResolvedOntologyModule, DiscoveryPortableError> {
     resolve_discovered_ontology_module(&DiscoveryOntologyModuleRequest {
         manifest_json: &discovery.manifest_json,
         refs_json: &discovery.refs_json,
@@ -237,7 +237,7 @@ fn resolve(
         module: exact,
         package,
         discovery_limits: DiscoveryLimits::default(),
-        portable_limits: PortableV2Limits::default(),
+        portable_limits: PortableLimits::default(),
         cancelled: None,
     })
 }
@@ -253,7 +253,7 @@ fn publish(operation: u128, document: &OntologyDoc) -> Published {
     let roots = tempfile::tempdir().unwrap();
     let (graph, exact) = project_adopting(&roots.path().join("project"), document, operation);
     let bundle = roots.path().join("module.gfpb");
-    let exported = export_module_package(&graph, &exact, bundle.clone(), PortableV2Output::Bundle);
+    let exported = export_module_package(&graph, &exact, bundle.clone(), PortableOutput::Bundle);
     Published {
         exact,
         bundle,
@@ -281,7 +281,7 @@ fn two_projects_adopting_the_same_exact_module_resolve_to_the_same_module() {
                 module: &exact,
                 package: &published.bundle,
                 discovery_limits: DiscoveryLimits::default(),
-                portable_limits: PortableV2Limits::default(),
+                portable_limits: PortableLimits::default(),
                 cancelled: None,
             })
             .expect("resolve module");
@@ -318,12 +318,12 @@ fn expanded_and_bundle_representations_resolve_identically() {
     let bundle = roots.path().join("module.gfpb");
     let expanded = roots.path().join("module.gfproject");
     let bundled =
-        export_module_package(&graph, &exact_id, bundle.clone(), PortableV2Output::Bundle);
+        export_module_package(&graph, &exact_id, bundle.clone(), PortableOutput::Bundle);
     let directory = export_module_package(
         &graph,
         &exact_id,
         expanded.clone(),
-        PortableV2Output::Expanded,
+        PortableOutput::Expanded,
     );
     assert_eq!(bundled.package_digest, directory.package_digest);
     let exact = identity(&exact_id);
@@ -357,8 +357,8 @@ fn tampered_module_byte_fails_portable_verification() {
     assert!(
         matches!(
             &error,
-            DiscoveryPortableV2Error::Portable(portable)
-                if portable.code == PortableV2ErrorCode::DigestMismatch
+            DiscoveryPortableError::Portable(portable)
+                if portable.code == PortableErrorCode::DigestMismatch
         ),
         "{error:?}"
     );
@@ -376,7 +376,7 @@ fn absent_identity_is_missing_object_before_any_package_io() {
     assert!(
         matches!(
             &error,
-            DiscoveryPortableV2Error::Discovery(discovery)
+            DiscoveryPortableError::Discovery(discovery)
                 if discovery.code == DiscoveryErrorCode::MissingObject
         ),
         "{error:?}"
@@ -385,7 +385,7 @@ fn absent_identity_is_missing_object_before_any_package_io() {
     // then fails in the package verifier, proving the error above preceded I/O.
     let error = resolve(&documents, &exact, &never_created).unwrap_err();
     assert!(
-        matches!(&error, DiscoveryPortableV2Error::Portable(_)),
+        matches!(&error, DiscoveryPortableError::Portable(_)),
         "{error:?}"
     );
 }
@@ -406,7 +406,7 @@ fn descriptor_pointing_at_the_project_package_is_rejected_before_any_package_io(
     assert!(
         matches!(
             &error,
-            DiscoveryPortableV2Error::Discovery(discovery)
+            DiscoveryPortableError::Discovery(discovery)
                 if discovery.code == DiscoveryErrorCode::MalformedResponse
         ),
         "{error:?}"
@@ -423,8 +423,8 @@ fn package_digest_and_module_identity_must_match_the_advertisement() {
     let wrong_package = discovery(&exact, &published.bundle, &marker('7').0, None);
     assert!(matches!(
         resolve(&wrong_package, &exact, &published.bundle),
-        Err(DiscoveryPortableV2Error::ReferenceMismatch(
-            DiscoveryPortableV2Mismatch::PackageDigest
+        Err(DiscoveryPortableError::ReferenceMismatch(
+            DiscoveryPortableMismatch::PackageDigest
         ))
     ));
 
@@ -441,8 +441,8 @@ fn package_digest_and_module_identity_must_match_the_advertisement() {
     );
     assert!(matches!(
         resolve(&swapped, &advertised, &published.bundle),
-        Err(DiscoveryPortableV2Error::ReferenceMismatch(
-            DiscoveryPortableV2Mismatch::ModuleIdentity
+        Err(DiscoveryPortableError::ReferenceMismatch(
+            DiscoveryPortableMismatch::ModuleIdentity
         ))
     ));
 }

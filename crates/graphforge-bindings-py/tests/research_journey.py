@@ -414,11 +414,11 @@ class Journey:
                 "projection": projection,
             }
         )
-        verified = graphforge.GraphForge.verify_portable_v2(str(package), mode="full")
+        verified = graphforge.GraphForge.verify_portable(str(package), mode="full")
         assert verified["package_digest"] == exported["package_digest"]
         request = {"input": str(package), "operation_id": identity()}
-        first = graphforge.GraphForge.import_portable_v2(str(target), **request)
-        replay = graphforge.GraphForge.import_portable_v2(str(target), **request)
+        first = graphforge.GraphForge.import_portable(str(target), **request)
+        replay = graphforge.GraphForge.import_portable(str(target), **request)
         assert replay["idempotent_replay"] and first["generation_uuid"] == replay["generation_uuid"]
         return graphforge.GraphForge(str(target))
 

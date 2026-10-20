@@ -178,8 +178,8 @@ EVIDENCE = {
     "semantic-generation-diff": {
         "generation_diff.py": ["check_generation_diff"],
     },
-    "portable-v2-facade": {
-        "portable_v2_parity.py": ["check_portable_v2_parity"],
+    "portable-facade": {
+        "portable_parity.py": ["check_portable_parity"],
     },
 }
 
@@ -340,9 +340,9 @@ def _classification_report() -> dict[str, object]:
     aliases = {
         "GraphForge.new": "GraphForge.__init__",
         "crate.version": "crate.version",
-        "crate.verify_portable_v2": "GraphForge.verify_portable_v2",
-        "crate.publish_portable_v2_oci": "GraphForge.publish_portable_v2_oci",
-        "crate.pull_portable_v2_oci": "GraphForge.pull_portable_v2_oci",
+        "crate.verify_portable": "GraphForge.verify_portable",
+        "crate.publish_portable_oci": "GraphForge.publish_portable_oci",
+        "crate.pull_portable_oci": "GraphForge.pull_portable_oci",
         "GraphForge.execute_to_parquet_stream_with_params": (
             "GraphForge.execute_to_parquet_stream"
         ),

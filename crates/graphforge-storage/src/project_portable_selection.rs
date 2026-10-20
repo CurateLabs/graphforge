@@ -1,0 +1,677 @@
+//! Deterministic, content-safe portable component selection.
+
+use std::collections::BTreeSet;
+use std::fs::File;
+use std::io::Read as _;
+
+use graphforge_core::hash_observation::ContractSha256 as Sha256;
+use serde_json::Value;
+use sha2::Digest;
+
+use crate::{
+    PortableError, PortableErrorCode, PortableExactIdentity, PortableLimits,
+    ResolvedProjectGeneration, WORKSPACE_CAPABILITY_ID, WORKSPACE_CONFIGURATION_FAMILY,
+};
+
+pub use graphforge_core::portable::{
+    PortableParticipantId, PortableProjectedSelectionEntry, PortableSelectionEntry,
+    PortableSelectionPlan, PortableSelectionProfile, PortableSelectionReason,
+    PortableSelectionRequest,
+};
+
+/// Resolve one bounded deterministic selection without retaining payload values.
+#[expect(
+    clippy::too_many_lines,
+    reason = "keeps identity matching, dependency closure, and fingerprinting in one audit path"
+)]
+pub fn preview_portable_selection(
+    generation: &ResolvedProjectGeneration,
+    request: &PortableSelectionRequest,
+    limits: PortableLimits,
+) -> Result<PortableSelectionPlan, PortableError> {
+    let descriptors = generation.participant_descriptors().map_err(storage)?;
+    if descriptors.len() as u64 > limits.max_components {
+        return Err(limit("selection component count exceeds limit"));
+    }
+    let custom = match &request.profile {
+        PortableSelectionProfile::Custom(values) => {
+            let set = values.iter().cloned().collect::<BTreeSet<_>>();
+            if set.len() != values.len() {
+                return Err(incompatible("duplicate custom selector"));
+            }
+            Some(set)
+        }
+        _ => None,
+    };
+    let available = descriptors
+        .iter()
+        .map(|descriptor| PortableParticipantId {
+            capability_id: descriptor.capability_id.clone(),
+            record_family_id: descriptor.record_family_id.clone(),
+        })
+        .collect::<BTreeSet<_>>();
+    if custom.as_ref().is_some_and(|selectors| {
+        selectors
+            .iter()
+            .any(|selector| !available.contains(selector))
+    }) {
+        return Err(incompatible("custom selector is missing or ambiguous"));
+    }
+
+    let mut requested = BTreeSet::new();
+    for descriptor in &descriptors {
+        let identity = PortableParticipantId {
+            capability_id: descriptor.capability_id.clone(),
+            record_family_id: descriptor.record_family_id.clone(),
+        };
+        let kind = component_kind(&identity.capability_id, &identity.record_family_id);
+        let selected = match &request.profile {
+            PortableSelectionProfile::Complete => true,
+            PortableSelectionProfile::OntologyOnly => kind == "ontology",
+            PortableSelectionProfile::DataComponents => kind == "graph-data",
+            PortableSelectionProfile::Artifacts => kind == "derived-artifact",
+            PortableSelectionProfile::Settings => kind == "settings",
+            PortableSelectionProfile::Custom(_) => custom.as_ref().unwrap().contains(&identity),
+            PortableSelectionProfile::OntologyComposition(_) => {
+                identity.capability_id == crate::WORKSPACE_CAPABILITY_ID
+                    && identity.record_family_id == crate::WORKSPACE_ONTOLOGY_COMPOSITION_FAMILY
+            }
+        };
+        if selected {
+            requested.insert(identity);
+        }
+    }
+    if requested.is_empty()
+        && matches!(
+            request.profile,
+            PortableSelectionProfile::Custom(_)
+                | PortableSelectionProfile::OntologyComposition(_)
+        )
+    {
+        return Err(incompatible("selection matched no portable components"));
+    }
+
+    let exact_composition = matches!(
+        request.profile,
+        PortableSelectionProfile::OntologyComposition(_)
+    );
+    let needs_schema = !exact_composition
+        && requested.iter().any(|identity| {
+            matches!(
+                component_kind(&identity.capability_id, &identity.record_family_id),
+                "ontology" | "graph-data" | "derived-artifact"
+            )
+        });
+    let schema = descriptors
+        .iter()
+        .filter(|descriptor| {
+            component_kind(&descriptor.capability_id, &descriptor.record_family_id) == "schema"
+        })
+        .map(|descriptor| PortableParticipantId {
+            capability_id: descriptor.capability_id.clone(),
+            record_family_id: descriptor.record_family_id.clone(),
+        })
+        .collect::<BTreeSet<_>>();
+    let mut auto = if needs_schema {
+        schema
+            .difference(&requested)
+            .cloned()
+            .collect::<BTreeSet<_>>()
+    } else {
+        BTreeSet::new()
+    };
+    let needs_composition = requested.iter().any(|identity| {
+        matches!(
+            component_kind(&identity.capability_id, &identity.record_family_id),
+            "ontology" | "graph-data" | "derived-artifact"
+        )
+    });
+    let composition = PortableParticipantId {
+        capability_id: crate::WORKSPACE_CAPABILITY_ID.to_owned(),
+        record_family_id: crate::WORKSPACE_ONTOLOGY_COMPOSITION_FAMILY.to_owned(),
+    };
+    if needs_composition && available.contains(&composition) && !requested.contains(&composition) {
+        auto.insert(composition.clone());
+    }
+    if request.strict && !auto.is_empty() {
+        return Err(incompatible(if auto.contains(&composition) {
+            "strict selection requires undeclared ontology composition closure"
+        } else {
+            "strict selection requires undeclared schema authority"
+        }));
+    }
+    let selected = requested.union(&auto).cloned().collect::<BTreeSet<_>>();
+    let semantic_bindings = PortableParticipantId {
+        capability_id: crate::GRAPH_CAPABILITY_ID.to_owned(),
+        record_family_id: crate::GRAPH_SEMANTIC_BINDINGS_FAMILY.to_owned(),
+    };
+    if selected.contains(&semantic_bindings) {
+        crate::semantic_storage_bindings(generation).map_err(storage)?;
+    }
+    validate_settings(generation, &selected, limits)?;
+    if selected.contains(&PortableParticipantId {
+        capability_id: crate::WORKSPACE_CAPABILITY_ID.into(),
+        record_family_id: crate::WORKSPACE_SAVED_QUERIES_FAMILY.into(),
+    }) {
+        crate::read_workspace_saved_queries(generation)
+            .map_err(|_| incompatible("invalid native saved-query definitions"))?;
+    }
+
+    let mut included = Vec::new();
+    let mut excluded = Vec::new();
+    let mut total = 0_u64;
+    for descriptor in descriptors {
+        let identity = PortableParticipantId {
+            capability_id: descriptor.capability_id.clone(),
+            record_family_id: descriptor.record_family_id.clone(),
+        };
+        let path = generation
+            .participant_path(&identity.capability_id, &identity.record_family_id)
+            .map_err(storage)?;
+        let bytes = std::fs::metadata(path).map_err(storage_io)?.len();
+        let is_selected = selected.contains(&identity);
+        if is_selected {
+            total = total
+                .checked_add(bytes)
+                .ok_or_else(|| limit("selection byte overflow"))?;
+            if total > limits.max_total_bytes {
+                return Err(limit("selection bytes exceed limit"));
+            }
+        }
+        let entry = PortableSelectionEntry {
+            kind: component_kind(&identity.capability_id, &identity.record_family_id).into(),
+            reason: if auto.contains(&identity) {
+                if identity == composition {
+                    PortableSelectionReason::RequiredOntologyComposition
+                } else {
+                    PortableSelectionReason::RequiredSchemaAuthority
+                }
+            } else if is_selected {
+                PortableSelectionReason::Requested
+            } else {
+                PortableSelectionReason::ProfileExcluded
+            },
+            identity,
+            estimated_bytes: bytes,
+            row_count: descriptor.row_count,
+        };
+        if is_selected {
+            included.push(entry);
+        } else {
+            excluded.push(entry);
+        }
+    }
+    included.sort_by(|a, b| a.identity.cmp(&b.identity));
+    excluded.sort_by(|a, b| a.identity.cmp(&b.identity));
+    let required_capabilities = if matches!(request.profile, PortableSelectionProfile::Complete) {
+        generation
+            .capabilities()
+            .into_iter()
+            .map(|capability| capability.capability_id)
+            .collect()
+    } else {
+        included
+            .iter()
+            .map(|entry| entry.identity.capability_id.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>()
+    };
+    let package_class = match request.profile {
+        PortableSelectionProfile::Complete => "complete",
+        PortableSelectionProfile::OntologyOnly => "ontology-only",
+        PortableSelectionProfile::DataComponents
+        | PortableSelectionProfile::Artifacts
+        | PortableSelectionProfile::Settings
+        | PortableSelectionProfile::Custom(_)
+        | PortableSelectionProfile::OntologyComposition(_) => "component-selective",
+    }
+    .to_owned();
+    let projected = projected_composition_entries(generation, request, &selected, limits)?;
+    total = projected.iter().try_fold(total, |sum, entry| {
+        sum.checked_add(entry.estimated_bytes)
+            .ok_or_else(|| limit("selection byte overflow"))
+    })?;
+    if total > limits.max_total_bytes {
+        return Err(limit("selection bytes exceed limit"));
+    }
+    let include_graph_tree = included.iter().any(|entry| entry.kind == "graph-data");
+    let mut plan = PortableSelectionPlan::new(
+        generation.generation_uuid().hyphenated().to_string(),
+        format!("sha256:{}", hex(generation.manifest_sha256())),
+        package_class,
+        included,
+        excluded,
+        projected,
+        Vec::new(),
+        required_capabilities,
+        total,
+        String::new(),
+        include_graph_tree,
+    );
+    plan.selection_fingerprint = fingerprint(&plan)?;
+    Ok(plan)
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "keeps exact identity validation and transitive module/bridge closure in one audit path"
+)]
+fn projected_composition_entries(
+    generation: &ResolvedProjectGeneration,
+    request: &PortableSelectionRequest,
+    selected: &BTreeSet<PortableParticipantId>,
+    limits: PortableLimits,
+) -> Result<Vec<PortableProjectedSelectionEntry>, PortableError> {
+    let authority = PortableParticipantId {
+        capability_id: crate::WORKSPACE_CAPABILITY_ID.into(),
+        record_family_id: crate::WORKSPACE_ONTOLOGY_COMPOSITION_FAMILY.into(),
+    };
+    if !selected.contains(&authority) {
+        return Ok(Vec::new());
+    }
+    let path = generation
+        .participant_path(&authority.capability_id, &authority.record_family_id)
+        .map_err(storage)?;
+    let mut file = File::open(path).map_err(storage_io)?;
+    let cap = limits.max_manifest_bytes.min(limits.max_entry_bytes);
+    let mut bytes = Vec::new();
+    std::io::Read::by_ref(&mut file)
+        .take(cap.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(storage_io)?;
+    if bytes.len() as u64 > cap {
+        return Err(limit("composition preview exceeds limit"));
+    }
+    let composition =
+        crate::WorkspaceOntologyComposition::from_canonical_json(&bytes).map_err(storage)?;
+    let requested = match &request.profile {
+        PortableSelectionProfile::OntologyComposition(values) => {
+            let set = values.iter().cloned().collect::<BTreeSet<_>>();
+            if set.len() != values.len() {
+                return Err(incompatible("duplicate projected ontology selector"));
+            }
+            Some(set)
+        }
+        _ => None,
+    };
+    let module_identity = |module: &crate::WorkspaceCompositionModule| PortableExactIdentity {
+        id: module.id.ontology_id.clone(),
+        version: module.id.authored_version.clone(),
+        content_digest: format!("sha256:{}", module.id.canonical_digest),
+    };
+    let bridge_identity = |bridge: &graphforge_ontology::BridgeDocument| {
+        let digest = graphforge_ontology::bridge_document_digest(bridge)
+            .map_err(|_| incompatible("composition bridge digest"))?;
+        Ok::<_, PortableError>((
+            PortableExactIdentity {
+                id: bridge.bridge_id.clone(),
+                version: bridge.authored_version.clone(),
+                content_digest: format!("sha256:{digest}"),
+            },
+            digest,
+        ))
+    };
+    let module_by_identity = composition
+        .modules
+        .iter()
+        .map(|module| (module_identity(module), module))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let mut bridge_by_identity = std::collections::BTreeMap::new();
+    for bridge in &composition.bridges {
+        let (identity, digest) = bridge_identity(bridge)?;
+        bridge_by_identity.insert(identity, (bridge, digest));
+    }
+    let mut closure = requested.clone().unwrap_or_else(|| {
+        module_by_identity
+            .keys()
+            .chain(bridge_by_identity.keys())
+            .cloned()
+            .collect()
+    });
+    if requested.as_ref().is_some_and(|roots| {
+        roots.iter().any(|identity| {
+            !module_by_identity.contains_key(identity) && !bridge_by_identity.contains_key(identity)
+        })
+    }) {
+        return Err(incompatible("projected ontology selector is absent"));
+    }
+    loop {
+        let before = closure.len();
+        for identity in closure.clone() {
+            if let Some(module) = module_by_identity.get(&identity) {
+                closure.extend(module.dependencies.iter().map(|dependency| {
+                    PortableExactIdentity {
+                        id: dependency.ontology_id.clone(),
+                        version: dependency.authored_version.clone(),
+                        content_digest: format!("sha256:{}", dependency.canonical_digest),
+                    }
+                }));
+            } else if let Some((bridge, _)) = bridge_by_identity.get(&identity) {
+                closure.extend(
+                    bridge
+                        .source_modules
+                        .iter()
+                        .chain(&bridge.target_modules)
+                        .map(|module| PortableExactIdentity {
+                            id: module.ontology_id.clone(),
+                            version: module.authored_version.clone(),
+                            content_digest: format!("sha256:{}", module.canonical_digest),
+                        }),
+                );
+                closure.extend(bridge.dependencies.iter().map(|dependency| {
+                    PortableExactIdentity {
+                        id: dependency.bridge_id.clone(),
+                        version: dependency.authored_version.clone(),
+                        content_digest: format!("sha256:{}", dependency.canonical_digest),
+                    }
+                }));
+            }
+        }
+        if closure.len() == before {
+            break;
+        }
+    }
+    if closure.iter().any(|identity| {
+        !module_by_identity.contains_key(identity) && !bridge_by_identity.contains_key(identity)
+    }) {
+        return Err(incompatible(
+            "projected ontology dependency closure is missing",
+        ));
+    }
+    let mut entries = Vec::new();
+    for module in &composition.modules {
+        let identity = PortableExactIdentity {
+            id: module.id.ontology_id.clone(),
+            version: module.id.authored_version.clone(),
+            content_digest: format!("sha256:{}", module.id.canonical_digest),
+        };
+        if !closure.contains(&identity) {
+            continue;
+        }
+        let payload = crate::project_portable::canonical_json(
+            &serde_json::to_value(&module.document)
+                .map_err(|_| incompatible("composition preview serialization"))?,
+        )?;
+        entries.push(PortableProjectedSelectionEntry {
+            kind: "ontology".into(),
+            participant_id: format!("ontology-module-{}", module.id.canonical_digest),
+            reason: if requested
+                .as_ref()
+                .is_some_and(|set| set.contains(&identity))
+            {
+                PortableSelectionReason::Requested
+            } else {
+                PortableSelectionReason::RequiredOntologyComposition
+            },
+            identity,
+            estimated_bytes: payload.len() as u64,
+        });
+    }
+    for bridge in &composition.bridges {
+        let digest = graphforge_ontology::bridge_document_digest(bridge)
+            .map_err(|_| incompatible("composition bridge digest"))?;
+        let identity = PortableExactIdentity {
+            id: bridge.bridge_id.clone(),
+            version: bridge.authored_version.clone(),
+            content_digest: format!("sha256:{digest}"),
+        };
+        if !closure.contains(&identity) {
+            continue;
+        }
+        let payload = crate::project_portable::canonical_json(
+            &serde_json::to_value(bridge)
+                .map_err(|_| incompatible("composition preview serialization"))?,
+        )?;
+        entries.push(PortableProjectedSelectionEntry {
+            kind: "schema".into(),
+            participant_id: format!("ontology-bridge-{digest}"),
+            reason: if requested
+                .as_ref()
+                .is_some_and(|set| set.contains(&identity))
+            {
+                PortableSelectionReason::Requested
+            } else {
+                PortableSelectionReason::RequiredOntologyComposition
+            },
+            identity,
+            estimated_bytes: payload.len() as u64,
+        });
+    }
+    entries.sort_by(|left, right| left.participant_id.cmp(&right.participant_id));
+    Ok(entries)
+}
+
+pub(crate) fn validate_selection_plan(
+    generation: &ResolvedProjectGeneration,
+    plan: &PortableSelectionPlan,
+) -> Result<(), PortableError> {
+    if plan.source_generation_uuid != generation.generation_uuid().hyphenated().to_string()
+        || plan.source_manifest_sha256 != format!("sha256:{}", hex(generation.manifest_sha256()))
+        || plan.selection_fingerprint != fingerprint(plan)?
+    {
+        return Err(incompatible("selection plan identity mismatch"));
+    }
+    if plan.includes(
+        crate::WORKSPACE_CAPABILITY_ID,
+        crate::WORKSPACE_SAVED_QUERIES_FAMILY,
+    ) {
+        crate::read_workspace_saved_queries(generation)
+            .map_err(|_| incompatible("invalid native saved-query definitions"))?;
+    }
+    Ok(())
+}
+
+pub(crate) fn fingerprint(plan: &PortableSelectionPlan) -> Result<String, PortableError> {
+    let mut unsigned = plan.clone();
+    unsigned.selection_fingerprint.clear();
+    let bytes = crate::project_portable::canonical_json(
+        &serde_json::to_value(unsigned).map_err(|_| incompatible("selection serialization"))?,
+    )?;
+    let mut digest = Sha256::new();
+    digest.update(b"graphforge-portable-selection/1\0");
+    digest.update(bytes);
+    Ok(format!("sha256:{}", hex(digest.finalize().into())))
+}
+
+pub(crate) fn component_kind(capability: &str, family: &str) -> &'static str {
+    if capability == crate::WORKSPACE_CAPABILITY_ID
+        && family == crate::WORKSPACE_SAVED_QUERIES_FAMILY
+    {
+        // Definitions are portable project metadata, not graph membership or results.
+        "settings"
+    } else if capability == "research" {
+        "research"
+    } else if capability == crate::GRAPH_CAPABILITY_ID {
+        "graph-data"
+    } else if family.contains("ontology") {
+        "ontology"
+    } else if family.contains("schema") {
+        "schema"
+    } else if family.contains("artifact") || family.contains("repository_snapshot") {
+        "derived-artifact"
+    } else {
+        "settings"
+    }
+}
+
+fn validate_settings(
+    generation: &ResolvedProjectGeneration,
+    selected: &BTreeSet<PortableParticipantId>,
+    limits: PortableLimits,
+) -> Result<(), PortableError> {
+    let identity = PortableParticipantId {
+        capability_id: WORKSPACE_CAPABILITY_ID.into(),
+        record_family_id: WORKSPACE_CONFIGURATION_FAMILY.into(),
+    };
+    if !selected.contains(&identity) {
+        return Ok(());
+    }
+    let path = generation
+        .participant_path(&identity.capability_id, &identity.record_family_id)
+        .map_err(storage)?;
+    let mut file = File::open(path).map_err(storage_io)?;
+    let cap = limits.max_manifest_bytes.min(limits.max_entry_bytes);
+    let mut bytes = Vec::new();
+    file.by_ref()
+        .take(cap + 1)
+        .read_to_end(&mut bytes)
+        .map_err(storage_io)?;
+    if bytes.len() as u64 > cap {
+        return Err(limit("settings validation state exceeds limit"));
+    }
+    let value: Value = serde_json::from_slice(&bytes).map_err(|_| incompatible("settings JSON"))?;
+    validate_setting_value(None, &value)
+}
+
+pub(crate) fn validate_setting_value(
+    key: Option<&str>,
+    value: &Value,
+) -> Result<(), PortableError> {
+    if key.is_some_and(|key| {
+        let key = key.to_ascii_lowercase();
+        ["secret", "password", "token", "credential", "private_key"]
+            .iter()
+            .any(|needle| key.contains(needle))
+    }) {
+        return Err(incompatible("secret-bearing setting is not portable"));
+    }
+    match value {
+        Value::String(value)
+            if value.starts_with('/')
+                || value.starts_with("\\\\")
+                || value.as_bytes().get(1) == Some(&b':') =>
+        {
+            Err(incompatible("absolute host path setting is not portable"))
+        }
+        Value::Array(values) => values
+            .iter()
+            .try_for_each(|value| validate_setting_value(key, value)),
+        Value::Object(values) => values
+            .iter()
+            .try_for_each(|(key, value)| validate_setting_value(Some(key), value)),
+        _ => Ok(()),
+    }
+}
+
+fn storage(_: crate::GfError) -> PortableError {
+    PortableError::new(PortableErrorCode::Io, "selection inventory unavailable")
+}
+fn storage_io(_: std::io::Error) -> PortableError {
+    PortableError::new(PortableErrorCode::Io, "selection entry unavailable")
+}
+fn incompatible(detail: &'static str) -> PortableError {
+    PortableError::new(PortableErrorCode::Incompatible, detail)
+}
+fn limit(detail: &'static str) -> PortableError {
+    PortableError::new(PortableErrorCode::LimitExceeded, detail)
+}
+fn hex(digest: [u8; 32]) -> String {
+    use std::fmt::Write as _;
+    digest
+        .iter()
+        .fold(String::with_capacity(64), |mut output, byte| {
+            write!(output, "{byte:02x}").expect("writing to String cannot fail");
+            output
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use uuid::Uuid;
+
+    fn semantic_generation(
+        composition: Option<crate::WorkspaceOntologyComposition>,
+        binding_fingerprint: String,
+    ) -> (tempfile::TempDir, crate::ResolvedProjectGeneration) {
+        let root = tempfile::tempdir().unwrap();
+        let parent = crate::open_or_initialize_project(root.path()).unwrap();
+        let mut participants = crate::empty_workspace_participants().unwrap();
+        participants.push(
+            crate::SemanticStorageBindings::new(binding_fingerprint, Vec::new())
+                .unwrap()
+                .to_project_participant()
+                .unwrap(),
+        );
+        if let Some(composition) = composition {
+            participants.push(composition.to_project_participant().unwrap());
+        }
+        participants.sort_by(|left, right| {
+            (&left.capability_id, &left.record_family_id)
+                .cmp(&(&right.capability_id, &right.record_family_id))
+        });
+        let request = crate::ProjectGenerationRequest {
+            transaction_uuid: Uuid::new_v4(),
+            generation_uuid: Uuid::new_v4(),
+            capabilities: vec![
+                crate::ProjectCapability {
+                    capability_id: crate::GRAPH_CAPABILITY_ID.into(),
+                    capability_version: crate::GRAPH_CAPABILITY_VERSION,
+                },
+                crate::ProjectCapability {
+                    capability_id: crate::WORKSPACE_CAPABILITY_ID.into(),
+                    capability_version: crate::WORKSPACE_CAPABILITY_VERSION,
+                },
+            ],
+            participants,
+        };
+        let crate::ProjectStageOutcome::Staged(staged) =
+            crate::stage_project_generation(root.path(), &request).unwrap()
+        else {
+            panic!("fresh semantic generation replayed");
+        };
+        staged
+            .validate(|_| Ok(()), |_, _| Ok(()))
+            .unwrap()
+            .publish()
+            .unwrap();
+        drop(parent);
+        let generation = crate::resolve_project_generation(root.path()).unwrap();
+        (root, generation)
+    }
+
+    fn composition() -> crate::WorkspaceOntologyComposition {
+        let legacy = crate::WorkspaceOntology {
+            contract_version: 1,
+            mode: crate::WorkspaceOntologyMode::Strict,
+            source_format: Some(crate::WorkspaceOntologySourceFormat::Json),
+            canonical_ontology_sha256: Some("a".repeat(64)),
+            canonical_ontology: Some(
+                serde_json::to_value(graphforge_ontology::OntologyDoc {
+                    ontology_id: "https://graphforge.dev/ontology/selection-closure".into(),
+                    version: "1".into(),
+                    entity_types: Vec::new(),
+                    relation_types: Vec::new(),
+                    properties: Vec::new(),
+                    constraints: Vec::new(),
+                    migrations: Vec::new(),
+                })
+                .unwrap(),
+            ),
+        };
+        crate::WorkspaceOntologyComposition::virtual_legacy(&legacy)
+            .unwrap()
+            .unwrap()
+    }
+
+    #[test]
+    fn semantic_selection_fails_closed_without_matching_composition_authority() {
+        for (authority, fingerprint) in [
+            (None, "b".repeat(64)),
+            (Some(composition()), "c".repeat(64)),
+        ] {
+            let (_root, generation) = semantic_generation(authority, fingerprint);
+            let error = preview_portable_selection(
+                &generation,
+                &PortableSelectionRequest {
+                    profile: PortableSelectionProfile::Complete,
+                    strict: false,
+                },
+                PortableLimits::default(),
+            )
+            .unwrap_err();
+            assert_eq!(error.code, PortableErrorCode::Io);
+        }
+    }
+}

@@ -40,9 +40,9 @@ fn selected_accepted_lineage_roundtrips_without_private_ancestor_or_live_accepta
     export_selected(&graph, &proposal, node_uuid, projection_uuid, &package);
     assert_no_private_parquet_values(&package);
     let target = directory.path().join("imported");
-    GraphForge::import_portable_v2(
+    GraphForge::import_portable(
         &target,
-        &PortableV2ImportRequest {
+        &PortableImportRequest {
             input: package,
             operation_id: OperationId(Uuid::now_v7()),
             limits: Default::default(),
@@ -314,19 +314,19 @@ fn verify_reexport(imported: &GraphForge, selected: Uuid, root: &std::path::Path
         )
         .unwrap();
     assert_no_private_parquet_values(&package);
-    crate::verify_portable_v2(
+    crate::verify_portable(
         &PortableVerifyRequest {
             input: package.clone(),
-            mode: graphforge_core::portable::PortableV2Mode::Full,
+            mode: graphforge_core::portable::PortableMode::Full,
             limits: Default::default(),
         },
         None,
     )
     .unwrap();
     let target = root.join("imported");
-    GraphForge::import_portable_v2(
+    GraphForge::import_portable(
         &target,
-        &PortableV2ImportRequest {
+        &PortableImportRequest {
             input: package,
             operation_id: OperationId(Uuid::now_v7()),
             limits: Default::default(),

@@ -50,18 +50,18 @@ fn complete_research_roundtrip_preserves_version_and_historical_genealogy() {
             &cancellation,
         )
         .unwrap();
-    let report = crate::verify_portable_v2(
+    let report = crate::verify_portable(
         &crate::PortableVerifyRequest {
             input: package.clone(),
-            mode: graphforge_core::portable::PortableV2Mode::Full,
-            limits: graphforge_core::portable::PortableV2Limits::default(),
+            mode: graphforge_core::portable::PortableMode::Full,
+            limits: graphforge_core::portable::PortableLimits::default(),
         },
         Some(cancellation.flag()),
     )
     .unwrap();
     assert!(report.research_interchange);
     let target = directory.path().join("imported");
-    let import = crate::PortableV2ImportRequest {
+    let import = crate::PortableImportRequest {
         input: package,
         operation_id: OperationId(Uuid::now_v7()),
         limits: Default::default(),
@@ -69,14 +69,14 @@ fn complete_research_roundtrip_preserves_version_and_historical_genealogy() {
     let cancelled = CancellationToken::new();
     cancelled.cancel();
     let error =
-        GraphForge::import_portable_v2(&target, &import, Some(cancelled.flag())).unwrap_err();
+        GraphForge::import_portable(&target, &import, Some(cancelled.flag())).unwrap_err();
     assert_eq!(
         error.code,
-        graphforge_core::portable::PortableV2ErrorCode::Cancelled
+        graphforge_core::portable::PortableErrorCode::Cancelled
     );
     assert!(!target.exists());
-    let first = GraphForge::import_portable_v2(&target, &import, None).unwrap();
-    let replay = GraphForge::import_portable_v2(&target, &import, None).unwrap();
+    let first = GraphForge::import_portable(&target, &import, None).unwrap();
+    let replay = GraphForge::import_portable(&target, &import, None).unwrap();
     assert!(replay.idempotent_replay);
     assert_eq!(first.generation_uuid, replay.generation_uuid);
     let imported = GraphForge::new(Some(target.to_str().unwrap())).unwrap();
@@ -117,7 +117,7 @@ fn complete_research_roundtrip_preserves_version_and_historical_genealogy() {
         .path();
     std::fs::remove_file(entry).unwrap();
     let refused = directory.path().join("incomplete-import");
-    assert!(GraphForge::import_portable_v2(&refused, &import, None).is_err());
+    assert!(GraphForge::import_portable(&refused, &import, None).is_err());
     assert!(!refused.exists());
 
     assert_eq!(after.genealogy, before.genealogy);
@@ -318,9 +318,9 @@ fn disjoint_and_redacted_exports_have_distinct_content_and_stable_transport_iden
         assert_eq!(expanded.package_digest, bundle.package_digest);
         assert_eq!(expanded.selection_fingerprint, bundle.selection_fingerprint);
         let target = directory.path().join(format!("import-{index}"));
-        GraphForge::import_portable_v2(
+        GraphForge::import_portable(
             &target,
-            &crate::PortableV2ImportRequest {
+            &crate::PortableImportRequest {
                 input: request.output,
                 operation_id: OperationId(Uuid::now_v7()),
                 limits: Default::default(),
@@ -421,10 +421,10 @@ fn check_projection_from_fork(fork: &GraphForge, version_uuid: Uuid, directory: 
         &cancel,
     )
     .unwrap();
-    let report = crate::verify_portable_v2(
+    let report = crate::verify_portable(
         &crate::PortableVerifyRequest {
             input: output,
-            mode: graphforge_core::portable::PortableV2Mode::Full,
+            mode: graphforge_core::portable::PortableMode::Full,
             limits: Default::default(),
         },
         None,

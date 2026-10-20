@@ -101,8 +101,8 @@ impl GraphForge {
         import_operation: Uuid,
     ) -> Result<Option<ResearchOperationReceipt>, GfError> {
         let imported_generation =
-            graphforge_core::uuid::portable_v2_import_generation(&import_operation);
-        if graphforge_storage::portable_v2_import_pending(project_path, import_operation)? {
+            graphforge_core::uuid::portable_import_generation(&import_operation);
+        if graphforge_storage::portable_import_pending(project_path, import_operation)? {
             return Ok(None);
         }
         // Admission is read-only: never initialize or repair a staged target as a probe.
