@@ -204,7 +204,7 @@ pub(crate) fn scan_stream(
         cancelled,
         Some(spill.sink()),
         None,
-        true,
+        Some(&scratch),
         || PortableError::new(PortableErrorCode::InvalidStructure, "trailing bytes"),
     )?;
     let (report, entries) =
@@ -914,7 +914,7 @@ fn verify_bundle(
         cancelled,
         sink,
         written,
-        false,
+        None,
         || match probe.metadata() {
             Err(_) => PortableError::new(PortableErrorCode::Io, "bundle metadata"),
             Ok(current)
@@ -976,8 +976,9 @@ fn finish_bundle(
 /// reader: it hashes every byte, checks every header and retains only what
 /// later semantic reads need, within `max_retained_control_bytes`.
 /// `on_trailing_bytes` names the fault when bytes follow the end blocks.
-/// `walk_parquet` walks each Parquet entry's pages as it streams past, for a
-/// source that cannot be read back; a file is walked after the scan instead.
+/// `walk_parquet` is the scratch directory in which each Parquet entry's pages
+/// are walked as it streams past, for a source that cannot be read back; a
+/// file is walked in place after the scan instead.
 #[allow(clippy::too_many_lines)]
 fn read_bundle<R: Read + ?Sized>(
     reader: &mut R,
@@ -985,7 +986,7 @@ fn read_bundle<R: Read + ?Sized>(
     cancelled: Option<&AtomicBool>,
     mut sink: Option<&mut materialization::CopySink<'_>>,
     written: Option<&crate::project_portable_export::WrittenPackage>,
-    walk_parquet: bool,
+    walk_parquet: Option<&Path>,
     on_trailing_bytes: impl FnOnce() -> PortableError,
 ) -> Result<BundleScan, PortableError> {
     if limits.copy_buffer_bytes == 0 {
@@ -1140,8 +1141,11 @@ fn read_bundle<R: Read + ?Sized>(
                     size
                 })
             });
-        let mut walk = (walk_parquet && entry_path.starts_with("data/components/") && size >= 12)
-            .then(|| ParquetWalk::new(size, limits.max_parquet_walk_bytes));
+        let mut walk = walk_parquet
+            .filter(|_| entry_path.starts_with("data/components/") && size >= 12)
+            .map(|scratch| {
+                ParquetWalk::new(&entry_path, size, limits.max_parquet_walk_bytes, scratch)
+            });
         let (digest, bytes) = hash_payload(
             reader,
             size,
@@ -1156,7 +1160,7 @@ fn read_bundle<R: Read + ?Sized>(
             walk.as_mut(),
         )?;
         if let Some(walk) = walk {
-            walk.finish(&entry_path)?;
+            walk.finish()?;
         }
         if let Some(check) = check {
             inventory_verdict = Some(check.finish());
@@ -2048,7 +2052,7 @@ fn hash_payload(
     entry: &str,
     mut sink: Option<&mut materialization::CopySink<'_>>,
     expected: Option<([u8; 32], u64)>,
-    mut walk: Option<&mut ParquetWalk>,
+    mut walk: Option<&mut ParquetWalk<'_>>,
 ) -> Result<([u8; 32], Option<Vec<u8>>), PortableError> {
     let mut payload_hash = StreamHash::new(expected);
     let mut kept = retain_payload(size, retain_limit, entry)?;
@@ -2085,7 +2089,7 @@ fn hash_payload(
             inventory.update(&copy_buffer[..chunk_len]);
         }
         if let Some(walk) = walk.as_deref_mut() {
-            walk.update(&copy_buffer[..chunk_len]);
+            walk.update(&copy_buffer[..chunk_len])?;
         }
         left -= chunk_len as u64;
     }

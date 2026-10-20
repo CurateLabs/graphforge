@@ -5,6 +5,7 @@ use super::{
     PortableLimits, PortableReport, Read, Seek, SeekFrom, Sha256, canonical_json, check_cancel, fs,
     has_multiple_links, hex, modified, research, same_identity, semantic_validation,
 };
+use std::io::Write;
 
 /// Where a semantic read finds an entry whose bytes the scan did not retain.
 /// Nothing is ever read back from the bundle being scanned.
@@ -261,27 +262,54 @@ impl parquet::file::reader::ChunkReader for EntryWindow {
 }
 
 /// What the Parquet page walk needs of one streamed entry. A stream cannot be
-/// read back, so the entry is held in memory while it streams past, up to
-/// `max_parquet_walk_bytes`, together with its last four bytes. If it ends in
-/// the footer magic it is walked exactly as a file entry is; if it is larger
-/// than the bound it is refused rather than left unwalked.
-pub(super) struct ParquetWalk {
-    kept: Option<Vec<u8>>,
+/// read back, so the entry is kept while it streams past: in memory up to
+/// `max_parquet_walk_bytes`, in an unnamed scratch file beyond that (the page
+/// walk needs random access, and a stream offers none). If the entry ends in
+/// the footer magic it is walked with the same routine as a file entry, so
+/// the verdict does not depend on the source or on the entry's size. The
+/// scratch file has no name and is gone when the walk is dropped.
+pub(super) struct ParquetWalk<'a> {
+    path: &'a str,
+    threshold: u64,
+    scratch: &'a Path,
+    kept: Vec<u8>,
+    spill: Option<(fs::File, u64)>,
     tail: [u8; 4],
 }
 
-impl ParquetWalk {
-    pub(super) fn new(size: u64, limit: u64) -> Self {
+impl<'a> ParquetWalk<'a> {
+    pub(super) fn new(path: &'a str, size: u64, threshold: u64, scratch: &'a Path) -> Self {
+        let capacity = usize::try_from(size.min(threshold)).unwrap_or(0);
         Self {
-            kept: (size <= limit).then(|| {
-                Vec::with_capacity(usize::try_from(size).unwrap_or(usize::MAX).min(1 << 30))
-            }),
+            path,
+            threshold,
+            scratch,
+            kept: Vec::with_capacity(capacity),
+            spill: None,
             tail: [0; 4],
         }
     }
-    pub(super) fn update(&mut self, chunk: &[u8]) {
-        if let Some(kept) = &mut self.kept {
-            kept.extend_from_slice(chunk);
+    pub(super) fn update(&mut self, chunk: &[u8]) -> Result<(), PortableError> {
+        let stage = |_: std::io::Error| {
+            PortableError::at(
+                PortableErrorCode::Io,
+                self.path,
+                "cannot stage entry for the page walk",
+            )
+        };
+        if self.spill.is_none() && (self.kept.len() + chunk.len()) as u64 > self.threshold {
+            let mut file = tempfile::tempfile_in(self.scratch).map_err(stage)?;
+            file.write_all(&self.kept).map_err(stage)?;
+            let written = self.kept.len() as u64;
+            self.kept = Vec::new();
+            self.spill = Some((file, written));
+        }
+        match &mut self.spill {
+            Some((file, written)) => {
+                file.write_all(chunk).map_err(stage)?;
+                *written += chunk.len() as u64;
+            }
+            None => self.kept.extend_from_slice(chunk),
         }
         if chunk.len() >= 4 {
             self.tail.copy_from_slice(&chunk[chunk.len() - 4..]);
@@ -290,21 +318,33 @@ impl ParquetWalk {
             let at = 4 - chunk.len();
             self.tail[at..].copy_from_slice(chunk);
         }
+        Ok(())
     }
-    pub(super) fn finish(self, path: &str) -> Result<(), PortableError> {
+    pub(super) fn finish(self) -> Result<(), PortableError> {
         if &self.tail != b"PAR1" {
             return Ok(());
         }
-        let Some(bytes) = self.kept else {
-            return Err(PortableError::at(
-                PortableErrorCode::LimitExceeded,
-                path,
-                "parquet entry exceeds the stream page-walk bound",
-            ));
-        };
-        crate::parquet_encoding_profile::admit_pages(&bytes::Bytes::from(bytes))
-            .map_err(|error| refuse_profile(path, error))
+        match self.spill {
+            Some((file, length)) => walk_entry(&file, 0, length, self.path),
+            None => crate::parquet_encoding_profile::admit_pages(&bytes::Bytes::from(self.kept))
+                .map_err(|error| refuse_profile(self.path, error)),
+        }
     }
+}
+
+/// Walk the pages of the Parquet entry at `base..base + length` of `file`.
+/// The one page-walk call for entries that are read in place: a file's
+/// bundle or directory entry, and a streamed entry staged in scratch.
+fn walk_entry(file: &fs::File, base: u64, length: u64, path: &str) -> Result<(), PortableError> {
+    let window = EntryWindow {
+        file: file
+            .try_clone()
+            .map_err(|_| PortableError::at(PortableErrorCode::Io, path, "cannot read entry"))?,
+        base,
+        length,
+    };
+    crate::parquet_encoding_profile::admit_pages(&window)
+        .map_err(|error| refuse_profile(path, error))
 }
 
 /// The refusal for a Parquet entry the funded decoder profile does not admit.
@@ -366,13 +406,7 @@ pub(super) fn validate_parquet_profile(
         let before = file.metadata().map_err(|_| {
             PortableError::at(PortableErrorCode::Io, &entry.path, "cannot inspect entry")
         })?;
-        let window = EntryWindow {
-            file: file.try_clone().map_err(|_| {
-                PortableError::at(PortableErrorCode::Io, &entry.path, "cannot read entry")
-            })?,
-            base: entry.offset.unwrap_or(0),
-            length: entry.length,
-        };
+        let base = entry.offset.unwrap_or(0);
         if entry.offset.is_none() && before.len() != entry.length {
             return Err(PortableError::at(
                 PortableErrorCode::ConcurrentMutation,
@@ -381,7 +415,7 @@ pub(super) fn validate_parquet_profile(
             ));
         }
         let mut tail = [0_u8; 4];
-        file.seek(SeekFrom::Start(window.base + entry.length - 4))
+        file.seek(SeekFrom::Start(base + entry.length - 4))
             .and_then(|_| file.read_exact(&mut tail))
             .map_err(|_| {
                 PortableError::at(
@@ -391,7 +425,7 @@ pub(super) fn validate_parquet_profile(
                 )
             })?;
         if &tail == b"PAR1" {
-            admit_pages(&window).map_err(|error| refuse_profile(&entry.path, error))?;
+            walk_entry(&file, base, entry.length, &entry.path)?;
         }
         let after = file.metadata().map_err(|_| {
             PortableError::at(PortableErrorCode::Io, &entry.path, "cannot inspect entry")

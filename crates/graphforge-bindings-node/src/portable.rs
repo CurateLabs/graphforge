@@ -355,7 +355,8 @@ pub struct PortableLimitsInput {
     pub max_tag_manifest_bytes: Option<BigInt>,
     /// Bytes the bundle reader may retain for controls it reads after the scan.
     pub max_retained_control_bytes: Option<BigInt>,
-    /// Largest Parquet entry a stream holds in memory to walk its pages.
+    /// Largest Parquet entry a stream holds in memory to walk its pages; a
+    /// larger one is staged in scratch.
     pub max_parquet_walk_bytes: Option<BigInt>,
     pub max_path_bytes: Option<BigInt>,
     pub copy_buffer_bytes: Option<BigInt>,

@@ -73,6 +73,23 @@ fn stream(bundle: &Path, limits: PortableLimits) -> Result<crate::PortableReport
     crate::verify_portable_stream(&mut reader, None, limits, None)
 }
 
+/// Stream `bundle` through a fresh scratch directory and require that nothing
+/// is left in it, whether the verdict is a report or a refusal.
+fn stream_in_scratch(
+    bundle: &Path,
+    limits: PortableLimits,
+) -> Result<crate::PortableReport, PortableError> {
+    let scratch = tempfile::tempdir().unwrap();
+    let mut reader = std::io::BufReader::new(fs::File::open(bundle).unwrap());
+    let verdict = crate::verify_portable_stream(&mut reader, Some(scratch.path()), limits, None);
+    assert_eq!(
+        fs::read_dir(scratch.path()).unwrap().count(),
+        0,
+        "the stream left files in its scratch directory"
+    );
+    verdict
+}
+
 fn import(
     package: &Path,
     target: &Path,
@@ -181,19 +198,51 @@ fn funded_parquet_in_both_package_forms_still_verifies() {
     assert_eq!(streamed.source, crate::PortableSource::Stream);
     assert_eq!(streamed.package_digest, file.package_digest);
     assert_eq!(streamed.payload_bytes, file.payload_bytes);
-    // A file is walked in place; a stream holds the entry to walk it, so a
-    // bound below the entry refuses the Parquet entry instead of skipping it.
-    let small = PortableLimits {
-        max_parquet_walk_bytes: 16,
+}
+
+#[test]
+fn a_parquet_entry_over_the_in_memory_threshold_gets_the_file_verdict_from_a_stream() {
+    let funded = hostile::string_file(Encoding::PLAIN, WriterVersion::PARQUET_1_0, 64);
+    let unfunded = hostile::string_file(
+        Encoding::DELTA_LENGTH_BYTE_ARRAY,
+        WriterVersion::PARQUET_1_0,
+        64,
+    );
+    // A threshold below both entries sends them through the scratch file.
+    let spilling = PortableLimits {
+        max_parquet_walk_bytes: 256,
         ..PortableLimits::default()
     };
-    verify_with(&bundle, small).unwrap();
-    let refused = stream(&bundle, small).unwrap_err();
-    assert_eq!(refused.code, PortableErrorCode::LimitExceeded);
-    assert_eq!(refused.entry.as_deref(), Some(GRAPH_FILE));
-    assert!(
-        refused
-            .to_string()
-            .ends_with("exceeds the stream page-walk bound")
-    );
+    assert!(funded.len() as u64 > spilling.max_parquet_walk_bytes);
+    assert!(unfunded.len() as u64 > spilling.max_parquet_walk_bytes);
+    for (bytes, valid) in [(funded, true), (unfunded, false)] {
+        let (_project, generation) = generation_with_graph_file(&bytes);
+        let plan = plan_complete_portable(&generation, PortableExportLimits::default()).unwrap();
+        let outputs = tempfile::tempdir().unwrap();
+        let (_, bundle) = write_test_representations(&plan, outputs.path());
+        let file = verify_with(&bundle, spilling);
+        let spilled = stream_in_scratch(&bundle, spilling);
+        let in_memory = stream_in_scratch(&bundle, PortableLimits::default());
+        if valid {
+            let (file, spilled, in_memory) = (file.unwrap(), spilled.unwrap(), in_memory.unwrap());
+            for report in [&spilled, &in_memory] {
+                assert_eq!(report.source, crate::PortableSource::Stream);
+                assert_eq!(report.package_digest, file.package_digest);
+                assert_eq!(report.payload_bytes, file.payload_bytes);
+                assert_eq!(report.transport_digest, file.transport_digest);
+            }
+        } else {
+            let (file, spilled, in_memory) = (
+                file.unwrap_err(),
+                spilled.unwrap_err(),
+                in_memory.unwrap_err(),
+            );
+            assert_eq!(file.code, PortableErrorCode::LimitExceeded);
+            for error in [&spilled, &in_memory] {
+                assert_eq!(error.code, file.code);
+                assert_eq!(error.entry.as_deref(), Some(GRAPH_FILE));
+                assert_eq!(error.to_string(), file.to_string());
+            }
+        }
+    }
 }

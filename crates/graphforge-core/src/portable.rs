@@ -42,10 +42,11 @@ pub struct PortableLimits {
     /// fails with `LimitExceeded` at that entry. The same rule governs bundles
     /// read from a file and from a stream.
     pub max_retained_control_bytes: u64,
-    /// Largest Parquet entry a stream holds in memory, one at a time, to walk
-    /// its pages before any decoder sees it. A file is walked in place and has
-    /// no such bound; a streamed entry that ends in the Parquet footer magic
-    /// and is larger than this is refused `LimitExceeded` at that entry.
+    /// Largest Parquet candidate entry a stream holds in memory while it walks
+    /// the entry's pages before any decoder sees it. A larger entry streams
+    /// into an unnamed scratch file instead and is walked there with the same
+    /// routine, so the verdict never depends on this value or on the source:
+    /// it only trades memory for scratch writes.
     pub max_parquet_walk_bytes: u64,
     /// UTF-8 bytes in one portable path.
     pub max_path_bytes: usize,
@@ -93,7 +94,7 @@ impl Default for PortableLimits {
                 .next_power_of_two(),
             max_tag_manifest_bytes: 4 * 1024 * 1024,
             max_retained_control_bytes: 256 * 1024 * 1024,
-            max_parquet_walk_bytes: 256 * 1024 * 1024,
+            max_parquet_walk_bytes: 64 * 1024 * 1024,
             max_path_bytes: 4096,
             copy_buffer_bytes: 1024 * 1024,
         }
