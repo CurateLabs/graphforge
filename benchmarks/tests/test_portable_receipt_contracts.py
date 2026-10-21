@@ -110,6 +110,23 @@ class LiveAssemblyContractTests(unittest.TestCase):
     def test_all_current_receipts_assemble(self) -> None:
         self.assertEqual(self.assemble(*self.documents(verify="1"))["status"], "passed")
 
+    def test_malformed_and_foreign_portable_contracts_are_refused_live(self) -> None:
+        for verify in (
+            "graphforge-portable-verify/2 ",
+            "graphforge-portable-verify/2.0",
+            "graphforge-portable-verify/1 ",
+            "graphforge-portable-preview/1",
+            "GRAPHFORGE-PORTABLE-VERIFY/1",
+            "graphforge-portable-verify",
+        ):
+            with self.subTest(verify=verify):
+                graphforge, benchexec = self.documents(verify="1")
+                text = json.dumps(graphforge).replace("graphforge-portable-verify/1", verify)
+                graphforge = json.loads(text)
+                benchexec["graphforge"] = graphforge
+                with self.assertRaisesRegex(ControllerError, "are not the required"):
+                    self.assemble(graphforge, benchexec)
+
     def test_mixed_revision_receipts_are_refused_live(self) -> None:
         with self.assertRaisesRegex(ControllerError, "graphforge-portable-verify/2"):
             self.assemble(*self.documents(verify="2"))

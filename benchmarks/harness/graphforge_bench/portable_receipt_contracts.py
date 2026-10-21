@@ -11,7 +11,6 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-import re
 from typing import Any
 
 
@@ -43,7 +42,7 @@ RECORDED_EVIDENCE_CONTRACTS: Mapping[str, PortableContracts] = {
     "710c6c64f4718c0664d08bdd3aafe21de4a29eba": _RETIRED_ERA,
 }
 
-_FAMILY = re.compile(r"graphforge-portable-(export|import|verify)/[0-9]+")
+_PORTABLE_PREFIX = "graphforge-portable-"
 
 
 def contracts_for_commit(commit: str) -> PortableContracts:
@@ -51,21 +50,23 @@ def contracts_for_commit(commit: str) -> PortableContracts:
 
 
 def stray_contracts(document: Any, expected: PortableContracts) -> list[str]:
-    """Portable receipt contract values in `document` that differ from `expected`."""
-    wanted = {
-        "export": expected.export,
-        "import": expected.import_,
-        "verify": expected.verify,
-    }
+    """Portable receipt contract values in `document` that are not exactly `expected`.
+
+    Any contract string that begins with the portable prefix (compared case-insensitively,
+    whatever follows it) is a portable receipt and must equal one of the allowed IDs.
+    """
+    allowed = {expected.export, expected.import_, expected.verify}
     found: list[str] = []
 
     def visit(value: Any) -> None:
         if isinstance(value, dict):
             contract = value.get("contract")
-            if isinstance(contract, str):
-                match = _FAMILY.fullmatch(contract)
-                if match and contract != wanted[match.group(1)]:
-                    found.append(contract)
+            if (
+                isinstance(contract, str)
+                and contract.lower().startswith(_PORTABLE_PREFIX)
+                and contract not in allowed
+            ):
+                found.append(contract)
             for child in value.values():
                 visit(child)
         elif isinstance(value, list):
