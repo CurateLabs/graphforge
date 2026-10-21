@@ -267,20 +267,36 @@ enum Command {
     Publish(hub_publish::PublishArgs),
     Hub(hub_clone::HubArgs),
     /// Show the current Branch, its head and its upstream.
+    ///
+    /// Example: `gf status`
     Status(porcelain::StatusArgs),
     /// Show history, newest first.
+    ///
+    /// Example: `gf log -n 10`, `gf log v1`, `gf log --remote --all`
     Log(porcelain::LogArgs),
-    /// Record a new Version of the Branch by running a query.
+    /// Record a new Version of the Branch by running a query, with a message.
+    ///
+    /// Example: `gf commit -m "Raise scores" --query "MATCH (n:Item) SET n.score = 2"`
     Commit(porcelain::CommitArgs),
-    /// List Branches, or create one.
+    /// List Branches, or create one at the current head or at `--from`.
+    ///
+    /// Example: `gf branch`, `gf branch feature/score`, `gf branch fix --from v1`
     Branch(porcelain::BranchArgs),
     /// Select the Branch the other verbs act on.
+    ///
+    /// Example: `gf switch feature/score`
     Switch(porcelain::SwitchArgs),
     /// List tags, create one on a Version, or delete one.
+    ///
+    /// Example: `gf tag`, `gf tag v1`, `gf tag v1 <version-uuid>`, `gf tag -d v1`
     Tag(porcelain::TagArgs),
     /// Publish the Branch head to its Hub repository.
+    ///
+    /// Example: `gf push owner/repository` the first time, then `gf push`
     Push(porcelain::PushArgs),
-    /// Incorporate the Hub's head of the Branch's ref.
+    /// Incorporate the Hub's head of the Branch's ref into the local Branch.
+    ///
+    /// Example: `gf pull`
     Pull(porcelain::PullArgs),
     /// Initialize repository-local GraphForge definitions and state.
     Init(InitArgs),
