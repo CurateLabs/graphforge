@@ -328,6 +328,11 @@ mod tests {
         summary.facts.ontology_composition = None;
         summary.facts.ontology_mode = "none".into();
         summary.facts.components.remove("ontology");
+        // Keep the per-kind byte totals consistent with the histogram and the
+        // payload total: drop the dropped kind's bytes from both.
+        if let Some(bytes) = summary.facts.bytes_by_kind.remove("ontology") {
+            summary.facts.payload_bytes -= bytes;
+        }
         let summary = summary.to_canonical_json().unwrap();
         let summary_digest = sha256_digest(&summary);
         manifest.summary = Some(ProjectSummaryReference {

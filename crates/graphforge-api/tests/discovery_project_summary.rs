@@ -233,6 +233,30 @@ fn summary_bytes_are_identical_for_bundle_and_expanded_and_facts_are_verified() 
     assert_eq!(from_bundle.package.package_digest.0, report.package_digest);
     assert_eq!(from_bundle.package.package_class, "complete");
     assert_eq!(from_bundle.facts.payload_bytes, report.payload_bytes);
+    // Verified bytes per component kind, copied from the report: the values
+    // sum exactly to `payload_bytes`, and the key set is the component
+    // histogram's kinds plus the package's control entries.
+    assert_eq!(from_bundle.facts.bytes_by_kind, report.bytes_by_kind);
+    assert_eq!(
+        from_bundle.facts.bytes_by_kind.values().sum::<u64>(),
+        from_bundle.facts.payload_bytes
+    );
+    let expected_kinds: BTreeSet<_> = from_bundle
+        .facts
+        .components
+        .keys()
+        .cloned()
+        .chain(["package-control".to_owned()])
+        .collect();
+    assert_eq!(
+        from_bundle
+            .facts
+            .bytes_by_kind
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>(),
+        expected_kinds
+    );
 
     // Component histogram, derived independently from the authenticated manifest.
     let manifest: Value =
@@ -491,6 +515,69 @@ fn absent_participants_yield_empty_metadata_and_ontology_mode_none() {
     }
     assert!(populated.is_empty(), "unexpected metadata: {populated:?}");
     summary.validate(DiscoveryLimits::default()).unwrap();
+}
+
+/// Build a valid summary from a real export, apply one mutation to its JSON,
+/// and return the parse error. Every mutation below only touches
+/// `facts.bytes_by_kind` or its agreement with the other facts.
+fn rejected_byte_totals(mutate: impl FnOnce(&mut Value)) -> graphforge_discovery::DiscoveryError {
+    let exported = exported_project();
+    let summary = summarize(&exported.bundle).unwrap();
+    let mut document: Value =
+        serde_json::from_slice(&summary.to_canonical_json().unwrap()).unwrap();
+    mutate(&mut document);
+    ProjectSummary::from_json(
+        &serde_json::to_vec(&document).unwrap(),
+        DiscoveryLimits::default(),
+    )
+    .unwrap_err()
+}
+
+fn assert_byte_totals_refused(error: graphforge_discovery::DiscoveryError) {
+    assert_eq!(error.code, DiscoveryErrorCode::MalformedResponse);
+    assert_eq!(error.field.as_deref(), Some("facts.bytes_by_kind"));
+}
+
+#[test]
+fn from_json_rejects_byte_totals_that_omit_a_component_kind() {
+    let error = rejected_byte_totals(|document| {
+        document["facts"]["bytes_by_kind"]
+            .as_object_mut()
+            .unwrap()
+            .remove("graph-data");
+    });
+    assert_byte_totals_refused(error);
+}
+
+#[test]
+fn from_json_rejects_byte_totals_outside_the_component_histogram() {
+    let error = rejected_byte_totals(|document| {
+        document["facts"]["bytes_by_kind"]["settings"] = Value::from(
+            document["facts"]["bytes_by_kind"]["ontology"]
+                .as_u64()
+                .unwrap(),
+        );
+    });
+    assert_byte_totals_refused(error);
+}
+
+#[test]
+fn from_json_rejects_byte_totals_that_do_not_sum_to_the_payload_bytes() {
+    let error = rejected_byte_totals(|document| {
+        let ontology = document["facts"]["bytes_by_kind"]["ontology"]
+            .as_u64()
+            .unwrap();
+        document["facts"]["bytes_by_kind"]["ontology"] = Value::from(ontology - 1);
+    });
+    assert_byte_totals_refused(error);
+}
+
+#[test]
+fn from_json_rejects_byte_totals_with_an_unknown_kind() {
+    let error = rejected_byte_totals(|document| {
+        document["facts"]["bytes_by_kind"]["mystery"] = Value::from(16u64);
+    });
+    assert_byte_totals_refused(error);
 }
 
 #[test]
