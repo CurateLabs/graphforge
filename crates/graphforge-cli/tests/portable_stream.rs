@@ -7,7 +7,8 @@ use std::collections::BTreeMap;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{Arc, mpsc};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use arrow::array::{RecordBatch, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
@@ -36,6 +37,9 @@ const EVIDENCE_LENGTH: u64 = 5 * GIB;
 /// `head -c $((5 * 1024 ** 3)) /dev/zero | sha256sum`.
 const EVIDENCE_DIGEST: &str = "7f06c62352aebd8125b2a1841e2b9e1ffcbed602f381c3dcb3200200e383d1d5";
 /// The memory the verifier may hold, whatever the package size.
+/// The longest a run may take to feed and finish: generous over the seconds the
+/// largest case takes, short of the CI job timeout.
+const DEADLINE: Duration = Duration::from_secs(120);
 const PEAK_RSS_LIMIT: u64 = 768 * MIB;
 /// The graph Parquet entry of the staging run: more than
 /// `max_parquet_walk_bytes` (64 MiB), so the walk stages it in scratch.
@@ -378,20 +382,10 @@ impl Read for Bundle {
     }
 }
 
-/// What the sampler read from the live child: `VmHWM` and the limits it runs
-/// under.
-struct Sampled {
-    /// Peak resident memory, a high-water mark: one read after the payload is
-    /// fed is the run's peak.
-    peak_rss: u64,
-    /// `Max address space` and `Max file size`, soft.
+/// The limits the child runs under, read from `/proc/<pid>/limits`.
+struct Effective {
     address_space: u64,
     file_size: u64,
-}
-
-fn proc_field(text: &str, key: &str) -> Option<u64> {
-    let line = text.lines().find(|line| line.starts_with(key))?;
-    line.split_whitespace().nth(1)?.parse().ok()
 }
 
 fn limit_field(text: &str, name: &str) -> Option<u64> {
@@ -400,34 +394,55 @@ fn limit_field(text: &str, name: &str) -> Option<u64> {
     line.split_whitespace().nth(3)?.parse().ok()
 }
 
-/// Read the live child's peak memory and limits. Every read must succeed.
-fn sample(pid: u32) -> Result<Sampled, String> {
-    let read = |name: &str| {
-        std::fs::read_to_string(format!("/proc/{pid}/{name}"))
-            .map_err(|error| format!("/proc/{pid}/{name}: {error}"))
-    };
-    let missing = |what: &str| format!("/proc/{pid}: no {what}");
-    let status = read("status")?;
-    let limits = read("limits")?;
-    // The gf image, not the shell that set the limits before `exec`.
-    if !read("cmdline")?.contains("portable") {
-        return Err(missing("gf command line"));
+/// Read the live child's effective limits. Until `sh` has `exec`ed `gf`, the
+/// process is the shell, whose first argument is not the `gf` path; retry for
+/// a bounded moment, then fail. Every read must succeed.
+fn effective_limits(pid: u32) -> Result<Effective, String> {
+    let give_up = Instant::now() + Duration::from_secs(10);
+    let gf = gf_bin();
+    loop {
+        let read = |name: &str| std::fs::read_to_string(format!("/proc/{pid}/{name}"));
+        if let (Ok(cmdline), Ok(limits)) = (read("cmdline"), read("limits"))
+            && cmdline.split('\0').next() == gf.to_str()
+        {
+            return Ok(Effective {
+                address_space: limit_field(&limits, "Max address space")
+                    .ok_or("/proc limits: no address-space limit")?,
+                file_size: limit_field(&limits, "Max file size")
+                    .ok_or("/proc limits: no file-size limit")?,
+            });
+        }
+        if Instant::now() >= give_up {
+            return Err(format!("/proc/{pid}: gf never showed its command line"));
+        }
+        std::thread::sleep(Duration::from_millis(5));
     }
-    Ok(Sampled {
-        peak_rss: proc_field(&status, "VmHWM:").ok_or_else(|| missing("VmHWM"))? * 1024,
-        address_space: limit_field(&limits, "Max address space")
-            .ok_or_else(|| missing("address-space limit"))?,
-        file_size: limit_field(&limits, "Max file size")
-            .ok_or_else(|| missing("file-size limit"))?,
-    })
+}
+
+/// Peak resident memory of the largest reaped child, from `getrusage`. The
+/// verifier is the only child the test process reaps (`exec` replaces the
+/// shell), and nextest runs each test in its own process. The kernel keeps the
+/// high-water mark over the whole life of the process, so the report built
+/// after end of input is included.
+fn children_max_rss() -> u64 {
+    // SAFETY: `getrusage` only writes the zeroed `rusage` it is given.
+    let (status, usage) = unsafe {
+        let mut usage = std::mem::zeroed::<libc::rusage>();
+        (libc::getrusage(libc::RUSAGE_CHILDREN, &mut usage), usage)
+    };
+    assert_eq!(status, 0, "getrusage failed");
+    // `ru_maxrss` is in KiB on Linux.
+    u64::try_from(usage.ru_maxrss).expect("non-negative") * 1024
 }
 
 struct Verified {
     code: Option<i32>,
     stdout: Vec<u8>,
     stderr: String,
-    /// Sampled while the child was alive with the whole payload fed.
-    sampled: Option<Sampled>,
+    /// The limits the child ran under, when the run asked to read them.
+    effective: Option<Effective>,
+    /// Whole-life peak resident memory of the reaped child.
+    max_rss: u64,
     fed: u64,
 }
 
@@ -447,46 +462,43 @@ impl Verified {
             .clone()
     }
 
-    /// The child ran under exactly `limits` and stayed under `PEAK_RSS_LIMIT`,
-    /// as read from it while it was alive.
+    /// The child ran under exactly `limits` and its peak resident memory over
+    /// the whole run stayed under `PEAK_RSS_LIMIT`.
     fn assert_ran_within(&self, limits: Limits) {
-        let sampled = self.sampled.as_ref().unwrap_or_else(|| {
-            panic!(
-                "the verifier ended before the stream was fed: {}",
-                self.stderr
-            )
-        });
-        assert_eq!(sampled.address_space, limits.address_space);
-        assert_eq!(sampled.file_size, limits.file_size);
-        println!("peak_rss_bytes={}", sampled.peak_rss);
-        assert!(sampled.peak_rss > 0, "VmHWM was never read");
+        let effective = self
+            .effective
+            .as_ref()
+            .expect("the run did not read the child's limits");
+        assert_eq!(effective.address_space, limits.address_space);
+        assert_eq!(effective.file_size, limits.file_size);
+        println!("ru_maxrss_bytes={}", self.max_rss);
+        assert!(self.max_rss > 0, "the child's peak memory was not recorded");
         assert!(
-            sampled.peak_rss < PEAK_RSS_LIMIT,
+            self.max_rss < PEAK_RSS_LIMIT,
             "peak resident memory was {} bytes",
-            sampled.peak_rss
+            self.max_rss
         );
     }
 }
 
-/// How a run reads the child.
+/// Whether a run reads the child's effective limits.
 #[derive(Clone, Copy, PartialEq)]
-enum Hold {
-    /// Run to the end; read nothing.
+enum Observe {
     No,
-    /// Keep stdin open after the last byte until the child's memory and
-    /// limits were read while it was alive, then close it. The verifier reads
-    /// to end of input after the end blocks, so it is alive and blocked there.
-    ForSample,
+    Limits,
 }
 
 /// Run `gf portable verify --input - --json` on `stdin` under `limits`, with
-/// `tmpdir` as its `TMPDIR`, feeding it from a thread.
+/// `tmpdir` as its `TMPDIR`, feeding it from a thread. Feeding and completion
+/// share one `DEADLINE`: on expiry the child is killed and reaped, the feeder
+/// (which then gets `EPIPE`) is joined, and the test fails.
 fn verify_stream(
     mut stdin: impl Read + Send + 'static,
     tmpdir: &Path,
     limits: Limits,
-    hold: Hold,
+    observe: Observe,
 ) -> Verified {
+    let started = Instant::now();
     let mut child = Command::new("sh")
         .args(["-c", &limits.script()])
         .arg(gf_bin())
@@ -497,29 +509,27 @@ fn verify_stream(
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn gf under ulimit");
+    // The child is blocked reading the empty stdin until the feeder starts, so
+    // it is alive for this read.
+    let effective = (observe == Observe::Limits).then(|| {
+        effective_limits(child.id()).unwrap_or_else(|error| {
+            child.kill().ok();
+            child.wait().ok();
+            panic!("{error}")
+        })
+    });
     let mut pipe = child.stdin.take().unwrap();
-    let (fed_tx, fed_rx) = mpsc::channel::<()>();
-    let (sampled_tx, sampled_rx) = mpsc::channel::<()>();
     let feeder = std::thread::spawn(move || {
         let mut fed = 0u64;
         let mut block = vec![0u8; MIB as usize];
         loop {
             let count = stdin.read(&mut block).expect("generate the stream");
-            if count == 0 {
-                break;
-            }
             // The verifier may refuse before the end of the stream.
-            if pipe.write_all(&block[..count]).is_err() {
+            if count == 0 || pipe.write_all(&block[..count]).is_err() {
                 return fed;
             }
             fed += count as u64;
         }
-        if hold == Hold::ForSample {
-            // Released only once the main thread acknowledges its reads.
-            fed_tx.send(()).ok();
-            sampled_rx.recv().ok();
-        }
-        fed
     });
     let mut stdout = child.stdout.take().unwrap();
     let mut stderr = child.stderr.take().unwrap();
@@ -533,20 +543,27 @@ fn verify_stream(
         stderr.read_to_string(&mut text).unwrap();
         text
     });
-    let sampled = (hold == Hold::ForSample)
-        .then(|| fed_rx.recv().ok())
-        .flatten()
-        .map(|()| {
-            let sampled = sample(child.id()).unwrap_or_else(|error| panic!("{error}"));
-            sampled_tx.send(()).expect("release the feeder");
-            sampled
-        });
-    let status = child.wait().expect("wait for gf");
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("poll gf") {
+            break status;
+        }
+        if started.elapsed() >= DEADLINE {
+            child.kill().expect("kill the stalled verifier");
+            child.wait().expect("reap the stalled verifier");
+            let fed = feeder.join().unwrap();
+            let stderr = err.join().unwrap();
+            panic!(
+                "gf did not finish within {DEADLINE:?}; killed after {fed} bytes were fed: {stderr}"
+            );
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    };
     Verified {
         code: status.code(),
         stdout: out.join().unwrap(),
         stderr: err.join().unwrap(),
-        sampled,
+        effective,
+        max_rss: children_max_rss(),
         fed: feeder.join().unwrap(),
     }
 }
@@ -596,7 +613,7 @@ fn a_five_gib_package_streams_from_stdin_in_bounded_memory() {
         Bundle::new(entries, u64::MAX),
         tmp.path(),
         OPAQUE,
-        Hold::ForSample,
+        Observe::Limits,
     );
 
     run.assert_ran_within(OPAQUE);
@@ -633,7 +650,7 @@ fn a_graph_entry_over_the_walk_threshold_verifies_from_stdin() {
         Bundle::new(entries, u64::MAX),
         tmp.path(),
         STAGED,
-        Hold::ForSample,
+        Observe::Limits,
     );
 
     run.assert_ran_within(STAGED);
@@ -656,7 +673,7 @@ fn a_stream_truncated_at_sixty_percent_is_refused() {
     );
     let cut = Bundle::length(&entries) / 10 * 6;
     let tmp = TempDir::new().unwrap();
-    let run = verify_stream(Bundle::new(entries, cut), tmp.path(), OPAQUE, Hold::No);
+    let run = verify_stream(Bundle::new(entries, cut), tmp.path(), OPAQUE, Observe::No);
 
     assert_eq!(run.code, Some(2), "{}", run.stderr);
     let error = run.error();
@@ -691,7 +708,12 @@ fn impostor_and_corrupted_bundles_are_refused() {
     .0;
     for entries in [impostor, corrupted] {
         let tmp = TempDir::new().unwrap();
-        let run = verify_stream(Bundle::new(entries, u64::MAX), tmp.path(), OPAQUE, Hold::No);
+        let run = verify_stream(
+            Bundle::new(entries, u64::MAX),
+            tmp.path(),
+            OPAQUE,
+            Observe::No,
+        );
         assert_eq!(run.code, Some(2), "{}", run.stderr);
         assert_eq!(run.error()["code"], "GF_VALIDATION");
         assert_empty(tmp.path());
@@ -710,7 +732,12 @@ fn a_limit_refusal_reports_its_stable_code_in_json() {
         .unwrap()
         .1 = Body::Zeros(32 * MIB);
     let tmp = TempDir::new().unwrap();
-    let run = verify_stream(Bundle::new(entries, u64::MAX), tmp.path(), OPAQUE, Hold::No);
+    let run = verify_stream(
+        Bundle::new(entries, u64::MAX),
+        tmp.path(),
+        OPAQUE,
+        Observe::No,
+    );
     assert_eq!(run.code, Some(1), "{}", run.stderr);
     assert_eq!(run.error()["code"], "GF_LIMIT_EXCEEDED");
     assert_empty(tmp.path());
