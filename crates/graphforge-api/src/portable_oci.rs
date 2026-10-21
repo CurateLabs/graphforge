@@ -1145,6 +1145,90 @@ mod tests {
     }
 
     #[test]
+    fn retired_config_contract_is_refused_as_unsupported_future() {
+        let (_dir, bundle, _) = export_bundle();
+        let registry = MemoryOciRegistry::default();
+        let published =
+            publish_portable_oci(&registry, &publish_req(&bundle, None, None, None), None).unwrap();
+        let (_, manifest_bytes) = registry
+            .get_manifest("tests/portable", &published.oci_manifest_digest)
+            .unwrap();
+        let mut manifest: OciManifest = serde_json::from_slice(&manifest_bytes).unwrap();
+        let config_bytes = registry
+            .get_blob("tests/portable", &manifest.config.digest)
+            .unwrap();
+        let retired = String::from_utf8(config_bytes).unwrap().replace(
+            CONFIG_CONTRACT,
+            concat!("graphforge-portable-", "v2", "-oci-config/1"),
+        );
+        assert!(!retired.contains(CONFIG_CONTRACT));
+        let retired = retired.into_bytes();
+        manifest.config.digest = digest_sha256(&retired);
+        manifest.config.size = retired.len() as u64;
+        registry
+            .put_blob("tests/portable", &manifest.config.digest, &retired)
+            .unwrap();
+        let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
+        let digest = registry
+            .put_manifest(
+                "tests/portable",
+                &digest_sha256(&manifest_bytes),
+                OCI_MANIFEST_MEDIA_TYPE,
+                &manifest_bytes,
+            )
+            .unwrap();
+        let out_dir = tempdir().unwrap();
+        let destination = out_dir.path().join("retired.gfpb");
+        let error = pull_portable_oci(
+            &registry,
+            &pull_req(&digest, &destination, None, Default::default()),
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(error.code, PortableErrorCode::UnsupportedFuture);
+        assert!(!destination.exists());
+    }
+
+    #[test]
+    fn retired_signature_contract_never_verifies() {
+        let (_dir, bundle, _) = export_bundle();
+        let registry = MemoryOciRegistry::default();
+        let secret = b"test-signing-key".to_vec();
+        let published = publish_portable_oci(
+            &registry,
+            &publish_req(
+                &bundle,
+                None,
+                Some(PortableOciSignatureMaterial {
+                    signer: "releases@curatelabs.ai".into(),
+                    key_id: "test-key".into(),
+                    secret: secret.clone(),
+                }),
+                None,
+            ),
+            None,
+        )
+        .unwrap();
+        let policy = PortableOciAuthenticityPolicy {
+            require_named_signer: Some("releases@curatelabs.ai".into()),
+            verification_key: Some(secret),
+        };
+        let state = |registry: &dyn PortableOciRegistry| {
+            evaluate_portable_oci_signature_state(
+                registry,
+                "tests/portable",
+                &published.oci_manifest_digest,
+                &published.package_digest,
+                &policy,
+            )
+            .unwrap()
+        };
+        assert_eq!(state(&registry), PortableOciSignatureState::Valid);
+        let retired = RetiredSignatureContract { registry };
+        assert_eq!(state(&retired), PortableOciSignatureState::Invalid);
+    }
+
+    #[test]
     fn authenticity_distinguishes_absent_valid_invalid_and_mismatched() {
         let (_dir, bundle, _) = export_bundle();
         let registry = MemoryOciRegistry::default();
@@ -1424,6 +1508,55 @@ impl PortableOciRegistry for FaultyDownload {
             *first ^= 0xff;
         }
         Ok(b)
+    }
+    fn blob_exists(&self, r: &str, d: &str) -> Result<bool, PortableError> {
+        self.registry.blob_exists(r, d)
+    }
+    fn put_manifest(&self, r: &str, d: &str, m: &str, b: &[u8]) -> Result<String, PortableError> {
+        self.registry.put_manifest(r, d, m, b)
+    }
+    fn get_manifest(&self, r: &str, d: &str) -> Result<(String, Vec<u8>), PortableError> {
+        self.registry.get_manifest(r, d)
+    }
+}
+
+#[cfg(test)]
+struct RetiredSignatureContract {
+    registry: MemoryOciRegistry,
+}
+#[cfg(test)]
+impl PortableOciRegistry for RetiredSignatureContract {
+    fn list_referrers(&self, r: &str, d: &str) -> Result<Vec<Vec<u8>>, PortableError> {
+        self.registry.list_referrers(r, d)
+    }
+    fn put_blob(&self, r: &str, d: &str, b: &[u8]) -> Result<(), PortableError> {
+        self.registry.put_blob(r, d, b)
+    }
+    fn put_blob_stream(
+        &self,
+        r: &str,
+        d: &str,
+        size: u64,
+        source: &mut dyn Read,
+    ) -> Result<(), PortableError> {
+        self.registry.put_blob_stream(r, d, size, source)
+    }
+    fn get_blob_stream<'a>(
+        &'a self,
+        r: &str,
+        d: &str,
+        size: u64,
+    ) -> Result<Box<dyn Read + 'a>, PortableError> {
+        self.registry.get_blob_stream(r, d, size)
+    }
+    fn get_blob(&self, r: &str, d: &str) -> Result<Vec<u8>, PortableError> {
+        let blob = self.registry.get_blob(r, d)?;
+        Ok(String::from_utf8_lossy(&blob)
+            .replace(
+                "graphforge-portable-oci-signature/1",
+                concat!("graphforge-portable-", "v2", "-oci-signature/1"),
+            )
+            .into_bytes())
     }
     fn blob_exists(&self, r: &str, d: &str) -> Result<bool, PortableError> {
         self.registry.blob_exists(r, d)

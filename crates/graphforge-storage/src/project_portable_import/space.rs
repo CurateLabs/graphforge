@@ -30,8 +30,8 @@ pub(super) fn stage_paths(
     let parent = target.parent().unwrap_or_else(|| Path::new("."));
     let id = transaction_uuid.hyphenated();
     Ok((
-        parent.join(format!(".{name}.portable-v2-{id}")),
-        parent.join(format!(".{name}.portable-v2-{id}.owner")),
+        parent.join(format!(".{name}.portable-{id}")),
+        parent.join(format!(".{name}.portable-{id}.owner")),
     ))
 }
 

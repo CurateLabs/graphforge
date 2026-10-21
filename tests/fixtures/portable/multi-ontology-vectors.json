@@ -1,5 +1,5 @@
 {
-  "contract": "graphforge-portable-v2-multi-ontology-conformance/1",
+  "contract": "graphforge-portable-multi-ontology-conformance/1",
   "decision": "existing-versioned-compatibility",
   "required_capability": "ontology-composition@1",
   "component": {

@@ -1,7 +1,7 @@
 # Rust-owned Hub fixture
 
 This directory is the single GraphForge authority for the public Hub closeout
-fixture. `openalex-source/` is the complete, synthetic, expanded portable-v2
+fixture. `openalex-source/` is the complete, synthetic, expanded portable
 source state of the `openalex/openalex` Project. `generated/v1/` contains the
 deterministic bundle, Project summary, per-module package, and canonical
 discovery manifest and refs emitted by Rust.
@@ -43,7 +43,7 @@ rejects a different base or a changed location, even if the manifest digest is
 recomputed. No flags still checks the production fixture at the default base.
 
 After the artifacts change, regenerate the shared verification receipts as
-described in `tests/fixtures/portable-v2/README.md`.
+described in `tests/fixtures/portable/README.md`.
 
 ## The source
 
@@ -75,7 +75,7 @@ test asserts that the rebuild equals the checked-in tree.
 The generator fully verifies the source, imports and reopens it through the
 public GraphForge facade with a fixed operation identity, exports and fully
 verifies the canonical bundle, derives the summary from that verified bundle
-(`summarize_verified_portable_v2`, never from hand-entered metadata), exports one
+(`summarize_verified_portable`, never from hand-entered metadata), exports one
 package per advertised module, then constructs and validates manifest and refs
 through `graphforge-discovery`. The manifest advertises the summary
 (`summary.object_digest`) and each module (`ontology.modules[].package`) as

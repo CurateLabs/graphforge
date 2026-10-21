@@ -9,6 +9,7 @@ from typing import Any
 
 from jsonschema import Draft202012Validator
 
+from graphforge_bench.portable_receipt_contracts import contracts_for_commit, stray_contracts
 from graphforge_bench.progressive_qualification import PHASES
 from graphforge_bench.progressive_run import ControllerError, assemble_rung_evidence
 
@@ -71,6 +72,13 @@ def read_native_rung(root: Path, source: Path, scale: int) -> dict[str, Any]:
         raise NativeRungError(f"S{scale} artifact digest mismatch")
     profile = f"graph500-s{scale}-{'local' if scale < 20 else 'provider'}"
     graphforge, benchexec = documents["graphforge"], documents["benchexec"]
+    contracts = contracts_for_commit(identities["commit"])
+    stray = stray_contracts(documents, contracts)
+    if stray:
+        raise NativeRungError(
+            f"S{scale} portable receipt contracts {sorted(set(stray))} are not those emitted by "
+            f"the recorded source commit {identities['commit']}"
+        )
     if (
         identities["profile_id"] != profile
         or rung["profile_id"] != profile
@@ -94,6 +102,7 @@ def read_native_rung(root: Path, source: Path, scale: int) -> dict[str, Any]:
             benchexec=benchexec,
             profile_id=profile,
             source="progressive_profile" if scale < 20 else "canonical_ladder",
+            contracts=contracts,
         )
     except (ValueError, KeyError, TypeError) as error:
         raise NativeRungError(f"S{scale} ordinary lifecycle receipts invalid: {error}") from error
