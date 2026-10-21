@@ -283,18 +283,26 @@ curl -sS "$OBJECT_URL" | graphforge --json portable verify --input - --mode full
 
 `--input -` reads the bundle once from standard input and gives the verdict a
 file gives the same bytes; only the report's `source` is `stream` instead of
-`file`. Memory is bounded by the resource limits, not by the package size. A
-package of any size is hashed as it passes and nothing is written to disk,
-except that a research package stages one Version at a time in a private
-directory under `TMPDIR` that is removed before the command returns.
+`file`. Memory is bounded by the resource limits, not by the package size:
+
+- opaque `evidence` artifacts of any size are hashed as they pass and never
+  touch disk;
+- a graph Parquet entry larger than `max_parquet_walk_bytes` (64 MiB) is staged
+  in an anonymous file in `TMPDIR` while it streams, because the page walk needs
+  random access, and the file is gone when that entry is done. At any moment the
+  verifier holds at most one such entry on disk, so its temporary disk is
+  bounded by the largest graph Parquet entry, not by the package;
+- a research package additionally stages one Version at a time in a private
+  directory under `TMPDIR`, removed before the command returns.
+
 `--input -` requires `--mode full` (`--mode inspect` is refused with
 `GF_VALIDATION`), and a bundle only: pass an expanded directory by path. To
 name a file called `-`, write `./-`.
 
 With `--json`, a verified package prints exactly one JSON document on stdout:
 the report, including `package_digest`, the component inventory,
-`bytes_by_kind`, and `plausibility`. A refusal prints one JSON error document
-on stderr and nothing on stdout. The exit code is `0` for a verified package
+`bytes_by_kind`, and `plausibility`. A refusal, including a refused argument
+list, prints one JSON error document on stderr and nothing on stdout. The exit code is `0` for a verified package
 and `2` for a package that is not valid (an impostor manifest, a truncated
 stream, a digest mismatch, a structural fault); any other refusal exits `1`.
 

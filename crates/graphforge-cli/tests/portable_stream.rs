@@ -7,8 +7,14 @@ use std::collections::BTreeMap;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::Arc;
 use std::time::Duration;
 
+use arrow::array::{RecordBatch, StringArray};
+use arrow::datatypes::{DataType, Field, Schema};
+use parquet::arrow::ArrowWriter;
+use parquet::basic::{Compression, Encoding};
+use parquet::file::properties::WriterProperties;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
@@ -16,6 +22,7 @@ use tempfile::TempDir;
 const GIB: u64 = 1024 * 1024 * 1024;
 const MIB: u64 = 1024 * 1024;
 const EVIDENCE_PATH: &str = "data/components/evidence/scan-0001/scan.bin";
+const GRAPH_PATH: &str = "data/components/graph-data/graph-0001/topology/nodes.parquet";
 const ONTOLOGY_PATH: &str = "data/components/ontology/core-ontology/ontology.json";
 const MANIFEST_PATH: &str = "data/graphforge-project.json";
 const BAGIT: &[u8] = b"BagIt-Version: 1.0\nTag-File-Character-Encoding: UTF-8\n";
@@ -31,8 +38,42 @@ const EVIDENCE_LENGTH: u64 = 5 * GIB;
 const EVIDENCE_DIGEST: &str = "7f06c62352aebd8125b2a1841e2b9e1ffcbed602f381c3dcb3200200e383d1d5";
 /// The memory the verifier may hold, whatever the package size.
 const PEAK_RSS_LIMIT: u64 = 768 * MIB;
-const VERIFY_SCRIPT: &str = "ulimit -v 1048576; ulimit -f 65536; \
-                             exec \"$0\" portable verify --input - --json";
+/// What the opaque 5 GiB run may write in all: its controls and its report.
+const OPAQUE_WRITE_LIMIT: u64 = MIB;
+/// The largest graph Parquet entry of the spill run: more than
+/// `max_parquet_walk_bytes` (64 MiB), so the walk stages it in scratch.
+const GRAPH_ROWS: usize = 64;
+const GRAPH_ROW_BYTES: usize = 1_150_000;
+
+/// The limits a verifier runs under. `ulimit -f` counts 512-byte blocks in the
+/// shell `sh` is here; the effective values are read back from
+/// `/proc/<pid>/limits` and asserted, not trusted.
+#[derive(Clone, Copy)]
+struct Limits {
+    address_space: u64,
+    file_size: u64,
+}
+
+/// Virtual memory 1 GiB, files 64 MiB.
+const OPAQUE: Limits = Limits {
+    address_space: GIB,
+    file_size: 64 * MIB,
+};
+/// The same memory; files 128 MiB, room for one staged graph entry.
+const STAGED: Limits = Limits {
+    address_space: GIB,
+    file_size: 128 * MIB,
+};
+
+impl Limits {
+    fn script(self) -> String {
+        format!(
+            "ulimit -v {}; ulimit -f {}; exec \"$0\" portable verify --input - --json",
+            self.address_space / 1024,
+            self.file_size / 512
+        )
+    }
+}
 
 fn gf_bin() -> PathBuf {
     std::fs::canonicalize(env!("CARGO_BIN_EXE_gf")).expect("resolve same-build gf binary")
@@ -116,16 +157,34 @@ fn tar_header(path: &str, size: u64) -> Vec<u8> {
     header.to_vec()
 }
 
-/// The fixture ontology-only package plus one `evidence` component whose only
-/// file is [`EVIDENCE_PATH`], with SHA-256 `digest`. Every control is rebuilt
-/// to describe it, so the package is valid. `manifest` replaces the semantic
-/// manifest bytes when given (an impostor), with the inventories describing it.
-fn package(
-    evidence: Body,
-    digest: &str,
-    manifest: Option<Vec<u8>>,
-) -> (Vec<(String, Body)>, String) {
-    let length = evidence.length();
+/// A component added to the fixture package: one file of `kind`.
+struct Artifact {
+    kind: &'static str,
+    participant: &'static str,
+    path: &'static str,
+    media_type: &'static str,
+    body: Body,
+    /// SHA-256 of the file, as the manifest declares it.
+    sha256: String,
+}
+
+/// The 5 GiB opaque artifact, with its pinned digest.
+fn evidence(sha256: &str, body: Body) -> Artifact {
+    Artifact {
+        kind: "evidence",
+        participant: "scan-0001",
+        path: EVIDENCE_PATH,
+        media_type: "application/octet-stream",
+        body,
+        sha256: sha256.into(),
+    }
+}
+
+/// The fixture ontology-only package plus `artifacts`. Every control is
+/// rebuilt to describe them, so the package is valid. `manifest` replaces the
+/// semantic manifest bytes when given (an impostor), with the inventories
+/// describing it. Returns the entries in canonical order and `package_digest`.
+fn package(artifacts: Vec<Artifact>, manifest: Option<Vec<u8>>) -> (Vec<(String, Body)>, String) {
     let mut document: Value = serde_json::from_str(include_str!(
         "../../../tests/fixtures/portable/ontology-only.manifest.json"
     ))
@@ -133,52 +192,108 @@ fn package(
     let object = document.as_object_mut().unwrap();
     object.remove("package_digest");
     object.insert("package_class".into(), "component-selective".into());
-    object["requirements"]["capabilities"] = serde_json::json!(["evidence@1", "ontology@1"]);
-    object["selection"]["roots"] = serde_json::json!(["core-ontology", "scan-0001"]);
-    object["components"].as_array_mut().unwrap().insert(
-        0,
-        serde_json::json!({
-            "kind": "evidence",
+    let mut capabilities = vec!["ontology@1".to_owned()];
+    let mut roots = vec!["core-ontology".to_owned()];
+    let mut components = document["components"].as_array().unwrap().clone();
+    for artifact in &artifacts {
+        capabilities.push(format!("{}@1", artifact.kind));
+        roots.push(artifact.participant.to_owned());
+        components.push(serde_json::json!({
+            "kind": artifact.kind,
             "files": [{
-                "length": length,
-                "media_type": "application/octet-stream",
-                "path": EVIDENCE_PATH,
-                "sha256": digest,
+                "length": artifact.body.length(),
+                "media_type": artifact.media_type,
+                "path": artifact.path,
+                "sha256": artifact.sha256,
             }],
-            "participant_id": "scan-0001",
+            "participant_id": artifact.participant,
             "required_dependencies": [],
-        }),
-    );
+        }));
+    }
+    capabilities.sort();
+    roots.sort();
+    components.sort_by_key(|component| {
+        (
+            component["kind"].as_str().unwrap().to_owned(),
+            component["participant_id"].as_str().unwrap().to_owned(),
+        )
+    });
+    document["requirements"]["capabilities"] = capabilities.into();
+    document["selection"]["roots"] = roots.into();
+    document["components"] = components.into();
     let package_digest = hex(&Sha256::digest(
         [b"graphforge-project/2\0".as_slice(), &canonical(&document)].concat(),
     ));
     document["package_digest"] = format!("sha256:{package_digest}").into();
     let manifest = manifest.unwrap_or_else(|| canonical(&document));
 
-    let inventory: String = [
-        (EVIDENCE_PATH, digest.to_owned()),
-        (ONTOLOGY_PATH, hex(&Sha256::digest(b"{}"))),
-        (MANIFEST_PATH, hex(&Sha256::digest(&manifest))),
-    ]
-    .iter()
-    .map(|(path, digest)| format!("{digest}  {path}\n"))
-    .collect();
+    let mut data = BTreeMap::from([
+        (ONTOLOGY_PATH.to_owned(), hex(&Sha256::digest(b"{}"))),
+        (MANIFEST_PATH.to_owned(), hex(&Sha256::digest(&manifest))),
+    ]);
+    let mut entries = vec![
+        ("bag-info.txt".to_owned(), Body::Bytes(BAG_INFO.to_vec())),
+        ("bagit.txt".to_owned(), Body::Bytes(BAGIT.to_vec())),
+        (ONTOLOGY_PATH.to_owned(), Body::Bytes(b"{}".to_vec())),
+        (MANIFEST_PATH.to_owned(), Body::Bytes(manifest)),
+    ];
+    for artifact in artifacts {
+        data.insert(artifact.path.to_owned(), artifact.sha256);
+        entries.push((artifact.path.to_owned(), artifact.body));
+    }
+    let inventory: String = data
+        .iter()
+        .map(|(path, digest)| format!("{digest}  {path}\n"))
+        .collect();
     let tags = format!(
         "{}  bag-info.txt\n{}  bagit.txt\n{}  manifest-sha256.txt\n",
         hex(&Sha256::digest(BAG_INFO)),
         hex(&Sha256::digest(BAGIT)),
         hex(&Sha256::digest(inventory.as_bytes()))
     );
-    let entries = vec![
-        ("bag-info.txt".into(), Body::Bytes(BAG_INFO.to_vec())),
-        ("bagit.txt".into(), Body::Bytes(BAGIT.to_vec())),
-        (EVIDENCE_PATH.into(), evidence),
-        (ONTOLOGY_PATH.into(), Body::Bytes(b"{}".to_vec())),
-        (MANIFEST_PATH.into(), Body::Bytes(manifest)),
-        ("manifest-sha256.txt".into(), Body::Bytes(inventory.into())),
-        ("tagmanifest-sha256.txt".into(), Body::Bytes(tags.into())),
-    ];
+    entries.push(("manifest-sha256.txt".into(), Body::Bytes(inventory.into())));
+    entries.push(("tagmanifest-sha256.txt".into(), Body::Bytes(tags.into())));
+    entries.sort_by(|left, right| left.0.cmp(&right.0));
     (entries, package_digest)
+}
+
+/// A valid graph Parquet file of about 70 MiB: plain-encoded, uncompressed,
+/// one page per row, so it passes the encoding profile and is walked.
+fn graph_parquet() -> Vec<u8> {
+    let schema = Arc::new(Schema::new(vec![Field::new(
+        "value",
+        DataType::Utf8,
+        false,
+    )]));
+    let values = StringArray::from_iter_values(
+        (0..GRAPH_ROWS).map(|row| format!("{row:02}{}", "x".repeat(GRAPH_ROW_BYTES))),
+    );
+    let batch = RecordBatch::try_new(Arc::clone(&schema), vec![Arc::new(values)]).unwrap();
+    let properties = WriterProperties::builder()
+        .set_compression(Compression::UNCOMPRESSED)
+        .set_dictionary_enabled(false)
+        .set_encoding(Encoding::PLAIN)
+        .set_write_batch_size(1)
+        .set_data_page_row_count_limit(1)
+        .set_max_row_group_row_count(Some(GRAPH_ROWS))
+        .build();
+    let mut file = Vec::new();
+    let mut writer = ArrowWriter::try_new(&mut file, schema, Some(properties)).unwrap();
+    writer.write(&batch).unwrap();
+    writer.close().unwrap();
+    file
+}
+
+fn graph_data(file: Vec<u8>) -> Artifact {
+    let sha256 = hex(&Sha256::digest(&file));
+    Artifact {
+        kind: "graph-data",
+        participant: "graph-0001",
+        path: GRAPH_PATH,
+        media_type: "application/vnd.apache.parquet",
+        body: Body::Bytes(file),
+        sha256,
+    }
 }
 
 /// A canonical bundle read one entry at a time: a zero-filled entry is
@@ -204,6 +319,16 @@ impl Bundle {
             ended: false,
             limit,
         }
+    }
+
+    /// Where the payload of the entry at `path` starts in the stream.
+    fn payload_offset(entries: &[(String, Body)], path: &str) -> u64 {
+        entries
+            .iter()
+            .take_while(|(entry, _)| entry != path)
+            .map(|(_, body)| 512 + body.length().div_ceil(512) * 512)
+            .sum::<u64>()
+            + 512
     }
 
     /// The stream's length, whole.
@@ -266,11 +391,96 @@ impl Read for Bundle {
     }
 }
 
+/// Pauses for 400 ms the first time `consumed` reaches each of `pauses`, so
+/// the sampler sees the verifier idle at those points in the stream.
+struct Paced<R> {
+    inner: R,
+    consumed: u64,
+    pauses: Vec<u64>,
+}
+
+impl<R: Read> Read for Paced<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if self.pauses.first().is_some_and(|at| self.consumed >= *at) {
+            self.pauses.remove(0);
+            std::thread::sleep(Duration::from_millis(400));
+        }
+        let count = self.inner.read(buf)?;
+        self.consumed += count as u64;
+        Ok(count)
+    }
+}
+
+/// What the sampler saw of the child.
+#[derive(Default)]
+struct Sampled {
+    /// Peak resident memory (`VmHWM`).
+    peak_rss: u64,
+    /// Bytes the process passed to `write(2)` (`wchar`), to any file or pipe.
+    written: u64,
+    /// The most bytes allocated at once to its open, deleted files.
+    unlinked: u64,
+    /// `Max address space` and `Max file size`, soft, as the child runs.
+    address_space: Option<u64>,
+    file_size: Option<u64>,
+}
+
+fn proc_field(text: &str, key: &str) -> Option<u64> {
+    let line = text.lines().find(|line| line.starts_with(key))?;
+    line.split_whitespace().nth(1)?.parse().ok()
+}
+
+fn limit_field(text: &str, name: &str) -> Option<u64> {
+    let line = text.lines().find(|line| line.starts_with(name))?;
+    // "Max file size", soft, hard, "bytes".
+    line.split_whitespace().nth(3)?.parse().ok()
+}
+
+/// Allocated bytes of the process's open files whose names are gone, as #2205's
+/// scratch sampler counts them.
+fn unlinked_bytes(pid: u32) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    let Ok(fds) = std::fs::read_dir(format!("/proc/{pid}/fd")) else {
+        return 0;
+    };
+    fds.flatten()
+        .filter(|fd| {
+            std::fs::read_link(fd.path())
+                .is_ok_and(|target| target.to_string_lossy().ends_with(" (deleted)"))
+        })
+        .filter_map(|fd| std::fs::metadata(fd.path()).ok())
+        .map(|metadata| metadata.blocks() * 512)
+        .sum()
+}
+
+impl Sampled {
+    fn sample(&mut self, pid: u32) {
+        let read = |name: &str| std::fs::read_to_string(format!("/proc/{pid}/{name}")).ok();
+        if let Some(status) = read("status") {
+            self.peak_rss = self
+                .peak_rss
+                .max(proc_field(&status, "VmHWM:").unwrap_or(0) * 1024);
+        }
+        if let Some(io) = read("io") {
+            self.written = self.written.max(proc_field(&io, "wchar:").unwrap_or(0));
+        }
+        self.unlinked = self.unlinked.max(unlinked_bytes(pid));
+        // The limits are set before `exec`, so read them from the gf image.
+        if self.file_size.is_none()
+            && read("cmdline").is_some_and(|cmdline| cmdline.contains("portable"))
+            && let Some(limits) = read("limits")
+        {
+            self.address_space = limit_field(&limits, "Max address space");
+            self.file_size = limit_field(&limits, "Max file size");
+        }
+    }
+}
+
 struct Verified {
     code: Option<i32>,
     stdout: Vec<u8>,
     stderr: String,
-    peak_rss: u64,
+    sampled: Sampled,
     fed: u64,
 }
 
@@ -289,20 +499,20 @@ impl Verified {
         })["error"]
             .clone()
     }
+
+    /// The child ran under exactly the limits it was given.
+    fn assert_ran_under(&self, limits: Limits) {
+        assert_eq!(self.sampled.address_space, Some(limits.address_space));
+        assert_eq!(self.sampled.file_size, Some(limits.file_size));
+    }
 }
 
-fn peak_rss(pid: u32) -> Option<u64> {
-    let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
-    let line = status.lines().find(|line| line.starts_with("VmHWM:"))?;
-    Some(line.split_whitespace().nth(1)?.parse::<u64>().ok()? * 1024)
-}
-
-/// Run `gf portable verify --input - --json` on `stdin` under the memory and
-/// file-size limits, with `tmpdir` as its `TMPDIR`, feeding it from a thread
-/// and sampling the child's peak resident memory every 50 ms.
-fn verify_stream(mut stdin: impl Read + Send + 'static, tmpdir: &Path) -> Verified {
+/// Run `gf portable verify --input - --json` on `stdin` under `limits`, with
+/// `tmpdir` as its `TMPDIR`, feeding it from a thread and sampling the child
+/// every 50 ms.
+fn verify_stream(mut stdin: impl Read + Send + 'static, tmpdir: &Path, limits: Limits) -> Verified {
     let mut child = Command::new("sh")
-        .args(["-c", VERIFY_SCRIPT])
+        .args(["-c", &limits.script()])
         .arg(gf_bin())
         .env("TMPDIR", tmpdir)
         .current_dir(tmpdir)
@@ -339,19 +549,19 @@ fn verify_stream(mut stdin: impl Read + Send + 'static, tmpdir: &Path) -> Verifi
         stderr.read_to_string(&mut text).unwrap();
         text
     });
-    let mut peak = 0;
+    let mut sampled = Sampled::default();
     let status = loop {
         if let Some(status) = child.try_wait().expect("poll gf") {
             break status;
         }
-        peak = peak.max(peak_rss(child.id()).unwrap_or(0));
+        sampled.sample(child.id());
         std::thread::sleep(Duration::from_millis(50));
     };
     Verified {
         code: status.code(),
         stdout: out.join().unwrap(),
         stderr: err.join().unwrap(),
-        peak_rss: peak,
+        sampled,
         fed: feeder.join().unwrap(),
     }
 }
@@ -364,48 +574,136 @@ fn assert_empty(dir: &Path) {
     assert!(left.is_empty(), "TMPDIR holds {left:?}");
 }
 
+fn zeros_digest(length: u64) -> String {
+    let mut hash = Sha256::new();
+    let block = vec![0u8; MIB as usize];
+    let mut left = length;
+    while left > 0 {
+        let count = left.min(MIB);
+        hash.update(&block[..count as usize]);
+        left -= count;
+    }
+    hex(&hash.finalize())
+}
+
+fn bytes_by_kind(report: &Value) -> BTreeMap<String, u64> {
+    report["bytes_by_kind"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .map(|(kind, bytes)| (kind.clone(), bytes.as_u64().unwrap()))
+        .collect()
+}
+
+/// Opaque evidence is never staged: the run writes next to nothing, holds a
+/// bounded amount of memory, and leaves no file, whatever the package size.
 #[test]
 fn a_five_gib_package_streams_from_stdin_in_bounded_memory_and_disk() {
-    let (entries, package_digest) = package(Body::Zeros(EVIDENCE_LENGTH), EVIDENCE_DIGEST, None);
+    let (entries, package_digest) = package(
+        vec![evidence(EVIDENCE_DIGEST, Body::Zeros(EVIDENCE_LENGTH))],
+        None,
+    );
     let length = Bundle::length(&entries);
     assert!(length > 5 * GIB);
     let tmp = TempDir::new().unwrap();
-    let run = verify_stream(Bundle::new(entries, u64::MAX), tmp.path());
+    let run = verify_stream(Bundle::new(entries, u64::MAX), tmp.path(), OPAQUE);
 
+    run.assert_ran_under(OPAQUE);
+    println!(
+        "peak_rss_bytes={} written_bytes={} unlinked_bytes={}",
+        run.sampled.peak_rss, run.sampled.written, run.sampled.unlinked
+    );
+    assert!(
+        run.sampled.written < OPAQUE_WRITE_LIMIT,
+        "the verifier wrote {} bytes",
+        run.sampled.written
+    );
+    assert!(
+        run.sampled.unlinked < OPAQUE_WRITE_LIMIT,
+        "{}",
+        run.sampled.unlinked
+    );
     assert_eq!(run.code, Some(0), "{}", run.stderr);
     assert_eq!(run.fed, length, "the whole stream was read");
     let report = run.json();
     assert_eq!(report["integrity"], "verified");
     assert_eq!(report["source"], "stream");
     assert_eq!(report["package_digest"], format!("sha256:{package_digest}"));
-    let kinds: BTreeMap<String, u64> = report["bytes_by_kind"]
-        .as_object()
-        .unwrap()
-        .iter()
-        .map(|(kind, bytes)| (kind.clone(), bytes.as_u64().unwrap()))
-        .collect();
+    let kinds = bytes_by_kind(&report);
     assert_eq!(kinds["evidence"], EVIDENCE_LENGTH);
     assert_eq!(
         kinds.values().sum::<u64>(),
         report["payload_bytes"].as_u64().unwrap()
     );
     assert_empty(tmp.path());
-    println!("peak_rss_bytes={}", run.peak_rss);
-    assert!(run.peak_rss > 0, "VmHWM was never sampled");
+    assert!(run.sampled.peak_rss > 0, "VmHWM was never sampled");
     assert!(
-        run.peak_rss < PEAK_RSS_LIMIT,
+        run.sampled.peak_rss < PEAK_RSS_LIMIT,
         "peak resident memory was {} bytes",
-        run.peak_rss
+        run.sampled.peak_rss
     );
+}
+
+/// A graph Parquet entry over `max_parquet_walk_bytes` is staged in an
+/// anonymous scratch file while it streams, so the walk can seek in it: the
+/// disk the verifier holds is that one entry, gone with it.
+#[test]
+fn a_graph_entry_over_the_walk_threshold_is_staged_once_and_removed() {
+    let file = graph_parquet();
+    let entry = file.len() as u64;
+    assert!(
+        entry > 64 * MIB,
+        "{entry} bytes does not exceed the walk threshold"
+    );
+    let (entries, _) = package(vec![graph_data(file)], None);
+    let length = Bundle::length(&entries);
+    // Pause midway through the entry, with its scratch file open, and again
+    // before the end of the archive, when the final `wchar` can be read.
+    let midway = Bundle::payload_offset(&entries, GRAPH_PATH) + entry / 2;
+    let tmp = TempDir::new().unwrap();
+    let stream = Paced {
+        inner: Bundle::new(entries, u64::MAX),
+        consumed: 0,
+        pauses: vec![midway, length - 1024],
+    };
+    let run = verify_stream(stream, tmp.path(), STAGED);
+
+    run.assert_ran_under(STAGED);
+    println!(
+        "entry_bytes={entry} written_bytes={} unlinked_bytes={}",
+        run.sampled.written, run.sampled.unlinked
+    );
+    assert_eq!(run.code, Some(0), "{}", run.stderr);
+    assert_eq!(run.fed, length);
+    assert_eq!(run.json()["integrity"], "verified");
+    assert_eq!(bytes_by_kind(&run.json())["graph-data"], entry);
+    // Written once, in full, and no more than the entry plus the report.
+    assert!(run.sampled.written >= entry, "{}", run.sampled.written);
+    assert!(
+        run.sampled.written <= entry + OPAQUE_WRITE_LIMIT,
+        "{}",
+        run.sampled.written
+    );
+    // The scratch file was seen open, unlinked, holding part of the entry.
+    assert!(run.sampled.unlinked > entry / 4, "{}", run.sampled.unlinked);
+    assert!(
+        run.sampled.unlinked <= entry + OPAQUE_WRITE_LIMIT,
+        "{}",
+        run.sampled.unlinked
+    );
+    assert_empty(tmp.path());
 }
 
 /// A stream cut short in the evidence artifact is refused as truncated.
 #[test]
 fn a_stream_truncated_at_sixty_percent_is_refused() {
-    let (entries, _) = package(Body::Zeros(EVIDENCE_LENGTH), EVIDENCE_DIGEST, None);
+    let (entries, _) = package(
+        vec![evidence(EVIDENCE_DIGEST, Body::Zeros(EVIDENCE_LENGTH))],
+        None,
+    );
     let cut = Bundle::length(&entries) / 10 * 6;
     let tmp = TempDir::new().unwrap();
-    let run = verify_stream(Bundle::new(entries, cut), tmp.path());
+    let run = verify_stream(Bundle::new(entries, cut), tmp.path(), OPAQUE);
 
     assert_eq!(run.code, Some(2), "{}", run.stderr);
     let error = run.error();
@@ -424,23 +722,23 @@ fn a_stream_truncated_at_sixty_percent_is_refused() {
 /// whose artifact is not the bytes its manifest names.
 #[test]
 fn impostor_and_corrupted_bundles_are_refused() {
-    let small = MIB;
-    let digest = hex(&Sha256::digest(vec![0u8; small as usize]));
+    let digest = zeros_digest(MIB);
     let impostor = package(
-        Body::Zeros(small),
-        &digest,
+        vec![evidence(&digest, Body::Zeros(MIB))],
         Some(b"this is not a manifest".to_vec()),
     )
     .0;
     let corrupted = package(
-        Body::Zeros(small),
-        &hex(&Sha256::digest(b"other bytes")),
+        vec![evidence(
+            &hex(&Sha256::digest(b"other bytes")),
+            Body::Zeros(MIB),
+        )],
         None,
     )
     .0;
     for entries in [impostor, corrupted] {
         let tmp = TempDir::new().unwrap();
-        let run = verify_stream(Bundle::new(entries, u64::MAX), tmp.path());
+        let run = verify_stream(Bundle::new(entries, u64::MAX), tmp.path(), OPAQUE);
         assert_eq!(run.code, Some(2), "{}", run.stderr);
         assert_eq!(run.error()["code"], "GF_VALIDATION");
         assert_empty(tmp.path());
@@ -451,11 +749,7 @@ fn impostor_and_corrupted_bundles_are_refused() {
 /// JSON error.
 #[test]
 fn a_limit_refusal_reports_its_stable_code_in_json() {
-    let (mut entries, _) = package(
-        Body::Zeros(MIB),
-        &hex(&Sha256::digest(vec![0u8; MIB as usize])),
-        None,
-    );
+    let (mut entries, _) = package(vec![evidence(&zeros_digest(MIB), Body::Zeros(MIB))], None);
     // A manifest beyond `max_manifest_bytes` (16 MiB), refused at its header.
     entries
         .iter_mut()
@@ -463,13 +757,19 @@ fn a_limit_refusal_reports_its_stable_code_in_json() {
         .unwrap()
         .1 = Body::Zeros(32 * MIB);
     let tmp = TempDir::new().unwrap();
-    let run = verify_stream(Bundle::new(entries, u64::MAX), tmp.path());
+    let run = verify_stream(Bundle::new(entries, u64::MAX), tmp.path(), OPAQUE);
     assert_eq!(run.code, Some(1), "{}", run.stderr);
     assert_eq!(run.error()["code"], "GF_LIMIT_EXCEEDED");
     assert_empty(tmp.path());
 }
 
-fn gf(args: &[&str], stdin: &[u8]) -> (Option<i32>, Vec<u8>, String) {
+struct Run {
+    code: Option<i32>,
+    stdout: Vec<u8>,
+    stderr: String,
+}
+
+fn gf(args: &[&str], stdin: &[u8]) -> Run {
     let mut child = Command::new(gf_bin())
         .args(args)
         .stdin(Stdio::piped())
@@ -484,11 +784,18 @@ fn gf(args: &[&str], stdin: &[u8]) -> (Option<i32>, Vec<u8>, String) {
     });
     let output = child.wait_with_output().expect("run gf");
     feeder.join().unwrap();
-    (
-        output.status.code(),
-        output.stdout,
-        String::from_utf8_lossy(&output.stderr).into_owned(),
-    )
+    Run {
+        code: output.status.code(),
+        stdout: output.stdout,
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+    }
+}
+
+fn one_document(text: &[u8]) -> Value {
+    let mut documents = serde_json::Deserializer::from_slice(text).into_iter::<Value>();
+    let document = documents.next().expect("a document").expect("valid JSON");
+    assert!(documents.next().is_none(), "more than one document");
+    document
 }
 
 /// The Hub fixture verifies alike from a file and from stdin, and `--json`
@@ -496,20 +803,15 @@ fn gf(args: &[&str], stdin: &[u8]) -> (Option<i32>, Vec<u8>, String) {
 #[test]
 fn stdin_verifies_the_hub_bundle_with_one_json_document() {
     let bytes = std::fs::read(HUB_BUNDLE).unwrap();
-    let (code, stdout, stderr) = gf(&["portable", "verify", "--input", "-", "--json"], &bytes);
-    assert_eq!(code, Some(0), "{stderr}");
-    let documents = serde_json::Deserializer::from_slice(&stdout)
-        .into_iter::<Value>()
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap();
-    assert_eq!(documents.len(), 1, "{}", String::from_utf8_lossy(&stdout));
-    let (code, stdout, stderr) = gf(
+    let stdin = gf(&["portable", "verify", "--input", "-", "--json"], &bytes);
+    assert_eq!(stdin.code, Some(0), "{}", stdin.stderr);
+    let mut stream = one_document(&stdin.stdout);
+    let file = gf(
         &["portable", "verify", "--input", HUB_BUNDLE, "--json"],
         &[],
     );
-    assert_eq!(code, Some(0), "{stderr}");
-    let mut file: Value = serde_json::from_slice(&stdout).unwrap();
-    let mut stream = documents.into_iter().next().unwrap();
+    assert_eq!(file.code, Some(0), "{}", file.stderr);
+    let mut file = one_document(&file.stdout);
     for report in [&mut file, &mut stream] {
         report.as_object_mut().unwrap().remove("source");
     }
@@ -519,18 +821,62 @@ fn stdin_verifies_the_hub_bundle_with_one_json_document() {
 #[test]
 fn stdin_input_requires_full_mode() {
     let bytes = std::fs::read(HUB_BUNDLE).unwrap();
-    let (code, stdout, stderr) = gf(
+    let run = gf(
         &[
             "portable", "verify", "--input", "-", "--mode", "inspect", "--json",
         ],
         &bytes,
     );
-    assert_eq!(code, Some(2));
-    assert!(stdout.is_empty());
-    let documents = serde_json::Deserializer::from_str(&stderr)
-        .into_iter::<Value>()
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap();
-    assert_eq!(documents.len(), 1);
-    assert_eq!(documents[0]["error"]["code"], "GF_VALIDATION");
+    assert_eq!(run.code, Some(2));
+    assert!(run.stdout.is_empty());
+    assert_eq!(
+        one_document(run.stderr.as_bytes())["error"]["code"],
+        "GF_VALIDATION"
+    );
+}
+
+/// A refused argument list is the one JSON error document the embedded
+/// `execute` gives, with the argument-error exit code, on the real binary.
+#[test]
+fn an_argument_error_under_json_is_one_json_document() {
+    for args in [
+        &[
+            "portable", "verify", "--input", "-", "--mode", "invalid", "--json",
+        ][..],
+        &["--json", "portable", "verify", "--no-such-flag"][..],
+        &["--json", "no-such-command"][..],
+    ] {
+        let run = gf(args, &[]);
+        assert_eq!(run.code, Some(2), "{args:?}: {}", run.stderr);
+        assert!(run.stdout.is_empty(), "{args:?}");
+        let error = &one_document(run.stderr.as_bytes())["error"];
+        assert_eq!(error["code"], "GF_VALIDATION", "{args:?}");
+        assert_eq!(error["details"]["source"], "argument_parser", "{args:?}");
+    }
+    // Without --json the refusal stays clap's text.
+    let run = gf(&["portable", "verify", "--mode", "invalid"], &[]);
+    assert_eq!(run.code, Some(2));
+    assert!(run.stdout.is_empty());
+    assert!(run.stderr.contains("invalid value"), "{}", run.stderr);
+}
+
+#[test]
+fn help_and_version_print_normally() {
+    for args in [
+        &["--help"][..],
+        &["--version"][..],
+        &["portable", "verify", "--help"][..],
+        &["--json", "--help"][..],
+        &["--json", "--version"][..],
+    ] {
+        let run = gf(args, &[]);
+        assert_eq!(run.code, Some(0), "{args:?}: {}", run.stderr);
+        assert!(run.stderr.is_empty(), "{args:?}: {}", run.stderr);
+        let text = String::from_utf8_lossy(&run.stdout);
+        assert!(!text.trim().is_empty(), "{args:?}");
+        assert!(
+            serde_json::from_str::<Value>(&text).is_err(),
+            "{args:?}: {text}"
+        );
+    }
 }

@@ -1343,37 +1343,9 @@ where
     } else {
         args[0] = "graphforge".into();
     }
-    let json = args.iter().any(|arg| arg == "--json");
     let cli = match Cli::try_parse_from(&args) {
         Ok(cli) => cli,
-        Err(error) => {
-            let exit_code = error.exit_code();
-            if matches!(
-                error.kind(),
-                ErrorKind::DisplayHelp | ErrorKind::DisplayVersion
-            ) {
-                stdout = error.to_string().into_bytes();
-            } else if json {
-                write_json_error(
-                    &mut stderr,
-                    "GF_VALIDATION",
-                    &error.to_string(),
-                    JsonErrorDetails {
-                        source: "argument_parser",
-                        kind: clap_error_kind(error.kind()),
-                        semantic_code: None,
-                    },
-                )
-                .expect("writing to Vec cannot fail");
-            } else {
-                stderr = error.to_string().into_bytes();
-            }
-            return CliExecution {
-                exit_code,
-                stdout,
-                stderr,
-            };
-        }
+        Err(error) => return argument_error_execution(&error, requests_json(&args)),
     };
     let json = cli.json;
     let exit_code = match run(cli, &mut stdout) {
@@ -1385,6 +1357,45 @@ where
     };
     CliExecution {
         exit_code,
+        stdout,
+        stderr,
+    }
+}
+
+/// Whether the arguments ask for JSON, which a refused argument list cannot
+/// say through the parsed `--json` flag.
+fn requests_json(args: &[std::ffi::OsString]) -> bool {
+    args.iter().any(|arg| arg == "--json")
+}
+
+/// The finished execution of an argument list clap refused, or that asked for
+/// help or the version: help and version print to stdout, any other refusal to
+/// stderr, as one JSON error document when `json` is set.
+fn argument_error_execution(error: &clap::Error, json: bool) -> CliExecution {
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    if matches!(
+        error.kind(),
+        ErrorKind::DisplayHelp | ErrorKind::DisplayVersion
+    ) {
+        stdout = error.to_string().into_bytes();
+    } else if json {
+        write_json_error(
+            &mut stderr,
+            "GF_VALIDATION",
+            &error.to_string(),
+            JsonErrorDetails {
+                source: "argument_parser",
+                kind: clap_error_kind(error.kind()),
+                semantic_code: None,
+            },
+        )
+        .expect("writing to Vec cannot fail");
+    } else {
+        stderr = error.to_string().into_bytes();
+    }
+    CliExecution {
+        exit_code: error.exit_code(),
         stdout,
         stderr,
     }
@@ -1574,7 +1585,18 @@ fn error_exit_code(error: &CliRuntimeError) -> i32 {
 
 /// Stream process output directly and terminate with the native CLI exit status.
 pub fn run_process() {
-    let cli = Cli::parse();
+    let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    let cli = match Cli::try_parse_from(&args) {
+        Ok(cli) => cli,
+        // Help and the version keep clap's own styled output; a refusal
+        // under `--json` is the one JSON error document `execute` gives.
+        Err(error) if !requests_json(&args) || !error.use_stderr() => error.exit(),
+        Err(error) => {
+            let refused = argument_error_execution(&error, true);
+            let _ = io::stderr().write_all(&refused.stderr);
+            std::process::exit(refused.exit_code);
+        }
+    };
     let json = cli.json;
     let mut output = io::stdout().lock();
     hub_publish::allow_device_flow();
