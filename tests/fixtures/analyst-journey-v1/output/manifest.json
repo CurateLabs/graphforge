@@ -9,57 +9,57 @@
     {
       "bytes": 5064,
       "file": "discovery.arrow",
-      "sha256": "440cf45bef2a56832f52017fdda18aac8afb8f2670af45fe57dc24c8de5fa083"
+      "sha256": "d8d8bc8d6fbf2d9206e16debf25408f94d66e1ffc48d266bcf189bc704198016"
     },
     {
       "bytes": 2056,
       "file": "source.arrow",
-      "sha256": "cf0c9a88049702b0f5cea1680630c9b638e042d2b77bedd17bce3af45090642b"
+      "sha256": "9a8455803443b5e2d2cdf769b097a81ee065f7f1d70dc6baaa4b02d2163d36f6"
     },
     {
       "bytes": 3848,
       "file": "ocr-artifact.arrow",
-      "sha256": "4528264a0119b8a79c416f426096276dda4793f96376d1f53a3177ed1dac710e"
+      "sha256": "f1ee9d8ba79afaf22070c735aa03c74dc6611b9388dbbb572f27db37aa559364"
     },
     {
       "bytes": 1480,
       "file": "assertion.arrow",
-      "sha256": "2877ea2df71c1d05b1466729fcece8af31cc1a49d7bbb57b68c6e3a4f67609ce"
+      "sha256": "0858117cf248fba36bd99dd5279c68d5f83d038e40a75d7357483101c06e4df1"
     },
     {
       "bytes": 4488,
       "file": "claim-context.arrow",
-      "sha256": "ce40504a85b3481a93f910d5ffc5d3e1e6dbc2460c184891b40501a416dc336c"
+      "sha256": "843ef42794a001b7aa7b37874a78f82bd990836d0d94af3663ee0758cfd0ce14"
     },
     {
       "bytes": 2504,
       "file": "claim-evidence.arrow",
-      "sha256": "448a9ebfd1794616017b5f4577a7d0f01ba8f9a5f0772fb75868319eda1df7c5"
+      "sha256": "5cf63115bdd51833bb601caaf9b784380a9fb601736596f1692b4f13b9d9aa33"
     },
     {
       "bytes": 3080,
       "file": "included.arrow",
-      "sha256": "340c34348ad4a17688b097816d5140eac0112966be44e9b993b0e2f604857c6f"
+      "sha256": "6920a4ba980e78a9720603bce2b66dc4e82332ebc2f625167a14cb9b68e74e96"
     },
     {
       "bytes": 2952,
       "file": "boundary.arrow",
-      "sha256": "c9b42bee0b3ea31166bb40699cda91307a7f953b9be9724d22f5435fc129f9a4"
+      "sha256": "aad4456e4277ca9315c95f592867d102ca6163da128a060c512e0e4ffc04fd6b"
     },
     {
       "bytes": 4040,
       "file": "dependencies.arrow",
-      "sha256": "e0013a3a4425f4ad0e807acef5e095ff44a3bc5a79d3eb9c3db3d1a071be1cb8"
+      "sha256": "5ef0b1979bcf88b7a22557f66563f0c5e2f0fc26c867357189603225266f86d1"
     },
     {
       "bytes": 3080,
       "file": "explanations.arrow",
-      "sha256": "340c34348ad4a17688b097816d5140eac0112966be44e9b993b0e2f604857c6f"
+      "sha256": "6920a4ba980e78a9720603bce2b66dc4e82332ebc2f625167a14cb9b68e74e96"
     },
     {
       "bytes": 3912,
       "file": "external-artifact.arrow",
-      "sha256": "b1bbf32ccf9296afd349c86f329bfc058ac81144f99b5a77d7bd31ab68c21a69"
+      "sha256": "c926c0c699fe9bc44435d260b9133faf7b4bc96b989201bb4770017d86bcb0c1"
     },
     {
       "bytes": 74,
@@ -69,37 +69,37 @@
     {
       "bytes": 6344,
       "file": "upstream-preview.arrow",
-      "sha256": "4b5004624244881b091bcfc0b60cd1615edf367f930e58466a3cd92b9ff38a17"
+      "sha256": "b695edb46451818246e0e077a3706feb16ffaa5da28874e7402ff7a6e0ae52c6"
     },
     {
-      "bytes": 782,
+      "bytes": 780,
       "file": "upstream-receipt.json",
-      "sha256": "cf92890488cc5e9ce9bfd84020755286eb3065f3f577b5e404545bc33ec86f40"
+      "sha256": "0010cefccd01d7f9a0ceda46033b0cd87b7a02be4e242f60ba37748e3fa01b30"
     },
     {
       "bytes": 1160,
       "file": "branch-analysis.arrow",
-      "sha256": "f7f6dae7eb8c2c35ca93d7dfad2a30f71e708e51b24b44ef12378eb6aa845bf2"
+      "sha256": "5df8e19432ed1dca399c4cbfdbc86b8f9112c6128ba74a2ad623d431ece5f8e8"
     },
     {
       "bytes": 5640,
       "file": "comparison.arrow",
-      "sha256": "286c8f470ca4ac1df8ee39f27602768920802bb3269cd85d5f737c5ee1f13376"
+      "sha256": "6bb32d1bb011ab204ca6b17d04c9f22c04fb9a51dabe35cecfbe510b240c715b"
     },
     {
-      "bytes": 37747,
+      "bytes": 37736,
       "file": "immutable-reference.json",
-      "sha256": "f3a1a33f68f6dd6585103d179043d8a9e68b0cb590c0b05fc440743804f433cc"
+      "sha256": "81c6726eb939edd647df45d172e0308c273f0616d836f1472b50cfa1f56cdf08"
     },
     {
       "bytes": 7304,
       "file": "proposal-preview.arrow",
-      "sha256": "46bded71bfef7dd473d6653c7052b6d77417c53a0787b5c60d713994d2b56cc7"
+      "sha256": "216e656df885a52817c800fab4f0754570e012a1171fcf7ee4a0b7f490e7c4a8"
     },
     {
-      "bytes": 782,
+      "bytes": 785,
       "file": "acceptance-receipt.json",
-      "sha256": "6d8d3a399d9cab767a2064dbcd44cbd7ff4a9092eeae94a1459ce250250a8be7"
+      "sha256": "fa15ab92482cc137cfe3190afc481d3b7f2862b2c8736c1db8184d31a538283f"
     },
     {
       "bytes": 1928,
@@ -109,22 +109,22 @@
     {
       "bytes": 3720,
       "file": "decision-history.arrow",
-      "sha256": "13babc3f237a45a26b8fdf24199c1e002c5e0bc2c244f5049705ffe2fa46256b"
+      "sha256": "e41d837252495c7346600c3fb19f9551d97f3d1fbd72af5010b6b8b766fa2303"
     },
     {
       "bytes": 6856,
       "file": "accepted-history.arrow",
-      "sha256": "b2276b7d86fef244cf8ae706a2f456f451ac79ea5f57c51a7bb06bbdcd8daa82"
+      "sha256": "f66bfba81df432b0314a375a346553386e1ee3f4541696215ee1d23335664eb6"
     },
     {
       "bytes": 37696,
       "file": "continued-live-reference.json",
-      "sha256": "a0f0f579c71a534114ff42f1b05d971b30fa69231d28e673148ad168fc70b540"
+      "sha256": "e2ca21adb7643576c5b98d80154812809b29a4638ce62125d0bdfc1f4582586d"
     },
     {
       "bytes": 6536,
       "file": "reproposal-preview.arrow",
-      "sha256": "d12932a06f8c304536fe943a206f21faf2ee2c22c215e15755d3649ca7d25bbf"
+      "sha256": "9b0f201f74810d48c6fd80a348cbfa761b9ecabab167d0fc71ba5a882b585e95"
     },
     {
       "bytes": 211,
@@ -132,51 +132,51 @@
       "sha256": "92c76361859486e893f8e16d7eb06304c1ecae3f22ab24ce0615da8f50bf5095"
     },
     {
-      "bytes": 37820,
+      "bytes": 37800,
       "file": "export-source-reference.json",
-      "sha256": "44933a624e4b1422f2220a2161d2c0edd19a594e289681109cd466dadf6e8ca9"
+      "sha256": "4760a494ebd814b1f3b850858a225a68ee9299eeedb9bb7909d344a39a7e4dc4"
     },
     {
       "bytes": 24658,
       "file": "complete-verification.json",
-      "sha256": "28b1e4765dd251f9219bd4a2d7b6bb352cbc4fe74fa89ee44039e4397c80ccd9"
+      "sha256": "3cf99267e71cb794ccfa83c5487a57c650a6ee69366d307d9481203ef0776d21"
     },
     {
       "bytes": 3912,
       "file": "imported-external-artifact.arrow",
-      "sha256": "b1bbf32ccf9296afd349c86f329bfc058ac81144f99b5a77d7bd31ab68c21a69"
+      "sha256": "c926c0c699fe9bc44435d260b9133faf7b4bc96b989201bb4770017d86bcb0c1"
     },
     {
-      "bytes": 37820,
+      "bytes": 37800,
       "file": "imported-reference.json",
-      "sha256": "0c65f2daf5272e0bb6f048fec195b27b6aad4dcff3181f2bc7a2af6226d73b38"
+      "sha256": "083beff6ac701c9c6f1d1cd99c81cee3dc29b60fbfeaa5e9915769eb18fd2329"
     },
     {
-      "bytes": 36031,
+      "bytes": 36027,
       "file": "selected-reference.json",
-      "sha256": "6e3a9906d8da8d476ddb1f96ceb665f1cc65e35325467dfef62a6fede2a5cae9"
+      "sha256": "00ce6900c96ff8e28a2c761905af30f8916681c7033b714f0c075ce3036decd6"
     },
     {
-      "bytes": 37820,
+      "bytes": 37800,
       "file": "fork-reference.json",
-      "sha256": "67ec0df87aa124e6c1074c0ae5244f9b304591460ffac11cf6ff3db410fb22af"
+      "sha256": "c606305769781419d0020814c86176369e29984641e5b5fcfa4db9184f21f82f"
     }
   ],
   "identities": {
-    "character": "01a1593a-a52d-71a6-82f1-3480075e31fa",
-    "claim": "01a1593a-a5a8-7094-ae69-fb6b0acbceca",
-    "external": "01a1593a-a5a8-7094-ae69-fb6adcac4e19",
-    "mystery_branch": "01a1593a-a5a8-7094-ae69-fb64de808319",
-    "ocr": "01a1593a-a5a8-7094-ae69-fb6924b00530",
-    "scan": "01a1593a-a5a8-7094-ae69-fb68f1cee8c7",
-    "source": "01a1593a-a5a8-7094-ae69-fb67359b3e1b",
-    "voyage_branch": "01a1593a-a5a8-7094-ae69-fb65ff6f34f6"
+    "character": "01a15b0b-0003-7229-9cb6-a4f655fda97d",
+    "claim": "01a15b0b-0054-7016-a95c-dfdd771f6659",
+    "external": "01a15b0b-0054-7016-a95c-dfdc61e4b160",
+    "mystery_branch": "01a15b0b-0054-7016-a95c-dfd60713bb1a",
+    "ocr": "01a15b0b-0054-7016-a95c-dfdbfb81891a",
+    "scan": "01a15b0b-0054-7016-a95c-dfda4933dc52",
+    "source": "01a15b0b-0054-7016-a95c-dfd9c36beabc",
+    "voyage_branch": "01a15b0b-0054-7016-a95c-dfd7a5605157"
   },
   "qualification": "Native Arrow IPC and serialized control outputs; cancelled-reference and restoration-outcome are derived assertion summaries, not native response schemas. Generated identities are preserved; the identity map names fixture roles. Synthetic scan/OCR inputs do not claim OCR execution or human comprehension.",
   "reader": {
     "crate_version": "0.6.0-rc.5",
     "interchange": 1,
     "portable": 2,
-    "research_registry": 6
+    "research_registry": 9
   }
 }

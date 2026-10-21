@@ -13,7 +13,7 @@ revisit_when: "A field needs required interpretation beyond a new feature token,
 
 ## Decision
 
-M9 uses decision-gate option 1: it is representable through portable-v2's
+M9 uses decision-gate option 1: it is representable through portable's
 existing authenticated, versioned compatibility semantics. It does not add a
 component kind, change `graphforge-project/2`, or require portable v3.
 
@@ -80,7 +80,7 @@ control schema and capability to the Rust verifier before it can accept M9.
 
 This decision was checked against
 `docs/contracts/graphforge-project-v2.schema.json` and
-`crates/graphforge-storage/src/project_portable_v2.rs` at `68a1655`.
+`crates/graphforge-storage/src/project_portable.rs` at `68a1655`.
 
 | Surface | Existing v2 contract | M9 use or constraint |
 |---|---|---|
@@ -99,8 +99,8 @@ This decision was checked against
 The schema's capability pattern is the intentional compatibility extension
 point. Adding `ontology-composition@1` to a package is valid schema but not
 supported semantics for the current reader, exactly the distinction represented
-by `PortableV2ErrorCode::UnsupportedFuture` and
-`PortableV2Compatibility::UnsupportedFuture`.
+by `PortableErrorCode::UnsupportedFuture` and
+`PortableCompatibility::UnsupportedFuture`.
 
 ## Closure rules
 
@@ -137,7 +137,7 @@ publish the already verified closure.
 
 ## Operational conformance
 
-The generic portable-v2 limits, streaming copy buffer, cancellation checks,
+The generic portable limits, streaming copy buffer, cancellation checks,
 source identity checks, private staging, cleanup, and no-replace publication
 rules apply unchanged. The composition document is bounded by
 `max_manifest_bytes`; inventory collections are bounded by `max_components`;
@@ -146,7 +146,7 @@ integrity, authority, or I/O failure removes private residue and leaves the
 previous project generation authoritative.
 
 Normative semantic vectors are in
-`tests/fixtures/portable-v2/multi-ontology-vectors.json`. They cover every
+`tests/fixtures/portable/multi-ontology-vectors.json`. They cover every
 package class, representation equivalence, exact identity inputs, malformed and
 unknown features, closure, cancellation, cleanup, and authority non-mutation.
 

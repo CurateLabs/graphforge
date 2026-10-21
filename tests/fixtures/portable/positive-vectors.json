@@ -1,5 +1,5 @@
 {
-  "contract": "graphforge-portable-v2-positive/1",
+  "contract": "graphforge-portable-positive/1",
   "vectors": [
     {"package_class":"complete","package_digest":"sha256:090ec2cb738ff59527884b6b543f0875acee46b7ea319ac5ad5bd5dac4a164e5","representations":["expanded","bundle"]},
     {"package_class":"ontology-only","package_digest":"sha256:869da25f99c90864c321bf8c42aa3f1f3642c877b92bc34255c900d3083a525d","representations":["expanded","bundle"]},

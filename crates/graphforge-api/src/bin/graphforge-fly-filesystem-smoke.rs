@@ -274,7 +274,7 @@ fn qualify(config: &Config) -> Evidence {
             &filesystem,
             memory,
             capacity,
-            "GF_PORTABLE_V2",
+            "GF_PORTABLE",
             "portable_export_failed",
         );
     }
@@ -294,7 +294,7 @@ fn qualify(config: &Config) -> Evidence {
             &filesystem,
             memory,
             capacity,
-            "GF_PORTABLE_V2",
+            "GF_PORTABLE",
             "portable_verify_failed",
         );
     }
@@ -315,7 +315,7 @@ fn qualify(config: &Config) -> Evidence {
             &filesystem,
             memory,
             capacity,
-            "GF_PORTABLE_V2",
+            "GF_PORTABLE",
             "portable_import_failed",
         );
     }
@@ -329,7 +329,7 @@ fn qualify(config: &Config) -> Evidence {
             &filesystem,
             memory,
             capacity,
-            "GF_PORTABLE_V2",
+            "GF_PORTABLE",
             "portable_reopen_mismatch",
         );
     }

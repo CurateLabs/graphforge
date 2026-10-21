@@ -478,7 +478,7 @@ try {
     "current-copy.gfpb",
   );
   const exported = success("export", "--current", "--output", bundle);
-  assert.equal(exported.contract, "graphforge-portable-export/2");
+  assert.equal(exported.contract, "graphforge-portable-export/1");
   assert.equal(exported.source, "current");
   assert.equal(exported.checkpoint, null);
   const secondExport = success("export", "--current", "--output", secondBundle);
@@ -494,7 +494,7 @@ try {
     "--idempotency-key",
     importOperation,
   );
-  assert.equal(imported.contract, "graphforge-portable-import/2");
+  assert.equal(imported.contract, "graphforge-portable-import/1");
   assert.equal(imported.package_digest, exported.package_digest);
   assert.equal(imported.idempotent_replay, false);
   assert.equal(

@@ -434,8 +434,8 @@ For the normative layout, identity, resource, compatibility, and security
 contract, see [Portable project architecture](../book/architecture/portable-project.md)
 and [ADR 0021](../adr/0021-portable-project.md).
 
-Primary `export` and `import` reuse the streaming `graphforge-portable-export/2`
-and `graphforge-portable-import/2` JSON receipts. Package and transport digests
+Primary `export` and `import` reuse the streaming `graphforge-portable-export/1`
+and `graphforge-portable-import/1` JSON receipts. Package and transport digests
 remain distinct; retired envelope digest/count fields are not compatibility aliases.
 The duplicate `portable export` and `portable import` verbs are removed.
 
