@@ -1076,7 +1076,7 @@ impl From<graphforge_api::MultiOntologyError> for CliRuntimeError {
 }
 
 #[allow(clippy::too_many_lines)]
-fn run(cli: Cli, output: &mut dyn Write) -> Result<i32, CliRuntimeError> {
+fn run(cli: Cli, output: &mut dyn Write, stderr: &mut dyn Write) -> Result<i32, CliRuntimeError> {
     let _capture = storage_attribution_cli::capture(&cli)?;
     let allocation = if cli.diagnostics.allocation_diagnostics {
         if !cli.json {
@@ -1091,7 +1091,7 @@ fn run(cli: Cli, output: &mut dyn Write) -> Result<i32, CliRuntimeError> {
     } else {
         None
     };
-    let result = run_with_allocation(cli, output, allocation.as_ref())?;
+    let result = run_with_allocation(cli, output, stderr, allocation.as_ref())?;
     if let Some(allocation) = allocation {
         let (current, peak) = allocation.totals()?;
         // The composition sums to `peak_allocated_bytes`, so a consumer can
@@ -1101,6 +1101,43 @@ fn run(cli: Cli, output: &mut dyn Write) -> Result<i32, CliRuntimeError> {
         writeln!(output).map_err(|error| graphforge_api::GfError::Execution(error.to_string()))?;
     }
     Ok(result)
+}
+
+/// Standard-error channel for warnings a command raises while it runs.
+///
+/// Text mode prints `warning <code>: <message>`; `--json` prints one
+/// `{"warning":{...}}` line, the same envelope shape errors use.
+pub(crate) struct Diagnostics<'a> {
+    json: bool,
+    sink: &'a mut dyn Write,
+}
+
+impl<'a> Diagnostics<'a> {
+    pub(crate) fn new(json: bool, sink: &'a mut dyn Write) -> Self {
+        Self { json, sink }
+    }
+
+    pub(crate) fn warn(&mut self, warnings: &[graphforge_api::CoreVersionWarning]) {
+        for warning in warnings {
+            // Best effort: a closed standard error never fails the command.
+            let _ = if self.json {
+                writeln!(self.sink, "{}", serde_json::json!({ "warning": warning }))
+            } else {
+                writeln!(self.sink, "warning {}: {}", warning.code, warning.message)
+            };
+        }
+    }
+}
+
+/// Open the `--project` and report anything the open warns about.
+fn open_cli_graph_warning(
+    path: &Path,
+    allocation: Option<&graphforge_api::StorageAllocationDiagnostics>,
+    diagnostics: &mut Diagnostics<'_>,
+) -> Result<GraphForge, graphforge_api::GfError> {
+    let graph = open_cli_graph(path, allocation)?;
+    diagnostics.warn(&graph.open_warnings());
+    Ok(graph)
 }
 
 pub(crate) fn open_cli_graph(
@@ -1121,6 +1158,7 @@ pub(crate) fn open_cli_graph(
 fn run_with_allocation(
     cli: Cli,
     output: &mut dyn Write,
+    stderr: &mut dyn Write,
     allocation: Option<&graphforge_api::StorageAllocationDiagnostics>,
 ) -> Result<i32, CliRuntimeError> {
     if cli.info {
@@ -1151,7 +1189,14 @@ fn run_with_allocation(
         return auth::run(args, cli.json, output);
     }
     if let hub @ (Command::Clone(_) | Command::Publish(_) | Command::Hub(_)) = command {
-        return hub_publish::run_hub_command(hub, cli.project, cli.project_dir, cli.json, output);
+        return hub_publish::run_hub_command(
+            hub,
+            cli.project,
+            cli.project_dir,
+            cli.json,
+            output,
+            &mut Diagnostics::new(cli.json, stderr),
+        );
     }
     if let Command::Ontology { command } = &command
         && let Some(result) = ontology_cli::run_without_project(command, cli.json, output)
@@ -1178,7 +1223,11 @@ fn run_with_allocation(
                 let path_text = path.to_str().ok_or_else(|| {
                     graphforge_api::GfError::Validation("--project must be valid UTF-8".into())
                 })?;
-                let mut graph = open_cli_graph(Path::new(path_text), allocation)?;
+                let mut graph = open_cli_graph_warning(
+                    Path::new(path_text),
+                    allocation,
+                    &mut Diagnostics::new(cli.json, stderr),
+                )?;
                 return portable_cli::run_portable(
                     &mut graph, &path, command, cli.json, output, allocation,
                 )
@@ -1189,7 +1238,15 @@ fn run_with_allocation(
     let path = resolve_project_path(cli.project, cli.project_dir)?;
     let command = match command {
         Command::Import(args) => {
-            return portable_cli::run_import(&path, args, cli.json, output, allocation).map(|()| 0);
+            return portable_cli::run_import(
+                &path,
+                args,
+                cli.json,
+                output,
+                &mut Diagnostics::new(cli.json, stderr),
+                allocation,
+            )
+            .map(|()| 0);
         }
         command => command,
     };
@@ -1199,7 +1256,11 @@ fn run_with_allocation(
     let path_text = path.to_str().ok_or_else(|| {
         graphforge_api::GfError::Validation("--project must be valid UTF-8".into())
     })?;
-    let mut graph = open_cli_graph(Path::new(path_text), allocation)?;
+    let mut graph = open_cli_graph_warning(
+        Path::new(path_text),
+        allocation,
+        &mut Diagnostics::new(cli.json, stderr),
+    )?;
     let command = match command {
         Command::Export(args) => {
             return portable_cli::run_export(&graph, args, cli.json, output).map(|()| 0);
@@ -1376,7 +1437,7 @@ where
         }
     };
     let json = cli.json;
-    let exit_code = match run(cli, &mut stdout) {
+    let exit_code = match run(cli, &mut stdout, &mut stderr) {
         Ok(exit_code) => exit_code,
         Err(error) => {
             write_runtime_error(&error, json, &mut stderr).expect("writing to Vec cannot fail");
@@ -1579,7 +1640,7 @@ pub fn run_process() {
     let mut output = io::stdout().lock();
     hub_publish::allow_device_flow();
     hub_clone::attach_to_process();
-    match run(cli, &mut output) {
+    match run(cli, &mut output, &mut io::stderr()) {
         Ok(exit_code) if exit_code != 0 => {
             let _ = output.flush();
             std::process::exit(exit_code);

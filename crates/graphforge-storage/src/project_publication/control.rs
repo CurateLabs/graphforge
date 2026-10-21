@@ -88,6 +88,8 @@ pub(super) struct GenerationManifestRecord {
     pub(super) transaction_uuid: String,
     pub(super) capabilities: Vec<CapabilityRecord>,
     pub(super) participants: Vec<StagedParticipant>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) producing_core_version: Option<String>,
 }
 
 #[derive(Debug, Serialize)]

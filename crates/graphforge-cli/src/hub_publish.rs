@@ -184,10 +184,11 @@ pub(crate) fn run_hub_command(
     project_dir: Option<PathBuf>,
     json: bool,
     output: &mut dyn Write,
+    diagnostics: &mut crate::Diagnostics<'_>,
 ) -> Result<i32, crate::CliRuntimeError> {
     match command {
         crate::Command::Clone(args) => {
-            Ok(crate::hub_clone::run_clone(args, json, output).map(|()| 0)?)
+            Ok(crate::hub_clone::run_clone(args, json, output, diagnostics).map(|()| 0)?)
         }
         crate::Command::Publish(args) => run(&args, project, project_dir, json, output),
         crate::Command::Hub(args) => {
