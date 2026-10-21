@@ -362,6 +362,14 @@ fn walk_entry(file: &fs::File, base: u64, length: u64, path: &str) -> Result<(),
         .map_err(|error| refuse_profile(path, error))
 }
 
+/// True when a package entry's bytes can reach a decoder, so the Parquet page
+/// profile must admit them. Opaque component files, which no decoder reads
+/// (objects only a research Version's evidence needs), return false. The one
+/// rule for the streamed walk and for the walk of a file or directory.
+pub(super) fn reaches_a_decoder(entry_path: &str) -> bool {
+    entry_path.starts_with("data/components/") && !research::is_evidence_only(entry_path)
+}
+
 /// Walk the pages of an entry a sink kept as the file at `path`.
 pub(super) fn walk_staged(path: &Path, length: u64, entry: &str) -> Result<(), PortableError> {
     if length < 12 {
@@ -411,11 +419,10 @@ pub(super) fn validate_parquet_profile(
 ) -> Result<(), PortableError> {
     use crate::parquet_encoding_profile::admit_pages;
 
-    for entry in entries.iter().filter(|entry| {
-        entry.path.starts_with("data/components/")
-            && entry.length >= 12
-            && !research::is_evidence_only(&entry.path)
-    }) {
+    for entry in entries
+        .iter()
+        .filter(|entry| reaches_a_decoder(&entry.path) && entry.length >= 12)
+    {
         check_cancel(cancelled)?;
         if let Some(bytes) = &entry.bytes {
             if bytes.ends_with(b"PAR1") {

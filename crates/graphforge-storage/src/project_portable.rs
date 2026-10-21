@@ -1115,11 +1115,7 @@ fn read_bundle<R: Read + ?Sized>(
                 })
             });
         let mut walk = walk_parquet
-            .filter(|_| {
-                entry_path.starts_with("data/components/")
-                    && size >= 12
-                    && !research::is_evidence_only(&entry_path)
-            })
+            .filter(|_| authenticated_entries::reaches_a_decoder(&entry_path) && size >= 12)
             .map(|scratch| {
                 ParquetWalk::new(&entry_path, size, limits.max_parquet_walk_bytes, scratch)
             });
