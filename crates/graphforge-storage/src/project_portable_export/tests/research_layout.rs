@@ -261,7 +261,7 @@ fn producer_emits_the_pinned_registry_first_layout() {
 }
 
 #[test]
-fn a_relocated_registry_is_incompatible() {
+fn a_relocated_registry_is_refused() {
     let fixture = two_versions_sharing_one_graph();
     let mut plan =
         plan_complete_portable(&fixture.generation, PortableExportLimits::default()).unwrap();
@@ -295,12 +295,14 @@ fn a_relocated_registry_is_incompatible() {
             .filter(|(_, path)| path.starts_with(RETAINED))
             .all(|(index, _)| index < moved)
     );
+    // A runtime participant must sit in its own component directory, so the
+    // relocation is refused by the placement rule before research validation.
     let error = verify(&bundle).unwrap_err();
-    assert_eq!(error.code, PortableErrorCode::Incompatible);
+    assert_eq!(error.code, PortableErrorCode::InvalidStructure);
     assert!(
-        error.to_string().contains(
-            "research component identity, schema, provenance or selected closure is invalid"
-        ),
+        error
+            .to_string()
+            .contains("runtime participant outside its component kind"),
         "{error}"
     );
 }

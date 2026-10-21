@@ -4,8 +4,8 @@ use super::{
     Entry, Manifest, ManifestComponent, ManifestFile, ONTOLOGY_COMPOSITION_PATH,
     PortableCompositionEntry, PortableError, PortableErrorCode, PortableExactIdentity,
     PortableLimits, PortableOntologyComposition, PortablePackageClass, PortableReport,
-    RUNTIME_MAP_PATH, RuntimeGenerationMap, UniqueValue, canonical_json, check_cancel,
-    constant_time_eq, hex, read_entry_bytes_from_map, sha, validate_path,
+    RUNTIME_MAP_PATH, RuntimeGenerationMap, RuntimeParticipant, UniqueValue, canonical_json,
+    check_cancel, constant_time_eq, hex, read_entry_bytes_from_map, sha, validate_path,
 };
 use graphforge_core::hash_observation::ControlSha256 as Sha256;
 use serde::Deserialize;
@@ -846,6 +846,46 @@ fn runtime_map_descriptor(manifest: &Manifest) -> Result<Option<&ManifestFile>, 
     Ok(Some(descriptor))
 }
 
+/// A runtime participant's payload lives in the component kind its capability
+/// and record family belong to, under that component's own directory:
+/// `data/components/{kind}/{participant}/`. The kind is derived by the same
+/// `component_kind` the exporter lays packages out with, so a valid package is
+/// never refused.
+///
+/// This is what lets `evidence` be an opaque kind: `component_kind` never
+/// yields it, so no runtime participant (and no payload a reader opens through
+/// the runtime map) can sit in an evidence component or directory, and the
+/// Parquet page walk may skip such entries (`reaches_a_decoder`).
+fn validate_participant_placement(
+    participant: &RuntimeParticipant,
+    manifest: &Manifest,
+) -> Result<(), PortableError> {
+    let kind = crate::project_portable_selection::component_kind(
+        &participant.capability_id,
+        &participant.record_family_id,
+    );
+    let directory = format!("data/components/{kind}/{}/", participant.participant_id);
+    let misplaced = manifest
+        .components
+        .iter()
+        .filter(|component| component.participant_id == participant.participant_id)
+        .any(|component| {
+            component.kind != kind
+                || component
+                    .files
+                    .iter()
+                    .any(|file| !file.path.starts_with(&directory))
+        });
+    if misplaced {
+        return Err(PortableError::at(
+            PortableErrorCode::InvalidStructure,
+            RUNTIME_MAP_PATH,
+            "runtime participant outside its component kind",
+        ));
+    }
+    Ok(())
+}
+
 fn validate_runtime_map_contents(
     runtime: &RuntimeGenerationMap,
     manifest: &Manifest,
@@ -879,6 +919,7 @@ fn validate_runtime_map_contents(
                 "runtime participant mapping",
             ));
         }
+        validate_participant_placement(participant, manifest)?;
         let _ = participant.row_count;
         prior = Some(participant.participant_id.as_str());
     }

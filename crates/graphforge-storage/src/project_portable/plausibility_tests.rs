@@ -437,3 +437,142 @@ fn parquet_signals_are_absent_unless_the_pages_were_read() {
     assert!(full.plausibility.parquet.is_some());
     assert_eq!(inspected.bytes_by_kind, full.bytes_by_kind);
 }
+
+/// `entries` with every control that describes them rebuilt: the manifest's
+/// file descriptors and package digest, the payload inventory and the tag
+/// manifest. An edited package is then valid in everything but the edit.
+fn resigned(entries: Vec<(String, Vec<u8>)>) -> Vec<(String, Vec<u8>)> {
+    let mut entries: BTreeMap<String, Vec<u8>> = entries.into_iter().collect();
+    let mut manifest: Value = serde_json::from_slice(&entries[MANIFEST_PATH]).unwrap();
+    manifest.as_object_mut().unwrap().remove("package_digest");
+    for component in manifest["components"].as_array_mut().unwrap() {
+        for file in component["files"].as_array_mut().unwrap() {
+            let bytes = &entries[file["path"].as_str().unwrap()];
+            file["length"] = bytes.len().into();
+            file["sha256"] = hex(&Sha256::digest(bytes)).into();
+        }
+    }
+    let semantic = canonical_json(&manifest).unwrap();
+    let digest = hex(&Sha256::digest(
+        [b"graphforge-project/2\0".as_slice(), semantic.as_slice()].concat(),
+    ));
+    manifest["package_digest"] = format!("sha256:{digest}").into();
+    entries.insert(MANIFEST_PATH.into(), canonical_json(&manifest).unwrap());
+    let inventory: String = entries
+        .iter()
+        .filter(|(path, _)| path.starts_with("data/"))
+        .map(|(path, bytes)| format!("{}  {path}\n", hex(&Sha256::digest(bytes))))
+        .collect();
+    let tags = format!(
+        "{}  bag-info.txt\n{}  bagit.txt\n{}  manifest-sha256.txt\n",
+        hex(&Sha256::digest(&entries["bag-info.txt"])),
+        hex(&Sha256::digest(&entries["bagit.txt"])),
+        hex(&Sha256::digest(inventory.as_bytes()))
+    );
+    entries.insert("manifest-sha256.txt".into(), inventory.into());
+    entries.insert("tagmanifest-sha256.txt".into(), tags.into());
+    entries.into_iter().collect()
+}
+
+/// The Hub bundle with `participant`'s payload moved into an `evidence`
+/// component of the same id and replaced by `payload`, its runtime mapping kept
+/// and now declaring a Parquet encoding. Every control is rebuilt to match.
+fn participant_moved_to_evidence(participant: &str, payload: Vec<u8>) -> Vec<(String, Vec<u8>)> {
+    let mut entries: BTreeMap<String, Vec<u8>> = read_tar(&fs::read(HUB_BUNDLE).unwrap())
+        .into_iter()
+        .collect();
+    let from = format!("data/components/settings/{participant}/participant.json");
+    let to = format!("data/components/evidence/{participant}/participant.parquet");
+    entries.remove(&from).expect("a settings participant");
+    entries.insert(to.clone(), payload);
+
+    let mut manifest: Value = serde_json::from_slice(&entries[MANIFEST_PATH]).unwrap();
+    manifest["requirements"]["capabilities"] = serde_json::json!([
+        "compatibility@1",
+        "evidence@1",
+        "graph-data@1",
+        "ontology-composition@1",
+        "ontology@1",
+        "settings@1"
+    ]);
+    let components = manifest["components"].as_array_mut().unwrap();
+    let moved = components
+        .iter_mut()
+        .find(|component| component["participant_id"] == participant)
+        .unwrap();
+    moved["kind"] = "evidence".into();
+    moved["files"][0]["path"] = to.into();
+    moved["files"][0]["media_type"] = "application/vnd.apache.parquet".into();
+    components.sort_by(|left, right| {
+        let key = |component: &Value| {
+            (
+                component["kind"].as_str().unwrap().to_owned(),
+                component["participant_id"].as_str().unwrap().to_owned(),
+            )
+        };
+        key(left).cmp(&key(right))
+    });
+    entries.insert(MANIFEST_PATH.into(), canonical_json(&manifest).unwrap());
+
+    let runtime_path =
+        "data/components/compatibility/graphforge-runtime-map/runtime-generation.json";
+    let mut runtime: Value = serde_json::from_slice(&entries[runtime_path]).unwrap();
+    runtime["participants"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|entry| entry["participant_id"] == participant)
+        .unwrap()["encoding"] = "parquet".into();
+    entries.insert(runtime_path.into(), canonical_json(&runtime).unwrap());
+    resigned(entries.into_iter().collect())
+}
+
+#[test]
+fn a_runtime_participant_cannot_hide_in_an_evidence_component() {
+    // A payload no decoder may see: Parquet pages in an unfunded encoding.
+    let unfunded = hostile::string_file(
+        Encoding::DELTA_LENGTH_BYTE_ARRAY,
+        WriterVersion::PARQUET_1_0,
+        64,
+    );
+    let entries = participant_moved_to_evidence("workspace-configuration-0b4c69ad58c5", unfunded);
+    let bytes = bundle_of(entries.clone());
+    let directory = tempfile::tempdir().unwrap();
+    for (path, payload) in &entries {
+        let target = directory.path().join(path);
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        fs::write(target, payload).unwrap();
+    }
+    let verdicts = [
+        verify_portable(
+            directory.path(),
+            PortableMode::Full,
+            PortableLimits::default(),
+            None,
+        )
+        .unwrap_err(),
+        by_file(&bytes, PortableLimits::default()).unwrap_err(),
+        by_stream(&bytes, PortableLimits::default()).unwrap_err(),
+    ];
+    for error in &verdicts {
+        // InvalidStructure, not the page walk's LimitExceeded: the refusal comes
+        // from the placement rule, before any page could be read.
+        assert_eq!(error.code, PortableErrorCode::InvalidStructure, "{error}");
+        assert!(
+            error
+                .to_string()
+                .contains("runtime participant outside its component kind"),
+            "{error}"
+        );
+    }
+    assert_eq!(verdicts[0].to_string(), verdicts[1].to_string());
+    assert_eq!(verdicts[1].to_string(), verdicts[2].to_string());
+}
+
+#[test]
+fn the_unmoved_hub_package_still_verifies_after_resigning() {
+    // The control: the same rebuild with no edit is valid, so the refusal above
+    // is the placement rule and not an artifact of the rebuild.
+    let entries = resigned(read_tar(&fs::read(HUB_BUNDLE).unwrap()));
+    super::stream_tests::assert_stream_equals_file(&bundle_of(entries));
+}

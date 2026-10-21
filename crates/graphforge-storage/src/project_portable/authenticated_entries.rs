@@ -270,11 +270,14 @@ impl parquet::file::reader::ChunkReader for EntryWindow {
 ///
 /// Only component entries are candidates; the package controls are JSON and
 /// text. Among components, `evidence` is opaque data authored outside the
-/// engine: the exporter never emits that kind for its own participants
-/// (`project_portable_selection::component_kind`), and import opens Parquet
-/// only under the graph tree (`project_portable_import.rs`, the
-/// `package_graph_tree` root). Everything else may be decoded, so it is
-/// walked: when unsure, walk.
+/// engine, and that is enforced rather than assumed: `component_kind` never
+/// yields it, semantic validation requires every runtime participant's
+/// component and files to sit in the kind and directory `component_kind`
+/// gives it (`validate_participant_placement`), and import finds a
+/// participant's payload only there (`find_participant_file`) and opens other
+/// Parquet only under the graph tree (`package_graph_tree`). So no reader is
+/// pointed into an evidence directory. Everything else may be decoded, so it
+/// is walked: when unsure, walk.
 ///
 /// Both walks use this one function: [`ParquetWalk`] for a stream and
 /// [`validate_parquet_profile`] for a file or directory.
