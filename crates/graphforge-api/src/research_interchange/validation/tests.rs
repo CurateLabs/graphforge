@@ -39,7 +39,7 @@ fn archived_native_baseline_rejects_unknown_origin_without_mutating_source() {
         directory.path(),
     )
     .unwrap();
-    validate(historical, &version, &registry).unwrap();
+    validate(&historical, &version, &registry).unwrap();
     let origin = registry
         .branches
         .values()
@@ -47,7 +47,7 @@ fn archived_native_baseline_rejects_unknown_origin_without_mutating_source() {
         .unwrap()
         .origin_version_uuid;
     let identity = registry.identities.remove(&origin).unwrap();
-    assert!(validate(historical, &version, &registry).is_err());
+    assert!(validate(&historical, &version, &registry).is_err());
     registry.identities.insert(origin, identity);
     unsupported_historical_capability_is_rejected(&historical, &version, &registry);
     malformed_owner_is_rejected(&historical, &version, &registry);
