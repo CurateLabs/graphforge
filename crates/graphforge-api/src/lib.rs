@@ -389,12 +389,12 @@ pub use graphforge_core::algorithms::{
     Algorithm, AlgorithmField, AlgorithmFieldType, AlgorithmResultSchema, AlgorithmVerb,
     AnalyzeAlgorithm, ClusterAlgorithm, PathAlgorithm, RankAlgorithm, SimilarAlgorithm,
 };
+pub use graphforge_core::core_version::{
+    CORE_VERSION_MISMATCH_CODE, CoreVersionWarning, check_core_version,
+};
 pub use graphforge_core::embedding_options::{
     EmbeddingAnalyzeOptions, EmbeddingOptions, FastRpOptions, GraphSageAggregator,
     GraphSageOptions, HashGnnOptions, Node2VecOptions,
-};
-pub use graphforge_core::core_version::{
-    CORE_VERSION_MISMATCH_CODE, CoreVersionWarning, check_core_version,
 };
 pub use graphforge_core::manifest::{
     GRAPHFORGE_VERSION, MANIFEST_FILE, ONTOLOGY_FILE, ProjectManifest,

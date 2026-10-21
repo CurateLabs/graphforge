@@ -143,7 +143,10 @@ fn a_version_from_another_core_warns_before_the_first_graph_object_request() {
             PACKAGE_PATH
         ]
     );
-    assert_eq!(*served_at_warning, 2, "the graph object was already requested");
+    assert_eq!(
+        *served_at_warning, 2,
+        "the graph object was already requested"
+    );
     assert_eq!(warning.code, "GF_CORE_VERSION_MISMATCH");
     assert_eq!(warning.producing_core_version, CORE_X);
     assert_eq!(
@@ -167,8 +170,10 @@ fn a_version_from_another_core_warns_before_the_first_graph_object_request() {
 #[test]
 fn a_version_from_the_running_core_clones_without_a_warning() {
     let root = tempfile::tempdir().unwrap();
-    let (result, server, seen) =
-        clone_version(graphforge_api::GRAPHFORGE_VERSION, &root.path().join("claims"));
+    let (result, server, seen) = clone_version(
+        graphforge_api::GRAPHFORGE_VERSION,
+        &root.path().join("claims"),
+    );
 
     assert!(seen.is_empty(), "{seen:?}");
     assert!(result.get("warnings").is_none(), "{result}");

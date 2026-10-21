@@ -24,10 +24,10 @@ Read this before you choose durable storage or build an integration. See also
   guarantee; a project written by another version may be refused with
   `GF_UNSUPPORTED_PROJECT_FORMAT`. GraphForge opens only supported
   current-format projects ([compatibility contract](../book/architecture/project-format-compatibility.md)).
-  Detecting and warning about data from a different Core version is tracked in
-  [#1936](https://github.com/CurateLabs/graphforge/issues/1936); do not assume
-  it exists in the version you install. Keep original source data and
-  construction code so you can rebuild.
+  GraphForge warns when data comes from a different Core version
+  ([details](portable-projects.md#data-from-another-core-version)); it does not
+  convert that data. Keep original source data and construction code so you can
+  rebuild.
 - **Current-format interchange is separate.** [Portable export, verify, and
   import](portable-projects.md) is a supported workflow for current-format
   projects. It is not a migration path from older versions.

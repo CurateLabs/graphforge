@@ -75,7 +75,10 @@ fn assert_names_both(warning: &Value) {
     assert_eq!(warning["producing_core_version"], CORE_X);
     assert_eq!(warning["running_core_version"], RUNNING);
     let message = warning["message"].as_str().unwrap();
-    assert!(message.contains(CORE_X) && message.contains(RUNNING), "{message}");
+    assert!(
+        message.contains(CORE_X) && message.contains(RUNNING),
+        "{message}"
+    );
 }
 
 fn stderr_text(output: &Output) -> String {
@@ -95,8 +98,14 @@ fn opening_data_from_another_core_warns_on_stderr_in_text_and_json() {
     let text = export(&project, &root.path().join("text"), false);
     assert!(text.status.success(), "{}", stderr_text(&text));
     let stderr = stderr_text(&text);
-    assert!(stderr.contains("warning GF_CORE_VERSION_MISMATCH:"), "{stderr}");
-    assert!(stderr.contains(CORE_X) && stderr.contains(RUNNING), "{stderr}");
+    assert!(
+        stderr.contains("warning GF_CORE_VERSION_MISMATCH:"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains(CORE_X) && stderr.contains(RUNNING),
+        "{stderr}"
+    );
 
     let as_json = export(&project, &root.path().join("json"), true);
     assert!(as_json.status.success(), "{}", stderr_text(&as_json));
@@ -109,7 +118,11 @@ fn opening_data_from_the_running_core_prints_no_warning() {
     let root = TempDir::new().unwrap();
     let project = root.path().join("project");
     fs::create_dir(&project).unwrap();
-    assert!(export(&project, &root.path().join("one"), true).status.success());
+    assert!(
+        export(&project, &root.path().join("one"), true)
+            .status
+            .success()
+    );
 
     for json in [false, true] {
         let again = export(&project, &root.path().join(format!("again-{json}")), json);
@@ -149,8 +162,14 @@ fn importing_a_package_from_another_core_warns_and_still_imports() {
     assert!(text.status.success(), "{}", stderr_text(&text));
     assert!(String::from_utf8_lossy(&text.stdout).starts_with("imported generation"));
     let stderr = stderr_text(&text);
-    assert!(stderr.contains("warning GF_CORE_VERSION_MISMATCH:"), "{stderr}");
-    assert!(stderr.contains(CORE_X) && stderr.contains(RUNNING), "{stderr}");
+    assert!(
+        stderr.contains("warning GF_CORE_VERSION_MISMATCH:"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains(CORE_X) && stderr.contains(RUNNING),
+        "{stderr}"
+    );
 }
 
 #[test]
@@ -168,7 +187,10 @@ fn importing_a_package_from_the_running_core_prints_no_warning() {
         true,
     );
     let result = stdout_json(&as_json);
-    assert!(result["warnings"].as_array().unwrap().is_empty(), "{result}");
+    assert!(
+        result["warnings"].as_array().unwrap().is_empty(),
+        "{result}"
+    );
     assert_eq!(stderr_text(&as_json), "");
 
     let text = import(

@@ -54,6 +54,6 @@ Treating any of these as another would let a reader accept the wrong bytes, or r
 - A module package is `component-selective`, not `ontology-only`, because relabeling exact-composition selections would change frozen interchange ledgers.
 - A publisher whose package carries an ontology composition must advertise `ontology` in the manifest, because `bind_summary` requires the two to agree (both absent, or identical).
 - `bind_summary` and `ontology_module_object` are pure; verifying a package against its descriptors stays with the portable verifier and the API layer.
-- A client that must refuse data from another Core version reads `package.producing_core_version` from the manifest and names it in the refusal; comparing it to the running Core is the client's decision (#1936).
+- `gf clone` reads `package.producing_core_version` from the manifest and warns when it differs from the running Core, before it downloads any graph object (#1936). A client that must refuse data from another Core version reads the same field and names it in the refusal.
 - Every new #1348 field requires an explicit projection decision before it reaches a summary.
 - The summary schema is stricter than the Rust parser on omitted optional keys: the schema describes the canonical shape, and Rust normalizes on parse.
