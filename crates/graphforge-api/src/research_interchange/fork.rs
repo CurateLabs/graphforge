@@ -26,7 +26,7 @@ pub struct ForkResearchRequest {
     pub governance: String,
     /// Explicit adoption of the selected native ontology as local authority.
     pub adopt_selected_ontology: bool,
-    /// Complete independent metadata, including explicit access-policy metadata.
+    /// Complete independent Project metadata.
     pub metadata: graphforge_storage::WorkspaceResearchMetadata,
 }
 

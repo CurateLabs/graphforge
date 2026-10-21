@@ -170,8 +170,7 @@ fn fork_has_independent_governance_metadata_and_exact_retry() {
     let directory = tempfile::tempdir().unwrap();
     let mut metadata = graphforge_storage::WorkspaceResearchMetadata::empty();
     metadata.title = Some("Independent study".into());
-    metadata.access.visibility = Some("private".into());
-    metadata.access.access_policy = Some("Local team only".into());
+    metadata.description = Some("Local team only".into());
     let request = ForkResearchRequest {
         operation_uuid: Uuid::now_v7(),
         project_uuid: Uuid::now_v7(),

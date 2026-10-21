@@ -81,6 +81,10 @@ query connected data.
 
 ## Publish research history
 
+Authors and committers recorded on Versions are always published, in the lineage
+and as the Project summary's derived people list; published credit is public and
+permanent, and there is no redaction option.
+
 History replacement is explicit: `gf publish <repository> --ref main --rewrite`
 requests a non-fast-forward replacement under the current revision lease.
 `--prune` separately removes unreachable published history where the Hub offers

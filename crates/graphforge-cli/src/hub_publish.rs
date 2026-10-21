@@ -1110,6 +1110,31 @@ struct Snapshot {
 ///
 /// Earlier Versions, Branches, and Proposals stay exactly as published; the
 /// new Branch entry replaces only its own earlier entry.
+/// The Version identity commits to author and committer (ADR 0055), so a matching
+/// identity proves the local record's credit equals the published record's. An
+/// entry published before credit was displayed lacks the fields and takes the
+/// verified local credit; the identity is unchanged. A published credit that
+/// differs from the local record contradicts the identity and is refused.
+fn adopt_verified_credit(
+    published: &mut graphforge_discovery::LineageVersion,
+    local: &graphforge_discovery::LineageVersion,
+) -> Result<(), GfError> {
+    for (old, new) in [
+        (&mut published.author, &local.author),
+        (&mut published.committer, &local.committer),
+    ] {
+        if old.is_none() {
+            old.clone_from(new);
+        } else if old != new {
+            return Err(publish_error(
+                HubPublishErrorCode::IntegrityFailure,
+                "a published Version's credit differs from its identity-verified local record",
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn merge_lineage(
     previous: Option<&ResearchLineage>,
     mut next: ResearchLineage,
@@ -1125,8 +1150,15 @@ fn merge_lineage(
             "the repository publishes a different research Project",
         ));
     }
-    if previous.fork.is_some() && previous.fork != next.fork {
-        return Err(invalid("the repository cites a different Fork origin"));
+    if let Some(published) = &previous.fork {
+        // The same citation, with origin credit filled where it was published
+        // without any; changed or removed credit is a different origin.
+        next.fork = Some(
+            next.fork
+                .as_ref()
+                .and_then(|proposed| published.completed_by(proposed))
+                .ok_or_else(|| invalid("the repository cites a different Fork origin"))?,
+        );
     }
     let mut versions: BTreeMap<String, _> = previous
         .versions
@@ -1142,6 +1174,7 @@ fn merge_lineage(
                 ));
             }
             Some(published) => {
+                adopt_verified_credit(published, &version)?;
                 // Metadata history does not imply a retained payload. Explicit
                 // publication may supply it later without replacing identity/history.
                 if published.package.is_none() {
@@ -1269,7 +1302,30 @@ fn build_snapshot(
     add_bundle(&mut objects, &mut sources, &project, &location);
     let immutable_version = Sha256Digest(project.package_digest.clone());
 
-    let summary = derive_summary(identity, &immutable_version, &project.path)
+    let lineage = graph.build_research_lineage_for_discovery(
+        &BuildResearchLineageRequest {
+            repository: identity.clone(),
+            immutable_version: immutable_version.clone(),
+            project_uuid: selection.project_uuid,
+            branch_ref_names: selection
+                .branch_uuid
+                .zip(selection.git_ref.clone())
+                .into_iter()
+                .collect(),
+            version_packages: BTreeMap::from([(selection.version_uuid, version_package)]),
+            fork_origin_repository,
+            published_proposals: BTreeSet::new(),
+        },
+        &cancellation,
+    )?;
+    let lineage = merge_lineage(
+        published.map(|published| &published.lineage),
+        lineage,
+        history.rewrite,
+        history.prune,
+    )?;
+
+    let summary = derive_summary(identity, &immutable_version, &project.path, Some(&lineage))
         .map_err(|error| derivation(&error))?;
     let summary_object = object_descriptor(
         digest_bytes(&summary.bytes),
@@ -1293,29 +1349,6 @@ fn build_snapshot(
     for module in &modules {
         add_bundle(&mut objects, &mut sources, &module.bundle, &location);
     }
-
-    let lineage = graph.build_research_lineage_for_discovery(
-        &BuildResearchLineageRequest {
-            repository: identity.clone(),
-            immutable_version: immutable_version.clone(),
-            project_uuid: selection.project_uuid,
-            branch_ref_names: selection
-                .branch_uuid
-                .zip(selection.git_ref.clone())
-                .into_iter()
-                .collect(),
-            version_packages: BTreeMap::from([(selection.version_uuid, version_package)]),
-            fork_origin_repository,
-            published_proposals: BTreeSet::new(),
-        },
-        &cancellation,
-    )?;
-    let lineage = merge_lineage(
-        published.map(|published| &published.lineage),
-        lineage,
-        history.rewrite,
-        history.prune,
-    )?;
 
     // Earlier published Version and Proposal packages are carried unchanged.
     let carried: BTreeSet<&Sha256Digest> = lineage

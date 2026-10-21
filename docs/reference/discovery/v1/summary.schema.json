@@ -26,6 +26,20 @@
       "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$",
       "type": "string"
     },
+    "credit_email": {
+      "maxLength": 254,
+      "minLength": 3,
+      "type": "string"
+    },
+    "credit_name": {
+      "maxLength": 256,
+      "minLength": 1,
+      "type": "string"
+    },
+    "credit_orcid": {
+      "pattern": "^[0-9]{4}-[0-9]{4}-[0-9]{4}-[0-9]{3}[0-9X]$",
+      "type": "string"
+    },
     "digest": {
       "pattern": "^sha256:[0-9a-f]{64}$",
       "type": "string"
@@ -173,22 +187,6 @@
     "metadata": {
       "additionalProperties": false,
       "properties": {
-        "access": {
-          "additionalProperties": false,
-          "properties": {
-            "access_policy": {
-              "$ref": "#/$defs/optional_text"
-            },
-            "visibility": {
-              "$ref": "#/$defs/optional_text"
-            }
-          },
-          "required": [
-            "visibility",
-            "access_policy"
-          ],
-          "type": "object"
-        },
         "authors": {
           "$ref": "#/$defs/text_list"
         },
@@ -328,7 +326,6 @@
         "corpus_size",
         "ontologies",
         "license",
-        "access",
         "tags",
         "originating_projects",
         "related_projects",
@@ -360,6 +357,39 @@
         }
       ]
     },
+    "person": {
+      "additionalProperties": false,
+      "properties": {
+        "email": {
+          "$ref": "#/$defs/credit_email"
+        },
+        "name": {
+          "$ref": "#/$defs/credit_name"
+        },
+        "orcid": {
+          "$ref": "#/$defs/credit_orcid"
+        },
+        "roles": {
+          "enum": [
+            [
+              "author"
+            ],
+            [
+              "committer"
+            ],
+            [
+              "author",
+              "committer"
+            ]
+          ]
+        }
+      },
+      "required": [
+        "name",
+        "roles"
+      ],
+      "type": "object"
+    },
     "semantic": {
       "additionalProperties": false,
       "properties": {
@@ -377,6 +407,24 @@
       "required": [
         "capability",
         "major"
+      ],
+      "type": "object"
+    },
+    "signature": {
+      "additionalProperties": false,
+      "properties": {
+        "email": {
+          "$ref": "#/$defs/credit_email"
+        },
+        "name": {
+          "$ref": "#/$defs/credit_name"
+        },
+        "orcid": {
+          "$ref": "#/$defs/credit_orcid"
+        }
+      },
+      "required": [
+        "name"
       ],
       "type": "object"
     },
@@ -476,6 +524,13 @@
       ],
       "type": "object"
     },
+    "people": {
+      "items": {
+        "$ref": "#/$defs/person"
+      },
+      "maxItems": 10000,
+      "type": "array"
+    },
     "repository": {
       "$ref": "#/$defs/identity"
     },
@@ -512,7 +567,8 @@
     "requirements",
     "capabilities",
     "metadata",
-    "facts"
+    "facts",
+    "people"
   ],
   "title": "summary",
   "type": "object"

@@ -297,6 +297,8 @@ fn listing_shows_branches_versions_fork_origin_and_proposals() {
             kind: "projection".into(),
             branch_uuid: feature.to_string(),
             source_version_uuid: Some(feature_head.to_string()),
+            author: None,
+            committer: None,
             package: Some(package.clone()),
         });
     proposed

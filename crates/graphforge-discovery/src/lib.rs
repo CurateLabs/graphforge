@@ -17,6 +17,7 @@
 /// Closed, bounded images independent of native Project packages.
 pub mod preview;
 
+mod credit;
 mod lineage;
 mod rehome;
 mod repository;
@@ -25,14 +26,15 @@ mod summary;
 pub use rehome::{RehomedRepository, RepositorySnapshot, rehome_repository};
 pub use repository::{ObjectLocationTemplate, RepositoryMoved};
 
+pub use credit::{CreditSignature, ROLE_AUTHOR, ROLE_COMMITTER, SummaryPerson};
 pub use lineage::{
     LineageBoundaryAnchor, LineageBranch, LineageForkOrigin, LineageProposal, LineageVersion,
     RESEARCH_LINEAGE_CAPABILITY, RESEARCH_LINEAGE_FORMAT, RESEARCH_LINEAGE_MEDIA_TYPE,
     ResearchLineage, ResearchLineageReference,
 };
 pub use summary::{
-    ProjectSummary, SummaryAccess, SummaryCorpusSize, SummaryFacts, SummaryGeographicCoverage,
-    SummaryMetadata, SummaryOntologyComposition, SummaryOntologyModule, SummaryPackageReference,
+    ProjectSummary, SummaryCorpusSize, SummaryFacts, SummaryGeographicCoverage, SummaryMetadata,
+    SummaryOntologyComposition, SummaryOntologyModule, SummaryPackageReference,
     SummaryTemporalCoverage,
 };
 

@@ -347,13 +347,12 @@ pub use workspace_participants::{
 };
 pub use workspace_research_metadata::{
     MAX_RESEARCH_METADATA_EXTENSION_FIELDS, MAX_RESEARCH_METADATA_LIST_ENTRIES,
-    MAX_RESEARCH_METADATA_STRING_BYTES, MAX_WORKSPACE_RESEARCH_METADATA_BYTES,
-    ResearchAccessPolicyMetadata, ResearchCorpusSize, ResearchDiscoveryFacets,
-    ResearchGeographicCoverage, ResearchProjectDiscoveryLimits, ResearchProjectDiscoveryQuery,
-    ResearchProjectIdentity, ResearchProjectSummary, ResearchTemporalCoverage,
-    WORKSPACE_RESEARCH_METADATA_FAMILY, WORKSPACE_RESEARCH_METADATA_VERSION,
-    WorkspaceResearchMetadata, discover_research_projects, read_workspace_research_metadata,
-    summarize_research_project,
+    MAX_RESEARCH_METADATA_STRING_BYTES, MAX_WORKSPACE_RESEARCH_METADATA_BYTES, ResearchCorpusSize,
+    ResearchDiscoveryFacets, ResearchGeographicCoverage, ResearchProjectDiscoveryLimits,
+    ResearchProjectDiscoveryQuery, ResearchProjectIdentity, ResearchProjectSummary,
+    ResearchTemporalCoverage, WORKSPACE_RESEARCH_METADATA_FAMILY,
+    WORKSPACE_RESEARCH_METADATA_VERSION, WorkspaceResearchMetadata, discover_research_projects,
+    read_workspace_research_metadata, summarize_research_project,
 };
 pub use workspace_saved_queries::{
     MAX_SAVED_QUERIES, MAX_SAVED_QUERY_BYTES, MAX_SAVED_QUERY_DESCRIPTION_BYTES,

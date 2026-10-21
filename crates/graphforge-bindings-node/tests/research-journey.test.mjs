@@ -614,7 +614,7 @@ class Journey {
     }
     const metadata = this.graph.researchProjectMetadata();
     metadata.title = corpus.fork_title;
-    metadata.access.access_policy = "Independent local governance";
+    metadata.description = "Independent local governance";
     const request = {
       operation_uuid: identity(),
       project_uuid: identity(),
