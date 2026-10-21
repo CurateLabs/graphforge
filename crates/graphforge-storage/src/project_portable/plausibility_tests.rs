@@ -164,6 +164,19 @@ fn zero_digest(length: u64) -> [u8; 32] {
 /// `evidence`, with SHA-256 `digest`. Every control the package carries is
 /// rebuilt to describe it, so the package is valid.
 fn evidence_package(evidence: Body, digest: [u8; 32]) -> Vec<(String, Body)> {
+    component_package("evidence", "scan-0001", EVIDENCE_PATH, evidence, digest)
+}
+
+/// [`evidence_package`] for a component of any `kind`, whose only file is
+/// `path`.
+fn component_package(
+    kind: &str,
+    participant: &str,
+    path: &str,
+    file: Body,
+    digest: [u8; 32],
+) -> Vec<(String, Body)> {
+    let evidence = file;
     let length = evidence.length();
     let mut manifest: Value = serde_json::from_str(include_str!(
         "../../../../tests/fixtures/portable/ontology-only.manifest.json"
@@ -172,19 +185,19 @@ fn evidence_package(evidence: Body, digest: [u8; 32]) -> Vec<(String, Body)> {
     let object = manifest.as_object_mut().unwrap();
     object.remove("package_digest");
     object.insert("package_class".into(), "component-selective".into());
-    object["requirements"]["capabilities"] = serde_json::json!(["evidence@1", "ontology@1"]);
-    object["selection"]["roots"] = serde_json::json!(["core-ontology", "scan-0001"]);
+    object["requirements"]["capabilities"] = serde_json::json!([format!("{kind}@1"), "ontology@1"]);
+    object["selection"]["roots"] = serde_json::json!(["core-ontology", participant]);
     object["components"].as_array_mut().unwrap().insert(
         0,
         serde_json::json!({
-            "kind": "evidence",
+            "kind": kind,
             "files": [{
                 "length": length,
                 "media_type": "application/octet-stream",
-                "path": EVIDENCE_PATH,
+                "path": path,
                 "sha256": hex(&digest),
             }],
-            "participant_id": "scan-0001",
+            "participant_id": participant,
             "required_dependencies": [],
         }),
     );
@@ -197,7 +210,7 @@ fn evidence_package(evidence: Body, digest: [u8; 32]) -> Vec<(String, Body)> {
 
     let ontology_path = "data/components/ontology/core-ontology/ontology.json";
     let data = [
-        (EVIDENCE_PATH, digest),
+        (path, digest),
         (ontology_path, Sha256::digest(b"{}").into()),
         (MANIFEST_PATH, Sha256::digest(&manifest).into()),
     ];
@@ -214,7 +227,7 @@ fn evidence_package(evidence: Body, digest: [u8; 32]) -> Vec<(String, Body)> {
     vec![
         ("bag-info.txt".into(), Body::Bytes(BAG_INFO.to_vec())),
         ("bagit.txt".into(), Body::Bytes(BAGIT.to_vec())),
-        (EVIDENCE_PATH.into(), evidence),
+        (path.into(), evidence),
         (ontology_path.into(), Body::Bytes(b"{}".to_vec())),
         (MANIFEST_PATH.into(), Body::Bytes(manifest)),
         ("manifest-sha256.txt".into(), Body::Bytes(inventory.into())),
@@ -327,13 +340,13 @@ fn written_bytes() -> u64 {
     line.split_whitespace().nth(1).unwrap().parse().unwrap()
 }
 
-/// A 3 GiB opaque artifact in an otherwise valid package: a stream verifies it
+/// A 5 GiB opaque artifact in an otherwise valid package: a stream verifies it
 /// without holding it, writes next to nothing to disk, and reports it as
 /// evidence.
 #[cfg(target_os = "linux")]
 #[test]
-fn a_three_gib_evidence_entry_streams_in_bounded_memory_with_no_disk() {
-    let length = 3 * GIB;
+fn a_five_gib_evidence_entry_streams_in_bounded_memory_with_no_disk() {
+    let length = 5 * GIB;
     let package = padded_package(length, zero_digest(length));
     let census_input: Vec<_> = package
         .iter()
@@ -366,10 +379,62 @@ fn a_three_gib_evidence_entry_streams_in_bounded_memory_with_no_disk() {
         report.plausibility
     );
     // Opaque evidence is never staged for a page walk: the scan writes nothing
-    // but what the stream's own controls need, whatever the entry's size.
+    // but what the stream's own controls need, whatever the entry's size. The
+    // staging writes run on this thread, so its `wchar` is all of them.
+    println!("evidence_entry_bytes={length} written_bytes={written}");
     assert!(written < MIB as u64, "the stream wrote {written} bytes");
     let peak = peak_resident_bytes();
     assert!(peak < GIB, "peak resident memory was {peak} bytes");
+}
+
+/// A graph Parquet entry above `max_parquet_walk_bytes` is staged once in an
+/// anonymous scratch file, whole, and removed: its writes are the entry, never
+/// more, and the same entry under the default threshold is written nowhere.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_graph_entry_just_over_the_walk_threshold_is_written_once_and_removed() {
+    let file = hostile::string_file(Encoding::PLAIN, WriterVersion::PARQUET_1_0, 64);
+    let entry = file.len() as u64;
+    let threshold = entry - 1;
+    let digest = Sha256::digest(&file).into();
+    let package = || {
+        component_package(
+            "graph-data",
+            "graph-tree",
+            "data/components/graph-data/graph-tree/topology/nodes.parquet",
+            Body::Bytes(file.clone()),
+            digest,
+        )
+    };
+    let stream = |limits: PortableLimits| {
+        let scratch = tempfile::tempdir().unwrap();
+        let (mut reader, _) = Generated::new(bundle_stream(package()));
+        let before = written_bytes();
+        let report =
+            verify_portable_stream(&mut reader, Some(scratch.path()), limits, None).unwrap();
+        let written = written_bytes() - before;
+        assert_eq!(fs::read_dir(scratch.path()).unwrap().count(), 0);
+        assert_eq!(report.integrity, PortableIntegrity::Verified);
+        assert_eq!(report.bytes_by_kind["graph-data"], entry);
+        // Walked, not merely hashed: the page walk read the staged copy.
+        let parquet = report.plausibility.parquet.unwrap();
+        assert_eq!((parquet.files, parquet.files_with_footer), (1, 1));
+        written
+    };
+    let staged = stream(PortableLimits {
+        max_parquet_walk_bytes: threshold,
+        ..PortableLimits::default()
+    });
+    assert!(
+        (threshold..=entry).contains(&staged),
+        "staged {staged} bytes for an entry of {entry} over a threshold of {threshold}"
+    );
+    let kept = stream(PortableLimits::default());
+    println!("entry_bytes={entry} threshold={threshold} staged_bytes={staged} kept_bytes={kept}");
+    assert!(
+        kept < threshold,
+        "an entry under the threshold wrote {kept} bytes"
+    );
 }
 
 /// The Hub bundle with its semantic manifest replaced by `manifest`.
