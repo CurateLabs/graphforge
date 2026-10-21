@@ -86,13 +86,16 @@ fn stderr_text(output: &Output) -> String {
 }
 
 #[test]
-fn opening_data_from_another_core_warns_on_stderr_in_text_and_json() {
+fn opening_data_from_another_core_warns_on_stderr_in_text() {
     let root = TempDir::new().unwrap();
     let project = root.path().join("project");
     fs::create_dir(&project).unwrap();
-    let package = root.path().join("package");
     // The first command creates the project; the running Core wrote it.
-    assert!(export(&project, &package, true).status.success());
+    assert!(
+        export(&project, &root.path().join("package"), true)
+            .status
+            .success()
+    );
     relabel_generation(&project, CORE_X);
 
     let text = export(&project, &root.path().join("text"), false);
@@ -106,11 +109,71 @@ fn opening_data_from_another_core_warns_on_stderr_in_text_and_json() {
         stderr.contains(CORE_X) && stderr.contains(RUNNING),
         "{stderr}"
     );
+}
+
+#[test]
+fn under_json_a_mismatch_with_success_is_one_stdout_document_and_silent_stderr() {
+    let root = TempDir::new().unwrap();
+    let project = root.path().join("project");
+    fs::create_dir(&project).unwrap();
+    assert!(
+        export(&project, &root.path().join("package"), true)
+            .status
+            .success()
+    );
+    relabel_generation(&project, CORE_X);
 
     let as_json = export(&project, &root.path().join("json"), true);
-    assert!(as_json.status.success(), "{}", stderr_text(&as_json));
-    let line: Value = serde_json::from_str(stderr_text(&as_json).trim()).unwrap();
-    assert_names_both(&line["warning"]);
+    let result = stdout_json(&as_json);
+    let warnings = result["warnings"].as_array().unwrap();
+    assert_eq!(warnings.len(), 1, "{result}");
+    assert_names_both(&warnings[0]);
+    // The command's own result is still there.
+    assert_eq!(result["contract"], "graphforge-portable-export/1");
+    assert_eq!(stderr_text(&as_json), "");
+}
+
+#[test]
+fn under_json_a_mismatch_with_failure_is_one_stderr_document_with_error_and_warnings() {
+    let root = TempDir::new().unwrap();
+    let project = root.path().join("project");
+    fs::create_dir(&project).unwrap();
+    let package = root.path().join("package");
+    assert!(export(&project, &package, true).status.success());
+    relabel_generation(&project, CORE_X);
+
+    // Exporting onto the package that already exists fails after the open.
+    let failed = export(&project, &package, true);
+    assert!(!failed.status.success());
+    let stderr = stderr_text(&failed);
+    let mut documents = serde_json::Deserializer::from_str(&stderr).into_iter::<Value>();
+    let document = documents.next().expect("one document").expect("valid JSON");
+    assert!(
+        documents.next().is_none(),
+        "more than one document: {stderr}"
+    );
+    assert!(document["error"]["code"].is_string(), "{document}");
+    assert_eq!(
+        document["warnings"].as_array().unwrap().len(),
+        1,
+        "{document}"
+    );
+    assert_names_both(&document["warnings"][0]);
+    assert!(failed.stdout.is_empty() || serde_json::from_slice::<Value>(&failed.stdout).is_ok());
+}
+
+#[test]
+fn a_failure_without_a_mismatch_has_no_warnings_key() {
+    let root = TempDir::new().unwrap();
+    let project = root.path().join("project");
+    fs::create_dir(&project).unwrap();
+    let package = root.path().join("package");
+    assert!(export(&project, &package, true).status.success());
+
+    let failed = export(&project, &package, true);
+    assert!(!failed.status.success());
+    let document: Value = serde_json::from_str(stderr_text(&failed).trim()).unwrap();
+    assert!(document.get("warnings").is_none(), "{document}");
 }
 
 #[test]
@@ -150,8 +213,7 @@ fn importing_a_package_from_another_core_warns_and_still_imports() {
     let warnings = result["warnings"].as_array().unwrap();
     assert_eq!(warnings.len(), 1, "{result}");
     assert_names_both(&warnings[0]);
-    let line: Value = serde_json::from_str(stderr_text(&as_json).trim()).unwrap();
-    assert_names_both(&line["warning"]);
+    assert_eq!(stderr_text(&as_json), "");
 
     let text = import(
         &root.path().join("into-text"),

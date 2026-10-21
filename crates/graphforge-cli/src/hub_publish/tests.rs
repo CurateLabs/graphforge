@@ -25,6 +25,7 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 mod ancestor_publication;
+mod core_version_warning;
 mod hub_listing;
 mod producing_version;
 use hub_listing::serve_lineage;

@@ -190,7 +190,9 @@ pub(crate) fn run_hub_command(
         crate::Command::Clone(args) => {
             Ok(crate::hub_clone::run_clone(args, json, output, diagnostics).map(|()| 0)?)
         }
-        crate::Command::Publish(args) => run(&args, project, project_dir, json, output),
+        crate::Command::Publish(args) => {
+            run(&args, project, project_dir, json, output, diagnostics)
+        }
         crate::Command::Hub(args) => {
             Ok(crate::hub_clone::run_hub(&args, json, output).map(|()| 0)?)
         }
@@ -209,8 +211,9 @@ fn run(
     project_dir: Option<PathBuf>,
     json: bool,
     output: &mut dyn Write,
+    diagnostics: &mut crate::Diagnostics<'_>,
 ) -> Result<i32, crate::CliRuntimeError> {
-    run_command(args, project, project_dir, json, output)
+    run_command(args, project, project_dir, json, output, diagnostics)
         .map(|()| 0)
         .map_err(Into::into)
 }
@@ -221,6 +224,7 @@ fn run_command(
     project_dir: Option<PathBuf>,
     json: bool,
     output: &mut dyn Write,
+    diagnostics: &mut crate::Diagnostics<'_>,
 ) -> Result<(), GfError> {
     use std::io::IsTerminal as _;
     let streaming = DEVICE_FLOW_ALLOWED.load(Ordering::Relaxed);
@@ -271,7 +275,6 @@ fn run_command(
     let path = path
         .to_str()
         .ok_or_else(|| GfError::Validation("--project must be valid UTF-8".into()))?;
-    let graph = GraphForge::new(Some(path))?;
     let stderr = std::io::stderr();
     let mut notices = stderr.lock();
     let mut environment = PublishEnvironment {
@@ -281,7 +284,32 @@ fn run_command(
         notices: &mut notices,
         resolution: Some(resolution),
     };
-    let outcome = publish(&transport, &graph, args, &mut environment)?;
+    open_and_publish(
+        &transport,
+        path,
+        args,
+        &mut environment,
+        json,
+        output,
+        diagnostics,
+    )
+}
+
+/// Open the Project and publish it. A Core version warning from the open is
+/// raised before anything is published, so it is reported whether or not the
+/// publication then succeeds.
+fn open_and_publish(
+    transport: &dyn Transport,
+    path: &str,
+    args: &PublishArgs,
+    environment: &mut PublishEnvironment<'_>,
+    json: bool,
+    output: &mut dyn Write,
+    diagnostics: &mut crate::Diagnostics<'_>,
+) -> Result<(), GfError> {
+    let graph = GraphForge::new(Some(path))?;
+    diagnostics.warn(&graph.open_warnings());
+    let outcome = publish(transport, &graph, args, environment)?;
     write_outcome(&outcome, json, output)
 }
 

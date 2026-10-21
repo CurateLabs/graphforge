@@ -229,7 +229,11 @@ mod tests {
         ])
         .unwrap();
         let mut output = Vec::new();
-        match crate::run(cli, &mut output, &mut Vec::new()) {
+        match crate::run(
+            cli,
+            &mut output,
+            &mut crate::Diagnostics::new(true, &mut Vec::new()),
+        ) {
             Ok(code) => (code == 0, output),
             Err(error) => {
                 crate::write_runtime_error(&error, true, &mut output).unwrap();
