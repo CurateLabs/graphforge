@@ -549,6 +549,10 @@ export default defineConfig({
                   label: '0060 — Carry prepaid memory authority across reader handoffs',
                   slug: 'adr/0060-query-memory-handoffs',
                 },
+                {
+                  label: '0061 — Research porcelain and one meaning for a ref',
+                  slug: 'adr/0061-research-porcelain-and-ref-naming',
+                },
                 // END generated ADR records
               ],
             },
