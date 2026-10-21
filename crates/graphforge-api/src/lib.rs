@@ -649,6 +649,17 @@ pub use search_index::SearchIndexOptions;
 // GraphForge
 // ---------------------------------------------------------------------------
 
+/// The Core version warnings for a generation: the one place a resolved
+/// generation's producing version is compared with the running Core, shared by
+/// opening a project and previewing a revert.
+pub(crate) fn core_version_warnings(
+    generation: &ResolvedProjectGeneration,
+) -> Vec<CoreVersionWarning> {
+    check_core_version(generation.producing_core_version())
+        .into_iter()
+        .collect()
+}
+
 /// The GraphForge engine — the public entry point for openCypher execution.
 ///
 /// Built with [`new`](Self::new) (in-memory or Parquet-backed), then queried via
@@ -831,9 +842,7 @@ impl GraphForge {
     /// running Core, give none. Opening never refuses on a mismatch alone.
     #[must_use]
     pub fn open_warnings(&self) -> Vec<CoreVersionWarning> {
-        check_core_version(self.resolved_generation.producing_core_version())
-            .into_iter()
-            .collect()
+        core_version_warnings(&self.resolved_generation)
     }
 
     /// Create a new in-memory (`None`) or Parquet-backed (`Some(path)`) instance.

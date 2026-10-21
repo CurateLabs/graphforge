@@ -264,3 +264,266 @@ fn importing_a_package_from_the_running_core_prints_no_warning() {
     assert!(text.status.success());
     assert_eq!(stderr_text(&text), "");
 }
+
+fn gf_in(project: &Path, json: bool, args: &[&str]) -> Output {
+    let mut all = vec!["--project", project.to_str().unwrap()];
+    if json {
+        all.push("--json");
+    }
+    all.extend_from_slice(args);
+    gf(&all)
+}
+
+/// A project that has a checkpoint and a later commit, then relabelled as
+/// written by another Core (the checkpoint pins an earlier generation).
+fn project_with_checkpoint(root: &Path) -> std::path::PathBuf {
+    let project = root.join("project");
+    fs::create_dir(&project).unwrap();
+    let created = gf_in(
+        &project,
+        false,
+        &[
+            "checkpoint",
+            "create",
+            "before",
+            "--idempotency-key",
+            "00000000-0000-0000-0000-0000000000c1",
+        ],
+    );
+    assert!(created.status.success(), "{}", stderr_text(&created));
+    let graph = graphforge_api::GraphForge::new(project.to_str()).unwrap();
+    graph.execute("CREATE (:Item {score: 1})").unwrap();
+    drop(graph);
+    relabel_generation(&project, CORE_X);
+    project
+}
+
+#[test]
+fn a_revert_preview_of_another_cores_project_warns_in_text_and_json() {
+    let root = TempDir::new().unwrap();
+    let project = project_with_checkpoint(root.path());
+
+    let text = gf_in(&project, false, &["revert", "before", "--preview"]);
+    assert!(text.status.success(), "{}", stderr_text(&text));
+    let stderr = stderr_text(&text);
+    assert!(
+        stderr.contains("warning GF_CORE_VERSION_MISMATCH:"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains(CORE_X) && stderr.contains(RUNNING),
+        "{stderr}"
+    );
+
+    let as_json = gf_in(&project, true, &["revert", "before", "--preview"]);
+    let document = stdout_json(&as_json);
+    assert_eq!(document["contract"], "graphforge-revert-preview/1");
+    assert_eq!(
+        document["warnings"].as_array().unwrap().len(),
+        1,
+        "{document}"
+    );
+    assert_names_both(&document["warnings"][0]);
+    assert_eq!(stderr_text(&as_json), "");
+}
+
+#[test]
+fn a_revert_preview_of_a_matching_project_has_no_warnings() {
+    let root = TempDir::new().unwrap();
+    let project = root.path().join("project");
+    fs::create_dir(&project).unwrap();
+    let created = gf_in(
+        &project,
+        false,
+        &[
+            "checkpoint",
+            "create",
+            "before",
+            "--idempotency-key",
+            "00000000-0000-0000-0000-0000000000c2",
+        ],
+    );
+    assert!(created.status.success());
+
+    let as_json = gf_in(&project, true, &["revert", "before", "--preview"]);
+    let document = stdout_json(&as_json);
+    assert!(document.get("warnings").is_none(), "{document}");
+    assert_eq!(stderr_text(&as_json), "");
+    let text = gf_in(&project, false, &["revert", "before", "--preview"]);
+    assert!(text.status.success());
+    assert_eq!(stderr_text(&text), "");
+}
+
+fn written_project(root: &Path) -> std::path::PathBuf {
+    let project = root.join("project");
+    fs::create_dir(&project).unwrap();
+    assert!(export(&project, &root.join("seed"), true).status.success());
+    project
+}
+
+#[test]
+fn a_multi_output_json_query_stamps_only_its_first_document() {
+    let root = TempDir::new().unwrap();
+    let project = written_project(root.path());
+    relabel_generation(&project, CORE_X);
+    let (a, b) = (root.path().join("a.parquet"), root.path().join("b.parquet"));
+
+    let both = gf_in(
+        &project,
+        true,
+        &[
+            "query",
+            "--cypher",
+            "RETURN 1 AS n",
+            "--output",
+            a.to_str().unwrap(),
+            "--cypher",
+            "RETURN 2 AS n",
+            "--output",
+            b.to_str().unwrap(),
+        ],
+    );
+    assert!(both.status.success(), "{}", stderr_text(&both));
+    let documents: Vec<Value> = String::from_utf8(both.stdout.clone())
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("each stdout line is JSON"))
+        .collect();
+    assert_eq!(documents.len(), 2);
+    assert_eq!(documents[0]["warnings"].as_array().unwrap().len(), 1);
+    assert_names_both(&documents[0]["warnings"][0]);
+    assert!(documents[1].get("warnings").is_none(), "{}", documents[1]);
+    assert_eq!(stderr_text(&both), "");
+}
+
+#[test]
+fn a_failing_second_query_gives_one_stderr_document_carrying_the_warnings() {
+    let root = TempDir::new().unwrap();
+    let project = written_project(root.path());
+    relabel_generation(&project, CORE_X);
+    let (a, b) = (root.path().join("a.parquet"), root.path().join("b.parquet"));
+
+    let failed = gf_in(
+        &project,
+        true,
+        &[
+            "query",
+            "--cypher",
+            "RETURN 1 AS n",
+            "--output",
+            a.to_str().unwrap(),
+            "--cypher",
+            "THIS IS NOT CYPHER",
+            "--output",
+            b.to_str().unwrap(),
+        ],
+    );
+    assert!(!failed.status.success());
+    let stderr = stderr_text(&failed);
+    let mut documents = serde_json::Deserializer::from_str(&stderr).into_iter::<Value>();
+    let document = documents.next().expect("one document").expect("valid JSON");
+    assert!(
+        documents.next().is_none(),
+        "more than one document: {stderr}"
+    );
+    assert!(document["error"]["code"].is_string(), "{document}");
+    assert_names_both(&document["warnings"][0]);
+    for line in String::from_utf8(failed.stdout).unwrap().lines() {
+        serde_json::from_str::<Value>(line).expect("each stdout line is JSON");
+    }
+}
+
+fn decision_file(root: &Path) -> std::path::PathBuf {
+    let question = uuid::Uuid::now_v7();
+    let item = uuid::Uuid::now_v7();
+    let request = serde_json::json!({
+        "input": {
+            "generation_uuid": uuid::Uuid::now_v7(),
+            "version_uuid": null,
+            "projection_sha256": vec![7; 32],
+            "selection_sha256": vec![9; 32],
+            "selected_item_uuids": [item],
+        },
+        "producer": { "name": "offline CLI fixture" },
+        "questions": [{
+            "question_uuid": question,
+            "text": "Where should this item go?",
+            "item_uuids": [item],
+            "kind": { "kind": "choice", "allowed_choices": ["research", "human_review"] },
+        }],
+        "results": [{
+            "question_uuid": question,
+            "item_uuid": item,
+            "status": "answered",
+            "value": { "kind": "choice", "value": "research" },
+        }],
+    });
+    let path = root.join("decision.json");
+    fs::write(&path, serde_json::to_vec(&request).unwrap()).unwrap();
+    path
+}
+
+fn validate_decisions(project: &Path, input: &Path, output: &Path, json: bool) -> Output {
+    gf_in(
+        project,
+        json,
+        &[
+            "research",
+            "decision",
+            "validate",
+            "--file",
+            input.to_str().unwrap(),
+            "--output",
+            output.to_str().unwrap(),
+        ],
+    )
+}
+
+#[test]
+fn decision_validate_emits_one_json_document_under_json_and_text_otherwise() {
+    let root = TempDir::new().unwrap();
+    let project = written_project(root.path());
+    let input = decision_file(root.path());
+    let arrow = root.path().join("decision.arrow");
+
+    let text = validate_decisions(&project, &input, &arrow, false);
+    assert!(text.status.success(), "{}", stderr_text(&text));
+    assert_eq!(
+        String::from_utf8_lossy(&text.stdout),
+        "validated 1 decision rows\n"
+    );
+
+    let as_json = validate_decisions(&project, &input, &arrow, true);
+    let document = stdout_json(&as_json);
+    assert_eq!(document["validated_rows"], 1);
+    assert_eq!(document["output"], arrow.to_str().unwrap());
+    assert!(document.get("warnings").is_none());
+    assert_eq!(stderr_text(&as_json), "");
+}
+
+#[test]
+fn decision_validate_on_another_cores_project_carries_the_warnings_in_its_document() {
+    let root = TempDir::new().unwrap();
+    let project = written_project(root.path());
+    relabel_generation(&project, CORE_X);
+    let input = decision_file(root.path());
+    let arrow = root.path().join("decision.arrow");
+
+    let as_json = validate_decisions(&project, &input, &arrow, true);
+    let document = stdout_json(&as_json);
+    assert_eq!(document["validated_rows"], 1);
+    assert_eq!(
+        document["warnings"].as_array().unwrap().len(),
+        1,
+        "{document}"
+    );
+    assert_names_both(&document["warnings"][0]);
+    assert_eq!(stderr_text(&as_json), "");
+
+    let text = validate_decisions(&project, &input, &arrow, false);
+    assert!(stderr_text(&text).contains("warning GF_CORE_VERSION_MISMATCH:"));
+    assert_eq!(
+        String::from_utf8_lossy(&text.stdout),
+        "validated 1 decision rows\n"
+    );
+}

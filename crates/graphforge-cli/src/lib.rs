@@ -821,9 +821,11 @@ fn run_revert_preview(
     name: String,
     json: bool,
     output: &mut dyn Write,
+    diagnostics: &mut Diagnostics<'_>,
 ) -> Result<(), graphforge_api::GfError> {
     let preview =
         GraphForge::preview_revert_to_checkpoint(path, PreviewRevertCheckpointRequest { name })?;
+    diagnostics.warn(&preview.warnings);
     write_revert_preview(&preview, json, output)
 }
 
@@ -864,12 +866,13 @@ fn handle_revert_before_open(
     path: &Path,
     json: bool,
     output: &mut dyn Write,
+    diagnostics: &mut Diagnostics<'_>,
 ) -> Result<bool, graphforge_api::GfError> {
     let Some(args) = revert_args(command) else {
         return Ok(false);
     };
     if args.preview {
-        run_revert_preview(path, args.name.clone(), json, output)?;
+        run_revert_preview(path, args.name.clone(), json, output, diagnostics)?;
         return Ok(true);
     }
     if !args.yes {
@@ -1233,7 +1236,7 @@ fn run_with_allocation(
         }
         command => command,
     };
-    if handle_revert_before_open(&command, &path, cli.json, output)? {
+    if handle_revert_before_open(&command, &path, cli.json, output, &mut *diagnostics)? {
         return Ok(0);
     }
     let path_text = path.to_str().ok_or_else(|| {
@@ -1800,6 +1803,7 @@ mod tests {
             source_generation_uuid: source,
             source_manifest_sha256: "11".repeat(32),
             current_generation_uuid: generation,
+            warnings: Vec::new(),
         };
         for json in [false, true] {
             let mut output = Vec::new();
