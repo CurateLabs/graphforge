@@ -538,25 +538,35 @@ fn assert_byte_totals_refused(error: graphforge_discovery::DiscoveryError) {
     assert_eq!(error.field.as_deref(), Some("facts.bytes_by_kind"));
 }
 
+/// Shift `delta` bytes into (or out of) `package-control`, keeping the per-kind
+/// totals summing to `payload_bytes` across a mutation of another kind.
+fn move_control_bytes(document: &mut Value, delta: i64) {
+    let control = &mut document["facts"]["bytes_by_kind"]["package-control"];
+    *control = Value::from((control.as_u64().unwrap() as i64 + delta) as u64);
+}
+
 #[test]
 fn from_json_rejects_byte_totals_that_omit_a_component_kind() {
+    // The omitted kind's bytes move to package-control, so the sum still
+    // holds and only the missing kind is wrong.
     let error = rejected_byte_totals(|document| {
-        document["facts"]["bytes_by_kind"]
+        let bytes = document["facts"]["bytes_by_kind"]
             .as_object_mut()
             .unwrap()
-            .remove("graph-data");
+            .remove("graph-data")
+            .unwrap();
+        move_control_bytes(document, bytes.as_u64().unwrap() as i64);
     });
     assert_byte_totals_refused(error);
 }
 
 #[test]
 fn from_json_rejects_byte_totals_outside_the_component_histogram() {
+    // `evidence` is a known kind the histogram does not name; its byte comes
+    // out of package-control, so the sum still holds.
     let error = rejected_byte_totals(|document| {
-        document["facts"]["bytes_by_kind"]["settings"] = Value::from(
-            document["facts"]["bytes_by_kind"]["ontology"]
-                .as_u64()
-                .unwrap(),
-        );
+        document["facts"]["bytes_by_kind"]["evidence"] = Value::from(1u64);
+        move_control_bytes(document, -1);
     });
     assert_byte_totals_refused(error);
 }
@@ -576,6 +586,7 @@ fn from_json_rejects_byte_totals_that_do_not_sum_to_the_payload_bytes() {
 fn from_json_rejects_byte_totals_with_an_unknown_kind() {
     let error = rejected_byte_totals(|document| {
         document["facts"]["bytes_by_kind"]["mystery"] = Value::from(16u64);
+        move_control_bytes(document, -16);
     });
     assert_byte_totals_refused(error);
 }

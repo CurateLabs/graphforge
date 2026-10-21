@@ -546,7 +546,7 @@ fn validate_facts(facts: &SummaryFacts, limits: DiscoveryLimits) -> Result<(), D
 }
 
 /// Require the per-kind byte totals to agree with the component histogram and
-/// the payload total: every key is a known kind that the histogram names or is
+/// the payload total: every key is a kind the histogram names or is
 /// `package-control`, every histogram kind has a total, and the totals sum to
 /// exactly `payload_bytes`.
 fn validate_bytes_by_kind(facts: &SummaryFacts) -> Result<(), DiscoveryError> {
@@ -558,9 +558,7 @@ fn validate_bytes_by_kind(facts: &SummaryFacts) -> Result<(), DiscoveryError> {
         if *kind == PACKAGE_CONTROL {
             continue;
         }
-        if !COMPONENT_KINDS.contains(&kind.as_str()) {
-            return Err(invalid("byte totals name an unknown component kind"));
-        }
+        // The histogram holds only known kinds, so this also refuses unknown ones.
         if !facts.components.contains_key(kind) {
             return Err(invalid(
                 "byte totals name a kind outside the component histogram",
