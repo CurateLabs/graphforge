@@ -41,6 +41,7 @@ mod ancestry;
 mod remote;
 pub use ancestry::{MAX_PARENTS, ResearchVersionProvenance};
 pub use remote::ResearchRemoteBranch;
+mod local_state;
 mod remote_fetch;
 pub use remote_fetch::{
     ResearchRemoteBranchFetch, ResearchRemoteFetchBinding, stage_remote_branch_fetch,
@@ -282,6 +283,13 @@ pub struct ResearchRegistry {
     pub ancestry: BTreeMap<Uuid, Vec<Uuid>>,
     /// Versions whose exact participant and graph payloads are rooted in CAS.
     pub materialized: BTreeSet<Uuid>,
+    /// Human names for immutable Versions. Local until published; a published tag
+    /// travels in the lineage document (ADR 0061).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub tags: BTreeMap<String, Uuid>,
+    /// The Branch the porcelain verbs act on; local only, never published (ADR 0061).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_branch: Option<Uuid>,
 }
 
 /// Request to capture frozen research from an authenticated generation.
@@ -450,6 +458,18 @@ pub enum ResearchMutation {
         /// Exact releasable root identity.
         root_uuid: Uuid,
     },
+    /// Create (`Some`) or delete (`None`) one tag on an immutable Version (ADR 0061).
+    SetTag {
+        /// Tag name, a valid discovery ref.
+        name: String,
+        /// Version the tag names; `None` deletes the tag.
+        version_uuid: Option<Uuid>,
+    },
+    /// Select the Branch the porcelain verbs act on (ADR 0061).
+    SelectBranch {
+        /// Existing Branch with a head.
+        branch_uuid: Uuid,
+    },
     /// Release a Version when no head, root or required Version depends on it.
     DeleteVersion {
         /// Exact Version to release; receipts remain available.
@@ -509,6 +529,7 @@ impl ResearchRegistry {
     pub fn validate(&self) -> Result<(), GfError> {
         self.validate_capacity()?;
         self.validate_remote_branches()?;
+        self.validate_local_state()?;
         for (id, version) in &self.versions {
             if id.is_nil()
                 || *id != version.version_uuid
@@ -1055,6 +1076,14 @@ fn apply_mutation(
                 ));
             }
             registry.roots.remove(root_uuid);
+            None
+        }
+        ResearchMutation::SetTag { name, version_uuid } => {
+            local_state::set_tag(registry, name, *version_uuid)?;
+            None
+        }
+        ResearchMutation::SelectBranch { branch_uuid } => {
+            local_state::select_branch(registry, *branch_uuid)?;
             None
         }
         ResearchMutation::DeleteVersion { version_uuid } => {

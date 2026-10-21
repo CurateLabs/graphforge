@@ -1649,3 +1649,58 @@ fn branch_label_must_be_a_valid_unique_ref() {
         1
     );
 }
+
+#[test]
+fn current_branch_and_tags_persist_through_the_native_operations() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("project");
+    let mut graph = GraphForge::new(path.to_str()).unwrap();
+    graph.execute("CREATE (:Item {score:0})").unwrap();
+    let main = create(&mut graph, "main");
+    let feature = create(&mut graph, "feature/score");
+    let head = graph.research_version_retention().unwrap().heads[&feature.branch_uuid];
+
+    let select = SelectResearchBranchRequest {
+        operation_uuid: Uuid::now_v7(),
+        expected_generation_uuid: current(&graph),
+        branch_uuid: main.branch_uuid,
+    };
+    let receipt = graph
+        .select_research_branch(&select, &CancellationToken::new())
+        .unwrap();
+    assert_eq!(
+        graph
+            .select_research_branch(&select, &CancellationToken::new())
+            .unwrap(),
+        receipt
+    );
+    let unknown = SelectResearchBranchRequest {
+        operation_uuid: Uuid::now_v7(),
+        expected_generation_uuid: current(&graph),
+        branch_uuid: Uuid::now_v7(),
+    };
+    graph
+        .select_research_branch(&unknown, &CancellationToken::new())
+        .unwrap_err();
+
+    let tag = |graph: &GraphForge, name: &str, version| SetResearchTagRequest {
+        operation_uuid: Uuid::now_v7(),
+        expected_generation_uuid: current(graph),
+        name: name.into(),
+        version_uuid: version,
+    };
+    let invalid = tag(&graph, "not a ref", Some(head));
+    graph
+        .set_research_tag(&invalid, &CancellationToken::new())
+        .unwrap_err();
+    let valid = tag(&graph, "release/v1", Some(head));
+    graph
+        .set_research_tag(&valid, &CancellationToken::new())
+        .unwrap();
+
+    drop(graph);
+    let reopened = GraphForge::new(path.to_str()).unwrap();
+    let registry = reopened.research_version_retention().unwrap();
+    assert_eq!(registry.current_branch, Some(main.branch_uuid));
+    assert_eq!(registry.tags["release/v1"], head);
+}

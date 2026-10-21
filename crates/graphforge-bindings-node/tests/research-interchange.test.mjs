@@ -28,7 +28,7 @@ test("native research interchange preserves citations exports and independent Fo
       },
       creator_uuid: identity(),
       created_at: 1,
-      label: "Portable research",
+      label: "portable-research",
     });
     const target = { kind: "version", version_uuid: version };
     const reference = await graph.researchReference(target);

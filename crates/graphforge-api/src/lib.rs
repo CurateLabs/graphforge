@@ -270,6 +270,8 @@ pub use saved_queries::{
     SavedQuerySource,
 };
 #[cfg(feature = "research")]
+mod research_local_state;
+#[cfg(feature = "research")]
 mod research_versions;
 #[cfg(feature = "research")]
 pub use branches::{
@@ -277,6 +279,8 @@ pub use branches::{
     CreateResearchBranchRequest, ExecuteResearchBranchRequest, ReferenceResearchBranchRequest,
     ResearchBranchView, RestoreResearchBranchRequest, SuppressResearchBranchAssertionRequest,
 };
+#[cfg(feature = "research")]
+pub use research_local_state::{SelectResearchBranchRequest, SetResearchTagRequest};
 #[cfg(feature = "research")]
 mod slices;
 #[cfg(feature = "research")]

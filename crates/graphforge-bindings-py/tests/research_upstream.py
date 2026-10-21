@@ -32,7 +32,7 @@ class ResearchUpstreamTests(unittest.TestCase):
                 },
                 "creator_uuid": identity(),
                 "created_at": 1,
-                "label": "Upstream review",
+                "label": "upstream-review",
             }
         )
         graph.execute("MATCH (n:Item) SET n.x=1,n.y=2")

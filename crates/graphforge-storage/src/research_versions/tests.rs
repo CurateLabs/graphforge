@@ -717,6 +717,7 @@ mod proposals;
 mod retention;
 mod revision_six;
 mod saved_queries;
+mod tag_state;
 mod upstream;
 
 #[test]
