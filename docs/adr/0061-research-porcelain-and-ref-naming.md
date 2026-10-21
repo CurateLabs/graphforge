@@ -1,7 +1,7 @@
 ---
 title: "ADR 0061: Research porcelain and one meaning for a ref"
 adr: "0061"
-status: "Proposed"
+status: "Accepted"
 date: "2026-10-21"
 superseded_by: null
 revisit_when: "A porcelain verb needs behavior no native operation provides, a Hub advertises tag refs in its refs document, or a Branch needs more than one name"
@@ -9,7 +9,7 @@ revisit_when: "A porcelain verb needs behavior no native operation provides, a H
 
 # ADR 0061: Research porcelain and one meaning for a ref
 
-**Status:** Proposed
+**Status:** Accepted
 
 **Implementation:** #2126 is the close gate. The porcelain verbs, the ref rule
 and the two pieces of local state land on one branch; #2127 (agent errors,
@@ -423,3 +423,51 @@ Step 7 is the close evidence for #2126's walkthrough criterion. Steps 1 to 6
 each land with their unit tests; no step introduces a behavior the native API
 does not already provide except the two state fields and the message fields
 named above.
+
+## Implementation notes
+
+Recorded when #2126 landed; each is a refinement of the text above, not a change
+of decision.
+
+- **Registry revision.** The registry is revision 9, not 7. `tags` and
+  `current_branch` are omitted when empty, so existing bytes and identity digests
+  are unchanged and no revision is bumped
+  (`registry_without_tags_or_current_branch_keeps_its_bytes`).
+- **Error codes.** The `GF_*` codes in section 7 are stable prefixes of the
+  validation message, the convention `hub.publish.*` uses, not new variants of the
+  closed public `ApiErrorCode` set. Tag names are checked against the ref grammar
+  at the API boundary (`set_research_tag`) and structurally in storage, which does
+  not depend on the discovery crate. The `research` feature of `graphforge-api`
+  now implies `discovery` for the Branch label grammar.
+- **`--ref` selects a Branch.** Because the label is the ref, `gf push --ref X` and
+  `gf pull --ref X` select the Branch labelled `X`; naming a different `--branch`
+  is an error. `CreateResearchBranchRequest` gains `description` only (its label
+  already is the Branch label); the other three requests gain `label` and
+  `description`.
+- **Operation identity.** A caller-supplied `--operation-uuid` must be a UUIDv7.
+  The Version, Branch and actor identities and the creation time are derived from
+  it, so a rerun builds the same request. The verbs find an earlier result in the
+  durable receipt ledger instead of rebuilding a request whose
+  `expected_generation_uuid` has moved.
+- **First Branch.** `gf branch <name>` in a Project with no Branch creates it from
+  the Project's current research.
+- **Upstream record.** `ahead N` is measured against the recorded remote head,
+  which clone and pull refresh; a push does not. A Branch that was published but
+  never cloned or pulled has no upstream until its first `gf pull <repository>`,
+  and `gf push` names the repository until then.
+- **Tags on clone and pull.** A lineage tag is installed with the Version it
+  names: at clone for Versions the cloned history contains, after `gf pull` for the
+  rest. Tags on other Versions stay on the Hub.
+- **Pull conflicts.** `conflict` and `dependency_unavailable` preview rows refuse
+  the pull before any update; the fetch is durable. The evidence acknowledgement is
+  the union required by the adopted rows.
+- **Identity file.** `config.toml` is read and written as the documented subset
+  (`[user]`/`[committer]` tables of string `name`, `email`, `orcid`) without a TOML
+  dependency; anything else is refused.
+- **Walkthrough.** The product transport speaks only HTTPS to public addresses, so
+  a child `gf` cannot reach an in-process Hub. The Hub-facing walkthrough runs the
+  CLI's own parser and dispatcher in-process over the loopback transport every
+  publish and clone test uses (`hub_publish::tests::porcelain`), and the built
+  binary drives the verbs that need no Hub
+  (`tests/research_porcelain_walkthrough.rs`).
+
