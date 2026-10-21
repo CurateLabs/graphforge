@@ -39,7 +39,7 @@ test("research metadata and discovery stay metadata-only across reopen", () => {
     const first = new GraphForge(firstRoot);
     first.updateResearchMetadata({
       metadata: {
-        contract_version: 1,
+        contract_version: 2,
         title: "Arabian Nights",
         description: null,
         authors: [],
@@ -55,11 +55,6 @@ test("research metadata and discovery stay metadata-only across reopen", () => {
         corpus_size: null,
         ontologies: ["narrative-events"],
         license: null,
-        access: {
-          visibility: null,
-          access_policy: null,
-          collaborators: [],
-        },
         tags: [],
         originating_projects: [],
         related_projects: [],
@@ -94,7 +89,7 @@ test("research metadata and discovery stay metadata-only across reopen", () => {
     const second = new GraphForge(secondRoot);
     second.updateResearchMetadata({
       metadata: {
-        contract_version: 1,
+        contract_version: 2,
         title: "Medieval Latin Corpus",
         description: null,
         authors: [],
@@ -106,11 +101,6 @@ test("research metadata and discovery stay metadata-only across reopen", () => {
         corpus_size: null,
         ontologies: [],
         license: null,
-        access: {
-          visibility: null,
-          access_policy: null,
-          collaborators: [],
-        },
         tags: [],
         originating_projects: [],
         related_projects: [],

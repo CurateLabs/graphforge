@@ -431,11 +431,10 @@ pub use graphforge_exec::{
     ExecutionResult, ExecutionStats, RetainedTopologyBytes, SendableRecordBatchStream,
 };
 pub use graphforge_storage::{
-    GraphDirectedness, ResearchAccessPolicyMetadata, ResearchCorpusSize, ResearchDiscoveryFacets,
-    ResearchGeographicCoverage, ResearchProjectDiscoveryLimits, ResearchProjectDiscoveryQuery,
-    ResearchProjectIdentity, ResearchProjectSummary, ResearchTemporalCoverage,
-    WorkspaceConfiguration, WorkspaceOntology, WorkspaceOntologyMode,
-    WorkspaceOntologySourceFormat, WorkspaceResearchMetadata,
+    GraphDirectedness, ResearchCorpusSize, ResearchDiscoveryFacets, ResearchGeographicCoverage,
+    ResearchProjectDiscoveryLimits, ResearchProjectDiscoveryQuery, ResearchProjectIdentity,
+    ResearchProjectSummary, ResearchTemporalCoverage, WorkspaceConfiguration, WorkspaceOntology,
+    WorkspaceOntologyMode, WorkspaceOntologySourceFormat, WorkspaceResearchMetadata,
 };
 /// Per-phase application I/O attribution for the whole project lifecycle.
 ///

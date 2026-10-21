@@ -26,12 +26,14 @@ use std::sync::{Arc, Mutex};
 
 mod ancestor_publication;
 mod core_version_warning;
+mod credit;
 mod hub_listing;
 mod producing_version;
 use hub_listing::serve_lineage;
 mod remote_fetch;
 mod rewrite_prune;
 mod selection;
+use credit::edit_by;
 use selection::{args, on_ref};
 
 const HUB: &str = "https://hub.test";
@@ -2806,31 +2808,6 @@ fn opaque_workbench_file_cannot_be_selected_as_native_package_data() {
             .to_string()
             .contains("custom selector is missing or ambiguous")
     );
-}
-
-fn edit_by(graph: &mut GraphForge, branch: Uuid, score: i64, name: &str) -> Uuid {
-    let version_uuid = Uuid::now_v7();
-    let signature = graphforge_storage::research_versions::ResearchSignature {
-        name: name.into(),
-        email: None,
-        orcid: None,
-    };
-    graph
-        .execute_research_branch(
-            &ExecuteResearchBranchRequest {
-                author: Some(signature.clone()),
-                committer: Some(signature),
-                operation_uuid: Uuid::now_v7(),
-                expected_generation_uuid: generation(graph),
-                branch_uuid: branch,
-                version_uuid,
-                created_at: 3,
-                query: format!("MATCH (n:Item) SET n.score={score}"),
-            },
-            &CancellationToken::new(),
-        )
-        .unwrap();
-    version_uuid
 }
 
 #[test]

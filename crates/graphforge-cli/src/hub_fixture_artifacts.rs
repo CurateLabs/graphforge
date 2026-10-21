@@ -8,9 +8,9 @@ use graphforge_api::{
     ActivationMode, ActivationProfileChangeRequest, DiscoveryOntologyModuleRequest, GraphForge,
     ModuleAdoptionRequest, OntologyAuthorityExpectation, OntologyDoc, OperationId,
     PortableExportRequest, PortableImportRequest, PortableLimits, PortableOutput,
-    PortableSelection, PortableSelectionProfile, ResearchAccessPolicyMetadata, ResearchCorpusSize,
-    UpdateResearchMetadataRequest, WorkspaceResearchMetadata, WriteContext,
-    repack_verified_expanded_portable, resolve_discovered_ontology_module,
+    PortableSelection, PortableSelectionProfile, ResearchCorpusSize, UpdateResearchMetadataRequest,
+    WorkspaceResearchMetadata, WriteContext, repack_verified_expanded_portable,
+    resolve_discovered_ontology_module,
 };
 use graphforge_discovery::{
     DISCOVERY_FORMAT, DiscoveryLimits, DiscoveryManifest, ExactIdentity, ObjectDescriptor,
@@ -130,11 +130,6 @@ fn fixture_research_metadata() -> WorkspaceResearchMetadata {
         source_count: Some(1),
         artifact_count: Some(0),
     });
-    metadata.access = ResearchAccessPolicyMetadata {
-        visibility: Some("public".into()),
-        access_policy: Some("open".into()),
-        collaborators: Vec::new(),
-    };
     metadata.created_at = Some("2026-01-01T00:00:00.000000Z".into());
     metadata.updated_at = Some("2026-01-01T00:00:00.000000Z".into());
     metadata
@@ -375,8 +370,9 @@ pub fn generate(source: &Path, destination: &Path, location_base: &str) -> Resul
     let repository = repository_identity();
     let immutable_version = Sha256Digest(exported_package_digest.clone());
 
-    // The summary is derived from the verified bundle, never entered by hand.
-    let derived = derive_summary(&repository, &immutable_version, &object_path)?;
+    // The summary is derived from the verified bundle, never entered by hand. The
+    // fixture publishes no research lineage, so it lists no people.
+    let derived = derive_summary(&repository, &immutable_version, &object_path, None)?;
     write(destination.join(SUMMARY_PATH), &derived.bytes)?;
 
     // One component-selective package per advertised module, exported from the

@@ -167,7 +167,10 @@ Public projects support transparent participation with attributable authors and
 committers, following Git practices. Private projects provide a non-public space
 for known collaborators. Choose the appropriate project space when sharing;
 privacy is not a prerequisite lesson for basic graph use. Hosting applications
-own authentication and access enforcement.
+own authentication and access enforcement. Project metadata holds no access
+fields. Published credit is public and permanent: the authors and committers
+recorded on Versions are always published, and the Project people list in the
+summary is derived from them.
 
 Use [portable projects](portable-projects.md) for actual transfer and Hub clone.
 History, fast-forward publication, rewrite, and prune behavior are specified in

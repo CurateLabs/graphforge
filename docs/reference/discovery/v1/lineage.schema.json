@@ -60,6 +60,20 @@
       "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$",
       "type": "string"
     },
+    "credit_email": {
+      "maxLength": 254,
+      "minLength": 3,
+      "type": "string"
+    },
+    "credit_name": {
+      "maxLength": 256,
+      "minLength": 1,
+      "type": "string"
+    },
+    "credit_orcid": {
+      "pattern": "^[0-9]{4}-[0-9]{4}-[0-9]{4}-[0-9]{3}[0-9X]$",
+      "type": "string"
+    },
     "digest": {
       "pattern": "^sha256:[0-9a-f]{64}$",
       "type": "string"
@@ -74,6 +88,12 @@
     "fork_origin": {
       "additionalProperties": false,
       "properties": {
+        "origin_author": {
+          "$ref": "#/$defs/signature"
+        },
+        "origin_committer": {
+          "$ref": "#/$defs/signature"
+        },
         "origin_project_uuid": {
           "$ref": "#/$defs/uuid"
         },
@@ -166,8 +186,14 @@
     "research_version": {
       "additionalProperties": false,
       "properties": {
+        "author": {
+          "$ref": "#/$defs/signature"
+        },
         "branch_uuid": {
           "$ref": "#/$defs/uuid"
+        },
+        "committer": {
+          "$ref": "#/$defs/signature"
         },
         "identity_digest": {
           "$ref": "#/$defs/digest"
@@ -236,6 +262,24 @@
       "required": [
         "capability",
         "major"
+      ],
+      "type": "object"
+    },
+    "signature": {
+      "additionalProperties": false,
+      "properties": {
+        "email": {
+          "$ref": "#/$defs/credit_email"
+        },
+        "name": {
+          "$ref": "#/$defs/credit_name"
+        },
+        "orcid": {
+          "$ref": "#/$defs/credit_orcid"
+        }
+      },
+      "required": [
+        "name"
       ],
       "type": "object"
     },

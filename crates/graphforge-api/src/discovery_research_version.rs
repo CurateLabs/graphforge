@@ -239,7 +239,8 @@ fn verify_selected_research_version(
 
 /// True when the archived record is exactly the lineage Version: the registry
 /// commitment and the record's recomputed identity both equal the lineage
-/// identity digest, and complete/projection kind and source agree.
+/// identity digest, complete/projection kind and source agree, and the published
+/// author and committer equal the record's.
 #[cfg(feature = "research")]
 fn selected_matches(
     expected: &LineageVersion,
@@ -277,6 +278,12 @@ fn selected_matches(
             == expected.parents
         && kind == expected.kind
         && source == expected.source_version_uuid
+        // Credit is part of what verified means: the lineage must name exactly the
+        // author and committer the native record carries.
+        && version.author.as_ref().map(crate::discovery_research_lineage::credit)
+            == expected.author
+        && version.committer.as_ref().map(crate::discovery_research_lineage::credit)
+            == expected.committer
 }
 
 fn map_immutable_mismatch(error: DiscoveryError) -> DiscoveryResearchVersionError {

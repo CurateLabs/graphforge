@@ -52,4 +52,16 @@ Missing intermediate Branch commit records are not boundary anchors.
 A Branch clone installs the selected Branch as live through the native publication
 owner, preserving its record and head. Other advertised refs persist as read-only
 remote citations. An immutable-Version clone does not activate a Branch. Neither
-path changes archive read-only authority or imports destination access policy.
+path changes archive read-only authority.
+
+## Published credit
+
+Each lineage Version carries its recorded `author` and `committer` (free-form
+`{name, email?, orcid?}`, omitted when the Version records none), and a Fork
+origin citation carries `origin_author` and `origin_committer` of the cited
+Version. They are credit, never access control, and are published unconditionally
+(ADR 0055). Because they are part of the Version record, #2124's immutability rule
+covers them: a later publication cannot change a published Version's credit. The
+Project people list in the summary is derived from these fields
+(`ResearchLineage::people`). The format string and requirement are unchanged: the
+fields are added in place before the first public release of this format.

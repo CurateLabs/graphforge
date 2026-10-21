@@ -16,11 +16,26 @@ use arrow::array::{FixedSizeBinaryArray, RecordBatch, StringArray};
 use graphforge_api::{
     GraphForge, OperationId, PortableExportRequest, PortableImportRequest, PortableLimits,
     PortableOutput, PortableSelection, PortableSelectionProfile, PortableVerifyRequest,
-    bulk_edge_input_schema, bulk_node_input_schema, verify_portable,
+    UpdateResearchMetadataRequest, WorkspaceResearchMetadata, WriteContext, bulk_edge_input_schema,
+    bulk_node_input_schema, verify_portable,
 };
 use graphforge_core::portable::PortableMode;
 use graphforge_ir::IrLiteral;
 use uuid::Uuid;
+
+/// Legacy Project metadata (contract version 1) is refused, never migrated; writing
+/// current metadata is the explicit recovery before such a Project can be exported.
+fn rewrite_legacy_metadata(graph: &mut GraphForge) {
+    graph
+        .update_research_metadata(UpdateResearchMetadataRequest {
+            context: WriteContext {
+                operation_uuid: OperationId(Uuid::now_v7()),
+                actor_uuid: None,
+            },
+            metadata: WorkspaceResearchMetadata::empty(),
+        })
+        .unwrap();
+}
 
 const FIXTURE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -146,7 +161,7 @@ fn a_legacy_project_opens_appends_refuses_and_round_trips() {
         "the fixture must carry the legacy index: {before:?}"
     );
 
-    let graph = GraphForge::new(project.to_str()).unwrap();
+    let mut graph = GraphForge::new(project.to_str()).unwrap();
     assert_eq!(count(&graph, "MATCH (n) RETURN count(n)"), 14);
     assert_eq!(count(&graph, "MATCH ()-[r]->() RETURN count(r)"), 14);
 
@@ -236,6 +251,7 @@ fn a_legacy_project_opens_appends_refuses_and_round_trips() {
         before.len(),
         "legacy membership entries carry forward unchanged"
     );
+    rewrite_legacy_metadata(&mut graph);
     let bundle = directory.path().join("legacy.gfpb");
     let exported = graph
         .export_portable(

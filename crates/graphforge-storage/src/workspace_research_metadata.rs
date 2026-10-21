@@ -19,7 +19,10 @@ use crate::{
 /// Canonical research-metadata record family.
 pub const WORKSPACE_RESEARCH_METADATA_FAMILY: &str = "research_metadata";
 /// Frozen research-metadata contract version.
-pub const WORKSPACE_RESEARCH_METADATA_VERSION: u32 = 1;
+///
+/// Version 2 removed the `access` member (ADR 0055): access belongs to the host
+/// and never appears in Project data. Version 1 records are refused.
+pub const WORKSPACE_RESEARCH_METADATA_VERSION: u32 = 2;
 /// Maximum canonical research-metadata participant size.
 pub const MAX_WORKSPACE_RESEARCH_METADATA_BYTES: usize = 256 * 1024;
 /// Maximum UTF-8 bytes for one bounded metadata string.
@@ -63,18 +66,6 @@ pub struct ResearchCorpusSize {
     pub source_count: Option<u64>,
     /// Optional declared artifact count.
     pub artifact_count: Option<u64>,
-}
-
-/// Policy metadata for consumers; Core does not enforce access.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ResearchAccessPolicyMetadata {
-    /// Optional visibility label such as `private`, `shared`, or `public`.
-    pub visibility: Option<String>,
-    /// Optional access-policy description.
-    pub access_policy: Option<String>,
-    /// Maintainer or collaborator labels in canonical order.
-    pub collaborators: Vec<String>,
 }
 
 /// Entry-point availability counts for discovery summaries.
@@ -133,8 +124,6 @@ pub struct WorkspaceResearchMetadata {
     pub ontologies: Vec<String>,
     /// SPDX or other license label.
     pub license: Option<String>,
-    /// Access metadata for consumers.
-    pub access: ResearchAccessPolicyMetadata,
     /// Free-form tags in canonical order.
     pub tags: Vec<String>,
     /// Originating Project identifiers.
@@ -229,11 +218,6 @@ impl WorkspaceResearchMetadata {
             corpus_size: None,
             ontologies: Vec::new(),
             license: None,
-            access: ResearchAccessPolicyMetadata {
-                visibility: None,
-                access_policy: None,
-                collaborators: Vec::new(),
-            },
             tags: Vec::new(),
             originating_projects: Vec::new(),
             related_projects: Vec::new(),
@@ -257,11 +241,29 @@ impl WorkspaceResearchMetadata {
 
     /// Parse exact canonical JSON plus LF.
     ///
+    /// A record of any other contract version, including version 1 which carried
+    /// the removed `access` member, is refused as `GF_UNSUPPORTED_PROJECT_FORMAT`;
+    /// no reader migrates it (ADR 0055).
+    ///
     /// # Errors
-    /// Returns `GF_PROJECT_CORRUPT` for future, malformed, or noncanonical data.
+    /// Returns `GF_UNSUPPORTED_PROJECT_FORMAT` for another contract version and
+    /// `GF_PROJECT_CORRUPT` for malformed or noncanonical data.
     pub fn from_canonical_json(bytes: &[u8]) -> Result<Self, GfError> {
         if bytes.len() > MAX_WORKSPACE_RESEARCH_METADATA_BYTES {
             return Err(corrupt("workspace research metadata exceeds size limit"));
+        }
+        // The contract version is read first, so a record of another version is
+        // refused as unsupported rather than as malformed against this shape.
+        if let Ok(header) = serde_json::from_slice::<Header>(bytes)
+            && header.contract_version != WORKSPACE_RESEARCH_METADATA_VERSION
+        {
+            return Err(project_error(
+                ProjectErrorCode::UnsupportedProjectFormat,
+                format!(
+                    "workspace research metadata contract version {} is unsupported",
+                    header.contract_version
+                ),
+            ));
         }
         parse_canonical_json(
             bytes,
@@ -490,9 +492,6 @@ fn validate_research_metadata(record: &WorkspaceResearchMetadata) -> Result<(), 
         validate_optional_string(temporal.end.as_deref(), "temporal end")?;
         validate_optional_string(temporal.label.as_deref(), "temporal label")?;
     }
-    validate_optional_string(record.access.visibility.as_deref(), "visibility")?;
-    validate_optional_string(record.access.access_policy.as_deref(), "access policy")?;
-    validate_string_list(&record.access.collaborators, "collaborators")?;
     if record.extensions.len() > MAX_RESEARCH_METADATA_EXTENSION_FIELDS {
         return Err(corrupt("research metadata extensions exceed limit"));
     }
@@ -565,6 +564,12 @@ fn canonical_json<T: Serialize>(value: &T, label: &str) -> Result<Vec<u8>, GfErr
     Ok(bytes)
 }
 
+/// Only the contract version, read before the record's shape.
+#[derive(Deserialize)]
+struct Header {
+    contract_version: u32,
+}
+
 fn parse_canonical_json<T: for<'de> Deserialize<'de>>(
     bytes: &[u8],
     label: &str,
@@ -602,6 +607,58 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    fn record_json(version: u32, access: bool) -> Vec<u8> {
+        let mut value: serde_json::Value = serde_json::from_slice(
+            &WorkspaceResearchMetadata::empty()
+                .to_canonical_json()
+                .unwrap(),
+        )
+        .unwrap();
+        value["contract_version"] = version.into();
+        value["title"] = "Legacy".into();
+        if access {
+            value["access"] = serde_json::json!({
+                "visibility": "private",
+                "access_policy": "Local team only",
+                "collaborators": ["someone@example.org"],
+            });
+        }
+        let mut bytes = serde_json::to_vec(&value).unwrap();
+        bytes.push(b'\n');
+        bytes
+    }
+
+    fn code(error: &GfError) -> ProjectErrorCode {
+        match error {
+            GfError::Project { code, .. } => *code,
+            other => panic!("not a project error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_stored_version_one_record_carrying_access_is_refused_as_unsupported() {
+        let error = WorkspaceResearchMetadata::from_canonical_json(&record_json(1, true))
+            .expect_err("version 1 metadata is not read");
+        assert_eq!(code(&error), ProjectErrorCode::UnsupportedProjectFormat);
+        // Not even without the member: the contract version itself is retired.
+        let error = WorkspaceResearchMetadata::from_canonical_json(&record_json(1, false))
+            .expect_err("version 1 metadata is not read");
+        assert_eq!(code(&error), ProjectErrorCode::UnsupportedProjectFormat);
+    }
+
+    #[test]
+    fn a_current_record_carrying_access_is_malformed_and_a_future_version_unsupported() {
+        let error = WorkspaceResearchMetadata::from_canonical_json(&record_json(2, true))
+            .expect_err("access is not a member of the current contract");
+        assert_eq!(code(&error), ProjectErrorCode::ProjectCorrupt);
+        let error = WorkspaceResearchMetadata::from_canonical_json(&record_json(3, false))
+            .expect_err("future version");
+        assert_eq!(code(&error), ProjectErrorCode::UnsupportedProjectFormat);
+        let current = WorkspaceResearchMetadata::from_canonical_json(&record_json(2, false))
+            .expect("current contract");
+        assert_eq!(current.title.as_deref(), Some("Legacy"));
+    }
+
     #[test]
     fn discovery_query_matches_structured_filters_in_memory() {
         let metadata = WorkspaceResearchMetadata {
@@ -621,11 +678,6 @@ mod tests {
             corpus_size: None,
             ontologies: vec!["narrative-events".into()],
             license: None,
-            access: ResearchAccessPolicyMetadata {
-                visibility: None,
-                access_policy: None,
-                collaborators: Vec::new(),
-            },
             tags: Vec::new(),
             originating_projects: Vec::new(),
             related_projects: Vec::new(),

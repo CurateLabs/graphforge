@@ -108,7 +108,7 @@ mod tests {
             .unwrap();
         let mut metadata = graph.research_project_metadata().unwrap();
         metadata.title = Some("Independent CLI Fork".into());
-        metadata.access.access_policy = Some("Independent local review".into());
+        metadata.description = Some("Independent local review".into());
         drop(graph);
         let before = std::fs::read(root.join("CURRENT")).unwrap();
         let file = directory.path().join("request.json");

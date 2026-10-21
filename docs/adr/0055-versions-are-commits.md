@@ -14,7 +14,9 @@ revisit_when: "A head-moving operation needs more than one merge parent, a host 
 **Implementation:** #1771 is the close gate and stays Proposed until it completes.
 Slice 1 (#1773, storage) records parents, author and committer on every new
 Version, keeps the permanent ancestry ledger, and moves the research format to
-revision 7. Round trip, merge, erase and credit display are later slices of #1771.
+revision 7. Round trip, merge and erase are later slices of #1771. Credit
+display, the derived people list and removal of access metadata (#2125) publish
+what history records.
 
 **Related:** #1771, #1772, ADR 0039 (research Version publication), ADR 0041
 (Branch publication), ADR 0043 (Proposal acceptance), ADR 0044 (research
@@ -97,11 +99,38 @@ An imported archive's ancestry must agree with the importing registry's ledger.
 
 ### Credit and access
 
-Credit lives in the project; access lives on the host. Authors and committers
-are part of history and are public by default; opt-in redaction is applied
-client-side at export and publish (#1771, slice 5). Permission to see or change
-anything belongs to the Hub or other host and never appears in project,
-package, lineage or summary formats.
+Credit lives in the project; access lives on the host. A public repository is
+public: there is no anonymity and no credit redaction. Authors and committers
+recorded in research history are always published, and published credit is
+public and permanent. Because the Version identity commits to author and
+committer, removing credit would be a history rewrite, and #2124's rule that a
+rewrite never changes a published Version identity forbids it. Nothing in the
+publish path masks or substitutes credit.
+
+Published credit appears in three derived places, none of them entered by hand:
+
+- each lineage Version carries its `author` and `committer`, and a Fork's
+  origin citation carries the cited origin Version's (`origin_author`,
+  `origin_committer`) (ADR 0052);
+- the summary's `people` list is derived from the lineage's credited Versions:
+  every distinct signature with the roles (`author`, `committer`) it holds, in
+  canonical order. `ProjectSummary::bind_lineage` requires equality, so a reader
+  recomputes and checks it (ADR 0051);
+- `metadata.authors` stays user-authored display text and is published as
+  written. It is neither derived from history nor redacted.
+
+Permission to see or change anything belongs to the Hub or other host and never
+appears in project, package, lineage or summary formats. The former
+`access.collaborators`, `access.visibility` and `access.access_policy` Project
+metadata fields are removed in place from the Project metadata record and from
+every format. No format publishes or accepts them, and there is no migration
+(pre-v1): Project metadata contract version 2 omits `access`, and a stored version
+1 record, including one in a revision 6 Project, is refused on read as
+`GF_UNSUPPORTED_PROJECT_FORMAT`. The portable export planner reads the metadata
+participant before copying it, so a raw legacy participant can never reach a
+package. The revision 6 research layout itself remains readable (see Format and
+compatibility); a Project whose metadata is version 1 must have that participant
+rewritten with the current contract before its metadata is read or exported.
 
 ### Format and compatibility
 
@@ -139,7 +168,10 @@ decode, validate and digest identically.
   6 in the archive. Every export is written at revision 7, including a
   whole-Project export of an admissible Project imported at revision 6. This
   does not promise import or re-export of archives from a different pre-v1
-  package version.
+  package version. A Version
+  freezes the Project metadata of its time, so a Version captured with the retired
+  metadata contract (version 1, which carried `access`) cannot be exported at all
+  (`GF_UNSUPPORTED_PROJECT_FORMAT`); this includes the revision 6 fixtures.
 - **Readers of research participants.** Canonical decisions written at
   revision 6 read unchanged. Checkpoint summary diffs span the upgrade;
   record-level checkpoint diff still has no research registry adapter at any

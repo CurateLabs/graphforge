@@ -1,5 +1,5 @@
 {
-  "contract_version": 1,
+  "contract_version": 2,
   "title": "Two stories, one shared character",
   "description": null,
   "authors": [],
@@ -11,11 +11,6 @@
   "corpus_size": null,
   "ontologies": [],
   "license": null,
-  "access": {
-    "visibility": null,
-    "access_policy": null,
-    "collaborators": []
-  },
   "tags": [],
   "originating_projects": [],
   "related_projects": [],
