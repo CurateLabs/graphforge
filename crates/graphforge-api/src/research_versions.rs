@@ -244,6 +244,24 @@ impl GraphForge {
                 "Proposal publication requires the native review and selected-content owner".into(),
             ));
         }
+        if matches!(
+            &operation.mutation,
+            ResearchMutation::RecordPublishedBranch { .. }
+        ) {
+            return Err(GfError::Validation(
+                "a published-head record requires the Hub publication owner".into(),
+            ));
+        }
+        self.publish_research_operation(operation, cancellation)
+    }
+
+    /// Publish a prepared operation after the public entry has refused the
+    /// mutations that need their own verified owner.
+    pub(crate) fn publish_research_operation(
+        &mut self,
+        operation: ResearchOperation,
+        cancellation: &CancellationToken,
+    ) -> Result<ResearchOperationReceipt, GfError> {
         if self.read_only {
             return Err(GfError::Project {
                 code: graphforge_core::ProjectErrorCode::ReadOnlyView,

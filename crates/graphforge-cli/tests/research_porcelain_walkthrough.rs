@@ -16,7 +16,7 @@ struct Gf {
 impl Gf {
     fn new(root: &Path) -> Self {
         let project = root.join("project");
-        let mut graph = GraphForge::new(project.to_str()).unwrap();
+        let graph = GraphForge::new(project.to_str()).unwrap();
         graph.execute("CREATE (:Item {score:0})").unwrap();
         Self {
             project,

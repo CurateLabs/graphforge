@@ -280,7 +280,9 @@ pub use branches::{
     ResearchBranchView, RestoreResearchBranchRequest, SuppressResearchBranchAssertionRequest,
 };
 #[cfg(feature = "research")]
-pub use research_local_state::{SelectResearchBranchRequest, SetResearchTagRequest};
+pub use research_local_state::{
+    RecordResearchPublicationRequest, SelectResearchBranchRequest, SetResearchTagRequest,
+};
 #[cfg(feature = "research")]
 mod slices;
 #[cfg(feature = "research")]

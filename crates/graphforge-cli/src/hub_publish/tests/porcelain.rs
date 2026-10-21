@@ -30,6 +30,18 @@ fn gf(hub: &LoopbackHub, project: &Path, arguments: &[&str]) -> Result<Value, Gf
         Command::Clone(args) => {
             run_clone_with(&hub.transport(), args, true, &mut output)?;
         }
+        Command::Publish(args) => {
+            let mut graph = GraphForge::new(Some(project_text))?;
+            crate::hub_publish::publish_with_credentials(
+                &hub.transport(),
+                &mut graph,
+                &args,
+                Some(token(hub, "curate/claims")),
+                None,
+                true,
+                &mut output,
+            )?;
+        }
         command @ (Command::Push(_) | Command::Pull(_)) => {
             let mut graph = GraphForge::new(Some(project_text))?;
             run_remote_with(
@@ -92,7 +104,7 @@ fn sum(result: graphforge_api::ExecutionResult) -> i64 {
 /// A Project with one Item, as a researcher would have before the first Branch.
 fn seeded(root: &Path, name: &str) -> PathBuf {
     let path = root.join(name);
-    let mut graph = GraphForge::new(path.to_str()).unwrap();
+    let graph = GraphForge::new(path.to_str()).unwrap();
     graph.execute("CREATE (:Item {score:0})").unwrap();
     path
 }
@@ -128,9 +140,24 @@ fn porcelain_walkthrough_clones_commits_tags_pushes_pulls_and_logs() {
     let root = tempfile::tempdir().unwrap();
     let alice = seeded(root.path(), "alice");
 
-    // Alice starts a Branch and publishes it; the ref is the Branch label.
+    // Alice starts a Branch and publishes it; the ref is the Branch label. Until
+    // it is published the Branch has no upstream and a push must name one.
     ok(&hub, &alice, &["branch", "main", "--author", ALICE]);
+    let unpublished = gf(&hub, &alice, &["push"]).unwrap_err().to_string();
+    assert!(
+        unpublished.contains("GF_RESEARCH_UPSTREAM_UNSET"),
+        "{unpublished}"
+    );
     ok(&hub, &alice, &["push", REPOSITORY]);
+    // The confirmed publication is her upstream, and she is not ahead of it.
+    let tracked = ok(&hub, &alice, &["status"]);
+    assert_eq!(tracked["upstream"]["repository_url"], REPOSITORY);
+    assert_eq!(tracked["upstream"]["ref"], "main");
+    assert_eq!(
+        tracked["upstream"]["head_version_uuid"],
+        tracked["head_version_uuid"]
+    );
+    assert_eq!(tracked["ahead"], 0);
 
     // Bob clones that ref and sees it as his current Branch with an upstream.
     let bob = root.path().join("bob");
@@ -155,6 +182,13 @@ fn porcelain_walkthrough_clones_commits_tags_pushes_pulls_and_logs() {
     ok(&hub, &bob, &["tag", "v1"]);
     assert_eq!(ok(&hub, &bob, &["tag"])[0]["name"], "v1");
     ok(&hub, &bob, &["push"]);
+    // The push moved Bob's recorded upstream head, so nothing is left unpublished.
+    let pushed = ok(&hub, &bob, &["status"]);
+    assert_eq!(pushed["ahead"], 0);
+    assert_eq!(
+        pushed["upstream"]["head_version_uuid"],
+        second["version_uuid"]
+    );
 
     // Alice pulls Bob's two commits: her head had not moved, and the pull still
     // records a two-parent Version (there is no pointer fast-forward).
@@ -294,10 +328,25 @@ fn porcelain_walkthrough_preserves_replay_and_fast_forward() {
     // Alice advances the Hub; Bob's push from a stale clone is refused exactly as
     // `gf publish` refuses it, and `--rewrite` replaces the head under the lease.
     commit(&hub, &alice, ALICE, "alice's change", 5);
-    ok(&hub, &alice, &["push", REPOSITORY]);
+    ok(&hub, &alice, &["push"]);
+    let recorded = |project: &Path| {
+        GraphForge::new(project.to_str())
+            .unwrap()
+            .research_version_retention()
+            .unwrap()
+            .remote_branches
+    };
+    let before = recorded(&bob);
     let refused = gf(&hub, &bob, &["push"]).unwrap_err();
     assert_eq!(error_code(&refused), "hub.publish.non_fast_forward");
+    assert_eq!(
+        recorded(&bob),
+        before,
+        "a refused push leaves the upstream alone"
+    );
+    assert_eq!(ok(&hub, &bob, &["status"])["ahead"], 1);
     ok(&hub, &bob, &["push", "--rewrite"]);
+    assert_eq!(ok(&hub, &bob, &["status"])["ahead"], 0);
     let (_, lineage) = served_lineage(&hub, "curate/claims");
     assert_eq!(
         lineage.branches[0].head_version_uuid,
@@ -320,7 +369,7 @@ fn pull_refuses_before_update_when_the_preview_has_incompatible_changes() {
     );
     // Both sides change the same field from the same base.
     commit(&hub, &alice, ALICE, "alice", 1);
-    ok(&hub, &alice, &["push", REPOSITORY]);
+    ok(&hub, &alice, &["push"]);
     commit(&hub, &bob, BOB, "bob", 2);
     let before = GraphForge::new(bob.to_str())
         .unwrap()
@@ -384,6 +433,20 @@ fn pull_refuses_a_served_tag_that_conflicts_with_a_local_tag() {
         .unwrap_err()
         .to_string();
     assert!(error.contains("GF_RESEARCH_TAG_CONFLICT"), "{error}");
+}
+
+#[test]
+fn publish_records_the_upstream_a_later_push_uses() {
+    let hub = LoopbackHub::start();
+    let root = tempfile::tempdir().unwrap();
+    let alice = seeded(root.path(), "alice");
+    ok(&hub, &alice, &["branch", "main", "--author", ALICE]);
+    ok(&hub, &alice, &["publish", REPOSITORY, "--ref", "main"]);
+    assert_eq!(ok(&hub, &alice, &["status"])["upstream"]["ref"], "main");
+    commit(&hub, &alice, ALICE, "more", 1);
+    assert_eq!(ok(&hub, &alice, &["status"])["ahead"], 1);
+    ok(&hub, &alice, &["push"]);
+    assert_eq!(ok(&hub, &alice, &["status"])["ahead"], 0);
 }
 
 #[test]

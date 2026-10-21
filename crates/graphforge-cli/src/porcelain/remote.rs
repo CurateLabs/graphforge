@@ -134,7 +134,7 @@ pub(super) fn push_args(
 /// `gf push`: `gf publish` with the Branch's upstream as its defaults.
 pub(crate) fn push(
     transport: &dyn Transport,
-    graph: &GraphForge,
+    graph: &mut GraphForge,
     args: &PushArgs,
     token: Option<PublishToken>,
     json_output: bool,

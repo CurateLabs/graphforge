@@ -175,6 +175,18 @@ pub(crate) struct PublishOutcome {
     /// Whether this run replayed a committed operation without any upload.
     pub replayed: bool,
     pub moved: Option<graphforge_discovery::RepositoryMoved>,
+    /// The Branch head the Hub's receipt confirmed; absent for a Version publication.
+    pub published: Option<PublishedHead>,
+}
+
+/// A Branch head published under its ref.
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) struct PublishedHead {
+    pub branch_uuid: Uuid,
+    pub version_uuid: Uuid,
+    pub ref_name: String,
+    /// Canonical HTTPS repository URL, the key of the local remote Branch citation.
+    pub repository_url: String,
 }
 
 /// Dispatch the Hub commands, `gf clone` and `gf publish`.
@@ -250,10 +262,10 @@ pub(crate) fn run_command_with_token_env(
     let path = path
         .to_str()
         .ok_or_else(|| GfError::Validation("--project must be valid UTF-8".into()))?;
-    let graph = GraphForge::new(Some(path))?;
+    let mut graph = GraphForge::new(Some(path))?;
     publish_with_credentials(
         &crate::hub_http::HubTransport::new(),
-        &graph,
+        &mut graph,
         args,
         explicit,
         bypass.as_ref(),
@@ -287,7 +299,7 @@ pub(crate) fn publish_token(token_env: Option<&str>) -> Result<Option<PublishTok
 /// the repository, obtain a credential, publish and report.
 pub(crate) fn publish_with_credentials(
     transport: &dyn Transport,
-    graph: &GraphForge,
+    graph: &mut GraphForge,
     args: &PublishArgs,
     explicit: Option<PublishToken>,
     bypass: Option<&crate::hub_http::DiscoveryCredentials>,
@@ -331,7 +343,37 @@ pub(crate) fn publish_with_credentials(
         resolution: Some(resolution),
     };
     let outcome = publish(transport, graph, args, &mut environment)?;
+    record_upstream(graph, &outcome)?;
     write_outcome(&outcome, json, output)
+}
+
+/// A Branch whose publication the Hub confirmed tracks that repository and ref:
+/// the remote citation clone and fetch maintain records the confirmed head. A
+/// refused or failed publication never reaches this.
+fn record_upstream(graph: &mut GraphForge, outcome: &PublishOutcome) -> Result<(), GfError> {
+    let Some(head) = &outcome.published else {
+        return Ok(());
+    };
+    if !outcome.receipt.refs.contains(&head.ref_name) {
+        return Ok(());
+    }
+    graph
+        .record_research_publication(
+            &graphforge_api::RecordResearchPublicationRequest {
+                operation_uuid: Uuid::now_v7(),
+                expected_generation_uuid: graph.committed_generation_identity()?.generation_uuid,
+                branch_uuid: head.branch_uuid,
+                repository_url: head.repository_url.clone(),
+                head_version_uuid: head.version_uuid,
+            },
+            &CancellationToken::new(),
+        )
+        .map(|_| ())
+        .map_err(|error| {
+            GfError::Validation(format!(
+                "the Hub confirmed the publication, but recording it as the Branch's upstream failed ({error}); rerun the same command to retry"
+            ))
+        })
 }
 
 pub(crate) fn write_outcome(
@@ -1916,6 +1958,20 @@ pub(crate) fn publish(
         capabilities,
         ..
     } = resolution;
+    let confirmed =
+        selection
+            .branch_uuid
+            .zip(selection.git_ref.clone())
+            .map(|(branch_uuid, ref_name)| PublishedHead {
+                branch_uuid,
+                version_uuid: selection.version_uuid,
+                ref_name,
+                repository_url: format!(
+                    "{}/{}",
+                    base.origin().ascii_serialization(),
+                    identity.canonical_name()
+                ),
+            });
 
     let operation_uuid = operation_uuid.unwrap_or_else(|| {
         graphforge_api::hub_publish_operation(
@@ -2001,6 +2057,7 @@ pub(crate) fn publish(
                     receipt,
                     replayed: true,
                     moved,
+                    published: confirmed,
                 });
             }
         }
@@ -2171,6 +2228,7 @@ pub(crate) fn publish(
                 receipt,
                 replayed: true,
                 moved,
+                published: confirmed,
             });
         }
         SessionResponse::Open {
@@ -2274,6 +2332,7 @@ pub(crate) fn publish(
         receipt,
         replayed: false,
         moved,
+        published: confirmed,
     })
 }
 

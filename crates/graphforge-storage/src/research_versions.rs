@@ -461,6 +461,12 @@ pub enum ResearchMutation {
         /// Exact releasable root identity.
         root_uuid: Uuid,
     },
+    /// Record the head a Hub's publish receipt confirmed it serves for a local
+    /// Branch's ref, as that Branch's remote citation (ADR 0061).
+    RecordPublishedBranch {
+        /// Citation of the confirmed head; bound to local Branch authority on apply.
+        reference: ResearchRemoteBranch,
+    },
     /// Create (`Some`) or delete (`None`) one tag on an immutable Version (ADR 0061).
     SetTag {
         /// Tag name, a valid discovery ref.
@@ -1064,6 +1070,10 @@ fn apply_mutation(
             release_root(registry, root_uuid)?;
             None
         }
+        ResearchMutation::RecordPublishedBranch { reference } => {
+            remote::record_published_branch(registry, reference)?;
+            None
+        }
         ResearchMutation::SetTag { name, version_uuid } => {
             local_state::set_tag(registry, name, *version_uuid)?;
             None
@@ -1332,6 +1342,10 @@ pub fn publish_research_operation_with_mode(
                         ResearchMutation::FetchRemoteBranch { fetch } => Some(fetch.as_ref()),
                         _ => None,
                     },
+                    published: match &request.mutation {
+                        ResearchMutation::RecordPublishedBranch { reference } => Some(reference),
+                        _ => None,
+                    },
                 },
             )?
             .publish_with_graph_objects_cancellable(&graph_objects, &mut || {
@@ -1531,6 +1545,7 @@ fn registry_publication_revision(
 pub(crate) struct ResearchPublicationWitness<'a> {
     pub(crate) origin: Option<&'a RegisterResearchVersion>,
     pub(crate) fetch: Option<&'a ResearchRemoteBranchFetch>,
+    pub(crate) published: Option<&'a ResearchRemoteBranch>,
 }
 
 pub(crate) fn validate_publication_transition(
@@ -1597,7 +1612,14 @@ pub(crate) fn validate_publication_transition(
         }
     }
     ancestry::preserve(&before, &after)?;
-    remote_fetch::preserve(&before, &after, parent, candidate_generation, witness.fetch)?;
+    remote_fetch::preserve(
+        &before,
+        &after,
+        parent,
+        candidate_generation,
+        witness.fetch,
+        witness.published,
+    )?;
     for (id, root) in &before.roots {
         if root.kind == ResearchRootKind::AcceptedProvenance && after.roots.get(id) != Some(root) {
             return Err(invalid(

@@ -1,7 +1,7 @@
 {
   "contract_version": 1,
   "scope": "Rust non-Cypher public release surface",
-  "public_method_digest": "df86c7306175ecccf28cc82b174f0b143b6a743552e8c92ab13ad9c7bc12b2d2",
+  "public_method_digest": "4659379e4c010783457dd8b01c149d3e26160d0750d184b1e7c9242afa279252",
   "method_policy": {
     "receiver_defaults": {
       "PortableImportResult": "release-tested",
@@ -1240,6 +1240,7 @@
         "GraphForge.create_research_branch",
         "GraphForge.execute_research_branch",
         "GraphForge.open_research_branch",
+        "GraphForge.record_research_publication",
         "GraphForge.reference_research_branch",
         "GraphForge.research_branch_selection",
         "GraphForge.restore_research_branch",
@@ -1308,6 +1309,10 @@
         {
           "path": "crates/graphforge-api/tests/branches.rs",
           "symbol": "current_branch_and_tags_persist_through_the_native_operations"
+        },
+        {
+          "path": "crates/graphforge-api/tests/branches.rs",
+          "symbol": "a_published_head_is_recorded_only_against_native_branch_authority"
         }
       ]
     },

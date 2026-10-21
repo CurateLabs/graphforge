@@ -1765,3 +1765,101 @@ fn execute_records_label_and_description_on_the_new_version() {
         .execute_research_branch(&request, &CancellationToken::new())
         .unwrap_err();
 }
+
+#[test]
+fn a_published_head_is_recorded_only_against_native_branch_authority() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("project");
+    let mut graph = GraphForge::new(path.to_str()).unwrap();
+    graph.execute("CREATE (:Item {score:0})").unwrap();
+    let main = create(&mut graph, "main");
+    let other = create(&mut graph, "other");
+    let base = main.version_uuid;
+    let edited = edit(
+        &mut graph,
+        main.branch_uuid,
+        "MATCH (n:Item) SET n.score = 1",
+    )
+    .version_uuid;
+    let foreign = graph.research_version_retention().unwrap().heads[&other.branch_uuid];
+    let url = "https://hub.test/curate/claims";
+    let record = |graph: &mut GraphForge, branch: Uuid, head: Uuid, url: &str| {
+        let request = RecordResearchPublicationRequest {
+            operation_uuid: Uuid::now_v7(),
+            expected_generation_uuid: current(graph),
+            branch_uuid: branch,
+            repository_url: url.into(),
+            head_version_uuid: head,
+        };
+        graph.record_research_publication(&request, &CancellationToken::new())
+    };
+
+    // The Branch head, and an ancestor of it, can be the confirmed head.
+    record(&mut graph, main.branch_uuid, base, url).unwrap();
+    let registry = graph.research_version_retention().unwrap();
+    let citation = registry.remote_branches.values().next().unwrap();
+    assert_eq!(
+        (citation.ref_name.as_str(), citation.head_version_uuid),
+        ("main", base)
+    );
+    record(&mut graph, main.branch_uuid, edited, url).unwrap();
+    let registry = graph.research_version_retention().unwrap();
+    assert_eq!(
+        registry.remote_branches.len(),
+        1,
+        "the same record is refreshed"
+    );
+    assert_eq!(
+        registry
+            .remote_branches
+            .values()
+            .next()
+            .unwrap()
+            .head_version_uuid,
+        edited
+    );
+
+    // Nothing else is a confirmed head: another Branch's Version, an unknown
+    // Version, an unknown Branch, a non-canonical repository.
+    record(&mut graph, main.branch_uuid, foreign, url).unwrap_err();
+    record(&mut graph, main.branch_uuid, Uuid::now_v7(), url).unwrap_err();
+    record(&mut graph, Uuid::now_v7(), edited, url).unwrap_err();
+    record(
+        &mut graph,
+        main.branch_uuid,
+        edited,
+        "http://hub.test/curate/claims",
+    )
+    .unwrap_err();
+    assert_eq!(
+        graph
+            .research_version_retention()
+            .unwrap()
+            .remote_branches
+            .len(),
+        1
+    );
+
+    // The generic operation entry cannot forge the citation.
+    let forged = ResearchOperation {
+        operation_uuid: Uuid::now_v7(),
+        expected_generation_uuid: current(&graph),
+        mutation: ResearchMutation::RecordPublishedBranch {
+            reference: registry.remote_branches.values().next().unwrap().clone(),
+        },
+    };
+    graph
+        .commit_research_version_operation(forged, &CancellationToken::new())
+        .unwrap_err();
+
+    drop(graph);
+    let reopened = GraphForge::new(path.to_str()).unwrap();
+    assert_eq!(
+        reopened
+            .research_version_retention()
+            .unwrap()
+            .remote_branches
+            .len(),
+        1
+    );
+}

@@ -241,14 +241,35 @@ pub(super) fn preserve(
     parent: &crate::ResolvedProjectGeneration,
     candidate_generation: Uuid,
     witness: Option<&ResearchRemoteBranchFetch>,
+    published: Option<&super::ResearchRemoteBranch>,
 ) -> Result<(), GfError> {
     let refreshed = witness
         .map(|fetch| fetch.binding.reference.key())
         .transpose()?;
+    let recorded = published
+        .map(super::ResearchRemoteBranch::key)
+        .transpose()?;
     for (key, reference) in &before.remote_branches {
-        if Some(key) != refreshed.as_ref() && after.remote_branches.get(key) != Some(reference) {
+        if Some(key) != refreshed.as_ref()
+            && Some(key) != recorded.as_ref()
+            && after.remote_branches.get(key) != Some(reference)
+        {
             return Err(invalid(
                 "publication cannot rewrite remote Branch citations",
+            ));
+        }
+    }
+    if let (Some(reference), Some(key)) = (published, &recorded) {
+        if after.remote_branches.get(key) != Some(reference)
+            || before.heads != after.heads
+            || before.branches != after.branches
+            || after
+                .remote_branches
+                .keys()
+                .any(|other| other != key && !before.remote_branches.contains_key(other))
+        {
+            return Err(invalid(
+                "a published-head record changed local authority or another citation",
             ));
         }
     }
