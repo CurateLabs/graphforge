@@ -1,6 +1,9 @@
 //! Publish behaviors driven through the typed wire documents against
 //! [`ReferenceHub`], asserting Hub state as well as responses.
 
+#[path = "publish_flow/retention.rs"]
+mod retention;
+
 use graphforge_discovery::{
     DISCOVERY_FORMAT, DiscoveryLimits, DiscoveryManifest, PORTABLE_MEDIA_TYPE, RefSet,
     RepositoryIdentity,
@@ -104,6 +107,8 @@ impl<'a> Client<'a> {
         )
         .unwrap();
         PublishIntent {
+            rewrite: false,
+            prune: false,
             repository: self.repository.clone(),
             intent_digest: plan.intent_digest.clone(),
             objects: vec![plan.declaration()],
@@ -173,6 +178,8 @@ impl<'a> Client<'a> {
             )
             .with_header("authorization", self.token.authorization())
             .with_json(&CommitRequest {
+                rewrite: false,
+                prune: false,
                 manifest: self.manifest(plan),
                 refs: vec!["main".into()],
                 expected_revision: plan.expected_revision.clone(),
@@ -239,6 +246,44 @@ fn receipt(response: &HubResponse) -> PublishReceipt {
         SessionResponse::Open { .. } | SessionResponse::Pending { .. } => {
             panic!("expected a receipt")
         }
+    }
+}
+
+#[test]
+fn committed_ordinary_session_cannot_replay_as_rewrite_or_prune() {
+    let hub = ReferenceHub::new();
+    let client = Client::new(&hub, demo());
+    let plan = Plan::new("package v1", 'b', None);
+    let (session, upload) = client.opened(&plan);
+    assert_eq!(client.put(&upload, 0, &plan.bytes).status, 200);
+    let first = receipt(&client.commit(&plan, &session));
+    let refs = client.refs().unwrap();
+    for (rewrite, prune) in [(true, false), (false, true), (true, true)] {
+        let response = hub.handle(
+            &HubRequest::new(
+                HubMethod::Post,
+                format!(
+                    "{}/.gf/publish/sessions/{session}/commit",
+                    hub.repository_url(&demo())
+                ),
+            )
+            .with_header("authorization", client.token.authorization())
+            .with_json(&CommitRequest {
+                rewrite,
+                prune,
+                manifest: client.manifest(&plan),
+                refs: vec!["main".into()],
+                expected_revision: plan.expected_revision.clone(),
+            }),
+        );
+        assert_eq!(response.status, 422);
+        assert_eq!(
+            error_code(&response),
+            HubPublishErrorCode::UnsupportedFuture
+        );
+        assert_eq!(client.refs().unwrap(), refs);
+        assert_eq!(hub.revisions(&demo()), vec![first.revision.clone()]);
+        assert_eq!(receipt(&client.commit(&plan, &session)), first);
     }
 }
 
@@ -955,6 +1000,8 @@ fn actual_200_gib_object_publishes_in_uniform_64_mib_parts() {
     )
     .unwrap();
     let intent = PublishIntent {
+        rewrite: false,
+        prune: false,
         repository: demo(),
         intent_digest: plan.intent_digest.clone(),
         objects: vec![object.clone()],
@@ -998,6 +1045,8 @@ fn actual_200_gib_object_publishes_in_uniform_64_mib_parts() {
     )
     .with_header("authorization", client.token.authorization())
     .with_json(&CommitRequest {
+        rewrite: false,
+        prune: false,
         manifest,
         refs: vec!["main".into()],
         expected_revision: None,

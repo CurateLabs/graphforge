@@ -29,6 +29,9 @@ mod hub_listing;
 mod producing_version;
 use hub_listing::serve_lineage;
 mod remote_fetch;
+mod rewrite_prune;
+mod selection;
+use selection::{args, on_ref};
 
 const HUB: &str = "https://hub.test";
 
@@ -522,26 +525,6 @@ fn history() -> History {
 
 fn repository_url(repository: &str) -> String {
     format!("{HUB}/{repository}")
-}
-
-fn args(repository: &str) -> PublishArgs {
-    PublishArgs {
-        repository: repository_url(repository),
-        git_ref: None,
-        version_uuid: None,
-        fork_of: None,
-        operation_uuid: None,
-        protection_bypass_env: None,
-        staging_directory: None,
-        previews: Vec::new(),
-    }
-}
-
-fn on_ref(repository: &str, name: &str) -> PublishArgs {
-    PublishArgs {
-        git_ref: Some(name.into()),
-        ..args(repository)
-    }
 }
 
 fn token(hub: &LoopbackHub, repository: &str) -> PublishToken {
@@ -2705,6 +2688,8 @@ fn reference_hub_revalidates_unsafe_images_even_when_client_admission_is_bypasse
             .collect();
         let expected_revision = Some(sha256_digest(&refs_document(&hub, "curate/claims").body));
         let intent = PublishIntent {
+            rewrite: false,
+            prune: false,
             repository: manifest.repository.clone(),
             intent_digest: sha256_digest(b"untrusted preview caller"),
             objects: objects.clone(),
@@ -2773,6 +2758,8 @@ fn reference_hub_revalidates_unsafe_images_even_when_client_admission_is_bypasse
             )
             .with_header("authorization", token.authorization())
             .with_json(&CommitRequest {
+                rewrite: false,
+                prune: false,
                 manifest: serde_json::to_value(manifest).unwrap(),
                 refs: vec!["main".into()],
                 expected_revision,
