@@ -597,6 +597,24 @@ derived from the lineage with their roles. Published credit is public and
 permanent. Project metadata and every portable, lineage and summary format carry no
 access fields; permission belongs to the host.
 
+### Version history
+
+Each Version records its parent Version(s) and its author and committer
+([ADR 0055](../../adr/0055-versions-are-commits.md)). Normal `gf publish`
+fast-forwards the selected ref only and refuses divergent history as
+`non_fast_forward`; a stale repository revision is still `ref_conflict`. Neither
+refusal moves a ref. History replacement is explicit:
+`gf publish <repository> --ref main --rewrite` moves a Branch to a
+non-descendant head under the expected-revision lease, and a concurrent update
+remains a conflict, never permission to replace a newer head. `--prune`
+additionally drops now-unreferenced Versions, whose objects the Hub deletes
+after its fixed 900-second reference grace. Pruning is refused for a Version
+that a Branch base/origin, a Proposal's source or payload, or a projection's
+source still depends on. Incorporating a divergent remote head records a
+two-parent Version, so the incorporated result publishes as a fast-forward.
+[Research journey](../../guide/research-journey.md) walks this collaboration
+cycle end to end.
+
 ## Consumer interaction contract
 
 Define these projections in #1346 before runtime implementation. Each owning

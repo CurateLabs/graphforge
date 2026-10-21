@@ -11,12 +11,15 @@ use graphforge_api::{
     PortableOciAuthenticityPolicy, PortableOciPublishFacadeRequest, PortableOciPullFacadeRequest,
     PortableOutput, PortableSelection, PortableSelectionPreviewRequest, PortableSelectionProfile,
     PortableSelectionRequest, PortableVerifyRequest, ResultSinkOptions, publish_portable_oci,
-    pull_portable_oci, verify_portable,
+    pull_portable_oci, verify_portable, verify_portable_stream,
 };
 use serde_json::Value;
 use uuid::Uuid;
 
 use crate::canonical_uuid;
+
+/// The `--input` value that names standard input instead of a file.
+const STDIN_INPUT: &str = "-";
 
 fn map_portable(error: PortableError) -> crate::CliRuntimeError {
     graphforge_api::MultiOntologyError::from(error).into()
@@ -156,6 +159,7 @@ pub(crate) struct PortableExportArgs {
 
 #[derive(Args)]
 pub(crate) struct PortableVerifyArgs {
+    /// Package path, or `-` to read a canonical bundle from standard input.
     #[arg(long)]
     input: PathBuf,
     #[arg(long, value_enum, default_value_t = VerifyMode::Full)]
@@ -289,14 +293,29 @@ pub(crate) fn run_portable_without_graph(
             .into())
         }
         PortableCommand::Verify(args) => {
-            let report = verify_portable(
-                &PortableVerifyRequest {
-                    input: args.input,
-                    mode: args.mode.into(),
-                    limits: PortableLimits::default(),
-                },
-                None,
-            )
+            let report = if args.input == std::path::Path::new(STDIN_INPUT) {
+                if !matches!(args.mode, VerifyMode::Full) {
+                    return Err(graphforge_api::GfError::Validation(
+                        "--input - verifies a stream and requires --mode full".into(),
+                    )
+                    .into());
+                }
+                verify_portable_stream(
+                    &mut std::io::stdin().lock(),
+                    None,
+                    PortableLimits::default(),
+                    None,
+                )
+            } else {
+                verify_portable(
+                    &PortableVerifyRequest {
+                        input: args.input,
+                        mode: args.mode.into(),
+                        limits: PortableLimits::default(),
+                    },
+                    None,
+                )
+            }
             .map_err(map_portable)?;
             if json {
                 write_json(&report, output)?;
