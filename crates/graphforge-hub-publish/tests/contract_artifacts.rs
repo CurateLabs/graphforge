@@ -16,11 +16,11 @@ mod history;
 
 use graphforge_discovery::{
     CreditSignature, DISCOVERY_FORMAT, DiscoveryErrorCode, DiscoveryLimits, DiscoveryManifest,
-    LineageBranch, LineageForkOrigin, LineageVersion, PORTABLE_FORMAT, PORTABLE_MEDIA_TYPE,
-    PROJECT_SUMMARY_FORMAT, PROJECT_SUMMARY_MEDIA_TYPE, PortablePackageReference, ProjectSummary,
-    ProtocolRequirement, ProtocolVersion, RESEARCH_LINEAGE_CAPABILITY, RESEARCH_LINEAGE_FORMAT,
-    RESEARCH_LINEAGE_MEDIA_TYPE, RefSet, RepositoryIdentity, RepositoryRef, ResearchLineage,
-    ResearchLineageReference, Sha256Digest,
+    LineageBranch, LineageForkOrigin, LineageProposal, LineageVersion, PORTABLE_FORMAT,
+    PORTABLE_MEDIA_TYPE, PROJECT_SUMMARY_FORMAT, PROJECT_SUMMARY_MEDIA_TYPE,
+    PortablePackageReference, ProjectSummary, ProtocolRequirement, ProtocolVersion,
+    RESEARCH_LINEAGE_CAPABILITY, RESEARCH_LINEAGE_FORMAT, RESEARCH_LINEAGE_MEDIA_TYPE, RefSet,
+    RepositoryIdentity, RepositoryRef, ResearchLineage, ResearchLineageReference, Sha256Digest,
 };
 use graphforge_hub_publish::{
     DEVICE_CODE_GRANT_TYPE, HubMethod, HubRequest, HubResponse, ObjectDeclaration, PublishIntent,

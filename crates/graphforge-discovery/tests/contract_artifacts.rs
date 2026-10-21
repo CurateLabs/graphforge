@@ -1322,6 +1322,13 @@ fn summary_cases() -> Vec<Case> {
             |v| v["metadata"]["access"] = json!({"visibility":"public","access_policy":"open"}),
         ),
         (
+            "lineage-rejects-access-metadata",
+            Document::Lineage,
+            "malformed_response",
+            None,
+            |v| v["access"] = json!({"collaborators":["curate"],"visibility":"private"}),
+        ),
+        (
             "summary-rejects-unordered-people",
             Document::Summary,
             "duplicate",
