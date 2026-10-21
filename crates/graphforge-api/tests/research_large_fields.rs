@@ -127,7 +127,9 @@ fn branch_write_paths_keep_the_whole_map_field_bound() {
         .unwrap_err();
     assert_eq!(error.code(), "GF_RESOURCE_LIMIT");
     assert!(
-        error.to_string().contains("semantic fields exceed creation"),
+        error
+            .to_string()
+            .contains("semantic fields exceed creation"),
         "the field map reserve, not another bound, must refuse: {error}"
     );
 }
