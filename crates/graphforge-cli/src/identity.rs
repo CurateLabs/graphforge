@@ -7,6 +7,7 @@ use clap::Args;
 use graphforge_api::{GfError, ResearchSignature};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use toml_edit::{DocumentMut, Item, Table, Value};
 
 const AUTHOR_ENV: &str = "GF_AUTHOR";
 const COMMITTER_ENV: &str = "GF_COMMITTER";
@@ -120,122 +121,105 @@ pub(crate) fn resolve_from_process(
 }
 
 pub(crate) fn read_config(path: &Path) -> Result<UserConfig, GfError> {
+    parse_config(&read_text(path)?.unwrap_or_default())
+}
+
+/// The file's text, or `None` when it does not exist.
+fn read_text(path: &Path) -> Result<Option<String>, GfError> {
     let bytes = match std::fs::read(path) {
         Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(UserConfig::default());
-        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(_) => return Err(GfError::Validation("cannot read config.toml".into())),
     };
     if bytes.len() > MAX_CONFIG_BYTES {
         return Err(GfError::Validation("config.toml is too large".into()));
     }
-    let text = String::from_utf8(bytes)
-        .map_err(|_| GfError::Validation("config.toml is not UTF-8".into()))?;
-    parse_config(&text)
+    String::from_utf8(bytes)
+        .map(Some)
+        .map_err(|_| GfError::Validation("config.toml is not UTF-8".into()))
 }
 
-/// The documented subset of TOML: `[user]` and `[committer]` tables of
-/// `name`, `email` and `orcid` string values. Anything else is refused.
+fn parse_document(text: &str) -> Result<DocumentMut, GfError> {
+    text.parse::<DocumentMut>()
+        .map_err(|error| GfError::Validation(format!("config.toml is not valid TOML: {error}")))
+}
+
+/// The `[user]` and `[committer]` tables of the document; every other key and
+/// table is left to the person who wrote it.
 fn parse_config(text: &str) -> Result<UserConfig, GfError> {
-    #[derive(Default)]
-    struct Fields {
-        name: Option<String>,
-        email: Option<String>,
-        orcid: Option<String>,
-    }
-    let bad = |line: usize, why: &str| {
-        GfError::Validation(format!("config.toml line {}: {why}", line + 1))
-    };
-    let (mut user, mut committer) = (Fields::default(), Fields::default());
-    let mut table: Option<&str> = None;
-    for (index, raw) in text.lines().enumerate() {
-        let line = raw.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        if let Some(name) = line
-            .strip_prefix('[')
-            .and_then(|rest| rest.strip_suffix(']'))
-        {
-            table = Some(match name.trim() {
-                "user" => "user",
-                "committer" => "committer",
-                _ => return Err(bad(index, "unknown table")),
-            });
-            continue;
-        }
-        let (key, value) = line
-            .split_once('=')
-            .ok_or_else(|| bad(index, "expected `key = \"value\"`"))?;
-        let value = unquote(value.trim()).ok_or_else(|| bad(index, "expected a quoted string"))?;
-        let fields = match table {
-            Some("user") => &mut user,
-            Some(_) => &mut committer,
-            None => return Err(bad(index, "a key must follow a table header")),
-        };
-        match key.trim() {
-            "name" => fields.name = Some(value),
-            "email" => fields.email = Some(value),
-            "orcid" => fields.orcid = Some(value),
-            _ => return Err(bad(index, "unknown key")),
-        }
-    }
-    let finish = |fields: Fields| -> Result<Option<ResearchSignature>, GfError> {
-        let Some(name) = fields.name else {
-            return Ok(None);
-        };
-        let signature = ResearchSignature {
-            name,
-            email: fields.email,
-            orcid: fields.orcid,
-        };
-        signature.validate()?;
-        Ok(Some(signature))
-    };
+    let document = parse_document(text)?;
     Ok(UserConfig {
-        user: finish(user)?,
-        committer: finish(committer)?,
+        user: signature_in(&document, "user")?,
+        committer: signature_in(&document, "committer")?,
     })
 }
 
-fn unquote(value: &str) -> Option<String> {
-    let inner = value.strip_prefix('"')?.strip_suffix('"')?;
-    let mut out = String::new();
-    let mut chars = inner.chars();
-    while let Some(c) = chars.next() {
-        match c {
-            '\\' => out.push(match chars.next()? {
-                '"' => '"',
-                '\\' => '\\',
-                _ => return None,
-            }),
-            '"' => return None,
-            c => out.push(c),
-        }
-    }
-    Some(out)
+fn signature_in(document: &DocumentMut, table: &str) -> Result<Option<ResearchSignature>, GfError> {
+    let Some(item) = document.get(table) else {
+        return Ok(None);
+    };
+    let fields = item
+        .as_table_like()
+        .ok_or_else(|| GfError::Validation(format!("config.toml: [{table}] must be a table")))?;
+    let text = |key: &str| -> Result<Option<String>, GfError> {
+        fields
+            .get(key)
+            .map(|value| {
+                value.as_str().map(str::to_owned).ok_or_else(|| {
+                    GfError::Validation(format!("config.toml: {table}.{key} must be a string"))
+                })
+            })
+            .transpose()
+    };
+    let Some(name) = text("name")? else {
+        return Ok(None);
+    };
+    let signature = ResearchSignature {
+        name,
+        email: text("email")?,
+        orcid: text("orcid")?,
+    };
+    signature.validate()?;
+    Ok(Some(signature))
 }
 
-fn quote(value: &str) -> String {
-    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
-}
-
-fn render_config(config: &UserConfig) -> String {
-    use std::fmt::Write as _;
-    let mut out = String::new();
-    for (table, signature) in [("user", &config.user), ("committer", &config.committer)] {
-        let Some(signature) = signature else { continue };
-        let _ = writeln!(out, "[{table}]\nname = {}", quote(&signature.name));
-        if let Some(email) = &signature.email {
-            let _ = writeln!(out, "email = {}", quote(email));
+/// Set the given `[user]` keys in `text`, leaving every other byte of the file,
+/// comments and unrelated tables included, as it was.
+fn edit_config(text: &str, args: &UserArgs) -> Result<String, GfError> {
+    let mut document = parse_document(text)?;
+    if document.get("user").is_none() {
+        // Comments after the last item stay above the table appended below them.
+        let mut table = Table::new();
+        let trailing = document.trailing().as_str().unwrap_or_default().to_owned();
+        if !trailing.is_empty() {
+            let spacing = if trailing.ends_with("\n\n") { "" } else { "\n" };
+            table.decor_mut().set_prefix(format!("{trailing}{spacing}"));
+            document.set_trailing("");
         }
-        if let Some(orcid) = &signature.orcid {
-            let _ = writeln!(out, "orcid = {}", quote(orcid));
-        }
-        out.push('\n');
+        document["user"] = Item::Table(table);
     }
-    out
+    let user = document["user"]
+        .as_table_like_mut()
+        .ok_or_else(|| GfError::Validation("config.toml: [user] must be a table".into()))?;
+    for (key, value) in [
+        ("name", &args.name),
+        ("email", &args.email),
+        ("orcid", &args.orcid),
+    ] {
+        let Some(value) = value else { continue };
+        let mut replacement = Value::from(value.as_str());
+        // Keep a trailing comment and the spacing of the line being edited.
+        if let Some(old) = user.get(key).and_then(Item::as_value) {
+            *replacement.decor_mut() = old.decor().clone();
+        }
+        user.insert(key, Item::Value(replacement));
+    }
+    if signature_in(&document, "user")?.is_none() {
+        return Err(GfError::Validation(
+            "a credited name is required: pass --name".into(),
+        ));
+    }
+    Ok(document.to_string())
 }
 
 fn show(signature: &ResearchSignature) -> String {
@@ -252,26 +236,12 @@ pub(crate) fn run_config_user(
     output: &mut dyn Write,
 ) -> Result<(), GfError> {
     let path = config_path()?;
-    let mut config = read_config(&path)?;
+    let mut text = read_text(&path)?.unwrap_or_default();
     if args.name.is_some() || args.email.is_some() || args.orcid.is_some() {
-        let mut user = config.user.take().unwrap_or(ResearchSignature {
-            name: String::new(),
-            email: None,
-            orcid: None,
-        });
-        if let Some(name) = &args.name {
-            user.name.clone_from(name);
-        }
-        if args.email.is_some() {
-            user.email.clone_from(&args.email);
-        }
-        if args.orcid.is_some() {
-            user.orcid.clone_from(&args.orcid);
-        }
-        user.validate()?;
-        config.user = Some(user);
-        write_config(&path, &config)?;
+        text = edit_config(&text, args)?;
+        write_text(&path, &text)?;
     }
+    let config = parse_config(&text)?;
     let (author, committer) = resolve(
         &IdentityFlags::default(),
         &|name| std::env::var(name).ok(),
@@ -291,7 +261,7 @@ pub(crate) fn run_config_user(
     .map_err(|error| GfError::Execution(error.to_string()))
 }
 
-fn write_config(path: &Path, config: &UserConfig) -> Result<(), GfError> {
+fn write_text(path: &Path, text: &str) -> Result<(), GfError> {
     let directory = path
         .parent()
         .ok_or_else(|| GfError::Validation("config.toml has no directory".into()))?;
@@ -301,7 +271,7 @@ fn write_config(path: &Path, config: &UserConfig) -> Result<(), GfError> {
     let mut staged = tempfile::NamedTempFile::new_in(directory)
         .map_err(|_| GfError::Validation("cannot stage config.toml".into()))?;
     staged
-        .write_all(render_config(config).as_bytes())
+        .write_all(text.as_bytes())
         .and_then(|()| staged.as_file().sync_all())
         .map_err(|_| GfError::Validation("cannot write config.toml".into()))?;
     staged
@@ -370,12 +340,76 @@ mod tests {
         resolve(&flags, &|_| None, &UserConfig::default()).unwrap_err();
     }
 
+    const COMMENTED: &str = "# Credit for my Versions.\n\n[user]\nname = \"Ada \\\"The Countess\\\" # not a comment\" # my name\nemail = \"ada@example.org\" # old address\n\n# Other tools read this table.\n[editor]\ncommand = \"vi # -p\"   # keep\nargs = [\"-c\", \"set nu\"]\n";
+
     #[test]
-    fn config_round_trips_and_refuses_unknown_content() {
-        let parsed = config();
-        assert_eq!(parse_config(&render_config(&parsed)).unwrap(), parsed);
-        parse_config("[other]\nname = \"x\"\n").unwrap_err();
-        parse_config("[user]\nnickname = \"x\"\n").unwrap_err();
-        parse_config("[user]\nname = x\n").unwrap_err();
+    fn config_edits_keep_comments_escapes_and_unrelated_tables() {
+        let parsed = parse_config(COMMENTED).unwrap();
+        assert_eq!(
+            parsed.user.as_ref().unwrap().name,
+            "Ada \"The Countess\" # not a comment"
+        );
+        let args = UserArgs {
+            name: None,
+            email: Some("countess@example.org".into()),
+            orcid: Some("0000-0002-1825-0097".into()),
+        };
+        let edited = edit_config(COMMENTED, &args).unwrap();
+        // Only the edited keys change: the old comment stays on the edited line,
+        // and the name line, the other table and every comment are untouched.
+        assert_eq!(
+            edited,
+            COMMENTED.replace(
+                "email = \"ada@example.org\" # old address\n",
+                "email = \"countess@example.org\" # old address\norcid = \"0000-0002-1825-0097\"\n",
+            )
+        );
+        let reparsed = parse_config(&edited).unwrap().user.unwrap();
+        assert_eq!(reparsed.email.as_deref(), Some("countess@example.org"));
+        assert_eq!(reparsed.orcid.as_deref(), Some("0000-0002-1825-0097"));
+        assert_eq!(
+            edit_config(
+                &edited,
+                &UserArgs {
+                    name: None,
+                    email: None,
+                    orcid: None
+                }
+            )
+            .unwrap(),
+            edited
+        );
+    }
+
+    #[test]
+    fn config_edits_create_the_table_and_refuse_bad_values() {
+        let created = edit_config(
+            "# mine\n",
+            &UserArgs {
+                name: Some("Grace Hopper".into()),
+                email: None,
+                orcid: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(created, "# mine\n\n[user]\nname = \"Grace Hopper\"\n");
+        assert_eq!(
+            parse_config(&created).unwrap().user.unwrap().name,
+            "Grace Hopper"
+        );
+        // A name is required before an email can be credited.
+        edit_config(
+            "",
+            &UserArgs {
+                name: None,
+                email: Some("a@example.org".into()),
+                orcid: None,
+            },
+        )
+        .unwrap_err();
+        // Invalid TOML and a wrongly typed key are refused, not skipped.
+        parse_config("[user\nname = ").unwrap_err();
+        parse_config("[user]\nname = 3\n").unwrap_err();
+        parse_config("user = 1\n").unwrap_err();
     }
 }

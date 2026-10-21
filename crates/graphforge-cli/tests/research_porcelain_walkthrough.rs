@@ -194,3 +194,34 @@ fn every_porcelain_verb_documents_an_example() {
         );
     }
 }
+
+#[test]
+fn config_user_changes_only_the_edited_keys() {
+    let root = tempfile::tempdir().unwrap();
+    let gf = Gf::new(root.path());
+    let directory = gf.config.join("graphforge");
+    std::fs::create_dir_all(&directory).unwrap();
+    let before = "# Credit for my Versions.\n\n[user]\nname = \"Ada \\\"The Countess\\\" # not a comment\" # my name\nemail = \"ada@example.org\" # old address\n\n# Other tools read this table.\n[editor]\ncommand = \"vi # -p\"   # keep\nargs = [\"-c\", \"set nu\"]\n";
+    std::fs::write(directory.join("config.toml"), before).unwrap();
+
+    let shown = gf.json(&["config", "user", "--email", "countess@example.org"]);
+    assert_eq!(
+        shown["author"]["name"],
+        "Ada \"The Countess\" # not a comment"
+    );
+    assert_eq!(shown["author"]["email"], "countess@example.org");
+    let after = std::fs::read_to_string(directory.join("config.toml")).unwrap();
+    assert_eq!(
+        after,
+        before.replace("ada@example.org", "countess@example.org")
+    );
+
+    // A file that is not TOML is refused, never overwritten.
+    std::fs::write(directory.join("config.toml"), "[user\nname = ").unwrap();
+    let refused = gf.refusal(&["config", "user", "--name", "Ada"]);
+    assert!(refused.contains("config.toml"), "{refused}");
+    assert_eq!(
+        std::fs::read_to_string(directory.join("config.toml")).unwrap(),
+        "[user\nname = "
+    );
+}

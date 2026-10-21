@@ -17,7 +17,7 @@ python3 scripts/generate_third_party_notices.py
 
 ## License overview
 
-- Apache License 2.0 (388)
+- Apache License 2.0 (389)
 - MIT License (91)
 - Unicode License v3 (21)
 - BSD 3-Clause "New" or "Revised" License (13)
@@ -2916,6 +2916,7 @@ Used by:
 - clap 4.6.7
 - clap_builder 4.6.7
 - clap_derive 4.6.7
+- toml_writer 1.1.3+spec-1.1.0
 
 ```
                                  Apache License

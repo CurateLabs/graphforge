@@ -93,7 +93,7 @@ impl GraphForge {
             .get(&request.head_version_uuid)
             .ok_or_else(|| invalid("the published head is not a known Version"))?;
         self.publish_research_operation(
-            ResearchOperation {
+            &ResearchOperation {
                 operation_uuid: request.operation_uuid,
                 expected_generation_uuid: request.expected_generation_uuid,
                 mutation: ResearchMutation::RecordPublishedBranch {

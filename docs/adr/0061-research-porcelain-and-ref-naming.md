@@ -451,19 +451,23 @@ of decision.
   `expected_generation_uuid` has moved.
 - **First Branch.** `gf branch <name>` in a Project with no Branch creates it from
   the Project's current research.
-- **Upstream record.** `ahead N` is measured against the recorded remote head,
-  which clone and pull refresh; a push does not. A Branch that was published but
-  never cloned or pulled has no upstream until its first `gf pull <repository>`,
-  and `gf push` names the repository until then.
+- **Upstream record.** A publication the Hub confirmed (`gf push`, `gf publish
+  --ref`) records the published head as the Branch's remote citation, the record
+  clone and fetch maintain (`ResearchMutation::RecordPublishedBranch`, built by
+  `record_research_publication` from native Branch authority; the generic
+  operation entry refuses it). A Branch's first confirmed publication therefore
+  makes it track that repository and ref, and `ahead N` is `0` right after a push.
+  A failed or refused publication leaves the record unchanged, and a Version
+  publication records nothing.
 - **Tags on clone and pull.** A lineage tag is installed with the Version it
   names: at clone for Versions the cloned history contains, after `gf pull` for the
   rest. Tags on other Versions stay on the Hub.
 - **Pull conflicts.** `conflict` and `dependency_unavailable` preview rows refuse
   the pull before any update; the fetch is durable. The evidence acknowledgement is
   the union required by the adopted rows.
-- **Identity file.** `config.toml` is read and written as the documented subset
-  (`[user]`/`[committer]` tables of string `name`, `email`, `orcid`) without a TOML
-  dependency; anything else is refused.
+- **Identity file.** `config.toml` is read and edited with `toml_edit`:
+  `gf config user` changes only the keys it is given and keeps comments, quoting
+  and every unrelated key and table.
 - **Walkthrough.** The product transport speaks only HTTPS to public addresses, so
   a child `gf` cannot reach an in-process Hub. The Hub-facing walkthrough runs the
   CLI's own parser and dispatcher in-process over the loopback transport every

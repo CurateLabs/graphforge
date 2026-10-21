@@ -252,14 +252,14 @@ impl GraphForge {
                 "a published-head record requires the Hub publication owner".into(),
             ));
         }
-        self.publish_research_operation(operation, cancellation)
+        self.publish_research_operation(&operation, cancellation)
     }
 
     /// Publish a prepared operation after the public entry has refused the
     /// mutations that need their own verified owner.
     pub(crate) fn publish_research_operation(
         &mut self,
-        operation: ResearchOperation,
+        operation: &ResearchOperation,
         cancellation: &CancellationToken,
     ) -> Result<ResearchOperationReceipt, GfError> {
         if self.read_only {
@@ -329,7 +329,7 @@ impl GraphForge {
         };
         let outcome = graphforge_storage::research_versions::publish_research_operation_with_mode(
             &root,
-            &operation,
+            operation,
             cancellation.flag(),
             self.lifecycle_mode,
         );

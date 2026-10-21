@@ -259,19 +259,18 @@ pub(super) fn preserve(
             ));
         }
     }
-    if let (Some(reference), Some(key)) = (published, &recorded) {
-        if after.remote_branches.get(key) != Some(reference)
+    if let (Some(reference), Some(key)) = (published, &recorded)
+        && (after.remote_branches.get(key) != Some(reference)
             || before.heads != after.heads
             || before.branches != after.branches
             || after
                 .remote_branches
                 .keys()
-                .any(|other| other != key && !before.remote_branches.contains_key(other))
-        {
-            return Err(invalid(
-                "a published-head record changed local authority or another citation",
-            ));
-        }
+                .any(|other| other != key && !before.remote_branches.contains_key(other)))
+    {
+        return Err(invalid(
+            "a published-head record changed local authority or another citation",
+        ));
     }
     if let Some(fetch) = witness {
         fetch.validate_identity(before, fetch.binding.reference.project_uuid)?;
