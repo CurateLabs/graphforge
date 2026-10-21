@@ -1830,8 +1830,13 @@ fn read_exact_hash(
     h: &mut StreamHash,
     detail: &'static str,
 ) -> Result<(), PortableError> {
-    r.read_exact(b)
-        .map_err(|_| PortableError::new(PortableErrorCode::InvalidStructure, detail))?;
+    r.read_exact(b).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::UnexpectedEof {
+            PortableError::new(PortableErrorCode::InvalidStructure, detail)
+        } else {
+            PortableError::new(PortableErrorCode::Io, "bundle read failed")
+        }
+    })?;
     h.update(b);
     Ok(())
 }

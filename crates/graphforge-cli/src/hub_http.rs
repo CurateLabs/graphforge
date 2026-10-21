@@ -379,6 +379,7 @@ pub(crate) struct RangedObjectReader<'a> {
     etag: Option<String>,
     total: Option<u64>,
     consumed: u64,
+    response_remaining: u64,
     resumes: u8,
     done: bool,
     changed: bool,
@@ -403,13 +404,15 @@ impl<'a> RangedObjectReader<'a> {
                 "object response has no Content-Length; cannot verify resumably",
             ));
         };
+        let response_remaining = content_length;
         Ok(Self {
             transport,
             url,
-            body: response.body,
+            body: Box::new(response.body.take(content_length)),
             etag: response.etag,
             total: Some(content_length),
             consumed: 0,
+            response_remaining,
             resumes: 0,
             done: false,
             changed: false,
@@ -420,8 +423,10 @@ impl<'a> RangedObjectReader<'a> {
         if self.resumes == 8 {
             return Err(io::Error::other("maximum ranged resumes exceeded"));
         }
-        let Some(etag) = self.etag.as_deref() else {
-            return Err(io::Error::other("cannot safely resume object without ETag"));
+        let Some(etag) = self.etag.as_deref().filter(|etag| !etag.starts_with("W/")) else {
+            return Err(io::Error::other(
+                "object has no strong validator; cannot safely resume",
+            ));
         };
         let response =
             match self
@@ -453,6 +458,7 @@ impl<'a> RangedObjectReader<'a> {
         };
         let length = end.saturating_sub(self.consumed).saturating_add(1);
         if end < self.consumed
+            || end >= total
             || self.total.is_some_and(|known| known != total)
             || response.content_length.is_some_and(|known| known != length)
         {
@@ -461,7 +467,8 @@ impl<'a> RangedObjectReader<'a> {
         }
         self.total = Some(total);
         self.resumes += 1;
-        self.body = response.body;
+        self.response_remaining = length;
+        self.body = Box::new(response.body.take(length));
         Ok(())
     }
 }
@@ -486,10 +493,12 @@ impl Read for RangedObjectReader<'_> {
                     self.done = true;
                     return Ok(0);
                 }
+                Ok(0) if self.response_remaining == 0 => self.resume()?,
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
                 Ok(0) | Err(_) => self.resume()?,
                 Ok(count) => {
                     self.consumed += count as u64;
+                    self.response_remaining = self.response_remaining.saturating_sub(count as u64);
                     return Ok(count);
                 }
             }

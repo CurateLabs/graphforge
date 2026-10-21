@@ -324,6 +324,8 @@ the report, including `package_digest`, the component inventory,
 list, prints one JSON error document on stderr and nothing on stdout. The exit code is `0` for a verified package
 and `2` for a package that is not valid (an impostor manifest, a truncated
 stream, a digest mismatch, a structural fault); any other refusal exits `1`.
+The storage class `GF_STORAGE` exits `3` for every input source. It covers I/O
+failures, invalid paths, and insufficient space.
 
 A package that exceeds a resource limit (the retained control bytes, the
 entry count, a declared size) is refused with the stable code
