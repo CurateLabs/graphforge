@@ -145,7 +145,7 @@ fn verify_selected_content(graph: &GraphForge, version: Uuid, node: Uuid, deferr
     );
 }
 
-fn fixture(root: &std::path::Path) -> (GraphForge, SubmitResearchProposalRequest) {
+pub(super) fn fixture(root: &std::path::Path) -> (GraphForge, SubmitResearchProposalRequest) {
     let mut graph = GraphForge::new(root.to_str()).unwrap();
     graph.execute("CREATE (:Character {score:0, other:0, deferred:0, private_note:'private-selected-note'})").unwrap();
     let private_nodes = (0..32)
@@ -312,7 +312,7 @@ fn research_bundle_streams_to_the_file_verdict() {
 
 /// Every digest in the package is correct, but one accepted mapping commits to
 /// a value the Version does not hold, which only native validation can see.
-fn native_failure_is_refused_alike_from_a_file_and_a_stream(
+pub(super) fn native_failure_is_refused_alike_from_a_file_and_a_stream(
     directory: &std::path::Path,
     package: &std::path::Path,
     limits: graphforge_core::portable::PortableLimits,
@@ -362,7 +362,7 @@ fn native_failure_is_refused_alike_from_a_file_and_a_stream(
 /// Rewrite the research registry of a canonical bundle with `edit`, then
 /// recompute every digest that covers it: the manifest file record, the
 /// package digest, the payload inventory and the tag manifest.
-fn reauthenticated(
+pub(super) fn reauthenticated(
     bundle: &[u8],
     edit: impl FnOnce(&mut graphforge_storage::research_versions::ResearchRegistry),
 ) -> Vec<u8> {
@@ -494,7 +494,7 @@ fn reauthenticated(
     out
 }
 
-fn stream_with_validator(
+pub(super) fn stream_with_validator(
     scratch: &std::path::Path,
     package: &std::path::Path,
     limits: graphforge_core::portable::PortableLimits,
@@ -518,7 +518,7 @@ fn stream_with_validator(
     .unwrap()
 }
 
-fn export_selected(
+pub(super) fn export_selected(
     graph: &GraphForge,
     proposal: &SubmitResearchProposalRequest,
     node_uuid: Uuid,

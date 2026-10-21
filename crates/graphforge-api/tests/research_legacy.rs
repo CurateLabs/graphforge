@@ -5,6 +5,8 @@
 //! interchange producer is intentionally incompatible with this pre-v1 build;
 //! exporting the readable Project creates a package with the current producer.
 use graphforge_api::*;
+#[path = "support/research_stream.rs"]
+mod research_stream;
 use graphforge_knowledge::research::{ResearchDecisionKind, ResearchSubjectKind};
 use graphforge_storage::research_versions::{RESEARCH_LEGACY_VERSION, RESEARCH_VERSION};
 use sha2::{Digest, Sha256};
@@ -354,6 +356,7 @@ fn research_v6_project_exports_research_as_current() {
             &CancellationToken::new(),
         )
         .unwrap();
+    research_stream::assert_stream_matches_file(&package);
     assert_eq!(
         revision(&project),
         RESEARCH_LEGACY_VERSION,

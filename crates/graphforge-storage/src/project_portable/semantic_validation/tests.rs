@@ -144,3 +144,39 @@ fn research_runtime_cannot_be_relabelled_or_downgraded_to_generic_settings() {
         PortableErrorCode::UnsupportedFuture
     );
 }
+
+#[test]
+fn a_component_cannot_take_a_research_object_directory_as_its_identity() {
+    let manifest_with = |participant_id: &str| -> Manifest {
+        let mut value: Value = serde_json::from_str(include_str!(
+            "../../../../../tests/fixtures/portable/ontology-only.manifest.json"
+        ))
+        .unwrap();
+        value["components"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "kind": "settings",
+                "participant_id": participant_id,
+                "required_dependencies": [],
+                "files": []
+            }));
+        serde_json::from_value(value).unwrap()
+    };
+    // The same component under an ordinary identity is not refused for its identity.
+    let ordinary = validate_semantics(
+        &manifest_with("workspace-settings"),
+        PortableLimits::default(),
+    )
+    .unwrap_err();
+    assert!(!ordinary.to_string().contains("component identity"));
+    for reserved in ["research-retained-evidence", "research-retained"] {
+        let error =
+            validate_semantics(&manifest_with(reserved), PortableLimits::default()).unwrap_err();
+        assert_eq!(error.code, PortableErrorCode::Incompatible, "{reserved}");
+        assert!(
+            error.to_string().contains("component identity"),
+            "{reserved}"
+        );
+    }
+}
