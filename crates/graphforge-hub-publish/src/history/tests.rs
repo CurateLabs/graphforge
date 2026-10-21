@@ -314,6 +314,7 @@ fn proposal_projection_and_branch_dependencies_are_never_erased() {
         format: PORTABLE_FORMAT.into(),
         package_digest: Sha256Digest(sha256_digest(b"package")),
         object_digest: Sha256Digest(sha256_digest(b"object")),
+        producing_core_version: "0.6.0".into(),
     };
     next.proposals.push(LineageProposal {
         proposal_uuid: uuid(8),

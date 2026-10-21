@@ -87,12 +87,12 @@ impl<'a> Client<'a> {
         let object = plan.declaration();
         json!({
             "format": DISCOVERY_FORMAT,
-            "version": {"major": 1, "minor": 1},
+            "version": {"major": 1, "minor": 2},
             "repository": self.repository,
             "default_ref": "main",
             "resolved_ref": "main",
             "immutable_version": plan.package_digest,
-            "package": {"format": "graphforge-project/2", "package_digest": plan.package_digest, "object_digest": object.digest},
+            "package": {"format": "graphforge-project/2", "package_digest": plan.package_digest, "producing_core_version": "0.6.0", "object_digest": object.digest},
             "requirements": [{"capability": "portable", "major": 1}],
             "capabilities": [],
             "objects": [{"digest": object.digest, "length": object.length, "media_type": object.media_type,

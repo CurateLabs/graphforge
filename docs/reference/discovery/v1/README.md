@@ -46,12 +46,13 @@ Schema-derived Hub artifacts consume the required `package.object_digest` field
 from `manifest.schema.json`; regenerating the Rust-owned artifacts updates that
 versioned input and the conformance cases together.
 
-## Project summary and ontology descriptors (protocol 1.1)
+## Project summary and ontology descriptors (protocol 1.2)
 
-`ProtocolVersion::CURRENT` is 1.1. Version 1.0 was never released and is retired:
-the manifest gained two optional fields, and readers reject unknown fields, so a
-reader that predates them rejects a manifest that uses them. A manifest that
-carries neither field is still valid, and clone consumers need neither.
+`ProtocolVersion::CURRENT` is 1.2. Versions 1.0 and 1.1 were never released and
+are retired: the manifest gained two optional fields (1.1) and every package
+reference gained the required `producing_core_version` (1.2), and readers reject
+unknown fields and missing required fields. A manifest that carries neither
+optional field is still valid, and clone consumers need neither.
 
 - `summary { format, summary_digest, object_digest }` selects a Project summary
   object from `objects` by `object_digest`, the same way `package` selects the
@@ -67,8 +68,16 @@ carries neither field is still valid, and clone consumers need neither.
   and must be at most `max_module_package_bytes` (default 64 MiB). Bridge sets
   are listed by identity only.
 
+Every package reference (`package` in the manifest, module packages, lineage
+Versions and Proposals, and the summary) declares `producing_core_version`: the
+exact GraphForge Core version that wrote the package. It is an opaque exact
+label (non-empty, bounded, no control characters) that readers compare for
+equality and never order or parse. A Hub reads it from the manifest, or from the
+summary, without downloading the package; the verifier requires the package's
+own manifest to declare the same value.
+
 The summary document embeds `repository`, `immutable_version`, and the package
-reference (`format`, `package_digest`, `package_class`). It carries its own
+reference (`format`, `package_digest`, `producing_core_version`, `package_class`). It carries its own
 closed `requirements`: only `project-summary@1` is understood. An unknown
 required capability or an unknown format major fails `unsupported_future` during
 parsing, before any other content is read. Unknown optional `capabilities` are

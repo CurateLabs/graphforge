@@ -129,6 +129,11 @@ pub fn verify_discovered_research_version(
             DiscoveryPortableMismatch::PackageDigest,
         ));
     }
+    if report.producing_core_version != package.producing_core_version {
+        return Err(DiscoveryResearchVersionError::ReferenceMismatch(
+            DiscoveryPortableMismatch::ProducingCoreVersion,
+        ));
+    }
     // A research Version package must carry research interchange; a package
     // without it cannot prove which Version it holds.
     if !report.research_interchange {

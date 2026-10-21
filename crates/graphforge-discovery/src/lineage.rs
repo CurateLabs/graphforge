@@ -687,8 +687,8 @@ pub(super) fn validate_package_reference(
         });
     }
     package.package_digest.validate()?;
+    crate::check_core_version(&package.producing_core_version, field, limits)?;
     package.object_digest.validate()?;
-    let _ = limits;
     Ok(())
 }
 

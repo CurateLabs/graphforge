@@ -27,6 +27,7 @@ use std::sync::{Arc, Mutex};
 mod ancestor_publication;
 mod credit;
 mod hub_listing;
+mod producing_version;
 use hub_listing::serve_lineage;
 mod remote_fetch;
 mod rewrite_prune;

@@ -277,7 +277,7 @@ impl Publication {
     fn manifest(&self) -> Value {
         let mut manifest = json!({
             "format": DISCOVERY_FORMAT,
-            "version": {"major": 1, "minor": 1},
+            "version": {"major": 1, "minor": 2},
             "repository": self.repository,
             "default_ref": "main",
             "resolved_ref": self.resolved_ref,
@@ -285,6 +285,7 @@ impl Publication {
             "package": {
                 "format": "graphforge-project/2",
                 "package_digest": self.package_digest,
+                "producing_core_version": "0.6.0",
                 "object_digest": self.package_object().digest(),
             },
             "requirements": [{"capability": "portable", "major": 1}],
@@ -779,6 +780,7 @@ fn research_publication(
             package: Some(PortablePackageReference {
                 format: PORTABLE_FORMAT.into(),
                 package_digest: Sha256Digest(digest_of('e')),
+                producing_core_version: "0.6.0".into(),
                 object_digest: Sha256Digest(research_package.digest()),
             }),
         }],
@@ -2271,7 +2273,7 @@ fn with_summary(mut publication: Publication, people: Value) -> Publication {
         "format": PROJECT_SUMMARY_FORMAT, "version": {"major": 1, "minor": 1},
         "repository": publication.repository,
         "immutable_version": publication.package_digest,
-        "package": {"format": "graphforge-project/2", "package_digest": publication.package_digest, "package_class": "complete"},
+        "package": {"format": "graphforge-project/2", "package_digest": publication.package_digest, "producing_core_version": "0.6.0", "package_class": "complete"},
         "requirements": [{"capability": "project-summary", "major": 1}], "capabilities": [],
         "metadata": {
             "title": null, "description": null, "authors": [], "subjects": [], "languages": [],

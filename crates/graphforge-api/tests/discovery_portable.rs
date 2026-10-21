@@ -89,6 +89,7 @@ fn discovery(package_digest: String) -> (DiscoveryManifest, RefSet, RepositoryId
         package: PortablePackageReference {
             format: PORTABLE_FORMAT.into(),
             package_digest: Sha256Digest(package_digest),
+            producing_core_version: "0.6.0".into(),
             object_digest: digest('c'),
         },
         summary: None,
@@ -181,6 +182,16 @@ fn repository_package_and_version_mismatches_fail_without_acceptance() {
         verify(&wrong_package, &refs, &repository, &package),
         Err(DiscoveryPortableError::ReferenceMismatch(
             DiscoveryPortableMismatch::PackageDigest
+        ))
+    ));
+
+    // Only the advertised producer differs; the package digest still matches.
+    let mut wrong_producer = manifest.clone();
+    wrong_producer.package.producing_core_version = "0.0.1".into();
+    assert!(matches!(
+        verify(&wrong_producer, &refs, &repository, &package),
+        Err(DiscoveryPortableError::ReferenceMismatch(
+            DiscoveryPortableMismatch::ProducingCoreVersion
         ))
     ));
 

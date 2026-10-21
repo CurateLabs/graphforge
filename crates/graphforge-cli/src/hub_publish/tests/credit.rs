@@ -246,6 +246,7 @@ fn full_lineage(history: &History, head: Uuid) -> ResearchLineage {
     let package = |marker: char| graphforge_discovery::PortablePackageReference {
         format: graphforge_discovery::PORTABLE_FORMAT.into(),
         package_digest: digest(marker),
+        producing_core_version: "0.6.0".into(),
         object_digest: digest(marker),
     };
     history
