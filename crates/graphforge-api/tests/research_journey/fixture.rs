@@ -111,7 +111,7 @@ impl Output {
     }
     pub fn finish(&self, j: &Journey) {
         if let Some(root) = &self.root {
-            let manifest = json!({"contract":"graphforge-analyst-journey-output/1","reader":{"crate_version":env!("CARGO_PKG_VERSION"),"research_registry":6,"interchange":1,"portable":2},"identities":{"character":j.ada,"mystery_branch":j.a,"voyage_branch":j.b,"source":j.source,"scan":j.scan,"ocr":j.ocr,"external":j.external,"claim":j.claim},"files":self.entries.borrow().clone(),"qualification":"Native Arrow IPC and serialized control outputs; cancelled-reference and restoration-outcome are derived assertion summaries, not native response schemas. Generated identities are preserved; the identity map names fixture roles. Synthetic scan/OCR inputs do not claim OCR execution or human comprehension."});
+            let manifest = json!({"contract":"graphforge-analyst-journey-output/1","reader":{"crate_version":env!("CARGO_PKG_VERSION"),"research_registry":graphforge_storage::research_versions::RESEARCH_VERSION,"interchange":1,"portable":2},"identities":{"character":j.ada,"mystery_branch":j.a,"voyage_branch":j.b,"source":j.source,"scan":j.scan,"ocr":j.ocr,"external":j.external,"claim":j.claim},"files":self.entries.borrow().clone(),"qualification":"Native Arrow IPC and serialized control outputs; cancelled-reference and restoration-outcome are derived assertion summaries, not native response schemas. Generated identities are preserved; the identity map names fixture roles. Synthetic scan/OCR inputs do not claim OCR execution or human comprehension."});
             std::fs::write(
                 root.join("manifest.json"),
                 serde_json::to_vec_pretty(&manifest).unwrap(),
