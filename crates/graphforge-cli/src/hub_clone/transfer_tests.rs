@@ -256,6 +256,7 @@ fn the_object_bound_is_the_publish_cumulative_bound() {
 
 pub(super) fn clone_args(destination: &Path) -> CloneArgs {
     CloneArgs {
+        tag: None,
         hub: None,
         token_env: None,
         protection_bypass_env: None,

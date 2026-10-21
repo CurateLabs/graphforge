@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use uuid::Uuid;
 
 mod local;
-mod remote;
+pub(crate) mod remote;
 mod render;
 #[cfg(test)]
 mod tests;

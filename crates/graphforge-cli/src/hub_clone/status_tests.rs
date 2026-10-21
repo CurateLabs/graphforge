@@ -187,6 +187,7 @@ fn each_hub_status_class_has_its_semantic_code_and_exit_class_over_real_http() {
         let error = run_clone_with(
             &Routed::new(server.address),
             CloneArgs {
+                tag: None,
                 repository: "https://hub.test/curate/claims".into(),
                 hub: None,
                 token_env: None,

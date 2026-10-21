@@ -81,6 +81,9 @@ pub(crate) struct CloneArgs {
     /// Immutable research Version UUID to clone instead of the Project package.
     #[arg(long)]
     pub version_uuid: Option<String>,
+    /// Tag, published in the research lineage, whose Version to clone.
+    #[arg(long)]
+    pub tag: Option<String>,
 }
 
 #[derive(Clone, Default)]
@@ -491,9 +494,22 @@ fn prepare_research_clone(
     limits: DiscoveryLimits,
     git_ref: Option<&str>,
     version_uuid: Option<&str>,
+    tag: Option<&str>,
     retry: &RetryPolicy,
 ) -> Result<Option<(ObjectDescriptor, ResearchCloneContext)>, graphforge_api::GfError> {
     let (lineage_bytes, lineage) = read_lineage(transport, manifest, refs, limits, retry)?;
+    // A tag names a Version through the lineage, then follows the `--version-uuid` path.
+    let tagged = tag
+        .map(|name| {
+            lineage
+                .tags
+                .iter()
+                .find(|tag| tag.name == name)
+                .map(|tag| tag.version_uuid.clone())
+                .ok_or_else(|| validation("hub.missing_ref", "tag is absent from research lineage"))
+        })
+        .transpose()?;
+    let version_uuid = version_uuid.or(tagged.as_deref());
     let implicit_default = git_ref.is_none() && version_uuid.is_none();
     if implicit_default && lineage.branches.is_empty() {
         return Ok(None);
@@ -1853,10 +1869,19 @@ fn run_clone_job(
     delays: &CloneDelays,
     env: &mut CloneEnv<'_>,
 ) -> Result<CloneResult, graphforge_api::GfError> {
-    if args.git_ref.is_some() && args.version_uuid.is_some() {
+    if [
+        args.git_ref.is_some(),
+        args.version_uuid.is_some(),
+        args.tag.is_some(),
+    ]
+    .iter()
+    .filter(|given| **given)
+    .count()
+        > 1
+    {
         return Err(validation(
             "hub.invalid_identity",
-            "specify only one of --ref and --version-uuid",
+            "specify only one of --ref, --version-uuid and --tag",
         ));
     }
     let requested_destination = args.destination.take();
@@ -2062,7 +2087,8 @@ fn clone_into_staging(
         limits,
     } = *discovered;
     let refs = RefSet::from_json(refs_bytes, limits).map_err(|error| protocol_error(&error))?;
-    let research_requested = args.git_ref.is_some() || args.version_uuid.is_some();
+    let research_requested =
+        args.git_ref.is_some() || args.version_uuid.is_some() || args.tag.is_some();
     let (object, research_context) = if research_requested || manifest.lineage.is_some() {
         if manifest.lineage.is_none() {
             return Err(validation(
@@ -2083,6 +2109,7 @@ fn clone_into_staging(
             limits,
             args.git_ref.as_deref(),
             args.version_uuid.as_deref(),
+            args.tag.as_deref(),
             &env.retry,
         )?;
         profile.handoff(

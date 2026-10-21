@@ -632,6 +632,7 @@ fn clone_into(
     run_clone_with(
         hub,
         CloneArgs {
+            tag: None,
             hub: None,
             token_env: None,
             protection_bypass_env: None,
@@ -1885,6 +1886,7 @@ fn research_verification_and_import_stay_within_their_budgets_with_an_expanded_g
     run_clone_profiled_with_delays(
         &hub,
         CloneArgs {
+            tag: None,
             hub: None,
             token_env: None,
             protection_bypass_env: None,

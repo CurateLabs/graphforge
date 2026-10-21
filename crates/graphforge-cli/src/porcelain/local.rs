@@ -6,7 +6,8 @@ use super::{
 };
 use graphforge_api::{
     BranchSource, CancellationToken, CreateResearchBranchRequest, ExecuteResearchBranchRequest,
-    GfError, GraphForge, ResearchRegistry, SelectResearchBranchRequest, SetResearchTagRequest,
+    GfError, GraphForge, ResearchRegistry, ResearchSignature, SelectResearchBranchRequest,
+    SetResearchTagRequest,
 };
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
@@ -257,6 +258,29 @@ fn read_query(args: &CommitArgs) -> Result<String, GfError> {
     }
 }
 
+/// The native request `gf commit` publishes.
+pub(super) fn commit_request(
+    branch: Uuid,
+    args: &CommitArgs,
+    operation: Uuid,
+    expected_generation: Uuid,
+    (author, committer): (ResearchSignature, ResearchSignature),
+    query: String,
+) -> ExecuteResearchBranchRequest {
+    ExecuteResearchBranchRequest {
+        author: Some(author),
+        committer: Some(committer),
+        operation_uuid: operation,
+        expected_generation_uuid: expected_generation,
+        branch_uuid: branch,
+        version_uuid: derived_uuid(operation, "version"),
+        query,
+        created_at: created_at(operation),
+        label: None,
+        description: Some(args.message.clone()),
+    }
+}
+
 fn commit(
     graph: &mut GraphForge,
     args: &CommitArgs,
@@ -281,19 +305,15 @@ fn commit(
         }
         (receipt, true)
     } else {
-        let (author, committer) = crate::identity::resolve_from_process(&args.identity)?;
-        let request = ExecuteResearchBranchRequest {
-            author: Some(author),
-            committer: Some(committer),
-            operation_uuid: operation,
-            expected_generation_uuid: current_generation(graph)?,
-            branch_uuid: branch,
-            version_uuid: derived_uuid(operation, "version"),
-            query: read_query(args)?,
-            created_at: created_at(operation),
-            label: None,
-            description: Some(args.message.clone()),
-        };
+        let signatures = crate::identity::resolve_from_process(&args.identity)?;
+        let request = commit_request(
+            branch,
+            args,
+            operation,
+            current_generation(graph)?,
+            signatures,
+            read_query(args)?,
+        );
         (
             graph.execute_research_branch(&request, &CancellationToken::new())?,
             false,
@@ -383,12 +403,21 @@ fn branch(
         }
         (receipt, true)
     } else {
-        let base = match &args.from {
-            Some(text) => resolve_version(&registry, text)?,
-            None => head_of(
-                &registry,
-                resolve_branch(&registry, args.select.branch.as_deref())?,
-            )?,
+        // The first Branch of a Project starts from the Project's current research.
+        let source = match &args.from {
+            Some(text) => BranchSource::Version {
+                version_uuid: resolve_version(&registry, text)?,
+            },
+            None if registry.branches.is_empty() => BranchSource::Current {
+                origin_version_uuid: derived_uuid(operation, "origin"),
+                context_uuid: derived_uuid(operation, "project"),
+            },
+            None => BranchSource::Version {
+                version_uuid: head_of(
+                    &registry,
+                    resolve_branch(&registry, args.select.branch.as_deref())?,
+                )?,
+            },
         };
         let (author, committer) = crate::identity::resolve_from_process(&args.identity)?;
         let request = CreateResearchBranchRequest {
@@ -398,7 +427,7 @@ fn branch(
             expected_generation_uuid: current_generation(graph)?,
             branch_uuid: derived_uuid(operation, "branch"),
             version_uuid: derived_uuid(operation, "version"),
-            source: BranchSource::Version { version_uuid: base },
+            source,
             creator_uuid: derived_uuid(operation, "creator"),
             created_at: created_at(operation),
             label: name.clone(),

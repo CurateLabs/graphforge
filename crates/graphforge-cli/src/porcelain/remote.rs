@@ -23,7 +23,7 @@ use std::path::PathBuf;
 use uuid::Uuid;
 
 /// Dispatch a Hub verb for the production process: open the Project and use the
-/// real transport.
+/// real transport and credential sources.
 pub(crate) fn run_remote(
     command: crate::Command,
     project: Option<PathBuf>,
@@ -36,14 +36,32 @@ pub(crate) fn run_remote(
         .to_str()
         .ok_or_else(|| GfError::Validation("--project must be valid UTF-8".into()))?;
     let mut graph = GraphForge::new(Some(path))?;
-    let transport = crate::hub_http::HubTransport::new();
+    run_remote_with(
+        &crate::hub_http::HubTransport::new(),
+        &|hub: &HubFlags| crate::hub_publish::publish_token(hub.token_env.as_deref()),
+        &mut graph,
+        command,
+        json_output,
+        output,
+    )
+}
+
+/// Dispatch a Hub verb over a given transport and publish-credential source.
+pub(crate) fn run_remote_with(
+    transport: &dyn Transport,
+    publish_token: &dyn Fn(&HubFlags) -> Result<Option<PublishToken>, GfError>,
+    graph: &mut GraphForge,
+    command: crate::Command,
+    json_output: bool,
+    output: &mut dyn Write,
+) -> Result<(), GfError> {
     match command {
         crate::Command::Push(args) => {
-            let token = crate::hub_publish::publish_token(args.hub.token_env.as_deref())?;
-            push(&transport, &graph, &args, token, json_output, output)
+            let token = publish_token(&args.hub)?;
+            push(transport, graph, &args, token, json_output, output)
         }
-        crate::Command::Pull(args) => pull(&transport, &mut graph, &args, json_output, output),
-        crate::Command::Log(args) => log_remote(&transport, &graph, &args, json_output, output),
+        crate::Command::Pull(args) => pull(transport, graph, &args, json_output, output),
+        crate::Command::Log(args) => log_remote(transport, graph, &args, json_output, output),
         _ => unreachable!("only Hub porcelain verbs are dispatched here"),
     }
 }

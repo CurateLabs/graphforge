@@ -27,6 +27,7 @@ use std::sync::{Arc, Mutex};
 mod ancestor_publication;
 mod credit;
 mod hub_listing;
+mod porcelain;
 mod producing_version;
 use hub_listing::serve_lineage;
 mod remote_fetch;
@@ -640,6 +641,7 @@ fn clone_into(
     run_clone_with(
         &hub.transport(),
         CloneArgs {
+            tag: None,
             hub: None,
             token_env: None,
             protection_bypass_env: None,
@@ -2307,6 +2309,7 @@ fn assert_rehomed_clones(hub: &LoopbackHub, history: &History) {
             run_clone_with(
                 &hub.transport(),
                 CloneArgs {
+                    tag: None,
                     hub: Some(HUB.into()),
                     token_env: None,
                     protection_bypass_env: None,
@@ -2353,6 +2356,7 @@ fn assert_rehomed_clones(hub: &LoopbackHub, history: &History) {
     run_clone_with(
         &hub.transport(),
         CloneArgs {
+            tag: None,
             hub: Some(HUB.into()),
             token_env: None,
             protection_bypass_env: None,
