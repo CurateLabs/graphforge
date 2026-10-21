@@ -269,6 +269,41 @@ malformed control document, unsupported required feature, missing closure, or
 digest mismatch before materializing staging. Inspect and verify never adopt,
 replace, remove, activate, deactivate, or clear ontology authority.
 
+### Verify from standard input
+
+A canonical bundle can be verified without a file on disk, which is how a
+service verifies an object it is streaming from storage:
+
+```text
+curl -sS "$OBJECT_URL" | graphforge --json portable verify --input - --mode full
+```
+
+`--input -` reads the bundle once from standard input and gives the verdict a
+file gives the same bytes; only the report's `source` is `stream` instead of
+`file`. Memory is bounded by the resource limits, not by the package size. A
+package of any size is hashed as it passes and nothing is written to disk,
+except that a research package stages one Version at a time in a private
+directory under `TMPDIR` that is removed before the command returns.
+`--input -` requires `--mode full` (`--mode inspect` is refused with
+`GF_VALIDATION`), and a bundle only: pass an expanded directory by path. To
+name a file called `-`, write `./-`.
+
+With `--json`, a verified package prints exactly one JSON document on stdout:
+the report, including `package_digest`, the component inventory,
+`bytes_by_kind`, and `plausibility`. A refusal prints one JSON error document
+on stderr and nothing on stdout. The exit code is `0` for a verified package
+and `2` for a package that is not valid (an impostor manifest, a truncated
+stream, a digest mismatch, a structural fault); any other refusal exits `1`.
+
+A package that exceeds a resource limit (the retained control bytes, the
+entry count, a declared size) is refused with the stable code
+`GF_LIMIT_EXCEEDED` in `error.code` of the JSON error. Its exit code is `1`,
+shared with other refusals, so a caller that must distinguish a limit from them
+reads `error.code`, not the exit code.
+
+[Portable verify qualification](../development/portable-verify-qualification.md)
+records how the bounded-memory and no-disk claims are measured.
+
 ## Import a complete package
 
 Import only into a new, empty, or pristine initialized destination, using a
