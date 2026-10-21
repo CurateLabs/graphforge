@@ -167,3 +167,8 @@ doc_markdown        = "allow"
 # `scripts/clean-builds.sh` — see its header.
 [profile.dev]
 debug = "line-tables-only"
+
+# Hashing is the cost of verifying a large package. Unoptimized SHA-256 runs at
+# about 25 MB/s, which made streaming a multi-GiB entry take minutes in a test.
+[profile.dev.package.sha2]
+opt-level = 3

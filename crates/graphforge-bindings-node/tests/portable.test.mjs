@@ -120,6 +120,28 @@ export function canonicalVerification(report) {
     component_count: exactNumber(report.componentCount),
     entry_count: exactNumber(report.entryCount),
     payload_bytes: exactNumber(report.payloadBytes),
+    bytes_by_kind: Object.fromEntries(
+      report.bytesByKind.map((entry) => [entry.kind, exactNumber(entry.bytes)]),
+    ),
+    plausibility: {
+      graph_data_bytes: exactNumber(report.plausibility.graphDataBytes),
+      graph_data_ratio_ppm: exactNumber(report.plausibility.graphDataRatioPpm),
+      parquet:
+        report.plausibility.parquet == null
+          ? null
+          : {
+              files: exactNumber(report.plausibility.parquet.files),
+              files_with_footer: exactNumber(
+                report.plausibility.parquet.filesWithFooter,
+              ),
+              row_groups: exactNumber(report.plausibility.parquet.rowGroups),
+              node_rows: exactNumber(report.plausibility.parquet.nodeRows),
+              edge_rows: exactNumber(report.plausibility.parquet.edgeRows),
+              property_rows: exactNumber(
+                report.plausibility.parquet.propertyRows,
+              ),
+            },
+    },
     integrity: report.integrity,
     compatibility: report.compatibility,
     authenticity: report.authenticity,

@@ -4,8 +4,8 @@ use super::{
     Entry, Manifest, ManifestComponent, ManifestFile, ONTOLOGY_COMPOSITION_PATH,
     PortableCompositionEntry, PortableError, PortableErrorCode, PortableExactIdentity,
     PortableLimits, PortableOntologyComposition, PortablePackageClass, PortableReport,
-    RUNTIME_MAP_PATH, RuntimeGenerationMap, UniqueValue, canonical_json, check_cancel,
-    constant_time_eq, hex, read_entry_bytes_from_map, sha, validate_path,
+    RUNTIME_MAP_PATH, RuntimeGenerationMap, RuntimeParticipant, UniqueValue, canonical_json,
+    check_cancel, constant_time_eq, hex, read_entry_bytes_from_map, sha, validate_path,
 };
 use graphforge_core::hash_observation::ControlSha256 as Sha256;
 use serde::Deserialize;
@@ -851,6 +851,73 @@ fn runtime_map_descriptor(manifest: &Manifest) -> Result<Option<&ManifestFile>, 
     Ok(Some(descriptor))
 }
 
+/// A runtime participant's payload lives in the component kind its capability
+/// and record family belong to, under that component's own directory:
+/// `data/components/{kind}/{participant}/`. The kind is derived by the same
+/// `component_kind` the exporter lays packages out with, so a valid package is
+/// never refused.
+///
+/// This is what lets `evidence` be an opaque kind: `component_kind` never
+/// yields it, so no runtime participant (and no payload a reader opens through
+/// the runtime map) can sit in an evidence component or directory, and the
+/// Parquet page walk may skip such entries (`reaches_a_decoder`).
+fn validate_participant_placement(
+    participant: &RuntimeParticipant,
+    manifest: &Manifest,
+) -> Result<(), PortableError> {
+    let kind = crate::project_portable_selection::component_kind(
+        &participant.capability_id,
+        &participant.record_family_id,
+    );
+    let directory = format!("data/components/{kind}/{}/", participant.participant_id);
+    let component = manifest
+        .components
+        .iter()
+        .find(|component| component.participant_id == participant.participant_id);
+    // The entry named is the offending file when there is one, else the map.
+    let misplaced = component.and_then(|component| {
+        component
+            .files
+            .iter()
+            .find(|file| !file.path.starts_with(&directory))
+            .map(|file| Some(file.path.as_str()))
+            .or_else(|| (component.kind != kind).then_some(None))
+    });
+    if let Some(entry) = misplaced {
+        return Err(PortableError::at(
+            PortableErrorCode::InvalidStructure,
+            entry.unwrap_or(RUNTIME_MAP_PATH),
+            "runtime participant outside its component kind",
+        ));
+    }
+    Ok(())
+}
+
+/// The graph tree component's files all sit under `data/components/graph-data/graph-tree/`,
+/// the one directory import opens as a graph tree (`package_graph_tree`). The
+/// graph tree is decoded, so a file of it declared anywhere else, an exempt
+/// directory included, would reach a decoder unwalked.
+fn validate_graph_tree_placement(
+    component_id: &str,
+    manifest: &Manifest,
+) -> Result<(), PortableError> {
+    const GRAPH_TREE: &str = "data/components/graph-data/graph-tree/";
+    let misplaced = manifest
+        .components
+        .iter()
+        .filter(|component| component.participant_id == component_id)
+        .flat_map(|component| &component.files)
+        .find(|file| !file.path.starts_with(GRAPH_TREE));
+    if let Some(file) = misplaced {
+        return Err(PortableError::at(
+            PortableErrorCode::InvalidStructure,
+            &file.path,
+            "graph tree file outside the graph tree directory",
+        ));
+    }
+    Ok(())
+}
+
 fn validate_runtime_map_contents(
     runtime: &RuntimeGenerationMap,
     manifest: &Manifest,
@@ -860,6 +927,15 @@ fn validate_runtime_map_contents(
         .iter()
         .map(|component| component.participant_id.as_str())
         .collect();
+    // Placement first: whatever else is wrong with a participant, one that sits
+    // outside its own component kind is reported as that, before any check
+    // that reads its payload's meaning (research included).
+    for participant in &runtime.participants {
+        validate_participant_placement(participant, manifest)?;
+    }
+    if let Some(graph) = &runtime.graph_tree {
+        validate_graph_tree_placement(&graph.component_id, manifest)?;
+    }
     validate_research_runtime(runtime, manifest)?;
     let mut prior = None;
     let mut runtime_ids = BTreeSet::new();
