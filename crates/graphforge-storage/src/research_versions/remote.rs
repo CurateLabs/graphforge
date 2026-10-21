@@ -84,6 +84,7 @@ pub(super) fn activate_imported_branch(
     head_version_uuid: &Uuid,
     project_uuid: &Uuid,
     remote_branches: &[ResearchRemoteBranch],
+    tags: &BTreeMap<String, Uuid>,
 ) -> Result<Option<Uuid>, GfError> {
     let archive = registry
         .interchange
@@ -156,6 +157,9 @@ pub(super) fn activate_imported_branch(
     }
     if !selected {
         return Err(invalid("selected Branch remote reference is absent"));
+    }
+    for (name, target) in tags {
+        super::local_state::install_served_tag(registry, name, *target)?;
     }
     registry.remote_branches.extend(references);
     registry.branches.insert(*branch_uuid, branch);

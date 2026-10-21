@@ -571,6 +571,19 @@ fn imported_branch_operation(
             )
             .into(),
             remote_branches,
+            // A tag is installed with the Version it names; a tag on a Version
+            // outside the cloned history stays on the Hub.
+            tags: lineage
+                .tags
+                .iter()
+                .filter_map(|tag| {
+                    let version = Uuid::parse_str(&tag.version_uuid).ok()?;
+                    state
+                        .identities
+                        .contains_key(&version)
+                        .then(|| (tag.name.clone(), version))
+                })
+                .collect(),
         },
     };
     Ok(operation)

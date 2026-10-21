@@ -289,6 +289,24 @@
       "pattern": "^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$",
       "type": "string"
     },
+    "tag": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "type": "string"
+        },
+        "version_uuid": {
+          "$ref": "#/$defs/uuid"
+        }
+      },
+      "required": [
+        "name",
+        "version_uuid"
+      ],
+      "type": "object"
+    },
     "uuid": {
       "maxLength": 36,
       "minLength": 36,
@@ -408,6 +426,13 @@
         "type": "object"
       },
       "maxItems": 1,
+      "type": "array"
+    },
+    "tags": {
+      "items": {
+        "$ref": "#/$defs/tag"
+      },
+      "maxItems": 10000,
       "type": "array"
     },
     "version": {

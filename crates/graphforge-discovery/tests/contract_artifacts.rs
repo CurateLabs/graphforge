@@ -190,6 +190,7 @@ fn lineage_schema() -> Value {
             "branches":{"type":"array","maxItems":10000,"items":{"$ref":"#/$defs/branch"}},
             "versions":{"type":"array","maxItems":10000,"items":{"$ref":"#/$defs/research_version"}},
             "proposals":{"type":"array","maxItems":10000,"items":{"$ref":"#/$defs/proposal"}},
+            "tags":{"type":"array","maxItems":10000,"items":{"$ref":"#/$defs/tag"}},
             "extensions":{"$ref":"#/$defs/extensions"}
         }),
         {
@@ -203,6 +204,7 @@ fn lineage_schema() -> Value {
             map.insert("research_version".into(), json!({"type":"object","additionalProperties":false,"required":["version_uuid","parents","identity_digest","kind","branch_uuid"],"properties":{"parents":{"type":"array","maxItems":8,"uniqueItems":true,"items":{"$ref":"#/$defs/uuid"}},"version_uuid":{"$ref":"#/$defs/uuid"},"identity_digest":{"$ref":"#/$defs/digest"},"kind":{"enum":["complete","projection"]},"branch_uuid":{"$ref":"#/$defs/uuid"},"source_version_uuid":{"anyOf":[{"$ref":"#/$defs/uuid"},{"type":"null"}]},"author":{"$ref":"#/$defs/signature"},"committer":{"$ref":"#/$defs/signature"},"package":{"anyOf":[{"$ref":"#/$defs/package_reference"},{"type":"null"}]}}}));
             insert_credit_defs(map);
             map.insert("proposal".into(), json!({"type":"object","additionalProperties":false,"required":["proposal_uuid","source_branch_uuid","source_version_uuid","payload_version_uuid","package"],"properties":{"proposal_uuid":{"$ref":"#/$defs/uuid"},"source_branch_uuid":{"$ref":"#/$defs/uuid"},"source_version_uuid":{"$ref":"#/$defs/uuid"},"payload_version_uuid":{"$ref":"#/$defs/uuid"},"package":{"$ref":"#/$defs/package_reference"}}}));
+            map.insert("tag".into(), json!({"type":"object","additionalProperties":false,"required":["name","version_uuid"],"properties":{"name":{"type":"string","minLength":1,"maxLength":4096},"version_uuid":{"$ref":"#/$defs/uuid"}}}));
             defs
         },
     )
@@ -875,6 +877,54 @@ fn lineage_cases() -> Vec<Case> {
             "refs-with-research-branches",
             Document::Refs,
             refs_with_research_branches(),
+        ),
+        valid("lineage-with-tags", Document::Lineage, {
+            let mut v = base_lineage();
+            v["tags"] = json!([
+                {"name":"release/v1","version_uuid":LINEAGE_VERSION_MAIN},
+                {"name":"v1","version_uuid":LINEAGE_VERSION_FEATURE}
+            ]);
+            v
+        }),
+        invalid(
+            "lineage-tags-unordered",
+            Document::Lineage,
+            {
+                let mut v = base_lineage();
+                v["tags"] = json!([
+                    {"name":"v1","version_uuid":LINEAGE_VERSION_FEATURE},
+                    {"name":"release/v1","version_uuid":LINEAGE_VERSION_MAIN}
+                ]);
+                v
+            },
+            "duplicate",
+            Some("tags"),
+        ),
+        invalid(
+            "lineage-tag-names-unknown-version",
+            Document::Lineage,
+            {
+                let mut v = base_lineage();
+                v["tags"] = json!([
+                    {"name":"v1","version_uuid":"01900000-0000-7000-8000-0000000000ff"}
+                ]);
+                v
+            },
+            "integrity_failure",
+            Some("tags"),
+        ),
+        invalid(
+            "lineage-tag-name-is-not-a-ref",
+            Document::Lineage,
+            {
+                let mut v = base_lineage();
+                v["tags"] = json!([
+                    {"name":"has space","version_uuid":LINEAGE_VERSION_MAIN}
+                ]);
+                v
+            },
+            "malformed_response",
+            Some("ref"),
         ),
         invalid(
             "lineage-projection-without-source",

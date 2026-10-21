@@ -340,6 +340,9 @@ pub enum ResearchMutation {
         lineage_sha256: [u8; 32],
         /// Read-only references from the same verified repository snapshot.
         remote_branches: Vec<ResearchRemoteBranch>,
+        /// Lineage tags naming Versions this import makes known (ADR 0061).
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        tags: BTreeMap<String, Uuid>,
     },
     /// Admit an exact fetched remote head without replacing the local Branch/workspace.
     FetchRemoteBranch {
@@ -994,12 +997,14 @@ fn apply_mutation(
             project_uuid,
             lineage_sha256: _,
             remote_branches,
+            tags,
         } => remote::activate_imported_branch(
             registry,
             branch_uuid,
             head_version_uuid,
             project_uuid,
             remote_branches,
+            tags,
         )?,
         ResearchMutation::SubmitProposal { .. }
         | ResearchMutation::ReviewProposal { .. }

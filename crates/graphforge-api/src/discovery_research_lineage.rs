@@ -10,7 +10,7 @@
 use crate::{CancellationToken, GfError, GraphForge};
 use graphforge_discovery::{
     CreditSignature, DiscoveryError, DiscoveryLimits, LineageBranch, LineageForkOrigin,
-    LineageProposal, LineageVersion, PortablePackageReference, ProtocolRequirement,
+    LineageProposal, LineageTag, LineageVersion, PortablePackageReference, ProtocolRequirement,
     ProtocolVersion, RESEARCH_LINEAGE_CAPABILITY, RESEARCH_LINEAGE_FORMAT, RepositoryIdentity,
     ResearchLineage, Sha256Digest,
 };
@@ -183,6 +183,21 @@ pub fn build_research_lineage_from_registry(
         });
     }
 
+    // A local tag is published when the Version it names is published (ADR 0061).
+    let published: BTreeSet<String> = versions
+        .iter()
+        .map(|version| version.version_uuid.clone())
+        .collect();
+    let tags = registry
+        .tags
+        .iter()
+        .filter(|(_, target)| published.contains(&target.to_string()))
+        .map(|(name, target)| LineageTag {
+            name: name.clone(),
+            version_uuid: target.to_string(),
+        })
+        .collect();
+
     let lineage = ResearchLineage {
         format: RESEARCH_LINEAGE_FORMAT.into(),
         version: ProtocolVersion::CURRENT,
@@ -199,6 +214,7 @@ pub fn build_research_lineage_from_registry(
         boundary_anchors,
         versions,
         proposals,
+        tags,
         extensions: BTreeMap::new(),
     };
     lineage

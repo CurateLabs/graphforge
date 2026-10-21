@@ -156,6 +156,16 @@ pub struct LineageVersion {
     pub package: Option<PortablePackageReference>,
 }
 
+/// One published human name for an immutable research Version (ADR 0061).
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LineageTag {
+    /// Tag name, a valid discovery ref.
+    pub name: String,
+    /// Version the tag names; present in `versions`.
+    pub version_uuid: String,
+}
+
 /// One published frozen Proposal payload as a distinct projection package.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -201,6 +211,9 @@ pub struct ResearchLineage {
     pub versions: Vec<LineageVersion>,
     /// Published Proposals in strictly ascending `proposal_uuid` order.
     pub proposals: Vec<LineageProposal>,
+    /// Published tags in strictly ascending name order; omitted when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<LineageTag>,
     /// Explicit optional extension values, preserved canonically by readers.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub extensions: BTreeMap<String, Value>,
@@ -328,6 +341,9 @@ impl ResearchLineage {
         if self.proposals.len() > limits.max_lineage_entries {
             return Err(limit("proposals"));
         }
+        if self.tags.len() > limits.max_lineage_entries {
+            return Err(limit("tags"));
+        }
         let mut prior = None;
         let mut branch_refs = BTreeSet::new();
         let mut branch_uuids = BTreeSet::new();
@@ -423,6 +439,26 @@ impl ResearchLineage {
             }
             prior = Some(version.version_uuid.as_str());
             version_ids.insert(version.version_uuid.as_str(), version);
+        }
+        let mut prior_tag = None;
+        for tag in &self.tags {
+            validate_ref_name(&tag.name, limits)?;
+            check_uuid(&tag.version_uuid, "tags.version_uuid", limits)?;
+            if prior_tag.is_some_and(|name: &str| name >= tag.name.as_str()) {
+                return Err(DiscoveryError::new(
+                    DiscoveryErrorCode::Duplicate,
+                    Some("tags"),
+                    "entries are duplicated or not canonically ordered",
+                ));
+            }
+            if !version_ids.contains_key(tag.version_uuid.as_str()) {
+                return Err(DiscoveryError::new(
+                    DiscoveryErrorCode::IntegrityFailure,
+                    Some("tags"),
+                    "tag names a Version absent from the lineage",
+                ));
+            }
+            prior_tag = Some(tag.name.as_str());
         }
         let mut anchors = BTreeMap::new();
         let mut prior_anchor = None;

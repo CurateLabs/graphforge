@@ -28,9 +28,9 @@ pub use repository::{ObjectLocationTemplate, RepositoryMoved};
 
 pub use credit::{CreditSignature, ROLE_AUTHOR, ROLE_COMMITTER, SummaryPerson};
 pub use lineage::{
-    LineageBoundaryAnchor, LineageBranch, LineageForkOrigin, LineageProposal, LineageVersion,
-    RESEARCH_LINEAGE_CAPABILITY, RESEARCH_LINEAGE_FORMAT, RESEARCH_LINEAGE_MEDIA_TYPE,
-    ResearchLineage, ResearchLineageReference,
+    LineageBoundaryAnchor, LineageBranch, LineageForkOrigin, LineageProposal, LineageTag,
+    LineageVersion, RESEARCH_LINEAGE_CAPABILITY, RESEARCH_LINEAGE_FORMAT,
+    RESEARCH_LINEAGE_MEDIA_TYPE, ResearchLineage, ResearchLineageReference,
 };
 pub use summary::{
     ProjectSummary, SummaryCorpusSize, SummaryFacts, SummaryGeographicCoverage, SummaryMetadata,

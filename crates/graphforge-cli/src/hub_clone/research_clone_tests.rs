@@ -535,6 +535,16 @@ fn lineage_request(published: &Published) -> BuildResearchLineageRequest {
 /// Serve canonical manifest, refs, lineage, and every package object.
 fn serve(published: &Published, lineage: &ResearchLineage) -> Hub {
     let repository = RepositoryIdentity::parse(REPOSITORY).unwrap();
+    let ref_names: BTreeSet<&str> = lineage
+        .branches
+        .iter()
+        .map(|branch| branch.ref_name.as_str())
+        .collect();
+    let default = if ref_names.contains("main") {
+        "main"
+    } else {
+        ref_names.first().copied().unwrap()
+    };
     let lineage_bytes = lineage.to_canonical_json().unwrap();
     let lineage_object = sha256(&lineage_bytes);
     let mut documents = BTreeMap::new();
@@ -566,8 +576,8 @@ fn serve(published: &Published, lineage: &ResearchLineage) -> Hub {
         format: DISCOVERY_FORMAT.into(),
         version: ProtocolVersion::CURRENT,
         repository: repository.clone(),
-        default_ref: "main".into(),
-        resolved_ref: "main".into(),
+        default_ref: default.into(),
+        resolved_ref: default.into(),
         immutable_version: lineage.immutable_version.clone(),
         package: published.project_package.0.clone(),
         summary: None,
@@ -590,12 +600,8 @@ fn serve(published: &Published, lineage: &ResearchLineage) -> Hub {
         format: DISCOVERY_FORMAT.into(),
         version: ProtocolVersion::CURRENT,
         repository,
-        default_ref: "main".into(),
-        refs: lineage
-            .branches
-            .iter()
-            .map(|branch| branch.ref_name.as_str())
-            .collect::<BTreeSet<_>>()
+        default_ref: default.into(),
+        refs: ref_names
             .into_iter()
             .map(|name| RepositoryRef {
                 name: name.into(),
@@ -1265,6 +1271,44 @@ fn clone_refuses_a_lineage_whose_label_differs_from_its_ref() {
     assert!(!destination.exists());
 }
 
+#[test]
+fn clone_installs_lineage_tags() {
+    let mut published = publish_history();
+    for (name, version) in [
+        ("release/v1", published.main_head),
+        ("feature/v0", published.feature_head),
+    ] {
+        let request = graphforge_api::SetResearchTagRequest {
+            operation_uuid: Uuid::now_v7(),
+            expected_generation_uuid: generation(&published.fork),
+            name: name.into(),
+            version_uuid: Some(version),
+        };
+        published
+            .fork
+            .set_research_tag(&request, &CancellationToken::new())
+            .unwrap();
+    }
+    let lineage = published
+        .fork
+        .build_research_lineage_for_discovery(
+            &lineage_request(&published),
+            &CancellationToken::new(),
+        )
+        .unwrap();
+    assert_eq!(lineage.tags.len(), 2);
+    let hub = serve(&published, &lineage);
+    let root = tempfile::tempdir().unwrap();
+    let destination = root.path().join("main");
+    clone_into(&hub, &destination, Some("main"), None).unwrap();
+    let cloned = GraphForge::new(destination.to_str()).unwrap();
+    // A tag installs with the Version it names; the feature Branch is not cloned.
+    assert_eq!(
+        cloned.research_version_retention().unwrap().tags,
+        BTreeMap::from([("release/v1".to_owned(), published.main_head)])
+    );
+}
+
 fn branchless_hub(
     package_digest: Sha256Digest,
     bytes: Vec<u8>,
@@ -1286,6 +1330,7 @@ fn branchless_hub(
         branches: vec![],
         versions: vec![],
         proposals: vec![],
+        tags: vec![],
         extensions: BTreeMap::new(),
     };
     let lineage_bytes = lineage.to_canonical_json().unwrap();

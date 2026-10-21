@@ -89,3 +89,22 @@ pub(super) fn select_branch(
     registry.current_branch = Some(branch_uuid);
     Ok(())
 }
+
+/// Install a tag served by a Hub. A local tag of the same name on another Version
+/// is a conflict the analyst resolves by deleting it.
+pub(super) fn install_served_tag(
+    registry: &mut ResearchRegistry,
+    name: &str,
+    target: Uuid,
+) -> Result<(), GfError> {
+    if registry
+        .tags
+        .get(name)
+        .is_some_and(|existing| *existing != target)
+    {
+        return Err(refused(
+            "GF_RESEARCH_TAG_CONFLICT: the Hub serves this tag on another Version than the local tag; delete the local tag and retry",
+        ));
+    }
+    set_tag(registry, name, Some(target))
+}
