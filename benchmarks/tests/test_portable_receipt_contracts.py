@@ -107,6 +107,19 @@ class LiveAssemblyContractTests(unittest.TestCase):
             source="progressive_profile",
         )
 
+    def test_exactly_the_three_current_ids_are_accepted(self) -> None:
+        current = contracts.CURRENT
+        document = {"contract": current.export, "child": [{"contract": current.import_}]}
+        self.assertEqual(contracts.stray_contracts(document, current), [])
+        self.assertEqual(
+            contracts.stray_contracts({"contract": current.verify}, current),
+            [],
+        )
+        self.assertEqual(
+            contracts.stray_contracts({"contract": " " + current.verify}, current),
+            [" " + current.verify],
+        )
+
     def test_all_current_receipts_assemble(self) -> None:
         self.assertEqual(self.assemble(*self.documents(verify="1"))["status"], "passed")
 
@@ -118,10 +131,16 @@ class LiveAssemblyContractTests(unittest.TestCase):
             "graphforge-portable-preview/1",
             "GRAPHFORGE-PORTABLE-VERIFY/1",
             "graphforge-portable-verify",
+            " graphforge-portable-verify/2",
+            "\tgraphforge-portable-verify/2",
+            "\ngraphforge-portable-verify/2",
+            "x-graphforge-portable-verify/1",
         ):
             with self.subTest(verify=verify):
                 graphforge, benchexec = self.documents(verify="1")
-                text = json.dumps(graphforge).replace("graphforge-portable-verify/1", verify)
+                text = json.dumps(graphforge).replace(
+                    "graphforge-portable-verify/1", json.dumps(verify)[1:-1]
+                )
                 graphforge = json.loads(text)
                 benchexec["graphforge"] = graphforge
                 with self.assertRaisesRegex(ControllerError, "are not the required"):

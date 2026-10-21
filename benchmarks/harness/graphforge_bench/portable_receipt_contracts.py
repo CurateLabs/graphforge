@@ -52,8 +52,8 @@ def contracts_for_commit(commit: str) -> PortableContracts:
 def stray_contracts(document: Any, expected: PortableContracts) -> list[str]:
     """Portable receipt contract values in `document` that are not exactly `expected`.
 
-    Any contract string that begins with the portable prefix (compared case-insensitively,
-    whatever follows it) is a portable receipt and must equal one of the allowed IDs.
+    Any contract string that contains the portable prefix anywhere (compared case-insensitively,
+    whatever surrounds it) is a portable receipt and must equal, as written, one of the allowed IDs.
     """
     allowed = {expected.export, expected.import_, expected.verify}
     found: list[str] = []
@@ -63,7 +63,7 @@ def stray_contracts(document: Any, expected: PortableContracts) -> list[str]:
             contract = value.get("contract")
             if (
                 isinstance(contract, str)
-                and contract.lower().startswith(_PORTABLE_PREFIX)
+                and _PORTABLE_PREFIX in contract.lower()
                 and contract not in allowed
             ):
                 found.append(contract)
