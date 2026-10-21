@@ -250,7 +250,7 @@
       ],
       "properties": {
         "contract": {
-          "const": "graphforge-portable-verify/2"
+          "const": "graphforge-portable-verify/1"
         },
         "format": {
           "const": "portable-project-v2-bundle"

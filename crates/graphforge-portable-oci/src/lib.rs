@@ -27,8 +27,8 @@ pub const OCI_LAYER_MEDIA_TYPE: &str = "application/vnd.graphforge.project.v2+ta
 /// OCI image manifest media type.
 pub const OCI_MANIFEST_MEDIA_TYPE: &str = "application/vnd.oci.image.manifest.v1+json";
 
-pub const CONFIG_CONTRACT: &str = "graphforge-portable-v2-oci-config/1";
-const SIGNATURE_CONTRACT: &str = "graphforge-portable-v2-oci-signature/1";
+pub const CONFIG_CONTRACT: &str = "graphforge-portable-oci-config/1";
+const SIGNATURE_CONTRACT: &str = "graphforge-portable-oci-signature/1";
 /// Artifact type for GraphForge OCI signature/provenance attachments.
 pub const OCI_SIGNATURE_ARTIFACT_TYPE: &str = "application/vnd.graphforge.project.v2.signature";
 /// Config media type for signature attachments.

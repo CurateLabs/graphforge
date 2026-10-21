@@ -297,7 +297,7 @@ pub fn build_manifest(inputs: ManifestInputs) -> Result<DiscoveryManifest, Deriv
         ontology: inputs.ontology,
         lineage: inputs.lineage,
         requirements: vec![ProtocolRequirement {
-            capability: "portable-v2".into(),
+            capability: "portable".into(),
             major: 1,
         }],
         capabilities: vec![],

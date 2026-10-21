@@ -764,7 +764,7 @@ mod lifecycle_storage_tests {
     #[test]
     fn portable_export_receipt_exposes_closed_writer_allocation() {
         let result = graphforge_api::PortableExportFacadeResult {
-            contract: "graphforge-portable-export/2",
+            contract: "graphforge-portable-export/1",
             source: "current",
             checkpoint: None,
             generation_uuid: Uuid::nil(),
@@ -934,7 +934,7 @@ pub(crate) fn run_import(
     if json {
         write_json(
             &serde_json::json!({
-                "contract": "graphforge-portable-import/2",
+                "contract": "graphforge-portable-import/1",
                 "application_io": crate::storage_attribution_cli::lifecycle_application_io()?,
                 "package_digest": result.package_digest,
                 "transport_digest": result.transport_digest,

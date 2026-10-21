@@ -286,7 +286,7 @@ impl Publication {
                 "package_digest": self.package_digest,
                 "object_digest": self.package_object().digest(),
             },
-            "requirements": [{"capability": "portable-v2", "major": 1}],
+            "requirements": [{"capability": "portable", "major": 1}],
             "capabilities": [{"capability": "range-requests", "major": 1}],
             "objects": self.objects.iter().map(|object| json!({
                 "digest": object.digest(),

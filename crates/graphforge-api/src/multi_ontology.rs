@@ -1443,7 +1443,7 @@ mod tests {
         const PAYLOAD_PATH: &str = "data/components/ontology/core-ontology/ontology.json";
         const BAGIT: &[u8] = b"BagIt-Version: 1.0\nTag-File-Character-Encoding: UTF-8\n";
         const BAG_INFO: &[u8] =
-            b"Bag-Software-Agent: GraphForge portable-v2\nBagging-Date: 1970-01-01\n";
+            b"Bag-Software-Agent: GraphForge portable\nBagging-Date: 1970-01-01\n";
 
         let root = tempfile::tempdir().unwrap();
         let mut manifest: serde_json::Value = serde_json::from_str(include_str!(

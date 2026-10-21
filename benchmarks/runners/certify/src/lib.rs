@@ -394,7 +394,7 @@ impl LifecycleStorageSession {
                 self.construction_peak_observed = true;
             }
             if receipt.get("contract").and_then(serde_json::Value::as_str)
-                == Some("graphforge-portable-import/2")
+                == Some("graphforge-portable-import/1")
             {
                 self.portable_import_peak_observed = true;
             }
@@ -1432,7 +1432,7 @@ fn sanitize_receipt(value: &serde_json::Value) -> Option<serde_json::Value> {
                 "equivalent",
             ],
         ),
-        Some("graphforge-portable-export/2") => copy_selected_receipt(
+        Some("graphforge-portable-export/1") => copy_selected_receipt(
             object,
             &[
                 "contract",
@@ -1460,7 +1460,7 @@ fn sanitize_receipt(value: &serde_json::Value) -> Option<serde_json::Value> {
                 .get("application_io")
                 .is_none_or(sanitized_lifecycle_application_io)
         }),
-        Some("graphforge-portable-import/2") => copy_selected_receipt(
+        Some("graphforge-portable-import/1") => copy_selected_receipt(
             object,
             &[
                 "contract",
@@ -1477,7 +1477,7 @@ fn sanitize_receipt(value: &serde_json::Value) -> Option<serde_json::Value> {
                     .get("application_io")
                     .is_none_or(sanitized_lifecycle_application_io)
         }),
-        Some(contract) if contract.starts_with("graphforge-portable-") => copy_selected_receipt(
+        Some("graphforge-portable-verify/1") => copy_selected_receipt(
             object,
             &[
                 "contract",
@@ -3128,9 +3128,30 @@ mod tests {
     }
 
     #[test]
+    fn portable_receipts_are_admitted_only_under_their_exact_current_contract() {
+        let verify = |contract: &str| {
+            sanitize_receipt(&serde_json::json!({
+                "contract": contract,
+                "package_digest": format!("sha256:{}", "0".repeat(64)),
+                "integrity": "verified",
+            }))
+        };
+        assert!(verify("graphforge-portable-verify/1").is_some());
+        for contract in [
+            "graphforge-portable-verify/2",
+            "graphforge-portable-export/2",
+            "graphforge-portable-import/2",
+            "graphforge-portable-preview/1",
+            "graphforge-portable-verify/10",
+        ] {
+            assert!(verify(contract).is_none(), "{contract} must not be admitted");
+        }
+    }
+
+    #[test]
     fn portable_export_receipt_preserves_only_writer_allocation_totals() {
         let receipt = serde_json::json!({
-            "contract": "graphforge-portable-export/2",
+            "contract": "graphforge-portable-export/1",
             "source": "current",
             "generation_uuid": "00000000-0000-4000-8000-000000000001",
             "output": "/secret/package.gfpb",
@@ -3970,7 +3991,7 @@ fi
         let executable = root.join("gf");
         fs::write(
             &executable,
-            "#!/bin/sh\nprintf '%s\\n' '{\"contract\":\"graphforge-portable-import/2\"}'\n",
+            "#!/bin/sh\nprintf '%s\\n' '{\"contract\":\"graphforge-portable-import/1\"}'\n",
         )
         .unwrap();
         let result = execute_process(

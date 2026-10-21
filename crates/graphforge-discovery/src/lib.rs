@@ -57,7 +57,7 @@ pub const PROJECT_SUMMARY_FORMAT: &str = "graphforge-project-summary/1";
 pub const PROJECT_SUMMARY_MEDIA_TYPE: &str = "application/vnd.graphforge.project-summary+json";
 /// Capability that a Project summary document may require, at major version 1.
 pub const PROJECT_SUMMARY_CAPABILITY: &str = "project-summary";
-const PORTABLE_CAPABILITY: &str = "portable-v2";
+const PORTABLE_CAPABILITY: &str = "portable";
 const PROJECT_SUMMARY_FORMAT_NAME: &str = "graphforge-project-summary";
 
 /// Explicit resource bounds for untrusted discovery responses.
@@ -1687,7 +1687,7 @@ mod tests {
                 object_digest: digest('c'),
             },
             requirements: vec![ProtocolRequirement {
-                capability: "portable-v2".to_owned(),
+                capability: "portable".to_owned(),
                 major: 1,
             }],
             capabilities: vec![ProtocolCapability {
