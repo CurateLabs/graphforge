@@ -396,3 +396,245 @@ fn a_changed_byte_after_a_refused_version_is_reported_first_on_every_path() {
     );
     assert_eq!(std::fs::read_dir(scratch.path()).unwrap().count(), 0);
 }
+
+/// One tar member of a canonical bundle: its header run, path and payload.
+struct Member {
+    run: Vec<u8>,
+    path: String,
+    payload: Vec<u8>,
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn members(bundle: &[u8]) -> Vec<Member> {
+    let mut members = Vec::new();
+    let mut at = 0;
+    let mut pax = Vec::new();
+    while bundle[at..at + 512].iter().any(|byte| *byte != 0) {
+        let header = &bundle[at..at + 512];
+        let size = usize::from_str_radix(
+            std::str::from_utf8(&header[124..136])
+                .unwrap()
+                .trim_matches(['\0', ' ']),
+            8,
+        )
+        .unwrap();
+        let end = at + 512 + size.div_ceil(512) * 512;
+        if header[156] == b'x' {
+            pax.extend_from_slice(&bundle[at..end]);
+        } else {
+            let field = |range: std::ops::Range<usize>| {
+                std::str::from_utf8(&header[range])
+                    .unwrap()
+                    .trim_end_matches('\0')
+                    .to_owned()
+            };
+            let (name, prefix) = (field(0..100), field(345..500));
+            let path = if prefix.is_empty() {
+                name
+            } else {
+                format!("{prefix}/{name}")
+            };
+            let mut run = std::mem::take(&mut pax);
+            run.extend_from_slice(header);
+            members.push(Member {
+                run,
+                path,
+                payload: bundle[at + 512..at + 512 + size].to_vec(),
+            });
+        }
+        at = end;
+    }
+    members
+}
+
+fn bundle_bytes(members: &[Member]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for member in members {
+        let mut run = member.run.clone();
+        let header = run.len() - 512;
+        let header = &mut run[header..];
+        header[124..136].copy_from_slice(format!("{:011o}\0", member.payload.len()).as_bytes());
+        header[148..156].fill(b' ');
+        let sum: u64 = header.iter().map(|byte| u64::from(*byte)).sum();
+        header[148..156].copy_from_slice(format!("{sum:06o}\0 ").as_bytes());
+        out.extend(run);
+        out.extend(&member.payload);
+        out.resize(out.len().div_ceil(512) * 512, 0);
+    }
+    out.extend([0_u8; 1024]);
+    out
+}
+
+/// The first staged core object of the bundle that is a Parquet file is
+/// replaced by `replacement` under its own content address, and every digest
+/// that covers it in the package is recomputed: the manifest's file record,
+/// the package digest, the payload inventory and the tag manifest. Returns the
+/// new bundle and the replaced object's new path.
+fn with_core_parquet_replaced(bundle: &[u8], replacement: &[u8]) -> (Vec<u8>, String) {
+    const MANIFEST: &str = "data/graphforge-project.json";
+    let mut members = members(bundle);
+    let target = members
+        .iter()
+        .position(|member| {
+            member.path.contains("/research-retained/") && member.payload.ends_with(b"PAR1")
+        })
+        .expect("a staged core Parquet object");
+    let old = members[target].path.clone();
+    let directory = old.rsplit_once('/').unwrap().0.to_owned();
+    let new = format!("{directory}/{}", sha256_hex(replacement));
+    {
+        let member = &mut members[target];
+        let header = member.run.len() - 512;
+        let header = &mut member.run[header..];
+        header[..100].fill(0);
+        let name = new.rsplit_once('/').unwrap().1;
+        header[..name.len()].copy_from_slice(name.as_bytes());
+        member.path = new.clone();
+        member.payload = replacement.to_vec();
+    }
+    members.sort_by(|a, b| a.path.as_bytes().cmp(b.path.as_bytes()));
+    let digest = |members: &[Member], path: &str| -> (String, usize) {
+        let member = members.iter().find(|member| member.path == path).unwrap();
+        (sha256_hex(&member.payload), member.payload.len())
+    };
+    let (new_digest, new_length) = digest(&members, &new);
+    for member in &mut members {
+        if member.path != MANIFEST {
+            continue;
+        }
+        let mut manifest: serde_json::Value = serde_json::from_slice(&member.payload).unwrap();
+        for component in manifest["components"].as_array_mut().unwrap() {
+            let files = component["files"].as_array_mut().unwrap();
+            for file in files.iter_mut() {
+                if file["path"] == old.as_str() {
+                    file["path"] = new.clone().into();
+                    file["sha256"] = new_digest.clone().into();
+                    file["length"] = new_length.into();
+                }
+            }
+            files.sort_by(|a, b| {
+                a["path"]
+                    .as_str()
+                    .unwrap()
+                    .as_bytes()
+                    .cmp(b["path"].as_str().unwrap().as_bytes())
+            });
+        }
+        manifest.as_object_mut().unwrap().remove("package_digest");
+        let canonical = serde_json::to_vec(&manifest).unwrap();
+        let package = sha256_hex(&[b"graphforge-project/2\0".as_slice(), &canonical].concat());
+        manifest["package_digest"] = format!("sha256:{package}").into();
+        member.payload = serde_json::to_vec(&manifest).unwrap();
+    }
+    let manifest_digest = digest(&members, MANIFEST).0;
+    for member in &mut members {
+        if member.path == "manifest-sha256.txt" {
+            let mut rows: Vec<(String, String)> = std::str::from_utf8(&member.payload)
+                .unwrap()
+                .lines()
+                .map(|line| {
+                    let (hash, path) = line.split_once("  ").unwrap();
+                    match path {
+                        p if p == old => (new.clone(), new_digest.clone()),
+                        MANIFEST => (path.to_owned(), manifest_digest.clone()),
+                        _ => (path.to_owned(), hash.to_owned()),
+                    }
+                })
+                .collect();
+            rows.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
+            member.payload = rows
+                .iter()
+                .map(|(path, hash)| format!("{hash}  {path}\n"))
+                .collect::<String>()
+                .into_bytes();
+        }
+    }
+    let inventory_digest = digest(&members, "manifest-sha256.txt").0;
+    for member in &mut members {
+        if member.path == "tagmanifest-sha256.txt" {
+            member.payload = std::str::from_utf8(&member.payload)
+                .unwrap()
+                .lines()
+                .map(|line| {
+                    let (hash, path) = line.split_once("  ").unwrap();
+                    let hash = if path == "manifest-sha256.txt" {
+                        &inventory_digest
+                    } else {
+                        hash
+                    };
+                    format!("{hash}  {path}\n")
+                })
+                .collect::<String>()
+                .into_bytes();
+        }
+    }
+    (bundle_bytes(&members), new)
+}
+
+/// A staged research core object with an unfunded Parquet encoding is refused
+/// by the page profile before any native owner runs, from a bundle file, an
+/// expanded directory and a stream. The object is staged and walked from its
+/// staged copy, so nothing but that walk catches it.
+#[test]
+fn a_core_parquet_object_with_an_unfunded_encoding_is_refused_on_every_path() {
+    let directory = tempfile::tempdir().unwrap();
+    let (_, bytes) = bundle(directory.path());
+    let (hostile, path) = with_core_parquet_replaced(
+        &bytes,
+        &crate::research_interchange::stream_parity::unfunded_parquet(),
+    );
+    let limits = PortableLimits::default();
+    let scratch = tempfile::tempdir().unwrap();
+    let bundle_path = directory.path().join("hostile.gfpb");
+    std::fs::write(&bundle_path, &hostile).unwrap();
+    let expanded = directory.path().join("hostile");
+    for member in members(&hostile) {
+        let target = expanded.join(&member.path);
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(target, &member.payload).unwrap();
+    }
+    let mut native_runs = 0;
+    let mut validate = |generation: &graphforge_storage::ResolvedProjectGeneration,
+                        version: &ResearchVersionRecord,
+                        registry: &ResearchRegistry| {
+        native_runs += 1;
+        crate::research_interchange::validation::validate(generation, version, registry)
+    };
+    let outcomes = [
+        graphforge_storage::validate_research_package(
+            &bundle_path,
+            Some(scratch.path()),
+            limits,
+            None,
+            &mut validate,
+        ),
+        graphforge_storage::validate_research_package(
+            &expanded,
+            Some(scratch.path()),
+            limits,
+            None,
+            &mut validate,
+        ),
+        graphforge_storage::validate_research_package_stream(
+            &mut std::io::Cursor::new(&hostile),
+            Some(scratch.path()),
+            limits,
+            None,
+            &mut validate,
+        ),
+    ];
+    for outcome in outcomes {
+        let error = outcome.unwrap_err();
+        assert_eq!(error.code, PortableErrorCode::LimitExceeded, "{error:?}");
+        assert_eq!(error.entry.as_deref(), Some(path.as_str()));
+    }
+    assert_eq!(native_runs, 0, "refused before any native owner ran");
+    assert_eq!(std::fs::read_dir(scratch.path()).unwrap().count(), 0);
+}

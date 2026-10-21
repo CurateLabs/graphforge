@@ -427,44 +427,13 @@ fn local_evidence_is_authenticated_in_the_stream_and_never_staged() {
     }
 }
 
-/// A Parquet file whose pages use an encoding outside the funded decoder profile.
-fn unfunded_parquet() -> Vec<u8> {
-    use arrow::array::{ArrayRef, RecordBatch, StringArray};
-    use arrow::datatypes::{Field, Schema};
-    use parquet::{
-        arrow::ArrowWriter,
-        basic::{Compression, Encoding},
-        file::properties::{WriterProperties, WriterVersion},
-    };
-    let values: ArrayRef = std::sync::Arc::new(StringArray::from_iter_values(
-        (0..64).map(|row| format!("value-{row}")),
-    ));
-    let schema = std::sync::Arc::new(Schema::new(vec![Field::new(
-        "value",
-        values.data_type().clone(),
-        false,
-    )]));
-    let batch = RecordBatch::try_new(schema.clone(), vec![values]).unwrap();
-    let properties = WriterProperties::builder()
-        .set_writer_version(WriterVersion::PARQUET_1_0)
-        .set_compression(Compression::UNCOMPRESSED)
-        .set_dictionary_enabled(false)
-        .set_encoding(Encoding::DELTA_BYTE_ARRAY)
-        .build();
-    let mut output = Vec::new();
-    let mut writer = ArrowWriter::try_new(&mut output, schema, Some(properties)).unwrap();
-    writer.write(&batch).unwrap();
-    writer.close().unwrap();
-    output
-}
-
 /// Evidence bytes reach no decoder, so an evidence-only Parquet file with an
 /// unfunded encoding verifies alike from a file and a stream.
 #[test]
 fn evidence_only_parquet_with_an_unfunded_encoding_is_never_decoded() {
     use graphforge_core::portable::{PortableLimits, PortableMode};
     let owner = tempfile::tempdir().unwrap();
-    let blob = unfunded_parquet();
+    let blob = super::stream_parity::unfunded_parquet();
     let (package, bytes) = evidence_bundle(owner.path(), |_| blob.clone());
     let limits = PortableLimits::default();
     let file = crate::verify_portable(
