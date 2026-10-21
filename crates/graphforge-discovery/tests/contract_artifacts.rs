@@ -1347,10 +1347,13 @@ fn summary_cases() -> Vec<Case> {
             "malformed_response",
             Some("facts.bytes_by_kind"),
             |v| {
+                // The omitted kind's bytes move to package control, so the
+                // totals still sum to the payload.
                 v["facts"]["bytes_by_kind"]
                     .as_object_mut()
                     .unwrap()
                     .remove("research");
+                v["facts"]["bytes_by_kind"]["package-control"] = json!(2560);
             },
         ),
         (
@@ -1358,7 +1361,10 @@ fn summary_cases() -> Vec<Case> {
             Document::Summary,
             "malformed_response",
             Some("facts.bytes_by_kind"),
-            |v| v["facts"]["bytes_by_kind"]["migration"] = json!(16),
+            |v| {
+                v["facts"]["bytes_by_kind"]["migration"] = json!(16);
+                v["facts"]["bytes_by_kind"]["package-control"] = json!(2032);
+            },
         ),
         (
             "summary-byte-totals-do-not-sum-to-the-payload",
@@ -1372,7 +1378,10 @@ fn summary_cases() -> Vec<Case> {
             Document::Summary,
             "malformed_response",
             Some("facts.bytes_by_kind"),
-            |v| v["facts"]["bytes_by_kind"]["mystery"] = json!(16),
+            |v| {
+                v["facts"]["bytes_by_kind"]["mystery"] = json!(16);
+                v["facts"]["bytes_by_kind"]["package-control"] = json!(2032);
+            },
         ),
         (
             "summary-unknown-ontology-mode",
