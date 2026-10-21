@@ -1,19 +1,17 @@
 {
   "full": {
-    "research_interchange": false,
-    "research_entries": [],
-    "contract": "graphforge-portable-verify/2",
+    "contract": "graphforge-portable-verify/1",
     "representation": "bundle",
     "source": "file",
     "package_digest": "sha256:78b7bc473e6b009a155f596a0de75d81e833594508abe64a38af6c87d51a1c24",
     "package_class": "complete",
     "component_count": 7,
     "entry_count": 12,
-    "payload_bytes": 10159,
+    "payload_bytes": 10156,
     "integrity": "verified",
     "compatibility": "supported",
     "authenticity": "unsigned",
-    "transport_digest": "sha256:74a367ece6dc7a5bb28b2e8c783e6d067a4d3342d147e020846b055c7a22ff70",
+    "transport_digest": "sha256:4cd671abaa9b0db93c5dbb9dc2ce019ec23d045e745215d5c231b68f3c60e2bf",
     "ontology_composition": {
       "contract": "graphforge-ontology-composition/1",
       "activation_profile": {
@@ -51,23 +49,23 @@
         "sha256": "7d0c5018d4bd4abca09e268900412020317100af4ecdc11f81ad29b0296d6a94",
         "required_dependencies": []
       }
-    ]
+    ],
+    "research_interchange": false,
+    "research_entries": []
   },
   "structure_only": {
-    "research_interchange": false,
-    "research_entries": [],
-    "contract": "graphforge-portable-verify/2",
+    "contract": "graphforge-portable-verify/1",
     "representation": "bundle",
     "source": "file",
     "package_digest": "sha256:78b7bc473e6b009a155f596a0de75d81e833594508abe64a38af6c87d51a1c24",
     "package_class": "complete",
     "component_count": 7,
     "entry_count": 12,
-    "payload_bytes": 10159,
+    "payload_bytes": 10156,
     "integrity": "not_checked",
     "compatibility": "supported",
     "authenticity": "unsigned",
-    "transport_digest": "sha256:74a367ece6dc7a5bb28b2e8c783e6d067a4d3342d147e020846b055c7a22ff70",
+    "transport_digest": "sha256:4cd671abaa9b0db93c5dbb9dc2ce019ec23d045e745215d5c231b68f3c60e2bf",
     "ontology_composition": {
       "contract": "graphforge-ontology-composition/1",
       "activation_profile": {
@@ -105,6 +103,8 @@
         "sha256": "7d0c5018d4bd4abca09e268900412020317100af4ecdc11f81ad29b0296d6a94",
         "required_dependencies": []
       }
-    ]
+    ],
+    "research_interchange": false,
+    "research_entries": []
   }
 }
