@@ -169,6 +169,9 @@ pub struct PortableReport {
     pub source: PortableSource,
     pub package_digest: String,
     pub package_class: PortablePackageClass,
+    /// Exact GraphForge Core version that produced the package, as declared by
+    /// its authenticated manifest.
+    pub producing_core_version: String,
     pub component_count: u64,
     pub entry_count: u64,
     pub payload_bytes: u64,

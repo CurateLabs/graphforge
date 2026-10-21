@@ -303,8 +303,11 @@ pub(crate) fn run_portable_without_graph(
             } else {
                 writeln!(
                     output,
-                    "verified package_digest={} integrity={:?} compatibility={:?}",
-                    report.package_digest, report.integrity, report.compatibility
+                    "verified package_digest={} producing_core_version={} integrity={:?} compatibility={:?}",
+                    report.package_digest,
+                    report.producing_core_version,
+                    report.integrity,
+                    report.compatibility
                 )
                 .map_err(|error| graphforge_api::GfError::Execution(error.to_string()))?;
             }

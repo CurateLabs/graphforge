@@ -116,6 +116,7 @@ export function canonicalVerification(report) {
     source: report.source,
     package_digest: report.packageDigest,
     package_class: report.packageClass.replaceAll("_", "-"),
+    producing_core_version: report.producingCoreVersion,
     component_count: exactNumber(report.componentCount),
     entry_count: exactNumber(report.entryCount),
     payload_bytes: exactNumber(report.payloadBytes),
