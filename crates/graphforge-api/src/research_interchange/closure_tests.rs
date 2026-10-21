@@ -462,56 +462,6 @@ fn evidence_only_parquet_with_an_unfunded_encoding_is_never_decoded() {
     assert_eq!(stream.package_digest, file.package_digest);
 }
 
-/// Bytes allocated under `scratch` right now: named files, and the unnamed
-/// files this process holds open there (which no directory listing shows).
-#[cfg(target_os = "linux")]
-fn allocated_under(scratch: &std::path::Path) -> u64 {
-    use std::os::unix::fs::MetadataExt;
-    let mut total = 0;
-    let mut pending = vec![scratch.to_path_buf()];
-    while let Some(directory) = pending.pop() {
-        for entry in std::fs::read_dir(&directory)
-            .into_iter()
-            .flatten()
-            .flatten()
-        {
-            let Ok(metadata) = entry.metadata() else {
-                continue;
-            };
-            if metadata.is_dir() {
-                pending.push(entry.path());
-            } else {
-                total += metadata.blocks() * 512;
-            }
-        }
-    }
-    let prefix = scratch.to_string_lossy().into_owned();
-    for descriptor in std::fs::read_dir("/proc/self/fd").unwrap().flatten() {
-        let Ok(target) = std::fs::read_link(descriptor.path()) else {
-            continue;
-        };
-        let target = target.to_string_lossy();
-        if target.starts_with(&prefix) && target.ends_with("(deleted)") {
-            if let Ok(metadata) = std::fs::metadata(descriptor.path()) {
-                total += metadata.blocks() * 512;
-            }
-        }
-    }
-    total
-}
-
-/// Reads in small steps with a pause, so a sampling thread sees the transient
-/// scratch an entry causes while it streams past.
-struct Paced<R>(R);
-
-impl<R: std::io::Read> std::io::Read for Paced<R> {
-    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
-        std::thread::sleep(std::time::Duration::from_micros(500));
-        let step = buffer.len().min(64 * 1024);
-        self.0.read(&mut buffer[..step])
-    }
-}
-
 /// The page walk keeps a copy of a streamed entry that exceeds its in-memory
 /// threshold, in an unnamed file. Evidence bytes reach no decoder, so no copy of
 /// them is kept anywhere: allocated scratch stays below the evidence size.
@@ -527,9 +477,9 @@ fn a_streamed_evidence_blob_is_not_copied_into_scratch() {
     {
         let mut probe = tempfile::tempfile_in(scratch.path()).unwrap();
         std::io::Write::write_all(&mut probe, &vec![1_u8; 1024 * 1024]).unwrap();
-        assert!(allocated_under(scratch.path()) >= 1024 * 1024);
+        assert!(super::stream_parity::allocated_under(scratch.path()) >= 1024 * 1024);
     }
-    assert_eq!(allocated_under(scratch.path()), 0);
+    assert_eq!(super::stream_parity::allocated_under(scratch.path()), 0);
     let limits = PortableLimits {
         max_parquet_walk_bytes: 1024 * 1024,
         ..PortableLimits::default()
@@ -539,12 +489,12 @@ fn a_streamed_evidence_blob_is_not_copied_into_scratch() {
         let sampler = scope.spawn(|| {
             let mut peak = 0;
             while !done.load(std::sync::atomic::Ordering::Acquire) {
-                peak = peak.max(allocated_under(scratch.path()));
+                peak = peak.max(super::stream_parity::allocated_under(scratch.path()));
             }
             peak
         });
         crate::verify_portable_stream(
-            &mut Paced(std::io::Cursor::new(&bytes)),
+            &mut super::stream_parity::Paced(std::io::Cursor::new(&bytes)),
             Some(scratch.path()),
             limits,
             None,

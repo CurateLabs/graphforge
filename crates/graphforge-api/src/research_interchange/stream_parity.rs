@@ -93,3 +93,53 @@ pub(crate) fn unfunded_parquet() -> Vec<u8> {
     writer.close().unwrap();
     output
 }
+
+/// Bytes allocated under `scratch` right now: named files, and the unnamed
+/// files this process holds open there (which no directory listing shows).
+#[cfg(target_os = "linux")]
+pub(crate) fn allocated_under(scratch: &std::path::Path) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    let mut total = 0;
+    let mut pending = vec![scratch.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(&directory)
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
+            let Ok(metadata) = entry.metadata() else {
+                continue;
+            };
+            if metadata.is_dir() {
+                pending.push(entry.path());
+            } else {
+                total += metadata.blocks() * 512;
+            }
+        }
+    }
+    let prefix = scratch.to_string_lossy().into_owned();
+    for descriptor in std::fs::read_dir("/proc/self/fd").unwrap().flatten() {
+        let Ok(target) = std::fs::read_link(descriptor.path()) else {
+            continue;
+        };
+        let target = target.to_string_lossy();
+        if target.starts_with(&prefix) && target.ends_with("(deleted)") {
+            if let Ok(metadata) = std::fs::metadata(descriptor.path()) {
+                total += metadata.blocks() * 512;
+            }
+        }
+    }
+    total
+}
+
+/// Reads in small steps with a pause, so a sampling thread sees the transient
+/// scratch an entry causes while it streams past.
+pub(crate) struct Paced<R>(pub(crate) R);
+
+impl<R: std::io::Read> std::io::Read for Paced<R> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        std::thread::sleep(std::time::Duration::from_micros(500));
+        let step = buffer.len().min(64 * 1024);
+        self.0.read(&mut buffer[..step])
+    }
+}

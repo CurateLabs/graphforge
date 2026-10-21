@@ -300,9 +300,10 @@ pub(super) trait EntrySink {
     fn validates_research(&self) -> bool {
         false
     }
-    /// True when the sink keeps a copy of each entry it opens and walks that
-    /// copy for the Parquet page profile itself, so the scan need not keep one.
-    fn walks_staged(&self) -> bool {
+    /// True when the sink answers for the Parquet page profile of this entry
+    /// itself (it walks its staged copy, or the entry's Version was refused), so
+    /// the scan keeps no copy of it for the walk.
+    fn owns_profile(&self, _relative: &str) -> bool {
         false
     }
 }

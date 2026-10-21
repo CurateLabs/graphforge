@@ -129,11 +129,19 @@ impl<'a, 'v> Driver<'a, 'v> {
             error.code,
             PortableErrorCode::Incompatible | PortableErrorCode::LimitExceeded
         ) {
-            self.refusal.get_or_insert(error);
+            self.refuse(error);
             Ok(())
         } else {
             Err(error)
         }
+    }
+
+    /// The first refused Version, in scan order, answers for the package unless
+    /// authentication fails. Its stage is reclaimed now, and nothing more is
+    /// staged, spilled or validated: later entries are only hashed.
+    fn refuse(&mut self, error: PortableError) {
+        self.refusal.get_or_insert(error);
+        self.current = None;
     }
 
     fn validate_stage(&mut self, stage: &VersionStage) -> Result<(), PortableError> {
@@ -299,7 +307,7 @@ pub(crate) fn scan_stream(
     let (report, entries) =
         finish_bundle(scan, PortableMode::Full, limits, PortableSource::Stream)?;
     authenticated_entries::validate_semantics(
-        Reopen::Driven,
+        Reopen::Driven(None),
         &entries,
         &report,
         limits,
@@ -338,8 +346,8 @@ impl EntrySink for Driver<'_, '_> {
         true
     }
 
-    fn walks_staged(&self) -> bool {
-        true
+    fn owns_profile(&self, relative: &str) -> bool {
+        matches!(Self::slot(relative), Slot::Retained(..))
     }
 
     fn open(&mut self, relative: &str, length: u64) -> Result<Option<File>, PortableError> {
@@ -418,10 +426,24 @@ impl EntrySink for Driver<'_, '_> {
                 stage.staged.insert((id, hex.clone()), held);
                 // The scan does not spill a second copy for the page walk: the
                 // staged copy is the one walked, like a file's entry in place.
-                if let Some(dir) = stage.sink.staged() {
-                    walk_staged(&dir.join(relative), length, relative)?;
+                let profile = stage.sink.staged().map_or(Ok(()), |dir| {
+                    walk_staged(&dir.join(relative), length, relative)
+                });
+                self.record(id, hex, held)?;
+                match profile {
+                    Ok(()) => Ok(()),
+                    // A refusal of the profile is a refusal of this Version.
+                    Err(refusal)
+                        if matches!(
+                            refusal.code,
+                            PortableErrorCode::LimitExceeded | PortableErrorCode::InvalidStructure
+                        ) =>
+                    {
+                        self.refuse(refusal);
+                        Ok(())
+                    }
+                    Err(failure) => Err(failure),
                 }
-                self.record(id, hex, held)
             }
             Slot::Evidence(..) | Slot::Other => Ok(()),
         }

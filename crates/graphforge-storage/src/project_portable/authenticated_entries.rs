@@ -24,8 +24,9 @@ pub(super) enum Reopen<'a> {
     /// Verification never uses this.
     Indexed(&'a Path),
     /// Research files were validated per Version while they streamed past and
-    /// none is read back.
-    Driven,
+    /// none is read back. Other controls the scan did not retain are read from
+    /// the expanded package's root, when it has one.
+    Driven(Option<&'a Path>),
 }
 
 /// Authentication for untrusted bytes, or corruption refusal against evidence
@@ -103,7 +104,7 @@ pub(super) fn validate_semantics(
         }
         Ok(value)
     })?;
-    if !matches!(source, Reopen::Driven) {
+    if !matches!(source, Reopen::Driven(_)) {
         research::validate_with_reader(report, limits, cancelled, |path, bound| {
             read(source, entries, path, bound, cancelled)
         })?;
@@ -212,14 +213,15 @@ fn locate(source: Reopen<'_>, path: &str) -> Result<std::path::PathBuf, Portable
         Reopen::Indexed(bundle) => bundle.to_path_buf(),
         Reopen::BundleFile(bundle) if path.starts_with(research::NAMESPACE) => bundle.to_path_buf(),
         Reopen::Bundle(Some(stage)) if path.starts_with(research::NAMESPACE) => stage.join(path),
-        Reopen::Bundle(None) | Reopen::Driven if path.starts_with(research::NAMESPACE) => {
+        Reopen::Driven(Some(root)) if !path.starts_with(research::NAMESPACE) => root.join(path),
+        Reopen::Bundle(None) | Reopen::Driven(_) if path.starts_with(research::NAMESPACE) => {
             return Err(PortableError::at(
                 PortableErrorCode::Io,
                 path,
                 "research file was not staged",
             ));
         }
-        Reopen::Bundle(_) | Reopen::BundleFile(_) | Reopen::Driven => {
+        Reopen::Bundle(_) | Reopen::BundleFile(_) | Reopen::Driven(_) => {
             return Err(PortableError::at(
                 PortableErrorCode::LimitExceeded,
                 path,
@@ -412,17 +414,24 @@ pub(super) fn refuse_profile(
 ///
 /// An entry is Parquet when it ends in the `PAR1` footer magic, which is all the
 /// Parquet reader requires; paths and declared encodings are not trusted.
+///
+/// `driven` is true when the research driver answers for the staged research
+/// objects (it walked each as it was staged, and a refused Version's remaining
+/// objects are never decoded): they are skipped here so one rule orders their
+/// refusal against the rest of the scan.
 pub(super) fn validate_parquet_profile(
     source: &Path,
     entries: &[Entry],
+    driven: bool,
     cancelled: Option<&AtomicBool>,
 ) -> Result<(), PortableError> {
     use crate::parquet_encoding_profile::admit_pages;
 
-    for entry in entries
-        .iter()
-        .filter(|entry| reaches_a_decoder(&entry.path) && entry.length >= 12)
-    {
+    for entry in entries.iter().filter(|entry| {
+        reaches_a_decoder(&entry.path)
+            && entry.length >= 12
+            && !(driven && research::is_staged_object(&entry.path))
+    }) {
         check_cancel(cancelled)?;
         if let Some(bytes) = &entry.bytes {
             if bytes.ends_with(b"PAR1") {

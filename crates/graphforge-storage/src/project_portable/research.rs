@@ -20,10 +20,40 @@ const RETAINED: &str = "data/components/research/research-retained/";
 /// (`-` < `/`), so the registry is still the first research entry.
 const EVIDENCE: &str = "data/components/research/research-retained-evidence/";
 
-/// True for a path whose bytes only evidence needs. No decoder reads them, so
-/// nothing walks their Parquet pages.
+/// True for a path whose bytes only evidence needs: exactly
+/// `research-retained-evidence/<version-uuid>/<sha256>`. No decoder reads them,
+/// so nothing walks their Parquet pages.
 pub(super) fn is_evidence_only(path: &str) -> bool {
-    path.starts_with(EVIDENCE)
+    matches!(object_key(path), Some((_, _, true)))
+}
+
+/// True for a path of a research object a reader stages
+/// (`research-retained/<version-uuid>/<sha256>`).
+pub(super) fn is_staged_object(path: &str) -> bool {
+    matches!(object_key(path), Some((_, _, false)))
+}
+
+/// Nothing but a canonical evidence object may sit below
+/// `research-retained-evidence/`: a file there is exempt from the page profile,
+/// so any other would reach a decoder unwalked.
+pub(super) fn check_reserved_path(path: &str) -> Result<(), PortableError> {
+    if path.starts_with(EVIDENCE) && !is_evidence_only(path) {
+        return Err(PortableError::at(
+            PortableErrorCode::InvalidStructure,
+            path,
+            "research evidence directory holds only canonical evidence objects",
+        ));
+    }
+    Ok(())
+}
+
+/// Directory names below `data/components/research/` that research objects own;
+/// no component may take one as its participant identity.
+pub(super) fn is_reserved_directory(participant_id: &str) -> bool {
+    matches!(
+        participant_id,
+        "research-retained" | "research-retained-evidence"
+    )
 }
 
 /// One retained object of a Version.
@@ -52,7 +82,11 @@ fn object_key(path: &str) -> Option<(Uuid, String, bool)> {
         .find_map(|(prefix, evidence_only)| {
             let (version, digest) = path.strip_prefix(prefix)?.split_once('/')?;
             let version: Uuid = version.parse().ok()?;
-            (object_path(&version, digest, evidence_only) == path)
+            let sha256 = digest.len() == 64
+                && digest
+                    .bytes()
+                    .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+            (sha256 && object_path(&version, digest, evidence_only) == path)
                 .then(|| (version, digest.to_owned(), evidence_only))
         })
 }

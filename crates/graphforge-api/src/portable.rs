@@ -220,6 +220,19 @@ pub fn verify_portable(
     request: &PortableVerifyRequest,
     cancelled: Option<&AtomicBool>,
 ) -> Result<PortableVerifyResult, graphforge_core::portable::PortableError> {
+    // A full verification is one scan: the research driver authenticates every
+    // entry and validates each Version as the scan reaches it, so a bundle file,
+    // an expanded directory and a stream rank their refusals the same way.
+    #[cfg(feature = "research")]
+    if request.mode == graphforge_core::portable::PortableMode::Full {
+        return graphforge_storage::validate_research_package(
+            &request.input,
+            None,
+            request.limits,
+            cancelled,
+            &mut crate::research_interchange::validation::validate,
+        );
+    }
     let report = graphforge_storage::verify_portable(
         &request.input,
         request.mode,

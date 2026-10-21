@@ -472,32 +472,39 @@ fn bundle_bytes(members: &[Member]) -> Vec<u8> {
     out
 }
 
-/// The first staged core object of the bundle that is a Parquet file is
-/// replaced by `replacement` under its own content address, and every digest
-/// that covers it in the package is recomputed: the manifest's file record,
-/// the package digest, the payload inventory and the tag manifest. Returns the
-/// new bundle and the replaced object's new path.
-fn with_core_parquet_replaced(bundle: &[u8], replacement: &[u8]) -> (Vec<u8>, String) {
+/// One member of the bundle moves to `new_path` (and takes `replacement` as its
+/// payload, if given), and every digest that covers it in the package is
+/// recomputed: the manifest's file record, the package digest, the payload
+/// inventory and the tag manifest. Returns the new bundle and the member's new
+/// path. The semantic chain that refers to the member (participants, registry)
+/// is left alone: the tests that use this are refused before it is read.
+fn with_member_moved(
+    bundle: &[u8],
+    select: impl Fn(&Member) -> bool,
+    new_path: impl FnOnce(&str, &[u8]) -> String,
+    replacement: Option<&[u8]>,
+) -> (Vec<u8>, String) {
     const MANIFEST: &str = "data/graphforge-project.json";
     let mut members = members(bundle);
-    let target = members
-        .iter()
-        .position(|member| {
-            member.path.contains("/research-retained/") && member.payload.ends_with(b"PAR1")
-        })
-        .expect("a staged core Parquet object");
+    let target = members.iter().position(select).expect("a member to move");
     let old = members[target].path.clone();
-    let directory = old.rsplit_once('/').unwrap().0.to_owned();
-    let new = format!("{directory}/{}", sha256_hex(replacement));
+    let payload = replacement.map_or_else(|| members[target].payload.clone(), <[u8]>::to_vec);
+    let new = new_path(&old, &payload);
     {
         let member = &mut members[target];
         let header = member.run.len() - 512;
         let header = &mut member.run[header..];
+        let (prefix, name) = new.rsplit_once('/').unwrap();
+        assert!(
+            name.len() <= 100 && prefix.len() <= 155,
+            "{new} needs a PAX header"
+        );
         header[..100].fill(0);
-        let name = new.rsplit_once('/').unwrap().1;
+        header[345..500].fill(0);
         header[..name.len()].copy_from_slice(name.as_bytes());
+        header[345..345 + prefix.len()].copy_from_slice(prefix.as_bytes());
         member.path = new.clone();
-        member.payload = replacement.to_vec();
+        member.payload = payload;
     }
     members.sort_by(|a, b| a.path.as_bytes().cmp(b.path.as_bytes()));
     let digest = |members: &[Member], path: &str| -> (String, usize) {
@@ -578,6 +585,117 @@ fn with_core_parquet_replaced(bundle: &[u8], replacement: &[u8]) -> (Vec<u8>, St
     (bundle_bytes(&members), new)
 }
 
+/// The Versions of a research bundle, in order.
+fn bundle_versions(bundle: &[u8]) -> Vec<String> {
+    let mut versions: Vec<String> = members(bundle)
+        .iter()
+        .filter_map(|member| {
+            member
+                .path
+                .split("/research-retained/")
+                .nth(1)?
+                .split('/')
+                .next()
+                .map(str::to_owned)
+        })
+        .collect();
+    versions.dedup();
+    versions
+}
+
+/// The first staged core Parquet object of Version number `version` is replaced
+/// by `replacement` under its own content address.
+fn with_core_parquet_replaced(
+    bundle: &[u8],
+    replacement: &[u8],
+    version: usize,
+) -> (Vec<u8>, String) {
+    let directory = format!("/research-retained/{}/", bundle_versions(bundle)[version]);
+    with_member_moved(
+        bundle,
+        |member| member.path.contains(&directory) && member.payload.ends_with(b"PAR1"),
+        |old, payload| {
+            format!(
+                "{}/{}",
+                old.rsplit_once('/').unwrap().0,
+                sha256_hex(payload)
+            )
+        },
+        Some(replacement),
+    )
+}
+
+/// Run the research validation on a bundle file, an expanded directory and a
+/// stream of the same bytes. `refused` names a Version whose native owner
+/// refuses; the count is how many Versions reached a native owner.
+fn on_every_path(
+    directory: &Path,
+    scratch: &Path,
+    name: &str,
+    bytes: &[u8],
+    refused: Option<&str>,
+) -> ([Result<PortableReport, PortableError>; 3], usize) {
+    use graphforge_core::GfError;
+    let limits = PortableLimits::default();
+    let bundle_path = directory.join(format!("{name}.gfpb"));
+    std::fs::write(&bundle_path, bytes).unwrap();
+    let expanded = directory.join(name);
+    for member in members(bytes) {
+        let target = expanded.join(&member.path);
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(target, &member.payload).unwrap();
+    }
+    let runs = std::cell::Cell::new(0);
+    let mut validate = |generation: &graphforge_storage::ResolvedProjectGeneration,
+                        version: &ResearchVersionRecord,
+                        registry: &ResearchRegistry| {
+        runs.set(runs.get() + 1);
+        if refused.is_some_and(|refused| version.version_uuid.to_string() == refused) {
+            Err(GfError::Validation("refused".into()))
+        } else {
+            crate::research_interchange::validation::validate(generation, version, registry)
+        }
+    };
+    let outcomes = [
+        graphforge_storage::validate_research_package(
+            &bundle_path,
+            Some(scratch),
+            limits,
+            None,
+            &mut validate,
+        ),
+        graphforge_storage::validate_research_package(
+            &expanded,
+            Some(scratch),
+            limits,
+            None,
+            &mut validate,
+        ),
+        graphforge_storage::validate_research_package_stream(
+            &mut std::io::Cursor::new(bytes),
+            Some(scratch),
+            limits,
+            None,
+            &mut validate,
+        ),
+    ];
+    (outcomes, runs.get())
+}
+
+fn assert_refused_alike(
+    outcomes: &[Result<PortableReport, PortableError>; 3],
+    code: PortableErrorCode,
+    entry: Option<&str>,
+) {
+    for outcome in outcomes {
+        let error = outcome.as_ref().unwrap_err();
+        assert_eq!(error.code, code, "{error:?}");
+        if let Some(entry) = entry {
+            assert_eq!(error.entry.as_deref(), Some(entry), "{error:?}");
+        }
+    }
+}
+
 /// A staged research core object with an unfunded Parquet encoding is refused
 /// by the page profile before any native owner runs, from a bundle file, an
 /// expanded directory and a stream. The object is staged and walked from its
@@ -586,55 +704,171 @@ fn with_core_parquet_replaced(bundle: &[u8], replacement: &[u8]) -> (Vec<u8>, St
 fn a_core_parquet_object_with_an_unfunded_encoding_is_refused_on_every_path() {
     let directory = tempfile::tempdir().unwrap();
     let (_, bytes) = bundle(directory.path());
-    let (hostile, path) = with_core_parquet_replaced(
-        &bytes,
-        &crate::research_interchange::stream_parity::unfunded_parquet(),
-    );
-    let limits = PortableLimits::default();
+    let unfunded = crate::research_interchange::stream_parity::unfunded_parquet();
+    let (hostile, path) = with_core_parquet_replaced(&bytes, &unfunded, 0);
     let scratch = tempfile::tempdir().unwrap();
-    let bundle_path = directory.path().join("hostile.gfpb");
-    std::fs::write(&bundle_path, &hostile).unwrap();
-    let expanded = directory.path().join("hostile");
-    for member in members(&hostile) {
-        let target = expanded.join(&member.path);
-        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
-        std::fs::write(target, &member.payload).unwrap();
-    }
-    let mut native_runs = 0;
-    let mut validate = |generation: &graphforge_storage::ResolvedProjectGeneration,
-                        version: &ResearchVersionRecord,
-                        registry: &ResearchRegistry| {
-        native_runs += 1;
-        crate::research_interchange::validation::validate(generation, version, registry)
-    };
-    let outcomes = [
-        graphforge_storage::validate_research_package(
-            &bundle_path,
-            Some(scratch.path()),
-            limits,
-            None,
-            &mut validate,
-        ),
-        graphforge_storage::validate_research_package(
-            &expanded,
-            Some(scratch.path()),
-            limits,
-            None,
-            &mut validate,
-        ),
-        graphforge_storage::validate_research_package_stream(
-            &mut std::io::Cursor::new(&hostile),
-            Some(scratch.path()),
-            limits,
-            None,
-            &mut validate,
-        ),
-    ];
-    for outcome in outcomes {
-        let error = outcome.unwrap_err();
-        assert_eq!(error.code, PortableErrorCode::LimitExceeded, "{error:?}");
-        assert_eq!(error.entry.as_deref(), Some(path.as_str()));
-    }
+    let (outcomes, native_runs) =
+        on_every_path(directory.path(), scratch.path(), "hostile", &hostile, None);
+    assert_refused_alike(&outcomes, PortableErrorCode::LimitExceeded, Some(&path));
     assert_eq!(native_runs, 0, "refused before any native owner ran");
     assert_eq!(std::fs::read_dir(scratch.path()).unwrap().count(), 0);
+}
+
+/// A profile refusal is a refusal of its Version, deferred like a native one:
+/// the first refused Version in order answers, and authentication outranks both.
+#[test]
+fn a_profile_refusal_is_deferred_like_a_native_refusal() {
+    let directory = tempfile::tempdir().unwrap();
+    let (_, bytes) = bundle(directory.path());
+    let versions = bundle_versions(&bytes);
+    assert!(versions.len() >= 2);
+    let unfunded = crate::research_interchange::stream_parity::unfunded_parquet();
+    let scratch = tempfile::tempdir().unwrap();
+    let corrupt = |bytes: &[u8], version: &str| {
+        let needle = format!("research-retained/{version}");
+        let at = bytes
+            .windows(needle.len())
+            .position(|window| window == needle.as_bytes())
+            .unwrap();
+        let mut changed = bytes.to_vec();
+        changed[at - at % 512 + 512] ^= 1;
+        changed
+    };
+    // (i) An unfunded object in the first Version, a changed byte in the second.
+    let (early, _) = with_core_parquet_replaced(&bytes, &unfunded, 0);
+    let (outcomes, _) = on_every_path(
+        directory.path(),
+        scratch.path(),
+        "authentication-first",
+        &corrupt(&early, &versions[1]),
+        None,
+    );
+    assert_refused_alike(&outcomes, PortableErrorCode::DigestMismatch, None);
+    // (ii) A native refusal in the first Version, an unfunded object in the
+    // second: the first Version answers.
+    let (late, _) = with_core_parquet_replaced(&bytes, &unfunded, 1);
+    let (outcomes, _) = on_every_path(
+        directory.path(),
+        scratch.path(),
+        "native-first",
+        &late,
+        Some(&versions[0]),
+    );
+    assert_refused_alike(&outcomes, PortableErrorCode::Incompatible, None);
+    // The reverse: an unfunded object in the first Version, a native refusal in the second.
+    let (outcomes, native_runs) = on_every_path(
+        directory.path(),
+        scratch.path(),
+        "profile-first",
+        &early,
+        Some(&versions[1]),
+    );
+    assert_refused_alike(&outcomes, PortableErrorCode::LimitExceeded, None);
+    assert_eq!(native_runs, 0, "no native work after the first refusal");
+    assert_eq!(std::fs::read_dir(scratch.path()).unwrap().count(), 0);
+}
+
+/// Nothing but a canonical evidence object may sit below the evidence
+/// directory, whose files are exempt from the page profile: a Parquet payload
+/// moved there is refused at its header on every path, never decoded.
+#[test]
+fn a_parquet_payload_below_the_evidence_directory_is_refused_on_every_path() {
+    let directory = tempfile::tempdir().unwrap();
+    let (_, bytes) = bundle(directory.path());
+    let (hostile, path) = with_member_moved(
+        &bytes,
+        |member| {
+            member.path.starts_with("data/components/")
+                && !member.path.contains("/research/")
+                && member.payload.ends_with(b"PAR1")
+        },
+        |_, _| "data/components/research/research-retained-evidence/payload.parquet".to_owned(),
+        None,
+    );
+    let scratch = tempfile::tempdir().unwrap();
+    let (outcomes, native_runs) =
+        on_every_path(directory.path(), scratch.path(), "reserved", &hostile, None);
+    assert_refused_alike(&outcomes, PortableErrorCode::InvalidStructure, Some(&path));
+    assert_eq!(native_runs, 0);
+    assert_eq!(std::fs::read_dir(scratch.path()).unwrap().count(), 0);
+}
+
+/// Once a Version is refused for any reason its stage is reclaimed and its
+/// remaining entries are only hashed: a large entry that follows the refusal
+/// is neither staged nor copied for the page walk, and the result is the
+/// deferred refusal.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_refused_version_stages_and_spills_nothing_more() {
+    let directory = tempfile::tempdir().unwrap();
+    let (_, bytes) = bundle(directory.path());
+    let first = bundle_versions(&bytes)[0].clone();
+    let version_directory = format!("/research-retained/{first}/");
+    let digests: Vec<String> = members(&bytes)
+        .iter()
+        .filter(|member| member.path.contains(&version_directory))
+        .map(|member| member.path.rsplit_once('/').unwrap().1.to_owned())
+        .collect();
+    assert!(digests.len() >= 2);
+    // A large object ending in the Parquet magic that sorts after the rest of
+    // its Version, so the refusal of the first object comes before it.
+    let mut payload = vec![0x5a_u8; 9 * 1024 * 1024];
+    let length = payload.len();
+    payload[length - 4..].copy_from_slice(b"PAR1");
+    let last = digests.iter().max().unwrap();
+    let mut salt = 0_u32;
+    while sha256_hex(&payload) <= *last {
+        salt += 1;
+        payload[..4].copy_from_slice(&salt.to_le_bytes());
+    }
+    let (large, _) = with_core_parquet_replaced(&bytes, &payload, 0);
+    let refused = members(&large)
+        .iter()
+        .find(|member| member.path.contains(&version_directory))
+        .unwrap()
+        .path
+        .clone();
+    let limits = PortableLimits {
+        max_research_version_bytes: 1,
+        max_parquet_walk_bytes: 1024 * 1024,
+        ..PortableLimits::default()
+    };
+    let scratch = tempfile::tempdir().unwrap();
+    let done = std::sync::atomic::AtomicBool::new(false);
+    let (result, peak) = std::thread::scope(|scope| {
+        let sampler = scope.spawn(|| {
+            let mut peak = 0;
+            while !done.load(std::sync::atomic::Ordering::Acquire) {
+                peak = peak.max(crate::research_interchange::stream_parity::allocated_under(
+                    scratch.path(),
+                ));
+            }
+            peak
+        });
+        let result = by_stream_paced(&large, scratch.path(), limits);
+        done.store(true, std::sync::atomic::Ordering::Release);
+        (result, sampler.join().unwrap())
+    });
+    let error = result.unwrap_err();
+    assert_eq!(error.code, PortableErrorCode::LimitExceeded, "{error:?}");
+    assert_eq!(error.entry.as_deref(), Some(refused.as_str()));
+    assert!(
+        peak < payload.len() as u64,
+        "{peak} bytes were allocated in scratch for a {} byte entry after the refusal",
+        payload.len()
+    );
+    assert_eq!(std::fs::read_dir(scratch.path()).unwrap().count(), 0);
+}
+
+fn by_stream_paced(
+    bytes: &[u8],
+    scratch: &Path,
+    limits: PortableLimits,
+) -> Result<PortableReport, PortableError> {
+    crate::verify_portable_stream(
+        &mut crate::research_interchange::stream_parity::Paced(std::io::Cursor::new(bytes)),
+        Some(scratch),
+        limits,
+        None,
+    )
 }

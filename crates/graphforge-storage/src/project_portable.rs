@@ -295,7 +295,7 @@ fn scan_entries(
     }
     if mode == PortableMode::Full {
         let reopen = if driven {
-            Reopen::Driven
+            Reopen::Driven(metadata.is_dir().then_some(source))
         } else if metadata.is_dir() {
             Reopen::Directory(source)
         } else if import_stage.is_some() {
@@ -303,7 +303,7 @@ fn scan_entries(
         } else {
             Reopen::BundleFile(source)
         };
-        authenticated_entries::validate_parquet_profile(source, &entries, cancelled)?;
+        authenticated_entries::validate_parquet_profile(source, &entries, driven, cancelled)?;
         authenticated_entries::validate_semantics(reopen, &entries, &report, limits, cancelled)?;
     }
     let after = fs::symlink_metadata(source).map_err(|_| {
@@ -570,6 +570,7 @@ fn preflight_bundle(
         let entry = pending_pax.take().map_or(raw_path, |records| records.path);
         // No entry is extracted until every path is creatable everywhere.
         validate_path(&entry, limits.max_path_bytes)?;
+        research::check_reserved_path(&entry)?;
         paths.push(entry.clone());
         census.admit(&entry, size, limits)?;
         if entry == MANIFEST_PATH || entry == ONTOLOGY_COMPOSITION_PATH {
@@ -846,6 +847,7 @@ fn walk(
         if ty.is_dir() {
             walk(root, &child.path(), out, limits, cancelled)?;
         } else {
+            research::check_reserved_path(&relative)?;
             out.push(relative);
             if out.len() as u64 > limits.max_entries {
                 return Err(PortableError::new(
@@ -1082,6 +1084,7 @@ fn read_bundle<R: Read + ?Sized>(
         };
         verify_canonical_header_path(&header, &entry_path, used_pax)?;
         validate_path(&entry_path, limits.max_path_bytes)?;
+        research::check_reserved_path(&entry_path)?;
         // Canonical order is strictly increasing, which also refuses a
         // duplicate. It is enforced before the entry is read so that a
         // repeated path can never be retained twice.
@@ -2036,10 +2039,7 @@ fn hash_payload(
         .map(|sink| sink.open(entry, size))
         .transpose()?
         .flatten();
-    if output.is_some()
-        && sink
-            .as_deref()
-            .is_some_and(materialization::EntrySink::walks_staged)
+    if sink.as_deref().is_some_and(|sink| sink.owns_profile(entry))
         && let Some(walk) = walk.as_deref_mut()
     {
         walk.skip();

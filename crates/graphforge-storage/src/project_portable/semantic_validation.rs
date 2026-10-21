@@ -236,6 +236,7 @@ pub(super) fn validate_semantics(
         last = Some(key);
         if !valid_kind(&c.kind)
             || !valid_id(&c.participant_id)
+            || super::research::is_reserved_directory(&c.participant_id)
             || !ids.insert(c.participant_id.as_str())
         {
             return Err(PortableError::new(
