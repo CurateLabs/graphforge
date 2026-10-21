@@ -15,7 +15,7 @@ users and agents do not need the full capability set to obtain a useful result.
 | Internals (specialist)             | Architecture and implementation contracts; outside both learning paths                                                                                                                                                         |
 | API and feature reference          | Lookup material for a specific operation or constraint                                                                                                                                                                         |
 | Contribute & operate / Engineering | Contributor setup, testing, implementation decisions, and publishing                                                                                                                                                           |
-| Community                          | Licensing, security, and conduct                                                                                                                                                                                               |
+| Community                          | Licensing, support, security, and conduct                                                                                                                                                                                               |
 
 Both learning paths explain their subject without assuming expert knowledge.
 Basic keeps commands in optional helper instructions and lets readers check the

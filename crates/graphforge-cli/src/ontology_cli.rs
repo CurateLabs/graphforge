@@ -12,7 +12,7 @@ use graphforge_api::{
     CompositionDataDisposition, GraphForge, ImportFormatHint, ModuleAdoptionRequest,
     ModuleDeleteRequest, ModuleMigrationPreview, ModuleMigrationRequest, ModuleSelector,
     ModuleUpdateRequest, OntologyAuthorityExpectation, OntologyDoc, OntologyModuleId, OperationId,
-    PortableV2Limits, ResolutionExplainRequest, SymbolKind, WorkspaceOntologyComposition,
+    PortableLimits, ResolutionExplainRequest, SymbolKind, WorkspaceOntologyComposition,
     WriteContext,
 };
 use serde::Deserialize;
@@ -807,7 +807,7 @@ pub(crate) fn run_portable_staging_inspect(
     json_output: bool,
     output: &mut dyn Write,
 ) -> Result<(), CliRuntimeError> {
-    let staged = graph.portable_ontology_staging(PortableV2Limits::default())?;
+    let staged = graph.portable_ontology_staging(PortableLimits::default())?;
     let value = staged.map(|candidate| {
         json!({
             "contract":"graphforge-portable-ontology-staging/1",
@@ -829,7 +829,7 @@ pub(crate) fn run_portable_staging_adopt(
     let (authority, token) = authority(authority_args)?;
     let receipt = graph.adopt_portable_ontology_staging(
         &authority,
-        PortableV2Limits::default(),
+        PortableLimits::default(),
         Some(&token),
     )?;
     emit(&receipt, json_output, output)

@@ -252,10 +252,33 @@ class ProgressiveHostRunTests(unittest.TestCase):
             workspace = work / "workspace" / "s18"
             workspace.mkdir(parents=True)
             (workspace / "nodes.parquet").write_bytes(b"x")
+            scratch = work / "tmp"
+            (scratch / "gf-scratch").mkdir(parents=True)
+            (scratch / "gf-scratch" / "spill").write_bytes(b"x")
+            (scratch / "graphforge-certify-evidence.json").write_text("{}", encoding="utf-8")
+            outside = root / "outside"
+            outside.mkdir()
+            (outside / "kept").write_bytes(b"x")
+            (scratch / "linked").symlink_to(outside, target_is_directory=True)
             reclaim_rung_workspace(work, 18)
+            self.assertTrue((outside / "kept").exists())
+            self.assertEqual(list(scratch.iterdir()), [])
             inventory = inventory_work_root(work)
             self.assertTrue(inventory["empty"])
             self.assertEqual(inventory["host_profile_id"], HOST_PROFILE_ID)
+
+    def test_reclaim_refuses_a_linked_tmp_scaffold(self) -> None:
+        with tempfile.TemporaryDirectory(dir=WORK_PARENT) as temporary:
+            root = Path(temporary)
+            work = root / "work"
+            (work / "workspace").mkdir(parents=True)
+            outside = root / "outside"
+            outside.mkdir()
+            (outside / "kept").write_bytes(b"x")
+            (work / "tmp").symlink_to(outside, target_is_directory=True)
+            with self.assertRaisesRegex(HostRunError, "tmp_link_refused"):
+                reclaim_rung_workspace(work, 18)
+            self.assertTrue((outside / "kept").exists())
 
     def test_scratch_root_top_level_is_unchanged_after_host_bundle(self) -> None:
         before = scratch_top_level()

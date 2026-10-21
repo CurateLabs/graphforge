@@ -26,6 +26,8 @@ use std::sync::{Arc, Mutex};
 
 mod ancestor_publication;
 mod credit;
+mod hub_listing;
+use hub_listing::serve_lineage;
 mod remote_fetch;
 mod rewrite_prune;
 mod selection;
@@ -1068,7 +1070,7 @@ fn tampered_origin(
     repository: &str,
     version: Uuid,
 ) -> BTreeMap<String, Vec<u8>> {
-    let (mut manifest, mut lineage) = served_lineage(hub, repository);
+    let (_, mut lineage) = served_lineage(hub, repository);
     let entry = lineage
         .versions
         .iter_mut()
@@ -1076,49 +1078,12 @@ fn tampered_origin(
         .unwrap();
     assert_ne!(entry.identity_digest.0, sha256_digest(b"another Version"));
     entry.identity_digest = Sha256Digest(sha256_digest(b"another Version"));
-    let lineage_bytes = lineage.to_canonical_json().unwrap();
-    let lineage_object = digest_bytes(&lineage_bytes);
-    let old_object = manifest.lineage.as_ref().unwrap().object_digest.clone();
-    manifest
-        .objects
-        .retain(|object| object.digest != old_object);
-    manifest.objects.push(object_descriptor(
-        lineage_object.clone(),
-        lineage_bytes.len() as u64,
-        RESEARCH_LINEAGE_MEDIA_TYPE,
-        format!(
-            "{}/.gf/objects/{lineage_object}",
-            repository_url(repository)
-        ),
-    ));
-    manifest
-        .objects
-        .sort_by(|left, right| left.digest.0.cmp(&right.digest.0));
-    manifest.lineage = Some(ResearchLineageReference {
-        format: RESEARCH_LINEAGE_FORMAT.into(),
-        lineage_digest: lineage.canonical_digest().unwrap(),
-        object_digest: Sha256Digest(lineage_object.clone()),
-    });
-    let manifest_bytes = manifest.to_canonical_json().unwrap();
-    let mut refs = RefSet::from_json(
-        &refs_document(hub, repository).body,
-        DiscoveryLimits::default(),
+    serve_lineage(
+        hub,
+        repository,
+        lineage.to_canonical_json().unwrap(),
+        lineage.canonical_digest().unwrap(),
     )
-    .unwrap();
-    for item in &mut refs.refs {
-        item.validator = Sha256Digest(digest_bytes(&manifest_bytes));
-    }
-    BTreeMap::from([
-        (
-            format!("/{repository}/.gf/refs"),
-            refs.to_canonical_json().unwrap(),
-        ),
-        (format!("/{repository}/.gf/manifest"), manifest_bytes),
-        (
-            format!("/{repository}/.gf/objects/{lineage_object}"),
-            lineage_bytes,
-        ),
-    ])
 }
 
 // ------------------------------------------------------------ supporting
@@ -2812,8 +2777,8 @@ fn reference_hub_revalidates_unsafe_images_even_when_client_admission_is_bypasse
 #[test]
 fn opaque_workbench_file_cannot_be_selected_as_native_package_data() {
     use graphforge_api::{
-        PortableV2ErrorCode, PortableV2Limits, PortableV2ParticipantId, PortableV2SelectionProfile,
-        PortableV2SelectionRequest,
+        PortableErrorCode, PortableLimits, PortableParticipantId, PortableSelectionProfile,
+        PortableSelectionRequest,
     };
     let history = history();
     std::fs::write(
@@ -2823,19 +2788,19 @@ fn opaque_workbench_file_cannot_be_selected_as_native_package_data() {
     .unwrap();
     let error = history
         .graph
-        .preview_portable_v2_selection(&graphforge_api::PortableV2SelectionPreviewRequest {
+        .preview_portable_selection(&graphforge_api::PortableSelectionPreviewRequest {
             selection: graphforge_api::PortableSelection::Current,
-            request: PortableV2SelectionRequest {
-                profile: PortableV2SelectionProfile::Custom(vec![PortableV2ParticipantId {
+            request: PortableSelectionRequest {
+                profile: PortableSelectionProfile::Custom(vec![PortableParticipantId {
                     capability_id: "opaque-files".into(),
                     record_family_id: "notebook.ipynb".into(),
                 }]),
                 strict: true,
             },
-            limits: PortableV2Limits::default(),
+            limits: PortableLimits::default(),
         })
         .unwrap_err();
-    assert_eq!(error.code, PortableV2ErrorCode::Incompatible);
+    assert_eq!(error.code, PortableErrorCode::Incompatible);
     assert!(
         error
             .to_string()

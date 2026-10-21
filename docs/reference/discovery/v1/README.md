@@ -61,7 +61,7 @@ carries neither field is still valid, and clone consumers need neither.
 - `ontology { composition_digest, modules[], bridge_sets[] }` lists exact
   identities in strictly ascending `(id, version, content_digest)` order, at most
   `max_ontology_entries` (default 4096) of each. A module may carry
-  `package { format, package_digest, object_digest }` referencing a portable-v2
+  `package { format, package_digest, object_digest }` referencing a portable
   package for that one module. That object must use
   `application/vnd.graphforge.project`, must not be the Project package object,
   and must be at most `max_module_package_bytes` (default 64 MiB). Bridge sets
@@ -112,7 +112,7 @@ These are distinct fields. None substitutes for another.
 
 | Field | Identifies | Stable across publishing Projects |
 | --- | --- | --- |
-| `package_digest` | One exported portable-v2 package, including its source generation | No |
+| `package_digest` | One exported portable package, including its source generation | No |
 | `(id, version, content_digest)` | One exact ontology module or bridge set | Yes |
 | `composition_digest` | The whole composition of one Project version | Only for identical compositions |
 
@@ -130,7 +130,7 @@ The summary has no location field. Locations appear only in
 `ontology` descriptors do not change when only locations change. Only the
 manifest's own canonical digest does.
 
-See [portable-v2-integration.md](portable-v2-integration.md) for the normative
+See [portable-integration.md](portable-integration.md) for the normative
 validation order and the boundary between discovery and package verification.
 
 ## Repository moves and re-homing

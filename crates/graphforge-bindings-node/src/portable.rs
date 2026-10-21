@@ -1,19 +1,18 @@
-//! Thin Node bindings for portable-v2 and streaming result sinks (#744).
+//! Thin Node bindings for portable and streaming result sinks (#744).
 
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
 use graphforge_api::{
-    CancellationToken, GfError, MultiOntologyError, PortableSelection, PortableV2Authenticity,
-    PortableV2Compatibility, PortableV2Error, PortableV2ExportRequest, PortableV2GraphSelector,
-    PortableV2ImportRequest, PortableV2Integrity, PortableV2Limits, PortableV2Mode,
-    PortableV2OciAuthenticityPolicy, PortableV2OciPublishFacadeRequest,
-    PortableV2OciPullFacadeRequest, PortableV2OciSignatureMaterial, PortableV2OciSignatureState,
-    PortableV2Output, PortableV2ParticipantId, PortableV2PropertyProjection,
-    PortableV2SelectionPreviewRequest, PortableV2SelectionProfile, PortableV2SelectionRequest,
-    PortableV2SubsetClosure, PortableV2SubsetPlan, PortableV2SubsetPreviewRequest,
-    PortableV2SubsetRequest, PortableVerifyRequest, ResultSinkFormat, ResultSinkOptions,
-    ResultSinkReceipt,
+    CancellationToken, GfError, MultiOntologyError, PortableAuthenticity, PortableCompatibility,
+    PortableError, PortableExportRequest, PortableGraphSelector, PortableImportRequest,
+    PortableIntegrity, PortableLimits, PortableMode, PortableOciAuthenticityPolicy,
+    PortableOciPublishFacadeRequest, PortableOciPullFacadeRequest, PortableOciSignatureMaterial,
+    PortableOciSignatureState, PortableOutput, PortableParticipantId, PortablePropertyProjection,
+    PortableSelection, PortableSelectionPreviewRequest, PortableSelectionProfile,
+    PortableSelectionRequest, PortableSubsetClosure, PortableSubsetPlan,
+    PortableSubsetPreviewRequest, PortableSubsetRequest, PortableVerifyRequest, ResultSinkFormat,
+    ResultSinkOptions, ResultSinkReceipt,
 };
 use napi::bindgen_prelude::{AbortSignal, AsyncTask, BigInt, Buffer};
 use napi::{Env, Task};
@@ -22,7 +21,7 @@ use napi_derive::napi;
 use crate::error::to_napi_err;
 use crate::{Result, napi_validation};
 
-pub(crate) fn to_portable_napi_err(error: PortableV2Error) -> crate::NodeError {
+pub(crate) fn to_portable_napi_err(error: PortableError) -> crate::NodeError {
     let committed = error.committed_import.clone();
     let envelope = MultiOntologyError::from(error);
     let mut value = serde_json::to_value(&envelope).expect("native error serializes");
@@ -35,7 +34,7 @@ pub(crate) fn to_portable_napi_err(error: PortableV2Error) -> crate::NodeError {
     napi::Error::new(envelope.code().to_owned(), reason)
 }
 
-pub(crate) fn to_portable_deferred_err(env: Env, error: PortableV2Error) -> napi::Error {
+pub(crate) fn to_portable_deferred_err(env: Env, error: PortableError) -> napi::Error {
     let value = napi::JsError::from(to_portable_napi_err(error)).into_unknown(env);
     napi::Error::from(value)
 }
@@ -47,12 +46,12 @@ fn selection_from_checkpoint(checkpoint: Option<String>) -> PortableSelection {
     }
 }
 
-fn parse_limits(input: Option<PortableV2LimitsInput>) -> Result<PortableV2Limits> {
-    let defaults = PortableV2Limits::default();
+fn parse_limits(input: Option<PortableLimitsInput>) -> Result<PortableLimits> {
+    let defaults = PortableLimits::default();
     let Some(input) = input else {
         return Ok(defaults);
     };
-    Ok(PortableV2Limits {
+    Ok(PortableLimits {
         max_components: match input.max_components {
             Some(value) => crate::node_u64(Some(value), "maxComponents")?,
             None => defaults.max_components,
@@ -81,6 +80,14 @@ fn parse_limits(input: Option<PortableV2LimitsInput>) -> Result<PortableV2Limits
             Some(value) => crate::node_u64(Some(value), "maxTagManifestBytes")?,
             None => defaults.max_tag_manifest_bytes,
         },
+        max_retained_control_bytes: match input.max_retained_control_bytes {
+            Some(value) => crate::node_u64(Some(value), "maxRetainedControlBytes")?,
+            None => defaults.max_retained_control_bytes,
+        },
+        max_parquet_walk_bytes: match input.max_parquet_walk_bytes {
+            Some(value) => crate::node_u64(Some(value), "maxParquetWalkBytes")?,
+            None => defaults.max_parquet_walk_bytes,
+        },
         max_path_bytes: match input.max_path_bytes {
             Some(value) => crate::node_usize(Some(value), defaults.max_path_bytes, "maxPathBytes")?,
             None => defaults.max_path_bytes,
@@ -97,23 +104,23 @@ fn parse_limits(input: Option<PortableV2LimitsInput>) -> Result<PortableV2Limits
 fn parse_profile(
     profile: Option<String>,
     identities: Option<Vec<PortableParticipantIdInput>>,
-) -> Result<PortableV2SelectionProfile> {
+) -> Result<PortableSelectionProfile> {
     match profile.as_deref().unwrap_or("complete") {
-        "complete" => Ok(PortableV2SelectionProfile::Complete),
-        "ontology_only" => Ok(PortableV2SelectionProfile::OntologyOnly),
-        "data_components" => Ok(PortableV2SelectionProfile::DataComponents),
-        "artifacts" => Ok(PortableV2SelectionProfile::Artifacts),
-        "settings" => Ok(PortableV2SelectionProfile::Settings),
+        "complete" => Ok(PortableSelectionProfile::Complete),
+        "ontology_only" => Ok(PortableSelectionProfile::OntologyOnly),
+        "data_components" => Ok(PortableSelectionProfile::DataComponents),
+        "artifacts" => Ok(PortableSelectionProfile::Artifacts),
+        "settings" => Ok(PortableSelectionProfile::Settings),
         "custom" => {
             let identities = identities.ok_or_else(|| {
                 to_napi_err(&GfError::Validation(
                     "custom profile requires identities".into(),
                 ))
             })?;
-            Ok(PortableV2SelectionProfile::Custom(
+            Ok(PortableSelectionProfile::Custom(
                 identities
                     .into_iter()
-                    .map(|identity| PortableV2ParticipantId {
+                    .map(|identity| PortableParticipantId {
                         capability_id: identity.capability_id,
                         record_family_id: identity.record_family_id,
                     })
@@ -126,27 +133,27 @@ fn parse_profile(
     }
 }
 
-fn parse_subset(input: Option<PortableSubsetInput>) -> Result<Option<PortableV2SubsetRequest>> {
+fn parse_subset(input: Option<PortableSubsetInput>) -> Result<Option<PortableSubsetRequest>> {
     let Some(input) = input else {
         return Ok(None);
     };
     let selector = input.selector.unwrap_or_default();
     let closure = match input.closure.as_deref().unwrap_or("induced_edges") {
-        "induced_edges" => PortableV2SubsetClosure::InducedEdges,
-        "referential" => PortableV2SubsetClosure::Referential,
+        "induced_edges" => PortableSubsetClosure::InducedEdges,
+        "referential" => PortableSubsetClosure::Referential,
         _ => {
             return Err(napi_validation(
                 "closure must be induced_edges or referential",
             ));
         }
     };
-    Ok(Some(PortableV2SubsetRequest {
-        selector: PortableV2GraphSelector {
+    Ok(Some(PortableSubsetRequest {
+        selector: PortableGraphSelector {
             node_uuids: selector.node_uuids.unwrap_or_default(),
             edge_uuids: selector.edge_uuids.unwrap_or_default(),
         },
         closure,
-        projection: PortableV2PropertyProjection {
+        projection: PortablePropertyProjection {
             exclude: input
                 .projection
                 .and_then(|projection| projection.exclude)
@@ -155,18 +162,18 @@ fn parse_subset(input: Option<PortableSubsetInput>) -> Result<Option<PortableV2S
     }))
 }
 
-fn parse_output(representation: Option<&str>) -> Result<PortableV2Output> {
+fn parse_output(representation: Option<&str>) -> Result<PortableOutput> {
     match representation.unwrap_or("bundle") {
-        "expanded" => Ok(PortableV2Output::Expanded),
-        "bundle" => Ok(PortableV2Output::Bundle),
+        "expanded" => Ok(PortableOutput::Expanded),
+        "bundle" => Ok(PortableOutput::Bundle),
         _ => Err(napi_validation("representation must be expanded or bundle")),
     }
 }
 
-fn parse_mode(mode: Option<&str>) -> Result<PortableV2Mode> {
+fn parse_mode(mode: Option<&str>) -> Result<PortableMode> {
     match mode.unwrap_or("full") {
-        "structure_only" => Ok(PortableV2Mode::StructureOnly),
-        "full" => Ok(PortableV2Mode::Full),
+        "structure_only" => Ok(PortableMode::StructureOnly),
+        "full" => Ok(PortableMode::Full),
         _ => Err(napi_validation("mode must be structure_only or full")),
     }
 }
@@ -180,7 +187,7 @@ fn bind_signal(signal: Option<AbortSignal>) -> CancellationToken {
     cancellation
 }
 
-fn selection_plan_json(plan: &graphforge_api::PortableV2SelectionPlan) -> serde_json::Value {
+fn selection_plan_json(plan: &graphforge_api::PortableSelectionPlan) -> serde_json::Value {
     serde_json::json!({
         "sourceGenerationUuid": plan.source_generation_uuid,
         "sourceManifestSha256": plan.source_manifest_sha256,
@@ -196,7 +203,7 @@ fn selection_plan_json(plan: &graphforge_api::PortableV2SelectionPlan) -> serde_
     })
 }
 
-fn subset_plan_json(plan: &PortableV2SubsetPlan) -> serde_json::Value {
+fn subset_plan_json(plan: &PortableSubsetPlan) -> serde_json::Value {
     serde_json::json!({
         "selection": selection_plan_json(&plan.selection),
         "graphSubset": plan.graph_subset,
@@ -209,7 +216,7 @@ fn subset_plan_json(plan: &PortableV2SubsetPlan) -> serde_json::Value {
 }
 
 fn export_result_output(
-    result: graphforge_api::PortableV2ExportFacadeResult,
+    result: graphforge_api::PortableExportFacadeResult,
 ) -> PortableExportOutput {
     PortableExportOutput {
         contract: result.contract.to_owned(),
@@ -226,37 +233,37 @@ fn export_result_output(
     }
 }
 
-fn integrity_token(value: PortableV2Integrity) -> String {
+fn integrity_token(value: PortableIntegrity) -> String {
     match value {
-        PortableV2Integrity::NotChecked => "not_checked".into(),
-        PortableV2Integrity::Verified => "verified".into(),
-        PortableV2Integrity::Failed => "failed".into(),
+        PortableIntegrity::NotChecked => "not_checked".into(),
+        PortableIntegrity::Verified => "verified".into(),
+        PortableIntegrity::Failed => "failed".into(),
     }
 }
 
-fn compatibility_token(value: PortableV2Compatibility) -> String {
+fn compatibility_token(value: PortableCompatibility) -> String {
     match value {
-        PortableV2Compatibility::Supported => "supported".into(),
-        PortableV2Compatibility::UnsupportedFuture => "unsupported_future".into(),
-        PortableV2Compatibility::Failed => "failed".into(),
+        PortableCompatibility::Supported => "supported".into(),
+        PortableCompatibility::UnsupportedFuture => "unsupported_future".into(),
+        PortableCompatibility::Failed => "failed".into(),
     }
 }
 
-fn authenticity_token(value: PortableV2Authenticity) -> String {
+fn authenticity_token(value: PortableAuthenticity) -> String {
     match value {
-        PortableV2Authenticity::NotEvaluated => "not_evaluated".into(),
-        PortableV2Authenticity::Unsigned => "unsigned".into(),
-        PortableV2Authenticity::Verified => "verified".into(),
-        PortableV2Authenticity::Failed => "failed".into(),
+        PortableAuthenticity::NotEvaluated => "not_evaluated".into(),
+        PortableAuthenticity::Unsigned => "unsigned".into(),
+        PortableAuthenticity::Verified => "verified".into(),
+        PortableAuthenticity::Failed => "failed".into(),
     }
 }
 
-fn signature_state_token(value: PortableV2OciSignatureState) -> String {
+fn signature_state_token(value: PortableOciSignatureState) -> String {
     match value {
-        PortableV2OciSignatureState::Valid => "valid".into(),
-        PortableV2OciSignatureState::Invalid => "invalid".into(),
-        PortableV2OciSignatureState::Absent => "absent".into(),
-        PortableV2OciSignatureState::PolicyMismatched => "policy_mismatched".into(),
+        PortableOciSignatureState::Valid => "valid".into(),
+        PortableOciSignatureState::Invalid => "invalid".into(),
+        PortableOciSignatureState::Absent => "absent".into(),
+        PortableOciSignatureState::PolicyMismatched => "policy_mismatched".into(),
     }
 }
 
@@ -275,17 +282,21 @@ fn verify_report_output(report: graphforge_api::PortableVerifyResult) -> Portabl
             .collect(),
         contract: report.contract.to_owned(),
         representation: match report.representation {
-            graphforge_api::PortableV2Representation::Expanded => "expanded".into(),
-            graphforge_api::PortableV2Representation::Bundle => "bundle".into(),
+            graphforge_api::PortableRepresentation::Expanded => "expanded".into(),
+            graphforge_api::PortableRepresentation::Bundle => "bundle".into(),
+        },
+        source: match report.source {
+            graphforge_api::PortableSource::File => "file".into(),
+            graphforge_api::PortableSource::Stream => "stream".into(),
         },
         package_digest: report.package_digest,
         package_class: match report.package_class {
-            graphforge_api::PortableV2PackageClass::Complete => "complete".into(),
-            graphforge_api::PortableV2PackageClass::OntologyOnly => "ontology_only".into(),
-            graphforge_api::PortableV2PackageClass::ComponentSelective => {
+            graphforge_api::PortablePackageClass::Complete => "complete".into(),
+            graphforge_api::PortablePackageClass::OntologyOnly => "ontology_only".into(),
+            graphforge_api::PortablePackageClass::ComponentSelective => {
                 "component_selective".into()
             }
-            graphforge_api::PortableV2PackageClass::GraphDataSubset => "graph_data_subset".into(),
+            graphforge_api::PortablePackageClass::GraphDataSubset => "graph_data_subset".into(),
         },
         component_count: BigInt::from(report.component_count),
         entry_count: BigInt::from(report.entry_count),
@@ -334,7 +345,7 @@ fn sink_receipt_output(receipt: ResultSinkReceipt) -> ResultSinkReceiptOutput {
 }
 
 #[napi(object)]
-pub struct PortableV2LimitsInput {
+pub struct PortableLimitsInput {
     pub max_components: Option<BigInt>,
     pub max_entries: Option<BigInt>,
     pub max_entry_bytes: Option<BigInt>,
@@ -342,6 +353,11 @@ pub struct PortableV2LimitsInput {
     pub max_manifest_bytes: Option<BigInt>,
     pub max_semantic_manifest_bytes: Option<BigInt>,
     pub max_tag_manifest_bytes: Option<BigInt>,
+    /// Bytes the bundle reader may retain for controls it reads after the scan.
+    pub max_retained_control_bytes: Option<BigInt>,
+    /// Largest Parquet entry a stream holds in memory to walk its pages; a
+    /// larger one is staged in scratch.
+    pub max_parquet_walk_bytes: Option<BigInt>,
     pub max_path_bytes: Option<BigInt>,
     pub copy_buffer_bytes: Option<BigInt>,
 }
@@ -377,14 +393,14 @@ pub struct PortableSelectionPreviewInput {
     pub profile: Option<String>,
     pub identities: Option<Vec<PortableParticipantIdInput>>,
     pub strict: Option<bool>,
-    pub limits: Option<PortableV2LimitsInput>,
+    pub limits: Option<PortableLimitsInput>,
 }
 
 #[napi(object)]
 pub struct PortableSubsetPreviewInput {
     pub checkpoint: Option<String>,
     pub subset: PortableSubsetInput,
-    pub limits: Option<PortableV2LimitsInput>,
+    pub limits: Option<PortableLimitsInput>,
 }
 
 #[napi(object, object_to_js = false)]
@@ -395,7 +411,7 @@ pub struct PortableExportInput {
     pub identities: Option<Vec<PortableParticipantIdInput>>,
     pub checkpoint: Option<String>,
     pub subset: Option<PortableSubsetInput>,
-    pub limits: Option<PortableV2LimitsInput>,
+    pub limits: Option<PortableLimitsInput>,
     pub signal: Option<AbortSignal>,
 }
 
@@ -403,7 +419,7 @@ pub struct PortableExportInput {
 pub struct PortableVerifyInput {
     pub input: String,
     pub mode: Option<String>,
-    pub limits: Option<PortableV2LimitsInput>,
+    pub limits: Option<PortableLimitsInput>,
     pub signal: Option<AbortSignal>,
 }
 
@@ -412,7 +428,7 @@ pub struct PortableImportInput {
     pub project_root: String,
     pub input: String,
     pub operation_id: String,
-    pub limits: Option<PortableV2LimitsInput>,
+    pub limits: Option<PortableLimitsInput>,
     pub signal: Option<AbortSignal>,
 }
 
@@ -435,7 +451,7 @@ pub struct PortableOciPublishInput {
     pub registry: String,
     pub repository: String,
     pub tag: Option<String>,
-    pub limits: Option<PortableV2LimitsInput>,
+    pub limits: Option<PortableLimitsInput>,
     pub authenticity: Option<PortableOciAuthenticityInput>,
     pub signature: Option<PortableOciSignatureInput>,
     pub insecure_http: Option<bool>,
@@ -450,7 +466,7 @@ pub struct PortableOciPullInput {
     pub reference: String,
     pub destination: String,
     pub expected_oci_digest: Option<String>,
-    pub limits: Option<PortableV2LimitsInput>,
+    pub limits: Option<PortableLimitsInput>,
     pub authenticity: Option<PortableOciAuthenticityInput>,
     pub insecure_http: Option<bool>,
     pub credential: Option<String>,
@@ -480,6 +496,8 @@ pub struct PortableVerifyOutput {
     pub research_entries: Vec<PortableResearchEntryOutput>,
     pub contract: String,
     pub representation: String,
+    /// How the verified bytes were read: `file` or `stream`.
+    pub source: String,
     pub package_digest: String,
     pub package_class: String,
     pub component_count: BigInt,
@@ -559,16 +577,16 @@ pub(crate) fn preview_selection(
     graph: &graphforge_api::GraphForge,
     input: PortableSelectionPreviewInput,
 ) -> Result<serde_json::Value> {
-    let request = PortableV2SelectionPreviewRequest {
+    let request = PortableSelectionPreviewRequest {
         selection: selection_from_checkpoint(input.checkpoint),
-        request: PortableV2SelectionRequest {
+        request: PortableSelectionRequest {
             profile: parse_profile(input.profile, input.identities)?,
             strict: input.strict.unwrap_or(false),
         },
         limits: parse_limits(input.limits)?,
     };
     let plan = graph
-        .preview_portable_v2_selection(&request)
+        .preview_portable_selection(&request)
         .map_err(to_portable_napi_err)?;
     Ok(selection_plan_json(&plan))
 }
@@ -579,26 +597,25 @@ pub(crate) fn preview_subset(
 ) -> Result<serde_json::Value> {
     let subset = parse_subset(Some(input.subset))?
         .ok_or_else(|| to_napi_err(&GfError::Validation("subset is required".into())))?;
-    let request = PortableV2SubsetPreviewRequest {
+    let request = PortableSubsetPreviewRequest {
         selection: selection_from_checkpoint(input.checkpoint),
         request: subset,
         limits: parse_limits(input.limits)?,
     };
     let plan = graph
-        .preview_portable_v2_graph_subset(&request)
+        .preview_portable_graph_subset(&request)
         .map_err(to_portable_napi_err)?;
     Ok(subset_plan_json(&plan))
 }
 
 pub struct ExportPortableTask {
     pub engine: Arc<RwLock<graphforge_api::GraphForge>>,
-    pub request: PortableV2ExportRequest,
+    pub request: PortableExportRequest,
     pub cancellation: CancellationToken,
 }
 
 impl Task for ExportPortableTask {
-    type Output =
-        std::result::Result<graphforge_api::PortableV2ExportFacadeResult, PortableV2Error>;
+    type Output = std::result::Result<graphforge_api::PortableExportFacadeResult, PortableError>;
     type JsValue = PortableExportOutput;
 
     fn compute(&mut self) -> napi::Result<Self::Output> {
@@ -606,7 +623,7 @@ impl Task for ExportPortableTask {
             .engine
             .read()
             .map_err(|_| napi::Error::from_reason("GraphForge lock poisoned"))?;
-        Ok(graph.export_portable_v2(&self.request, Some(self.cancellation.flag()), |_| {}))
+        Ok(graph.export_portable(&self.request, Some(self.cancellation.flag()), |_| {}))
     }
 
     fn resolve(&mut self, env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
@@ -622,11 +639,11 @@ pub struct VerifyPortableTask {
 }
 
 impl Task for VerifyPortableTask {
-    type Output = std::result::Result<graphforge_api::PortableVerifyResult, PortableV2Error>;
+    type Output = std::result::Result<graphforge_api::PortableVerifyResult, PortableError>;
     type JsValue = PortableVerifyOutput;
 
     fn compute(&mut self) -> napi::Result<Self::Output> {
-        Ok(graphforge_api::verify_portable_v2(
+        Ok(graphforge_api::verify_portable(
             &self.request,
             Some(self.cancellation.flag()),
         ))
@@ -641,16 +658,16 @@ impl Task for VerifyPortableTask {
 
 pub struct ImportPortableTask {
     pub project_root: PathBuf,
-    pub request: PortableV2ImportRequest,
+    pub request: PortableImportRequest,
     pub cancellation: CancellationToken,
 }
 
 impl Task for ImportPortableTask {
-    type Output = std::result::Result<graphforge_api::PortableV2ImportResult, PortableV2Error>;
+    type Output = std::result::Result<graphforge_api::PortableImportResult, PortableError>;
     type JsValue = PortableImportOutput;
 
     fn compute(&mut self) -> napi::Result<Self::Output> {
-        Ok(graphforge_api::GraphForge::import_portable_v2(
+        Ok(graphforge_api::GraphForge::import_portable(
             &self.project_root,
             &self.request,
             Some(self.cancellation.flag()),
@@ -671,11 +688,11 @@ impl Task for ImportPortableTask {
 
 fn authenticity_policy(
     input: Option<PortableOciAuthenticityInput>,
-) -> PortableV2OciAuthenticityPolicy {
+) -> PortableOciAuthenticityPolicy {
     let Some(input) = input else {
-        return PortableV2OciAuthenticityPolicy::default();
+        return PortableOciAuthenticityPolicy::default();
     };
-    PortableV2OciAuthenticityPolicy {
+    PortableOciAuthenticityPolicy {
         require_named_signer: input.require_named_signer,
         verification_key: input.verification_key.map(|key| key.to_vec()),
     }
@@ -683,8 +700,8 @@ fn authenticity_policy(
 
 fn signature_material(
     input: Option<PortableOciSignatureInput>,
-) -> Option<PortableV2OciSignatureMaterial> {
-    input.map(|input| PortableV2OciSignatureMaterial {
+) -> Option<PortableOciSignatureMaterial> {
+    input.map(|input| PortableOciSignatureMaterial {
         signer: input.signer,
         key_id: input.key_id,
         secret: input.secret.to_vec(),
@@ -692,7 +709,7 @@ fn signature_material(
 }
 
 fn oci_reference_output(
-    reference: graphforge_api::PortableV2OciReference,
+    reference: graphforge_api::PortableOciReference,
 ) -> PortableOciReferenceOutput {
     PortableOciReferenceOutput {
         registry: reference.registry,
@@ -700,12 +717,12 @@ fn oci_reference_output(
         oci_manifest_digest: reference.oci_manifest_digest,
         package_digest: reference.package_digest,
         package_class: match reference.package_class {
-            graphforge_api::PortableV2PackageClass::Complete => "complete".into(),
-            graphforge_api::PortableV2PackageClass::OntologyOnly => "ontology_only".into(),
-            graphforge_api::PortableV2PackageClass::ComponentSelective => {
+            graphforge_api::PortablePackageClass::Complete => "complete".into(),
+            graphforge_api::PortablePackageClass::OntologyOnly => "ontology_only".into(),
+            graphforge_api::PortablePackageClass::ComponentSelective => {
                 "component_selective".into()
             }
-            graphforge_api::PortableV2PackageClass::GraphDataSubset => "graph_data_subset".into(),
+            graphforge_api::PortablePackageClass::GraphDataSubset => "graph_data_subset".into(),
         },
         tag: reference.tag,
         bytes_transferred: BigInt::from(reference.bytes_transferred),
@@ -714,16 +731,16 @@ fn oci_reference_output(
 }
 
 pub struct PublishOciTask {
-    pub request: PortableV2OciPublishFacadeRequest,
+    pub request: PortableOciPublishFacadeRequest,
     pub cancellation: CancellationToken,
 }
 
 impl Task for PublishOciTask {
-    type Output = std::result::Result<graphforge_api::PortableV2OciReference, PortableV2Error>;
+    type Output = std::result::Result<graphforge_api::PortableOciReference, PortableError>;
     type JsValue = PortableOciReferenceOutput;
 
     fn compute(&mut self) -> napi::Result<Self::Output> {
-        Ok(graphforge_api::publish_portable_v2_oci(
+        Ok(graphforge_api::publish_portable_oci(
             &self.request,
             Some(self.cancellation.flag()),
         ))
@@ -737,16 +754,16 @@ impl Task for PublishOciTask {
 }
 
 pub struct PullOciTask {
-    pub request: PortableV2OciPullFacadeRequest,
+    pub request: PortableOciPullFacadeRequest,
     pub cancellation: CancellationToken,
 }
 
 impl Task for PullOciTask {
-    type Output = std::result::Result<graphforge_api::PortableV2OciPullReceipt, PortableV2Error>;
+    type Output = std::result::Result<graphforge_api::PortableOciPullReceipt, PortableError>;
     type JsValue = PortableOciPullOutput;
 
     fn compute(&mut self) -> napi::Result<Self::Output> {
-        Ok(graphforge_api::pull_portable_v2_oci(
+        Ok(graphforge_api::pull_portable_oci(
             &self.request,
             Some(self.cancellation.flag()),
         ))
@@ -771,7 +788,7 @@ pub fn build_export_task(
     let cancellation = bind_signal(input.signal);
     Ok(AsyncTask::new(ExportPortableTask {
         engine,
-        request: PortableV2ExportRequest {
+        request: PortableExportRequest {
             selection: selection_from_checkpoint(input.checkpoint),
             output_path: PathBuf::from(input.output_path),
             representation: parse_output(input.representation.as_deref())?,
@@ -799,7 +816,7 @@ pub fn build_import_task(input: PortableImportInput) -> Result<AsyncTask<ImportP
     let cancellation = bind_signal(input.signal);
     Ok(AsyncTask::new(ImportPortableTask {
         project_root: PathBuf::from(input.project_root),
-        request: PortableV2ImportRequest {
+        request: PortableImportRequest {
             input: PathBuf::from(input.input),
             operation_id: crate::canonical_operation_id(&input.operation_id)?,
             limits: parse_limits(input.limits)?,
@@ -811,7 +828,7 @@ pub fn build_import_task(input: PortableImportInput) -> Result<AsyncTask<ImportP
 pub fn build_publish_task(input: PortableOciPublishInput) -> Result<AsyncTask<PublishOciTask>> {
     let cancellation = bind_signal(input.signal);
     Ok(AsyncTask::new(PublishOciTask {
-        request: PortableV2OciPublishFacadeRequest {
+        request: PortableOciPublishFacadeRequest {
             package_path: PathBuf::from(input.package_path),
             registry: input.registry,
             repository: input.repository,
@@ -829,7 +846,7 @@ pub fn build_publish_task(input: PortableOciPublishInput) -> Result<AsyncTask<Pu
 pub fn build_pull_task(input: PortableOciPullInput) -> Result<AsyncTask<PullOciTask>> {
     let cancellation = bind_signal(input.signal);
     Ok(AsyncTask::new(PullOciTask {
-        request: PortableV2OciPullFacadeRequest {
+        request: PortableOciPullFacadeRequest {
             registry: input.registry,
             repository: input.repository,
             reference: input.reference,

@@ -2,7 +2,7 @@
 //! from the checked-in `generated/v1` artifacts alone.
 
 use graphforge_api::{
-    DiscoveryOntologyModuleRequest, PortableV2Limits, resolve_discovered_ontology_module,
+    DiscoveryOntologyModuleRequest, PortableLimits, resolve_discovered_ontology_module,
 };
 use graphforge_cli::hub_fixture_artifacts::{DEFAULT_LOCATION_BASE, check, generate};
 use graphforge_discovery::{
@@ -124,7 +124,7 @@ fn project_page_facts_come_from_the_checked_in_artifacts_alone() {
         module: &identity,
         package: &module_package,
         discovery_limits: DiscoveryLimits::default(),
-        portable_limits: PortableV2Limits::default(),
+        portable_limits: PortableLimits::default(),
         cancelled: None,
     })
     .unwrap();

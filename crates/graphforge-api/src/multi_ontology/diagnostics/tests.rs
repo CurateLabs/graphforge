@@ -5,67 +5,67 @@ use uuid::Uuid;
 
 #[test]
 fn portable_error_conversion_is_complete_and_stable() {
-    use graphforge_storage::{PortableV2Error, PortableV2ErrorCode};
+    use graphforge_storage::{PortableError, PortableErrorCode};
     let cases = [
         (
-            PortableV2ErrorCode::UnsupportedProjectFormat,
+            PortableErrorCode::UnsupportedProjectFormat,
             "GF_UNSUPPORTED_PROJECT_FORMAT",
             "interchange.unsupported_format",
         ),
         (
-            PortableV2ErrorCode::Cancelled,
+            PortableErrorCode::Cancelled,
             "GF_CANCELLED",
             "lifecycle.cancelled",
         ),
         (
-            PortableV2ErrorCode::LimitExceeded,
+            PortableErrorCode::LimitExceeded,
             "GF_LIMIT_EXCEEDED",
             "resource.bytes",
         ),
-        (PortableV2ErrorCode::Io, "GF_STORAGE", "interchange.io"),
+        (PortableErrorCode::Io, "GF_STORAGE", "interchange.io"),
         (
-            PortableV2ErrorCode::InvalidStructure,
+            PortableErrorCode::InvalidStructure,
             "GF_VALIDATION",
             "interchange.integrity",
         ),
         (
-            PortableV2ErrorCode::InvalidPath,
+            PortableErrorCode::InvalidPath,
             "GF_STORAGE",
             "interchange.io",
         ),
         (
-            PortableV2ErrorCode::DuplicateEntry,
+            PortableErrorCode::DuplicateEntry,
             "GF_VALIDATION",
             "interchange.integrity",
         ),
         (
-            PortableV2ErrorCode::UnsupportedFuture,
+            PortableErrorCode::UnsupportedFuture,
             "GF_UNSUPPORTED_FUTURE",
             "interchange.unsupported_future",
         ),
         (
-            PortableV2ErrorCode::Incompatible,
+            PortableErrorCode::Incompatible,
             "GF_VALIDATION",
             "interchange.selection",
         ),
         (
-            PortableV2ErrorCode::DigestMismatch,
+            PortableErrorCode::DigestMismatch,
             "GF_VALIDATION",
             "interchange.integrity",
         ),
         (
-            PortableV2ErrorCode::ConcurrentMutation,
+            PortableErrorCode::ConcurrentMutation,
             "GF_IDEMPOTENCY_CONFLICT",
             "inventory.generation_conflict",
         ),
     ];
     for (source, outer, diagnostic) in cases {
-        let error = MultiOntologyError::from(PortableV2Error::new(source, "test"));
+        let error = MultiOntologyError::from(PortableError::new(source, "test"));
         assert_eq!(error.code, outer);
         assert_eq!(error.diagnostics[0].code, diagnostic);
         assert_eq!(
             error.diagnostics[0].message,
-            format!("portable-v2 {source:?}: test")
+            format!("portable {source:?}: test")
         );
     }
 }

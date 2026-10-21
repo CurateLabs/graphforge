@@ -15,6 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
+use crate::terminal_ownership as od;
 use std::cmp::Ordering;
 use std::sync::Arc;
 
@@ -33,6 +34,18 @@ use datafusion_execution::memory_pool::MemoryReservation;
 /// This is a trait as there are several specialized implementations, such as for
 /// single columns or for normalized multi column keys ([`Rows`])
 pub trait CursorValues {
+    #[doc(hidden)]
+    fn diagnostic_id(&self) -> u64 {
+        0
+    }
+    #[doc(hidden)]
+    fn charged_cursor_slot() -> usize
+    where
+        Self: Sized,
+    {
+        size_of::<Option<Cursor<Self>>>()
+    }
+
     fn len(&self) -> usize;
 
     /// Returns true if `l[l_idx] == r[r_idx]`
@@ -77,6 +90,13 @@ pub trait CursorValues {
 /// depending on the column
 /// types
 #[derive(Debug)]
+#[allow(dead_code)]
+struct ChargedCursor<T> {
+    offset: usize,
+    values: T,
+}
+
+#[derive(Debug)]
 pub struct Cursor<T: CursorValues> {
     offset: usize,
     values: T,
@@ -86,6 +106,10 @@ impl<T: CursorValues> Cursor<T> {
     /// Create a [`Cursor`] from the given [`CursorValues`]
     pub fn new(values: T) -> Self {
         Self { offset: 0, values }
+    }
+
+    pub(super) fn diagnostic_id(&self) -> u64 {
+        self.values.diagnostic_id()
     }
 
     /// Returns true if there are no more rows in this cursor
@@ -151,6 +175,19 @@ impl<T: CursorValues> Ord for Cursor<T> {
 ///
 /// Used for sorting when there are multiple columns in the sort key
 #[derive(Debug)]
+#[allow(dead_code)]
+pub(super) struct ChargedRowValues {
+    rows: Arc<Rows>,
+
+    /// Tracks for the memory used by in the `Rows` of this
+    /// cursor. Freed on drop
+    _reservation: MemoryReservation,
+    // Last field: row backing drops before its paired authority.
+    copy_resident: Option<Arc<super::copy_admission::Resident>>,
+    copy_metadata: Option<Arc<super::copy_admission::Resident>>,
+}
+
+#[derive(Debug)]
 pub struct RowValues {
     rows: Arc<Rows>,
 
@@ -160,6 +197,10 @@ pub struct RowValues {
     // Last field: row backing drops before its paired authority.
     copy_resident: Option<Arc<super::copy_admission::Resident>>,
     copy_metadata: Option<Arc<super::copy_admission::Resident>>,
+    // Retirement-only sentinel for the original reservation field above.
+    #[allow(dead_code)]
+    diagnostic_piece: od::Piece,
+    diagnostic: od::Life,
 }
 
 impl RowValues {
@@ -175,7 +216,18 @@ impl RowValues {
             "memory reservation mismatch"
         );
         assert!(rows.num_rows() > 0);
+        let diagnostic = od::Life::inherited(od::Kind::Key);
+        let diagnostic_piece = od::Piece::new(&reservation, diagnostic.id());
+        diagnostic.update(|o| {
+            o.piece = diagnostic_piece.id();
+            o.a = rows.num_rows() as u64;
+            o.bytes = rows.size() as u64;
+            o.flags = 8;
+        });
+        diagnostic.rows(&rows);
         Self {
+            diagnostic,
+            diagnostic_piece,
             copy_resident: None,
             copy_metadata: None,
             rows,
@@ -190,6 +242,12 @@ impl RowValues {
         resident: Option<Arc<super::copy_admission::Resident>>,
         metadata: Option<Arc<super::copy_admission::Resident>>,
     ) -> Self {
+        if let Some(r) = &resident {
+            self.diagnostic.edge(r.diagnostic_id(), 2, self.rows.size());
+        }
+        if let Some(r) = &metadata {
+            self.diagnostic.edge(r.diagnostic_id(), 7, 0);
+        }
         self.copy_resident = resident;
         self.copy_metadata = metadata;
         self
@@ -197,6 +255,13 @@ impl RowValues {
 }
 
 impl CursorValues for RowValues {
+    fn diagnostic_id(&self) -> u64 {
+        self.diagnostic.id()
+    }
+    fn charged_cursor_slot() -> usize {
+        size_of::<Option<ChargedCursor<ChargedRowValues>>>()
+    }
+
     fn len(&self) -> usize {
         self.rows.num_rows()
     }
@@ -375,6 +440,20 @@ impl CursorValues for StringViewArray {
 ///
 /// Note: comparing cursors with different `SortOptions` will yield an arbitrary ordering
 #[derive(Debug)]
+#[allow(dead_code)]
+pub(super) struct ChargedArrayValues<T: CursorValues> {
+    values: T,
+    // If nulls first, the first non-null index
+    // Otherwise, the first null index
+    null_threshold: usize,
+    options: SortOptions,
+
+    /// Tracks the memory used by the values array,
+    /// freed on drop.
+    _reservation: MemoryReservation,
+}
+
+#[derive(Debug)]
 pub struct ArrayValues<T: CursorValues> {
     values: T,
     // If nulls first, the first non-null index
@@ -385,6 +464,10 @@ pub struct ArrayValues<T: CursorValues> {
     /// Tracks the memory used by the values array,
     /// freed on drop.
     _reservation: MemoryReservation,
+    // Retirement-only sentinel for the original reservation field above.
+    #[allow(dead_code)]
+    diagnostic_piece: od::Piece,
+    diagnostic: od::Life,
 }
 
 impl<T: CursorValues> ArrayValues<T> {
@@ -403,7 +486,19 @@ impl<T: CursorValues> ArrayValues<T> {
             false => array.len() - array.null_count(),
         };
 
+        let diagnostic = od::Life::inherited(od::Kind::Key);
+        let diagnostic_piece = od::Piece::new(&reservation, diagnostic.id());
+        diagnostic.update(|o| {
+            o.piece = diagnostic_piece.id();
+            o.bytes = reservation.size() as u64;
+            o.held = reservation.size() as u64;
+            o.a = array.len() as u64;
+            o.b = 1;
+        });
+        diagnostic.array(array);
         Self {
+            diagnostic,
+            diagnostic_piece,
             values: array.values(),
             null_threshold,
             options,
@@ -417,6 +512,13 @@ impl<T: CursorValues> ArrayValues<T> {
 }
 
 impl<T: CursorValues> CursorValues for ArrayValues<T> {
+    fn diagnostic_id(&self) -> u64 {
+        self.diagnostic.id()
+    }
+    fn charged_cursor_slot() -> usize {
+        size_of::<Option<ChargedCursor<ChargedArrayValues<T>>>>()
+    }
+
     fn len(&self) -> usize {
         self.values.len()
     }
@@ -621,5 +723,16 @@ mod tests {
         // 6 < -3
         b.advance();
         assert_eq!(a.cmp(&b), Ordering::Less);
+    }
+}
+
+impl Drop for RowValues {
+    fn drop(&mut self) {
+        self.diagnostic.begin_drop();
+    }
+}
+impl<T: CursorValues> Drop for ArrayValues<T> {
+    fn drop(&mut self) {
+        self.diagnostic.begin_drop();
     }
 }

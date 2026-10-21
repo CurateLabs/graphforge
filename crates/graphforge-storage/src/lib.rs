@@ -284,47 +284,47 @@ pub use project_retention::{
 };
 
 mod project_import_target;
-pub mod project_portable_v2_export;
-pub mod project_portable_v2_import;
+pub mod project_portable_export;
+pub mod project_portable_import;
 
-pub use project_portable_v2_export::{
-    PortableV2ExportLimits, PortableV2ExportPlan, PortableV2ExportProgress,
-    PortableV2ExportReceipt, PortableV2Output, export_complete_portable_v2,
-    export_complete_portable_v2_with_allocation, plan_complete_portable_v2,
-    plan_selected_portable_v2, repack_verified_expanded_portable_v2,
+pub use project_portable_export::{
+    PortableExportLimits, PortableExportPlan, PortableExportProgress, PortableExportReceipt,
+    PortableOutput, export_complete_portable, export_complete_portable_with_allocation,
+    plan_complete_portable, plan_selected_portable, repack_verified_expanded_portable,
 };
-pub use project_portable_v2_import::{
-    NativeResearchValidator, PortableV2ImportCleanupReceipt, PortableV2ImportPhase,
-    PortableV2ImportProgress, PortableV2ImportReceipt, PortableV2SelectiveCandidate,
-    PortableV2StagedCompositionReceipt, consume_selective_portable_v2, import_complete_portable_v2,
-    import_complete_portable_v2_with_allocation,
-    import_complete_portable_v2_with_native_validation, import_complete_portable_v2_with_progress,
-    load_portable_ontology_staging, portable_v2_import_pending, validate_research_package,
-};
-
-pub mod project_portable_v2;
-pub use project_portable_v2::{
-    PortableV2ActivationOverride, PortableV2ActivationProfile, PortableV2Authenticity,
-    PortableV2BridgeSet, PortableV2Compatibility, PortableV2CompositionEntry, PortableV2Error,
-    PortableV2ErrorCode, PortableV2ExactIdentity, PortableV2FileRef, PortableV2Integrity,
-    PortableV2Limits, PortableV2Mode, PortableV2OntologyComposition, PortableV2OntologyModule,
-    PortableV2PackageClass, PortableV2PackageIndex, PortableV2Report, PortableV2Representation,
-    materialize_verified_portable_v2, verify_portable_v2,
+pub use project_portable_import::{
+    NativeResearchValidator, PortableImportCleanupReceipt, PortableImportPhase,
+    PortableImportProgress, PortableImportReceipt, PortableSelectiveCandidate,
+    PortableStagedCompositionReceipt, consume_selective_portable, import_complete_portable,
+    import_complete_portable_with_allocation, import_complete_portable_with_native_validation,
+    import_complete_portable_with_progress, load_portable_ontology_staging,
+    portable_import_held_bytes, portable_import_pending, validate_research_package,
+    validate_research_package_stream,
 };
 
-mod project_portable_v2_selection;
-pub use project_portable_v2_selection::{
-    PortableV2ParticipantId, PortableV2ProjectedSelectionEntry, PortableV2SelectionEntry,
-    PortableV2SelectionPlan, PortableV2SelectionProfile, PortableV2SelectionReason,
-    PortableV2SelectionRequest, preview_portable_v2_selection,
+pub mod project_portable;
+pub use project_portable::{
+    PortableActivationOverride, PortableActivationProfile, PortableAuthenticity, PortableBridgeSet,
+    PortableCompatibility, PortableCompositionEntry, PortableError, PortableErrorCode,
+    PortableExactIdentity, PortableFileRef, PortableIntegrity, PortableLimits, PortableMode,
+    PortableOntologyComposition, PortableOntologyModule, PortablePackageClass,
+    PortablePackageIndex, PortableReport, PortableRepresentation, PortableSource,
+    materialize_verified_portable, portable_import_footprint, verify_portable,
+    verify_portable_stream,
 };
 
-pub mod project_portable_v2_subset;
-pub use project_portable_v2_subset::{
-    PortableV2GraphSelector, PortableV2GraphSubsetMeta, PortableV2PropertyProjection,
-    PortableV2SubsetClosure, PortableV2SubsetPlan, PortableV2SubsetRequest,
-    plan_graph_subset_portable_v2, portable_v2_graph_data_fingerprint,
-    preview_portable_v2_graph_subset,
+mod project_portable_selection;
+pub use project_portable_selection::{
+    PortableParticipantId, PortableProjectedSelectionEntry, PortableSelectionEntry,
+    PortableSelectionPlan, PortableSelectionProfile, PortableSelectionReason,
+    PortableSelectionRequest, preview_portable_selection,
+};
+
+pub mod project_portable_subset;
+pub use project_portable_subset::{
+    PortableGraphSelector, PortableGraphSubsetMeta, PortablePropertyProjection,
+    PortableSubsetClosure, PortableSubsetPlan, PortableSubsetRequest, plan_graph_subset_portable,
+    portable_graph_data_fingerprint, preview_portable_graph_subset,
 };
 
 pub mod portable_bytes;
@@ -544,6 +544,7 @@ pub use runtime_entity_labels::{
     validate_runtime_entity_label_ids_with_topology, write_runtime_entity_label_encoding_marker,
 };
 
+mod parquet_encoding_profile;
 pub mod parquet_scan;
 
 /// Shared encoding defaults for published project Parquet payloads.

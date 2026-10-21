@@ -34,10 +34,10 @@ impl Journey {
                 &cancel(),
             )
             .unwrap();
-        let verified = verify_portable_v2(
+        let verified = verify_portable(
             &PortableVerifyRequest {
                 input: package.clone(),
-                mode: PortableV2Mode::Full,
+                mode: PortableMode::Full,
                 limits: Default::default(),
             },
             None,
@@ -47,13 +47,13 @@ impl Journey {
         assert!(verified.research_interchange);
         self.output.json("complete-verification", &verified);
         let target = self.owner.path().join("imported");
-        let import = PortableV2ImportRequest {
+        let import = PortableImportRequest {
             input: package,
             operation_id: OperationId(Uuid::now_v7()),
             limits: Default::default(),
         };
-        let first = GraphForge::import_portable_v2(&target, &import, None).unwrap();
-        let replay = GraphForge::import_portable_v2(&target, &import, None).unwrap();
+        let first = GraphForge::import_portable(&target, &import, None).unwrap();
+        let replay = GraphForge::import_portable(&target, &import, None).unwrap();
         assert!(replay.idempotent_replay);
         assert_eq!(first.generation_uuid, replay.generation_uuid);
         graphforge_storage::execute_project_cleanup(
@@ -256,9 +256,9 @@ impl Journey {
             )
             .unwrap();
         let target = self.owner.path().join("selected-import");
-        GraphForge::import_portable_v2(
+        GraphForge::import_portable(
             &target,
-            &PortableV2ImportRequest {
+            &PortableImportRequest {
                 input: output,
                 operation_id: OperationId(Uuid::now_v7()),
                 limits: Default::default(),

@@ -11,9 +11,9 @@ from pathlib import Path
 import sys
 from typing import Any
 
-HISTORICAL_COMMIT = "6255f9393362c996b5840566d255569761e881d7"
+HISTORICAL_COMMIT = "114b1964874419b31d13820bfbdf72fe57286544"
 HISTORICAL_GENERATOR_IDENTITY = (
-    "sha256:3b4bdf5ae4f41523f911dc1998db2328dadd2fa9e5f95e49478f148e81a14ce2"
+    "sha256:a7cd8397ce191c48094d8812eb43dfc894084645dd439e76fb8704b35bb61fdc"
 )
 
 
@@ -62,12 +62,17 @@ def current_documents(root: Path) -> list[tuple[Path, list[dict[str, Any]]]]:
 
 
 def validate_historical_evidence(root: Path) -> None:
-    path = root / "benchmarks/fixtures/parity/ladder-bundle/manifest.json"
-    manifest = load_object(path)
-    if manifest.get("commit") != HISTORICAL_COMMIT:
-        raise ValueError(f"{path}: historical commit identity changed")
-    if manifest.get("generator_identity") != HISTORICAL_GENERATOR_IDENTITY:
-        raise ValueError(f"{path}: historical generator identity changed")
+    plans = sorted((root / "benchmarks/fixtures/parity/ladder-bundle").glob("s*-plan.json"))
+    if not plans:
+        raise ValueError("ladder bundle has no rung plans")
+    for path in plans:
+        identities = load_object(path).get("identities")
+        if not isinstance(identities, dict):
+            raise ValueError(f"{path}: identities are missing")
+        if identities.get("commit") != HISTORICAL_COMMIT:
+            raise ValueError(f"{path}: historical commit identity changed")
+        if identities.get("generator") != HISTORICAL_GENERATOR_IDENTITY:
+            raise ValueError(f"{path}: historical generator identity changed")
 
 
 def update_document(path: Path, bindings: list[dict[str, Any]], expected: str) -> int:

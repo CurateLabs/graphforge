@@ -9,6 +9,8 @@ use super::{
     PropertyRouteKind, Read, RecordBatch, TSerializable, corrupt, io_error, parquet_error,
 };
 
+use crate::parquet_encoding_profile::page_encodings_are_funded;
+
 #[derive(Debug, Default)]
 struct ReadCounterState {
     bytes: AtomicU64,
@@ -406,6 +408,12 @@ pub(super) fn replay_decoder_limit(message: &str) -> GfError {
     }
 }
 
+/// An actual page uses an encoding whose decoder allocation no budget funds.
+/// This is a profile limit, not corruption, on every admission path.
+pub(super) fn unfunded_encoding() -> GfError {
+    replay_decoder_limit("parquet page encoding is outside the funded decoder profile")
+}
+
 /// Reserve authenticated page, codec and batch exposure before replay decoding.
 /// Reuses the same bounded raw-page parser as property admission.
 pub(crate) fn replay_parquet_reader_reservation(
@@ -562,6 +570,9 @@ pub(super) fn parquet_resource_admission(
                         return Err(corrupt(
                             "property page bytes exceed column uncompressed size",
                         ));
+                    }
+                    if !page_encodings_are_funded(&header, column.column_descr().physical_type()) {
+                        return Err(unfunded_encoding());
                     }
                     if header.type_ == parquet::format::PageType::DICTIONARY_PAGE {
                         if column.column_descr().physical_type() == parquet::basic::Type::BYTE_ARRAY

@@ -315,10 +315,10 @@ fn map_discovery_error(error: &DiscoveryError) -> GfError {
 mod tests {
     use super::*;
     use crate::{BranchSource, CreateResearchBranchRequest, ExecuteResearchBranchRequest};
-    use graphforge_discovery::PORTABLE_V2_FORMAT;
+    use graphforge_discovery::PORTABLE_FORMAT;
     fn package_ref(package_digest: &str, object_digest: &str) -> PortablePackageReference {
         PortablePackageReference {
-            format: PORTABLE_V2_FORMAT.into(),
+            format: PORTABLE_FORMAT.into(),
             package_digest: Sha256Digest(package_digest.into()),
             object_digest: Sha256Digest(object_digest.into()),
         }

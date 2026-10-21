@@ -263,6 +263,7 @@ enum Command {
     Telemetry(TelemetryArgs),
     Clone(hub_clone::CloneArgs),
     Publish(hub_publish::PublishArgs),
+    Hub(hub_clone::HubArgs),
     /// Initialize repository-local GraphForge definitions and state.
     Init(InitArgs),
     /// Compare or reconcile declared definitions and source digests without ingesting data.
@@ -287,10 +288,10 @@ enum Command {
     /// Restore the complete workspace from a checkpoint.
     Revert(RevertArgs),
     /// Export one immutable generation as a streaming portable package.
-    Export(portable_cli::PortableV2ExportArgs),
+    Export(portable_cli::PortableExportArgs),
     /// Import a streaming portable package into a new or empty project.
-    Import(portable_cli::PortableV2ImportArgs),
-    /// Portable-v2 selection preview, verification, staging, and OCI promotion.
+    Import(portable_cli::PortableImportArgs),
+    /// Portable selection preview, verification, staging, and OCI promotion.
     Portable {
         #[command(subcommand)]
         command: portable_cli::PortableCommand,
@@ -1149,7 +1150,7 @@ fn run_with_allocation(
     if let Command::Auth(args) = command {
         return auth::run(args, cli.json, output);
     }
-    if let hub @ (Command::Clone(_) | Command::Publish(_)) = command {
+    if let hub @ (Command::Clone(_) | Command::Publish(_) | Command::Hub(_)) = command {
         return hub_publish::run_hub_command(hub, cli.project, cli.project_dir, cli.json, output);
     }
     if let Command::Ontology { command } = &command
@@ -1556,6 +1557,17 @@ fn error_exit_code(error: &CliRuntimeError) -> i32 {
         CliRuntimeError::Core(error) if error.code() == "GF_VALIDATION" => 2,
         CliRuntimeError::Core(graphforge_api::GfError::Storage(_)) => 3,
         CliRuntimeError::MultiOntology(error) if error.code == "GF_VALIDATION" => 2,
+        // A portable import refused before it extracted anything because the
+        // target's filesystem or free space cannot hold it: the storage class.
+        CliRuntimeError::MultiOntology(error)
+            if error.code == "GF_UNSUPPORTED_FILESYSTEM"
+                || error
+                    .diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic.code == "storage.insufficient_space") =>
+        {
+            3
+        }
         _ => 1,
     }
 }

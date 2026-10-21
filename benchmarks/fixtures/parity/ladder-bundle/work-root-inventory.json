@@ -1,0 +1,17 @@
+{
+  "empty": true,
+  "entries": [],
+  "host_profile_id": "local-linux-cgroups-v2",
+  "result_sha256": {
+    "s18-result.json": "9d10bc21a2f2b7218cbd87017d3ab797901dad299161bfc41d84f2f452866b08",
+    "s19-result.json": "8b0fd0f47aac78faa6728b2c3f58300258624cc3337870dccd1e110970572efb",
+    "s20-result.json": "03054e70eb246a7e46a2d2b9206d85ca67b69b6313a5a3a508d4fc162c0bf5dd",
+    "s22-result.json": "0381186bd0680fc1d9b375d0245a0ee098557fd251ab87c3da2519443a9dac9a",
+    "s24-result.json": "e2fd708d9377309288c46fd8d4c7dd7247f47f806266495e066af988825e6436",
+    "s25-result.json": "8d741bf5fee6e2cb29b0fb3acdc44979d14673b60d7ffa634b3fded4a1764bdc",
+    "s26-result.json": "dedf5a8fe9ed3f3f2709676610965a47c441a6a976e220589a7abd2715372f55"
+  },
+  "retained_evidence_directory": null,
+  "schema": "graphforge-host-work-root-inventory/2",
+  "scope": "work_root_except_evidence_and_empty_scaffolding"
+}

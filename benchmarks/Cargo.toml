@@ -25,6 +25,7 @@ parquet = { version = "=58.4.0", features = ["arrow"] }
 
 # This standalone workspace must use the same engine patches as the product.
 [patch.crates-io]
+arrow-row = { path = "../vendor/arrow-row" }
 datafusion-physical-plan = { path = "../vendor/datafusion-physical-plan" }
 datafusion-optimizer = { path = "../vendor/datafusion-optimizer" }
 

@@ -329,9 +329,9 @@ fn checkpoint_diff_spans_the_upgrade() {
 fn research_v6_package_from_old_producer_is_rejected_without_publication() {
     let directory = tempfile::tempdir().unwrap();
     let target = directory.path().join("imported");
-    let error = GraphForge::import_portable_v2(
+    let error = GraphForge::import_portable(
         &target,
-        &PortableV2ImportRequest {
+        &PortableImportRequest {
             input: Path::new(FIXTURE).join("package.gfpb"),
             operation_id: OperationId(Uuid::now_v7()),
             limits: Default::default(),
@@ -341,7 +341,7 @@ fn research_v6_package_from_old_producer_is_rejected_without_publication() {
     .unwrap_err();
     assert_eq!(
         error.code,
-        graphforge_core::portable::PortableV2ErrorCode::Incompatible
+        graphforge_core::portable::PortableErrorCode::Incompatible
     );
     assert!(error.committed_import.is_none());
     assert!(
@@ -372,7 +372,7 @@ fn research_v6_versions_freezing_retired_metadata_are_not_exported() {
         .expect_err("retired metadata must not reach a research package");
     assert_eq!(
         error.code,
-        graphforge_core::portable::PortableV2ErrorCode::UnsupportedProjectFormat
+        graphforge_core::portable::PortableErrorCode::UnsupportedProjectFormat
     );
     assert!(!package.exists());
     assert_eq!(
@@ -406,9 +406,7 @@ fn research_v6_imported_history_from_old_producer_is_rejected_without_publicatio
 /// `access` member. It is refused, never migrated, and never copied into a package.
 #[test]
 fn legacy_research_metadata_is_refused_on_read_and_can_never_reach_an_export() {
-    use graphforge_core::portable::{
-        PortableV2ErrorCode, PortableV2Output, PortableV2SelectionProfile,
-    };
+    use graphforge_core::portable::{PortableErrorCode, PortableOutput, PortableSelectionProfile};
     let (directory, project, _) = fixture();
     let graph = GraphForge::new(project.to_str()).unwrap();
     match graph.research_project_metadata().unwrap_err() {
@@ -418,25 +416,25 @@ fn legacy_research_metadata_is_refused_on_read_and_can_never_reach_an_export() {
         other => panic!("unexpected error {other:?}"),
     }
     for (name, profile) in [
-        ("settings", PortableV2SelectionProfile::Settings),
-        ("complete", PortableV2SelectionProfile::Complete),
+        ("settings", PortableSelectionProfile::Settings),
+        ("complete", PortableSelectionProfile::Complete),
     ] {
         let output = directory.path().join(format!("export-{name}"));
         let error = graph
-            .export_portable_v2(
-                &PortableV2ExportRequest {
+            .export_portable(
+                &PortableExportRequest {
                     selection: PortableSelection::Current,
                     output_path: output.clone(),
-                    representation: PortableV2Output::Expanded,
+                    representation: PortableOutput::Expanded,
                     profile,
                     subset: None,
-                    limits: graphforge_core::portable::PortableV2Limits::default(),
+                    limits: graphforge_core::portable::PortableLimits::default(),
                 },
                 None,
                 |_| {},
             )
             .expect_err("a legacy metadata participant must not be exported");
-        assert_eq!(error.code, PortableV2ErrorCode::UnsupportedProjectFormat);
+        assert_eq!(error.code, PortableErrorCode::UnsupportedProjectFormat);
         assert!(!output.exists(), "{name} export left a package behind");
     }
 }
@@ -444,7 +442,7 @@ fn legacy_research_metadata_is_refused_on_read_and_can_never_reach_an_export() {
 /// Recovery is explicit: writing current metadata replaces the retired participant.
 #[test]
 fn rewriting_legacy_research_metadata_makes_the_project_exportable_without_access() {
-    use graphforge_core::portable::{PortableV2Output, PortableV2SelectionProfile};
+    use graphforge_core::portable::{PortableOutput, PortableSelectionProfile};
     let (directory, project, _) = fixture();
     let mut graph = GraphForge::new(project.to_str()).unwrap();
     let mut metadata = WorkspaceResearchMetadata::empty();
@@ -464,14 +462,14 @@ fn rewriting_legacy_research_metadata_makes_the_project_exportable_without_acces
     );
     let output = directory.path().join("export");
     graph
-        .export_portable_v2(
-            &PortableV2ExportRequest {
+        .export_portable(
+            &PortableExportRequest {
                 selection: PortableSelection::Current,
                 output_path: output.clone(),
-                representation: PortableV2Output::Expanded,
-                profile: PortableV2SelectionProfile::Settings,
+                representation: PortableOutput::Expanded,
+                profile: PortableSelectionProfile::Settings,
                 subset: None,
-                limits: graphforge_core::portable::PortableV2Limits::default(),
+                limits: graphforge_core::portable::PortableLimits::default(),
             },
             None,
             |_| {},
@@ -500,18 +498,16 @@ fn rewriting_legacy_research_metadata_makes_the_project_exportable_without_acces
 /// rewritten current Project exports.
 #[test]
 fn a_checkpoint_pinning_legacy_metadata_is_never_exported() {
-    use graphforge_core::portable::{
-        PortableV2ErrorCode, PortableV2Output, PortableV2SelectionProfile,
-    };
+    use graphforge_core::portable::{PortableErrorCode, PortableOutput, PortableSelectionProfile};
     let export = |graph: &GraphForge, selection, output: PathBuf| {
-        graph.export_portable_v2(
-            &PortableV2ExportRequest {
+        graph.export_portable(
+            &PortableExportRequest {
                 selection,
                 output_path: output,
-                representation: PortableV2Output::Expanded,
-                profile: PortableV2SelectionProfile::Settings,
+                representation: PortableOutput::Expanded,
+                profile: PortableSelectionProfile::Settings,
                 subset: None,
-                limits: graphforge_core::portable::PortableV2Limits::default(),
+                limits: graphforge_core::portable::PortableLimits::default(),
             },
             None,
             |_| {},
@@ -537,6 +533,6 @@ fn a_checkpoint_pinning_legacy_metadata_is_never_exported() {
         pinned.clone(),
     )
     .expect_err("a checkpoint pinning retired metadata must not be exported");
-    assert_eq!(error.code, PortableV2ErrorCode::UnsupportedProjectFormat);
+    assert_eq!(error.code, PortableErrorCode::UnsupportedProjectFormat);
     assert!(!pinned.exists());
 }

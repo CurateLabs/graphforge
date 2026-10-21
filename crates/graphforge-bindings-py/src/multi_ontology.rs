@@ -836,7 +836,7 @@ pub(crate) fn explain_resolution(
 pub(crate) fn portable_staging(forge: &GraphForge, py: Python<'_>) -> PyResult<Py<PyAny>> {
     let native = forge.ensure_open()?;
     let result = py
-        .detach(|| native.portable_ontology_staging(graphforge_api::PortableV2Limits::default()))
+        .detach(|| native.portable_ontology_staging(graphforge_api::PortableLimits::default()))
         .map_err(|e| to_multi_ontology_pyerr(py, &e))?;
     to_python(py, &result)
 }
@@ -863,7 +863,7 @@ pub(crate) fn adopt_portable_staging(
         .detach(|| {
             native.adopt_portable_ontology_staging(
                 &authority,
-                graphforge_api::PortableV2Limits::default(),
+                graphforge_api::PortableLimits::default(),
                 cancel.as_ref(),
             )
         })

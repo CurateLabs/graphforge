@@ -308,10 +308,10 @@ fn destructive_negotiation_requires_the_exact_offered_capability() {
 
 #[test]
 fn proposal_projection_and_branch_dependencies_are_never_erased() {
-    use graphforge_discovery::{LineageProposal, PORTABLE_V2_FORMAT, PortablePackageReference};
+    use graphforge_discovery::{LineageProposal, PORTABLE_FORMAT, PortablePackageReference};
     let mut next = lineage();
     let package = PortablePackageReference {
-        format: PORTABLE_V2_FORMAT.into(),
+        format: PORTABLE_FORMAT.into(),
         package_digest: Sha256Digest(sha256_digest(b"package")),
         object_digest: Sha256Digest(sha256_digest(b"object")),
     };

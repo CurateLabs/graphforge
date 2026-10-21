@@ -254,7 +254,7 @@ fn the_object_bound_is_the_publish_cumulative_bound() {
     );
 }
 
-fn clone_args(destination: &Path) -> CloneArgs {
+pub(super) fn clone_args(destination: &Path) -> CloneArgs {
     CloneArgs {
         hub: None,
         token_env: None,
@@ -302,7 +302,7 @@ fn objects_that_each_fit_clone_when_their_total_exceeds_one_hundred_gib() {
         &[serde_json::json!({
             "digest": format!("sha256:{}", "f".repeat(64)),
             "length": large,
-            "media_type": graphforge_discovery::PORTABLE_V2_MEDIA_TYPE,
+            "media_type": graphforge_discovery::PORTABLE_MEDIA_TYPE,
             "locations": ["https://objects.example/other.gfpb"]
         })],
     );
@@ -412,13 +412,81 @@ fn insufficient_space_fails_before_download_and_leaves_nothing() {
 
 #[test]
 fn required_space_covers_the_download_and_the_import_peak() {
-    assert_eq!(required_space(1000, 0, 0, false), 1000 + 2250);
-    assert_eq!(required_space(1000, 400, 0, false), 600 + 2250);
-    assert_eq!(required_space(1000, 1000, 2000, false), 250);
-    assert_eq!(required_space(1000, 1000, 5000, false), 0);
-    assert_eq!(required_space(1000, 1000, 0, true), 1000);
-    assert_eq!(required_space(1000, 1000, 600, true), 400);
-    assert_eq!(required_space(u64::MAX, 0, 0, false), u64::MAX);
+    let peak = |length, research| {
+        PortableImportFootprint::of_package_length(length, research).peak_bytes()
+    };
+    let complete = peak(1000, false);
+    assert_eq!(required_space(1000, 0, 0, false, false), 1000 + complete);
+    assert_eq!(required_space(1000, 400, 0, false, false), 600 + complete);
+    assert_eq!(
+        required_space(1000, 1000, 2000, false, false),
+        complete - 2000
+    );
+    assert_eq!(required_space(1000, 1000, complete, false, false), 0);
+    let replay = PortableImportFootprint::of_package_length(1000, false).replay_peak_bytes();
+    assert!(replay < complete, "a replay publishes nothing");
+    assert_eq!(required_space(1000, 1000, 0, true, false), replay);
+    assert_eq!(required_space(1000, 1000, 600, true, false), replay - 600);
+    assert_eq!(required_space(u64::MAX, 0, 0, false, false), u64::MAX);
+}
+
+#[test]
+fn the_budget_counts_what_the_import_holds_before_it_knows_the_package() {
+    let length = 4 << 20;
+    let generated = 2 * length;
+    let stage = length + generated;
+    // The stage and the published copy of every file are live together.
+    let complete = required_space(length, 0, 0, false, false);
+    assert!(complete >= length + PortableImportFootprint::FIXED_BYTES + 2 * stage);
+    // A package of small files extracts to far more allocated blocks than its
+    // length: every allocating bundle member takes at least 1 KiB, and each
+    // file is rounded up to a 4 KiB block in both live copies.
+    let smallest_files = length / 1024;
+    assert!(complete >= length + 2 * stage + 2 * smallest_files * 4096);
+    // A research package also holds a validation store and a Version store.
+    let research = required_space(length, 0, 0, false, true);
+    assert!(research >= length + PortableImportFootprint::FIXED_BYTES + stage + 2 * length);
+    assert!(research >= length + 2 * stage + 3 * smallest_files * 4096);
+}
+
+static BUDGET_AVAILABLE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+#[test]
+fn a_clone_refuses_one_byte_below_the_budget_and_runs_at_it() {
+    let (bundle, package_digest) = real_bundle();
+    let length = bundle.len() as u64;
+    // The budget written out from the footprint, not from the function under
+    // test: the download plus the import's peak for a project package.
+    let budget = length + PortableImportFootprint::of_package_length(length, false).peak_bytes();
+    for (available, refused) in [(budget - 1, true), (budget, false)] {
+        BUDGET_AVAILABLE.store(available, Ordering::SeqCst);
+        let root = tempfile::tempdir().unwrap();
+        let destination = root.path().join("openalex");
+        let mut env = CloneEnv {
+            available_space: |_| Ok(BUDGET_AVAILABLE.load(Ordering::SeqCst)),
+            ..CloneEnv::quiet()
+        };
+        let result = run_clone_profiled_with_delays(
+            &clone_script(&bundle, &package_digest),
+            clone_args(&destination),
+            true,
+            &mut Vec::new(),
+            &TelemetryRuntime::default(),
+            &CloneDelays::default(),
+            &mut env,
+        );
+        if refused {
+            let error = result.unwrap_err();
+            assert!(
+                error.to_string().contains("hub.insufficient_space"),
+                "{error}"
+            );
+            assert!(names(root.path()).is_empty());
+        } else {
+            result.unwrap();
+            assert!(destination.is_dir());
+        }
+    }
 }
 
 #[test]
@@ -542,8 +610,8 @@ static RERUN_AVAILABLE: std::sync::atomic::AtomicU64 = std::sync::atomic::Atomic
 fn a_rerun_after_the_import_committed_needs_space_only_for_the_remaining_work() {
     let (bundle, package_digest, fixture) = helper_fixture();
     let length = bundle.len() as u64;
-    // A first run needs about 3.25x the package.
-    assert!(required_space(length, length, 0, false) > length);
+    // A first run needs the import's peak beyond the package.
+    assert!(required_space(length, length, 0, false, false) > length);
     for failpoint in ["portable_import.before_reopen", "clone.before_install"] {
         let root = tempfile::tempdir().unwrap();
         let destination = root.path().join("openalex");
@@ -553,11 +621,38 @@ fn a_rerun_after_the_import_committed_needs_space_only_for_the_remaining_work() 
             Some(CLONE_FAILPOINT_EXIT),
             "{failpoint}"
         );
-        // Bytes the killed run staged for the import are credited: offer
-        // less than the package, so the rerun passes only with that credit.
-        let staged = staged_import_bytes(&acquire_staging(&destination).unwrap());
-        assert!(staged > 0, "{failpoint}: nothing staged");
-        RERUN_AVAILABLE.store(length - staged / 2, Ordering::SeqCst);
+        // The import committed, so the rerun only replays: it needs the
+        // replay's peak, less what its interrupted stage frees, which is less
+        // than any fresh clone of the package needs.
+        let operation = clone_operation(
+            &RepositoryIdentity::parse("openalex/openalex").unwrap(),
+            &format!("sha256:{}", "a".repeat(64)),
+            None,
+        );
+        let (committed, held) = {
+            // Released before the rerun takes the staging lock itself.
+            let staging = acquire_staging(&destination).unwrap();
+            (
+                import_committed(&staging, &operation),
+                graphforge_api::portable_import_held_bytes(
+                    &staging.project,
+                    &operation,
+                    PortableLimits::default(),
+                ),
+            )
+        };
+        assert!(committed, "{failpoint}");
+        let replay = PortableImportFootprint::of_package_length(length, false).replay_peak_bytes();
+        assert_eq!(
+            required_space(length, length, held, true, false),
+            replay - held,
+            "{failpoint}"
+        );
+        assert!(
+            replay < required_space(length, 0, 0, false, false),
+            "{failpoint}"
+        );
+        RERUN_AVAILABLE.store(replay - held, Ordering::SeqCst);
         // Research validation scratch an interrupted run left behind is
         // removed before space is measured, never counted as credit.
         let scratch = staging_path(&destination)
@@ -815,4 +910,178 @@ fn killed_or_failed_clone_leaves_a_state_the_rerun_completes() {
         );
         assert_reopens_at(&destination, &result);
     }
+}
+
+#[test]
+fn a_verifier_that_saw_other_bytes_than_the_download_is_refused() {
+    let downloaded = format!("sha256:{}", "a".repeat(64));
+    require_downloaded_bytes(Some(&downloaded), &downloaded).unwrap();
+    for seen in [Some(format!("sha256:{}", "b".repeat(64))), None] {
+        let error = require_downloaded_bytes(seen.as_deref(), &downloaded).unwrap_err();
+        assert!(error.to_string().contains("hub.integrity"), "{error}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_prior_stage_reduces_clones_budget_by_what_removing_it_frees_and_no_more() {
+    let (bundle, _) = real_bundle();
+    let length = bundle.len() as u64;
+    let operation = OperationId(uuid::Uuid::from_u128(0x1770));
+    let root = tempfile::tempdir().unwrap();
+    let destination = root.path().join("openalex");
+    let staging = acquire_staging(&destination).unwrap();
+    let name = staging
+        .project
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let id = operation.0.hyphenated();
+    let stage = staging.root.join(format!(".{name}.portable-v2-{id}"));
+    std::fs::create_dir_all(stage.join("data")).unwrap();
+    std::fs::write(
+        staging.root.join(format!(".{name}.portable-v2-{id}.owner")),
+        id.to_string(),
+    )
+    .unwrap();
+    // The budget written out from the footprint: no credit at all.
+    let budget = length + PortableImportFootprint::of_package_length(length, false).peak_bytes();
+    static AVAILABLE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let probe: fn(&Path) -> std::io::Result<u64> = |_| Ok(AVAILABLE.load(Ordering::SeqCst));
+    let admitted = |available: u64| {
+        AVAILABLE.store(available, Ordering::SeqCst);
+        check_free_space(&staging, length, false, false, &operation, probe)
+    };
+
+    // A sparse file allocates nothing, and a file linked from outside the
+    // stage frees nothing by being removed: neither lowers the budget.
+    std::fs::File::create(stage.join("data/sparse"))
+        .unwrap()
+        .set_len(1 << 30)
+        .unwrap();
+    std::fs::write(root.path().join("outside"), vec![1_u8; 1 << 20]).unwrap();
+    std::fs::hard_link(root.path().join("outside"), stage.join("data/linked")).unwrap();
+    let error = admitted(budget - 1).unwrap_err();
+    assert!(
+        error.to_string().contains("hub.insufficient_space"),
+        "{error}"
+    );
+    admitted(budget).unwrap();
+
+    // Real allocation is credited, through the import's own function.
+    std::fs::write(stage.join("data/payload"), vec![2_u8; 1 << 20]).unwrap();
+    let credit = graphforge_api::portable_import_held_bytes(
+        &staging.project,
+        &operation,
+        PortableLimits::default(),
+    );
+    assert!(credit >= 1 << 20, "{credit}");
+    admitted(budget - credit).unwrap();
+    assert!(admitted(budget - credit - 1).is_err());
+}
+
+#[test]
+fn a_refused_replay_keeps_the_project_an_earlier_run_committed() {
+    let (_, _, fixture) = helper_fixture();
+    let operation = clone_operation(
+        &RepositoryIdentity::parse("openalex/openalex").unwrap(),
+        &format!("sha256:{}", "a".repeat(64)),
+        None,
+    );
+    // Refused before it wrote anything, so the error carries no commit.
+    let refusal = graphforge_api::PortableError::new(
+        PortableErrorCode::InsufficientSpace,
+        "insufficient disk space for import",
+    );
+    // A run killed after its import committed leaves the committed project.
+    let root = tempfile::tempdir().unwrap();
+    let committed = root.path().join("committed");
+    let child = clone_in_child(fixture.path(), &committed, "clone.before_install");
+    assert_eq!(child.status.code(), Some(CLONE_FAILPOINT_EXIT));
+    let staging = acquire_staging(&committed).unwrap();
+    assert!(import_committed(&staging, &operation));
+    assert!(
+        !discards_failed_import(&staging, &operation, &refusal),
+        "the refusal would clear the committed project"
+    );
+    drop(staging);
+    // Staging that holds no committed project is discarded as before.
+    let fresh = acquire_staging(&root.path().join("fresh")).unwrap();
+    assert!(discards_failed_import(&fresh, &operation, &refusal));
+}
+
+/// A research retry's interrupted stage is still on disk while the package is
+/// verified (verification extracts it again and builds two stores), and the
+/// import removes it only afterwards. The retry is therefore admitted against
+/// the larger of the verification and the credited import, not the import
+/// alone.
+#[cfg(unix)]
+#[test]
+fn a_research_retry_is_not_credited_for_space_verification_needs_first() {
+    let (bundle, _) = real_bundle();
+    let length = bundle.len() as u64;
+    let operation = OperationId(uuid::Uuid::from_u128(0x1771));
+    let root = tempfile::tempdir().unwrap();
+    let destination = root.path().join("openalex");
+    let staging = acquire_staging(&destination).unwrap();
+    let name = staging
+        .project
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let id = operation.0.hyphenated();
+    let stage = staging.root.join(format!(".{name}.portable-v2-{id}"));
+    std::fs::create_dir_all(stage.join("data")).unwrap();
+    std::fs::write(
+        staging.root.join(format!(".{name}.portable-v2-{id}.owner")),
+        id.to_string(),
+    )
+    .unwrap();
+    // An allocated interrupted stage, larger than the controls the import
+    // would generate, so crediting it drops the import below verification.
+    std::fs::write(stage.join("data/payload"), vec![3_u8; 4 << 20]).unwrap();
+    let held = graphforge_api::portable_import_held_bytes(
+        &staging.project,
+        &operation,
+        PortableLimits::default(),
+    );
+    assert!(held >= 4 << 20, "{held}");
+
+    // Both phases written out from the footprint, not from `required_space`.
+    let footprint = PortableImportFootprint::of_package_length(length, true);
+    let verification = length + footprint.verification_peak_bytes();
+    let import = length + footprint.peak_bytes().saturating_sub(held);
+    assert!(
+        import < verification,
+        "the fixture must credit the import below verification: {import} {verification}"
+    );
+
+    static AVAILABLE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let probe: fn(&Path) -> std::io::Result<u64> = |_| Ok(AVAILABLE.load(Ordering::SeqCst));
+    let admitted = |available: u64| {
+        AVAILABLE.store(available, Ordering::SeqCst);
+        check_free_space(&staging, length, false, true, &operation, probe)
+    };
+    // Enough for the credited import, not for verification: refused before
+    // anything is downloaded or verified.
+    for available in [import, verification - 1] {
+        let error = admitted(available).unwrap_err();
+        assert!(
+            error.to_string().contains("hub.insufficient_space"),
+            "{error}"
+        );
+    }
+    // At the larger requirement it is admitted.
+    admitted(verification).unwrap();
+    // A project package has no research verification: the credit applies.
+    AVAILABLE.store(
+        length
+            + PortableImportFootprint::of_package_length(length, false)
+                .peak_bytes()
+                .saturating_sub(held),
+        Ordering::SeqCst,
+    );
+    check_free_space(&staging, length, false, false, &operation, probe).unwrap();
 }

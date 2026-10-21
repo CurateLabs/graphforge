@@ -342,9 +342,9 @@ impl GraphForge {
         Ok(out.into_any().unbind())
     }
 
-    /// Preview one content-free portable-v2 component selection.
+    /// Preview one content-free portable component selection.
     #[pyo3(signature = (*, checkpoint=None, profile="complete", identities=None, strict=false, limits=None))]
-    fn preview_portable_v2_selection(
+    fn preview_portable_selection(
         &self,
         py: Python<'_>,
         checkpoint: Option<String>,
@@ -353,27 +353,27 @@ impl GraphForge {
         strict: bool,
         limits: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
-        portable::preview_portable_v2_selection(
+        portable::preview_portable_selection(
             self, py, checkpoint, profile, identities, strict, limits,
         )
     }
 
-    /// Preview one content-free portable-v2 graph-data subset.
+    /// Preview one content-free portable graph-data subset.
     #[pyo3(signature = (*, subset, checkpoint=None, limits=None))]
-    fn preview_portable_v2_graph_subset(
+    fn preview_portable_graph_subset(
         &self,
         py: Python<'_>,
         subset: &Bound<'_, PyDict>,
         checkpoint: Option<String>,
         limits: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
-        portable::preview_portable_v2_graph_subset(self, py, checkpoint, subset, limits)
+        portable::preview_portable_graph_subset(self, py, checkpoint, subset, limits)
     }
 
-    /// Export one pinned generation as an expanded or bundled portable-v2 package.
+    /// Export one pinned generation as an expanded or bundled portable package.
     #[pyo3(signature = (*, output_path, representation="bundle", profile="complete", identities=None, checkpoint=None, subset=None, limits=None, cancellation=None, progress=None))]
     #[allow(clippy::too_many_arguments)]
-    fn export_portable_v2(
+    fn export_portable(
         &self,
         py: Python<'_>,
         output_path: &str,
@@ -386,7 +386,7 @@ impl GraphForge {
         cancellation: Option<&PyCancellationToken>,
         progress: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Py<PyAny>> {
-        portable::export_portable_v2(
+        portable::export_portable(
             self,
             py,
             output_path,
@@ -401,23 +401,23 @@ impl GraphForge {
         )
     }
 
-    /// Verify portable-v2 content without opening or mutating a project.
+    /// Verify portable content without opening or mutating a project.
     #[staticmethod]
     #[pyo3(signature = (input, *, mode="full", limits=None, cancellation=None))]
-    fn verify_portable_v2(
+    fn verify_portable(
         py: Python<'_>,
         input: &str,
         mode: &str,
         limits: Option<&Bound<'_, PyDict>>,
         cancellation: Option<&PyCancellationToken>,
     ) -> PyResult<Py<PyAny>> {
-        portable::verify_portable_v2(py, input, mode, limits, cancellation)
+        portable::verify_portable(py, input, mode, limits, cancellation)
     }
 
-    /// Verify and atomically import a complete portable-v2 package.
+    /// Verify and atomically import a complete portable package.
     #[staticmethod]
     #[pyo3(signature = (project_root, *, input, operation_id, limits=None, cancellation=None))]
-    fn import_portable_v2(
+    fn import_portable(
         py: Python<'_>,
         project_root: &str,
         input: &str,
@@ -425,14 +425,14 @@ impl GraphForge {
         limits: Option<&Bound<'_, PyDict>>,
         cancellation: Option<&PyCancellationToken>,
     ) -> PyResult<Py<PyAny>> {
-        portable::import_portable_v2(py, project_root, input, operation_id, limits, cancellation)
+        portable::import_portable(py, project_root, input, operation_id, limits, cancellation)
     }
 
-    /// Publish a verified portable-v2 package to an OCI Distribution registry.
+    /// Publish a verified portable package to an OCI Distribution registry.
     #[staticmethod]
     #[pyo3(signature = (*, package_path, registry, repository, tag=None, limits=None, authenticity=None, signature=None, insecure_http=false, credential=None, cancellation=None))]
     #[allow(clippy::too_many_arguments)]
-    fn publish_portable_v2_oci(
+    fn publish_portable_oci(
         py: Python<'_>,
         package_path: &str,
         registry: &str,
@@ -445,7 +445,7 @@ impl GraphForge {
         credential: Option<String>,
         cancellation: Option<&PyCancellationToken>,
     ) -> PyResult<Py<PyAny>> {
-        portable::publish_portable_v2_oci(
+        portable::publish_portable_oci(
             py,
             package_path,
             registry,
@@ -460,11 +460,11 @@ impl GraphForge {
         )
     }
 
-    /// Pull and verify a portable-v2 package from an OCI Distribution registry.
+    /// Pull and verify a portable package from an OCI Distribution registry.
     #[staticmethod]
     #[pyo3(signature = (*, registry, repository, reference, destination, expected_oci_digest=None, limits=None, authenticity=None, insecure_http=false, credential=None, cancellation=None))]
     #[allow(clippy::too_many_arguments)]
-    fn pull_portable_v2_oci(
+    fn pull_portable_oci(
         py: Python<'_>,
         registry: &str,
         repository: &str,
@@ -477,7 +477,7 @@ impl GraphForge {
         credential: Option<String>,
         cancellation: Option<&PyCancellationToken>,
     ) -> PyResult<Py<PyAny>> {
-        portable::pull_portable_v2_oci(
+        portable::pull_portable_oci(
             py,
             registry,
             repository,

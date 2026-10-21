@@ -360,31 +360,31 @@ fn oversized_property_values_round_trip_through_bounded_objects() {
 #[cfg(feature = "portable")]
 fn assert_portable_large_round_trip(root: &std::path::Path, forge: &GraphForge, payload: &str) {
     use graphforge_api::{
-        OperationId, PortableSelection, PortableV2ExportRequest, PortableV2ImportRequest,
-        PortableV2Limits, PortableV2Output, PortableV2SelectionProfile,
+        OperationId, PortableExportRequest, PortableImportRequest, PortableLimits, PortableOutput,
+        PortableSelection, PortableSelectionProfile,
     };
     let package = root.join("large-values.gfpb");
     forge
-        .export_portable_v2(
-            &PortableV2ExportRequest {
+        .export_portable(
+            &PortableExportRequest {
                 selection: PortableSelection::Current,
                 output_path: package.clone(),
-                representation: PortableV2Output::Bundle,
-                profile: PortableV2SelectionProfile::Complete,
+                representation: PortableOutput::Bundle,
+                profile: PortableSelectionProfile::Complete,
                 subset: None,
-                limits: PortableV2Limits::default(),
+                limits: PortableLimits::default(),
             },
             None,
             |_| {},
         )
         .unwrap();
     let imported = root.join("imported");
-    GraphForge::import_portable_v2(
+    GraphForge::import_portable(
         &imported,
-        &PortableV2ImportRequest {
+        &PortableImportRequest {
             input: package,
             operation_id: OperationId(uuid::Uuid::now_v7()),
-            limits: PortableV2Limits::default(),
+            limits: PortableLimits::default(),
         },
         None,
     )

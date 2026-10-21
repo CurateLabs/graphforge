@@ -52,7 +52,7 @@ class ParityGateTests(unittest.TestCase):
         self.assertNotIn("ready_for_retirement", status)
         self.assertTrue(status["structural_retirement_ready"])
         self.assertTrue(status["prefix_parity_ready"])
-        self.assertFalse(status["full_ladder_evidence_complete"])
+        self.assertTrue(status["full_ladder_evidence_complete"])
         harness = next(
             row
             for row in status["criteria"]
@@ -82,11 +82,11 @@ class ParityGateTests(unittest.TestCase):
             status = parity_gate_status(base)
         self.assertFalse(status["structural_retirement_ready"])
         self.assertTrue(status["prefix_parity_ready"])
-        self.assertFalse(status["full_ladder_evidence_complete"])
+        self.assertTrue(status["full_ladder_evidence_complete"])
 
     def test_ingested_ladder_bundle_runs_comparisons(self) -> None:
         comparisons = compare_ladder_bundle(ladder_bundle_root())
-        self.assertEqual(len(comparisons), 2)
+        self.assertEqual(len(comparisons), 7)
         self.assertTrue(all(matrix.get("overall") for matrix in comparisons))
 
     def test_gate_status_json_serializable(self) -> None:
@@ -170,8 +170,7 @@ class ParityGateTests(unittest.TestCase):
         path.write_text(json.dumps(document) + "\n", encoding="utf-8")
 
     def test_cli_ignores_incomplete_full_ladder_evidence(self) -> None:
-        status = parity_gate_status()
-        self.assertFalse(status["full_ladder_evidence_complete"])
+        status = {**parity_gate_status(), "full_ladder_evidence_complete": False}
         with (
             patch("graphforge_bench.parity_gate_cli.parity_gate_status", return_value=status),
             redirect_stdout(io.StringIO()) as output,

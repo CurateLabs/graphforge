@@ -1,6 +1,6 @@
 //! First-party, explicit storage qualification context. This is not a public
 //! receipt format and does not change ordinary facade options or requests.
-use crate::{GfError, GraphForge, PortableV2ImportRequest, PortableV2ImportResult};
+use crate::{GfError, GraphForge, PortableImportRequest, PortableImportResult};
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 
@@ -32,17 +32,17 @@ impl StorageAllocationDiagnostics {
     pub fn import(
         &self,
         path: &Path,
-        request: &PortableV2ImportRequest,
+        request: &PortableImportRequest,
         cancelled: Option<&AtomicBool>,
-    ) -> Result<PortableV2ImportResult, graphforge_core::portable::PortableV2Error> {
+    ) -> Result<PortableImportResult, graphforge_core::portable::PortableError> {
         let path = graphforge_storage::StorageAllocationOperation::resolve_project_path(path)
             .map_err(|_| {
-                graphforge_core::portable::PortableV2Error::new(
-                    graphforge_core::portable::PortableV2ErrorCode::InvalidPath,
+                graphforge_core::portable::PortableError::new(
+                    graphforge_core::portable::PortableErrorCode::InvalidPath,
                     "invalid diagnostic import target path",
                 )
             })?;
-        GraphForge::import_portable_v2_with_allocation(
+        GraphForge::import_portable_with_allocation(
             &path,
             request,
             cancelled,

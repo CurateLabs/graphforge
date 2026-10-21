@@ -68,7 +68,7 @@ mod tests {
     use super::*;
     use clap::Parser;
     use graphforge_api::{
-        BranchSource, CreateResearchBranchRequest, OperationId, PortableV2ImportRequest,
+        BranchSource, CreateResearchBranchRequest, OperationId, PortableImportRequest,
         PortableVerifyRequest, ResearchReferenceTarget,
     };
     use serde_json::{Value, json};
@@ -125,10 +125,10 @@ mod tests {
             "export",
             &json!({"version_uuid":version, "output":package, "bundled":false, "projection":null}),
         );
-        let report = graphforge_api::verify_portable_v2(
+        let report = graphforge_api::verify_portable(
             &PortableVerifyRequest {
                 input: package.clone(),
-                mode: graphforge_api::PortableV2Mode::Full,
+                mode: graphforge_api::PortableMode::Full,
                 limits: Default::default(),
             },
             None,
@@ -136,9 +136,9 @@ mod tests {
         .unwrap();
         assert_eq!(exported["package_digest"], report.package_digest);
         let imported_root = directory.path().join("imported");
-        GraphForge::import_portable_v2(
+        GraphForge::import_portable(
             &imported_root,
-            &PortableV2ImportRequest {
+            &PortableImportRequest {
                 input: package,
                 operation_id: OperationId(Uuid::now_v7()),
                 limits: Default::default(),

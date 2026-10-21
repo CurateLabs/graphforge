@@ -244,7 +244,7 @@ fn fork_citation_carries_the_origin_versions_credit() {
 fn full_lineage(history: &History, head: Uuid) -> ResearchLineage {
     let digest = |marker: char| Sha256Digest(format!("sha256:{}", marker.to_string().repeat(64)));
     let package = |marker: char| graphforge_discovery::PortablePackageReference {
-        format: graphforge_discovery::PORTABLE_V2_FORMAT.into(),
+        format: graphforge_discovery::PORTABLE_FORMAT.into(),
         package_digest: digest(marker),
         object_digest: digest(marker),
     };

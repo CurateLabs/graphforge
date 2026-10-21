@@ -200,15 +200,15 @@ fn graph_mutation_reuses_large_unchanged_knowledge_participant() {
             bytes_before.len()
         );
         assert!(bytes_before.len() >= 64 * 1024);
-        let portable_limits = graphforge_core::portable::PortableV2Limits::default();
+        let portable_limits = graphforge_core::portable::PortableLimits::default();
         if repeats == 8_192 {
             let parent_export = graph
-                .export_portable_v2(
-                    &crate::PortableV2ExportRequest {
+                .export_portable(
+                    &crate::PortableExportRequest {
                         selection: crate::PortableSelection::Current,
                         output_path: root.path().join("parent.gfpb"),
-                        representation: graphforge_core::portable::PortableV2Output::Bundle,
-                        profile: graphforge_core::portable::PortableV2SelectionProfile::Complete,
+                        representation: graphforge_core::portable::PortableOutput::Bundle,
+                        profile: graphforge_core::portable::PortableSelectionProfile::Complete,
                         subset: None,
                         limits: portable_limits,
                     },
@@ -339,12 +339,12 @@ fn graph_mutation_reuses_large_unchanged_knowledge_participant() {
         assert_eq!(knowledge_after.row_count, knowledge_before.row_count);
         if repeats == 8_192 {
             let child_export = graph
-                .export_portable_v2(
-                    &crate::PortableV2ExportRequest {
+                .export_portable(
+                    &crate::PortableExportRequest {
                         selection: crate::PortableSelection::Current,
                         output_path: root.path().join("child.gfpb"),
-                        representation: graphforge_core::portable::PortableV2Output::Bundle,
-                        profile: graphforge_core::portable::PortableV2SelectionProfile::Complete,
+                        representation: graphforge_core::portable::PortableOutput::Bundle,
+                        profile: graphforge_core::portable::PortableSelectionProfile::Complete,
                         subset: None,
                         limits: portable_limits,
                     },
@@ -353,9 +353,9 @@ fn graph_mutation_reuses_large_unchanged_knowledge_participant() {
                 )
                 .unwrap_or_else(|error| panic!("child portable export failed: {error:?}"));
             let target = root.path().join("portable-import");
-            GraphForge::import_portable_v2(
+            GraphForge::import_portable(
                 &target,
-                &crate::PortableV2ImportRequest {
+                &crate::PortableImportRequest {
                     input: child_export.output,
                     operation_id: OperationId(uuid::Uuid::from_u128(80_004)),
                     limits: portable_limits,

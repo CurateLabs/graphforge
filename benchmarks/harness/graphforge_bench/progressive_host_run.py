@@ -565,8 +565,23 @@ def reclaim_workspace(work_root: Path, name: str) -> None:
 
 
 def reclaim_rung_workspace(work_root: Path, scale: int) -> None:
-    """Delete a Graph500 rung's datasets/projects after evidence is accepted."""
+    """Delete a Graph500 rung's datasets/projects after evidence is accepted.
+
+    The rung's scratch under `<work_root>/tmp` (the runner's TMPDIR and the
+    certification document BenchExec's tool writes there) is debris once the
+    evidence is accepted, so it goes too; the empty `tmp` scaffold stays.
+    """
     reclaim_workspace(work_root, f"s{scale}")
+    tmp = work_root / "tmp"
+    if tmp.is_symlink():
+        raise HostRunError("tmp_link_refused")
+    if not tmp.is_dir():
+        return
+    for entry in tmp.iterdir():
+        if entry.is_dir() and not entry.is_symlink():
+            shutil.rmtree(entry)
+        else:
+            entry.unlink()
 
 
 def inventory_work_root(work_root: Path, output_dir: Path | None = None) -> dict[str, Any]:

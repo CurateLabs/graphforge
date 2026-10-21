@@ -1578,7 +1578,7 @@ pub(crate) fn legacy_route_destination(text: &str) -> Result<PathBuf, GfError> {
 fn inventory_relative_path_candidates(text: &str) -> Result<Vec<PathBuf>, GfError> {
     if crate::route_component::route_position(text)?.is_some() {
         // Validate semantic containment and every non-route component before
-        // opening the raw legacy spelling. No portable-v2 parser is relaxed.
+        // opening the raw legacy spelling. No portable parser is relaxed.
         legacy_route_destination(text)?;
         let exact = text.split('/').fold(PathBuf::new(), |mut path, component| {
             path.push(component);

@@ -211,6 +211,7 @@ def authoritative_receipts(scale: int) -> dict[str, list[dict]]:
                 "publication_committed": True,
                 "input_rows": 65_536 * 64,
                 "input_batches": 64,
+                "bulk_build": {"nodes": 2**scale, "edges": 16 * 2**scale},
                 "transient_peak_allocated_bytes": 300,
                 "construction_staging": {
                     "logical_references": 3,
@@ -697,6 +698,35 @@ class ProgressiveRunControllerTests(unittest.TestCase):
             )
 
     def test_bulk_capability_is_derived_from_the_ordinary_commit_receipt(self) -> None:
+        receipt = {
+            "contract": "graphforge-import-session/1",
+            "outcome": "committed",
+            "construction": {
+                "configured_batch_rows": 65_536,
+                "accepted_chunks": 0,
+                "publication_committed": True,
+                "input_rows": 0,
+                "input_batches": 0,
+                "bulk_build": {"nodes": 262_144, "edges": 4_194_304},
+            },
+        }
+        self.assertIs(require_bulk_ingest_capability(receipt), receipt)
+        unpublished = json.loads(json.dumps(receipt))
+        unpublished["construction"]["publication_committed"] = False
+        missing = json.loads(json.dumps(receipt))
+        del missing["construction"]["bulk_build"]
+        for invalid in (unpublished, missing):
+            with self.assertRaisesRegex(ControllerError, "bulk_ingest_capability_unproven"):
+                require_bulk_ingest_capability(invalid)
+        for field in ("nodes", "edges"):
+            for invalid_value in (0, True, None, "2"):
+                with self.subTest(field=field, invalid_value=invalid_value):
+                    invalid = json.loads(json.dumps(receipt))
+                    invalid["construction"]["bulk_build"][field] = invalid_value
+                    with self.assertRaisesRegex(ControllerError, "bulk_ingest_capability_unproven"):
+                        require_bulk_ingest_capability(invalid)
+
+    def test_bulk_capability_accepts_preserved_staged_chunk_receipts(self) -> None:
         receipt = {
             "contract": "graphforge-import-session/1",
             "outcome": "committed",
@@ -1212,7 +1242,7 @@ class ProgressiveRunControllerTests(unittest.TestCase):
 
     def test_fly_s18_s19_ladder_bundle_refuses_s20_until_rss_plateaus(self) -> None:
         """Real #900 Fly evidence must not authorize S20 while RSS grows across rungs."""
-        bundle = ROOT / "fixtures" / "parity" / "ladder-bundle"
+        bundle = ROOT / "tests" / "fixtures" / "rungs" / "fly-rss-growth"
         for scale in (18, 19):
             source = bundle / f"s{scale}-rung.json"
             (self.output / source.name).write_text(source.read_text(encoding="utf-8"))

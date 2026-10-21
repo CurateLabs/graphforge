@@ -458,7 +458,7 @@ def validate_semantics(
         "policy": "complete-current-generation",
     }
     if package != expected_package:
-        raise EvidenceError("portable-v2 package contract is incomplete or incompatible")
+        raise EvidenceError("portable package contract is incomplete or incompatible")
     authority = require_mapping(
         evidence, "authority", ("source_fingerprint", "imported_fingerprint")
     )

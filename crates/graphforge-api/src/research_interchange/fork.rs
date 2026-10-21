@@ -1,6 +1,6 @@
 //! Explicit independent Project creation, committed by the portable import owner.
 use crate::{CancellationToken, GraphForge};
-use graphforge_core::portable::{PortableV2Error, PortableV2ErrorCode};
+use graphforge_core::portable::{PortableError, PortableErrorCode};
 use graphforge_storage::research_versions::ResearchForkRecord;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -50,7 +50,7 @@ impl GraphForge {
         &self,
         request: &ForkResearchRequest,
         cancel: &CancellationToken,
-    ) -> Result<ForkResearchResult, PortableV2Error> {
+    ) -> Result<ForkResearchResult, PortableError> {
         if request.operation_uuid.is_nil()
             || request.project_uuid.is_nil()
             || request.actor_uuid.is_nil()
@@ -66,7 +66,7 @@ impl GraphForge {
             .map_err(|_| invalid())?;
         cancel
             .checkpoint()
-            .map_err(|_| PortableV2Error::new(PortableV2ErrorCode::Cancelled, "Fork cancelled"))?;
+            .map_err(|_| PortableError::new(PortableErrorCode::Cancelled, "Fork cancelled"))?;
         let intent = intent(request)?;
         if let Some(result) = replay(request, intent)? {
             return Ok(result);
@@ -78,7 +78,7 @@ impl GraphForge {
             return Err(invalid());
         }
         let directory = tempfile::tempdir()
-            .map_err(|_| PortableV2Error::new(PortableV2ErrorCode::Io, "cannot prepare Fork"))?;
+            .map_err(|_| PortableError::new(PortableErrorCode::Io, "cannot prepare Fork"))?;
         let output = directory.path().join("research");
         super::export::export(
             self,
@@ -91,12 +91,12 @@ impl GraphForge {
             Some(request),
             cancel,
         )?;
-        let result = GraphForge::import_portable_v2(
+        let result = GraphForge::import_portable(
             &request.target,
-            &crate::PortableV2ImportRequest {
+            &crate::PortableImportRequest {
                 input: output,
                 operation_id: crate::OperationId(request.operation_uuid),
-                limits: graphforge_core::portable::PortableV2Limits::default(),
+                limits: graphforge_core::portable::PortableLimits::default(),
             },
             Some(cancel.flag()),
         )?;
@@ -109,7 +109,7 @@ impl GraphForge {
     }
 }
 
-pub(super) fn record(request: &ForkResearchRequest) -> Result<ResearchForkRecord, PortableV2Error> {
+pub(super) fn record(request: &ForkResearchRequest) -> Result<ResearchForkRecord, PortableError> {
     Ok(ResearchForkRecord {
         intent_sha256: intent(request)?,
         project_uuid: request.project_uuid,
@@ -123,7 +123,7 @@ pub(super) fn record(request: &ForkResearchRequest) -> Result<ResearchForkRecord
 pub(super) fn configure(
     generation: &graphforge_storage::ResolvedProjectGeneration,
     request: &ForkResearchRequest,
-) -> Result<graphforge_storage::ResolvedProjectGeneration, PortableV2Error> {
+) -> Result<graphforge_storage::ResolvedProjectGeneration, PortableError> {
     use graphforge_storage::{
         ProjectCapability, ProjectGenerationRequest, ProjectParticipantEncoding,
         ProjectStageOutcome,
@@ -195,9 +195,9 @@ pub(super) fn configure(
     graphforge_storage::resolve_project_generation(generation.container_root())
         .map_err(|_| invalid())
 }
-fn invalid() -> PortableV2Error {
-    PortableV2Error::new(
-        PortableV2ErrorCode::Incompatible,
+fn invalid() -> PortableError {
+    PortableError::new(
+        PortableErrorCode::Incompatible,
         "Fork requires valid independent identity, metadata, governance and explicit ontology adoption",
     )
 }
@@ -205,7 +205,7 @@ fn invalid() -> PortableV2Error {
 fn replay(
     request: &ForkResearchRequest,
     intent: [u8; 32],
-) -> Result<Option<ForkResearchResult>, PortableV2Error> {
+) -> Result<Option<ForkResearchResult>, PortableError> {
     let Some(receipt) =
         graphforge_storage::published_project_transaction(&request.target, request.operation_uuid)
             .map_err(|_| invalid())?
@@ -224,10 +224,10 @@ fn replay(
     if fork.is_none_or(|fork| {
         fork.intent_sha256 != intent || fork.project_uuid != request.project_uuid
     }) || receipt.generation_uuid
-        != graphforge_core::uuid::portable_v2_import_generation(&request.operation_uuid)
+        != graphforge_core::uuid::portable_import_generation(&request.operation_uuid)
     {
-        return Err(PortableV2Error::new(
-            PortableV2ErrorCode::ConcurrentMutation,
+        return Err(PortableError::new(
+            PortableErrorCode::ConcurrentMutation,
             "Fork operation identity has different immutable inputs",
         ));
     }
@@ -239,7 +239,7 @@ fn replay(
     }))
 }
 
-fn intent(request: &ForkResearchRequest) -> Result<[u8; 32], PortableV2Error> {
+fn intent(request: &ForkResearchRequest) -> Result<[u8; 32], PortableError> {
     use graphforge_storage::concurrency_attribution::ObservedSha256 as Sha256;
     use sha2::Digest;
     struct HashWriter {

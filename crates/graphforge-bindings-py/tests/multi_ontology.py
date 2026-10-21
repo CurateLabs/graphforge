@@ -277,9 +277,9 @@ def _run_four_surface_operation_conformance() -> dict[str, object]:
         assert forge.ontology_authority_state() == before
 
         expanded = root / "portable"
-        exported = forge.export_portable_v2(output_path=str(expanded), representation="expanded")
+        exported = forge.export_portable(output_path=str(expanded), representation="expanded")
         expanded_path = Path(exported["output"])
-        verified_composition = g.GraphForge.verify_portable_v2(str(expanded_path), mode="full")
+        verified_composition = g.GraphForge.verify_portable(str(expanded_path), mode="full")
         portable_manifest = json.loads((expanded_path / "data/graphforge-project.json").read_text())
         control = next(
             c
@@ -337,7 +337,7 @@ def _run_four_surface_operation_conformance() -> dict[str, object]:
         assert verified_composition["ontology_composition_entries"] == sorted(
             expected_entries, key=lambda entry: entry["path"]
         )
-        selection_preview = forge.preview_portable_v2_selection(profile="complete")
+        selection_preview = forge.preview_portable_selection(profile="complete")
         expected_projected = [
             {
                 "kind": e["kind"],
@@ -355,7 +355,7 @@ def _run_four_surface_operation_conformance() -> dict[str, object]:
         assert isinstance(selection_preview["include_graph_tree"], bool)
         inject_unsupported_feature(expanded_path)
         future_code, future_diagnostics = failure(
-            lambda: g.GraphForge.verify_portable_v2(str(expanded_path), mode="structure_only")
+            lambda: g.GraphForge.verify_portable(str(expanded_path), mode="structure_only")
         )
         assert future_code == oracle["expected"]["unsupported_future_code"]
         assert future_diagnostics[0]["code"] == oracle["expected"]["unsupported_future_diagnostic"]
@@ -365,7 +365,7 @@ def _run_four_surface_operation_conformance() -> dict[str, object]:
         before_entries = list(target.iterdir())
         import_authority_before = forge.ontology_authority_state()
         import_code, import_diagnostics = failure(
-            lambda: g.GraphForge.import_portable_v2(
+            lambda: g.GraphForge.import_portable(
                 str(target), input=str(expanded_path), operation_id=op(10)
             )
         )
@@ -531,10 +531,10 @@ def test_dependency_blocked_deletion() -> None:
 
 
 def test_unsupported_future_portability() -> None:
-    verify_portable_v2 = "verify_portable_v2"
+    verify_portable = "verify_portable"
     unsupported_future_version = "future-multi-ontology@999"
     assert semantic_results()["unsupported_future_portability"] == "interchange.unsupported_future"
-    assert verify_portable_v2 and unsupported_future_version
+    assert verify_portable and unsupported_future_version
 
 
 def test_cancellation() -> None:

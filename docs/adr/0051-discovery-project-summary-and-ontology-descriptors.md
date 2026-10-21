@@ -4,7 +4,7 @@ adr: "0051"
 status: "Accepted"
 date: "2026-10-02"
 superseded_by: null
-revisit_when: "A summary field needs required interpretation by readers, module packages must become independent of the publishing Project (which requires a portable-v2 manifest change), or a Hub needs summary data that cannot be derived from a verified package"
+revisit_when: "A summary field needs required interpretation by readers, module packages must become independent of the publishing Project (which requires a portable manifest change), or a Hub needs summary data that cannot be derived from a verified package"
 ---
 
 # ADR 0051: Discovery carries a digest-addressed Project summary and exact ontology descriptors
@@ -17,11 +17,11 @@ revisit_when: "A summary field needs required interpretation by readers, module 
 
 ## Context
 
-A Hub renders a Project page (title, license, ontologies, counts) and an ontology page, and a consumer resolves one exact ontology module from any Project that publishes it. Neither needs graph data. Discovery v1 names only the portable-v2 package, so every such need would download the package. The discovery wire shape is unreleased, so additive fields break no shipped reader.
+A Hub renders a Project page (title, license, ontologies, counts) and an ontology page, and a consumer resolves one exact ontology module from any Project that publishes it. Neither needs graph data. Discovery v1 names only the portable package, so every such need would download the package. The discovery wire shape is unreleased, so additive fields break no shipped reader.
 
 Three things look alike and are not:
 
-- **Package identity.** `package_digest`: the portable-v2 semantic identity of one exported package. It includes `source_generation`, so it differs between two Projects exporting the same content.
+- **Package identity.** `package_digest`: the portable semantic identity of one exported package. It includes `source_generation`, so it differs between two Projects exporting the same content.
 - **Module identity.** `(id, version, content_digest)`: the exact ontology module or bridge set. `content_digest` is the domain-separated canonical digest of the module document. It is the same wherever the module is published.
 - **Composition digest.** `composition_digest`: the identity of the whole set of modules, bridge sets and activation in one Project version.
 
@@ -35,7 +35,7 @@ Treating any of these as another would let a reader accept the wrong bytes, or r
 
 **The summary has its own closed requirements.** Only `project-summary@1` is understood; any other required capability, or an unknown format major, fails `unsupported_future` during parsing, before any other content is read. Optional `capabilities` stay free-form. Unknown fields fail `malformed_response`, as everywhere in discovery v1.
 
-**Ontology descriptors are identities, not packages.** An optional manifest field `ontology { composition_digest, modules[], bridge_sets[] }` lists exact identities in strictly ascending order. A module may carry a `package` reference `{ format, package_digest, object_digest }` to a portable-v2 package for that one module. That object must be a `application/vnd.graphforge.project` object other than the Project package object, within `max_module_package_bytes`. Its `package_digest` identifies that package and legitimately differs per publishing Project. Bridge sets are listed by identity only.
+**Ontology descriptors are identities, not packages.** An optional manifest field `ontology { composition_digest, modules[], bridge_sets[] }` lists exact identities in strictly ascending order. A module may carry a `package` reference `{ format, package_digest, object_digest }` to a portable package for that one module. That object must be a `application/vnd.graphforge.project` object other than the Project package object, within `max_module_package_bytes`. Its `package_digest` identifies that package and legitimately differs per publishing Project. Bridge sets are listed by identity only.
 
 **Public-safe projection.** Summary `metadata` includes every #1348 research metadata field except `extensions` and `discovery_facets`; the record's `contract_version` is replaced by the summary `format`. `authors` is user-authored display text and is published as written. Project metadata and the summary carry no access fields (amended by #2125): `access.collaborators`, `access.visibility` and `access.access_policy` were removed in place (Project metadata contract version 2; a stored version 1 record is refused as `GF_UNSUPPORTED_PROJECT_FORMAT`, with no migration), and permission belongs to the host (ADR 0055).
 

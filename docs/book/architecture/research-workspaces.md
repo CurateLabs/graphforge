@@ -824,7 +824,7 @@ cannot leave private values in exported Parquet. Expanded and bundled forms
 have equal semantic identity. Re-export preserves immutable proof identities
 only after checking the exact selected native content closure.
 
-Existing `verify_portable_v2` and `import_portable_v2` validate archived native
+Existing `verify_portable` and `import_portable` validate archived native
 domains before destination admission. Imported genealogy supports citation and
 explicit Version comparison, but is not local Branch or acceptance authority.
 Unavailable ancestor payloads stay unavailable after reopen and cleanup.
@@ -836,4 +836,4 @@ Portable errors after CURRENT replacement carry `committed_import` with the
 operation, generation, manifest, and package identities. This reports a committed
 outcome, not rollback; an absent receipt alone does not prove rollback. See
 [ADR 0044](../../adr/0044-research-interchange-authority.md) and
-[portable publication guarantees](portable-project-v2.md).
+[portable publication guarantees](portable-project.md).

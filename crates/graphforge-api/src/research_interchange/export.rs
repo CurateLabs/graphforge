@@ -1,6 +1,6 @@
 //! Freeze a native research selection into the existing verified portable transport.
 use crate::{CancellationToken, GfError, GraphForge};
-use graphforge_core::portable::{PortableV2Error, PortableV2Limits, PortableV2Output};
+use graphforge_core::portable::{PortableError, PortableLimits, PortableOutput};
 use graphforge_storage::research_versions::ResearchInterchangeSelection;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -36,7 +36,7 @@ impl GraphForge {
         &self,
         request: &ExportResearchRequest,
         cancellation: &CancellationToken,
-    ) -> Result<crate::PortableV2ExportFacadeResult, PortableV2Error> {
+    ) -> Result<crate::PortableExportFacadeResult, PortableError> {
         export(self, request, None, cancellation)
     }
 }
@@ -46,7 +46,7 @@ pub(super) fn export(
     request: &ExportResearchRequest,
     fork: Option<&super::ForkResearchRequest>,
     cancellation: &CancellationToken,
-) -> Result<crate::PortableV2ExportFacadeResult, PortableV2Error> {
+) -> Result<crate::PortableExportFacadeResult, PortableError> {
     // An immutable scoped facade shares authority and budgets, but not staging
     // configuration, with its caller. Nested proof and Slice views inherit this
     // output-local parent; ordinary historical queries keep their old policy.
@@ -143,7 +143,7 @@ fn publish_package(
     cancellation: &CancellationToken,
     root: &std::path::Path,
     manifest: &graphforge_storage::research_versions::ResearchInterchangeManifest,
-) -> Result<crate::PortableV2ExportFacadeResult, PortableV2Error> {
+) -> Result<crate::PortableExportFacadeResult, PortableError> {
     let parent = request
         .output
         .parent()
@@ -175,18 +175,18 @@ fn publish_package(
         ),
     )
     .map_err(resolve_error)?;
-    graph.export_portable_v2(
-        &crate::PortableV2ExportRequest {
+    graph.export_portable(
+        &crate::PortableExportRequest {
             selection: crate::PortableSelection::Current,
             output_path: request.output.clone(),
             representation: if request.bundled {
-                PortableV2Output::Bundle
+                PortableOutput::Bundle
             } else {
-                PortableV2Output::Expanded
+                PortableOutput::Expanded
             },
-            profile: graphforge_core::portable::PortableV2SelectionProfile::Complete,
+            profile: graphforge_core::portable::PortableSelectionProfile::Complete,
             subset: None,
-            limits: PortableV2Limits::default(),
+            limits: PortableLimits::default(),
         },
         Some(cancellation.flag()),
         |_| {},
@@ -197,7 +197,7 @@ fn publish_package(
     clippy::needless_pass_by_value,
     reason = "map_err consumes the native error while projecting a sanitized portable cause"
 )]
-fn resolve_error(error: GfError) -> PortableV2Error {
+fn resolve_error(error: GfError) -> PortableError {
     let code = if matches!(
         error,
         GfError::Api {
@@ -205,11 +205,11 @@ fn resolve_error(error: GfError) -> PortableV2Error {
             ..
         }
     ) {
-        graphforge_core::portable::PortableV2ErrorCode::Cancelled
+        graphforge_core::portable::PortableErrorCode::Cancelled
     } else {
-        graphforge_core::portable::PortableV2ErrorCode::Incompatible
+        graphforge_core::portable::PortableErrorCode::Incompatible
     };
-    PortableV2Error::new(
+    PortableError::new(
         code,
         "research export selection or native content is unavailable or invalid",
     )
@@ -218,7 +218,7 @@ fn resolve_error(error: GfError) -> PortableV2Error {
 fn register_prepared(
     registry: &mut graphforge_storage::research_versions::ResearchRegistry,
     content: &graphforge_storage::research_versions::PreparedResearchContent,
-) -> Result<(), PortableV2Error> {
+) -> Result<(), PortableError> {
     let id = content.version.version_uuid;
     let digest = content.version.identity_sha256().map_err(resolve_error)?;
     if registry

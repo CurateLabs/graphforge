@@ -70,7 +70,7 @@ impl GraphForge {
 }
 pub enum ResearchInterchangeError {
     Native(graphforge_api::GfError),
-    Portable(graphforge_api::PortableV2Error),
+    Portable(graphforge_api::PortableError),
 }
 pub struct ResearchInterchangeTask {
     engine: std::sync::Arc<std::sync::RwLock<graphforge_api::GraphForge>>,

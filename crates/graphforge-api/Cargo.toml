@@ -116,7 +116,7 @@ name = "knowledge_evolution_workflow"
 required-features = ["knowledge", "provenance", "search", "research"]
 
 [[test]]
-name = "discovery_portable_v2"
+name = "discovery_portable"
 required-features = ["discovery", "portable"]
 
 [[test]]
@@ -208,6 +208,10 @@ name = "scale_g500_ladder"
 required-features = ["portable"]
 
 [[test]]
+name = "oci_layer_streaming_peak"
+required-features = ["portable"]
+
+[[test]]
 name = "mutated_project_open"
 required-features = ["knowledge"]
 
@@ -262,6 +266,10 @@ required-features = ["knowledge", "portable"]
 # Measures real portable export/import through the Rust facade.
 [[test]]
 name = "portable_payload_identity"
+required-features = ["portable"]
+
+[[test]]
+name = "portable_hostile_names"
 required-features = ["portable"]
 
 # Includes knowledge/capability publication on a compact imported graph.

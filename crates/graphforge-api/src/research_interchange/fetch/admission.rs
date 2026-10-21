@@ -1,7 +1,7 @@
 //! Existing discovery/package and native import owners authenticate all fetch inputs.
 use super::{FetchResearchBranchRequest, invalid};
-use crate::{CancellationToken, GfError, GraphForge, OperationId, PortableV2ImportRequest};
-use graphforge_core::portable::PortableV2Mode;
+use crate::{CancellationToken, GfError, GraphForge, OperationId, PortableImportRequest};
+use graphforge_core::portable::PortableMode;
 use graphforge_discovery::ResearchLineage;
 use graphforge_storage::research_versions::{
     ResearchRemoteBranch, ResearchRemoteBranchFetch, ResearchRemoteFetchBinding,
@@ -40,9 +40,9 @@ pub(super) fn prepare(
         ));
     }
     let source = scratch.join("source");
-    let imported = GraphForge::import_portable_v2(
+    let imported = GraphForge::import_portable(
         &source,
-        &PortableV2ImportRequest {
+        &PortableImportRequest {
             input: discovery.package.to_path_buf(),
             operation_id: OperationId(request.operation_uuid),
             limits: discovery.portable_limits,
@@ -126,7 +126,7 @@ fn verify(
         package: discovery.package,
         discovery_limits: discovery.discovery_limits,
         portable_limits: discovery.portable_limits,
-        mode: PortableV2Mode::Full,
+        mode: PortableMode::Full,
         cancelled: Some(cancel.flag()),
         scratch: Some(scratch),
     })

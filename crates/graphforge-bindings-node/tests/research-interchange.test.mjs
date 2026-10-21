@@ -46,7 +46,7 @@ test("native research interchange preserves citations exports and independent Fo
       projection: null,
     };
     const exported = await graph.exportResearch(exportRequest);
-    const verified = await GraphForge.verifyPortableV2({ input, mode: "full" });
+    const verified = await GraphForge.verifyPortable({ input, mode: "full" });
     assert.equal(verified.packageDigest, exported.package_digest);
     assert.equal(verified.researchInterchange, true);
     assert.ok(verified.researchEntries.length > 0);
@@ -73,7 +73,7 @@ test("native research interchange preserves citations exports and independent Fo
       );
     }
     const projectRoot = join(root, "imported");
-    await GraphForge.importPortableV2({
+    await GraphForge.importPortable({
       projectRoot,
       input,
       operationId: identity(),

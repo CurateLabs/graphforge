@@ -543,11 +543,11 @@ the producing issue or PR, outside this documentation tree. Large two-size
 portable measurements are optional follow-up work under the maintainer waiver.
 
 ```bash
-cargo nextest run -p graphforge-storage -E 'test(project_portable_v2::materialization::tests::) | test(project_portable_v2_export::transport::tests::portable_member_copy_counts_crypto_and_refuses_same_identity_content_mutation) | test(captured_export_has_one_transport_hash_and_refuses_written_corruption)' --nocapture
+cargo nextest run -p graphforge-storage -E 'test(project_portable::materialization::tests::) | test(project_portable_export::transport::tests::portable_member_copy_counts_crypto_and_refuses_same_identity_content_mutation) | test(captured_export_has_one_transport_hash_and_refuses_written_corruption)' --nocapture
 ```
 
 The bounded input is the existing ontology-only fixture at
-`tests/fixtures/portable-v2/ontology-only.manifest.json`, with a two-byte `{}`
+`tests/fixtures/portable/ontology-only.manifest.json`, with a two-byte `{}`
 ontology member. Its SHA-256 is
 `ef18ecc2ee374ca4c29ee3870c2a78ad8d91f854bcfe521827c0eac84328d4ae`.
 The export fixture builds a real retained generation with

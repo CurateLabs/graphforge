@@ -2,8 +2,7 @@
 
 use graphforge_api::{
     BranchSource, CancellationToken, CreateResearchBranchRequest, ExecuteResearchBranchRequest,
-    ExportResearchRequest, GraphForge, OperationId, PortableV2ImportRequest,
-    ResearchReferenceTarget,
+    ExportResearchRequest, GraphForge, OperationId, PortableImportRequest, ResearchReferenceTarget,
 };
 use uuid::Uuid;
 
@@ -81,9 +80,9 @@ fn distinct_imports_reopen_with_identical_version_lineage() {
     let first_dir = root.path().join("first");
     let second_dir = root.path().join("second");
     let import = |destination: &std::path::Path| {
-        GraphForge::import_portable_v2(
+        GraphForge::import_portable(
             destination,
-            &PortableV2ImportRequest {
+            &PortableImportRequest {
                 input: package.clone(),
                 operation_id: OperationId(Uuid::now_v7()),
                 limits: Default::default(),

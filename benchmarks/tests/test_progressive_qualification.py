@@ -436,7 +436,7 @@ class ProgressiveQualificationTests(unittest.TestCase):
                 shutil.copytree(source, root / relative)
             generator = root / "benchmarks/runners/graph500-generator/src/main.rs"
             generator.write_bytes(generator.read_bytes() + b"\n// changed\n")
-            historical = root / "benchmarks/fixtures/parity/ladder-bundle/manifest.json"
+            historical = root / "benchmarks/fixtures/parity/ladder-bundle/s18-plan.json"
             before = historical.read_bytes()
 
             self.assertEqual(tool["main"](["--root", str(root), "--write"]), 0)
