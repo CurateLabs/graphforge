@@ -42,10 +42,8 @@ see [Scale and workload limits](../reference/scale-limits.md).
 ## How maintainers triage
 
 Bug reports arrive labeled `bug`, feature requests `enhancement`, and
-questions `question`. Both templates also request a `needs-triage` label, but
-the repository has no such label, so GitHub does not apply it: an issue with no
-milestone and no parent issue has not been triaged yet. Maintainers work
-through new issues in this order:
+questions `question`. An issue with no milestone and no parent issue has not
+been triaged yet. Maintainers work through new issues in this order:
 
 1. **Safety first.** A report involving data loss, corruption, a crash, or a
    security boundary is read first. Security reports belong in the private
