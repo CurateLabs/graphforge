@@ -47,7 +47,7 @@ fn import_with_space(
 fn assert_nothing_staged(parent: &Path) {
     let staged: Vec<_> = names(parent)
         .into_iter()
-        .filter(|name| name == "imported" || name.contains("portable-v2"))
+        .filter(|name| name == "imported" || name.contains(".portable-"))
         .collect();
     assert!(staged.is_empty(), "the refused import staged {staged:?}");
 }

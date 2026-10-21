@@ -338,7 +338,7 @@ fn a_staged_import_for_another_operation_is_replaced() {
     std::fs::create_dir(&staging).unwrap();
     std::fs::create_dir(staging.join("project")).unwrap();
     std::fs::write(staging.join("project/foreign"), b"older version").unwrap();
-    std::fs::write(staging.join(".project.portable-v2-older"), b"residue").unwrap();
+    std::fs::write(staging.join(".project.portable-older"), b"residue").unwrap();
     std::fs::write(
         staging.join("operation"),
         uuid::Uuid::from_u128(7).hyphenated().to_string(),
@@ -938,10 +938,10 @@ fn a_prior_stage_reduces_clones_budget_by_what_removing_it_frees_and_no_more() {
         .to_string_lossy()
         .into_owned();
     let id = operation.0.hyphenated();
-    let stage = staging.root.join(format!(".{name}.portable-v2-{id}"));
+    let stage = staging.root.join(format!(".{name}.portable-{id}"));
     std::fs::create_dir_all(stage.join("data")).unwrap();
     std::fs::write(
-        staging.root.join(format!(".{name}.portable-v2-{id}.owner")),
+        staging.root.join(format!(".{name}.portable-{id}.owner")),
         id.to_string(),
     )
     .unwrap();
@@ -1032,10 +1032,10 @@ fn a_research_retry_is_not_credited_for_space_verification_needs_first() {
         .to_string_lossy()
         .into_owned();
     let id = operation.0.hyphenated();
-    let stage = staging.root.join(format!(".{name}.portable-v2-{id}"));
+    let stage = staging.root.join(format!(".{name}.portable-{id}"));
     std::fs::create_dir_all(stage.join("data")).unwrap();
     std::fs::write(
-        staging.root.join(format!(".{name}.portable-v2-{id}.owner")),
+        staging.root.join(format!(".{name}.portable-{id}.owner")),
         id.to_string(),
     )
     .unwrap();

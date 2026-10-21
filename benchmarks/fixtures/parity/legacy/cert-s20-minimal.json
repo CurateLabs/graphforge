@@ -1,7 +1,7 @@
 {
   "schema": "graphforge-billion-edge-certification-evidence/1",
   "git_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-  "profile_sha256": "sha256:9680d53689ef12d036cb399956643b70c1e361845823bf208d37ffb393472f18",
+  "profile_sha256": "sha256:c484ed3ebfd66c5e71e173f618fde03d39e9943ee6c0f15b245e1f62792c55cc",
   "run": {
     "command": "cargo test -p graphforge-api --release --test scale_g500_ladder certification_target_live_full_lifecycle_evidence -- --ignored --exact --nocapture --test-threads=1",
     "scale": 20,
@@ -43,7 +43,7 @@
     "transport": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
   },
   "package": {
-    "contract": "graphforge-portable-verify/2",
+    "contract": "graphforge-portable-verify/1",
     "format": "portable-project-v2-bundle",
     "class": "complete",
     "integrity": "verified",

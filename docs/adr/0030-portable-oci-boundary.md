@@ -62,10 +62,10 @@ non-OCI facade and CLI cleanup remains outside this change.
 
 The API facade's publish/pull entrypoints retain their signatures and serialized
 results. Rust callers previously importing `HttpOciRegistry`, `MemoryOciRegistry`,
-or `PortableV2OciRegistry` from storage use `graphforge-portable-oci` (also
+or `PortableOciRegistry` from storage use `graphforge-portable-oci` (also
 re-exported by API). Injected publish/pull requests are API-owned and available at
 its crate root. Storage-level OCI workflow calls move to API's existing
-`publish_portable_v2_oci_with_registry` and `pull_portable_v2_oci_with_registry`.
+`publish_portable_oci_with_registry` and `pull_portable_oci_with_registry`.
 Passive package and OCI types are defined in `graphforge_core::portable`; existing
 storage package-type re-exports remain while #1015 completes the facade cleanup.
 No durable migration, registry re-upload, or signature regeneration is needed.

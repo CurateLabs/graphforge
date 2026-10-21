@@ -246,7 +246,7 @@ class WorkspaceSmokeTests(unittest.TestCase):
         )
         validator = Draft202012Validator(schema)
         receipt = {
-            "contract": "graphforge-portable-export/2",
+            "contract": "graphforge-portable-export/1",
             "package_digest": f"sha256:{'0' * 64}",
             "transport_digest": f"sha256:{'1' * 64}",
             "entry_count": 4,

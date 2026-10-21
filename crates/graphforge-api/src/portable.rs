@@ -483,7 +483,7 @@ impl GraphForge {
             self.allocation_operation.as_ref(),
         )?;
         Ok(PortableExportFacadeResult {
-            contract: "graphforge-portable-export/2",
+            contract: "graphforge-portable-export/1",
             source,
             checkpoint,
             generation_uuid: receipt.generation_uuid,
@@ -747,7 +747,7 @@ mod tests {
                 |_| {},
             )
             .unwrap();
-        assert_eq!(exported.contract, "graphforge-portable-export/2");
+        assert_eq!(exported.contract, "graphforge-portable-export/1");
         assert_eq!(exported.source, "current");
         assert_eq!(exported.checkpoint, None);
         assert_eq!(exported.output, bundle);
