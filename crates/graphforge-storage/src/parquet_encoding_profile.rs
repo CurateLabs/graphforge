@@ -10,10 +10,11 @@
 //! where a page is about to be decoded:
 //!
 //! * [`admit_pages`] walks the *actual* page headers of a Parquet object and
-//!   never trusts the footer's declared encodings. Like the Parquet reader, it
-//!   requires only the trailing `PAR1` footer magic. Portable verification and
-//!   import call it for every Parquet entry of a package, so every later read
-//!   of those checksum-protected files sees only funded encodings.
+//!   never trusts the footer's declared encodings to clear a page. Like the
+//!   Parquet reader, it requires only the trailing `PAR1` footer magic. Portable
+//!   verification and import call it for every Parquet entry of a package, so
+//!   every later read of those checksum-protected files sees only funded
+//!   encodings.
 //! * `property_overlay::parquet_budget` applies [`page_encodings_are_funded`]
 //!   to each page header it already walks for resource admission.
 //! * `catalog::filtered_parquet::decode_budget` applies
@@ -120,12 +121,25 @@ pub(crate) fn page_encodings_are_funded(header: &PageHeader, physical: Type) -> 
     }
 }
 
+/// What an admitted object's footer says about its size.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ParquetShape {
+    pub(crate) rows: u64,
+    pub(crate) row_groups: u64,
+    /// Bytes of the Thrift footer, not counting its length and magic.
+    pub(crate) footer_bytes: u64,
+}
+
 /// Walk the actual page headers of a Parquet object and refuse any encoding
-/// outside the profile, before a single page body is decoded.
+/// outside the profile, before a single page body is decoded. An admitted
+/// object reports the shape its footer declares.
 ///
 /// Only the footer and the page headers are read; memory is bounded by the
-/// footer and one header window. The footer's declared encodings are ignored.
-pub(crate) fn admit_pages<R: ChunkReader>(source: &R) -> Result<(), PageAdmissionError> {
+/// footer and one header window. The pages decide: a footer that declares only
+/// funded encodings cannot hide an unfunded page. A footer that declares an
+/// unfunded encoding is refused too, because the decoders' own cheap check
+/// would refuse the file at its first read.
+pub(crate) fn admit_pages<R: ChunkReader>(source: &R) -> Result<ParquetShape, PageAdmissionError> {
     let length = source.len();
     let malformed = PageAdmissionError::Malformed;
     if length < 8 {
@@ -147,7 +161,13 @@ pub(crate) fn admit_pages<R: ChunkReader>(source: &R) -> Result<(), PageAdmissio
     }
     let metadata = ParquetMetaDataReader::decode_metadata(&read(length - 8 - footer, footer)?)
         .map_err(|_| malformed("Parquet footer is undecodable"))?;
-    admit_pages_with_metadata(&metadata, source, length - 8 - footer)
+    admit_pages_with_metadata(&metadata, source, length - 8 - footer)?;
+    Ok(ParquetShape {
+        rows: u64::try_from(metadata.file_metadata().num_rows())
+            .map_err(|_| malformed("Parquet footer has a negative row count"))?,
+        row_groups: metadata.num_row_groups() as u64,
+        footer_bytes: footer,
+    })
 }
 
 /// [`admit_pages`] for a footer the caller already decoded. `pages_end` is the
@@ -161,6 +181,13 @@ pub(crate) fn admit_pages_with_metadata<R: ChunkReader>(
     let malformed = PageAdmissionError::Malformed;
     for group in metadata.row_groups() {
         for column in group.columns() {
+            let physical = column.column_descr().physical_type();
+            if !column
+                .encodings()
+                .all(|encoding| declared_encoding_is_funded(encoding, physical))
+            {
+                return Err(PageAdmissionError::Unfunded);
+            }
             let offset = |value: i64| {
                 u64::try_from(value).map_err(|_| malformed("column chunk has a negative offset"))
             };
@@ -175,7 +202,6 @@ pub(crate) fn admit_pages_with_metadata<R: ChunkReader>(
                 .and_then(|size| start.checked_add(size))
                 .filter(|end| *end <= pages_end)
                 .ok_or(malformed("column chunk escapes the object"))?;
-            let physical = column.column_descr().physical_type();
             let mut position = start;
             while position < end {
                 let (header, header_bytes) = read_header(source, position, end)?;

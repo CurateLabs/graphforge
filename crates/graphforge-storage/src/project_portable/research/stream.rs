@@ -18,6 +18,7 @@ use crate::project_portable::{
     authenticated_entries::walk_staged,
     check_cancel, finish_bundle,
     materialization::{CopySink, EntrySink},
+    plausibility::ParquetSignals,
     preflight, read_bounded_file, read_bundle, scan_entries,
 };
 use crate::project_portable_import::NativeResearchValidator;
@@ -359,7 +360,7 @@ pub(crate) fn scan_stream(
     check_cancel(cancelled)?;
     let scratch = scratch.map_or_else(std::env::temp_dir, Path::to_path_buf);
     let mut research = Driver::new(&scratch, limits, cancelled, validator);
-    let scan = read_bundle(
+    let mut scan = read_bundle(
         source,
         limits,
         cancelled,
@@ -368,8 +369,10 @@ pub(crate) fn scan_stream(
         Some(&scratch),
         || PortableError::new(PortableErrorCode::InvalidStructure, "trailing bytes"),
     )?;
-    let (report, entries) =
+    let parquet = scan.parquet.take();
+    let (mut report, entries) =
         finish_bundle(scan, PortableMode::Full, limits, PortableSource::Stream)?;
+    report.plausibility.parquet = parquet.map(ParquetSignals::finish);
     authenticated_entries::validate_semantics(
         Reopen::Driven(None),
         &entries,

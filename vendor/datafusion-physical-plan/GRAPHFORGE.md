@@ -256,6 +256,66 @@ python3 scripts/test_environment.py -- cargo nextest run --locked --no-fail-fast
 These commands describe reproduction, not a claim that a particular candidate
 has passed. Test results and native workload receipts belong on the issue/PR.
 
+## Spill merge pass admission patch
+
+GraphForge #2173 changes `src/sorts/{multi_level_merge,copy_admission,copy_bounds,sort,streaming_merge}.rs`,
+`src/spill/{admission,credit,in_progress_spill_file,spill_manager,spill_pool,mod}.rs`,
+`src/aggregates/row_hash.rs` and `src/joins/nested_loop_join.rs`. A spill merge
+used to choose how many files to read before it knew what reading them costs:
+its readers held more decoded batches than the buffers it credited them and
+asked the pool for the rest, its copies asked for the interleave workspace of
+every merged batch, its intermediate spill file's writer registered fresh, and
+a merging aggregate resized its state after every batch. Each of those is a
+request that a consumer which cannot spill any further fails its query on. The
+pass is now admitted in the one adaptive loop that selects its files, for
+every byte its participants can hold at once, and nothing in the pass asks the
+pool afterwards:
+
+- `get_sorted_spill_files_to_merge` credits each reader
+  `spill::admission::reader_pass_bound`: the shared schema owner and `BufReader`
+  it keeps, and `buffer_len + 3` batches (the channel, the batch in flight and
+  the two a merge retains), each at the decoder's own admission for a batch of
+  `max_record_batch_memory` (schema grant, metadata Vec, body or its
+  decompressed copies, headers, codec). It adds the copy working set (twice
+  `get_reserved_bytes_for_record_batch_size(max, max)` of the largest file) and
+  the constructor metadata of the copy capability, and, when files remain for a
+  later pass, `writer_pass_bound`: the intermediate file's source metadata,
+  encoding workspace and codec. Breadth and `buffer_len` shrink until the pass
+  fits.
+- The credit of a bounded pass is exact (`Credit::held` / `with_readers` with
+  `exact`): a reader or writer that outgrows it fails with `spill reader
+  exceeded its admitted credit` instead of asking the pool. Readers of the
+  exchange's FIFO keep the open bank. A schema whose bound is not derivable from
+  the bytes of its largest batch (nested, views, dictionaries, unions) keeps the
+  original admission and open credit.
+- The pass hands the writer of its intermediate file its bytes as the bank of
+  `InProgressSpillFile::with_bank`, codec included.
+- A primitive Field key (one Int64 key over Int64/Utf8 columns) selects
+  `CopyCapability::PrimitiveField` for a spilling sponsor too: `retiring` gates
+  only the credit lifecycle, so a spilled aggregate holds no idle envelope.
+- `ExternalSorterMerge[p]` registers `can_spill(true)`, the pool's only signal
+  that its selection adapts; its name does not carry the sort's headroom prefix.
+- A merging aggregate admits `merge_state_bound` (`2 * largest spill batch +
+  64 * (batch_size + 1)`) when the final spill leaves it within its floor, and
+  holds it as a floor of its state reservation through the merge: within it the
+  state asks nothing, and an accumulator whose state grows with its group
+  (`array_agg`) asks for the excess only.
+
+- The pass is admitted at the moment the pool guarantees a spiller a request.
+  `StreamingMergeBuilder::minimum_pass_bound` (the selection's arithmetic at its
+  second file with one buffered batch, the intermediate writer only when a third
+  file exists) is what a merging aggregate adds to its state bound, as one
+  request right after its final spill (`row_hash.rs`), and what every later
+  pass of `create_stream` requests before its selection. The selection charges
+  the intermediate writer only from the minimum stream count on, and a narrower
+  retry shrinks to the size the pass entered with instead of freeing it, so a
+  pre-reserve survives the retry.
+
+The product controls are `query_pool::merge_pass_tests::*` and
+`query_pool::tests::{a_merge_pass_with_*,merge_passes_that_write_*,a_merging_aggregate_holds_*}`
+in `crates/graphforge-exec/src/query_pool/`, the pinned contracts in
+`session::spill_*_tests`, and `session::query_memory_tests`.
+
 ## Updating and removal
 
 Compare each named patch file against registry `datafusion-physical-plan`

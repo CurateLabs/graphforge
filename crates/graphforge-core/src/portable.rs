@@ -2,6 +2,7 @@
 #![allow(missing_docs)]
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fmt;
 
 /// Writer and reader admission limits for portable packages.
@@ -48,6 +49,11 @@ pub struct PortableLimits {
     /// routine, so the verdict never depends on this value or on the source:
     /// it only trades memory for scratch writes.
     pub max_parquet_walk_bytes: u64,
+    /// Largest Parquet footer whose row counts the report carries. A larger
+    /// footer is still admitted (page admission has its own bound) and the
+    /// package still verifies; the file simply reports no footer signals, so
+    /// `files_with_footer` does not count it.
+    pub max_parquet_footer_bytes: u64,
     /// Bytes of one research Version's retained objects that native validation
     /// may stage on disk: the sum over its entries under
     /// `data/components/research/research-retained/<version>/`. Objects only
@@ -109,6 +115,7 @@ impl Default for PortableLimits {
             max_tag_manifest_bytes: 4 * 1024 * 1024,
             max_retained_control_bytes: 256 * 1024 * 1024,
             max_parquet_walk_bytes: 64 * 1024 * 1024,
+            max_parquet_footer_bytes: 16 * 1024 * 1024,
             max_research_version_bytes: u64::MAX,
             max_path_bytes: 4096,
             copy_buffer_bytes: 1024 * 1024,
@@ -190,6 +197,13 @@ pub struct PortableReport {
     pub component_count: u64,
     pub entry_count: u64,
     pub payload_bytes: u64,
+    /// Authenticated entry bytes by the kind of the component that declares
+    /// them; everything outside a component is `package-control`. Kinds with
+    /// no bytes are absent, and the values sum to `payload_bytes`.
+    pub bytes_by_kind: BTreeMap<String, u64>,
+    /// Cheap signals of how much of the payload is graph data. They report;
+    /// they decide nothing.
+    pub plausibility: PortablePlausibility,
     pub integrity: PortableIntegrity,
     pub compatibility: PortableCompatibility,
     pub authenticity: PortableAuthenticity,
@@ -198,6 +212,38 @@ pub struct PortableReport {
     pub ontology_composition: Option<PortableOntologyComposition>,
     /// Authenticated bounded payload entries available to explicit lifecycle consumers.
     pub ontology_composition_entries: Vec<PortableCompositionEntry>,
+}
+
+/// How much of a package's payload is graph data, from its authenticated
+/// lengths and from the footers of its graph Parquet files.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct PortablePlausibility {
+    /// Bytes of the `graph-data` kind.
+    pub graph_data_bytes: u64,
+    /// `graph_data_bytes` over `payload_bytes` in parts per million, rounded
+    /// down; zero for an empty payload.
+    pub graph_data_ratio_ppm: u64,
+    /// Row counts from Parquet footers. Absent unless the verification read
+    /// the Parquet entries, which only full verification does.
+    pub parquet: Option<PortableParquetSignals>,
+}
+
+/// Row counts read from the footers of the Parquet files under
+/// `data/components/graph-data/graph-tree/`.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
+pub struct PortableParquetSignals {
+    /// Files named `*.parquet` under the graph tree.
+    pub files: u64,
+    /// Those files that end in the Parquet footer magic and were walked; a
+    /// file without it has no footer to report.
+    pub files_with_footer: u64,
+    pub row_groups: u64,
+    /// Rows of `topology/nodes.parquet` and `topology/nodes/`.
+    pub node_rows: u64,
+    /// Rows of `topology/edges/`.
+    pub edge_rows: u64,
+    /// Rows of every other graph-tree Parquet file.
+    pub property_rows: u64,
 }
 
 /// The disk an import holds, at its peak, on the volume beside its target.

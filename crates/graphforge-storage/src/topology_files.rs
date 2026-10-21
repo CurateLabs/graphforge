@@ -201,7 +201,7 @@ pub fn enumerate_topology_files(
                 } else {
                     files.nodes.push((physical, name));
                 }
-            } else if name.starts_with("topology/edges/") && name.ends_with(".parquet") {
+            } else if is_edge(&name) {
                 let semantic = staged.semantic_relative_path(&authority.root, &name)?;
                 let route = crate::route_component::route_position(&semantic)?
                     .ok_or_else(|| GfError::Storage("owned edge lacks route".into()))?;
@@ -224,6 +224,10 @@ pub fn enumerate_topology_files(
 pub(crate) fn is_node(relative: &str) -> bool {
     relative == "topology/nodes.parquet"
         || relative.starts_with("topology/nodes/") && relative.ends_with(".parquet")
+}
+
+pub(crate) fn is_edge(relative: &str) -> bool {
+    relative.starts_with("topology/edges/") && relative.ends_with(".parquet")
 }
 
 pub(crate) fn is_topology(relative: &Path) -> bool {

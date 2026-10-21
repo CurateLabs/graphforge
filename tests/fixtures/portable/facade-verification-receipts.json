@@ -9,6 +9,25 @@
     "component_count": 7,
     "entry_count": 12,
     "payload_bytes": 10194,
+    "bytes_by_kind": {
+      "compatibility": 1881,
+      "graph-data": 1554,
+      "ontology": 561,
+      "package-control": 5158,
+      "settings": 1040
+    },
+    "plausibility": {
+      "graph_data_bytes": 1554,
+      "graph_data_ratio_ppm": 152442,
+      "parquet": {
+        "files": 0,
+        "files_with_footer": 0,
+        "row_groups": 0,
+        "node_rows": 0,
+        "edge_rows": 0,
+        "property_rows": 0
+      }
+    },
     "integrity": "verified",
     "compatibility": "supported",
     "authenticity": "unsigned",
@@ -64,6 +83,18 @@
     "component_count": 7,
     "entry_count": 12,
     "payload_bytes": 10194,
+    "bytes_by_kind": {
+      "compatibility": 1881,
+      "graph-data": 1554,
+      "ontology": 561,
+      "package-control": 5158,
+      "settings": 1040
+    },
+    "plausibility": {
+      "graph_data_bytes": 1554,
+      "graph_data_ratio_ppm": 152442,
+      "parquet": null
+    },
     "integrity": "not_checked",
     "compatibility": "supported",
     "authenticity": "unsigned",

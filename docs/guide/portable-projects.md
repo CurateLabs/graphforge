@@ -163,7 +163,10 @@ unselected ancestor payloads are excluded. Imported lineage is historical:
 import does not create live Branch heads or accept a contribution locally.
 Historical expansion beyond retained content returns unavailable. Full native
 verification and import reject unsupported readers and incomplete closure before
-destination admission. There is no pre-v1 migration promise.
+destination admission. There is no pre-v1 migration promise. A Version's size is
+bounded by the portable limits and the 256 MiB participant bound, not by its
+field count: native verification streams fields against the registry instead of
+building a whole-graph field map.
 
 Fork requires an independent Project UUID, author, governance declaration,
 complete workspace metadata, and explicit adoption of

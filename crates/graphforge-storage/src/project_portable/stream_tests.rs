@@ -8,17 +8,23 @@ fn file_of(bytes: &[u8]) -> tempfile::NamedTempFile {
     file
 }
 
-fn by_file(bytes: &[u8], limits: PortableLimits) -> Result<PortableReport, PortableError> {
+pub(super) fn by_file(
+    bytes: &[u8],
+    limits: PortableLimits,
+) -> Result<PortableReport, PortableError> {
     let file = file_of(bytes);
     verify_portable(file.path(), PortableMode::Full, limits, None)
 }
 
-fn by_stream(bytes: &[u8], limits: PortableLimits) -> Result<PortableReport, PortableError> {
+pub(super) fn by_stream(
+    bytes: &[u8],
+    limits: PortableLimits,
+) -> Result<PortableReport, PortableError> {
     verify_portable_stream(&mut Cursor::new(bytes), None, limits, None)
 }
 
 /// A report as JSON without its `source`, the one field that may differ.
-fn sans_source(report: &PortableReport) -> serde_json::Value {
+pub(super) fn sans_source(report: &PortableReport) -> serde_json::Value {
     let mut value = serde_json::to_value(report).unwrap();
     assert!(value.as_object_mut().unwrap().remove("source").is_some());
     value
@@ -207,7 +213,7 @@ fn walk_files(dir: &Path) -> Vec<std::path::PathBuf> {
 /// A `Read` that builds its bytes one part at a time and records how much was
 /// consumed and the largest single read request, so a test can tell a bounded
 /// streaming reader from one that buffers its input.
-struct Generated {
+pub(super) struct Generated {
     parts: Box<dyn Iterator<Item = Vec<u8>>>,
     current: Cursor<Vec<u8>>,
     consumed: std::rc::Rc<std::cell::Cell<u64>>,
@@ -215,7 +221,7 @@ struct Generated {
 }
 
 impl Generated {
-    fn new(parts: impl Iterator<Item = Vec<u8>> + 'static) -> (Self, GeneratedStats) {
+    pub(super) fn new(parts: impl Iterator<Item = Vec<u8>> + 'static) -> (Self, GeneratedStats) {
         let consumed = std::rc::Rc::new(std::cell::Cell::new(0));
         let largest_request = std::rc::Rc::new(std::cell::Cell::new(0));
         let stats = GeneratedStats {
@@ -234,9 +240,9 @@ impl Generated {
     }
 }
 
-struct GeneratedStats {
-    consumed: std::rc::Rc<std::cell::Cell<u64>>,
-    largest_request: std::rc::Rc<std::cell::Cell<usize>>,
+pub(super) struct GeneratedStats {
+    pub(super) consumed: std::rc::Rc<std::cell::Cell<u64>>,
+    pub(super) largest_request: std::rc::Rc<std::cell::Cell<usize>>,
 }
 
 impl Read for Generated {
@@ -257,7 +263,7 @@ impl Read for Generated {
     }
 }
 
-const MIB: usize = 1024 * 1024;
+pub(super) const MIB: usize = 1024 * 1024;
 
 #[test]
 fn a_repeated_fixed_control_is_refused_at_its_second_occurrence() {

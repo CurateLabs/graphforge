@@ -342,6 +342,84 @@ fn portable_export_verify_and_import_round_trip() {
 }
 
 #[test]
+fn verify_reports_graph_rows_from_footers_alike_from_a_file_and_a_stream() {
+    let root = TempDir::new().unwrap();
+    let project = root.path().join("source");
+    let graph = graphforge_api::GraphForge::new(project.to_str()).unwrap();
+    graph
+        .execute(
+            "CREATE (a:Person {name: 'Ada'})-[:KNOWS]->(b:Person {name: 'Bob'}), \
+             (b)-[:KNOWS]->(c:Person {name: 'Cy'})",
+        )
+        .unwrap();
+    drop(graph);
+    let bundle = root.path().join("project.gfpb");
+    json(&gf(
+        &project,
+        &[
+            "--json",
+            "export",
+            "--current",
+            "--format",
+            "bundle",
+            "--profile",
+            "complete",
+            "--output",
+            bundle.to_str().unwrap(),
+        ],
+    ));
+    let mut from_file = json(&gf(
+        &project,
+        &[
+            "--json",
+            "portable",
+            "verify",
+            "--mode",
+            "full",
+            "--input",
+            bundle.to_str().unwrap(),
+        ],
+    ));
+    let mut reader = std::io::BufReader::new(fs::File::open(&bundle).unwrap());
+    let streamed = graphforge_api::verify_portable_stream(
+        &mut reader,
+        None,
+        graphforge_api::PortableLimits::default(),
+        None,
+    )
+    .unwrap();
+    let mut from_stream = serde_json::to_value(streamed).unwrap();
+    assert_eq!(
+        from_file.as_object_mut().unwrap().remove("source").unwrap(),
+        "file"
+    );
+    assert_eq!(
+        from_stream
+            .as_object_mut()
+            .unwrap()
+            .remove("source")
+            .unwrap(),
+        "stream"
+    );
+    assert_eq!(from_file, from_stream);
+
+    let parquet = &from_file["plausibility"]["parquet"];
+    assert_eq!(parquet["node_rows"], 3);
+    assert_eq!(parquet["edge_rows"], 2);
+    assert!(parquet["files"].as_u64().unwrap() > 0);
+    assert_eq!(parquet["files_with_footer"], parquet["files"]);
+    let kinds = from_file["bytes_by_kind"].as_object().unwrap();
+    assert!(kinds["graph-data"].as_u64().unwrap() > 0);
+    assert_eq!(
+        kinds
+            .values()
+            .map(|bytes| bytes.as_u64().unwrap())
+            .sum::<u64>(),
+        from_file["payload_bytes"].as_u64().unwrap()
+    );
+}
+
+#[test]
 fn portable_facade_and_same_binary_preserve_complete_receipts() {
     use graphforge_api::{
         GraphForge, PortableExportRequest, PortableLimits, PortableMode, PortableOutput,

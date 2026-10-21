@@ -26,6 +26,7 @@ use arrow::record_batch::RecordBatch;
 use datafusion_common::{DataFusionError, Result, config::SpillCompression};
 use datafusion_execution::SendableRecordBatchStream;
 use datafusion_execution::disk_manager::RefCountedTempFile;
+use datafusion_execution::memory_pool::MemoryPool;
 use datafusion_execution::runtime_env::RuntimeEnv;
 use std::borrow::Borrow;
 use std::sync::Arc;
@@ -48,6 +49,12 @@ pub struct SpillManager {
 }
 
 impl SpillManager {
+    /// The pool the spills' readers and writers, and the consumers a merge
+    /// of spill files registers beside its sponsor, are served from.
+    pub(crate) fn memory_pool(&self) -> &Arc<dyn MemoryPool> {
+        &self.env.memory_pool
+    }
+
     pub fn new(env: Arc<RuntimeEnv>, metrics: SpillMetrics, schema: SchemaRef) -> Self {
         Self {
             env,
@@ -83,8 +90,22 @@ impl SpillManager {
         &self,
         request_msg: &str,
     ) -> Result<InProgressSpillFile> {
+        self.create_in_progress_file_with_bank(request_msg, None)
+    }
+
+    /// As [`Self::create_in_progress_file`], for a writer that draws every
+    /// grant from `bank`.
+    pub(crate) fn create_in_progress_file_with_bank(
+        &self,
+        request_msg: &str,
+        bank: Option<Arc<super::admission::Credit>>,
+    ) -> Result<InProgressSpillFile> {
         let temp_file = self.env.disk_manager.create_tmp_file(request_msg)?;
-        Ok(InProgressSpillFile::new(Arc::new(self.clone()), temp_file))
+        Ok(InProgressSpillFile::with_bank(
+            Arc::new(self.clone()),
+            temp_file,
+            bank,
+        ))
     }
 
     /// Spill input `batches` into a single file in a atomic operation. If it is
@@ -141,10 +162,12 @@ impl SpillManager {
         &self,
         stream: &mut SendableRecordBatchStream,
         request_description: &str,
+        bank: Option<Arc<super::admission::Credit>>,
     ) -> Result<Option<(RefCountedTempFile, usize)>> {
         use futures::StreamExt;
 
-        let mut in_progress_file = self.create_in_progress_file(request_description)?;
+        let mut in_progress_file =
+            self.create_in_progress_file_with_bank(request_description, bank)?;
 
         let mut max_record_batch_size = 0;
 

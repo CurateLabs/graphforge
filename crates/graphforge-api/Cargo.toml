@@ -232,6 +232,10 @@ name = "research_legacy"
 required-features = ["research"]
 
 [[test]]
+name = "research_large_fields"
+required-features = ["research"]
+
+[[test]]
 name = "branches"
 required-features = ["research"]
 

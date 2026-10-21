@@ -18,6 +18,9 @@
 //! Defines the spilling functions
 
 pub(crate) mod admission;
+/// The bytes a merge pass admits for its readers and for the writer of its
+/// intermediate file (see `MultiLevelMergeBuilder`).
+pub use admission::{reader_pass_bound, writer_pass_bound};
 mod credit;
 pub(crate) mod in_progress_spill_file;
 pub(crate) mod replayable_spill_input;

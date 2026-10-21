@@ -1406,6 +1406,7 @@ impl NestedLoopJoinStream {
                     .spill_record_batch_stream_and_return_max_batch_memory(
                         &mut stream,
                         "NestedLoopJoin left spill",
+                        None,
                     )
                     .await?;
 

@@ -37,15 +37,44 @@ pub(crate) fn validate(
     }
     let options = crate::GraphForgeOptions::default();
     let (_, resource_policy) = options.clone().validate()?;
+    // The streaming field comparison must hold one bounded decode batch at a
+    // time inside the private query pool, never a whole-graph field map.
+    let mut resource_policy = resource_policy.with_private_query_budget(64 * 1024 * 1024);
+    resource_policy.batch_size = 256;
+    resource_policy.target_partitions = 1;
     let graph = GraphForge::open_resolved_with_lifecycle_resources(
         generation.container_root().to_path_buf(),
         generation.clone(),
         true,
         graphforge_storage::filesystem_admission::ProjectLifecycleMode::Ephemeral,
         options,
-        resource_policy.with_private_query_budget(64 * 1024 * 1024),
+        resource_policy,
     )?;
-    let fields = crate::branches::fields::read(&graph, &CancellationToken::new())?;
+    // Streaming comparison: retain only the keys the registry commits for this
+    // Version, never a whole-graph field map.
+    let commitments = || {
+        registry
+            .interchange
+            .values()
+            .flat_map(|archive| {
+                archive.accepted.values().filter(|mapping| {
+                    archive.proof_exports.get(&mapping.proof_version_uuid)
+                        == Some(&version.version_uuid)
+                })
+            })
+            .map(|mapping| {
+                (
+                    (
+                        mapping.unit.object_kind.clone(),
+                        mapping.unit.object_uuid,
+                        mapping.unit.field.clone(),
+                    ),
+                    mapping.value_sha256,
+                )
+            })
+    };
+    let wanted = commitments().map(|(key, _)| key).collect();
+    let fields = crate::branches::fields::read_keys(&graph, &wanted, &CancellationToken::new())?;
     for row in crate::branches::baseline::read(&graph)?.values() {
         if !registry.identities.contains_key(&row.origin)
             || row
@@ -55,20 +84,10 @@ pub(crate) fn validate(
             return Err(invalid());
         }
     }
-    for archive in registry.interchange.values() {
-        for mapping in archive.accepted.values() {
-            if archive.proof_exports.get(&mapping.proof_version_uuid) != Some(&version.version_uuid)
-            {
-                continue;
-            }
-            let key = (
-                mapping.unit.object_kind.clone(),
-                mapping.unit.object_uuid,
-                mapping.unit.field.clone(),
-            );
-            if fields.get(&key) != mapping.value_sha256.as_ref() {
-                return Err(invalid());
-            }
+    // An absent value commits a deleted or missing field and must stay absent.
+    for (key, digest) in commitments() {
+        if fields.get(&key) != digest.as_ref() {
+            return Err(invalid());
         }
     }
     Ok(())

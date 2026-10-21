@@ -3,8 +3,10 @@
 use super::{
     AtomicBool, ControlSha256, Digest, Entry, Path, PortableError, PortableErrorCode,
     PortableLimits, PortableReport, Read, Seek, SeekFrom, Sha256, canonical_json, check_cancel, fs,
-    has_multiple_links, hex, modified, research, same_identity, semantic_validation,
+    has_multiple_links, hex, modified, plausibility::ParquetSignals, research, same_identity,
+    semantic_validation,
 };
+use crate::parquet_encoding_profile::ParquetShape;
 use std::io::Write;
 
 /// Where a semantic read finds an entry whose bytes the scan did not retain.
@@ -268,6 +270,37 @@ impl parquet::file::reader::ChunkReader for EntryWindow {
     }
 }
 
+/// Whether the engine can ever hand `entry_path` to a Parquet decoder, which
+/// is exactly the set of entries the page walk must cover: the walk exists so
+/// that no decoder sees an unwalked page, and an entry no decoder opens needs
+/// neither the walk nor the scratch it costs a stream. The one rule for the
+/// streamed walk ([`ParquetWalk`]) and for the walk of a file or directory
+/// ([`validate_parquet_profile`]).
+///
+/// It is false for:
+///
+/// * anything outside `data/components/`: the package controls are JSON and text;
+/// * the `evidence` component kind, opaque data authored outside the engine.
+///   That is enforced rather than assumed: `component_kind` never yields it,
+///   semantic validation requires every runtime participant's component and
+///   files to sit in the kind and directory `component_kind` gives it
+///   (`validate_participant_placement`), and import finds a participant's
+///   payload only there (`find_participant_file`) and opens other Parquet only
+///   under the graph tree (`package_graph_tree`);
+/// * the canonical `research-retained-evidence/<version>/<sha256>` objects,
+///   which only a research Version's evidence needs
+///   (`research::is_evidence_only`); `research::check_reserved_path` refuses
+///   anything else below that directory, so nothing decodable hides there.
+///
+/// Everything else may be decoded, so it is walked: when unsure, walk.
+pub(super) fn reaches_a_decoder(entry_path: &str) -> bool {
+    entry_path
+        .strip_prefix("data/components/")
+        .and_then(|rest| rest.split('/').next())
+        .is_some_and(|kind| kind != "evidence")
+        && !research::is_evidence_only(entry_path)
+}
+
 /// What the Parquet page walk needs of one streamed entry. A stream cannot be
 /// read back, so the entry is kept while it streams past: in memory up to
 /// `max_parquet_walk_bytes`, in an unnamed scratch file beyond that (the page
@@ -337,22 +370,31 @@ impl<'a> ParquetWalk<'a> {
         }
         Ok(())
     }
-    pub(super) fn finish(self) -> Result<(), PortableError> {
+    /// The footer shape of the walked entry, or `None` for an entry that does
+    /// not end in the footer magic (or that a sink kept and walked) and so was
+    /// not walked here.
+    pub(super) fn finish(self) -> Result<Option<ParquetShape>, PortableError> {
         if self.skipped || &self.tail != b"PAR1" {
-            return Ok(());
+            return Ok(None);
         }
         match self.spill {
             Some((file, length)) => walk_entry(&file, 0, length, self.path),
             None => crate::parquet_encoding_profile::admit_pages(&bytes::Bytes::from(self.kept))
                 .map_err(|error| refuse_profile(self.path, error)),
         }
+        .map(Some)
     }
 }
 
 /// Walk the pages of the Parquet entry at `base..base + length` of `file`.
 /// The one page-walk call for entries that are read in place: a file's
 /// bundle or directory entry, and a streamed entry staged in scratch.
-fn walk_entry(file: &fs::File, base: u64, length: u64, path: &str) -> Result<(), PortableError> {
+fn walk_entry(
+    file: &fs::File,
+    base: u64,
+    length: u64,
+    path: &str,
+) -> Result<ParquetShape, PortableError> {
     let window = EntryWindow {
         file: file
             .try_clone()
@@ -362,14 +404,6 @@ fn walk_entry(file: &fs::File, base: u64, length: u64, path: &str) -> Result<(),
     };
     crate::parquet_encoding_profile::admit_pages(&window)
         .map_err(|error| refuse_profile(path, error))
-}
-
-/// True when a package entry's bytes can reach a decoder, so the Parquet page
-/// profile must admit them. Opaque component files, which no decoder reads
-/// (objects only a research Version's evidence needs), return false. The one
-/// rule for the streamed walk and for the walk of a file or directory.
-pub(super) fn reaches_a_decoder(entry_path: &str) -> bool {
-    entry_path.starts_with("data/components/") && !research::is_evidence_only(entry_path)
 }
 
 /// Walk the pages of an entry a sink kept as the file at `path`.
@@ -415,6 +449,9 @@ pub(super) fn refuse_profile(
 /// An entry is Parquet when it ends in the `PAR1` footer magic, which is all the
 /// Parquet reader requires; paths and declared encodings are not trusted.
 ///
+/// Returns the footer facts of the graph Parquet entries, which a stream
+/// collects from the same walk as each entry passes ([`ParquetWalk`]).
+///
 /// `driven` is true when the research driver answers for the staged research
 /// objects (it walked each as it was staged, and a refused Version's remaining
 /// objects are never decoded): they are skipped here so one rule orders their
@@ -422,22 +459,29 @@ pub(super) fn refuse_profile(
 pub(super) fn validate_parquet_profile(
     source: &Path,
     entries: &[Entry],
+    limits: PortableLimits,
     driven: bool,
     cancelled: Option<&AtomicBool>,
-) -> Result<(), PortableError> {
+) -> Result<ParquetSignals, PortableError> {
     use crate::parquet_encoding_profile::admit_pages;
 
+    let mut signals = ParquetSignals::new(limits.max_parquet_footer_bytes);
     for entry in entries.iter().filter(|entry| {
-        reaches_a_decoder(&entry.path)
-            && entry.length >= 12
-            && !(driven && research::is_staged_object(&entry.path))
+        reaches_a_decoder(&entry.path) && !(driven && research::is_staged_object(&entry.path))
     }) {
         check_cancel(cancelled)?;
+        if entry.length < 12 {
+            signals.observe(&entry.path, None);
+            continue;
+        }
         if let Some(bytes) = &entry.bytes {
-            if bytes.ends_with(b"PAR1") {
+            let shape = if bytes.ends_with(b"PAR1") {
                 let bytes = bytes::Bytes::copy_from_slice(bytes);
-                admit_pages(&bytes).map_err(|error| refuse_profile(&entry.path, error))?;
-            }
+                Some(admit_pages(&bytes).map_err(|error| refuse_profile(&entry.path, error))?)
+            } else {
+                None
+            };
+            signals.observe(&entry.path, shape);
             continue;
         }
         let input_path = if entry.offset.is_some() {
@@ -474,9 +518,11 @@ pub(super) fn validate_parquet_profile(
                     "entry truncated",
                 )
             })?;
-        if &tail == b"PAR1" {
-            walk_entry(&file, base, entry.length, &entry.path)?;
-        }
+        let shape = if &tail == b"PAR1" {
+            Some(walk_entry(&file, base, entry.length, &entry.path)?)
+        } else {
+            None
+        };
         let after = file.metadata().map_err(|_| {
             PortableError::at(PortableErrorCode::Io, &entry.path, "cannot inspect entry")
         })?;
@@ -490,8 +536,9 @@ pub(super) fn validate_parquet_profile(
                 "authenticated entry changed",
             ));
         }
+        signals.observe(&entry.path, shape);
     }
-    Ok(())
+    Ok(signals)
 }
 
 /// Native admission uses authenticated runtime identities rather than payload paths.

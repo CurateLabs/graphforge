@@ -797,6 +797,7 @@ async fn copy_phase_merge(refuse_next_copy: bool) -> Result<()> {
         Field::new("left", DataType::Utf8, false),
         Field::new("right", DataType::Utf8, false),
     ]));
+    let admitted_schema = Arc::clone(&schema);
     let manager = manager(Arc::clone(&pool), Arc::clone(&schema));
     let mut files = Vec::new();
     let mut maximum = 0;
@@ -830,8 +831,9 @@ async fn copy_phase_merge(refuse_next_copy: bool) -> Result<()> {
         });
     }
     assert_eq!(pool.reserved(), 0);
-    // Existing multi-run admission: two input files, two buffered batches per
-    // file, and the original raw-plus-copy factor of two.
+    // The reservation starts with the original multi-run estimate (two input
+    // files, two buffered batches per file, the raw-plus-copy factor of two);
+    // the selection raises it to everything the pass can hold at once.
     let prepaid = 2 * 2 * 2 * maximum;
     let reservation = MemoryConsumer::new("copy phase control").register(&pool);
     reservation.try_grow(prepaid)?;
@@ -858,16 +860,31 @@ async fn copy_phase_merge(refuse_next_copy: bool) -> Result<()> {
             }
         }).await.expect("real IPC reader reaches admission");
     }
+    // Paused, the merge holds what it admitted at file selection: every batch
+    // its two readers can hold at once with two batches buffered (the reader
+    // pass bound of each file), the working set of its copies (twice the
+    // reserved bytes of the largest batch pair) and the bytes of its
+    // constructors, which are less than a batch. The pass has no later file.
+    let readers = 2 * datafusion::physical_plan::spill::reader_pass_bound(
+        &admitted_schema,
+        maximum,
+        ROWS,
+        datafusion::common::config::SpillCompression::Uncompressed,
+        2,
+    )?
+    .expect("a flat schema has a reader bound");
+    let working_set = 2 * (maximum + maximum);
     assert!(
-        pool.reserved() < prepaid,
-        "idle copy scratch must be released while the admitted reader is paused"
+        (readers + working_set..readers + working_set + maximum).contains(&pool.reserved()),
+        "the merge holds its readers and its copy working set, no more: held={} readers={readers} working_set={working_set}",
+        pool.reserved()
     );
     drop(release);
     let first = stream.next().await.unwrap()?;
     assert_eq!(first.num_rows(), ROWS);
     assert!(
-        observed.restored.load(std::sync::atomic::Ordering::Acquire),
-        "a real copy phase must fallibly reacquire its admitted workspace"
+        !observed.restored.load(std::sync::atomic::Ordering::Acquire),
+        "a real copy phase draws on its admitted workspace and asks the pool for nothing"
     );
     let alias = first.column(1).slice(0, 1);
     let alias_capacity = alias.to_data().buffers()[1].capacity();
@@ -898,19 +915,16 @@ async fn copy_phase_merge(refuse_next_copy: bool) -> Result<()> {
     check(&first, &mut expected);
     drop(first);
     if refuse_next_copy {
+        // The pool is full: the next copy is served from the admitted workspace.
         let pressure = MemoryConsumer::new("independent copy pressure").register(&pool);
         pressure.try_grow(LIMIT - pool.reserved())?;
-        let error = stream
-            .next()
-            .await
-            .unwrap()
-            .expect_err("unavailable copy workspace must refuse before interleave");
+        while let Some(batch) = stream.next().await {
+            check(&batch?, &mut expected);
+        }
+        assert_eq!(expected, 2 * ROWS);
         assert!(
-            matches!(
-                error.find_root(),
-                datafusion::common::DataFusionError::ResourcesExhausted(_)
-            ),
-            "{error}"
+            !observed.restored.load(std::sync::atomic::Ordering::Acquire),
+            "a full pool is never asked for the next copy"
         );
         drop(stream);
         drop(pressure);
@@ -946,13 +960,13 @@ async fn copy_phase_merge(refuse_next_copy: bool) -> Result<()> {
 }
 
 #[tokio::test]
-async fn spill_admission_merge_releases_idle_copy_scratch_and_preserves_fresh_output_aliases()
+async fn spill_admission_merge_holds_its_admitted_copy_workspace_and_preserves_fresh_output_aliases()
 -> Result<()> {
     copy_phase_merge(false).await
 }
 
 #[tokio::test]
-async fn spill_admission_merge_copy_reacquisition_refuses_and_cleans_up_with_alias_alive()
+async fn spill_admission_merge_serves_copies_from_its_admitted_workspace_under_a_full_pool_with_alias_alive()
 -> Result<()> {
     copy_phase_merge(true).await
 }

@@ -965,7 +965,7 @@ fn import_materialized(
     let mut participants = Vec::with_capacity(runtime.participants.len() + 2);
     let mut semantic_composition_fingerprint = None;
     for participant in runtime.participants {
-        let source = find_participant_file(stage, &participant.participant_id, limits)?;
+        let source = find_participant_file(stage, &participant, limits)?;
         let metadata = fs::metadata(&source).map_err(|_| {
             PortableError::new(
                 PortableErrorCode::ConcurrentMutation,
@@ -1866,27 +1866,24 @@ fn read_bounded_payload(path: &Path, limit: u64, context: &str) -> Result<Vec<u8
     Ok(bytes)
 }
 
+/// The payload of `participant`, found only where verification requires it to
+/// be: in the component kind its capability and record family belong to.
 fn find_participant_file(
     stage: &Path,
-    participant_id: &str,
+    participant: &crate::project_portable::RuntimeParticipant,
     limits: PortableLimits,
 ) -> Result<PathBuf, PortableError> {
-    let root = stage.join("data/components");
+    let kind = crate::project_portable_selection::component_kind(
+        &participant.capability_id,
+        &participant.record_family_id,
+    );
+    let directory = stage
+        .join("data/components")
+        .join(kind)
+        .join(&participant.participant_id);
     let mut found = None;
-    for kind in fs::read_dir(&root).map_err(|_| {
-        PortableError::new(
-            PortableErrorCode::InvalidStructure,
-            "components unavailable",
-        )
-    })? {
-        let candidate = kind
-            .map_err(|_| PortableError::new(PortableErrorCode::Io, "component unavailable"))?
-            .path()
-            .join(participant_id);
-        if !candidate.is_dir() {
-            continue;
-        }
-        for entry in fs::read_dir(candidate)
+    if directory.is_dir() {
+        for entry in fs::read_dir(directory)
             .map_err(|_| PortableError::new(PortableErrorCode::Io, "participant unavailable"))?
         {
             let path = entry
@@ -1948,6 +1945,7 @@ fn parse_digest(value: &str) -> Result<[u8; 32], PortableError> {
 mod tests {
     use super::*;
     mod crash_into_fresh_target;
+    mod participant_kind;
     mod returned_errors;
     mod space_preflight;
 
