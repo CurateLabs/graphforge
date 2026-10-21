@@ -96,14 +96,16 @@ prepared immutable participant transfer is bounded to 256 MiB. Baseline reads
 preflight uncompressed Parquet and field allocation before decoding/expansion.
 These are bounded operations, not streaming arbitrary-sized whole-Project
 Branch creation. Native validation of a research Version and the export-time
-comparison of its accepted mappings are the exception: they stream every typed
-field once, decoding all of them and checking owner conflicts across every key,
-but retain only the keys the registry's accepted mappings name. Their memory
+comparison of its accepted mappings are the exception: they decode every typed
+field and check owner conflicts across every key, but retain only the keys the
+registry's accepted mappings name, never a whole-graph field map. Their memory
 is the opened Version's private query pool (one decode batch), the registry,
-and a fixed bound on buffered owner-qualified keys (larger graphs are checked
-in hash partitions of the objects, rescanning per partition), never a
-whole-graph field map, so a Version whose fields exceed the Branch field-map
-budget still verifies, imports and clones. Exporting a Version that carries a
+and a buffer of at most 65,536 owner-qualified keys. A graph whose semantic
+emissions fit that buffer is read in one pass. A larger composition-bound
+graph is checked in hash partitions of its objects, each partition re-running
+the owner scans, so cost grows with the partition count while memory stays
+bounded, and a Version whose fields exceed the Branch field-map budget still
+verifies, imports and clones. Exporting a Version that carries a
 selected acceptance mapping also prepares that mapping's proof source, which
 still reads that source's whole field map and keeps its 64 MiB size refusal.
 Branch preparation holds the whole map and keeps the 64 MiB working bound.
