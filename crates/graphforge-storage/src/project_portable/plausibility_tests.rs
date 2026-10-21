@@ -641,3 +641,31 @@ fn the_unmoved_hub_package_still_verifies_after_resigning() {
     let entries = resigned(read_tar(&fs::read(HUB_BUNDLE).unwrap()));
     super::stream_tests::assert_stream_equals_file(&bundle_of(entries));
 }
+
+/// A component that lists no file still has a byte total, so the totals cover
+/// every kind the component histogram counts.
+#[test]
+fn a_component_without_files_has_a_zero_byte_total() {
+    let components = [ManifestComponent {
+        kind: "evidence".into(),
+        participant_id: "evidence".into(),
+        required_dependencies: Vec::new(),
+        files: Vec::new(),
+    }];
+    let entries = [Entry {
+        path: "data/graphforge-project.json".into(),
+        length: 7,
+        digest: [0; 32],
+        bytes: None,
+        offset: None,
+        source_metadata: None,
+    }];
+    let bytes = super::plausibility::bytes_by_kind(&entries, &components);
+    assert_eq!(
+        bytes,
+        BTreeMap::from([
+            ("evidence".to_owned(), 0),
+            ("package-control".to_owned(), 7)
+        ])
+    );
+}
