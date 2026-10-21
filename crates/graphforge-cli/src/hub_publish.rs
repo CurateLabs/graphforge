@@ -45,6 +45,7 @@ use std::time::Duration;
 use url::Url;
 use uuid::Uuid;
 
+mod history;
 pub(crate) mod publication;
 
 /// Set once by the streaming `gf` process; captured invocations (bindings,
@@ -77,6 +78,15 @@ const INTENT_FORMAT: &str = "graphforge-hub-publish-intent/1";
 #[derive(Args)]
 #[command(group(ArgGroup::new("selection").required(true).args(["git_ref", "version_uuid"])))]
 pub(crate) struct PublishArgs {
+    /// Explicitly replace a non-descendant head under the current revision lease.
+    #[arg(long)]
+    pub rewrite: bool,
+    /// Explicitly remove now-unreferenced published history under the Hub retention rule.
+    #[arg(long)]
+    pub prune: bool,
+    /// Explicitly check an established Fork's cited Version at this origin URL.
+    #[arg(long)]
+    pub check_fork_origin: Option<String>,
     /// Canonical owner/repository name or an HTTPS Hub repository URL.
     pub repository: String,
     /// Research Branch to publish, named by its label; its head becomes this
@@ -1103,6 +1113,8 @@ struct Snapshot {
 fn merge_lineage(
     previous: Option<&ResearchLineage>,
     mut next: ResearchLineage,
+    rewrite: bool,
+    prune: bool,
 ) -> Result<ResearchLineage, GfError> {
     let Some(previous) = previous else {
         return Ok(next);
@@ -1183,15 +1195,21 @@ fn merge_lineage(
         .branches
         .iter()
         .map(|branch| branch.ref_name.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
         .collect::<Vec<_>>();
-    if !next.fast_forwards(previous, &refs) {
-        return Err(publish_error(
-            HubPublishErrorCode::NonFastForward,
-            "published Branch head is not an ancestor of the proposed head",
-        ));
+    if prune {
+        graphforge_hub_publish::prune_unreferenced_history(&mut next);
     }
-    next.validate(DiscoveryLimits::default())
-        .map_err(|error| discovery(&error))?;
+    graphforge_hub_publish::validate_history_transition(
+        previous,
+        &next,
+        &refs,
+        rewrite,
+        prune,
+        DiscoveryLimits::default(),
+    )
+    .map_err(|error| protocol(&error))?;
     Ok(next)
 }
 
@@ -1201,10 +1219,11 @@ fn build_snapshot(
     identity: &RepositoryIdentity,
     capabilities: &PublishCapabilities,
     selection: &Selection,
-    published: Option<&Published>,
-    fork_origin_repository: Option<RepositoryIdentity>,
+    history: history::SnapshotHistory<'_>,
     scratch: &Path,
 ) -> Result<(Snapshot, ResearchLineage), GfError> {
+    let published = history.published;
+    let fork_origin_repository = history.fork_origin_repository;
     let cancellation = CancellationToken::new();
     let location = |digest: &str| capabilities.object_location(digest);
     let mut sources = BTreeMap::new();
@@ -1291,7 +1310,12 @@ fn build_snapshot(
         },
         &cancellation,
     )?;
-    let lineage = merge_lineage(published.map(|published| &published.lineage), lineage)?;
+    let lineage = merge_lineage(
+        published.map(|published| &published.lineage),
+        lineage,
+        history.rewrite,
+        history.prune,
+    )?;
 
     // Earlier published Version and Proposal packages are carried unchanged.
     let carried: BTreeSet<&Sha256Digest> = lineage
@@ -1748,6 +1772,7 @@ pub(crate) fn publish(
             &json!({"project_content":selection.project_content,"previews":preview_metadata}),
         ))
     };
+    let operation_content = history::bind_flags(operation_content, args);
     let resolution = match environment.resolution.take() {
         Some(resolution) => {
             if resolution.requested != identity || resolution.requested_base != base {
@@ -1784,6 +1809,9 @@ pub(crate) fn publish(
             &json!({"intent":base_intent,"previews":preview_metadata}),
         ))
     };
+    let intent_digest = history::bind_flags(intent_digest, args);
+    graphforge_hub_publish::require_history_capability(&capabilities, args.rewrite, args.prune)
+        .map_err(|error| protocol(&error))?;
     let hub = Hub {
         bypass: environment.bypass,
         transport,
@@ -1802,6 +1830,16 @@ pub(crate) fn publish(
         ));
     }
     let token = obtain_token(&hub, &capabilities, environment)?;
+
+    let read_current = || {
+        if capabilities.capabilities.iter().any(|capability| {
+            capability.capability == "publish-read-context" && capability.major == 1
+        }) {
+            read_private_context(&hub, &identity, &token)
+        } else {
+            read_published(&hub, &base, &identity)
+        }
+    };
 
     // A retry is classified before any package is derived.
     let status_url = endpoint(&base, &format!("publish/operations/{operation_uuid}"));
@@ -1824,6 +1862,17 @@ pub(crate) fn publish(
             }
             if let Some(receipt) = status.receipt {
                 check_receipt(&receipt, &identity, operation_uuid)?;
+                if args.check_fork_origin.is_some() {
+                    let published = read_current()?;
+                    history::verify_established_fork(
+                        &hub,
+                        graph,
+                        published.as_ref(),
+                        selection.project_uuid,
+                        args.check_fork_origin.as_deref(),
+                        environment.notices,
+                    )?;
+                }
                 return Ok(PublishOutcome {
                     receipt,
                     replayed: true,
@@ -1835,14 +1884,7 @@ pub(crate) fn publish(
         _ => return Err(hub_failure(&status)),
     }
 
-    let published =
-        if capabilities.capabilities.iter().any(|capability| {
-            capability.capability == "publish-read-context" && capability.major == 1
-        }) {
-            read_private_context(&hub, &identity, &token)?
-        } else {
-            read_published(&hub, &base, &identity)?
-        };
+    let published = read_current()?;
     let fork_origin_repository = match (&fork, &published) {
         (Some(_), Some(_)) => {
             return Err(publish_error(
@@ -1864,8 +1906,12 @@ pub(crate) fn publish(
         &identity,
         &capabilities,
         &selection,
-        published.as_ref(),
-        fork_origin_repository,
+        history::SnapshotHistory {
+            published: published.as_ref(),
+            fork_origin_repository,
+            rewrite: args.rewrite,
+            prune: args.prune,
+        },
         scratch.path(),
     )?;
     if !previews.is_empty() {
@@ -1925,6 +1971,21 @@ pub(crate) fn publish(
         verify_fork_origin(&hub, origin_base, cited)?;
     }
 
+    history::verify_established_fork(
+        &hub,
+        graph,
+        published.as_ref(),
+        selection.project_uuid,
+        args.check_fork_origin.as_deref(),
+        environment.notices,
+    )?;
+    if args.prune {
+        writeln!(
+            environment.notices,
+            "Pruning repository history; independent Fork copies and citations are retained."
+        )
+        .map_err(|error| GfError::Execution(error.to_string()))?;
+    }
     let manifest_validator = snapshot
         .manifest
         .canonical_digest()
@@ -1934,6 +1995,8 @@ pub(crate) fn publish(
         .as_ref()
         .map(|published| published.revision.clone());
     let request_commitment = PublishIntent {
+        rewrite: args.rewrite,
+        prune: args.prune,
         repository: identity.clone(),
         intent_digest: intent_digest.clone(),
         objects: snapshot.objects.clone(),
@@ -1963,6 +2026,12 @@ pub(crate) fn publish(
                 (!args.previews.is_empty())
                     .then(|| graphforge_hub_publish::Capability::new("version-previews", 1)),
             )
+            .chain((args.rewrite || args.prune).then(|| {
+                graphforge_hub_publish::Capability::new(
+                    graphforge_hub_publish::HISTORY_MUTATION_CAPABILITY,
+                    1,
+                )
+            }))
             .collect(),
     };
     negotiated_chunk_size(&capabilities.limits)?;
@@ -2033,6 +2102,8 @@ pub(crate) fn publish(
         .map_err(|error| GfError::Execution(error.to_string()))?;
     let committed = session_response(&hub.control(
         HubRequest::new(HubMethod::Post, commit_url.as_str()).with_json(&CommitRequest {
+            rewrite: args.rewrite,
+            prune: args.prune,
             manifest: manifest_value,
             refs: snapshot.refs.clone(),
             expected_revision,

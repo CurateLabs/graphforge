@@ -147,6 +147,9 @@
     "manifest": {
       "$ref": "https://graphforge.sh/schemas/discovery/v1/manifest.schema.json"
     },
+    "prune": {
+      "type": "boolean"
+    },
     "refs": {
       "items": {
         "maxLength": 4096,
@@ -157,6 +160,9 @@
       "minItems": 1,
       "type": "array",
       "uniqueItems": true
+    },
+    "rewrite": {
+      "type": "boolean"
     }
   },
   "required": [
