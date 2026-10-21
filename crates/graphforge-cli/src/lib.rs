@@ -33,6 +33,7 @@ mod ontology_cli;
 mod porcelain;
 mod portable_cli;
 mod research_cli;
+mod research_help;
 mod research_versions_cli;
 mod saved_queries_cli;
 mod source_artifact_cli;
@@ -1410,7 +1411,7 @@ where
         args[0] = "graphforge".into();
     }
     let json = args.iter().any(|arg| arg == "--json");
-    let cli = match Cli::try_parse_from(&args) {
+    let cli = match parse_cli(&args) {
         Ok(cli) => cli,
         Err(error) => {
             let exit_code = error.exit_code();
@@ -1638,9 +1639,19 @@ fn error_exit_code(error: &CliRuntimeError) -> i32 {
     }
 }
 
+/// Parse the arguments with the research help text attached.
+fn parse_cli<I, T>(args: I) -> Result<Cli, clap::Error>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<std::ffi::OsString> + Clone,
+{
+    use clap::FromArgMatches as _;
+    Cli::from_arg_matches(&research_help::command().try_get_matches_from(args)?)
+}
+
 /// Stream process output directly and terminate with the native CLI exit status.
 pub fn run_process() {
-    let cli = Cli::parse();
+    let cli = parse_cli(std::env::args_os()).unwrap_or_else(|error| error.exit());
     let json = cli.json;
     let mut output = io::stdout().lock();
     hub_publish::allow_device_flow();

@@ -26,3 +26,37 @@ fn standalone_verify_is_retired_and_portable_verify_remains_available() {
         })
     ));
 }
+
+fn research_help_texts(command: &clap::Command, found: &mut Vec<(String, String)>) {
+    let mut text = command.clone();
+    found.push((
+        command.get_name().to_owned(),
+        text.render_long_help().to_string(),
+    ));
+    for sub in command
+        .get_subcommands()
+        .filter(|sub| sub.get_name() != "help")
+    {
+        research_help_texts(sub, found);
+    }
+}
+
+#[test]
+fn every_research_help_text_has_an_example_or_pointer() {
+    let command = research_help::command();
+    let research = command.find_subcommand("research").expect("research");
+    let mut found = Vec::new();
+    research_help_texts(research, &mut found);
+    assert!(found.len() >= 60, "walked {} commands", found.len());
+    for (name, help) in &found {
+        assert!(
+            help.contains("Example:") || help.contains("gf --help"),
+            "gf research ... {name} has neither an example nor a pointer:\n{help}"
+        );
+    }
+    let branch = found
+        .iter()
+        .find(|(name, _)| name == "execute")
+        .expect("branch execute");
+    assert!(branch.1.contains("gf commit -m"), "{}", branch.1);
+}
