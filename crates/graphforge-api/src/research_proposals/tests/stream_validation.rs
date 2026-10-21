@@ -872,3 +872,87 @@ fn by_stream_paced(
         None,
     )
 }
+
+/// The bundle with a second local evidence reference added to every Version
+/// that has one: the same sha256 under a new artifact, `length` bytes long. The
+/// registry, its archive copy and their identity commitments are rewritten and
+/// every digest that covers them recomputed.
+fn with_duplicate_evidence(bytes: &[u8], length: impl Fn(u64) -> u64) -> Vec<u8> {
+    use graphforge_storage::research_versions::ResearchEvidenceReference::Local;
+    use sha2::{Digest, Sha256};
+    let duplicate = |version: &mut ResearchVersionRecord| {
+        let Some(mut copy) = version
+            .content
+            .evidence
+            .iter()
+            .find(|evidence| matches!(evidence, Local { .. }))
+            .cloned()
+        else {
+            return None;
+        };
+        if let Local {
+            artifact_uuid,
+            byte_length,
+            ..
+        } = &mut copy
+        {
+            *artifact_uuid = Uuid::now_v7();
+            *byte_length = length(*byte_length);
+        }
+        // First, so a map that keeps the last length keeps the true one.
+        version.content.evidence.insert(0, copy);
+        let mut logical = version.clone();
+        logical.content.generation_uuid = Uuid::nil();
+        logical.content.manifest_sha256 = [0; 32];
+        Some(<[u8; 32]>::from(Sha256::digest(
+            serde_json::to_vec(&logical).unwrap(),
+        )))
+    };
+    reauthenticated(bytes, |registry| {
+        for (id, version) in &mut registry.versions {
+            if let Some(identity) = duplicate(version) {
+                registry.identities.insert(*id, identity);
+                for archive in registry.interchange.values_mut() {
+                    if let Some(archived) = archive.versions.get_mut(id) {
+                        *archived = version.clone();
+                        archive.identities.insert(*id, identity);
+                    }
+                }
+            }
+        }
+    })
+}
+
+/// Two references to one object must agree on its length. One that does not is
+/// refused as it was before the driver, alike from every source; one that does
+/// still verifies.
+#[test]
+fn conflicting_evidence_lengths_are_refused_alike_and_equal_ones_verify() {
+    let directory = tempfile::tempdir().unwrap();
+    let payload = vec![0x5a_u8; 4096];
+    let (_, bytes) =
+        crate::research_interchange::closure_tests::evidence_bundle(directory.path(), |_| {
+            payload.clone()
+        });
+    let scratch = tempfile::tempdir().unwrap();
+    let equal = with_duplicate_evidence(&bytes, |length| length);
+    let (outcomes, _) = on_every_path(directory.path(), scratch.path(), "equal", &equal, None);
+    for outcome in &outcomes {
+        outcome.as_ref().expect("equal lengths verify");
+    }
+    let conflicting = with_duplicate_evidence(&bytes, |length| length + 1);
+    let (outcomes, _) = on_every_path(
+        directory.path(),
+        scratch.path(),
+        "conflicting",
+        &conflicting,
+        None,
+    );
+    assert_refused_alike(&outcomes, PortableErrorCode::Incompatible, None);
+    let message = outcomes[0].as_ref().unwrap_err().to_string();
+    assert!(message.contains("selected closure is invalid"), "{message}");
+    for outcome in &outcomes {
+        assert_eq!(outcome.as_ref().unwrap_err().to_string(), message);
+    }
+    assert_eq!(std::fs::read_dir(scratch.path()).unwrap().count(), 0);
+}

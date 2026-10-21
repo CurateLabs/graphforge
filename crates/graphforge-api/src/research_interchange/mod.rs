@@ -24,6 +24,6 @@ mod fork;
 pub use fork::{ForkResearchRequest, ForkResearchResult};
 
 #[cfg(test)]
-mod closure_tests;
+pub(crate) mod closure_tests;
 #[cfg(test)]
 pub(crate) mod stream_parity;

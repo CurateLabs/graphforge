@@ -79,20 +79,25 @@ pub(crate) fn core_objects(
 
 /// The Version's local evidence objects with their lengths. A digest can be both
 /// evidence and a participant, graph file or manifest node of the same Version.
-pub(crate) fn local_evidence(version: &ResearchVersionRecord) -> BTreeMap<String, u64> {
-    version
-        .content
-        .evidence
-        .iter()
-        .filter_map(|evidence| match evidence {
-            super::super::ResearchEvidenceReference::Local {
-                sha256,
-                byte_length,
-                ..
-            } => Some((hex(sha256), *byte_length)),
-            _ => None,
-        })
-        .collect()
+/// Two references to one digest must agree on its length.
+pub(crate) fn local_evidence(
+    version: &ResearchVersionRecord,
+) -> Result<BTreeMap<String, u64>, GfError> {
+    let mut objects = BTreeMap::new();
+    for evidence in &version.content.evidence {
+        if let super::super::ResearchEvidenceReference::Local {
+            sha256,
+            byte_length,
+            ..
+        } = evidence
+            && objects
+                .insert(hex(sha256), *byte_length)
+                .is_some_and(|old| old != *byte_length)
+        {
+            return Err(invalid("research object has conflicting lengths"));
+        }
+    }
+    Ok(objects)
 }
 
 fn add(
@@ -192,7 +197,7 @@ pub(crate) fn object_inventory(
         let objects = core_objects(version, |digest, limit| {
             crate::read_graph_object_by_digest(generation.container_root(), digest, limit)
         })?;
-        let evidence = local_evidence(version);
+        let evidence = local_evidence(version)?;
         for (digest, length) in &objects {
             if let Some(length) = length {
                 crate::verify_graph_object(generation.container_root(), digest, *length)?;

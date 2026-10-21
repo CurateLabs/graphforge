@@ -215,7 +215,7 @@ fn check_version(
         .map_err(|_| graphforge_core::GfError::Validation("research object unavailable".into()))
     })
     .map_err(|_| super::check_cancel(cancelled).err().unwrap_or_else(invalid))?;
-    let evidence = portable::local_evidence(version);
+    let evidence = portable::local_evidence(version).map_err(|_| invalid())?;
     let mut required: BTreeMap<&String, Option<u64>> = core.iter().map(|(d, l)| (d, *l)).collect();
     for (digest, length) in &evidence {
         if required

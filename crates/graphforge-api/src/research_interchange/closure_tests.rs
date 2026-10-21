@@ -227,7 +227,7 @@ fn selected_artifact_bytes_external_limits_and_ontology_survive_reopen() {
 }
 
 /// A bundled selected export whose Version holds one local evidence object.
-fn evidence_bundle(
+pub(crate) fn evidence_bundle(
     owner: &std::path::Path,
     payload: impl FnOnce(&std::path::Path) -> Vec<u8>,
 ) -> (std::path::PathBuf, Vec<u8>) {
