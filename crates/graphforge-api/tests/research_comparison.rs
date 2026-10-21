@@ -22,7 +22,7 @@ fn branch(g: &mut GraphForge) -> Uuid {
         },
         creator_uuid: Uuid::now_v7(),
         created_at: 1,
-        label: "Study".into(),
+        label: format!("study-{}", Uuid::now_v7()),
     };
     g.create_research_branch(&r, &CancellationToken::new())
         .unwrap();

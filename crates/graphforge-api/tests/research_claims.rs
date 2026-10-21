@@ -292,7 +292,7 @@ fn create_branch(g: &mut GraphForge) -> Uuid {
         },
         creator_uuid: Uuid::now_v7(),
         created_at: 20,
-        label: "claims".into(),
+        label: format!("claims-{}", Uuid::now_v7()),
     };
     g.create_research_branch(&request, &CancellationToken::new())
         .unwrap();

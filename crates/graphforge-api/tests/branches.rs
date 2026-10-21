@@ -1396,7 +1396,7 @@ fn required_roles_survive_branch_and_historical_branch_version_creation() {
             source,
             creator_uuid: Uuid::now_v7(),
             created_at: 3,
-            label: "Child-preserves-roles".into(),
+            label: format!("child-preserves-roles-{}", Uuid::now_v7()),
         };
         graph
             .create_research_branch(&child, &CancellationToken::new())
@@ -1520,7 +1520,7 @@ fn branch_cancel_stale_current_and_conflicting_retry_preserve_authority() {
             .is_err()
     );
     let mut conflicting_create = create_request.clone();
-    conflicting_create.label = "Different intent".into();
+    conflicting_create.label = "different-intent".into();
     assert_eq!(
         graph
             .create_research_branch(&conflicting_create, &CancellationToken::new())

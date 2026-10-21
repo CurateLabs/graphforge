@@ -17,7 +17,7 @@ pub(super) fn branch(graph: &mut GraphForge) -> Uuid {
                 },
                 creator_uuid: Uuid::now_v7(),
                 created_at: 1,
-                label: "Research".into(),
+                label: format!("research-{branch_uuid}"),
             },
             &CancellationToken::new(),
         )
