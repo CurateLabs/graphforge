@@ -103,6 +103,13 @@ macro_rules! merge_helper {
 pub(crate) struct ReaderShares {
     pub(crate) credit: Arc<crate::spill::admission::Credit>,
     pub(crate) shares: Vec<usize>,
+    /// The most bytes of rows one output batch may hold, when the output is
+    /// written to an intermediate spill file whose writer was admitted for
+    /// batches of that size: the merge emits what it holds rather than add a
+    /// row past it, so the batches it writes are the ones the writer's bank
+    /// covers, however narrow the input batches are and however wide their
+    /// rows. A row alone is never past it: it is part of an input batch.
+    pub(crate) output_cap: Option<usize>,
 }
 
 pub struct SortedSpillFile {

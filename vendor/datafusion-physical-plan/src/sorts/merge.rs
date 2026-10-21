@@ -146,6 +146,10 @@ pub(super) struct ChargedSortPreservingMergeStream<C: CursorValues> {
     exhausted: Vec<bool>,
     returned: Vec<bool>,
 
+    /// The bytes of the rows pending in the output, counted only while the
+    /// output is capped (`ReaderShares::output_cap`).
+    pending_bytes: usize,
+
     /// Flag indicating whether we are in the mode of round-robin
     /// tie breaker for the loser tree winners.
     round_robin_tie_breaker_mode: bool,
@@ -276,6 +280,10 @@ pub(crate) struct SortPreservingMergeStream<C: CursorValues> {
     exhausted: Vec<bool>,
     returned: Vec<bool>,
 
+    /// The bytes of the rows pending in the output, counted only while the
+    /// output is capped (`ReaderShares::output_cap`).
+    pending_bytes: usize,
+
     /// Flag indicating whether we are in the mode of round-robin
     /// tie breaker for the loser tree winners.
     round_robin_tie_breaker_mode: bool,
@@ -359,6 +367,7 @@ impl<C: CursorValues> SortPreservingMergeStream<C> {
             copy_resident: None,
             exhausted: vec![false; stream_count],
             returned: vec![false; stream_count],
+            pending_bytes: 0,
             enable_round_robin_tie_breaker,
             bounded_inputs,
         }
@@ -476,10 +485,23 @@ impl<C: CursorValues> SortPreservingMergeStream<C> {
         }
     }
 
+    fn output_cap(&self) -> Option<usize> {
+        self.bounded_inputs
+            .as_ref()
+            .and_then(|bank| bank.output_cap)
+    }
+
     fn emit_in_progress_batch(&mut self) -> Result<Option<RecordBatch>> {
         let rows_before = self.in_progress.len();
         let result = self.in_progress.build_record_batch();
         self.produced += rows_before - self.in_progress.len();
+        if self.output_cap().is_some() {
+            self.pending_bytes = if self.in_progress.is_empty() {
+                0
+            } else {
+                self.in_progress.pending_bytes()
+            };
+        }
         result
     }
 
@@ -580,9 +602,23 @@ impl<C: CursorValues> SortPreservingMergeStream<C> {
 
             let stream_idx = self.loser_tree[0];
             let exhausted = self.cursors[stream_idx].is_none();
+            // An output written to an intermediate spill file holds at most
+            // the bytes its writer was admitted for: emit what is pending
+            // before a row that would pass them.
+            let row_bytes = match self.output_cap() {
+                Some(cap) if !exhausted => {
+                    let row = self.in_progress.next_row_bytes(stream_idx);
+                    if !self.in_progress.is_empty() && self.pending_bytes + row > cap {
+                        return Poll::Ready(self.emit_in_progress_batch().transpose());
+                    }
+                    row
+                }
+                _ => 0,
+            };
             if self.advance_cursors(stream_idx) {
                 self.loser_tree_adjusted = false;
                 self.in_progress.push_row(stream_idx);
+                self.pending_bytes += row_bytes;
 
                 // stop sorting if fetch has been reached
                 if self.fetch_reached() {

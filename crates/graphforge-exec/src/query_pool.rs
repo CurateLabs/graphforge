@@ -292,7 +292,8 @@ impl QueryMemoryPool {
     /// floors together, the readers' among them, never pass half the pool, so
     /// the other consumers keep the rest.
     fn floor(&self, spillers: usize) -> usize {
-        SPILLER_FLOOR_BYTES.min((self.pool_size / 2 - self.readers_floor()) / spillers.max(1))
+        SPILLER_FLOOR_BYTES
+            .min((self.pool_size / 2).saturating_sub(self.readers_floor()) / spillers.max(1))
     }
 
     /// The bytes the pool keeps for the readers and writers of spilled data:
@@ -305,8 +306,14 @@ impl QueryMemoryPool {
     /// the sort's merge reservation its 2 MiB with 10.4 MB held, and half the
     /// pool, the share one more spiller's floor took before any aggregate had
     /// spilled, refused it with 8.4 MB held, where the greedy pool served it.
+    ///
+    /// A pool smaller than twice [`READERS_FLOOR_MINIMUM_BYTES`] cannot spare
+    /// the minimum: the floor is then half the pool and the spillers' floors
+    /// are nothing, so the floors together still stay within half the pool.
     fn readers_floor(&self) -> usize {
-        SPILLER_FLOOR_BYTES.min((self.pool_size / 8).max(READERS_FLOOR_MINIMUM_BYTES))
+        SPILLER_FLOOR_BYTES
+            .min((self.pool_size / 8).max(READERS_FLOOR_MINIMUM_BYTES))
+            .min(self.pool_size / 2)
     }
 
     /// The bytes lent to the spillers, which the reserved total counts beyond

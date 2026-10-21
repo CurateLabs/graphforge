@@ -457,6 +457,16 @@ impl MultiLevelMergeBuilder {
                 // Each stream's share of the readers' bank: nothing for an
                 // in-memory stream, the reader's credit for a spill file.
                 let mut shares = vec![0; sorted_streams.len()];
+                // The writer of an intermediate file was admitted for batches
+                // of the largest input's size: the merge splits its output at
+                // that many bytes (see `ReaderShares::output_cap`).
+                let output_cap = (writer > 0).then(|| {
+                    sorted_spill_files
+                        .iter()
+                        .map(|spill| spill.max_record_batch_memory)
+                        .max()
+                        .unwrap_or(0)
+                });
                 for spill in sorted_spill_files {
                     shares.push(
                         self.credit_bytes(spill.max_record_batch_memory, buffer_size)?,
@@ -482,6 +492,7 @@ impl MultiLevelMergeBuilder {
                     Some(ReaderShares {
                         credit: input_credit,
                         shares,
+                        output_cap,
                     }),
                 )?;
 

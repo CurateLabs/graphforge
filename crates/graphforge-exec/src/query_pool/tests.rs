@@ -1392,3 +1392,34 @@ fn a_partial_aggregate_holds_no_floor_and_takes_no_loan() {
     assert!(is_refused(exchange.try_grow(1)));
     assert!(is_refused(partial.try_grow(MIB)));
 }
+
+/// A pool too small for the readers' minimum (the execution-session resource
+/// constructor does not enforce the facade's 16 MiB): the readers' floor is at
+/// most half the pool, the spillers' floors are what the half leaves (nothing
+/// at 256 KiB and 512 KiB), nothing underflows, and the first request of a
+/// spillable exchange is served with no spiller present.
+#[test]
+fn the_floors_of_a_small_pool_stay_within_half_of_it_whatever_its_size() {
+    for size in [256 * 1024, 512 * 1024, MIB] {
+        let pool = QueryMemoryPool::new(size);
+        assert!(pool.readers_floor() <= size / 2, "{size}");
+        for spillers in 0..4 {
+            let floors = pool.readers_floor() + spillers * pool.floor(spillers);
+            assert!(
+                floors <= size / 2,
+                "{size} with {spillers} spillers: {floors}"
+            );
+        }
+        let dynamic: Arc<dyn MemoryPool> = Arc::new(QueryMemoryPool::new(size));
+        let repartition = exchange(&dynamic, 0);
+        repartition.try_grow(1).unwrap();
+        // The exchange is admitted up to the pool less the readers' floor, and
+        // a reader takes that floor.
+        let readers = QueryMemoryPool::new(size).readers_floor();
+        repartition.try_grow(size - readers - 1).unwrap();
+        assert!(is_refused(repartition.try_grow(1)));
+        let held = reader(&dynamic);
+        held.try_grow(readers).unwrap();
+        assert_eq!(dynamic.reserved(), size);
+    }
+}

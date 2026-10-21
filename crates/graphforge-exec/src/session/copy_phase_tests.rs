@@ -319,10 +319,16 @@ impl MemoryPool for CopyWorkspacePool {
     }
 }
 
-#[tokio::test]
-async fn copy_phase_workspace_refusal_precedes_copy_and_keeps_prior_output() -> Result<()> {
+/// Room for the output handoff (268.4 KB of output claims, the wide schema's)
+/// and not for the complete workspace of the next copy (3.5 KB more).
+const WORKSPACE_HEADROOM: usize = 276_000;
+
+/// The merge's first output has escaped and the pool has `headroom` bytes
+/// left; the merge's second output is refused. Returns the refusal and the
+/// merge's attempts and admissions (its sponsor's and its output consumer's)
+/// since, after checking that the escaped output survives the refusal intact.
+async fn second_output_refused(headroom: usize) -> Result<(String, usize, usize)> {
     const LIMIT: usize = 8 * 1024 * 1024;
-    const HEADROOM: usize = 64 * 1024;
     let schema = Arc::new(Schema::new(vec![
         Field::new("key", DataType::FixedSizeBinary(16), false),
         Field::new("value".repeat(3277), DataType::Int64, false),
@@ -353,34 +359,25 @@ async fn copy_phase_workspace_refusal_precedes_copy_and_keeps_prior_output() -> 
     let full_capacity = escaped.to_data().buffers()[0].capacity();
     drop(first);
     let pressure = MemoryConsumer::new("independent work before output handoff").register(&pool);
-    pressure.try_grow(LIMIT - pool.reserved() - HEADROOM)?;
+    pressure.try_grow(LIMIT - pool.reserved() - headroom)?;
     observed.attempts.store(0, Ordering::Relaxed);
     observed.admitted.store(0, Ordering::Relaxed);
-    // The first output has already loaded both IPC sources and their row
-    // cursors. The next copy must admit its complete workspace, including the
-    // wide schema's output claims, before creating its ledger or Arrow output;
-    // the escaped first output, which the working set cannot carry beside the
-    // workspace, is charged to the output consumer first, and that request
-    // is the one refused here.
-    let error =
-        stream.next().await.unwrap().expect_err(
-            "the complete copy workspace must be admitted before allocating its output",
-        );
+    let error = stream
+        .next()
+        .await
+        .unwrap()
+        .expect_err("the second output must be refused");
     assert!(matches!(
         error.find_root(),
         DataFusionError::ResourcesExhausted(_)
     ));
-    assert!(error.to_string().contains("MergeOutput"), "{error}");
     assert!(
         !error.to_string().contains("Merge output reconciliation"),
         "refusal must precede the kernel and its output ownership handoff: {error}"
     );
-    assert_eq!(observed.attempts.load(Ordering::Relaxed), 1);
-    assert_eq!(
-        observed.admitted.load(Ordering::Relaxed),
-        0,
-        "the complete workspace must be refused before any copy phase is funded"
-    );
+    let text = error.to_string();
+    let attempts = observed.attempts.load(Ordering::Relaxed);
+    let admitted = observed.admitted.load(Ordering::Relaxed);
     drop(stream);
     drop(pressure);
     assert!(pool.reserved() >= full_capacity);
@@ -390,10 +387,39 @@ async fn copy_phase_workspace_refusal_precedes_copy_and_keeps_prior_output() -> 
             .downcast_ref::<Int64Array>()
             .unwrap()
             .value(0),
-        0
+        0,
+        "the prior output survives the refusal"
     );
     drop(escaped);
     assert_eq!(pool.reserved(), 0);
+    Ok((text, attempts, admitted))
+}
+
+/// The output handoff: the escaped first output, which the working set cannot
+/// carry beside the next workspace, is charged to the output consumer at the
+/// merge's next operation, and with 64 KiB left that request is the one
+/// refused, before the workspace is asked for.
+#[tokio::test]
+async fn copy_phase_output_handoff_refusal_precedes_the_workspace_and_keeps_prior_output()
+-> Result<()> {
+    let (error, attempts, admitted) = second_output_refused(64 * 1024).await?;
+    assert!(error.contains("MergeOutput"), "{error}");
+    assert_eq!(attempts, 1);
+    assert_eq!(admitted, 0, "no copy phase is funded");
+    Ok(())
+}
+
+/// The workspace: with room for the output handoff and not for the next
+/// copy's complete workspace, the handoff is admitted and the sponsor's
+/// workspace growth is the request refused, before the copy creates its ledger
+/// or Arrow output; the prior output stays intact.
+#[tokio::test]
+async fn copy_phase_workspace_refusal_precedes_copy_and_keeps_prior_output() -> Result<()> {
+    let (error, attempts, admitted) = second_output_refused(WORKSPACE_HEADROOM).await?;
+    assert!(!error.contains("MergeOutput"), "{error}");
+    assert!(error.contains("serial copy phase control"), "{error}");
+    assert_eq!(attempts, 2, "the handoff, then the workspace");
+    assert_eq!(admitted, 1, "the handoff is admitted, the workspace is not");
     Ok(())
 }
 

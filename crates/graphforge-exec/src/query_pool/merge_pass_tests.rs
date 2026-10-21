@@ -187,6 +187,18 @@ fn spill_files(
     rows: usize,
     declared: impl Fn(usize) -> usize,
 ) -> Files {
+    spill_files_padded(manager, files, batches, rows, 100, declared)
+}
+
+/// As [`spill_files`], with values of `pad` bytes.
+fn spill_files_padded(
+    manager: &SpillManager,
+    files: usize,
+    batches: usize,
+    rows: usize,
+    pad: usize,
+    declared: impl Fn(usize) -> usize,
+) -> Files {
     let mut out = Vec::new();
     let mut maximum = 0;
     for file in 0..files {
@@ -198,7 +210,7 @@ fn spill_files(
             let first = (file + index * rows * files) as i64;
             largest = largest.max(
                 writer
-                    .append_batch(&batch(first, files as i64, rows, 100))
+                    .append_batch(&batch(first, files as i64, rows, pad))
                     .unwrap(),
             );
         }
@@ -885,4 +897,63 @@ async fn an_exhausted_reader_gives_its_share_back() {
     );
     let fresh = pool.fresh("SpillReader");
     assert!(fresh.is_empty(), "readers asked the pool: {fresh:?}");
+}
+
+/// The batches an intermediate pass writes stay within the bytes its writer was
+/// admitted for, however narrow the input batches and wide their rows (#2173,
+/// Sol's reproducer): three files of two 100-row batches of 10,000-byte values
+/// in a 30 MiB pool, where half the pool admits two files and the third waits
+/// for a second pass. The merge emits the rows it holds before the next row
+/// would pass the largest input batch, instead of the 399 rows (4 MB) pending
+/// before a stream's second refill, which the writer's bank does not cover. The
+/// rows come out in order with their values.
+#[tokio::test]
+async fn an_intermediate_pass_splits_its_output_to_the_bytes_its_writer_was_admitted() {
+    const FILES: usize = 3;
+    const BATCHES: usize = 2;
+    const ROWS: usize = 100;
+    const PAD: usize = 10_000;
+    let pool = Recorder::new(Arc::new(GreedyMemoryPool::new(30 * MIB)));
+    let dynamic: Arc<dyn MemoryPool> = Arc::clone(&pool) as Arc<dyn MemoryPool>;
+    let directory = tempfile::tempdir().unwrap();
+    let manager = spill_manager(&dynamic, &directory);
+    let set = spill_files_padded(&manager, FILES, BATCHES, ROWS, PAD, |largest| largest);
+    let sponsor = MemoryConsumer::new(SPONSOR).register(&dynamic);
+    let mut stream = merge(manager, set.files, sponsor, 8192);
+    let mut expected = 0_i64;
+    while let Some(batch) = stream.next().await {
+        let batch = batch.expect("the writer's bank covers every batch the pass emits");
+        let keys = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        let values = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        for row in 0..batch.num_rows() {
+            assert_eq!(keys.value(row), expected);
+            assert_eq!(values.value(row), format!("{expected:0>PAD$}"));
+            expected += 1;
+        }
+    }
+    assert_eq!(expected as usize, set.total_rows);
+    let requests = pool.requests.lock().unwrap().clone();
+    let first_reader = requests
+        .iter()
+        .position(|(name, _)| name.starts_with("register:SpillReader"))
+        .expect("the merge reads its spill files");
+    assert!(
+        requests[first_reader..]
+            .iter()
+            .any(|(name, _)| name == "register:SpillWriterCodec"),
+        "the pass is not the whole merge: an intermediate file is written"
+    );
+    let fresh = requests[first_reader..]
+        .iter()
+        .filter(|(name, bytes)| name.starts_with("SpillWriter") && *bytes > 0)
+        .collect::<Vec<_>>();
+    assert!(fresh.is_empty(), "the writer asked the pool: {fresh:?}");
 }
