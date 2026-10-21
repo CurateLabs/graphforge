@@ -21,7 +21,7 @@ use transport::{bundle, expanded};
 type ExportError = PortableError;
 
 const BAGIT: &[u8] = b"BagIt-Version: 1.0\nTag-File-Character-Encoding: UTF-8\n";
-const BAG_INFO: &[u8] = b"Bag-Software-Agent: GraphForge portable-v2\nBagging-Date: 1970-01-01\n";
+const BAG_INFO: &[u8] = b"Bag-Software-Agent: GraphForge portable\nBagging-Date: 1970-01-01\n";
 
 /// Finite planner and streaming-writer budgets.
 pub type PortableExportLimits = PortableLimits;
@@ -1948,7 +1948,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             ledger["contract"],
-            "graphforge-portable-v2-multi-ontology-interchange-cases/1"
+            "graphforge-portable-multi-ontology-interchange-cases/1"
         );
         assert_eq!(
             ledger["representations"],

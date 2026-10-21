@@ -29,7 +29,7 @@ use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 const BAGIT: &[u8] = b"BagIt-Version: 1.0\nTag-File-Character-Encoding: UTF-8\n";
-const BAG_INFO: &[u8] = b"Bag-Software-Agent: GraphForge portable-v2\nBagging-Date: 1970-01-01\n";
+const BAG_INFO: &[u8] = b"Bag-Software-Agent: GraphForge portable\nBagging-Date: 1970-01-01\n";
 const MANIFEST_PATH: &str = "data/graphforge-project.json";
 
 const PRIVATE_COLLABORATOR: &str = "private-collaborator@example.org";
@@ -384,7 +384,7 @@ fn summary_binds_to_a_manifest_built_with_discovery_types() {
             bridge_sets: composition.bridge_sets.clone(),
         }),
         requirements: vec![ProtocolRequirement {
-            capability: "portable-v2".into(),
+            capability: "portable".into(),
             major: 1,
         }],
         capabilities: vec![],

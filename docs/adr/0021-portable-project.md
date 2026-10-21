@@ -282,7 +282,7 @@ a realistic export of 100 GiB or more.
 ## Required verification
 
 The machine-readable schema and golden corpus under
-`tests/fixtures/portable-v2/` are normative. Their validator must cover every
+`tests/fixtures/portable/` are normative. Their validator must cover every
 package class, expanded/bundle equivalence, JCS bytes, bundle ordering and
 headers, hostile paths and entries, truncation, closed-world inventory,
 limits, v1 disposition, and future-version/capability rejection. A structural

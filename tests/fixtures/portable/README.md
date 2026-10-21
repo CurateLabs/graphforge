@@ -2,7 +2,7 @@
 
 These vectors are normative inputs to #741, #742, #784–#787, and #744. The
 manifest schema is `docs/contracts/graphforge-project-v2.schema.json`; the byte
-and security rules are in `docs/book/architecture/portable-project-v2.md`.
+and security rules are in `docs/book/architecture/portable-project.md`.
 
 `cases.json` is a closed test ledger. Each implementation MUST materialize both
 `expanded` and `bundle` for every positive package class and assert identical

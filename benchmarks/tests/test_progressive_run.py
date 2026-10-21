@@ -245,7 +245,7 @@ def authoritative_receipts(scale: int) -> dict[str, list[dict]]:
         "query": [one_hop, two_hop],
         "export": [
             {
-                "contract": "graphforge-portable-export/2",
+                "contract": "graphforge-portable-export/1",
                 "allocation_logical_bytes": 140,
                 "allocation_allocated_bytes": 150,
                 "allocation_physical_objects": 1,
@@ -254,7 +254,7 @@ def authoritative_receipts(scale: int) -> dict[str, list[dict]]:
         ],
         "clean_import": [
             {
-                "contract": "graphforge-portable-import/2",
+                "contract": "graphforge-portable-import/1",
                 "package_digest": f"sha256:{'e' * 64}",
                 "transport_digest": f"sha256:{'f' * 64}",
                 "idempotent_replay": False,
@@ -974,7 +974,7 @@ class ProgressiveRunControllerTests(unittest.TestCase):
         missing_portable = authoritative_receipts(18)
         del missing_portable["export"]
         changed_gf = graphforge(18, missing_portable)
-        with self.assertRaisesRegex(ControllerError, "graphforge-portable-export/2"):
+        with self.assertRaisesRegex(ControllerError, "graphforge-portable-export/1"):
             assemble_rung_evidence(
                 root=ROOT, scale=18, graphforge=changed_gf, benchexec=benchexec(changed_gf)
             )
