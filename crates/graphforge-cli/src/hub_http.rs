@@ -382,11 +382,16 @@ pub(crate) struct RangedObjectReader<'a> {
     resumes: u8,
     done: bool,
     changed: bool,
+    io_failure: Option<String>,
 }
 
 impl<'a> RangedObjectReader<'a> {
     pub(crate) fn changed(&self) -> bool {
         self.changed
+    }
+
+    pub(crate) fn io_failure(&self) -> Option<&str> {
+        self.io_failure.as_deref()
     }
     pub(crate) fn open(
         transport: &'a dyn Transport,
@@ -397,31 +402,48 @@ impl<'a> RangedObjectReader<'a> {
         if response.status != 200 {
             return Err(network("object request did not return 200"));
         }
+        let Some(content_length) = response.content_length else {
+            return Err(network(
+                "object response has no Content-Length; cannot verify resumably",
+            ));
+        };
         Ok(Self {
             transport,
             url,
             body: response.body,
             etag: response.etag,
-            total: response.content_length,
+            total: Some(content_length),
             consumed: 0,
             resumes: 0,
             done: false,
             changed: false,
+            io_failure: None,
         })
     }
 
     fn resume(&mut self) -> io::Result<()> {
         if self.resumes == 8 {
-            return Err(io::Error::other("maximum ranged resumes exceeded"));
+            let message = "maximum ranged resumes exceeded";
+            self.io_failure = Some(message.into());
+            return Err(io::Error::other(message));
         }
-        let etag = self
-            .etag
-            .as_deref()
-            .ok_or_else(|| io::Error::other("cannot safely resume object without ETag"))?;
-        let response = self
-            .transport
-            .get(&self.url, Some(self.consumed), Some(etag), u64::MAX)
-            .map_err(io::Error::other)?;
+        let Some(etag) = self.etag.as_deref() else {
+            let message = "cannot safely resume object without ETag";
+            self.io_failure = Some(message.into());
+            return Err(io::Error::other(message));
+        };
+        let response =
+            match self
+                .transport
+                .get(&self.url, Some(self.consumed), Some(etag), u64::MAX)
+            {
+                Ok(response) => response,
+                Err(error) => {
+                    let message = error.to_string();
+                    self.io_failure = Some(message.clone());
+                    return Err(io::Error::other(message));
+                }
+            };
         let conflict =
             || io::Error::other("ConcurrentMutation: remote object changed during verification");
         if response.status != 206 || response.etag.as_deref() != Some(etag) {
@@ -477,6 +499,7 @@ impl Read for RangedObjectReader<'_> {
                     self.done = true;
                     return Ok(0);
                 }
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
                 Ok(0) | Err(_) => self.resume()?,
                 Ok(count) => {
                     self.consumed += count as u64;

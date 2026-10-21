@@ -5,6 +5,20 @@ struct Disconnect {
     bytes: Vec<u8>,
     remaining: usize,
 }
+
+struct InterruptOnce {
+    bytes: std::io::Cursor<Vec<u8>>,
+    interrupted: bool,
+}
+impl Read for InterruptOnce {
+    fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+        if !self.interrupted {
+            self.interrupted = true;
+            return Err(io::Error::from(io::ErrorKind::Interrupted));
+        }
+        self.bytes.read(out)
+    }
+}
 impl Read for Disconnect {
     fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
         if self.remaining == 0 {
@@ -25,6 +39,9 @@ struct Fake {
     status_on_resume: u16,
     mismatch_range: bool,
     repeat_disconnect: bool,
+    initial_content_length: bool,
+    interrupt_once: bool,
+    initial_clean_eof: bool,
 }
 impl Transport for Fake {
     fn get(
@@ -42,6 +59,17 @@ impl Transport for Fake {
             "\"stable\""
         };
         if let Some(offset) = range {
+            if offset as usize >= self.bytes.len() {
+                return Ok(HttpResponse {
+                    status: 416,
+                    location: None,
+                    content_range: None,
+                    etag: Some(etag.into()),
+                    content_length: None,
+                    retry_after: None,
+                    body: Box::new(std::io::Cursor::new(Vec::new())),
+                });
+            }
             if self.status_on_resume != 206 {
                 return Ok(HttpResponse {
                     status: self.status_on_resume,
@@ -84,12 +112,23 @@ impl Transport for Fake {
                 location: None,
                 content_range: None,
                 etag: Some(etag.into()),
-                content_length: Some(self.bytes.len() as u64),
+                content_length: self
+                    .initial_content_length
+                    .then_some(self.bytes.len() as u64),
                 retry_after: None,
-                body: Box::new(Disconnect {
-                    bytes: self.bytes.clone(),
-                    remaining: self.bytes.len() / 2,
-                }),
+                body: if self.interrupt_once {
+                    Box::new(InterruptOnce {
+                        bytes: std::io::Cursor::new(self.bytes.clone()),
+                        interrupted: false,
+                    })
+                } else if self.initial_clean_eof {
+                    Box::new(std::io::Cursor::new(self.bytes.clone()))
+                } else {
+                    Box::new(Disconnect {
+                        bytes: self.bytes.clone(),
+                        remaining: self.bytes.len() / 2,
+                    })
+                },
             })
         }
     }
@@ -105,6 +144,9 @@ fn resume_carries_range_and_if_range_and_rejects_changed_etag() {
         status_on_resume: 206,
         mismatch_range: false,
         repeat_disconnect: false,
+        initial_content_length: true,
+        interrupt_once: false,
+        initial_clean_eof: false,
     };
     let mut reader = RangedObjectReader::open(
         &transport,
@@ -129,6 +171,9 @@ fn changed_etag_is_concurrent_mutation() {
         status_on_resume: 206,
         mismatch_range: false,
         repeat_disconnect: false,
+        initial_content_length: true,
+        interrupt_once: false,
+        initial_clean_eof: false,
     };
     let mut reader =
         RangedObjectReader::open(&changed, Url::parse("https://example.com/object").unwrap())
@@ -143,6 +188,116 @@ fn changed_etag_is_concurrent_mutation() {
     assert!(reader.changed);
 }
 
+fn assert_cli_error(error: crate::CliRuntimeError, code: &str, exit_code: i32) -> String {
+    assert_eq!(crate::error_exit_code(&error), exit_code);
+    let mut output = Vec::new();
+    crate::write_runtime_error(&error, true, &mut output).unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(value["error"]["code"], code);
+    value["error"]["message"].as_str().unwrap().to_owned()
+}
+
+fn fixture_bytes() -> Vec<u8> {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/hub/generated/v1/objects/openalex-openalex.gfpb");
+    std::fs::read(path).unwrap()
+}
+
+#[test]
+fn url_verification_maps_changed_objects_to_conflict_exit_one() {
+    for (changed, status_on_resume, mismatch_range) in
+        [(true, 206, false), (false, 200, false), (false, 206, true)]
+    {
+        let transport = Fake {
+            bytes: fixture_bytes(),
+            calls: Mutex::new(Vec::new()),
+            changed,
+            status_on_resume,
+            mismatch_range,
+            repeat_disconnect: false,
+            initial_content_length: true,
+            interrupt_once: false,
+            initial_clean_eof: false,
+        };
+        let error = crate::portable_cli::verify_portable_url(
+            &transport,
+            Url::parse("https://example.com/object").unwrap(),
+        )
+        .unwrap_err();
+        assert_cli_error(error, "GF_IDEMPOTENCY_CONFLICT", 1);
+    }
+}
+
+#[test]
+fn url_verification_maps_ninth_disconnect_to_io_exit_three() {
+    let transport = Fake {
+        bytes: fixture_bytes(),
+        calls: Mutex::new(Vec::new()),
+        changed: false,
+        status_on_resume: 206,
+        mismatch_range: false,
+        repeat_disconnect: true,
+        initial_content_length: true,
+        interrupt_once: false,
+        initial_clean_eof: false,
+    };
+    let error = crate::portable_cli::verify_portable_url(
+        &transport,
+        Url::parse("https://example.com/object").unwrap(),
+    )
+    .unwrap_err();
+    let message = assert_cli_error(error, "GF_IO", 3);
+    assert!(message.contains("maximum ranged resumes"), "{message}");
+}
+
+#[test]
+fn url_without_content_length_fails_before_reading() {
+    let transport = Fake {
+        bytes: fixture_bytes(),
+        calls: Mutex::new(Vec::new()),
+        changed: false,
+        status_on_resume: 206,
+        mismatch_range: false,
+        repeat_disconnect: false,
+        initial_content_length: false,
+        interrupt_once: false,
+        initial_clean_eof: true,
+    };
+    let error = crate::portable_cli::verify_portable_url(
+        &transport,
+        Url::parse("https://example.com/object").unwrap(),
+    )
+    .unwrap_err();
+    let message = assert_cli_error(error, "GF_IO", 3);
+    assert!(message.contains("object response has no Content-Length; cannot verify resumably"));
+    assert_eq!(transport.calls.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn interrupted_body_read_retries_without_ranging() {
+    let transport = Fake {
+        bytes: fixture_bytes(),
+        calls: Mutex::new(Vec::new()),
+        changed: false,
+        status_on_resume: 206,
+        mismatch_range: false,
+        repeat_disconnect: false,
+        initial_content_length: true,
+        interrupt_once: true,
+        initial_clean_eof: false,
+    };
+    let report = crate::portable_cli::verify_portable_url(
+        &transport,
+        Url::parse("https://example.com/object").unwrap(),
+    );
+    let report = match report {
+        Ok(report) => report,
+        Err(_) => panic!("interrupted body read should retry and verify"),
+    };
+    assert_eq!(report.source, graphforge_api::PortableSource::Stream);
+    assert_eq!(transport.calls.lock().unwrap().len(), 1);
+}
+
 #[test]
 fn resumed_hub_bundle_verifies_like_the_file() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -155,6 +310,9 @@ fn resumed_hub_bundle_verifies_like_the_file() {
         status_on_resume: 206,
         mismatch_range: false,
         repeat_disconnect: false,
+        initial_content_length: true,
+        interrupt_once: false,
+        initial_clean_eof: false,
     };
     let mut reader = RangedObjectReader::open(
         &transport,
@@ -204,6 +362,9 @@ fn resume_rejects_200_and_mismatched_content_range() {
             status_on_resume,
             mismatch_range,
             repeat_disconnect: false,
+            initial_content_length: true,
+            interrupt_once: false,
+            initial_clean_eof: false,
         };
         let mut reader = RangedObjectReader::open(
             &transport,
@@ -230,6 +391,9 @@ fn ninth_disconnect_fails_as_io() {
         status_on_resume: 206,
         mismatch_range: false,
         repeat_disconnect: true,
+        initial_content_length: true,
+        interrupt_once: false,
+        initial_clean_eof: false,
     };
     let mut reader = RangedObjectReader::open(
         &transport,

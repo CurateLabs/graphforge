@@ -17,13 +17,38 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::canonical_uuid;
-use crate::hub_http::{HttpTransport, RangedObjectReader};
+use crate::hub_http::{HttpTransport, RangedObjectReader, Transport};
 
 /// The `--input` value that names standard input instead of a file.
 const STDIN_INPUT: &str = "-";
 
 fn map_portable(error: PortableError) -> crate::CliRuntimeError {
     graphforge_api::MultiOntologyError::from(error).into()
+}
+
+pub(crate) fn verify_portable_url(
+    transport: &dyn Transport,
+    url: url::Url,
+) -> Result<graphforge_api::PortableVerifyResult, crate::CliRuntimeError> {
+    let mut reader = RangedObjectReader::open(transport, url)?;
+    match verify_portable_stream(&mut reader, None, PortableLimits::default(), None) {
+        Ok(report) => Ok(report),
+        Err(_) if reader.changed() => Err(map_portable(graphforge_api::PortableError::new(
+            graphforge_api::PortableErrorCode::ConcurrentMutation,
+            "remote object changed during verification",
+        ))),
+        Err(_) if reader.io_failure().is_some() => Err(graphforge_api::GfError::Storage(
+            reader
+                .io_failure()
+                .unwrap_or("remote object read failed")
+                .to_owned(),
+        )
+        .into()),
+        Err(error) if error.code == graphforge_api::PortableErrorCode::Io => {
+            Err(graphforge_api::GfError::Storage(error.to_string()).into())
+        }
+        Err(error) => Err(map_portable(error)),
+    }
 }
 
 fn write_json(
@@ -301,19 +326,7 @@ pub(crate) fn run_portable_without_graph(
                 let url = url::Url::parse(&url)
                     .map_err(|_| graphforge_api::GfError::Validation("invalid URL".into()))?;
                 let transport = HttpTransport::new();
-                let mut reader = RangedObjectReader::open(&transport, url)?;
-                let result =
-                    verify_portable_stream(&mut reader, None, PortableLimits::default(), None);
-                match result {
-                    Ok(report) => report,
-                    Err(_) if reader.changed() => {
-                        return Err(map_portable(graphforge_api::PortableError::new(
-                            graphforge_api::PortableErrorCode::ConcurrentMutation,
-                            "remote object changed during verification",
-                        )));
-                    }
-                    Err(error) => return Err(map_portable(error)),
-                }
+                verify_portable_url(&transport, url)?
             } else if args.input.as_deref() == Some(std::path::Path::new(STDIN_INPUT)) {
                 if !matches!(args.mode, VerifyMode::Full) {
                     return Err(graphforge_api::GfError::Validation(
