@@ -1236,6 +1236,9 @@ fn available_space(path: &Path) -> std::io::Result<u64> {
     fs4::available_space(path)
 }
 
+/// Receives Core version warnings as the clone raises them.
+type WarningSink<'a> = &'a mut dyn FnMut(&[graphforge_api::CoreVersionWarning]);
+
 /// Process-level effects of one clone: retry bound, cancellation, the free
 /// space probe, and progress output. Tests inject each of them.
 struct CloneEnv<'a> {
@@ -1245,7 +1248,7 @@ struct CloneEnv<'a> {
     available_space: fn(&Path) -> std::io::Result<u64>,
     progress: CloneProgress<'a>,
     /// Receives the Core version warning before the first graph object is requested.
-    warn: Option<&'a mut dyn FnMut(&[graphforge_api::CoreVersionWarning])>,
+    warn: Option<WarningSink<'a>>,
 }
 
 #[cfg(test)]
@@ -1522,7 +1525,7 @@ fn run_clone_observing_warnings(
     args: CloneArgs,
     json: bool,
     output: &mut dyn Write,
-    warn: &mut dyn FnMut(&[graphforge_api::CoreVersionWarning]),
+    warn: WarningSink<'_>,
 ) -> Result<(), graphforge_api::GfError> {
     let mut env = CloneEnv {
         warn: Some(warn),

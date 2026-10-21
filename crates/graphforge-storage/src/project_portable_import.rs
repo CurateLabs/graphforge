@@ -297,7 +297,7 @@ pub fn import_complete_portable_with_allocation(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn import_complete_portable_native(
     source: impl AsRef<Path>,
     target: impl AsRef<Path>,
