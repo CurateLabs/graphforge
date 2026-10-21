@@ -343,18 +343,18 @@ Git-style commands act on the Project's research history; `gf research ...` stay
 the namespace of the native JSON verbs they wrap ([ADR 0061](https://github.com/CurateLabs/graphforge/blob/main/docs/adr/0061-research-porcelain-and-ref-naming.md)).
 `--ref` always names a Branch by its label, which is also its ref on the Hub.
 
-| Command                                              | What it does                                                                                              |
-| ---------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
-| `gf status [--branch REF]`                           | Current Branch, head Version, upstream, `ahead N` of the last fetched head, tags on the head, warnings    |
-| `gf log [VERSION] [-n N] [--all] [--remote [REPO]]`  | Newest-first history of the Branch, from a tag or Version, or the Hub's published lineage                  |
-| `gf commit -m MESSAGE (--query CYPHER \| --file F)`  | Run the query against the Branch and record a Version; the message is its description                    |
-| `gf branch [NAME] [--from VERSION]`                  | List Branches, or create one (the first Branch starts from the Project's current research)                 |
-| `gf switch REF`                                      | Select the Branch the other commands act on                                                               |
-| `gf tag [NAME [VERSION]] [-d NAME]`                  | List, create (default: the head) or delete tags; a tag never moves, delete and create again               |
-| `gf push [REPO] [--ref REF] [--rewrite] [--prune]`   | `gf publish` of the Branch; the repository and ref default from its upstream                              |
-| `gf pull [REPO] [--ref REF]`                         | Fetch the Hub's head of the ref and record a two-parent Version adopting every compatible change           |
-| `gf clone REPO --tag NAME`                           | Clone the Version a published tag names                                                                   |
-| `gf config user [--name N] [--email E] [--orcid O]`  | Set or show the credited author and committer (`$XDG_CONFIG_HOME/graphforge/config.toml`)                 |
+| Command                                             | What it does                                                                                           |
+| --------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| `gf status [--branch REF]`                          | Current Branch, head Version, upstream, `ahead N` of the last fetched head, tags on the head, warnings |
+| `gf log [VERSION] [-n N] [--all] [--remote [REPO]]` | Newest-first history of the Branch, from a tag or Version, or the Hub's published lineage              |
+| `gf commit -m MESSAGE (--query CYPHER \| --file F)` | Run the query against the Branch and record a Version; the message is its description                  |
+| `gf branch [NAME] [--from VERSION]`                 | List Branches, or create one (the first Branch starts from the Project's current research)             |
+| `gf switch REF`                                     | Select the Branch the other commands act on                                                            |
+| `gf tag [NAME [VERSION]] [-d NAME]`                 | List, create (default: the head) or delete tags; a tag never moves, delete and create again            |
+| `gf push [REPO] [--ref REF] [--rewrite] [--prune]`  | `gf publish` of the Branch; the repository and ref default from its upstream                           |
+| `gf pull [REPO] [--ref REF]`                        | Fetch the Hub's head of the ref and record a two-parent Version adopting every compatible change       |
+| `gf clone REPO --tag NAME`                          | Clone the Version a published tag names                                                                |
+| `gf config user [--name N] [--email E] [--orcid O]` | Set or show the credited author and committer (`$XDG_CONFIG_HOME/graphforge/config.toml`)              |
 
 A command that records a Version credits an author and committer from
 `--author`/`--committer` (`Name <email>`), then `GF_AUTHOR`/`GF_COMMITTER`, then
@@ -364,15 +364,15 @@ Commands that record a Version take `--operation-uuid` (a UUIDv7); rerunning a
 command with it returns the original result. `gf push` and `gf pull` take the same
 `--hub`, `--token-env` and `--protection-bypass-env` as `gf clone`.
 
-| Code                                                                        | Class     | Meaning                                                                                   |
-| --------------------------------------------------------------------------- | --------- | ----------------------------------------------------------------------------------------- |
-| `GF_RESEARCH_BRANCH_LABEL_INVALID`, `GF_RESEARCH_BRANCH_LABEL_TAKEN`        | fix input | A Branch label must be a valid ref and unused in the Project                              |
-| `GF_RESEARCH_BRANCH_UNSELECTED`                                             | fix input | Several Branches and none selected; run `gf switch REF`                                   |
-| `GF_RESEARCH_SIGNATURE_MISSING`                                             | fix input | No author configured; pass `--author`, set `GF_AUTHOR` or run `gf config user`            |
-| `GF_RESEARCH_TAG_EXISTS`                                                    | fix input | The tag names another Version; delete it first                                            |
-| `GF_RESEARCH_TAG_CONFLICT`                                                  | fix input | The Hub serves a tag on another Version than the local tag; delete the local tag, pull again |
-| `GF_HUB_TAG_CONFLICT`                                                       | fix input | The Hub already serves the tag on another Version; publish with `--rewrite` to move it   |
-| `GF_RESEARCH_UPSTREAM_UNSET`                                                | fix input | The Branch has no upstream; name the repository                                           |
+| Code                                                                 | Class     | Meaning                                                                                      |
+| -------------------------------------------------------------------- | --------- | -------------------------------------------------------------------------------------------- |
+| `GF_RESEARCH_BRANCH_LABEL_INVALID`, `GF_RESEARCH_BRANCH_LABEL_TAKEN` | fix input | A Branch label must be a valid ref and unused in the Project                                 |
+| `GF_RESEARCH_BRANCH_UNSELECTED`                                      | fix input | Several Branches and none selected; run `gf switch REF`                                      |
+| `GF_RESEARCH_SIGNATURE_MISSING`                                      | fix input | No author configured; pass `--author`, set `GF_AUTHOR` or run `gf config user`               |
+| `GF_RESEARCH_TAG_EXISTS`                                             | fix input | The tag names another Version; delete it first                                               |
+| `GF_RESEARCH_TAG_CONFLICT`                                           | fix input | The Hub serves a tag on another Version than the local tag; delete the local tag, pull again |
+| `GF_HUB_TAG_CONFLICT`                                                | fix input | The Hub already serves the tag on another Version; publish with `--rewrite` to move it       |
+| `GF_RESEARCH_UPSTREAM_UNSET`                                         | fix input | The Branch has no upstream; name the repository                                              |
 
 Clone does not initialize or contact a telemetry exporter. Neither does module fetch. The future opt-in
 GraphForge OpenTelemetry lifecycle will remain Rust-owned and must not attach
