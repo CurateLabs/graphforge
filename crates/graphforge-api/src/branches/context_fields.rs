@@ -1,5 +1,5 @@
 //! Semantic ontology and citation fields extend the existing incorporated baseline.
-use super::fields::{Fields, insert};
+use super::fields::FieldSink;
 use crate::{CancellationToken, GfError, GraphForge};
 use arrow::array::StringArray;
 use graphforge_storage::concurrency_attribution::ObservedSha256 as Sha256;
@@ -7,23 +7,14 @@ use sha2::Digest;
 use uuid::Uuid;
 pub(super) fn read(
     graph: &GraphForge,
-    fields: &mut Fields,
-    bytes: &mut usize,
+    sink: &mut dyn FieldSink,
     cancellation: &CancellationToken,
 ) -> Result<(), GfError> {
     cancellation.checkpoint()?;
     let ontology = graph.workspace_ontology()?;
+    record(sink, "ontology", "workspace", "mode", &ontology.mode)?;
     record(
-        fields,
-        bytes,
-        "ontology",
-        "workspace",
-        "mode",
-        &ontology.mode,
-    )?;
-    record(
-        fields,
-        bytes,
+        sink,
         "ontology",
         "workspace",
         "document",
@@ -31,8 +22,7 @@ pub(super) fn read(
     )?;
     if let Some(composition) = graph.workspace_ontology_composition()? {
         record(
-            fields,
-            bytes,
+            sink,
             "ontology",
             "workspace",
             "profile_default",
@@ -41,8 +31,7 @@ pub(super) fn read(
         for module in &composition.modules {
             cancellation.checkpoint()?;
             record(
-                fields,
-                bytes,
+                sink,
                 "ontology_module",
                 &module.id.ontology_id,
                 &format!("version:{}", module.id.authored_version),
@@ -51,8 +40,7 @@ pub(super) fn read(
         }
         for bridge in &composition.bridges {
             record(
-                fields,
-                bytes,
+                sink,
                 "ontology_bridge",
                 &bridge.bridge_id,
                 &format!("version:{}", bridge.authored_version),
@@ -61,8 +49,7 @@ pub(super) fn read(
         }
         for activation in &composition.activation {
             record(
-                fields,
-                bytes,
+                sink,
                 "ontology_activation",
                 &format!("{:?}:{}", activation.scope, activation.subject),
                 "mode",
@@ -85,9 +72,7 @@ pub(super) fn read(
                     .and_then(|a| a.as_any().downcast_ref::<StringArray>())
                     .ok_or_else(invalid)?
                     .value(row);
-                insert(
-                    fields,
-                    bytes,
+                sink.field(
                     ("reference".into(), id, name.into()),
                     Sha256::digest(value.as_bytes()).into(),
                 )?;
@@ -97,8 +82,7 @@ pub(super) fn read(
     Ok(())
 }
 fn record(
-    fields: &mut Fields,
-    bytes: &mut usize,
+    sink: &mut dyn FieldSink,
     kind: &str,
     identity: &str,
     field: &str,
@@ -111,9 +95,7 @@ fn record(
         ));
     }
     let id = context_identity(kind, identity);
-    insert(
-        fields,
-        bytes,
+    sink.field(
         (kind.into(), id, field.into()),
         Sha256::digest(&encoded).into(),
     )

@@ -1,13 +1,12 @@
 //! Effective preference is a semantic value; immutable events retain its history.
-use super::fields::{Fields, Objects, insert};
+use super::fields::{FieldSink, Objects};
 use crate::{CancellationToken, GfError, GraphForge};
 use graphforge_storage::concurrency_attribution::ObservedSha256 as Sha256;
 use sha2::Digest;
 
 pub(super) fn read(
     graph: &GraphForge,
-    fields: &mut Fields,
-    bytes: &mut usize,
+    sink: &mut dyn FieldSink,
     selected: Option<&Objects>,
     cancellation: &CancellationToken,
 ) -> Result<(), GfError> {
@@ -29,9 +28,7 @@ pub(super) fn read(
         if let Some(id) = preferred {
             hash.update(id.as_bytes());
         }
-        insert(
-            fields,
-            bytes,
+        sink.field(
             (
                 "source".into(),
                 source.source_uuid,

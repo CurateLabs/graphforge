@@ -126,15 +126,28 @@ fn selected_mappings(
     cancel: &CancellationToken,
 ) -> Result<BTreeMap<Uuid, ResearchAcceptedMapping>, GfError> {
     let baseline = baseline::read(selected)?;
-    let values = fields::read(selected, cancel)?;
+    let all = || {
+        registry.proposals.accepted.values().chain(
+            registry
+                .interchange
+                .values()
+                .flat_map(|a| a.accepted.values()),
+        )
+    };
+    // Only the candidates' own fields are compared, so stream the Version and
+    // retain just those keys instead of building a whole-graph field map.
+    let wanted = all()
+        .map(|mapping| {
+            (
+                mapping.unit.object_kind.clone(),
+                mapping.unit.object_uuid,
+                mapping.unit.field.clone(),
+            )
+        })
+        .collect();
+    let values = fields::read_keys(selected, &wanted, cancel)?;
     let mut accepted = BTreeMap::new();
-    let all = registry.proposals.accepted.values().chain(
-        registry
-            .interchange
-            .values()
-            .flat_map(|a| a.accepted.values()),
-    );
-    for mapping in all {
+    for mapping in all() {
         let key = (
             mapping.unit.object_kind.clone(),
             mapping.unit.object_uuid,

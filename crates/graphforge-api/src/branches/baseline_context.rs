@@ -1,7 +1,7 @@
 //! Read legacy Branch context baselines from their retained exact selected base.
 use super::{
     baseline::{self, Row},
-    fields::{Fields, Key},
+    fields::Key,
 };
 use crate::{CancellationToken, GfError, GraphForge};
 use graphforge_storage::research_versions::ResearchRegistry;
@@ -33,10 +33,10 @@ pub(crate) fn read(
             message: "legacy Branch context baseline requires its retained selected base".into(),
         })?;
     let base_graph = crate::research_versions::materialize_version(owner, base)?;
-    let mut inherited = Fields::new();
-    super::context_fields::read(&base_graph, &mut inherited, &mut 0, cancel)?;
-    let mut current = Fields::new();
-    super::context_fields::read(graph, &mut current, &mut 0, cancel)?;
+    let mut inherited = super::fields::MapSink::new();
+    super::context_fields::read(&base_graph, &mut inherited, cancel)?;
+    let mut current = super::fields::MapSink::new();
+    super::context_fields::read(graph, &mut current, cancel)?;
     let hex = |value: &[u8; 32]| -> String {
         use std::fmt::Write;
         value.iter().fold(String::new(), |mut s, b| {
@@ -44,19 +44,19 @@ pub(crate) fn read(
             s
         })
     };
-    for (key, value) in inherited {
+    for (key, value) in inherited.fields {
         rows.entry(key.clone()).or_insert_with(|| Row {
             key: key.clone(),
             origin: branch.origin_version_uuid,
             incorporated: Some(branch.origin_version_uuid),
             original: hex(&value),
             baseline: hex(&value),
-            current: current.get(&key).map(hex).unwrap_or_default(),
+            current: current.fields.get(&key).map(hex).unwrap_or_default(),
             contribution: baseline::contribution(context, branch.base_version_uuid, &key),
             role: "required".into(),
         });
     }
-    for (key, value) in current {
+    for (key, value) in current.fields {
         rows.entry(key.clone()).or_insert_with(|| Row {
             key: key.clone(),
             origin: observed_version,

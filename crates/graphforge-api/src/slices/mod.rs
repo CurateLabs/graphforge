@@ -149,5 +149,17 @@ pub(crate) fn stream_branch_params(
         limits: SliceLimits::default(),
     };
     let mut budget = graph::Budget::new(&request, Some(cancellation));
-    graph::stream(view, query, params, &mut budget, consume)
+    graph::stream(view, query, params, Some(&mut budget), None, consume)
+}
+/// Shared bounded native read path for verification sinks that retain no
+/// whole-graph state and are bounded by their own construction, instead of the
+/// Branch slice budget. Cancellation still applies to every streamed batch.
+pub(crate) fn stream_branch_unbudgeted(
+    view: &GraphForge,
+    query: &str,
+    params: &std::collections::HashMap<String, graphforge_ir::IrLiteral>,
+    cancellation: &CancellationToken,
+    consume: impl FnMut(&arrow::record_batch::RecordBatch) -> Result<(), GfError>,
+) -> Result<(), GfError> {
+    graph::stream(view, query, params, None, Some(cancellation), consume)
 }
