@@ -27,8 +27,10 @@ mod hub_clone;
 pub mod hub_fixture_artifacts;
 mod hub_http;
 mod hub_publish;
+mod identity;
 mod maintenance_cli;
 mod ontology_cli;
+mod porcelain;
 mod portable_cli;
 mod research_cli;
 mod research_versions_cli;
@@ -264,6 +266,22 @@ enum Command {
     Clone(hub_clone::CloneArgs),
     Publish(hub_publish::PublishArgs),
     Hub(hub_clone::HubArgs),
+    /// Show the current Branch, its head and its upstream.
+    Status(porcelain::StatusArgs),
+    /// Show history, newest first.
+    Log(porcelain::LogArgs),
+    /// Record a new Version of the Branch by running a query.
+    Commit(porcelain::CommitArgs),
+    /// List Branches, or create one.
+    Branch(porcelain::BranchArgs),
+    /// Select the Branch the other verbs act on.
+    Switch(porcelain::SwitchArgs),
+    /// List tags, create one on a Version, or delete one.
+    Tag(porcelain::TagArgs),
+    /// Publish the Branch head to its Hub repository.
+    Push(porcelain::PushArgs),
+    /// Incorporate the Hub's head of the Branch's ref.
+    Pull(porcelain::PullArgs),
     /// Initialize repository-local GraphForge definitions and state.
     Init(InitArgs),
     /// Compare or reconcile declared definitions and source digests without ingesting data.
@@ -474,6 +492,8 @@ enum ConfigCommand {
     Validate,
     /// Emit deterministic, secret-free resolved configuration.
     Resolve,
+    /// Set or show the credited author and committer (a per-user file).
+    User(identity::UserArgs),
 }
 
 #[derive(Subcommand)]
@@ -951,6 +971,9 @@ fn run_repository(
         Command::Config {
             command: ConfigCommand::Resolve,
         } => Ok(repository.resolve_config()?),
+        Command::Config {
+            command: ConfigCommand::User(_),
+        } => unreachable!("`gf config user` is dispatched before the repository commands"),
         Command::Infra {
             command: InfraCommand::Validate(args),
         } => {
@@ -1051,7 +1074,9 @@ fn is_repository_command(command: &Command) -> bool {
         Command::Init(_)
             | Command::Sync(_)
             | Command::Remove(_)
-            | Command::Config { .. }
+            | Command::Config {
+                command: ConfigCommand::Validate | ConfigCommand::Resolve
+            }
             | Command::Infra { .. }
             | Command::Skills { .. }
     )
@@ -1137,6 +1162,14 @@ fn run_with_allocation(
         Command::Telemetry(args) => return run_telemetry(args, output).map_err(Into::into),
         command => command,
     };
+    if let Command::Config {
+        command: ConfigCommand::User(args),
+    } = &command
+    {
+        return identity::run_config_user(args, cli.json, output)
+            .map(|()| 0)
+            .map_err(Into::into);
+    }
     if is_repository_command(&command) {
         return run_repository_with_bundle(
             command,
@@ -1152,6 +1185,13 @@ fn run_with_allocation(
     }
     if let hub @ (Command::Clone(_) | Command::Publish(_) | Command::Hub(_)) = command {
         return hub_publish::run_hub_command(hub, cli.project, cli.project_dir, cli.json, output);
+    }
+    if matches!(&command, Command::Push(_) | Command::Pull(_))
+        || matches!(&command, Command::Log(args) if args.remote.is_some())
+    {
+        return porcelain::run_remote(command, cli.project, cli.project_dir, cli.json, output)
+            .map(|()| 0)
+            .map_err(Into::into);
     }
     if let Command::Ontology { command } = &command
         && let Some(result) = ontology_cli::run_without_project(command, cli.json, output)
@@ -1201,6 +1241,16 @@ fn run_with_allocation(
     })?;
     let mut graph = open_cli_graph(Path::new(path_text), allocation)?;
     let command = match command {
+        command @ (Command::Status(_)
+        | Command::Log(_)
+        | Command::Commit(_)
+        | Command::Branch(_)
+        | Command::Switch(_)
+        | Command::Tag(_)) => {
+            return porcelain::run_local(&mut graph, command, cli.json, output)
+                .map(|()| 0)
+                .map_err(Into::into);
+        }
         Command::Export(args) => {
             return portable_cli::run_export(&graph, args, cli.json, output).map(|()| 0);
         }

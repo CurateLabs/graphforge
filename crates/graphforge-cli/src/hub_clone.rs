@@ -43,6 +43,7 @@ use crate::hub_http::{
 use crate::hub_http::{fetch, parse_input};
 
 mod module_fetch;
+pub(crate) mod remote_read;
 pub(crate) mod repository_listing;
 pub(crate) use module_fetch::{ModuleFetchArgs, run_module_fetch};
 pub(crate) use repository_listing::{HubArgs, run_hub};

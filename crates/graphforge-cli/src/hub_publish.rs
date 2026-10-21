@@ -221,12 +221,21 @@ fn run_command(
     json: bool,
     output: &mut dyn Write,
 ) -> Result<(), GfError> {
-    use std::io::IsTerminal as _;
-    let streaming = DEVICE_FLOW_ALLOWED.load(Ordering::Relaxed);
-    let interactive =
-        streaming && std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
+    run_command_with_token_env(args, None, project, project_dir, json, output)
+}
+
+/// `gf publish` and `gf push`: `token_env` names the variable holding the publish
+/// token, otherwise `GRAPHFORGE_HUB_PUBLISH_TOKEN` is read.
+pub(crate) fn run_command_with_token_env(
+    args: &PublishArgs,
+    token_env: Option<&str>,
+    project: Option<PathBuf>,
+    project_dir: Option<PathBuf>,
+    json: bool,
+    output: &mut dyn Write,
+) -> Result<(), GfError> {
     // Locations and arguments are validated before any credential or network use.
-    let (identity, base) = parse_input(&args.repository)?;
+    let (_, base) = parse_input(&args.repository)?;
     if let Some(origin) = &args.fork_of {
         parse_input(origin)?;
     }
@@ -236,15 +245,61 @@ fn run_command(
         args.protection_bypass_env.as_deref(),
         |name| std::env::var(name),
     )?;
-    let explicit = PublishToken::from_env();
-    if explicit.is_none() && !streaming {
+    let explicit = publish_token(token_env)?;
+    let path = crate::resolve_project_path(project, project_dir)?;
+    let path = path
+        .to_str()
+        .ok_or_else(|| GfError::Validation("--project must be valid UTF-8".into()))?;
+    let graph = GraphForge::new(Some(path))?;
+    publish_with_credentials(
+        &crate::hub_http::HubTransport::new(),
+        &graph,
+        args,
+        explicit,
+        bypass.as_ref(),
+        json,
+        output,
+    )
+}
+
+/// The publish token the process supplies: the variable `token_env` names, else
+/// `GRAPHFORGE_HUB_PUBLISH_TOKEN`. Without one, only a terminal can authorize.
+pub(crate) fn publish_token(token_env: Option<&str>) -> Result<Option<PublishToken>, GfError> {
+    let explicit = match token_env {
+        Some(name) => Some(PublishToken::new(std::env::var(name).map_err(|_| {
+            publish_error(
+                HubPublishErrorCode::AuthDenied,
+                "the --token-env variable is unset or not UTF-8",
+            )
+        })?)),
+        None => PublishToken::from_env(),
+    };
+    if explicit.is_none() && !DEVICE_FLOW_ALLOWED.load(Ordering::Relaxed) {
         return Err(publish_error(
             HubPublishErrorCode::AuthDenied,
             "no publish credential: set GRAPHFORGE_HUB_PUBLISH_TOKEN or run gf publish in a terminal",
         ));
     }
-    let transport = crate::hub_http::HubTransport::new();
-    let resolution = resolve_publication(&transport, &identity, &base, bypass.as_ref())?;
+    Ok(explicit)
+}
+
+/// The publish flow behind `gf publish` and `gf push` over one transport: resolve
+/// the repository, obtain a credential, publish and report.
+pub(crate) fn publish_with_credentials(
+    transport: &dyn Transport,
+    graph: &GraphForge,
+    args: &PublishArgs,
+    explicit: Option<PublishToken>,
+    bypass: Option<&crate::hub_http::DiscoveryCredentials>,
+    json: bool,
+    output: &mut dyn Write,
+) -> Result<(), GfError> {
+    use std::io::IsTerminal as _;
+    let streaming = DEVICE_FLOW_ALLOWED.load(Ordering::Relaxed);
+    let interactive =
+        streaming && std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
+    let (identity, base) = parse_input(&args.repository)?;
+    let resolution = resolve_publication(transport, &identity, &base, bypass)?;
     let (identity, base) = (resolution.identity.clone(), resolution.base.clone());
     let credential = select_credential(explicit, streaming, interactive, || {
         let grant = crate::auth::repository_token(
@@ -266,21 +321,16 @@ fn run_command(
             })
             .transpose()
     })?;
-    let path = crate::resolve_project_path(project, project_dir)?;
-    let path = path
-        .to_str()
-        .ok_or_else(|| GfError::Validation("--project must be valid UTF-8".into()))?;
-    let graph = GraphForge::new(Some(path))?;
     let stderr = std::io::stderr();
     let mut notices = stderr.lock();
     let mut environment = PublishEnvironment {
-        bypass: bypass.as_ref(),
+        bypass,
         credential,
         wait: &std::thread::sleep,
         notices: &mut notices,
         resolution: Some(resolution),
     };
-    let outcome = publish(&transport, &graph, args, &mut environment)?;
+    let outcome = publish(transport, graph, args, &mut environment)?;
     write_outcome(&outcome, json, output)
 }
 
