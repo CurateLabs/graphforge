@@ -39,9 +39,11 @@ Treating any of these as another would let a reader accept the wrong bytes, or r
 
 **Public-safe projection.** Summary `metadata` includes every #1348 research metadata field except `access.collaborators`, `extensions` and `discovery_facets`; the record's `contract_version` is replaced by the summary `format`. `access.visibility` and `access.access_policy` stay as consumer metadata, not enforcement. Counts are the declared `corpus_size`, never computed from graph data. `facts` holds only what a verified package yields without graph payload: ontology mode, a component-kind histogram, `payload_bytes`, research and evidence presence, and the ontology composition. The summary has no location field.
 
+**The producing Core version is declared with every package reference.** Each portable package reference (the manifest's `package`, ontology module `package`, lineage Version and Proposal `package`, and the summary's `package`) carries a required `producing_core_version`: the exact GraphForge Core version that wrote the package (ADR 0054 section 9). It is an opaque exact label, non-empty, bounded by `max_string_bytes` and free of control characters; readers compare it for equality and never order or parse it. The package manifest declares the same value (it is inside `package_digest`), the verifier requires the discovery reference to match it, and `bind_summary` requires the summary's value to equal the manifest's. A Hub therefore shows the version from the manifest or summary without package I/O. The field is added in place and takes the protocol to 1.2; no reader of 1.1 shipped, so there is no fallback for its absence.
+
 **Locations are not identity.** Locations live only in `objects[].locations`. Summary bytes, `summary_digest` and the `summary` and `ontology` descriptors are invariant under location changes; only the manifest's own canonical digest changes.
 
-**Versioning.** `ProtocolVersion::CURRENT` becomes 1.1. Both manifest fields are optional, so clone consumers need neither. A reader that predates them rejects a 1.1 manifest that uses them under `deny_unknown_fields`; none shipped, so version 1.0 is retired.
+**Versioning.** `ProtocolVersion::CURRENT` becomes 1.1, and 1.2 adds the required `producing_core_version` of each package reference. Both manifest fields are optional, so clone consumers need neither. A reader that predates them rejects a 1.1 manifest that uses them under `deny_unknown_fields`; none shipped, so version 1.0 is retired.
 
 **Bounds.** `DiscoveryLimits` gains `max_summary_bytes` (1 MiB), `max_module_package_bytes` (64 MiB) and `max_ontology_entries` (4096). Summary strings and lists keep the #1348 bounds.
 
@@ -52,5 +54,6 @@ Treating any of these as another would let a reader accept the wrong bytes, or r
 - A module package is `component-selective`, not `ontology-only`, because relabeling exact-composition selections would change frozen interchange ledgers.
 - A publisher whose package carries an ontology composition must advertise `ontology` in the manifest, because `bind_summary` requires the two to agree (both absent, or identical).
 - `bind_summary` and `ontology_module_object` are pure; verifying a package against its descriptors stays with the portable verifier and the API layer.
+- A client that must refuse data from another Core version reads `package.producing_core_version` from the manifest and names it in the refusal; comparing it to the running Core is the client's decision (#1936).
 - Every new #1348 field requires an explicit projection decision before it reaches a summary.
 - The summary schema is stricter than the Rust parser on omitted optional keys: the schema describes the canonical shape, and Rust normalizes on parse.

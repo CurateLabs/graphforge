@@ -267,6 +267,39 @@ fn portable_export_verify_and_import_round_trip() {
         ],
     ));
     assert_eq!(verified["package_digest"], package_digest);
+    // The package states which Core wrote it; full and inspect verification report it.
+    let producer = graphforge_api::GRAPHFORGE_VERSION;
+    assert_eq!(verified["producing_core_version"], producer);
+    let inspected = json(&gf(
+        &source_project,
+        &[
+            "--json",
+            "portable",
+            "verify",
+            "--mode",
+            "inspect",
+            "--input",
+            bundle.to_str().unwrap(),
+        ],
+    ));
+    assert_eq!(inspected["producing_core_version"], producer);
+    let text = gf(
+        &source_project,
+        &[
+            "portable",
+            "verify",
+            "--mode",
+            "full",
+            "--input",
+            bundle.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        String::from_utf8_lossy(&text.stdout)
+            .contains(&format!("producing_core_version={producer}")),
+        "text output omitted the producing version: {}",
+        String::from_utf8_lossy(&text.stdout)
+    );
 
     let destination = root.path().join("destination");
     let imported = json(&gf(

@@ -11,8 +11,8 @@ use crate::{
     DiscoveryVersionDetails, DiscoveryVersionSubject, PORTABLE_FORMAT, PROJECT_SUMMARY_CAPABILITY,
     PROJECT_SUMMARY_FORMAT, PROJECT_SUMMARY_FORMAT_NAME, ProtocolCapability, ProtocolRequirement,
     ProtocolVersion, RepositoryIdentity, Sha256Digest, canonical_json, check_ascending,
-    check_identity_text, check_string, format_major, limit, parse_unique_json, sha256_digest,
-    validate_extensions, validate_semantics,
+    check_core_version, check_identity_text, check_string, format_major, limit, parse_unique_json,
+    sha256_digest, validate_extensions, validate_semantics,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -53,6 +53,9 @@ pub struct SummaryPackageReference {
     pub format: String,
     /// Portable semantic package identity.
     pub package_digest: Sha256Digest,
+    /// Exact GraphForge Core version that produced the package; must equal the
+    /// manifest's `package.producing_core_version`.
+    pub producing_core_version: String,
     /// Portable package class: `complete`, `ontology-only`,
     /// `component-selective`, or `graph-data-subset`.
     pub package_class: String,
@@ -267,7 +270,7 @@ impl ProjectSummary {
         self.version.validate()?;
         self.repository.validate()?;
         self.immutable_version.validate()?;
-        self.validate_package()?;
+        self.validate_package(limits)?;
         validate_semantics(
             &self.requirements,
             &self.capabilities,
@@ -279,7 +282,7 @@ impl ProjectSummary {
         validate_facts(&self.facts, limits)
     }
 
-    fn validate_package(&self) -> Result<(), DiscoveryError> {
+    fn validate_package(&self, limits: DiscoveryLimits) -> Result<(), DiscoveryError> {
         if self.package.format != PORTABLE_FORMAT {
             let error = DiscoveryError::new(
                 DiscoveryErrorCode::UnsupportedFuture,
@@ -298,6 +301,11 @@ impl ProjectSummary {
             );
         }
         self.package.package_digest.validate()?;
+        check_core_version(
+            &self.package.producing_core_version,
+            "package.producing_core_version",
+            limits,
+        )?;
         if !PACKAGE_CLASSES.contains(&self.package.package_class.as_str()) {
             return Err(DiscoveryError::new(
                 DiscoveryErrorCode::MalformedResponse,

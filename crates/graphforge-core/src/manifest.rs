@@ -14,6 +14,13 @@ use uuid::Uuid;
 
 use crate::{GfError, OntologyMode};
 
+/// Exact GraphForge Core version of this build.
+///
+/// The single source for every record that names the Core version that produced
+/// it: the Project manifest's `graphforge_version` and the producing version
+/// declared by portable packages, discovery manifests and Project summaries.
+pub const GRAPHFORGE_VERSION: &str = env!("CARGO_PKG_VERSION");
+
 /// File name of the manifest within a project directory.
 pub const MANIFEST_FILE: &str = "graphforge.yaml";
 /// File name of the optional ontology definition within a project directory.
@@ -143,7 +150,7 @@ impl ProjectManifest {
             ontology: None,
             ontology_mode: None,
             ir_version: "0.1.0".to_owned(),
-            graphforge_version: env!("CARGO_PKG_VERSION").to_owned(),
+            graphforge_version: GRAPHFORGE_VERSION.to_owned(),
             capabilities: Some(Capabilities::default()),
         };
 
