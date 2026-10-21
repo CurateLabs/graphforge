@@ -956,3 +956,82 @@ fn conflicting_evidence_lengths_are_refused_alike_and_equal_ones_verify() {
     }
     assert_eq!(std::fs::read_dir(scratch.path()).unwrap().count(), 0);
 }
+
+/// A saved query and an ontology are components the scan of an expanded package
+/// does not retain, so the checks that read them reopen the directory. The same
+/// research package, expanded and bundled, verifies alike from the directory,
+/// the bundle file and a stream.
+#[test]
+fn an_expanded_package_with_saved_queries_and_an_ontology_verifies_like_its_bundle() {
+    use crate::research_interchange::closure_tests::{generation, install_ontology};
+    let directory = tempfile::tempdir().unwrap();
+    let mut graph = GraphForge::new(directory.path().join("source").to_str()).unwrap();
+    graph.execute("CREATE (:Character), (:Character)").unwrap();
+    graph
+        .create_saved_query(SavedQuery {
+            query_uuid: Uuid::now_v7(),
+            name: "Characters".into(),
+            description: None,
+            query: "MATCH (n:Character) RETURN count(n) AS people".into(),
+            parameters: BTreeMap::new(),
+        })
+        .unwrap();
+    let branch = Uuid::now_v7();
+    graph
+        .create_research_branch(
+            &CreateResearchBranchRequest {
+                author: None,
+                committer: None,
+                operation_uuid: Uuid::now_v7(),
+                expected_generation_uuid: generation(&graph),
+                branch_uuid: branch,
+                version_uuid: Uuid::now_v7(),
+                source: BranchSource::Current {
+                    origin_version_uuid: Uuid::now_v7(),
+                    context_uuid: Uuid::now_v7(),
+                },
+                creator_uuid: Uuid::now_v7(),
+                created_at: 1,
+                label: "Queries and ontology".into(),
+            },
+            &CancellationToken::new(),
+        )
+        .unwrap();
+    let version = install_ontology(&mut graph, branch);
+    let export = |name: &str, bundled: bool| {
+        let output = directory.path().join(name);
+        graph
+            .export_research(
+                &ExportResearchRequest {
+                    version_uuid: version,
+                    output: output.clone(),
+                    bundled,
+                    projection: None,
+                },
+                &CancellationToken::new(),
+            )
+            .unwrap();
+        output
+    };
+    let expanded = export("expanded", false);
+    let bundle = export("bundle.gfpb", true);
+    let kinds: Vec<_> = std::fs::read_dir(expanded.join("data/components"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    for kind in ["ontology", "settings"] {
+        assert!(kinds.iter().any(|name| name == kind), "{kind} in {kinds:?}");
+    }
+    let limits = PortableLimits::default();
+    let from_directory = by_file(&expanded, limits).unwrap();
+    let from_bundle = by_file(&bundle, limits).unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let from_stream = by_stream(&std::fs::read(&bundle).unwrap(), scratch.path(), limits).unwrap();
+    assert!(from_directory.research_interchange);
+    assert_eq!(from_directory.package_digest, from_bundle.package_digest);
+    assert_eq!(
+        from_directory.research_entries,
+        from_bundle.research_entries
+    );
+    assert_eq!(strip_source(&from_bundle), strip_source(&from_stream));
+}

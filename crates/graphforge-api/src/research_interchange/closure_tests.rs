@@ -591,20 +591,20 @@ fn directory_bytes(root: &std::path::Path) -> u64 {
     total
 }
 
-fn context() -> WriteContext {
+pub(crate) fn context() -> WriteContext {
     WriteContext {
         operation_uuid: OperationId(Uuid::now_v7()),
         actor_uuid: None,
     }
 }
-fn generation(graph: &GraphForge) -> Uuid {
+pub(crate) fn generation(graph: &GraphForge) -> Uuid {
     graph
         .research_project_summary()
         .unwrap()
         .identity
         .generation_uuid
 }
-fn install_ontology(graph: &mut GraphForge, branch_uuid: Uuid) -> Uuid {
+pub(crate) fn install_ontology(graph: &mut GraphForge, branch_uuid: Uuid) -> Uuid {
     let doc = OntologyDoc {
         ontology_id: "https://example.invalid/interchange-evidence".into(),
         version: "1.0.0".into(),

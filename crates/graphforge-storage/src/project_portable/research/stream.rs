@@ -55,6 +55,8 @@ pub(crate) struct Driver<'a, 'v> {
     /// Every retained object seen so far, staged or not, with its length.
     seen: Objects,
     finished: BTreeSet<Uuid>,
+    /// Versions whose first staged object has arrived.
+    started: BTreeSet<Uuid>,
     /// The first refusal of a Version (its closure, a native owner, a limit). The
     /// scan goes on to authenticate the rest of the package without staging or
     /// validating anything more, and a failed authentication outranks this
@@ -87,6 +89,7 @@ impl<'a, 'v> Driver<'a, 'v> {
             current: None,
             seen: Objects::new(),
             finished: BTreeSet::new(),
+            started: BTreeSet::new(),
             refusal: None,
         }
     }
@@ -122,6 +125,43 @@ impl<'a, 'v> Driver<'a, 'v> {
         }
     }
 
+    /// Validate the Versions below `before` (all, when `None`) that no staged
+    /// object ever started: their closure is empty or only evidence, and they
+    /// owe the same checks and native owner as any other.
+    fn validate_unstarted(&mut self, before: Option<Uuid>) -> Result<(), PortableError> {
+        if self.refusal.is_some() {
+            return Ok(());
+        }
+        let Some(registry) = &self.registry else {
+            return Ok(());
+        };
+        let unstarted: Vec<Uuid> = registry
+            .versions
+            .keys()
+            .copied()
+            .filter(|id| {
+                before.is_none_or(|bound| *id < bound)
+                    && !self.started.contains(id)
+                    && !self.finished.contains(id)
+            })
+            .collect();
+        for id in unstarted {
+            let stage = VersionStage {
+                id,
+                sink: CopySink::staged_in(self.scratch.clone(), NAMESPACE),
+                bytes: 0,
+                staged: Objects::new(),
+            };
+            match self.validate_stage(&stage) {
+                Ok(()) => {
+                    self.finished.insert(id);
+                }
+                Err(refusal) => return self.defer(refusal),
+            }
+        }
+        Ok(())
+    }
+
     /// A refusal of a Version's content waits for the end of the scan; any other
     /// failure, authentication included, ends it now.
     fn defer(&mut self, error: PortableError) -> Result<(), PortableError> {
@@ -148,7 +188,28 @@ impl<'a, 'v> Driver<'a, 'v> {
         check_cancel(self.cancelled)?;
         let registry = self.registry.as_ref().ok_or_else(invalid)?;
         let version = registry.versions.get(&stage.id).ok_or_else(invalid)?;
-        let staged_dir = stage.sink.staged().map(Path::to_path_buf);
+        // A Version with no staged object still has a closure to check and a
+        // native owner to run; its stage is then an empty private directory.
+        let empty_stage = match stage.sink.staged() {
+            Some(_) => None,
+            None => Some(
+                tempfile::Builder::new()
+                    .prefix(".graphforge-research-validation-")
+                    .tempdir_in(&self.scratch)
+                    .map_err(|error| {
+                        PortableError::new(
+                            PortableErrorCode::Io,
+                            "cannot create research validation scratch",
+                        )
+                        .with_cause(error.kind().to_string())
+                    })?,
+            ),
+        };
+        let staged_dir = stage.sink.staged().map(Path::to_path_buf).or_else(|| {
+            empty_stage
+                .as_ref()
+                .map(|owner| owner.path().join("verified"))
+        });
         stage.sink.authenticate_and_sync(self.cancelled)?;
         check_version(
             &stage.id,
@@ -182,6 +243,7 @@ impl<'a, 'v> Driver<'a, 'v> {
         report: &graphforge_core::portable::PortableReport,
     ) -> Result<(), PortableError> {
         self.finish_version()?;
+        self.validate_unstarted(None)?;
         if let Some(refusal) = self.refusal.take() {
             return Err(refusal);
         }
@@ -219,11 +281,13 @@ impl<'a, 'v> Driver<'a, 'v> {
             return Ok(());
         }
         self.finish_version()?;
+        self.validate_unstarted(Some(id))?;
         // Canonical order keeps a Version's objects together; one that returns
         // after another began is a layout this reader does not accept.
         if self.finished.contains(&id) || self.finished.last().is_some_and(|last| *last > id) {
             return Err(invalid());
         }
+        self.started.insert(id);
         self.current = Some(VersionStage {
             id,
             sink: CopySink::staged_in(self.scratch.clone(), NAMESPACE),
