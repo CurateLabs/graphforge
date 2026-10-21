@@ -115,23 +115,21 @@ fn branch_write_paths_keep_the_whole_map_field_bound() {
         .unwrap_err();
     assert_eq!(error.code(), "GF_RESOURCE_LIMIT");
 
-    // With small rows the whole-graph map reserve itself is the operative
-    // bound: 62 keys per node at 1,536 B each exceeds 64 MiB after about 700
-    // nodes while scanned Arrow bytes stay far below it.
+    // With narrow rows the whole-graph map reserve is the operative bound:
+    // 15,000 nodes with one property are 45,000 keys at 1,536 B each while
+    // their scanned Arrow bytes stay far below 64 MiB.
     let mut narrow = GraphForge::new(None).unwrap();
-    let properties = (0..60)
-        .map(|i| format!("p{i}: i"))
-        .collect::<Vec<_>>()
-        .join(", ");
     narrow
-        .execute(&format!(
-            "UNWIND range(1, 750) AS i CREATE (:Row {{{properties}}})"
-        ))
+        .execute("UNWIND range(1, 15000) AS i CREATE (:Row {a: i})")
         .unwrap();
     let error = narrow
         .create_research_branch(&large_branch_request(&narrow), &cancellation)
         .unwrap_err();
     assert_eq!(error.code(), "GF_RESOURCE_LIMIT");
+    assert!(
+        error.to_string().contains("semantic fields exceed creation"),
+        "the field map reserve, not another bound, must refuse: {error}"
+    );
 }
 
 fn large_branch_request(graph: &GraphForge) -> CreateResearchBranchRequest {
