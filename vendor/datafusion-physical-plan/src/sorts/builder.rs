@@ -185,6 +185,13 @@ impl BatchBuilder {
         }
     }
 
+    /// The merge has built its last output.
+    pub(super) fn finish(&self) {
+        if let Some(copy) = &self.copy {
+            copy.release_working_set();
+        }
+    }
+
     pub(super) fn attach_copy(
         &mut self,
         copy: Arc<CopyAdmission>,
@@ -319,6 +326,41 @@ impl BatchBuilder {
     /// Returns `true` if this [`BatchBuilder`] contains no in-progress rows
     pub fn is_empty(&self) -> bool {
         self.indices.is_empty()
+    }
+
+    /// Whether a batch of `stream_idx` earlier than its current one is still
+    /// held: one is kept only while rows pending in the output refer to it,
+    /// and every batch is pruned to the stream's current one when the output
+    /// is built, so this is whether the stream was refilled since then.
+    pub(super) fn holds_an_earlier_batch(&self, stream_idx: usize) -> bool {
+        self.batches
+            .iter()
+            .filter(|input| input.stream_idx == stream_idx)
+            .count()
+            >= 2
+    }
+
+    /// The bytes of the row `push_row(stream_idx)` would append next: the
+    /// width of a fixed-width value, a variable-width value with its offset.
+    pub(super) fn next_row_bytes(&self, stream_idx: usize) -> usize {
+        let cursor = &self.cursors[stream_idx];
+        let batch = &self.batches[cursor.batch_idx].batch;
+        row_bytes(batch, cursor.row_idx)
+    }
+
+    /// The bytes of the rows pending in the output.
+    pub(super) fn pending_bytes(&self) -> usize {
+        self.indices
+            .iter()
+            .map(|&(batch, row)| row_bytes(&self.batches[batch].batch, row))
+            .sum()
+    }
+
+    /// Whether any batch of `stream_idx` is still held.
+    pub(super) fn holds_a_batch_of(&self, stream_idx: usize) -> bool {
+        self.batches
+            .iter()
+            .any(|input| input.stream_idx == stream_idx)
     }
 
     /// Returns the schema of this [`BatchBuilder`]
@@ -512,6 +554,43 @@ impl BatchBuilder {
 
         Ok(Some(self.finish_record_batch(rows_to_emit, columns)?))
     }
+}
+
+/// The bytes one row takes in the batch's arrays: the width of each fixed-width
+/// value, the length and the offset of each variable-width one. A column of
+/// another layout counts the average of its array.
+fn row_bytes(batch: &RecordBatch, row: usize) -> usize {
+    use arrow::array::{Array, AsArray};
+    use arrow::datatypes::DataType;
+    batch
+        .columns()
+        .iter()
+        .map(|column| match column.data_type() {
+            DataType::Null => 0,
+            DataType::Boolean => 1,
+            data_type if data_type.primitive_width().is_some() => {
+                data_type.primitive_width().unwrap_or(0)
+            }
+            DataType::FixedSizeBinary(width) => *width as usize,
+            DataType::Utf8 => {
+                let offsets = column.as_string::<i32>().value_offsets();
+                4 + (offsets[row + 1] - offsets[row]) as usize
+            }
+            DataType::LargeUtf8 => {
+                let offsets = column.as_string::<i64>().value_offsets();
+                8 + (offsets[row + 1] - offsets[row]) as usize
+            }
+            DataType::Binary => {
+                let offsets = column.as_binary::<i32>().value_offsets();
+                4 + (offsets[row + 1] - offsets[row]) as usize
+            }
+            DataType::LargeBinary => {
+                let offsets = column.as_binary::<i64>().value_offsets();
+                8 + (offsets[row + 1] - offsets[row]) as usize
+            }
+            _ => column.get_array_memory_size() / column.len().max(1),
+        })
+        .sum()
 }
 
 /// Try to grow `reservation` so it covers at least `needed` bytes.

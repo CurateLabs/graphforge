@@ -16,7 +16,8 @@
 // under the License.
 
 //! A private prepaid bank: numeric tickets recycle while real producers live.
-//! Retirement releases unused credit; escaped buffers retain only their tickets.
+//! A reader's share goes back once the merge holds nothing of it; retirement
+//! releases unused credit; escaped buffers retain only their tickets.
 use super::admission::{add, mul};
 use crate::terminal_ownership as od;
 use datafusion_common::{DataFusionError, Result};
@@ -36,6 +37,14 @@ struct State {
     outstanding: usize,
     producers: usize,
     lifecycle: Lifecycle,
+    /// A bank admitted for a bounded pass: what it cannot lend is an error
+    /// of the pass's bound, never a request to the pool.
+    exact: bool,
+    /// Whether an exhausted reader's share goes back before the bank ends:
+    /// not for a spilling aggregate's bank, whose sponsor holds a loan that
+    /// a shrink the pool reads as a spill would arm again; a sort's merge
+    /// and a sponsor that cannot spill hold none.
+    returns_shares: bool,
 }
 // Exact pre-observation layouts used by all existing admission formulas.
 #[allow(dead_code)]
@@ -80,15 +89,12 @@ impl Credit {
             };
         });
     }
-    /// Legacy sponsors keep their original reservation lifetime/pool policy.
-    pub(crate) fn new(authority: MemoryReservation) -> Arc<Self> {
-        Self::build(authority, None, 0, None)
-    }
     fn build(
         authority: MemoryReservation,
         control: Option<MemoryReservation>,
         producers: usize,
         observed: Option<(od::Life, od::Piece)>,
+        exact: bool,
     ) -> Arc<Self> {
         let _transition = od::Transition::begin();
         let (diagnostic, diagnostic_piece) = observed.unwrap_or_else(|| {
@@ -133,12 +139,19 @@ impl Credit {
             o.c = producers as u64;
             o.flags |= 4;
         });
+        let returns_shares = !authority.consumer().can_spill()
+            || authority
+                .consumer()
+                .name()
+                .starts_with(crate::sorts::sort::SORT_MERGE_CONSUMER_PREFIX);
         let state = Mutex::new(State {
             available: authority.size(),
             authority,
             outstanding: 0,
             producers,
             lifecycle: Lifecycle::Open,
+            exact,
+            returns_shares,
         });
         if control.is_some() {
             // A pthread-backed mutex can lazily allocate on its first lock.
@@ -162,8 +175,9 @@ impl Credit {
     pub(crate) fn with_readers(
         authority: MemoryReservation,
         readers: usize,
+        exact: bool,
     ) -> Result<(Arc<Self>, Vec<Arc<ReaderPermit>>)> {
-        Self::with_readers_and_control(authority, readers, 0)
+        Self::with_readers_and_control(authority, readers, 0, exact)
     }
     /// An owned FIFO donor also retains its literal-name registration after
     /// encoding ends. That checked control fee cannot become borrowable credit.
@@ -171,13 +185,32 @@ impl Credit {
         authority: MemoryReservation,
         readers: usize,
         owned_control: usize,
+        exact: bool,
     ) -> Result<(Arc<Self>, Vec<Arc<ReaderPermit>>)> {
-        let _transition = od::Transition::begin();
         if authority.consumer().can_spill() || readers == 0 {
             return Err(DataFusionError::Internal(
                 "Retiring IPC credit requires a nonspilling sponsor and readers".into(),
             ));
         }
+        Self::with_control(authority, readers, owned_control, exact)
+    }
+    /// A bank whose sponsor keeps its own lifecycle, loans and floors: nothing
+    /// retires it early, so it lends to its borrowers until its last holder
+    /// drops it, and gives everything back then (a sort's bank gives an
+    /// exhausted reader's share back before that, see [`Self::retire_share`]).
+    /// A spilling sponsor's merge pass and the writer of its intermediate
+    /// file borrow from such a bank. Its control is paid from the authority
+    /// like a retiring bank's.
+    pub(crate) fn held(authority: MemoryReservation, exact: bool) -> Result<Arc<Self>> {
+        Self::with_control(authority, 0, 0, exact).map(|(credit, _)| credit)
+    }
+    fn with_control(
+        authority: MemoryReservation,
+        readers: usize,
+        owned_control: usize,
+        exact: bool,
+    ) -> Result<(Arc<Self>, Vec<Arc<ReaderPermit>>)> {
+        let _transition = od::Transition::begin();
         let mutex_heap =
             super::resident_metadata::std_mutex_heap_bound().ok_or_else(|| {
                 DataFusionError::ResourcesExhausted(
@@ -224,24 +257,27 @@ impl Credit {
             Some(control),
             readers,
             Some((diagnostic, diagnostic_piece)),
+            exact,
         );
         for _ in 0..readers {
             permits.push(Arc::new(ReaderPermit::new(Arc::clone(&credit))));
         }
         Ok((credit, permits))
     }
-    pub(super) fn take(&self, wanted: usize) -> usize {
+    /// Lends up to `wanted`; the flag says whether the borrower may ask the
+    /// pool for what the bank could not lend.
+    pub(super) fn take(&self, wanted: usize) -> (usize, bool) {
         let _transition = od::Transition::begin();
         let mut state = self.state.lock().unwrap();
         if state.lifecycle != Lifecycle::Open {
-            return 0;
+            return (0, !state.exact);
         }
         let amount = wanted.min(state.available);
         state.available -= amount;
         state.outstanding += amount; // bounded by the admitted original total
         debug_assert_eq!(state.authority.size(), state.available + state.outstanding);
         self.observe(&state);
-        amount
+        (amount, !state.exact)
     }
     /// No allocation/admission/wait for workers. Stock reservation shrink can
     /// lock the pool. No Arrow walk/claim/drop occurs under this bank mutex.
@@ -260,6 +296,27 @@ impl Credit {
                 state.lifecycle = Lifecycle::Closed;
             }
         }
+        debug_assert_eq!(state.authority.size(), state.available + state.outstanding);
+        self.observe(&state);
+    }
+    /// A reader's share of the bank (`bytes`, what the pass credited it) goes
+    /// back to the pool once the reader is exhausted and the merge holds none
+    /// of its batches: what the bank can spare now, which is the share when
+    /// every other reader is within its own (an output that still aliases a
+    /// batch keeps that much lent). The other readers' shares, which bound
+    /// what they hold, stay.
+    pub(crate) fn retire_share(&self, bytes: usize) {
+        let _transition = od::Transition::begin();
+        let mut state = self.state.lock().unwrap();
+        if state.lifecycle != Lifecycle::Open || !state.returns_shares {
+            return;
+        }
+        let spare = bytes.min(state.available);
+        if spare == 0 {
+            return;
+        }
+        state.available -= spare;
+        state.authority.shrink(spare);
         debug_assert_eq!(state.authority.size(), state.available + state.outstanding);
         self.observe(&state);
     }
@@ -303,6 +360,7 @@ impl Drop for ReaderPermit {
 pub(crate) fn verify_ownership_controls() -> Result<()> {
     ownership_tests::retiring_credit_follows_worker_and_escaped_ticket_lifetimes()?;
     ownership_tests::failed_fresh_admission_returns_exact_borrowed_credit()?;
+    ownership_tests::an_exact_credit_never_requests_fresh()?;
     ownership_tests::original_permit_layout_is_one_arc();
     Ok(())
 }
@@ -321,7 +379,7 @@ mod ownership_tests {
         let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(32768));
         let authority = MemoryConsumer::new("IPC sponsor").register(&pool);
         authority.try_grow(32768)?;
-        let (credit, permits) = Credit::with_readers(authority, 2)?;
+        let (credit, permits) = Credit::with_readers(authority, 2, false)?;
         let worker = Arc::clone(&permits[0]);
         let mut work =
             reserve_with_credit(&pool, 256, "IPC decode", Some(Arc::clone(&credit)))?;
@@ -358,7 +416,7 @@ mod ownership_tests {
         let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(32768));
         let authority = MemoryConsumer::new("IPC sponsor").register(&pool);
         authority.try_grow(32768)?;
-        let (credit, permits) = Credit::with_readers(authority, 1)?;
+        let (credit, permits) = Credit::with_readers(authority, 1, false)?;
         let available = credit.state.lock().unwrap().available;
         let refused =
             reserve_with_credit(&pool, 32769, "IPC decode", Some(Arc::clone(&credit)));
@@ -370,6 +428,53 @@ mod ownership_tests {
             assert_eq!(state.authority.size(), available);
         }
         assert_eq!(pool.reserved(), 32768);
+        drop(permits);
+        drop(credit);
+        assert_eq!(pool.reserved(), 0);
+        Ok(())
+    }
+
+    /// A reader of a bounded pass draws only what the pass admitted: a request
+    /// one byte past its bank is refused without registering or asking for
+    /// anything, and the refusal returns the exact bytes it borrowed.
+    #[cfg_attr(test, test)]
+    pub(super) fn an_exact_credit_never_requests_fresh() -> Result<()> {
+        let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 20));
+        let authority = MemoryConsumer::new("IPC sponsor").register(&pool);
+        authority.try_grow(32768)?;
+        let (credit, permits) = Credit::with_readers(authority, 1, true)?;
+        let available = credit.state.lock().unwrap().available;
+        let before = pool.reserved();
+        let work = reserve_with_credit(
+            &pool,
+            available - 1,
+            "IPC decode",
+            Some(Arc::clone(&credit)),
+        )?;
+        assert_eq!(pool.reserved(), before);
+        // One batch short: the remaining byte is lent, the next is not.
+        work.try_grow(1)?;
+        let refused = work.try_grow(1);
+        let message = refused
+            .expect_err("an exact credit must refuse")
+            .to_string();
+        assert!(
+            message.contains("spill reader exceeded its admitted credit"),
+            "{message}"
+        );
+        assert_eq!(pool.reserved(), before, "a refusal asked the pool");
+        assert_eq!(work.size(), available);
+        // A fresh reservation past the bank is refused the same way.
+        let refused =
+            reserve_with_credit(&pool, 1, "IPC decode", Some(Arc::clone(&credit)));
+        assert!(refused.is_err());
+        assert_eq!(pool.reserved(), before, "a refusal asked the pool");
+        drop(work);
+        {
+            let state = credit.state.lock().unwrap();
+            assert_eq!(state.available, available);
+            assert_eq!(state.outstanding, 0);
+        }
         drop(permits);
         drop(credit);
         assert_eq!(pool.reserved(), 0);

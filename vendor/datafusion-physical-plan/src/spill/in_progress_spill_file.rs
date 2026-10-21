@@ -38,6 +38,11 @@ pub struct InProgressSpillFile {
     /// Lazily initialized writer
     writer: Option<IPCStreamWriter>,
     codec_authority: datafusion_execution::memory_pool::MemoryReservation,
+    /// The admitted bank of an intermediate merge file: every grant of the
+    /// writer, its codec included, is drawn from it. The codec then lives in
+    /// `banked_codec`, drawing on the bank, instead of in `codec_authority`.
+    bank: Option<Arc<admission::Credit>>,
+    banked_codec: Option<admission::Budget>,
     /// Lazily initialized in-progress file, it will be moved out when the `finish` method is invoked
     in_progress_file: Option<RefCountedTempFile>,
 }
@@ -54,11 +59,22 @@ impl InProgressSpillFile {
         spill_writer: Arc<SpillManager>,
         in_progress_file: RefCountedTempFile,
     ) -> Self {
+        Self::with_bank(spill_writer, in_progress_file, None)
+    }
+
+    /// A file whose writer draws its grants from `bank` instead of the pool.
+    pub(crate) fn with_bank(
+        spill_writer: Arc<SpillManager>,
+        in_progress_file: RefCountedTempFile,
+        bank: Option<Arc<admission::Credit>>,
+    ) -> Self {
         let codec_authority =
             datafusion_execution::memory_pool::MemoryConsumer::new("SpillWriterCodec")
                 .register(&spill_writer.env.memory_pool);
         Self {
             codec_authority,
+            bank,
+            banked_codec: None,
             spill_writer,
             in_progress_file: Some(in_progress_file),
             writer: None,
@@ -114,6 +130,7 @@ impl InProgressSpillFile {
         }
 
         let pool = &self.spill_writer.env.memory_pool;
+        let bank = bank.or_else(|| self.bank.clone());
         let schema_bytes = admission::schema_bound(self.spill_writer.schema())?;
         // Leaf metadata walks end before encoding; the encoding bound already
         // includes their flat metadata. Recursive GC can retain parent metadata
@@ -158,7 +175,15 @@ impl InProgressSpillFile {
             )?
         };
         let codec = admission::codec_bound(self.spill_writer.compression, true)?;
-        self.codec_authority.try_resize(codec)?;
+        match &self.bank {
+            Some(bank) => self
+                .banked_codec
+                .get_or_insert_with(|| {
+                    admission::register(pool, "SpillWriterCodec", Some(Arc::clone(bank)))
+                })
+                .try_resize(codec)?,
+            None => self.codec_authority.try_resize(codec)?,
+        }
         let gc_batch = gc_view_arrays(batch)?;
         admission::retain_dictionaries(&gc_batch, pool)?;
         drop(metadata);
@@ -252,6 +277,7 @@ impl InProgressSpillFile {
         // allocated. Destroy the writer before releasing their authority.
         drop(self.writer.take());
         self.codec_authority.free();
+        self.banked_codec = None;
         Ok(self.in_progress_file.take())
     }
 }
