@@ -34,7 +34,9 @@ use datafusion_execution::memory_pool::{MemoryLimit, MemoryReservation};
 use crate::sorts::builder::try_grow_reservation_to_at_least;
 use crate::sorts::copy_admission::{CopyAdmission, CopyCapability};
 use crate::sorts::sort::get_reserved_bytes_for_record_batch_size;
-use crate::sorts::streaming_merge::{ReaderShares, SortedSpillFile, StreamingMergeBuilder};
+use crate::sorts::streaming_merge::{
+    ReaderShares, SortedSpillFile, StreamingMergeBuilder,
+};
 use crate::spill::admission::Credit;
 use crate::stream::RecordBatchStreamAdapter;
 use datafusion_execution::{RecordBatchStream, SendableRecordBatchStream};
@@ -456,7 +458,9 @@ impl MultiLevelMergeBuilder {
                 // in-memory stream, the reader's credit for a spill file.
                 let mut shares = vec![0; sorted_streams.len()];
                 for spill in sorted_spill_files {
-                    shares.push(self.credit_bytes(spill.max_record_batch_memory, buffer_size)?);
+                    shares.push(
+                        self.credit_bytes(spill.max_record_batch_memory, buffer_size)?,
+                    );
                     let stream = self
                         .spill_manager
                         .clone()
@@ -653,7 +657,8 @@ impl MultiLevelMergeBuilder {
             }
 
             // Past its minimum, the pass stops at half the pool (see above).
-            if number_of_spills_to_read_for_current_phase >= minimum_number_of_required_streams
+            if number_of_spills_to_read_for_current_phase
+                >= minimum_number_of_required_streams
                 && needed > half
             {
                 break;

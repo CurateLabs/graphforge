@@ -469,7 +469,9 @@ impl CopyAdmission {
                 state.authority.try_grow(target - state.authority.size())?;
             }
             // Outputs charged to the output consumer leave the authority.
-            std::cmp::Ordering::Less => state.authority.shrink(state.authority.size() - target),
+            std::cmp::Ordering::Less => {
+                state.authority.shrink(state.authority.size() - target)
+            }
             std::cmp::Ordering::Equal => {}
         }
         state.active = true;

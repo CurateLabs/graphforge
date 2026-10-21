@@ -26,10 +26,10 @@ use std::task::{Context, Poll, ready};
 use crate::RecordBatchStream;
 use crate::metrics::BaselineMetrics;
 use crate::sorts::builder::BatchBuilder;
-use crate::sorts::streaming_merge::ReaderShares;
 use crate::sorts::copy_admission::{CopyAdmission, Resident};
 use crate::sorts::cursor::{Cursor, CursorValues};
 use crate::sorts::stream::PartitionedStream;
+use crate::sorts::streaming_merge::ReaderShares;
 use crate::spill::admission::{add, mul};
 
 use arrow::datatypes::SchemaRef;
