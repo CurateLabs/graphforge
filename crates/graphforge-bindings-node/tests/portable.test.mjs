@@ -136,7 +136,9 @@ export function canonicalVerification(report) {
               row_groups: exactNumber(report.plausibility.parquet.rowGroups),
               node_rows: exactNumber(report.plausibility.parquet.nodeRows),
               edge_rows: exactNumber(report.plausibility.parquet.edgeRows),
-              property_rows: exactNumber(report.plausibility.parquet.propertyRows),
+              property_rows: exactNumber(
+                report.plausibility.parquet.propertyRows,
+              ),
             },
     },
     integrity: report.integrity,
