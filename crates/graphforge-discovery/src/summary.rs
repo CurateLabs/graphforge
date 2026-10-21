@@ -43,6 +43,9 @@ const COMPONENT_KINDS: [&str; 10] = [
     "compatibility",
     "research",
 ];
+/// Summary byte total of the entries outside every component: BagIt tags, the
+/// inventory, the semantic manifest and any future control entry.
+const PACKAGE_CONTROL: &str = "package-control";
 /// Ontology enforcement modes a summary may report.
 const ONTOLOGY_MODES: [&str; 3] = ["none", "advisory", "strict"];
 
@@ -189,6 +192,11 @@ pub struct SummaryFacts {
     pub evidence_present: bool,
     /// Total verified payload bytes of the package.
     pub payload_bytes: u64,
+    /// Verified payload bytes by component kind, with `package-control` for
+    /// the entries outside every component. The values sum exactly to
+    /// [`Self::payload_bytes`], and the key set is the kinds of
+    /// [`Self::components`] plus `package-control` when control bytes exist.
+    pub bytes_by_kind: BTreeMap<String, u64>,
     /// Ontology composition, when the package carries one.
     pub ontology_composition: Option<SummaryOntologyComposition>,
 }
@@ -491,6 +499,7 @@ fn validate_facts(facts: &SummaryFacts, limits: DiscoveryLimits) -> Result<(), D
             "presence flags disagree with component histogram",
         ));
     }
+    validate_bytes_by_kind(facts)?;
     let Some(composition) = &facts.ontology_composition else {
         return Ok(());
     };
@@ -532,6 +541,41 @@ fn validate_facts(facts: &SummaryFacts, limits: DiscoveryLimits) -> Result<(), D
             ),
             FIELD,
         )?;
+    }
+    Ok(())
+}
+
+/// Require the per-kind byte totals to agree with the component histogram and
+/// the payload total: every key is a kind the histogram names or is
+/// `package-control`, every histogram kind has a total, and the totals sum to
+/// exactly `payload_bytes`.
+fn validate_bytes_by_kind(facts: &SummaryFacts) -> Result<(), DiscoveryError> {
+    const FIELD: &str = "facts.bytes_by_kind";
+    let invalid = |message: &'static str| {
+        DiscoveryError::new(DiscoveryErrorCode::MalformedResponse, Some(FIELD), message)
+    };
+    for kind in facts.bytes_by_kind.keys() {
+        if *kind == PACKAGE_CONTROL {
+            continue;
+        }
+        // The histogram holds only known kinds, so this also refuses unknown ones.
+        if !facts.components.contains_key(kind) {
+            return Err(invalid(
+                "byte totals name a kind outside the component histogram",
+            ));
+        }
+    }
+    for kind in facts.components.keys() {
+        if !facts.bytes_by_kind.contains_key(kind) {
+            return Err(invalid("byte totals omit a component kind"));
+        }
+    }
+    let total = facts
+        .bytes_by_kind
+        .values()
+        .try_fold(0u64, |total, bytes| total.checked_add(*bytes));
+    if total != Some(facts.payload_bytes) {
+        return Err(invalid("byte totals do not sum to the payload bytes"));
     }
     Ok(())
 }

@@ -2283,7 +2283,8 @@ fn with_summary(mut publication: Publication, people: Value) -> Publication {
             "external_identifiers": [], "created_at": null, "updated_at": null,
         },
         "facts": {"ontology_mode": "none", "components": {}, "research_present": false,
-                  "evidence_present": false, "payload_bytes": 0, "ontology_composition": null},
+                  "evidence_present": false, "payload_bytes": 0, "bytes_by_kind": {},
+                  "ontology_composition": null},
         "people": people,
     });
     let summary = ProjectSummary::from_json(

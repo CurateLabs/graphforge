@@ -17,7 +17,8 @@ const GRAPH_TREE: &str = "data/components/graph-data/graph-tree/";
 
 /// Entry bytes by the kind of the component that declares the entry. An entry
 /// no component declares is package control, so the values sum to the sum of
-/// the entry lengths.
+/// the entry lengths. Every declared kind has a total, zero when its components
+/// list no file, so the keys cover the component histogram.
 pub(super) fn bytes_by_kind(
     entries: &[Entry],
     components: &[ManifestComponent],
@@ -31,7 +32,10 @@ pub(super) fn bytes_by_kind(
                 .map(|file| (file.path.as_str(), component.kind.as_str()))
         })
         .collect();
-    let mut bytes = BTreeMap::<String, u64>::new();
+    let mut bytes: BTreeMap<String, u64> = components
+        .iter()
+        .map(|component| (component.kind.clone(), 0))
+        .collect();
     for entry in entries {
         let kind = kinds.get(entry.path.as_str()).unwrap_or(&PACKAGE_CONTROL);
         let total = bytes.entry((*kind).to_owned()).or_default();
