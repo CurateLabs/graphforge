@@ -1469,14 +1469,14 @@ fn property_fragment_corruption_is_refused_by_every_touching_read() {
     let export = |graph: &GraphForge| {
         let out = tempfile::tempdir().unwrap();
         graph
-            .export_portable_v2(
-                &crate::PortableV2ExportRequest {
+            .export_portable(
+                &crate::PortableExportRequest {
                     selection: crate::PortableSelection::Current,
                     output_path: out.path().join("export.gfpb"),
-                    representation: crate::PortableV2Output::Bundle,
-                    profile: crate::PortableV2SelectionProfile::Complete,
+                    representation: crate::PortableOutput::Bundle,
+                    profile: crate::PortableSelectionProfile::Complete,
                     subset: None,
-                    limits: crate::PortableV2Limits::default(),
+                    limits: crate::PortableLimits::default(),
                 },
                 None,
                 |_| {},

@@ -249,6 +249,7 @@ impl Reads {
             location: Some("https://evil.example/stolen".into()),
             content_range: Some("bytes 10-20/21".into()),
             etag: Some("digest".into()),
+            retry_after: None,
             body: Box::new(std::io::Cursor::new(b"payload".to_vec())),
         }
     }
@@ -764,6 +765,7 @@ impl PrivateFixture {
             location: None,
             content_range: None,
             etag: Some("\"private-fixture\"".into()),
+            retry_after: None,
             body: Box::new(std::io::Cursor::new(body)),
         }
     }

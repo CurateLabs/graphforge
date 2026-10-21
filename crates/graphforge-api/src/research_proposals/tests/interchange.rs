@@ -40,9 +40,9 @@ fn selected_accepted_lineage_roundtrips_without_private_ancestor_or_live_accepta
     export_selected(&graph, &proposal, node_uuid, projection_uuid, &package);
     assert_no_private_parquet_values(&package);
     let target = directory.path().join("imported");
-    GraphForge::import_portable_v2(
+    GraphForge::import_portable(
         &target,
-        &PortableV2ImportRequest {
+        &PortableImportRequest {
             input: package,
             operation_id: OperationId(Uuid::now_v7()),
             limits: Default::default(),
@@ -180,6 +180,344 @@ fn fixture(root: &std::path::Path) -> (GraphForge, SubmitResearchProposalRequest
     (graph, proposal)
 }
 
+/// A research bundle read as a stream gets the verdict the file path gives: the
+/// same native owner checks, the same report apart from `source`.
+#[test]
+fn research_bundle_streams_to_the_file_verdict() {
+    let directory = tempfile::tempdir().unwrap();
+    let (graph, proposal) = fixture(&directory.path().join("source"));
+    let projection = Uuid::now_v7();
+    let node = proposal.fields[0].object_uuid;
+    let package = directory.path().join("selected.gfpb");
+    graph
+        .export_research(
+            &ExportResearchRequest {
+                version_uuid: proposal.source_version_uuid,
+                output: package.clone(),
+                bundled: true,
+                projection: Some(ResearchExportProjection {
+                    version_uuid: projection,
+                    frozen_ipc: proposal.frozen_ipc.clone(),
+                    fields: ["$object", "$labels", "property:score", "property:deferred"]
+                        .into_iter()
+                        .map(|field| ResearchFieldIdentity {
+                            object_kind: "node".into(),
+                            object_uuid: node,
+                            field: field.into(),
+                        })
+                        .collect(),
+                    created_at: 9,
+                }),
+            },
+            &CancellationToken::new(),
+        )
+        .unwrap();
+    let limits = graphforge_core::portable::PortableLimits::default();
+    let file = crate::verify_portable(
+        &PortableVerifyRequest {
+            input: package.clone(),
+            mode: graphforge_core::portable::PortableMode::Full,
+            limits,
+        },
+        None,
+    )
+    .unwrap();
+    assert!(file.research_interchange);
+    // The package is in the per-Version layout: the registry precedes every
+    // retained object, which sits under its owning Version.
+    let paths = file
+        .research_entries
+        .iter()
+        .map(|entry| entry.path.as_str())
+        .collect::<Vec<_>>();
+    let registry = paths
+        .iter()
+        .position(|path| path.contains("research-registry-"))
+        .expect("a registry entry");
+    let retained = paths
+        .iter()
+        .filter(|path| path.contains("/research-retained/"))
+        .count();
+    assert!(retained > 0 && paths.iter().all(|path| !path.contains("research-content/")));
+    assert!(
+        paths
+            .iter()
+            .filter(|path| path.contains("/research-retained/"))
+            .all(|path| *path > paths[registry]),
+        "the registry precedes every retained object in canonical order"
+    );
+    let scratch = tempfile::tempdir().unwrap();
+    // The storage helper proves the native validator runs on the staged files.
+    let mut native_runs = 0;
+    let staged = stream_with_validator(scratch.path(), &package, limits, &mut native_runs);
+    assert!(native_runs > 0, "native research validation must run");
+    // The public facade, from a plain reader, gives the same verdict.
+    let stream = crate::verify_portable_stream(
+        &mut std::io::BufReader::new(std::fs::File::open(&package).unwrap()),
+        Some(scratch.path()),
+        limits,
+        None,
+    )
+    .unwrap();
+    let strip_source = |report: &graphforge_core::portable::PortableReport| {
+        let mut value = serde_json::to_value(report).unwrap();
+        value.as_object_mut().unwrap().remove("source").unwrap();
+        value
+    };
+    assert_eq!(strip_source(&staged), strip_source(&stream));
+    assert_eq!(file.source, graphforge_core::portable::PortableSource::File);
+    assert_eq!(
+        stream.source,
+        graphforge_core::portable::PortableSource::Stream
+    );
+    let strip = |report: &graphforge_core::portable::PortableReport| {
+        let mut value = serde_json::to_value(report).unwrap();
+        value.as_object_mut().unwrap().remove("source").unwrap();
+        value
+    };
+    assert_eq!(strip(&file), strip(&stream));
+    // The private stage is gone once the verdict is returned.
+    assert_eq!(std::fs::read_dir(scratch.path()).unwrap().count(), 0);
+    native_failure_is_refused_alike_from_a_file_and_a_stream(directory.path(), &package, limits);
+    // A changed research object is refused alike from a file and a stream.
+    let mut bytes = std::fs::read(&package).unwrap();
+    let name = b"research-retained/";
+    let header = bytes
+        .windows(name.len())
+        .position(|window| window == name)
+        .unwrap();
+    let header = header - header % 512;
+    bytes[header + 512] ^= 1;
+    let tampered = directory.path().join("tampered.gfpb");
+    std::fs::write(&tampered, &bytes).unwrap();
+    let by_file = crate::verify_portable(
+        &PortableVerifyRequest {
+            input: tampered,
+            mode: graphforge_core::portable::PortableMode::Full,
+            limits,
+        },
+        None,
+    )
+    .unwrap_err();
+    let by_stream = crate::verify_portable_stream(
+        &mut std::io::Cursor::new(bytes),
+        Some(directory.path()),
+        limits,
+        None,
+    )
+    .unwrap_err();
+    assert_eq!(by_file.code, by_stream.code);
+    assert_eq!(by_file.entry, by_stream.entry);
+}
+
+/// Every digest in the package is correct, but one accepted mapping commits to
+/// a value the Version does not hold, which only native validation can see.
+fn native_failure_is_refused_alike_from_a_file_and_a_stream(
+    directory: &std::path::Path,
+    package: &std::path::Path,
+    limits: graphforge_core::portable::PortableLimits,
+) {
+    use graphforge_core::portable::PortableErrorCode;
+    let forged = reauthenticated(&std::fs::read(package).unwrap(), |registry| {
+        let archive = registry.interchange.values_mut().next().unwrap();
+        let mut mapping = archive.accepted.values().next().unwrap().clone();
+        archive.accepted.remove(&mapping.mapping_uuid);
+        let mut value = mapping.value_sha256.expect("the accepted value");
+        value[0] ^= 1;
+        mapping.value_sha256 = Some(value);
+        mapping.mapping_uuid = mapping.identity().unwrap();
+        archive.accepted.insert(mapping.mapping_uuid, mapping);
+    });
+    let path = directory.join("forged.gfpb");
+    std::fs::write(&path, &forged).unwrap();
+    // Storage-level verification authenticates every byte and passes.
+    graphforge_storage::verify_portable(
+        &path,
+        graphforge_core::portable::PortableMode::Full,
+        limits,
+        None,
+    )
+    .expect("the forged package is authentic");
+    let by_file = crate::verify_portable(
+        &PortableVerifyRequest {
+            input: path,
+            mode: graphforge_core::portable::PortableMode::Full,
+            limits,
+        },
+        None,
+    )
+    .unwrap_err();
+    let by_stream = crate::verify_portable_stream(
+        &mut std::io::Cursor::new(forged),
+        Some(directory),
+        limits,
+        None,
+    )
+    .unwrap_err();
+    assert_eq!(by_file.code, PortableErrorCode::Incompatible);
+    assert_eq!(by_stream.code, by_file.code);
+    assert_eq!(by_stream.entry, by_file.entry);
+}
+
+/// Rewrite the research registry of a canonical bundle with `edit`, then
+/// recompute every digest that covers it: the manifest file record, the
+/// package digest, the payload inventory and the tag manifest.
+fn reauthenticated(
+    bundle: &[u8],
+    edit: impl FnOnce(&mut graphforge_storage::research_versions::ResearchRegistry),
+) -> Vec<u8> {
+    let mut edit = Some(edit);
+    use sha2::{Digest, Sha256};
+    const MANIFEST: &str = "data/graphforge-project.json";
+    let hex = |bytes: &[u8]| {
+        Sha256::digest(bytes)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    };
+    // Split the bundle into `(raw header run, path, payload)` units.
+    let mut units: Vec<(Vec<u8>, String, Vec<u8>)> = Vec::new();
+    let mut at = 0;
+    let mut pax_prefix = Vec::new();
+    while bundle[at..at + 512].iter().any(|byte| *byte != 0) {
+        let header = &bundle[at..at + 512];
+        let size = usize::from_str_radix(
+            std::str::from_utf8(&header[124..136])
+                .unwrap()
+                .trim_matches(['\0', ' ']),
+            8,
+        )
+        .unwrap();
+        let end = at + 512 + size.div_ceil(512) * 512;
+        if header[156] == b'x' {
+            pax_prefix.extend_from_slice(&bundle[at..end]);
+        } else {
+            let name = std::str::from_utf8(&header[..100])
+                .unwrap()
+                .trim_end_matches('\0');
+            let prefix = std::str::from_utf8(&header[345..500])
+                .unwrap()
+                .trim_end_matches('\0');
+            let path = if prefix.is_empty() {
+                name.to_owned()
+            } else {
+                format!("{prefix}/{name}")
+            };
+            units.push((
+                std::mem::take(&mut pax_prefix),
+                path,
+                bundle[at + 512..at + 512 + size].to_vec(),
+            ));
+            units.last_mut().unwrap().0.extend_from_slice(header);
+        }
+        at = end;
+    }
+    let registry_path = units
+        .iter()
+        .map(|unit| unit.1.clone())
+        .find(|path| path.contains("research-registry-"))
+        .expect("a research registry entry");
+    let mut digests = std::collections::BTreeMap::new();
+    for unit in &mut units {
+        if unit.1 == registry_path {
+            let mut registry: graphforge_storage::research_versions::ResearchRegistry =
+                serde_json::from_slice(&unit.2).unwrap();
+            let before = serde_json::to_vec(&registry).unwrap();
+            assert_eq!(before, unit.2, "the registry is canonical JSON");
+            edit.take().expect("one registry")(&mut registry);
+            unit.2 = serde_json::to_vec(&registry).unwrap();
+        }
+        digests.insert(unit.1.clone(), (hex(&unit.2), unit.2.len()));
+    }
+    for unit in &mut units {
+        if unit.1 == MANIFEST {
+            let mut manifest: serde_json::Value = serde_json::from_slice(&unit.2).unwrap();
+            for component in manifest["components"].as_array_mut().unwrap() {
+                for file in component["files"].as_array_mut().unwrap() {
+                    if file["path"] == registry_path.as_str() {
+                        file["sha256"] = digests[&registry_path].0.clone().into();
+                        file["length"] = digests[&registry_path].1.into();
+                    }
+                }
+            }
+            manifest.as_object_mut().unwrap().remove("package_digest");
+            let canonical = serde_json::to_vec(&manifest).unwrap();
+            let digest = hex(&[b"graphforge-project/2\0".as_slice(), &canonical].concat());
+            manifest["package_digest"] = format!("sha256:{digest}").into();
+            unit.2 = serde_json::to_vec(&manifest).unwrap();
+            digests.insert(MANIFEST.into(), (hex(&unit.2), unit.2.len()));
+        }
+    }
+    let rewrite_rows =
+        |bytes: &[u8], digests: &std::collections::BTreeMap<String, (String, usize)>| {
+            std::str::from_utf8(bytes)
+                .unwrap()
+                .lines()
+                .map(|line| {
+                    let (_, path) = line.split_once("  ").unwrap();
+                    let digest = digests.get(path).map_or_else(
+                        || line.split_once("  ").unwrap().0.to_owned(),
+                        |(digest, _)| digest.clone(),
+                    );
+                    format!("{digest}  {path}\n")
+                })
+                .collect::<String>()
+                .into_bytes()
+        };
+    for unit in &mut units {
+        if unit.1 == "manifest-sha256.txt" {
+            unit.2 = rewrite_rows(&unit.2, &digests);
+            digests.insert(unit.1.clone(), (hex(&unit.2), unit.2.len()));
+        }
+    }
+    for unit in &mut units {
+        if unit.1 == "tagmanifest-sha256.txt" {
+            unit.2 = rewrite_rows(&unit.2, &digests);
+        }
+    }
+    let mut out = Vec::new();
+    for (mut run, path, payload) in units {
+        // Fix the regular header's size and checksum; PAX runs are unchanged.
+        let header_at = run.len() - 512;
+        let header = &mut run[header_at..];
+        let size = format!("{:011o}\0", payload.len());
+        header[124..136].copy_from_slice(size.as_bytes());
+        header[148..156].fill(b' ');
+        let sum: u64 = header.iter().map(|byte| u64::from(*byte)).sum();
+        header[148..156].copy_from_slice(format!("{sum:06o}\0 ").as_bytes());
+        let _ = path;
+        out.extend(run);
+        out.extend(&payload);
+        out.resize(out.len().div_ceil(512) * 512, 0);
+    }
+    out.extend([0u8; 1024]);
+    out
+}
+
+fn stream_with_validator(
+    scratch: &std::path::Path,
+    package: &std::path::Path,
+    limits: graphforge_core::portable::PortableLimits,
+    runs: &mut usize,
+) -> graphforge_core::portable::PortableReport {
+    let mut reader = std::io::BufReader::new(std::fs::File::open(package).unwrap());
+    let mut count =
+        |generation: &graphforge_storage::ResolvedProjectGeneration,
+         version: &graphforge_storage::research_versions::ResearchVersionRecord,
+         registry: &graphforge_storage::research_versions::ResearchRegistry| {
+            *runs += 1;
+            crate::research_interchange::validation::validate(generation, version, registry)
+        };
+    graphforge_storage::validate_research_package_stream(
+        &mut reader,
+        Some(scratch),
+        limits,
+        None,
+        &mut count,
+    )
+    .unwrap()
+}
+
 fn export_selected(
     graph: &GraphForge,
     proposal: &SubmitResearchProposalRequest,
@@ -314,19 +652,19 @@ fn verify_reexport(imported: &GraphForge, selected: Uuid, root: &std::path::Path
         )
         .unwrap();
     assert_no_private_parquet_values(&package);
-    crate::verify_portable_v2(
+    crate::verify_portable(
         &PortableVerifyRequest {
             input: package.clone(),
-            mode: graphforge_core::portable::PortableV2Mode::Full,
+            mode: graphforge_core::portable::PortableMode::Full,
             limits: Default::default(),
         },
         None,
     )
     .unwrap();
     let target = root.join("imported");
-    GraphForge::import_portable_v2(
+    GraphForge::import_portable(
         &target,
-        &PortableV2ImportRequest {
+        &PortableImportRequest {
             input: package,
             operation_id: OperationId(Uuid::now_v7()),
             limits: Default::default(),

@@ -179,19 +179,19 @@ fn low_level_import_requires_native_owner(graph: &GraphForge, version_uuid: Uuid
         })
         .collect::<Vec<_>>();
     let target = owner.path().join("destination");
-    let error = graphforge_storage::import_complete_portable_v2(
+    let error = graphforge_storage::import_complete_portable(
         &package,
         &target,
         Uuid::now_v7(),
         Uuid::now_v7(),
         &capabilities,
-        graphforge_core::portable::PortableV2Limits::default(),
+        graphforge_core::portable::PortableLimits::default(),
         None,
     )
     .unwrap_err();
     assert_eq!(
         error.code,
-        graphforge_core::portable::PortableV2ErrorCode::Incompatible
+        graphforge_core::portable::PortableErrorCode::Incompatible
     );
     assert!(error.committed_import.is_none());
     assert!(

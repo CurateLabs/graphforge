@@ -175,8 +175,8 @@ impl From<EngineError> for MultiOntologyError {
     }
 }
 
-impl From<graphforge_storage::PortableV2Error> for MultiOntologyError {
-    fn from(error: graphforge_storage::PortableV2Error) -> Self {
+impl From<graphforge_storage::PortableError> for MultiOntologyError {
+    fn from(error: graphforge_storage::PortableError) -> Self {
         portable_error(error)
     }
 }
@@ -1236,7 +1236,7 @@ impl GraphForge {
     /// Inspect a verified durable portable candidate without adopting it.
     pub fn portable_ontology_staging(
         &self,
-        limits: graphforge_storage::PortableV2Limits,
+        limits: graphforge_storage::PortableLimits,
     ) -> Result<Option<graphforge_storage::WorkspacePortableOntologyStaging>, GfError> {
         graphforge_storage::load_portable_ontology_staging(&self.generation_for_read()?, limits)
             .map_err(MultiOntologyError::from)
@@ -1246,7 +1246,7 @@ impl GraphForge {
     pub fn adopt_portable_ontology_staging(
         &mut self,
         authority: &OntologyAuthorityExpectation,
-        limits: graphforge_storage::PortableV2Limits,
+        limits: graphforge_storage::PortableLimits,
         cancellation: Option<&CancellationToken>,
     ) -> Result<MultiOntologyMutationReceipt, GfError> {
         let parent = graphforge_storage::resolve_generation_by_uuid(
@@ -1447,7 +1447,7 @@ mod tests {
 
         let root = tempfile::tempdir().unwrap();
         let mut manifest: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../tests/fixtures/portable-v2/ontology-only.manifest.json"
+            "../../../tests/fixtures/portable/ontology-only.manifest.json"
         ))
         .unwrap();
         manifest["package_class"] = "future-package-class".into();
@@ -1485,11 +1485,11 @@ mod tests {
 
     fn observed_unsupported_future_error() -> MultiOntologyError {
         let package = future_portable_package();
-        let error = crate::verify_portable_v2(
+        let error = crate::verify_portable(
             &crate::PortableVerifyRequest {
                 input: package.path().to_path_buf(),
-                mode: graphforge_storage::PortableV2Mode::Full,
-                limits: graphforge_storage::PortableV2Limits::default(),
+                mode: graphforge_storage::PortableMode::Full,
+                limits: graphforge_storage::PortableLimits::default(),
             },
             None,
         )
@@ -1629,13 +1629,10 @@ mod tests {
                 "composition.resolution_explain",
                 "GraphForge.explain_ontology_resolution",
             ),
-            (
-                "portable.inspect",
-                "crate.verify_portable_v2[structure_only]",
-            ),
-            ("portable.verify", "crate.verify_portable_v2[full]"),
-            ("portable.export", "GraphForge.export_portable_v2"),
-            ("portable.import", "GraphForge.import_portable_v2"),
+            ("portable.inspect", "crate.verify_portable[structure_only]"),
+            ("portable.verify", "crate.verify_portable[full]"),
+            ("portable.export", "GraphForge.export_portable"),
+            ("portable.import", "GraphForge.import_portable"),
             (
                 "portable.post_import_inspect",
                 "GraphForge.portable_ontology_staging",
@@ -1787,18 +1784,18 @@ mod tests {
         assert_eq!(error.code, "GF_UNSUPPORTED_FUTURE");
         assert_eq!(error.diagnostics[0].code, "interchange.unsupported_future");
         let cancelled = AtomicBool::new(false);
-        let missing = crate::verify_portable_v2(
+        let missing = crate::verify_portable(
             &crate::PortableVerifyRequest {
-                input: std::path::PathBuf::from("missing-portable-v2"),
-                mode: graphforge_storage::PortableV2Mode::StructureOnly,
-                limits: graphforge_storage::PortableV2Limits::default(),
+                input: std::path::PathBuf::from("missing-portable"),
+                mode: graphforge_storage::PortableMode::StructureOnly,
+                limits: graphforge_storage::PortableLimits::default(),
             },
             Some(&cancelled),
         )
         .unwrap_err();
         assert_ne!(
             missing.code,
-            graphforge_storage::PortableV2ErrorCode::UnsupportedFuture
+            graphforge_storage::PortableErrorCode::UnsupportedFuture
         ); // UnsupportedFutureVersion mapping is distinct.
     }
 
@@ -1930,7 +1927,7 @@ mod tests {
             graph
                 .adopt_portable_ontology_staging(
                     &expectation(&graph, 9_050),
-                    graphforge_storage::PortableV2Limits::default(),
+                    graphforge_storage::PortableLimits::default(),
                     None
                 )
                 .is_err()
@@ -1939,33 +1936,33 @@ mod tests {
     }
 
     #[test]
-    fn failing_portable_v2_import_is_atomic_and_preserves_authority() {
+    fn failing_portable_import_is_atomic_and_preserves_authority() {
         let project = tempfile::tempdir().unwrap();
         let path = project.path().to_str().unwrap();
         let graph = GraphForge::new(Some(path)).unwrap();
         let before = graph.ontology_authority_state().unwrap();
         drop(graph);
         let invalid = project.path().join("invalid.gfpb");
-        std::fs::write(&invalid, b"not-a-portable-v2-package").unwrap();
-        let error = GraphForge::import_portable_v2(
+        std::fs::write(&invalid, b"not-a-portable-package").unwrap();
+        let error = GraphForge::import_portable(
             project.path(),
-            &crate::PortableV2ImportRequest {
+            &crate::PortableImportRequest {
                 input: invalid,
                 operation_id: OperationId(Uuid::from_u128(9_051)),
-                limits: graphforge_storage::PortableV2Limits::default(),
+                limits: graphforge_storage::PortableLimits::default(),
             },
             None,
         )
         .unwrap_err();
         assert_eq!(
             error.code,
-            graphforge_storage::PortableV2ErrorCode::InvalidStructure
+            graphforge_storage::PortableErrorCode::InvalidStructure
         );
         let reopened = GraphForge::new(Some(path)).unwrap();
         assert_eq!(reopened.ontology_authority_state().unwrap(), before);
         assert!(
             reopened
-                .portable_ontology_staging(graphforge_storage::PortableV2Limits::default())
+                .portable_ontology_staging(graphforge_storage::PortableLimits::default())
                 .unwrap()
                 .is_none()
         );
@@ -2115,12 +2112,12 @@ mod tests {
             .collect::<Vec<_>>();
         before_entries.sort();
         assert!(
-            GraphForge::import_portable_v2(
+            GraphForge::import_portable(
                 project.path(),
-                &crate::PortableV2ImportRequest {
+                &crate::PortableImportRequest {
                     input: invalid,
                     operation_id: OperationId(Uuid::from_u128(9_130)),
-                    limits: graphforge_storage::PortableV2Limits::default()
+                    limits: graphforge_storage::PortableLimits::default()
                 },
                 None
             )
@@ -2190,7 +2187,7 @@ mod tests {
         assert!(graph.ontology_modules().unwrap().is_empty());
         assert!(
             graph
-                .portable_ontology_staging(graphforge_storage::PortableV2Limits::default())
+                .portable_ontology_staging(graphforge_storage::PortableLimits::default())
                 .unwrap()
                 .is_none()
         );
@@ -2355,7 +2352,7 @@ mod tests {
             .unwrap();
         assert!(
             graph
-                .portable_ontology_staging(graphforge_storage::PortableV2Limits::default())
+                .portable_ontology_staging(graphforge_storage::PortableLimits::default())
                 .unwrap()
                 .is_none()
         );
@@ -2364,7 +2361,7 @@ mod tests {
             graph
                 .adopt_portable_ontology_staging(
                     &authority,
-                    graphforge_storage::PortableV2Limits::default(),
+                    graphforge_storage::PortableLimits::default(),
                     None,
                 )
                 .is_err()

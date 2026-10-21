@@ -43,7 +43,7 @@ and may be discarded and recompiled when incompatible or stale. External YAML
 or JSON files remain authoring/import inputs rather than project commit
 authority.
 
-Portable-v2 selection is dependency-closed for graph semantic bindings. When
+Portable selection is dependency-closed for graph semantic bindings. When
 the selected participant set includes the graph semantic-bindings participant,
 the bundle must also contain the exact workspace ontology-composition
 participant whose fingerprint those bindings name. Import authenticates and

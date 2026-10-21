@@ -57,7 +57,7 @@ the default. No transitional exemptions apply.
 
 - [#1309](https://github.com/CurateLabs/graphforge/pull/1309) merged #1301 portable
   storage ownership: `graph_projection/logical_fingerprint.rs` owns canonical
-  logical encoding; `project_portable_v2/materialization.rs` and
+  logical encoding; `project_portable/materialization.rs` and
   `semantic_validation.rs` own extraction and semantic checks; export's
   `planning.rs` and `transport.rs` own manifest planning and transport writing.
   The parents retain projection materialization, canonical transport authentication,

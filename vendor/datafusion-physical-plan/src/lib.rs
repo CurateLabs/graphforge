@@ -102,3 +102,6 @@ pub mod udaf {
 }
 
 pub mod test;
+
+#[doc(hidden)]
+pub mod terminal_ownership;

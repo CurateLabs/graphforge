@@ -850,8 +850,12 @@ class LadderControlTests(Scratch):
             [sys.executable, "-c", code], env={**os.environ, "GF_GDC_PROGRESS_PATH": str(progress)}
         )
         self.addCleanup(lambda: child.poll() is None and child.kill())
+        # Wait for the complete record, not for the file: the child creates the
+        # file before it writes, and a kill in between leaves it empty.
         deadline = time.monotonic() + 5
-        while not progress.exists() and time.monotonic() < deadline:
+        while time.monotonic() < deadline and not (
+            progress.exists() and progress.read_bytes().endswith(b"\n")
+        ):
             time.sleep(0.01)
         os.kill(child.pid, signal.SIGKILL)
         child.wait(timeout=5)

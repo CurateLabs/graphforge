@@ -1,0 +1,60 @@
+{
+  "checks": {
+    "correctness": true,
+    "retained_storage_headroom": true,
+    "rss_headroom": false,
+    "storage_headroom": true,
+    "time_headroom": true,
+    "transient_storage_headroom": true
+  },
+  "claim": "engineering_evidence_only",
+  "decision": "admitted",
+  "enforced_checks": [
+    "retained_storage_headroom",
+    "transient_storage_headroom",
+    "storage_headroom",
+    "correctness"
+  ],
+  "headroom": {
+    "rss_fraction": 0.2,
+    "storage_fraction": 0.150002281062191,
+    "time_fraction": 0.2
+  },
+  "limits": {
+    "rss_bytes": 4294967296,
+    "volume_bytes": 749057437696,
+    "wall_seconds": 14400
+  },
+  "native_capacity": {
+    "free_bytes": 749057437696,
+    "reserved_headroom_bytes": 112360324301
+  },
+  "projected": {
+    "logical_read_bytes": 76665243348,
+    "logical_write_bytes": 59983146465,
+    "peak_rss_bytes": 24527691776,
+    "physical_read_bytes": 1185709203456,
+    "physical_write_bytes": 829706096640,
+    "publication_work_units": 741080,
+    "reader_calls": 1256380,
+    "retained_storage_bytes": 216460238848,
+    "storage_peak_bytes": 276402552832,
+    "transient_peak_storage_bytes": 276402552832,
+    "wall_seconds": 3637
+  },
+  "rss_growth_fraction": 0.9506551949014664,
+  "schema": "graphforge-progressive-qualification-evidence/1",
+  "slopes_observed": {
+    "logical_read_bytes": 19877583317,
+    "logical_write_bytes": 15560254117,
+    "physical_read_bytes": 306527199232,
+    "physical_write_bytes": 213784997888,
+    "publication_work_units": 188667,
+    "reader_calls": 324712
+  },
+  "source_scales": [
+    24,
+    25
+  ],
+  "target": "S26"
+}

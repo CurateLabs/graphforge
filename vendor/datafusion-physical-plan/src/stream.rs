@@ -754,18 +754,39 @@ pub(crate) struct ReservationStream {
     schema: SchemaRef,
     inner: SendableRecordBatchStream,
     reservation: MemoryReservation,
+    diagnostic_piece: crate::terminal_ownership::Piece,
+    diagnostic: crate::terminal_ownership::Life,
 }
 
 impl ReservationStream {
+    #[cfg(test)]
     pub(crate) fn new(
         schema: SchemaRef,
         inner: SendableRecordBatchStream,
         reservation: MemoryReservation,
     ) -> Self {
+        Self::new_observed(
+            schema,
+            inner,
+            reservation,
+            crate::terminal_ownership::Piece::default(),
+            crate::terminal_ownership::Life::default(),
+        )
+    }
+
+    pub(crate) fn new_observed(
+        schema: SchemaRef,
+        inner: SendableRecordBatchStream,
+        reservation: MemoryReservation,
+        diagnostic_piece: crate::terminal_ownership::Piece,
+        diagnostic: crate::terminal_ownership::Life,
+    ) -> Self {
         Self {
             schema,
             inner,
             reservation,
+            diagnostic_piece,
+            diagnostic,
         }
     }
 }
@@ -777,6 +798,7 @@ impl Stream for ReservationStream {
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Option<Self::Item>> {
+        let _transition = crate::terminal_ownership::Transition::begin();
         let res = self.inner.poll_next_unpin(cx);
 
         match res {
@@ -785,12 +807,19 @@ impl Stream for ReservationStream {
                     Some(Ok(batch)) => {
                         self.reservation
                             .shrink(get_record_batch_memory_size(&batch));
+                        self.diagnostic_piece
+                            .refresh(&self.reservation, self.diagnostic.id());
+                        self.diagnostic
+                            .update(|o| o.held = self.reservation.size() as u64);
                         Poll::Ready(Some(Ok(batch)))
                     }
                     Some(Err(err)) => Poll::Ready(Some(Err(err))),
                     None => {
                         // Stream is done so free the reservation completely
                         self.reservation.free();
+                        self.diagnostic_piece
+                            .refresh(&self.reservation, self.diagnostic.id());
+                        self.diagnostic.update(|o| o.held = 0);
                         // Release the input pipeline's resources.
                         let inner_schema = self.inner.schema();
                         self.inner = Box::pin(EmptyRecordBatchStream::new(inner_schema));
@@ -1159,5 +1188,11 @@ mod test {
             0,
             "Memory should be freed when stream is dropped"
         );
+    }
+}
+
+impl Drop for ReservationStream {
+    fn drop(&mut self) {
+        self.diagnostic.begin_drop();
     }
 }

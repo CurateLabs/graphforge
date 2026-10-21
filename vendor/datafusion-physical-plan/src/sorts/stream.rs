@@ -19,6 +19,7 @@ use super::copy_admission::{CopyAdmission, CopyCapability, Phase, Resident};
 use crate::SendableRecordBatchStream;
 use crate::sorts::cursor::{ArrayValues, CursorArray, RowValues};
 use crate::spill::admission::{add, mul};
+use crate::terminal_ownership as od;
 use crate::{PhysicalExpr, PhysicalSortExpr};
 use arrow::array::{Array, UInt32Array};
 use arrow::compute::take_record_batch;
@@ -126,6 +127,26 @@ impl ReusableRows {
 /// Note: the stream returns an error if the consumer buffers more than one RowValues (i.e. holds on to two RowValues
 /// from the same partition at the same time).
 #[derive(Debug)]
+#[allow(dead_code)]
+pub(super) struct ChargedRowCursorStream {
+    copy: Option<Arc<CopyAdmission>>,
+    /// Converter to convert output of physical expressions
+    converter: RowConverter,
+    /// The physical expressions to sort by
+    column_expressions: Vec<Arc<dyn PhysicalExpr>>,
+    /// Input streams
+    streams: FusedStreams,
+    /// Tracks the memory used by `converter`
+    reservation: MemoryReservation,
+    /// Allocated rows for each partition, we keep two to allow for buffering one
+    /// in the consumer of the stream
+    rows: ReusableRows,
+    copy_resident: Option<Arc<Resident>>,
+    // A failed mutation can retain converter/reuse backing until stream drop.
+    failed_phase: Option<super::copy_admission::ChargedPhase>,
+}
+
+#[derive(Debug)]
 pub struct RowCursorStream {
     copy: Option<Arc<CopyAdmission>>,
     /// Converter to convert output of physical expressions
@@ -142,6 +163,10 @@ pub struct RowCursorStream {
     copy_resident: Option<Arc<Resident>>,
     // A failed mutation can retain converter/reuse backing until stream drop.
     failed_phase: Option<Phase>,
+    #[cfg(feature = "test_utils")]
+    diagnostic_rows: Vec<[od::Life; 2]>,
+    diagnostic_piece: od::Piece,
+    diagnostic: od::Life,
 }
 
 impl RowCursorStream {
@@ -151,7 +176,7 @@ impl RowCursorStream {
         {
             0 // The dynamic control floor owns these bytes through escaped output.
         } else {
-            size_of::<CopyAdmission>() + 2 * size_of::<usize>()
+            CopyAdmission::charged_size() + 2 * size_of::<usize>()
         }
     }
     pub(super) fn constructor_bound(streams: usize, keys: usize) -> Result<usize> {
@@ -164,7 +189,10 @@ impl RowCursorStream {
         )?;
         let vectors = mul(2, size_of::<Fuse<SendableRecordBatchStream>>())?;
         let per_stream = add(1024, add(slots, vectors)?)?;
-        let fixed = add(size_of::<Self>(), add(size_of::<CopyAdmission>(), 4096)?)?;
+        let fixed = add(
+            size_of::<ChargedRowCursorStream>(),
+            add(CopyAdmission::charged_size(), 4096)?,
+        )?;
         add(fixed, add(mul(keys, 1024)?, mul(streams, per_stream)?)?)
     }
     #[cfg(test)]
@@ -209,7 +237,10 @@ impl RowCursorStream {
             rows.push([Some(make_empty()?), Some(make_empty()?)]);
         }
         let metadata = add(
-            add(size_of::<Self>(), Self::copy_header(copy.as_ref()))?,
+            add(
+                size_of::<ChargedRowCursorStream>(),
+                Self::copy_header(copy.as_ref()),
+            )?,
             add(
                 converter.size(),
                 add(
@@ -228,7 +259,48 @@ impl RowCursorStream {
             )?,
         )?;
         let resident = phase.as_ref().map(|p| p.resident(metadata)).transpose()?;
+        let diagnostic = od::Life::inherited(od::Kind::Row);
+        let diagnostic_piece = od::Piece::new(&reservation, diagnostic.id());
+        diagnostic.update(|o| {
+            o.piece = diagnostic_piece.id();
+            o.a = streams.len() as u64;
+            o.b = rows.len() as u64;
+            o.bytes = metadata as u64;
+            o.flags = 1;
+        });
+        diagnostic.converter(&converter);
+        if let Some(r) = &resident {
+            diagnostic.edge(r.diagnostic_id(), 2, metadata);
+        }
+        let mut diagnostic_rows: Vec<[od::Life; 2]> = Vec::new();
+        if cfg!(feature = "test_utils")
+            && rows.len().checked_mul(2).is_some_and(od::sidecar_permitted)
+            && diagnostic_rows.try_reserve_exact(rows.len()).is_ok()
+        {
+            for pair in &rows {
+                let observed = std::array::from_fn(|i| {
+                    let life = od::Life::new(od::Kind::Key, diagnostic.id(), 0);
+                    if let Some((rows, resident)) = &pair[i] {
+                        life.rows(rows);
+                        if let Some(r) = resident {
+                            life.edge(r.diagnostic_id(), 2, rows.size());
+                        }
+                    }
+                    if let Some(r) = &resident {
+                        life.edge(r.diagnostic_id(), 7, 0);
+                    }
+                    life
+                });
+                diagnostic_rows.push(observed);
+            }
+        } else if cfg!(feature = "test_utils") {
+            od::gap(od::GAP_ROWS_STORAGE);
+        }
         Ok(Self {
+            #[cfg(feature = "test_utils")]
+            diagnostic_rows,
+            diagnostic,
+            diagnostic_piece,
             copy,
             copy_resident: resident,
             failed_phase: None,
@@ -242,7 +314,10 @@ impl RowCursorStream {
 
     fn metadata(&self) -> Result<usize> {
         add(
-            add(size_of::<Self>(), Self::copy_header(self.copy.as_ref()))?,
+            add(
+                size_of::<ChargedRowCursorStream>(),
+                Self::copy_header(self.copy.as_ref()),
+            )?,
             add(
                 self.converter.size(),
                 add(
@@ -270,6 +345,7 @@ impl RowCursorStream {
         batch: &RecordBatch,
         stream_idx: usize,
     ) -> Result<RowValues> {
+        let _transition = od::Transition::begin();
         // Poll input first, then admit this operation before evaluation or
         // encoding. Unknown expressions retain the old full-copy envelope.
         let mut phase = self
@@ -303,6 +379,11 @@ impl RowCursorStream {
             rows.clear();
 
             self.converter.append(&mut rows, &cols)?;
+            #[cfg(feature = "test_utils")]
+            if let Some(pair) = self.diagnostic_rows.get(stream_idx) {
+                pair[1].rows(&rows);
+            }
+            self.diagnostic.converter(&self.converter);
             self.reservation.try_resize(self.converter.size())?;
             if let Some(phase) = &phase {
                 let metadata = self.metadata()?;
@@ -316,14 +397,32 @@ impl RowCursorStream {
                 .map(|p| p.resident(add(rows.size(), 2 * size_of::<usize>())?))
                 .transpose()?;
             self.rows.save(stream_idx, &rows, resident.clone());
+            #[cfg(feature = "test_utils")]
+            if let Some(pair) = self.diagnostic_rows.get_mut(stream_idx) {
+                if let Some(r) = &resident {
+                    pair[1].edge(r.diagnostic_id(), 2, rows.size());
+                }
+                pair.swap(0, 1);
+            }
 
             // track the memory in the newly created Rows.
             let rows_reservation = self.reservation.new_empty();
             rows_reservation.try_grow(rows.size())?;
-            Ok(RowValues::new(rows, rows_reservation)
-                .with_copy_resident(resident, self.copy_resident.clone()))
+            Ok(od::scoped(
+                self.diagnostic.id(),
+                self.diagnostic_piece.id(),
+                || {
+                    RowValues::new(rows, rows_reservation)
+                        .with_copy_resident(resident, self.copy_resident.clone())
+                },
+            ))
         })();
         if result.is_err() {
+            #[cfg(feature = "test_utils")]
+            if let Some(pair) = self.diagnostic_rows.get_mut(stream_idx) {
+                pair[1] = od::Life::default();
+            }
+            self.diagnostic.converter(&self.converter);
             self.failed_phase = phase.take();
         }
         result
@@ -352,6 +451,10 @@ impl PartitionedStream for RowCursorStream {
             // Drop cached Rows before their paired leases; a live previous
             // cursor still retains its own Rows and lease until merge sees EOF.
             self.rows.inner[stream_idx] = [None, None];
+            #[cfg(feature = "test_utils")]
+            if let Some(pair) = self.diagnostic_rows.get_mut(stream_idx) {
+                *pair = Default::default();
+            }
         }
         Poll::Ready(next.map(|r| {
             r.and_then(|batch| {
@@ -363,6 +466,19 @@ impl PartitionedStream for RowCursorStream {
 }
 
 /// Specialized stream for sorts on single primitive columns
+#[allow(dead_code)]
+pub(super) struct ChargedFieldCursorStream<T: CursorArray> {
+    /// The physical expressions to sort by
+    sort: PhysicalSortExpr,
+    /// Input streams
+    streams: FusedStreams,
+    /// Create new reservations for each array
+    reservation: MemoryReservation,
+    phantom: PhantomData<fn(T) -> T>,
+    // This lease is last: fused input streams and their backing drop first.
+    _copy_resident: Option<Arc<Resident>>,
+}
+
 pub struct FieldCursorStream<T: CursorArray> {
     /// The physical expressions to sort by
     sort: PhysicalSortExpr,
@@ -373,6 +489,8 @@ pub struct FieldCursorStream<T: CursorArray> {
     phantom: PhantomData<fn(T) -> T>,
     // This lease is last: fused input streams and their backing drop first.
     _copy_resident: Option<Arc<Resident>>,
+    diagnostic_piece: od::Piece,
+    diagnostic: od::Life,
 }
 
 impl<T: CursorArray> std::fmt::Debug for FieldCursorStream<T> {
@@ -389,8 +507,17 @@ impl<T: CursorArray> FieldCursorStream<T> {
         streams: Vec<SendableRecordBatchStream>,
         reservation: MemoryReservation,
     ) -> Self {
-        let streams = streams.into_iter().map(|s| s.fuse()).collect();
+        let streams: Vec<_> = streams.into_iter().map(|s| s.fuse()).collect();
+        let diagnostic = od::Life::inherited(od::Kind::Field);
+        let diagnostic_piece = od::Piece::new(&reservation, diagnostic.id());
+        diagnostic.update(|o| {
+            o.piece = diagnostic_piece.id();
+            o.a = streams.len() as u64;
+            o.flags = 4;
+        });
         Self {
+            diagnostic,
+            diagnostic_piece,
             sort,
             streams: FusedStreams(streams),
             reservation,
@@ -406,7 +533,10 @@ impl<T: CursorArray> FieldCursorStream<T> {
         // The incoming Vec and newly allocated Fuse Vec coexist. Do not
         // assume collect can reuse its differently sized source allocation.
         add(
-            add(size_of::<Self>(), add(size_of::<CopyAdmission>(), 512)?)?,
+            add(
+                size_of::<ChargedFieldCursorStream<T>>(),
+                add(CopyAdmission::charged_size(), 512)?,
+            )?,
             add(
                 mul(input_capacity, size_of::<SendableRecordBatchStream>())?,
                 mul(streams, size_of::<Fuse<SendableRecordBatchStream>>())?,
@@ -431,14 +561,25 @@ impl<T: CursorArray> FieldCursorStream<T> {
             fused.push(stream.fuse());
         }
         let metadata = add(
-            size_of::<Self>(),
+            size_of::<ChargedFieldCursorStream<T>>(),
             mul(
                 fused.capacity(),
                 size_of::<Fuse<SendableRecordBatchStream>>(),
             )?,
         )?;
         let resident = phase.resident(metadata)?;
+        let diagnostic = od::Life::inherited(od::Kind::Field);
+        let diagnostic_piece = od::Piece::new(&reservation, diagnostic.id());
+        diagnostic.update(|o| {
+            o.piece = diagnostic_piece.id();
+            o.a = fused.len() as u64;
+            o.bytes = metadata as u64;
+            o.flags = 4;
+        });
+        diagnostic.edge(resident.diagnostic_id(), 2, metadata);
         Ok(Self {
+            diagnostic,
+            diagnostic_piece,
             sort,
             streams: FusedStreams(fused),
             reservation,
@@ -448,16 +589,17 @@ impl<T: CursorArray> FieldCursorStream<T> {
     }
 
     fn convert_batch(&mut self, batch: &RecordBatch) -> Result<ArrayValues<T::Values>> {
+        let _transition = od::Transition::begin();
         let value = self.sort.expr.evaluate(batch)?;
         let array = value.into_array(batch.num_rows())?;
         let size_in_mem = array.get_buffer_memory_size();
         let array = array.as_any().downcast_ref::<T>().expect("field values");
         let array_reservation = self.reservation.new_empty();
         array_reservation.try_grow(size_in_mem)?;
-        Ok(ArrayValues::new(
-            self.sort.options,
-            array,
-            array_reservation,
+        Ok(od::scoped(
+            self.diagnostic.id(),
+            self.diagnostic_piece.id(),
+            || ArrayValues::new(self.sort.options, array, array_reservation),
         ))
     }
 }
@@ -636,5 +778,16 @@ mod tests {
 
         assert_eq!(total_rows, original_len);
         Ok(())
+    }
+}
+
+impl Drop for RowCursorStream {
+    fn drop(&mut self) {
+        self.diagnostic.begin_drop();
+    }
+}
+impl<T: CursorArray> Drop for FieldCursorStream<T> {
+    fn drop(&mut self) {
+        self.diagnostic.begin_drop();
     }
 }

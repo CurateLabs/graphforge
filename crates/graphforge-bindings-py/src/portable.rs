@@ -1,16 +1,15 @@
-//! Thin Python bindings for portable-v2 preview/export/verify/import/OCI (#744).
+//! Thin Python bindings for portable preview/export/verify/import/OCI (#744).
 
 use std::path::PathBuf;
 
 use graphforge_api::{
-    GfError, PortableSelection, PortableV2Error, PortableV2ExportRequest, PortableV2GraphSelector,
-    PortableV2ImportRequest, PortableV2Limits, PortableV2Mode, PortableV2OciAuthenticityPolicy,
-    PortableV2OciPublishFacadeRequest, PortableV2OciPullFacadeRequest,
-    PortableV2OciSignatureMaterial, PortableV2Output, PortableV2ParticipantId,
-    PortableV2PropertyProjection, PortableV2SelectionPreviewRequest, PortableV2SelectionProfile,
-    PortableV2SelectionRequest, PortableV2SubsetClosure, PortableV2SubsetPlan,
-    PortableV2SubsetPreviewRequest, PortableV2SubsetRequest, PortableVerifyRequest,
-    ResultSinkOptions, ResultSinkReceipt,
+    GfError, PortableError, PortableExportRequest, PortableGraphSelector, PortableImportRequest,
+    PortableLimits, PortableMode, PortableOciAuthenticityPolicy, PortableOciPublishFacadeRequest,
+    PortableOciPullFacadeRequest, PortableOciSignatureMaterial, PortableOutput,
+    PortableParticipantId, PortablePropertyProjection, PortableSelection,
+    PortableSelectionPreviewRequest, PortableSelectionProfile, PortableSelectionRequest,
+    PortableSubsetClosure, PortableSubsetPlan, PortableSubsetPreviewRequest, PortableSubsetRequest,
+    PortableVerifyRequest, ResultSinkOptions, ResultSinkReceipt,
 };
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
@@ -20,8 +19,8 @@ use crate::{
     params_from_dict, to_pyerr,
 };
 
-/// Map a sanitized portable-v2 failure without credentials, headers, or host paths.
-pub(crate) fn to_portable_pyerr(py: Python<'_>, error: PortableV2Error) -> PyErr {
+/// Map a sanitized portable failure without credentials, headers, or host paths.
+pub(crate) fn to_portable_pyerr(py: Python<'_>, error: PortableError) -> PyErr {
     let entry = error.entry.clone();
     let committed = error.committed_import.clone();
     let projected = graphforge_api::MultiOntologyError::from(error);
@@ -46,8 +45,8 @@ fn selection_from_checkpoint(checkpoint: Option<String>) -> PortableSelection {
     }
 }
 
-fn parse_limits(py: Python<'_>, value: Option<&Bound<'_, PyDict>>) -> PyResult<PortableV2Limits> {
-    let mut limits = PortableV2Limits::default();
+fn parse_limits(py: Python<'_>, value: Option<&Bound<'_, PyDict>>) -> PyResult<PortableLimits> {
+    let mut limits = PortableLimits::default();
     let Some(dict) = value else {
         return Ok(limits);
     };
@@ -72,6 +71,12 @@ fn parse_limits(py: Python<'_>, value: Option<&Bound<'_, PyDict>>) -> PyResult<P
     if let Some(item) = dict.get_item("max_tag_manifest_bytes")? {
         limits.max_tag_manifest_bytes = item.extract()?;
     }
+    if let Some(item) = dict.get_item("max_retained_control_bytes")? {
+        limits.max_retained_control_bytes = item.extract()?;
+    }
+    if let Some(item) = dict.get_item("max_parquet_walk_bytes")? {
+        limits.max_parquet_walk_bytes = item.extract()?;
+    }
     if let Some(item) = dict.get_item("max_path_bytes")? {
         limits.max_path_bytes = item.extract()?;
     }
@@ -86,13 +91,13 @@ fn parse_profile(
     py: Python<'_>,
     profile: &str,
     identities: Option<&Bound<'_, PyList>>,
-) -> PyResult<PortableV2SelectionProfile> {
+) -> PyResult<PortableSelectionProfile> {
     match profile {
-        "complete" => Ok(PortableV2SelectionProfile::Complete),
-        "ontology_only" => Ok(PortableV2SelectionProfile::OntologyOnly),
-        "data_components" => Ok(PortableV2SelectionProfile::DataComponents),
-        "artifacts" => Ok(PortableV2SelectionProfile::Artifacts),
-        "settings" => Ok(PortableV2SelectionProfile::Settings),
+        "complete" => Ok(PortableSelectionProfile::Complete),
+        "ontology_only" => Ok(PortableSelectionProfile::OntologyOnly),
+        "data_components" => Ok(PortableSelectionProfile::DataComponents),
+        "artifacts" => Ok(PortableSelectionProfile::Artifacts),
+        "settings" => Ok(PortableSelectionProfile::Settings),
         "custom" => {
             let identities = identities.ok_or_else(|| {
                 to_pyerr(
@@ -126,12 +131,12 @@ fn parse_profile(
                         )
                     })?
                     .extract::<String>()?;
-                parsed.push(PortableV2ParticipantId {
+                parsed.push(PortableParticipantId {
                     capability_id,
                     record_family_id,
                 });
             }
-            Ok(PortableV2SelectionProfile::Custom(parsed))
+            Ok(PortableSelectionProfile::Custom(parsed))
         }
         _ => Err(to_pyerr(
             py,
@@ -146,7 +151,7 @@ fn parse_profile(
 fn parse_subset(
     py: Python<'_>,
     value: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Option<PortableV2SubsetRequest>> {
+) -> PyResult<Option<PortableSubsetRequest>> {
     let Some(dict) = value else {
         return Ok(None);
     };
@@ -176,8 +181,8 @@ fn parse_subset(
         .as_deref()
         .unwrap_or("induced_edges")
     {
-        "induced_edges" => PortableV2SubsetClosure::InducedEdges,
-        "referential" => PortableV2SubsetClosure::Referential,
+        "induced_edges" => PortableSubsetClosure::InducedEdges,
+        "referential" => PortableSubsetClosure::Referential,
         _ => {
             return Err(to_pyerr(
                 py,
@@ -197,20 +202,20 @@ fn parse_subset(
             })
         })
         .unwrap_or_default();
-    Ok(Some(PortableV2SubsetRequest {
-        selector: PortableV2GraphSelector {
+    Ok(Some(PortableSubsetRequest {
+        selector: PortableGraphSelector {
             node_uuids,
             edge_uuids,
         },
         closure,
-        projection: PortableV2PropertyProjection { exclude },
+        projection: PortablePropertyProjection { exclude },
     }))
 }
 
-fn parse_output(py: Python<'_>, representation: &str) -> PyResult<PortableV2Output> {
+fn parse_output(py: Python<'_>, representation: &str) -> PyResult<PortableOutput> {
     match representation {
-        "expanded" => Ok(PortableV2Output::Expanded),
-        "bundle" => Ok(PortableV2Output::Bundle),
+        "expanded" => Ok(PortableOutput::Expanded),
+        "bundle" => Ok(PortableOutput::Bundle),
         _ => Err(to_pyerr(
             py,
             &GfError::Validation("representation must be expanded or bundle".into()),
@@ -218,10 +223,10 @@ fn parse_output(py: Python<'_>, representation: &str) -> PyResult<PortableV2Outp
     }
 }
 
-fn parse_mode(py: Python<'_>, mode: &str) -> PyResult<PortableV2Mode> {
+fn parse_mode(py: Python<'_>, mode: &str) -> PyResult<PortableMode> {
     match mode {
-        "structure_only" => Ok(PortableV2Mode::StructureOnly),
-        "full" => Ok(PortableV2Mode::Full),
+        "structure_only" => Ok(PortableMode::StructureOnly),
+        "full" => Ok(PortableMode::Full),
         _ => Err(to_pyerr(
             py,
             &GfError::Validation("mode must be structure_only or full".into()),
@@ -229,7 +234,7 @@ fn parse_mode(py: Python<'_>, mode: &str) -> PyResult<PortableV2Mode> {
     }
 }
 
-fn selection_plan_json(plan: &graphforge_api::PortableV2SelectionPlan) -> serde_json::Value {
+fn selection_plan_json(plan: &graphforge_api::PortableSelectionPlan) -> serde_json::Value {
     serde_json::json!({
         "source_generation_uuid": plan.source_generation_uuid,
         "source_manifest_sha256": plan.source_manifest_sha256,
@@ -245,7 +250,7 @@ fn selection_plan_json(plan: &graphforge_api::PortableV2SelectionPlan) -> serde_
     })
 }
 
-fn subset_plan_json(plan: &PortableV2SubsetPlan) -> serde_json::Value {
+fn subset_plan_json(plan: &PortableSubsetPlan) -> serde_json::Value {
     serde_json::json!({
         "selection": selection_plan_json(&plan.selection),
         "graph_subset": plan.graph_subset,
@@ -257,7 +262,7 @@ fn subset_plan_json(plan: &PortableV2SubsetPlan) -> serde_json::Value {
     })
 }
 
-fn export_result_json(result: &graphforge_api::PortableV2ExportFacadeResult) -> serde_json::Value {
+fn export_result_json(result: &graphforge_api::PortableExportFacadeResult) -> serde_json::Value {
     serde_json::json!({
         "contract": result.contract,
         "source": result.source,
@@ -281,7 +286,7 @@ fn verify_result_json(
         .map_err(|error| to_pyerr(py, &GfError::Execution(error.to_string())))
 }
 
-fn import_result_json(result: &graphforge_api::PortableV2ImportResult) -> serde_json::Value {
+fn import_result_json(result: &graphforge_api::PortableImportResult) -> serde_json::Value {
     serde_json::json!({
         "package_digest": result.package_digest,
         "transport_digest": result.transport_digest,
@@ -292,7 +297,7 @@ fn import_result_json(result: &graphforge_api::PortableV2ImportResult) -> serde_
 
 fn oci_reference_json(
     py: Python<'_>,
-    reference: &graphforge_api::PortableV2OciReference,
+    reference: &graphforge_api::PortableOciReference,
 ) -> PyResult<serde_json::Value> {
     serde_json::to_value(reference)
         .map_err(|error| to_pyerr(py, &GfError::Execution(error.to_string())))
@@ -300,7 +305,7 @@ fn oci_reference_json(
 
 fn oci_pull_json(
     py: Python<'_>,
-    receipt: &graphforge_api::PortableV2OciPullReceipt,
+    receipt: &graphforge_api::PortableOciPullReceipt,
 ) -> PyResult<serde_json::Value> {
     let reference = oci_reference_json(py, &receipt.reference)?;
     let report = verify_result_json(py, &receipt.report)?;
@@ -339,9 +344,9 @@ fn sink_receipt_dict(py: Python<'_>, receipt: &ResultSinkReceipt) -> PyResult<Py
 fn authenticity_policy(
     py: Python<'_>,
     value: Option<&Bound<'_, PyDict>>,
-) -> PyResult<PortableV2OciAuthenticityPolicy> {
+) -> PyResult<PortableOciAuthenticityPolicy> {
     let Some(dict) = value else {
-        return Ok(PortableV2OciAuthenticityPolicy::default());
+        return Ok(PortableOciAuthenticityPolicy::default());
     };
     let require_named_signer = dict
         .get_item("require_named_signer")?
@@ -352,7 +357,7 @@ fn authenticity_policy(
         .map(|item| item.extract::<Vec<u8>>())
         .transpose()?;
     let _ = py;
-    Ok(PortableV2OciAuthenticityPolicy {
+    Ok(PortableOciAuthenticityPolicy {
         require_named_signer,
         verification_key,
     })
@@ -361,7 +366,7 @@ fn authenticity_policy(
 fn signature_material(
     py: Python<'_>,
     value: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Option<PortableV2OciSignatureMaterial>> {
+) -> PyResult<Option<PortableOciSignatureMaterial>> {
     let Some(dict) = value else {
         return Ok(None);
     };
@@ -377,16 +382,16 @@ fn signature_material(
         .get_item("secret")?
         .ok_or_else(|| to_pyerr(py, &GfError::Validation("signature requires secret".into())))?
         .extract::<Vec<u8>>()?;
-    Ok(Some(PortableV2OciSignatureMaterial {
+    Ok(Some(PortableOciSignatureMaterial {
         signer,
         key_id,
         secret,
     }))
 }
 
-/// Preview one content-free portable-v2 component selection.
+/// Preview one content-free portable component selection.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn preview_portable_v2_selection(
+pub(crate) fn preview_portable_selection(
     forge: &GraphForge,
     py: Python<'_>,
     checkpoint: Option<String>,
@@ -396,22 +401,22 @@ pub(crate) fn preview_portable_v2_selection(
     limits: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
     let native = forge.ensure_open()?;
-    let request = PortableV2SelectionPreviewRequest {
+    let request = PortableSelectionPreviewRequest {
         selection: selection_from_checkpoint(checkpoint),
-        request: PortableV2SelectionRequest {
+        request: PortableSelectionRequest {
             profile: parse_profile(py, profile, identities)?,
             strict,
         },
         limits: parse_limits(py, limits)?,
     };
     let plan = py
-        .detach(|| native.preview_portable_v2_selection(&request))
+        .detach(|| native.preview_portable_selection(&request))
         .map_err(|error| to_portable_pyerr(py, error))?;
     json_value_to_python(py, &selection_plan_json(&plan))
 }
 
-/// Preview one content-free portable-v2 graph-data subset.
-pub(crate) fn preview_portable_v2_graph_subset(
+/// Preview one content-free portable graph-data subset.
+pub(crate) fn preview_portable_graph_subset(
     forge: &GraphForge,
     py: Python<'_>,
     checkpoint: Option<String>,
@@ -425,20 +430,20 @@ pub(crate) fn preview_portable_v2_graph_subset(
             &GfError::Validation("subset request is required".into()),
         )
     })?;
-    let request = PortableV2SubsetPreviewRequest {
+    let request = PortableSubsetPreviewRequest {
         selection: selection_from_checkpoint(checkpoint),
         request: subset,
         limits: parse_limits(py, limits)?,
     };
     let plan = py
-        .detach(|| native.preview_portable_v2_graph_subset(&request))
+        .detach(|| native.preview_portable_graph_subset(&request))
         .map_err(|error| to_portable_pyerr(py, error))?;
     json_value_to_python(py, &subset_plan_json(&plan))
 }
 
-/// Export one pinned generation as an expanded or bundled portable-v2 package.
+/// Export one pinned generation as an expanded or bundled portable package.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn export_portable_v2(
+pub(crate) fn export_portable(
     forge: &GraphForge,
     py: Python<'_>,
     output_path: &str,
@@ -452,7 +457,7 @@ pub(crate) fn export_portable_v2(
     progress: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<Py<PyAny>> {
     let native = forge.ensure_open()?;
-    let request = PortableV2ExportRequest {
+    let request = PortableExportRequest {
         selection: selection_from_checkpoint(checkpoint),
         output_path: PathBuf::from(output_path),
         representation: parse_output(py, representation)?,
@@ -476,7 +481,7 @@ pub(crate) fn export_portable_v2(
     let progress_error = std::sync::Mutex::new(None::<PyErr>);
     let result = py
         .detach(|| {
-            native.export_portable_v2(&request, cancelled, |event| {
+            native.export_portable(&request, cancelled, |event| {
                 if let Some(callback) = progress_cb.as_ref() {
                     let callback_result = Python::attach(|py| {
                         let payload = PyDict::new(py);
@@ -508,8 +513,8 @@ pub(crate) fn export_portable_v2(
     json_value_to_python(py, &export_result_json(&result))
 }
 
-/// Verify portable-v2 content without opening a project.
-pub(crate) fn verify_portable_v2(
+/// Verify portable content without opening a project.
+pub(crate) fn verify_portable(
     py: Python<'_>,
     input: &str,
     mode: &str,
@@ -523,13 +528,13 @@ pub(crate) fn verify_portable_v2(
     };
     let cancelled = cancellation.map(|token| token.inner.flag());
     let report = py
-        .detach(|| graphforge_api::verify_portable_v2(&request, cancelled))
+        .detach(|| graphforge_api::verify_portable(&request, cancelled))
         .map_err(|error| to_portable_pyerr(py, error))?;
     json_value_to_python(py, &verify_result_json(py, &report)?)
 }
 
-/// Verify and atomically import a complete portable-v2 package.
-pub(crate) fn import_portable_v2(
+/// Verify and atomically import a complete portable package.
+pub(crate) fn import_portable(
     py: Python<'_>,
     project_root: &str,
     input: &str,
@@ -537,7 +542,7 @@ pub(crate) fn import_portable_v2(
     limits: Option<&Bound<'_, PyDict>>,
     cancellation: Option<&PyCancellationToken>,
 ) -> PyResult<Py<PyAny>> {
-    let request = PortableV2ImportRequest {
+    let request = PortableImportRequest {
         input: PathBuf::from(input),
         operation_id: canonical_operation_id(operation_id).map_err(|error| to_pyerr(py, &error))?,
         limits: parse_limits(py, limits)?,
@@ -545,14 +550,14 @@ pub(crate) fn import_portable_v2(
     let cancelled = cancellation.map(|token| token.inner.flag());
     let root = PathBuf::from(project_root);
     let result = py
-        .detach(|| graphforge_api::GraphForge::import_portable_v2(&root, &request, cancelled))
+        .detach(|| graphforge_api::GraphForge::import_portable(&root, &request, cancelled))
         .map_err(|error| to_portable_pyerr(py, error))?;
     json_value_to_python(py, &import_result_json(&result))
 }
 
-/// Publish a verified portable-v2 package to an OCI registry.
+/// Publish a verified portable package to an OCI registry.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn publish_portable_v2_oci(
+pub(crate) fn publish_portable_oci(
     py: Python<'_>,
     package_path: &str,
     registry: &str,
@@ -565,7 +570,7 @@ pub(crate) fn publish_portable_v2_oci(
     credential: Option<String>,
     cancellation: Option<&PyCancellationToken>,
 ) -> PyResult<Py<PyAny>> {
-    let request = PortableV2OciPublishFacadeRequest {
+    let request = PortableOciPublishFacadeRequest {
         package_path: PathBuf::from(package_path),
         registry: registry.to_owned(),
         repository: repository.to_owned(),
@@ -578,14 +583,14 @@ pub(crate) fn publish_portable_v2_oci(
     };
     let cancelled = cancellation.map(|token| token.inner.flag());
     let reference = py
-        .detach(|| graphforge_api::publish_portable_v2_oci(&request, cancelled))
+        .detach(|| graphforge_api::publish_portable_oci(&request, cancelled))
         .map_err(|error| to_portable_pyerr(py, error))?;
     json_value_to_python(py, &oci_reference_json(py, &reference)?)
 }
 
-/// Pull and verify a portable-v2 package from an OCI registry.
+/// Pull and verify a portable package from an OCI registry.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn pull_portable_v2_oci(
+pub(crate) fn pull_portable_oci(
     py: Python<'_>,
     registry: &str,
     repository: &str,
@@ -598,7 +603,7 @@ pub(crate) fn pull_portable_v2_oci(
     credential: Option<String>,
     cancellation: Option<&PyCancellationToken>,
 ) -> PyResult<Py<PyAny>> {
-    let request = PortableV2OciPullFacadeRequest {
+    let request = PortableOciPullFacadeRequest {
         registry: registry.to_owned(),
         repository: repository.to_owned(),
         reference: reference.to_owned(),
@@ -611,7 +616,7 @@ pub(crate) fn pull_portable_v2_oci(
     };
     let cancelled = cancellation.map(|token| token.inner.flag());
     let receipt = py
-        .detach(|| graphforge_api::pull_portable_v2_oci(&request, cancelled))
+        .detach(|| graphforge_api::pull_portable_oci(&request, cancelled))
         .map_err(|error| to_portable_pyerr(py, error))?;
     json_value_to_python(py, &oci_pull_json(py, &receipt)?)
 }

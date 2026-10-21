@@ -24,7 +24,7 @@ Copying only graph bytes would lose Version identity and research provenance.
 
 ## Decision
 
-Use the existing portable-v2 manifest and authenticated versioned components.
+Use the existing portable manifest and authenticated versioned components.
 Register a research component containing native immutable content commitments
 and an explicit bounded closure of required payloads. Complete materialization
 preserves the original Version record and identity commitment. Every subset or

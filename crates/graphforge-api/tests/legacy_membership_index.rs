@@ -14,11 +14,11 @@ use std::sync::Arc;
 
 use arrow::array::{FixedSizeBinaryArray, RecordBatch, StringArray};
 use graphforge_api::{
-    GraphForge, OperationId, PortableSelection, PortableV2ExportRequest, PortableV2ImportRequest,
-    PortableV2Limits, PortableV2Output, PortableV2SelectionProfile, PortableVerifyRequest,
-    bulk_edge_input_schema, bulk_node_input_schema, verify_portable_v2,
+    GraphForge, OperationId, PortableExportRequest, PortableImportRequest, PortableLimits,
+    PortableOutput, PortableSelection, PortableSelectionProfile, PortableVerifyRequest,
+    bulk_edge_input_schema, bulk_node_input_schema, verify_portable,
 };
-use graphforge_core::portable::PortableV2Mode;
+use graphforge_core::portable::PortableMode;
 use graphforge_ir::IrLiteral;
 use uuid::Uuid;
 
@@ -238,14 +238,14 @@ fn a_legacy_project_opens_appends_refuses_and_round_trips() {
     );
     let bundle = directory.path().join("legacy.gfpb");
     let exported = graph
-        .export_portable_v2(
-            &PortableV2ExportRequest {
+        .export_portable(
+            &PortableExportRequest {
                 selection: PortableSelection::Current,
                 output_path: bundle.clone(),
-                representation: PortableV2Output::Bundle,
-                profile: PortableV2SelectionProfile::Complete,
+                representation: PortableOutput::Bundle,
+                profile: PortableSelectionProfile::Complete,
                 subset: None,
-                limits: PortableV2Limits::default(),
+                limits: PortableLimits::default(),
             },
             None,
             |_| {},
@@ -256,23 +256,23 @@ fn a_legacy_project_opens_appends_refuses_and_round_trips() {
         bundle_names_membership_index(&bundle),
         "a legacy bundle must name its index files"
     );
-    verify_portable_v2(
+    verify_portable(
         &PortableVerifyRequest {
             input: bundle.clone(),
-            mode: PortableV2Mode::Full,
-            limits: PortableV2Limits::default(),
+            mode: PortableMode::Full,
+            limits: PortableLimits::default(),
         },
         None,
     )
     .unwrap();
     drop(graph);
     let target = directory.path().join("imported");
-    GraphForge::import_portable_v2(
+    GraphForge::import_portable(
         &target,
-        &PortableV2ImportRequest {
+        &PortableImportRequest {
             input: bundle,
             operation_id: operation(9),
-            limits: PortableV2Limits::default(),
+            limits: PortableLimits::default(),
         },
         None,
     )
@@ -356,14 +356,14 @@ fn a_new_project_carries_no_membership_index_and_round_trips() {
 
     let bundle = directory.path().join("new.gfpb");
     graph
-        .export_portable_v2(
-            &PortableV2ExportRequest {
+        .export_portable(
+            &PortableExportRequest {
                 selection: PortableSelection::Current,
                 output_path: bundle.clone(),
-                representation: PortableV2Output::Bundle,
-                profile: PortableV2SelectionProfile::Complete,
+                representation: PortableOutput::Bundle,
+                profile: PortableSelectionProfile::Complete,
                 subset: None,
-                limits: PortableV2Limits::default(),
+                limits: PortableLimits::default(),
             },
             None,
             |_| {},
@@ -373,23 +373,23 @@ fn a_new_project_carries_no_membership_index_and_round_trips() {
         !bundle_names_membership_index(&bundle),
         "the bundle must not carry the membership index"
     );
-    verify_portable_v2(
+    verify_portable(
         &PortableVerifyRequest {
             input: bundle.clone(),
-            mode: PortableV2Mode::Full,
-            limits: PortableV2Limits::default(),
+            mode: PortableMode::Full,
+            limits: PortableLimits::default(),
         },
         None,
     )
     .unwrap();
     drop(graph);
     let target = directory.path().join("imported");
-    GraphForge::import_portable_v2(
+    GraphForge::import_portable(
         &target,
-        &PortableV2ImportRequest {
+        &PortableImportRequest {
             input: bundle,
             operation_id: operation(50),
-            limits: PortableV2Limits::default(),
+            limits: PortableLimits::default(),
         },
         None,
     )

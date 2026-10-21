@@ -136,6 +136,7 @@ pub(super) fn response(status: u16, content_range: Option<&str>, body: &[u8]) ->
         location: None,
         content_range: content_range.map(str::to_owned),
         etag: Some("\"fixture-1\"".to_owned()),
+        retry_after: None,
         body: Box::new(std::io::Cursor::new(body.to_vec())),
     }
 }
@@ -145,7 +146,7 @@ pub(super) fn object(bytes: &[u8]) -> ObjectDescriptor {
     ObjectDescriptor {
         digest: graphforge_discovery::Sha256Digest(hash_reader(&mut cursor).unwrap()),
         length: bytes.len() as u64,
-        media_type: graphforge_discovery::PORTABLE_V2_MEDIA_TYPE.into(),
+        media_type: graphforge_discovery::PORTABLE_MEDIA_TYPE.into(),
         locations: vec!["https://objects.example/project.gfpb".into()],
     }
 }
@@ -472,7 +473,7 @@ fn research_ref_without_lineage_stops_before_project_download() {
         "requirements":[{"capability":"portable-v2","major":1}],"capabilities":[],
         "objects":[{
             "digest":format!("sha256:{}", "c".repeat(64)),"length":1,
-            "media_type":graphforge_discovery::PORTABLE_V2_MEDIA_TYPE,
+            "media_type":graphforge_discovery::PORTABLE_MEDIA_TYPE,
             "locations":["https://objects.example/project.gfpb"]
         }]
     }))
@@ -529,7 +530,7 @@ fn unsupported_future_manifest_stops_before_object_access() {
         "requirements":[],"capabilities":[],
         "objects":[{
             "digest":format!("sha256:{}", "c".repeat(64)),"length":1,
-            "media_type":graphforge_discovery::PORTABLE_V2_MEDIA_TYPE,
+            "media_type":graphforge_discovery::PORTABLE_MEDIA_TYPE,
             "locations":["https://objects.example/project.gfpb"]
         }]
     }))
@@ -594,7 +595,7 @@ pub(super) fn clone_documents(
     }))
     .unwrap();
     let mut objects = vec![
-        serde_json::json!({"digest":object_digest,"length":bundle.len(),"media_type":graphforge_discovery::PORTABLE_V2_MEDIA_TYPE,"locations":["https://objects.example/project.gfpb"]}),
+        serde_json::json!({"digest":object_digest,"length":bundle.len(),"media_type":graphforge_discovery::PORTABLE_MEDIA_TYPE,"locations":["https://objects.example/project.gfpb"]}),
     ];
     objects.extend(extra.iter().cloned());
     objects.sort_by(|left, right| left["digest"].as_str().cmp(&right["digest"].as_str()));
@@ -609,28 +610,43 @@ pub(super) fn clone_documents(
     (refs, manifest)
 }
 
-/// A real complete portable-v2 bundle of an empty project and its
+/// A real complete portable bundle of an empty project and its
 /// semantic package digest.
 pub(super) fn real_bundle() -> (Vec<u8>, String) {
+    bundle_of_nodes(0)
+}
+
+/// A real complete portable bundle of a project holding `nodes` nodes of
+/// about 200 payload bytes each, and its semantic package digest.
+pub(super) fn bundle_of_nodes(nodes: u32) -> (Vec<u8>, String) {
     let root = tempfile::tempdir().unwrap();
     let source = root.path().join("source");
     std::fs::create_dir(&source).unwrap();
-    GraphForge::new(source.to_str()).unwrap();
+    let graph = GraphForge::new(source.to_str()).unwrap();
+    if nodes > 0 {
+        graph
+            .execute(&format!(
+                "UNWIND range(1, {nodes}) AS i CREATE (:Doc {{id: i, body: '{}'}})",
+                "x".repeat(200)
+            ))
+            .unwrap();
+    }
+    drop(graph);
     let generation = graphforge_storage::resolve_project_generation(&source).unwrap();
-    let limits = PortableV2Limits::default();
-    let plan = graphforge_storage::plan_complete_portable_v2(&generation, limits).unwrap();
+    let limits = PortableLimits::default();
+    let plan = graphforge_storage::plan_complete_portable(&generation, limits).unwrap();
     let bundle_path = root.path().join("complete.gfpb");
-    graphforge_storage::export_complete_portable_v2(
+    graphforge_storage::export_complete_portable(
         &plan,
         &bundle_path,
-        graphforge_storage::PortableV2Output::Bundle,
+        graphforge_storage::PortableOutput::Bundle,
         limits,
         &AtomicBool::new(false),
         |_| {},
     )
     .unwrap();
     let report =
-        graphforge_storage::verify_portable_v2(&bundle_path, PortableV2Mode::Full, limits, None)
+        graphforge_storage::verify_portable(&bundle_path, PortableMode::Full, limits, None)
             .unwrap();
     (std::fs::read(&bundle_path).unwrap(), report.package_digest)
 }
@@ -716,6 +732,16 @@ fn clone_succeeds_against_the_checked_in_hub_fixture() {
     let result: serde_json::Value = serde_json::from_slice(&output).unwrap();
     assert_eq!(result["contract"], "graphforge-hub-clone/1");
     assert_eq!(result["package_digest"], manifest.package.package_digest.0);
+    // Without lineage the default ref selects the Project package itself.
+    assert!(manifest.lineage.is_none());
+    for field in [
+        "resolved_ref",
+        "research_branch_uuid",
+        "research_version_uuid",
+        "research_version_identity",
+    ] {
+        assert!(result.get(field).is_none(), "{field}: {result}");
+    }
     let cloned = GraphForge::new(destination.to_str()).expect("clone reopens");
     let metadata = cloned.research_project_metadata().unwrap();
     assert_eq!(metadata.title.as_deref(), Some("OpenAlex"));
@@ -890,6 +916,11 @@ fn hub_failure_codes_map_through_a_finite_matrix() {
         ("hub.limit_exceeded", Failure::ResourceLimit),
         ("hub.unsafe_location", Failure::Network),
         ("hub.network", Failure::Network),
+        ("hub.not_found", Failure::InvalidInput),
+        ("hub.access_denied", Failure::InvalidInput),
+        ("hub.rate_limited", Failure::Network),
+        ("hub.unavailable", Failure::Network),
+        ("hub.unexpected_status", Failure::Network),
         ("hub.package.io", Failure::Storage),
     ] {
         assert_eq!(classify_failure(&validation(code, "redacted")), expected);
@@ -909,13 +940,13 @@ fn both_identity_forms_import_and_reopen_the_same_real_project() {
     std::fs::create_dir(&source).unwrap();
     GraphForge::new(source.to_str()).unwrap();
     let generation = graphforge_storage::resolve_project_generation(&source).unwrap();
-    let limits = PortableV2Limits::default();
-    let plan = graphforge_storage::plan_complete_portable_v2(&generation, limits).unwrap();
+    let limits = PortableLimits::default();
+    let plan = graphforge_storage::plan_complete_portable(&generation, limits).unwrap();
     let bundle_path = root.path().join("complete.gfpb");
-    graphforge_storage::export_complete_portable_v2(
+    graphforge_storage::export_complete_portable(
         &plan,
         &bundle_path,
-        graphforge_storage::PortableV2Output::Bundle,
+        graphforge_storage::PortableOutput::Bundle,
         limits,
         &AtomicBool::new(false),
         |_| {},
@@ -923,7 +954,7 @@ fn both_identity_forms_import_and_reopen_the_same_real_project() {
     .unwrap();
     let bundle = std::fs::read(&bundle_path).unwrap();
     let report =
-        graphforge_storage::verify_portable_v2(&bundle_path, PortableV2Mode::Full, limits, None)
+        graphforge_storage::verify_portable(&bundle_path, PortableMode::Full, limits, None)
             .unwrap();
 
     let mut fail_open_results = Vec::new();
@@ -1133,13 +1164,13 @@ fn measure_clone_wall_time() {
     std::fs::create_dir(&source).unwrap();
     GraphForge::new(source.to_str()).unwrap();
     let generation = graphforge_storage::resolve_project_generation(&source).unwrap();
-    let limits = PortableV2Limits::default();
-    let plan = graphforge_storage::plan_complete_portable_v2(&generation, limits).unwrap();
+    let limits = PortableLimits::default();
+    let plan = graphforge_storage::plan_complete_portable(&generation, limits).unwrap();
     let bundle_path = root.path().join("complete.gfpb");
-    graphforge_storage::export_complete_portable_v2(
+    graphforge_storage::export_complete_portable(
         &plan,
         &bundle_path,
-        graphforge_storage::PortableV2Output::Bundle,
+        graphforge_storage::PortableOutput::Bundle,
         limits,
         &AtomicBool::new(false),
         |_| {},
@@ -1147,7 +1178,7 @@ fn measure_clone_wall_time() {
     .unwrap();
     let bundle = std::fs::read(&bundle_path).unwrap();
     let report =
-        graphforge_storage::verify_portable_v2(&bundle_path, PortableV2Mode::Full, limits, None)
+        graphforge_storage::verify_portable(&bundle_path, PortableMode::Full, limits, None)
             .unwrap();
 
     let runtime = TelemetryRuntime::default();

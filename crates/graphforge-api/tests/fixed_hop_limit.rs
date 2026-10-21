@@ -12,9 +12,9 @@ use std::time::{Duration, Instant};
 use arrow::array::{Array, FixedSizeBinaryArray, Int64Array, StringArray, UInt64Array};
 use arrow::record_batch::RecordBatch;
 use graphforge_api::{
-    ExecutionResourcePolicy, GraphForge, GraphForgeOptions, OperationId, PortableSelection,
-    PortableV2ExportRequest, PortableV2ImportRequest, PortableVerifyRequest, ResourcePolicyMode,
-    ResultSinkFormat, ResultSinkOptions, verify_portable_v2,
+    ExecutionResourcePolicy, GraphForge, GraphForgeOptions, OperationId, PortableExportRequest,
+    PortableImportRequest, PortableSelection, PortableVerifyRequest, ResourcePolicyMode,
+    ResultSinkFormat, ResultSinkOptions, verify_portable,
 };
 use graphforge_core::OntologyMode;
 use graphforge_core::uuid::{Uuid, new_v7};
@@ -22,8 +22,7 @@ use graphforge_exec::demand::{self, DemandSnapshot};
 use graphforge_ir::IrLiteral;
 use graphforge_storage::adjacency::build_adjacency_index;
 use graphforge_storage::{
-    GraphWriter, PortableV2Limits, PortableV2Mode, PortableV2Output, PortableV2SelectionProfile,
-    io_stats,
+    GraphWriter, PortableLimits, PortableMode, PortableOutput, PortableSelectionProfile, io_stats,
 };
 use tempfile::TempDir;
 
@@ -1353,7 +1352,7 @@ fn ordinary_streaming_sink_exposes_deterministic_query_evidence() {
 }
 
 #[test]
-fn portable_v2_clean_import_preserves_projected_ordered_hops_and_io() {
+fn portable_clean_import_preserves_projected_ordered_hops_and_io() {
     let _guard = io_guard();
     let root = TempDir::new().unwrap();
     let source_path = root.path().join("source");
@@ -1362,15 +1361,15 @@ fn portable_v2_clean_import_preserves_projected_ordered_hops_and_io() {
     let source_results =
         [ORDERED_ONE_HOP, ORDERED_TWO_HOP].map(|query| measured_identity_query(&source, query).0);
 
-    let limits = PortableV2Limits::default();
+    let limits = PortableLimits::default();
     let package = root.path().join("project.gfpb");
     let exported = source
-        .export_portable_v2(
-            &PortableV2ExportRequest {
+        .export_portable(
+            &PortableExportRequest {
                 selection: PortableSelection::Current,
                 output_path: package.clone(),
-                representation: PortableV2Output::Bundle,
-                profile: PortableV2SelectionProfile::Complete,
+                representation: PortableOutput::Bundle,
+                profile: PortableSelectionProfile::Complete,
                 subset: None,
                 limits,
             },
@@ -1379,10 +1378,10 @@ fn portable_v2_clean_import_preserves_projected_ordered_hops_and_io() {
         )
         .unwrap();
     drop(source);
-    let verified = verify_portable_v2(
+    let verified = verify_portable(
         &PortableVerifyRequest {
             input: package.clone(),
-            mode: PortableV2Mode::Full,
+            mode: PortableMode::Full,
             limits,
         },
         None,
@@ -1391,9 +1390,9 @@ fn portable_v2_clean_import_preserves_projected_ordered_hops_and_io() {
     assert_eq!(verified.package_digest, exported.package_digest);
 
     let imported_path = root.path().join("imported");
-    GraphForge::import_portable_v2(
+    GraphForge::import_portable(
         &imported_path,
-        &PortableV2ImportRequest {
+        &PortableImportRequest {
             input: package,
             operation_id: OperationId(Uuid::from_u128(966)),
             limits,

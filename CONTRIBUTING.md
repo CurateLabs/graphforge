@@ -47,7 +47,9 @@ make check   # Python format/lint/type-check/security, workflow lint, repo-check
 ## Getting help
 
 - **Questions:** [GitHub Discussions](https://github.com/CurateLabs/graphforge/discussions)
-- **Bugs:** [GitHub Issues](https://github.com/CurateLabs/graphforge/issues)
+- **Bugs:** [GitHub Issues](https://github.com/CurateLabs/graphforge/issues); see
+  [Get help and report a problem](docs/community/support.md) for the minimal
+  reproduction checklist and how maintainers triage
 - **Security:** report privately via [SECURITY.md](.github/SECURITY.md)
 - **Conduct:** [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)
 

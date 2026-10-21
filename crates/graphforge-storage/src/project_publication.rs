@@ -146,7 +146,7 @@ enum ParticipantPayloads<'a> {
         &'a [ProjectFileParticipant],
         Option<&'a AtomicBool>,
         usize,
-        Option<&'a BTreeMap<PathBuf, &'a crate::project_portable_v2::MaterializedCapture>>,
+        Option<&'a BTreeMap<PathBuf, &'a crate::project_portable::MaterializedCapture>>,
     ),
 }
 
@@ -855,7 +855,7 @@ pub(crate) fn stage_project_generation_from_files_admitted(
     copy_buffer_bytes: usize,
     allocation: Option<&crate::StorageAllocationOperation>,
     installed_objects: Option<&crate::GraphObjectPublicationLease>,
-    captures: Option<&BTreeMap<PathBuf, &crate::project_portable_v2::MaterializedCapture>>,
+    captures: Option<&BTreeMap<PathBuf, &crate::project_portable::MaterializedCapture>>,
 ) -> Result<ProjectStageOutcome, GfError> {
     let result = (|| {
         validate_request(request)?;

@@ -9,9 +9,9 @@ use std::process::Command;
 use std::time::Duration;
 
 use graphforge_api::{
-    GfError, GraphForge, OperationId, PortableSelection, PortableV2ExportRequest,
-    PortableV2ImportRequest, PortableV2Limits, PortableV2Mode, PortableV2Output,
-    PortableV2SelectionProfile, PortableVerifyRequest, PropValue, verify_portable_v2,
+    GfError, GraphForge, OperationId, PortableExportRequest, PortableImportRequest, PortableLimits,
+    PortableMode, PortableOutput, PortableSelection, PortableSelectionProfile,
+    PortableVerifyRequest, PropValue, verify_portable,
 };
 use graphforge_core::uuid::Uuid;
 use serde::Serialize;
@@ -249,18 +249,18 @@ fn qualify(config: &Config) -> Evidence {
     }
     drop(reopened);
     phase_peak_rss.durable_reopen = linux_peak_rss_bytes();
-    let limits = PortableV2Limits::default();
+    let limits = PortableLimits::default();
     let source = match GraphForge::new(project.to_str()) {
         Ok(graph) => graph,
         Err(error) => return gf_failure(config, &filesystem, memory, capacity, &error),
     };
     if source
-        .export_portable_v2(
-            &PortableV2ExportRequest {
+        .export_portable(
+            &PortableExportRequest {
                 selection: PortableSelection::Current,
                 output_path: package.clone(),
-                representation: PortableV2Output::Bundle,
-                profile: PortableV2SelectionProfile::Complete,
+                representation: PortableOutput::Bundle,
+                profile: PortableSelectionProfile::Complete,
                 subset: None,
                 limits,
             },
@@ -279,10 +279,10 @@ fn qualify(config: &Config) -> Evidence {
         );
     }
     drop(source);
-    if verify_portable_v2(
+    if verify_portable(
         &PortableVerifyRequest {
             input: package.clone(),
-            mode: PortableV2Mode::Full,
+            mode: PortableMode::Full,
             limits,
         },
         None,
@@ -299,9 +299,9 @@ fn qualify(config: &Config) -> Evidence {
         );
     }
     phase_peak_rss.portable_verify = linux_peak_rss_bytes();
-    if GraphForge::import_portable_v2(
+    if GraphForge::import_portable(
         &imported,
-        &PortableV2ImportRequest {
+        &PortableImportRequest {
             input: package.clone(),
             operation_id: OperationId(Uuid::from_u128(0x882)),
             limits,

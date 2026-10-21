@@ -15,11 +15,11 @@ use arrow::{
 };
 use graphforge_api::{
     CONSTRUCTION_EDGE_SCHEMA, CONSTRUCTION_NODE_SCHEMA, GraphConstructionBudgets, GraphForge,
-    OperationId, PortableSelection, PortableV2ExportRequest, PortableV2ImportRequest,
-    PortableVerifyRequest, verify_portable_v2,
+    OperationId, PortableExportRequest, PortableImportRequest, PortableSelection,
+    PortableVerifyRequest, verify_portable,
 };
 use graphforge_core::portable::{
-    PortableV2Limits, PortableV2Mode, PortableV2Output, PortableV2SelectionProfile,
+    PortableLimits, PortableMode, PortableOutput, PortableSelectionProfile,
 };
 use parquet::{
     arrow::{ArrowWriter, arrow_reader::ParquetRecordBatchReaderBuilder},
@@ -465,15 +465,15 @@ fn round_trip_checked(
 ) -> String {
     let graph = GraphForge::new(source.to_str()).unwrap();
     let fingerprint = verify(&graph);
-    let limits = PortableV2Limits::default();
+    let limits = PortableLimits::default();
     let package = root.join("graph.gfpb");
     let exported = graph
-        .export_portable_v2(
-            &PortableV2ExportRequest {
+        .export_portable(
+            &PortableExportRequest {
                 selection: PortableSelection::Current,
                 output_path: package.clone(),
-                representation: PortableV2Output::Bundle,
-                profile: PortableV2SelectionProfile::Complete,
+                representation: PortableOutput::Bundle,
+                profile: PortableSelectionProfile::Complete,
                 subset: None,
                 limits,
             },
@@ -481,10 +481,10 @@ fn round_trip_checked(
             |_| {},
         )
         .unwrap();
-    let verified = verify_portable_v2(
+    let verified = verify_portable(
         &PortableVerifyRequest {
             input: package.clone(),
-            mode: PortableV2Mode::Full,
+            mode: PortableMode::Full,
             limits,
         },
         None,
@@ -493,9 +493,9 @@ fn round_trip_checked(
     assert_eq!(exported.package_digest, verified.package_digest);
     drop(graph);
     let imported_path = root.join("imported");
-    let imported = GraphForge::import_portable_v2(
+    let imported = GraphForge::import_portable(
         &imported_path,
-        &PortableV2ImportRequest {
+        &PortableImportRequest {
             input: package,
             operation_id: OperationId(Uuid::from_u128(1196)),
             limits,
@@ -4904,14 +4904,14 @@ fn same_name_adoption_publishes_complete_constructed_authority() {
         let graph = GraphForge::new(source.to_str()).unwrap();
         verify_promoted_graph(&graph, &nodes, &edges);
         let package = root.path().join("promotion.gfpb");
-        let limits = PortableV2Limits::default();
+        let limits = PortableLimits::default();
         let exported = graph
-            .export_portable_v2(
-                &PortableV2ExportRequest {
+            .export_portable(
+                &PortableExportRequest {
                     selection: PortableSelection::Current,
                     output_path: package.clone(),
-                    representation: PortableV2Output::Bundle,
-                    profile: PortableV2SelectionProfile::Complete,
+                    representation: PortableOutput::Bundle,
+                    profile: PortableSelectionProfile::Complete,
                     subset: None,
                     limits,
                 },
@@ -4919,10 +4919,10 @@ fn same_name_adoption_publishes_complete_constructed_authority() {
                 |_| {},
             )
             .unwrap();
-        let verified = verify_portable_v2(
+        let verified = verify_portable(
             &PortableVerifyRequest {
                 input: package.clone(),
-                mode: PortableV2Mode::Full,
+                mode: PortableMode::Full,
                 limits,
             },
             None,
@@ -4930,9 +4930,9 @@ fn same_name_adoption_publishes_complete_constructed_authority() {
         .unwrap();
         assert_eq!(exported.package_digest, verified.package_digest);
         let imported = root.path().join("imported");
-        GraphForge::import_portable_v2(
+        GraphForge::import_portable(
             &imported,
-            &PortableV2ImportRequest {
+            &PortableImportRequest {
                 input: package,
                 operation_id: OperationId(Uuid::from_u128(1229002)),
                 limits,

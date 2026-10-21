@@ -1,7 +1,6 @@
 //! Local portable package byte operations; no transport or credentials.
 use graphforge_core::portable::{
-    PortableV2Error, PortableV2ErrorCode, PortableV2Limits, PortableV2Report,
-    PortableV2Representation,
+    PortableError, PortableErrorCode, PortableLimits, PortableReport, PortableRepresentation,
 };
 #[cfg(test)]
 use std::fs;
@@ -16,16 +15,16 @@ use std::path::{Path, PathBuf};
 /// record and, for an entry over the ustar size field, a `size` record), plus
 /// its header and padding.
 /// The verifier requires exactly two terminal blocks and rejects trailing bytes.
-pub fn portable_bundle_byte_limit(limits: PortableV2Limits) -> Result<u64, PortableV2Error> {
+pub fn portable_bundle_byte_limit(limits: PortableLimits) -> Result<u64, PortableError> {
     let overflow = || {
-        PortableV2Error::new(
-            PortableV2ErrorCode::LimitExceeded,
+        PortableError::new(
+            PortableErrorCode::LimitExceeded,
             "bundle byte limit overflow",
         )
     };
     let pax_payload = u64::try_from(limits.max_path_bytes)
         .map_err(|_| overflow())?
-        .checked_add(crate::project_portable_v2::pax::PAX_RECORD_OVERHEAD_BYTES as u64)
+        .checked_add(crate::project_portable::pax::PAX_RECORD_OVERHEAD_BYTES as u64)
         .ok_or_else(overflow)?;
     let regular_framing = 512_u64 + 511;
     let pax_framing = 512_u64 + 511;
@@ -38,31 +37,17 @@ pub fn portable_bundle_byte_limit(limits: PortableV2Limits) -> Result<u64, Porta
         .ok_or_else(overflow)
 }
 
-/// Read a verified bundle with a finite byte bound, including concurrent growth.
-pub fn read_package_bytes(
-    path: &Path,
-    report: &PortableV2Report,
-    max_bytes: u64,
-) -> Result<Vec<u8>, PortableV2Error> {
-    if report.representation != PortableV2Representation::Bundle {
-        return Err(PortableV2Error::new(
-            PortableV2ErrorCode::Incompatible,
-            "OCI publish currently requires a portable-v2 bundle representation",
+/// Open a verified bundle for streaming; the caller bounds how much it reads,
+/// including concurrent growth.
+pub fn open_package_file(path: &Path, report: &PortableReport) -> Result<File, PortableError> {
+    if report.representation != PortableRepresentation::Bundle {
+        return Err(PortableError::new(
+            PortableErrorCode::Incompatible,
+            "OCI publish currently requires a portable bundle representation",
         ));
     }
-    let file = File::open(path)
-        .map_err(|_| PortableV2Error::new(PortableV2ErrorCode::Io, "failed to open package"))?;
-    let mut bytes = Vec::new();
-    file.take(max_bytes.saturating_add(1))
-        .read_to_end(&mut bytes)
-        .map_err(|_| PortableV2Error::new(PortableV2ErrorCode::Io, "failed to read package"))?;
-    if bytes.len() as u64 > max_bytes {
-        return Err(PortableV2Error::new(
-            PortableV2ErrorCode::LimitExceeded,
-            "package exceeds byte limit",
-        ));
-    }
-    Ok(bytes)
+    File::open(path)
+        .map_err(|_| PortableError::new(PortableErrorCode::Io, "failed to open package"))
 }
 
 /// Owns only the exclusively created local staging file. Dropping removes it.
@@ -80,12 +65,12 @@ impl PortablePackageStage {
         path: &Path,
         source: &mut impl Read,
         max_bytes: u64,
-    ) -> Result<Self, PortableV2Error> {
+    ) -> Result<Self, PortableError> {
         let file = File::create_new(path).map_err(|_| {
-            PortableV2Error::new(PortableV2ErrorCode::Io, "failed to create staging file")
+            PortableError::new(PortableErrorCode::Io, "failed to create staging file")
         })?;
         let identity = graphforge_filesystem::file_identity(&file).map_err(|_| {
-            PortableV2Error::new(PortableV2ErrorCode::Io, "failed to identify staging file")
+            PortableError::new(PortableErrorCode::Io, "failed to identify staging file")
         })?;
         let mut stage = Self {
             path: path.to_owned(),
@@ -96,15 +81,15 @@ impl PortablePackageStage {
         let mut remaining = max_bytes;
         let mut buffer = vec![0_u8; 64 * 1024];
         loop {
-            let read = source.read(&mut buffer).map_err(|_| {
-                PortableV2Error::new(PortableV2ErrorCode::Io, "failed to read package")
-            })?;
+            let read = source
+                .read(&mut buffer)
+                .map_err(|_| PortableError::new(PortableErrorCode::Io, "failed to read package"))?;
             if read == 0 {
                 break;
             }
             remaining = remaining.checked_sub(read as u64).ok_or_else(|| {
-                PortableV2Error::new(
-                    PortableV2ErrorCode::LimitExceeded,
+                PortableError::new(
+                    PortableErrorCode::LimitExceeded,
                     "package exceeds byte limit",
                 )
             })?;
@@ -114,20 +99,20 @@ impl PortablePackageStage {
                 .expect("owned staging descriptor")
                 .write_all(&buffer[..read])
                 .map_err(|_| {
-                    PortableV2Error::new(PortableV2ErrorCode::Io, "failed to write staging file")
+                    PortableError::new(PortableErrorCode::Io, "failed to write staging file")
                 })?;
         }
         crate::durable_commit::seal_file(stage.file.as_ref().expect("owned staging descriptor"))
             .map_err(|_| {
-                PortableV2Error::new(PortableV2ErrorCode::Io, "failed to sync staging file")
+                PortableError::new(PortableErrorCode::Io, "failed to sync staging file")
             })?;
         // Verification on Windows must not coexist with a writable handle.
         // Reopen only the exact producer inode and keep that read authority.
         drop(stage.file.take());
-        let retained = crate::project_portable_v2_export::open_source_no_follow(path)?;
+        let retained = crate::project_portable_export::open_source_no_follow(path)?;
         if graphforge_filesystem::file_identity(&retained).ok() != Some(identity) {
-            return Err(PortableV2Error::new(
-                PortableV2ErrorCode::ConcurrentMutation,
+            return Err(PortableError::new(
+                PortableErrorCode::ConcurrentMutation,
                 "staging identity changed after producer close",
             ));
         }
@@ -140,7 +125,7 @@ impl PortablePackageStage {
         &self.path
     }
     /// Atomically publish without replacing any concurrent destination.
-    pub fn publish(mut self, destination: &Path) -> Result<(), PortableV2Error> {
+    pub fn publish(mut self, destination: &Path) -> Result<(), PortableError> {
         crate::durable_commit::promote_no_replace_authenticated(
             &self.path,
             destination,
@@ -150,12 +135,9 @@ impl PortablePackageStage {
         )
         .map_err(|failure| {
             if failure.cause.kind() == std::io::ErrorKind::AlreadyExists {
-                PortableV2Error::new(
-                    PortableV2ErrorCode::InvalidPath,
-                    "destination already exists",
-                )
+                PortableError::new(PortableErrorCode::InvalidPath, "destination already exists")
             } else {
-                PortableV2Error::new(PortableV2ErrorCode::Io, "failed to publish pulled package")
+                PortableError::new(PortableErrorCode::Io, "failed to publish pulled package")
             }
         })?;
         self.published = true;
@@ -197,7 +179,7 @@ mod tests {
         drop(stage);
         assert!(!path.exists());
         let error = PortablePackageStage::create(&path, &mut &b"too large"[..], 2).unwrap_err();
-        assert_eq!(error.code, PortableV2ErrorCode::LimitExceeded);
+        assert_eq!(error.code, PortableErrorCode::LimitExceeded);
         assert!(!path.exists());
     }
 
@@ -209,7 +191,7 @@ mod tests {
         let stage = PortablePackageStage::create(&path, &mut &b"new"[..], 10).unwrap();
         fs::write(&destination, b"concurrent owner").unwrap();
         let error = stage.publish(&destination).unwrap_err();
-        assert_eq!(error.code, PortableV2ErrorCode::InvalidPath);
+        assert_eq!(error.code, PortableErrorCode::InvalidPath);
         assert_eq!(fs::read(destination).unwrap(), b"concurrent owner");
         assert!(!path.exists());
     }

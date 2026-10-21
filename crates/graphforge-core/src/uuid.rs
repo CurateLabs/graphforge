@@ -34,29 +34,23 @@ pub fn new_v5(namespace: &Uuid, name: &[u8]) -> Uuid {
     Uuid::new_v5(namespace, name)
 }
 
-/// Derive the portable-v1 imported generation from its caller-owned operation.
+/// Derive the streaming portable imported generation from its caller-owned operation.
 /// The versioned name is a persisted compatibility contract.
 #[must_use]
 pub fn portable_import_generation(operation: &Uuid) -> Uuid {
-    new_v5(operation, b"graphforge-portable-import-generation/1")
-}
-
-/// Derive the portable-v2 imported generation in a separate versioned domain.
-#[must_use]
-pub fn portable_v2_import_generation(operation: &Uuid) -> Uuid {
     new_v5(operation, b"graphforge-portable-v2-import-generation/1")
 }
 
-/// Derive the empty parent generation used by a fresh portable-v2 import.
+/// Derive the empty parent generation used by a fresh portable import.
 /// The versioned name is a persisted compatibility contract.
 #[must_use]
-pub fn portable_v2_bootstrap_generation(operation: &Uuid) -> Uuid {
+pub fn portable_bootstrap_generation(operation: &Uuid) -> Uuid {
     new_v5(operation, b"graphforge-portable-v2-bootstrap-generation/1")
 }
 
 /// Derive the empty parent's transaction in a separate versioned domain.
 #[must_use]
-pub fn portable_v2_bootstrap_transaction(operation: &Uuid) -> Uuid {
+pub fn portable_bootstrap_transaction(operation: &Uuid) -> Uuid {
     new_v5(operation, b"graphforge-portable-v2-bootstrap-transaction/1")
 }
 
@@ -211,19 +205,19 @@ mod tests {
         let version_b = format!("sha256:{}", "b".repeat(64));
         let vectors = [
             (
-                portable_import_generation(&operation),
+                new_v5(&operation, b"graphforge-portable-import-generation/1"),
                 "02abd337-e93c-56a3-bf8f-dadbb5b1e8d5",
             ),
             (
-                portable_v2_import_generation(&operation),
+                portable_import_generation(&operation),
                 "167a58d3-52f2-533e-b3c4-01d743d7537d",
             ),
             (
-                portable_v2_bootstrap_generation(&operation),
+                portable_bootstrap_generation(&operation),
                 "d633da3b-0a2e-543e-bcdd-d383b3c52794",
             ),
             (
-                portable_v2_bootstrap_transaction(&operation),
+                portable_bootstrap_transaction(&operation),
                 "7f6e6309-9103-5c77-837a-0efffec19b70",
             ),
             (
@@ -327,16 +321,12 @@ mod tests {
             portable_import_generation(&other_operation)
         );
         assert_ne!(
-            portable_v2_import_generation(&operation),
-            portable_v2_import_generation(&other_operation)
+            portable_bootstrap_generation(&operation),
+            portable_bootstrap_generation(&other_operation)
         );
         assert_ne!(
-            portable_v2_bootstrap_generation(&operation),
-            portable_v2_bootstrap_generation(&other_operation)
-        );
-        assert_ne!(
-            portable_v2_bootstrap_transaction(&operation),
-            portable_v2_bootstrap_transaction(&other_operation)
+            portable_bootstrap_transaction(&operation),
+            portable_bootstrap_transaction(&other_operation)
         );
         assert_ne!(
             composite_delta_operation(&operation, 0),

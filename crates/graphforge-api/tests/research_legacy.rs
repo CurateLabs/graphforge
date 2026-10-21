@@ -316,9 +316,9 @@ fn checkpoint_diff_spans_the_upgrade() {
 fn research_v6_package_from_old_producer_is_rejected_without_publication() {
     let directory = tempfile::tempdir().unwrap();
     let target = directory.path().join("imported");
-    let error = GraphForge::import_portable_v2(
+    let error = GraphForge::import_portable(
         &target,
-        &PortableV2ImportRequest {
+        &PortableImportRequest {
             input: Path::new(FIXTURE).join("package.gfpb"),
             operation_id: OperationId(Uuid::now_v7()),
             limits: Default::default(),
@@ -328,7 +328,7 @@ fn research_v6_package_from_old_producer_is_rejected_without_publication() {
     .unwrap_err();
     assert_eq!(
         error.code,
-        graphforge_core::portable::PortableV2ErrorCode::Incompatible
+        graphforge_core::portable::PortableErrorCode::Incompatible
     );
     assert!(error.committed_import.is_none());
     assert!(
@@ -360,9 +360,9 @@ fn research_v6_project_exports_research_as_current() {
         "export is read-only"
     );
     let target = directory.path().join("imported");
-    GraphForge::import_portable_v2(
+    GraphForge::import_portable(
         &target,
-        &PortableV2ImportRequest {
+        &PortableImportRequest {
             input: package,
             operation_id: OperationId(Uuid::now_v7()),
             limits: Default::default(),
@@ -403,33 +403,33 @@ fn research_v6_project_exports_research_as_current() {
     // when the interchange archive has the current producer contract.
     let whole = directory.path().join("whole.gfpb");
     imported
-        .export_portable_v2(
-            &PortableV2ExportRequest {
+        .export_portable(
+            &PortableExportRequest {
                 selection: PortableSelection::Current,
                 output_path: whole.clone(),
-                representation: PortableV2Output::Bundle,
-                profile: PortableV2SelectionProfile::Complete,
+                representation: PortableOutput::Bundle,
+                profile: PortableSelectionProfile::Complete,
                 subset: None,
-                limits: PortableV2Limits::default(),
+                limits: PortableLimits::default(),
             },
             None,
             |_| {},
         )
         .unwrap();
-    let report = verify_portable_v2(
+    let report = verify_portable(
         &PortableVerifyRequest {
             input: whole.clone(),
-            mode: graphforge_core::portable::PortableV2Mode::Full,
-            limits: PortableV2Limits::default(),
+            mode: graphforge_core::portable::PortableMode::Full,
+            limits: PortableLimits::default(),
         },
         None,
     )
     .unwrap();
     assert!(report.research_interchange);
     let reimported = directory.path().join("reimported");
-    GraphForge::import_portable_v2(
+    GraphForge::import_portable(
         &reimported,
-        &PortableV2ImportRequest {
+        &PortableImportRequest {
             input: whole,
             operation_id: OperationId(Uuid::now_v7()),
             limits: Default::default(),
@@ -584,10 +584,10 @@ fn current_producer_revision_six_package_imports_reopens_and_reexports() {
         )
         .unwrap();
     synthesize_current_producer_revision_six(&package);
-    let report = verify_portable_v2(
+    let report = verify_portable(
         &PortableVerifyRequest {
             input: package.clone(),
-            mode: graphforge_core::portable::PortableV2Mode::Full,
+            mode: graphforge_core::portable::PortableMode::Full,
             limits: Default::default(),
         },
         None,
@@ -595,9 +595,9 @@ fn current_producer_revision_six_package_imports_reopens_and_reexports() {
     .unwrap();
     assert!(report.research_interchange);
     let target = directory.path().join("imported-revision-six");
-    GraphForge::import_portable_v2(
+    GraphForge::import_portable(
         &target,
-        &PortableV2ImportRequest {
+        &PortableImportRequest {
             input: package,
             operation_id: OperationId(Uuid::now_v7()),
             limits: Default::default(),
@@ -629,9 +629,9 @@ fn current_producer_revision_six_package_imports_reopens_and_reexports() {
         )
         .unwrap();
     let again = directory.path().join("reimported-current");
-    GraphForge::import_portable_v2(
+    GraphForge::import_portable(
         &again,
-        &PortableV2ImportRequest {
+        &PortableImportRequest {
             input: current_package,
             operation_id: OperationId(Uuid::now_v7()),
             limits: Default::default(),

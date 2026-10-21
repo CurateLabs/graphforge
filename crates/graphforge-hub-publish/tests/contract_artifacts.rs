@@ -16,7 +16,7 @@ mod history;
 
 use graphforge_discovery::{
     DISCOVERY_FORMAT, DiscoveryErrorCode, DiscoveryLimits, DiscoveryManifest, LineageBranch,
-    LineageForkOrigin, LineageVersion, PORTABLE_V2_FORMAT, PORTABLE_V2_MEDIA_TYPE,
+    LineageForkOrigin, LineageVersion, PORTABLE_FORMAT, PORTABLE_MEDIA_TYPE,
     PortablePackageReference, ProtocolRequirement, ProtocolVersion, RESEARCH_LINEAGE_CAPABILITY,
     RESEARCH_LINEAGE_FORMAT, RESEARCH_LINEAGE_MEDIA_TYPE, RefSet, RepositoryIdentity,
     RepositoryRef, ResearchLineage, ResearchLineageReference, Sha256Digest,
@@ -192,7 +192,7 @@ struct Object {
 impl Object {
     fn package(text: &str) -> Self {
         Self {
-            media_type: PORTABLE_V2_MEDIA_TYPE,
+            media_type: PORTABLE_MEDIA_TYPE,
             bytes: text.as_bytes().to_vec(),
         }
     }
@@ -231,7 +231,7 @@ impl Publication {
         objects.sort_by_key(Object::digest);
         let project_object_digest = objects
             .iter()
-            .find(|object| object.media_type == PORTABLE_V2_MEDIA_TYPE)
+            .find(|object| object.media_type == PORTABLE_MEDIA_TYPE)
             .unwrap()
             .digest();
         Self {
@@ -759,7 +759,7 @@ fn research_publication(
             branch_uuid,
             source_version_uuid: None,
             package: Some(PortablePackageReference {
-                format: PORTABLE_V2_FORMAT.into(),
+                format: PORTABLE_FORMAT.into(),
                 package_digest: Sha256Digest(digest_of('e')),
                 object_digest: Sha256Digest(research_package.digest()),
             }),
@@ -881,8 +881,7 @@ fn corpus() -> Corpus {
                 .objects
                 .iter()
                 .find(|o| {
-                    o.media_type == PORTABLE_V2_MEDIA_TYPE
-                        && o.digest() != first.project_object_digest
+                    o.media_type == PORTABLE_MEDIA_TYPE && o.digest() != first.project_object_digest
                 })
                 .unwrap();
             steps.push(act(Action::AdvanceClock { seconds: 900 }));

@@ -30,7 +30,7 @@ members = [
 # workspace test run never lint or test code we do not own. Cargo matches each
 # `exclude` entry as a literal path (a `vendor/*` glob is not recognised), so list
 # every vendored crate here.
-exclude = ["vendor/datafusion-physical-plan", "vendor/datafusion-optimizer"]
+exclude = ["vendor/datafusion-physical-plan", "vendor/datafusion-optimizer", "vendor/arrow-row"]
 
 [workspace.package]
 version = "0.6.0-rc.5"
@@ -52,6 +52,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
 serde_yaml = { version = "0.9", package = "serde_yaml_ng" }
 sha2 = "0.11"
+# Full Unicode case folding for portable path collisions; the ICU4X release already locked for icu_normalizer and icu_properties, so the shipped lock only gains two crates.
+icu_casemap = "~2.2"
 unicode-normalization = "0.1"
 url = { version = "2", features = ["serde"] }
 ureq = { version = "=3.4.2", default-features = false, features = ["rustls"] }
@@ -113,6 +115,8 @@ divan = { version = "5", package = "codspeed-divan-compat" }
 # datafusion-optimizer 54.1.0 with that one change applied; see
 # vendor/datafusion-optimizer/GRAPHFORGE.md.
 [patch.crates-io]
+# Additive borrowed accessors, activated only by development test utilities.
+arrow-row = { path = "vendor/arrow-row" }
 datafusion-physical-plan = { path = "vendor/datafusion-physical-plan" }
 datafusion-optimizer = { path = "vendor/datafusion-optimizer" }
 

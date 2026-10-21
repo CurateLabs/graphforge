@@ -41,6 +41,7 @@ export default defineConfig({
           label: "Basic",
           items: [
             { label: "Choose your learning path", slug: "guide/overview" },
+            { label: "Who it is for", slug: "guide/audience-and-fit" },
             { label: "Your first graph", slug: "guide/quickstart" },
             { label: "Work with an agent", slug: "guide/work-with-an-agent" },
             {
@@ -196,8 +197,8 @@ export default defineConfig({
                   slug: "book/architecture/project-format-compatibility",
                 },
                 {
-                  label: "Portable Project v2",
-                  slug: "book/architecture/portable-project-v2",
+                  label: "Portable Project",
+                  slug: "book/architecture/portable-project",
                 },
                 {
                   label: "Composable Multi-Ontology",
@@ -401,12 +402,12 @@ export default defineConfig({
                   slug: 'adr/0020-ntfs-write-through-namespace-durability',
                 },
                 {
-                  label: '0021 — Portable project v2 package layout and identity',
-                  slug: 'adr/0021-portable-project-v2',
+                  label: '0021 — Portable project package layout and identity',
+                  slug: 'adr/0021-portable-project',
                 },
                 {
-                  label: '0022 — Multi-ontology semantics in portable project v2',
-                  slug: 'adr/0022-portable-v2-multi-ontology-compatibility',
+                  label: '0022 — Multi-ontology semantics in portable projects',
+                  slug: 'adr/0022-multi-ontology-compatibility',
                 },
                 {
                   label: '0023 — Composable ontology modules and semantic bridges',
@@ -558,6 +559,7 @@ export default defineConfig({
           collapsed: true,
           items: [
             { label: "Licensing", slug: "legal/licensing" },
+            { label: "Get help", slug: "community/support" },
             { label: "Security", slug: "community/security" },
             { label: "Code of Conduct", slug: "community/code-of-conduct" },
           ],

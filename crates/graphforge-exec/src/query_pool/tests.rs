@@ -671,8 +671,7 @@ fn an_empty_sort_can_start_beyond_headroom_but_never_beyond_the_real_pool() {
 
 /// A sibling's buffered runs must not make an empty external sorter fail
 /// before it can spill. This reproduces the SF1 IC3 first-buffer refusal.
-#[tokio::test]
-async fn a_real_external_sort_starts_and_spills_while_a_sibling_holds_the_buffer_share() {
+async fn assert_external_sort_spills_with_sibling(rows: i64, coalesce_runs: bool) {
     use datafusion::datasource::memory::MemorySourceConfig;
     use datafusion::physical_expr::PhysicalSortExpr;
     use datafusion::physical_expr::expressions::Column;
@@ -697,20 +696,33 @@ async fn a_real_external_sort_starts_and_spills_while_a_sibling_holds_the_buffer
         runtime,
     );
     let schema = Arc::new(Schema::new(vec![Field::new("k", DataType::Int64, false)]));
-    let rows = 131_072_i64;
     let batches = [rows, 0]
         .into_iter()
-        .map(|offset| {
+        .flat_map(|offset| {
+            let batch_rows = if coalesce_runs { 8_192 } else { rows };
+            (offset..offset + rows)
+                .step_by(batch_rows as usize)
+                .map(move |start| (start, batch_rows))
+        })
+        .map(|(offset, batch_rows)| {
             RecordBatch::try_new(
                 Arc::clone(&schema),
                 vec![Arc::new(Int64Array::from_iter_values(
-                    (offset..offset + rows).rev(),
+                    (offset..offset + batch_rows).rev(),
                 ))],
             )
             .unwrap()
         })
         .collect::<Vec<_>>();
     let source = MemorySourceConfig::try_new_exec(&[batches], schema, None).unwrap();
+    let source = if coalesce_runs {
+        Arc::new(crate::sort_runs::SortRunCoalesceExec::new(
+            source,
+            rows as usize * size_of::<i64>(),
+        )) as Arc<dyn ExecutionPlan>
+    } else {
+        source
+    };
     let sort = SortExec::new(
         [PhysicalSortExpr::new_default(Arc::new(Column::new("k", 0)))].into(),
         source,
@@ -736,4 +748,16 @@ async fn a_real_external_sort_starts_and_spills_while_a_sibling_holds_the_buffer
     assert_eq!(pool.reserved(), 15 * MIB);
     drop(sibling);
     assert_eq!(pool.reserved(), 0);
+}
+
+#[tokio::test]
+async fn a_real_external_sort_starts_and_spills_while_a_sibling_holds_the_buffer_share() {
+    assert_external_sort_spills_with_sibling(131_072, false).await;
+}
+
+#[tokio::test]
+async fn a_real_external_sort_drains_spill_output_before_retaining_the_next_batch() {
+    // A larger source still has room to spill, but retaining every sorted
+    // output crosses the buffered-sort share while most of the pool is free.
+    assert_external_sort_spills_with_sibling(262_144, true).await;
 }

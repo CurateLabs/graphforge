@@ -475,7 +475,7 @@ fn copy_file_participant(
     metadata: &StagedParticipant,
     cancelled: Option<&super::AtomicBool>,
     copy_buffer_bytes: usize,
-    capture: Option<&crate::project_portable_v2::MaterializedCapture>,
+    capture: Option<&crate::project_portable::MaterializedCapture>,
 ) -> Result<u8, GfError> {
     let mut input = crate::project_import_target::open_regular_nofollow(&source.source)
         .map_err(publication_io)?;

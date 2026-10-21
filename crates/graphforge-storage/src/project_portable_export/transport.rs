@@ -1,0 +1,860 @@
+//! Authenticated expanded and canonical bundle transport writing.
+use super::{
+    BAG_INFO, BAGIT, ExportAllocationObserver, ExportError, File, Identity, Path, PathBuf,
+    PlannedFile, PlannedSource, PortableExportLimits, PortableExportPlan, PortableExportProgress,
+    err, fs, hex, identity_with_link_policy, limit, observed_write_result, open_source_no_follow,
+    storage, sync_dir,
+};
+use crate::project_portable::pax;
+use graphforge_core::hash_observation::{ContractSha256, ControlSha256, PortableSha256 as Sha256};
+use sha2::Digest;
+use std::fs::OpenOptions;
+use std::io::{Read, Seek, SeekFrom, Write};
+
+/// Private evidence minted only by successful writes of the canonical package.
+/// Public/untrusted packages cannot manufacture this authority.
+pub(crate) struct WrittenPackage {
+    digest: [u8; 32],
+    bundle_checksum: Option<u64>,
+    entries: std::collections::BTreeMap<String, (u64, [u8; 32], u64)>,
+}
+impl WrittenPackage {
+    pub(crate) fn digest(&self) -> [u8; 32] {
+        self.digest
+    }
+    pub(crate) fn bundle_identity(&self) -> Option<([u8; 32], u64)> {
+        self.bundle_checksum.map(|checksum| (self.digest, checksum))
+    }
+    pub(crate) fn entry_identity(&self, path: &str, length: u64) -> Option<([u8; 32], u64)> {
+        self.entries
+            .get(path)
+            .filter(|(expected, _, _)| *expected == length)
+            .map(|(_, digest, checksum)| (*digest, *checksum))
+    }
+    pub(crate) fn entry_count(&self) -> usize {
+        self.entries.len()
+    }
+}
+
+struct TransportHash {
+    digest: Sha256,
+    checksum: crate::corruption_checksum::Checksum,
+}
+impl TransportHash {
+    fn new() -> Self {
+        Self {
+            digest: Sha256::new(),
+            checksum: crate::corruption_checksum::Checksum::new(),
+        }
+    }
+    fn update(&mut self, bytes: impl AsRef<[u8]>) {
+        self.digest.update(bytes.as_ref());
+        self.checksum.update(bytes.as_ref());
+    }
+    fn finish(self) -> ([u8; 32], u64) {
+        (self.digest.finalize().into(), self.checksum.finish())
+    }
+}
+
+pub(super) fn expanded(
+    plan: &PortableExportPlan,
+    stage: &Path,
+    l: PortableExportLimits,
+    cancelled: &impl Fn() -> bool,
+    progress: &mut impl FnMut(PortableExportProgress),
+    allocation: &mut ExportAllocationObserver,
+) -> Result<WrittenPackage, ExportError> {
+    fs::create_dir(stage).map_err(storage)?;
+    write_bytes(
+        stage,
+        "data/graphforge-project.json",
+        &plan.manifest,
+        allocation,
+    )?;
+    let mut payload = vec![(
+        "data/graphforge-project.json".into(),
+        plan.manifest.len() as u64,
+        ControlSha256::digest(&plan.manifest).into(),
+    )];
+    let mut captured = std::collections::BTreeMap::new();
+    let mut done = 0;
+    for (i, f) in plan.files.iter().enumerate() {
+        let target = stage.join(&f.path);
+        parent(&target)?;
+        let checksum = copy(
+            f,
+            &target,
+            l.copy_buffer_bytes,
+            cancelled,
+            allocation,
+            |n| {
+                done += n;
+                progress(PortableExportProgress {
+                    entries_completed: i + 1,
+                    bytes_completed: done,
+                    entries_total: plan.files.len() + 5,
+                    bytes_total: plan.payload_bytes,
+                });
+            },
+        )?;
+        progress(PortableExportProgress {
+            entries_completed: i + 2,
+            bytes_completed: done,
+            entries_total: plan.files.len() + 5,
+            bytes_total: plan.payload_bytes,
+        });
+        captured.insert(f.path.clone(), (f.length, f.digest, checksum));
+        payload.push((f.path.clone(), f.length, f.digest));
+    }
+    payload.sort_by(|a, b| a.0.cmp(&b.0));
+    let inventory = write_inventory(
+        stage,
+        payload
+            .iter()
+            .map(|(path, _, digest)| (path.as_str(), *digest)),
+        allocation,
+    )?;
+    write_bytes(stage, "bagit.txt", BAGIT, allocation)?;
+    write_bytes(stage, "bag-info.txt", BAG_INFO, allocation)?;
+    let tag_rows = [("bag-info.txt", BAG_INFO), ("bagit.txt", BAGIT)]
+        .iter()
+        .map(|(p, b)| {
+            (
+                p.to_string(),
+                b.len() as u64,
+                ControlSha256::digest(b).into(),
+            )
+        })
+        .chain(std::iter::once((
+            INVENTORY_PATH.to_owned(),
+            inventory.length,
+            inventory.digest,
+        )))
+        .collect::<Vec<_>>();
+    let tag = tag_manifest(&tag_rows, l.max_tag_manifest_bytes)?;
+    write_bytes(stage, "tagmanifest-sha256.txt", &tag, allocation)?;
+    progress(PortableExportProgress {
+        entries_completed: plan.files.len() + 5,
+        bytes_completed: done,
+        entries_total: plan.files.len() + 5,
+        bytes_total: plan.payload_bytes,
+    });
+    sync_tree(stage)?;
+    let mut all = payload;
+    all.extend(tag_rows);
+    all.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut h = ContractSha256::new();
+    h.update(b"graphforge-expanded/2\0");
+    for (p, n, d) in all {
+        h.update((p.len() as u64).to_be_bytes());
+        h.update(p);
+        h.update(n.to_be_bytes());
+        h.update(d);
+    }
+    h.update(tag);
+    capture_controls(plan, l.max_tag_manifest_bytes, &mut captured)?;
+    Ok(WrittenPackage {
+        digest: h.finalize().into(),
+        bundle_checksum: None,
+        entries: captured,
+    })
+}
+
+fn capture_controls(
+    plan: &PortableExportPlan,
+    limit: u64,
+    captured: &mut std::collections::BTreeMap<String, (u64, [u8; 32], u64)>,
+) -> Result<(), ExportError> {
+    for (path, source) in entries(plan, limit)? {
+        match source {
+            Src::Bytes(bytes) => {
+                captured.insert(
+                    path,
+                    (
+                        bytes.len() as u64,
+                        ControlSha256::digest(&bytes).into(),
+                        crate::corruption_checksum::checksum(&bytes),
+                    ),
+                );
+            }
+            Src::Inventory(inventory) => {
+                captured.insert(
+                    path,
+                    (inventory.length, inventory.digest, inventory.checksum),
+                );
+            }
+            Src::File(_) => {}
+        }
+    }
+    Ok(())
+}
+
+pub(super) enum Src<'a> {
+    Bytes(Vec<u8>),
+    File(&'a PlannedFile),
+    /// The payload inventory, rendered from the `data/` entries while it is
+    /// written rather than held in memory.
+    Inventory(InventoryIdentity),
+}
+impl Src<'_> {
+    pub(super) fn len(&self) -> u64 {
+        match self {
+            Self::Bytes(b) => b.len() as u64,
+            Self::File(f) => f.length,
+            Self::Inventory(inventory) => inventory.length,
+        }
+    }
+    fn digest(&self) -> [u8; 32] {
+        match self {
+            Self::Bytes(b) => ControlSha256::digest(b).into(),
+            Self::File(f) => f.digest,
+            Self::Inventory(inventory) => inventory.digest,
+        }
+    }
+}
+
+/// Payload inventory rows: every `data/` entry, in canonical path order.
+fn payload_rows<'a>(
+    items: &'a [(String, Src<'_>)],
+) -> impl Iterator<Item = (&'a str, [u8; 32])> + 'a {
+    items
+        .iter()
+        .filter(|(path, _)| path.starts_with("data/"))
+        .map(|(path, source)| (path.as_str(), source.digest()))
+}
+
+pub(super) fn entries(
+    plan: &PortableExportPlan,
+    max_tag_manifest_bytes: u64,
+) -> Result<Vec<(String, Src<'_>)>, ExportError> {
+    let mut v = vec![(
+        "data/graphforge-project.json".into(),
+        Src::Bytes(plan.manifest.clone()),
+    )];
+    v.extend(plan.files.iter().map(|f| (f.path.clone(), Src::File(f))));
+    v.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
+    let inventory = inventory_identity(payload_rows(&v))?;
+    let tags = [
+        ("bag-info.txt", Src::Bytes(BAG_INFO.to_vec())),
+        ("bagit.txt", Src::Bytes(BAGIT.to_vec())),
+        (INVENTORY_PATH, Src::Inventory(inventory)),
+    ];
+    let tag = tag_manifest(
+        &tags
+            .iter()
+            .map(|(p, s)| ((*p).to_owned(), s.len(), s.digest()))
+            .collect::<Vec<_>>(),
+        max_tag_manifest_bytes,
+    )?;
+    v.extend(tags.into_iter().map(|(p, s)| (p.into(), s)));
+    v.push(("tagmanifest-sha256.txt".into(), Src::Bytes(tag)));
+    Ok(v)
+}
+pub(super) fn bundle(
+    plan: &PortableExportPlan,
+    stage: &Path,
+    l: PortableExportLimits,
+    cancelled: &impl Fn() -> bool,
+    progress: &mut impl FnMut(PortableExportProgress),
+    allocation: &mut ExportAllocationObserver,
+) -> Result<WrittenPackage, ExportError> {
+    let mut items = entries(plan, l.max_tag_manifest_bytes)?;
+    items.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut out = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(stage)
+        .map_err(storage)?;
+    allocation.register(stage, &out)?;
+    let mut h = TransportHash::new();
+    let mut captured = std::collections::BTreeMap::new();
+    let mut done = 0;
+    for (i, (path, src)) in items.iter().enumerate() {
+        if cancelled() {
+            return Err(err("GF_CANCELLED", "portable export cancelled"));
+        }
+        observed_write_result(header(&mut out, &mut h, path, src.len()), &out, allocation)?;
+        allocation.observe(&out)?;
+        let (digest, checksum) = match src {
+            Src::Bytes(b) => {
+                observed_write_result(emit(&mut out, &mut h, b), &out, allocation)?;
+                allocation.observe(&out)?;
+                (
+                    ControlSha256::digest(b).into(),
+                    crate::corruption_checksum::checksum(b),
+                )
+            }
+            Src::Inventory(expected) => {
+                let written = emit_inventory(&mut out, &mut h, payload_rows(&items), allocation)?;
+                if written != *expected {
+                    return Err(err(
+                        "GF_SOURCE_CHANGED",
+                        "payload inventory changed while writing",
+                    ));
+                }
+                (written.digest, written.checksum)
+            }
+            Src::File(f) => (
+                f.digest,
+                stream(
+                    &mut out,
+                    &mut h,
+                    f,
+                    l.copy_buffer_bytes,
+                    cancelled,
+                    allocation,
+                    |n| {
+                        done += n;
+                        progress(PortableExportProgress {
+                            entries_completed: i,
+                            bytes_completed: done,
+                            entries_total: items.len(),
+                            bytes_total: plan.payload_bytes,
+                        });
+                    },
+                )?,
+            ),
+        };
+        captured.insert(path.clone(), (src.len(), digest, checksum));
+        observed_write_result(pad(&mut out, &mut h, src.len()), &out, allocation)?;
+        allocation.observe(&out)?;
+        progress(PortableExportProgress {
+            entries_completed: i + 1,
+            bytes_completed: done,
+            entries_total: items.len(),
+            bytes_total: plan.payload_bytes,
+        });
+    }
+    let end = [0u8; 1024];
+    observed_write_result(out.write_all(&end).map_err(storage), &out, allocation)?;
+    allocation.observe(&out)?;
+    h.update(end);
+    crate::durable_commit::seal_file(&out).map_err(storage)?;
+    allocation.observe(&out)?;
+    let (digest, checksum) = h.finish();
+    Ok(WrittenPackage {
+        digest,
+        bundle_checksum: Some(checksum),
+        entries: captured,
+    })
+}
+
+fn copy(
+    planned: &PlannedFile,
+    target: &Path,
+    size: usize,
+    cancelled: &impl Fn() -> bool,
+    allocation: &mut ExportAllocationObserver,
+    mut tick: impl FnMut(u64),
+) -> Result<u64, ExportError> {
+    let mut output = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(target)
+        .map_err(storage)?;
+    allocation.register(target, &output)?;
+    if let PlannedSource::Control(bytes) = &planned.source {
+        if bytes.len() as u64 != planned.length
+            || <[u8; 32]>::from(ControlSha256::digest(bytes)) != planned.digest
+        {
+            return Err(err("GF_SOURCE_CHANGED", "planned control identity changed"));
+        }
+        if cancelled() {
+            return Err(err("GF_CANCELLED", "portable export cancelled"));
+        }
+        observed_write_result(
+            output.write_all(bytes).map_err(storage),
+            &output,
+            allocation,
+        )?;
+        allocation.observe(&output)?;
+        crate::durable_commit::seal_file(&output).map_err(storage)?;
+        allocation.observe(&output)?;
+        tick(bytes.len() as u64);
+        return Ok(crate::corruption_checksum::checksum(bytes));
+    }
+    let (mut input, planned_identity) = open_planned_source(planned)?;
+    let mut buffer = vec![0; size];
+    let mut digest = planned.checksum.is_none().then(Sha256::new);
+    let mut checksum = crate::corruption_checksum::Checksum::new();
+    let mut bytes_read = 0;
+    let bound = planned
+        .length
+        .checked_add(1)
+        .ok_or_else(|| limit("planned source length overflow"))?;
+    let mut reader = (&mut input).take(bound);
+    loop {
+        if cancelled() {
+            return Err(err("GF_CANCELLED", "portable export cancelled"));
+        }
+        let count = reader.read(&mut buffer).map_err(storage)?;
+        if count == 0 {
+            break;
+        }
+        observed_write_result(
+            output.write_all(&buffer[..count]).map_err(storage),
+            &output,
+            allocation,
+        )?;
+        if allocation.operation.is_some() {
+            allocation.observe(&output)?;
+        }
+        if let Some(digest) = &mut digest {
+            digest.update(&buffer[..count]);
+        }
+        checksum.update(&buffer[..count]);
+        bytes_read += count as u64;
+        tick(count as u64);
+    }
+    crate::durable_commit::seal_file(&output).map_err(storage)?;
+    allocation.observe(&output)?;
+    if bytes_read != planned.length
+        || digest.is_some_and(|digest| <[u8; 32]>::from(digest.finalize()) != planned.digest)
+        || planned
+            .checksum
+            .is_some_and(|expected| expected != checksum.finish())
+    {
+        return Err(err("GF_SOURCE_CHANGED", "source changed during export"));
+    }
+    if let Some(expected) = planned_identity
+        && identity_with_link_policy(
+            &input.metadata().map_err(storage)?,
+            expected.allow_hardlinks,
+        )? != expected
+    {
+        return Err(err("GF_SOURCE_CHANGED", "source changed during export"));
+    }
+    revalidate_source(planned, &input)?;
+    Ok(checksum.finish())
+}
+fn stream(
+    out: &mut File,
+    transport: &mut TransportHash,
+    planned: &PlannedFile,
+    size: usize,
+    cancelled: &impl Fn() -> bool,
+    allocation: &mut ExportAllocationObserver,
+    mut tick: impl FnMut(u64),
+) -> Result<u64, ExportError> {
+    if let PlannedSource::Control(bytes) = &planned.source {
+        if bytes.len() as u64 != planned.length
+            || <[u8; 32]>::from(ControlSha256::digest(bytes)) != planned.digest
+        {
+            return Err(err("GF_SOURCE_CHANGED", "planned control identity changed"));
+        }
+        if cancelled() {
+            return Err(err("GF_CANCELLED", "portable export cancelled"));
+        }
+        observed_write_result(out.write_all(bytes).map_err(storage), out, allocation)?;
+        allocation.observe(out)?;
+        transport.update(bytes);
+        tick(bytes.len() as u64);
+        return Ok(crate::corruption_checksum::checksum(bytes));
+    }
+    let (mut input, planned_identity) = open_planned_source(planned)?;
+    let mut digest = planned.checksum.is_none().then(Sha256::new);
+    let mut checksum = crate::corruption_checksum::Checksum::new();
+    let mut bytes_read = 0;
+    let bound = planned
+        .length
+        .checked_add(1)
+        .ok_or_else(|| limit("planned source length overflow"))?;
+    let mut reader = (&mut input).take(bound);
+    copy_chunks(&mut reader, size, cancelled, |chunk| {
+        observed_write_result(out.write_all(chunk).map_err(storage), out, allocation)?;
+        if allocation.operation.is_some() {
+            allocation.observe(out)?;
+        }
+        transport.update(chunk);
+        if let Some(digest) = &mut digest {
+            digest.update(chunk);
+        }
+        checksum.update(chunk);
+        bytes_read += chunk.len() as u64;
+        tick(chunk.len() as u64);
+        Ok(())
+    })?;
+    if bytes_read != planned.length
+        || digest.is_some_and(|digest| <[u8; 32]>::from(digest.finalize()) != planned.digest)
+        || planned
+            .checksum
+            .is_some_and(|expected| expected != checksum.finish())
+    {
+        return Err(err("GF_SOURCE_CHANGED", "source changed during export"));
+    }
+    if let Some(expected) = planned_identity
+        && identity_with_link_policy(
+            &input.metadata().map_err(storage)?,
+            expected.allow_hardlinks,
+        )? != expected
+    {
+        return Err(err("GF_SOURCE_CHANGED", "source changed during export"));
+    }
+    revalidate_source(planned, &input)?;
+    Ok(checksum.finish())
+}
+pub(super) fn open_planned_source(
+    planned: &PlannedFile,
+) -> Result<(File, Option<Identity>), ExportError> {
+    match &planned.source {
+        PlannedSource::File {
+            path,
+            identity: expected,
+        } => {
+            let input = open_source_no_follow(path)?;
+            if identity_with_link_policy(
+                &input.metadata().map_err(storage)?,
+                expected.allow_hardlinks,
+            )? != *expected
+            {
+                return Err(err("GF_SOURCE_CHANGED", "source changed"));
+            }
+            Ok((input, Some(*expected)))
+        }
+        PlannedSource::Cas {
+            lease,
+            digest,
+            length,
+        } => {
+            let mut file = lease
+                .open_for_attribution(digest, *length)
+                .map_err(|_| err("GF_SOURCE_CHANGED", "pinned CAS source changed"))?;
+            file.seek(SeekFrom::Start(0)).map_err(storage)?;
+            Ok((file, None))
+        }
+        PlannedSource::Control(_) => unreachable!("control source returned above"),
+    }
+}
+
+fn revalidate_source(planned: &PlannedFile, input: &File) -> Result<(), ExportError> {
+    let (named, _) = open_planned_source(planned)?;
+    if graphforge_filesystem::file_identity(input).map_err(storage)?
+        != graphforge_filesystem::file_identity(&named).map_err(storage)?
+    {
+        return Err(err("GF_SOURCE_CHANGED", "source replaced during export"));
+    }
+    Ok(())
+}
+
+/// Write one entry's headers. An entry whose path fits the ustar split and
+/// whose length fits the ustar `size` field keeps a single ustar header, so
+/// such bundles stay byte-identical. Otherwise one local PAX header carries
+/// the `path` record and, for an oversized entry, the POSIX.1-2001 `size`
+/// record; the regular header's ustar `size` field is then zero.
+fn header(out: &mut File, h: &mut TransportHash, path: &str, size: u64) -> Result<(), ExportError> {
+    let oversized = size > pax::ustar_size_limit();
+    if !oversized && let Ok((name, prefix)) = split(path) {
+        return raw_header(out, h, name, prefix, size, b'0');
+    }
+    let suffix = &hex(ContractSha256::digest(path.as_bytes()).into())[..16];
+    let body = pax::encode(path, size);
+    raw_header(
+        out,
+        h,
+        &format!("PaxHeaders/{suffix}"),
+        "",
+        body.len() as u64,
+        b'x',
+    )?;
+    emit(out, h, body.as_bytes())?;
+    pad(out, h, body.len() as u64)?;
+    let field = if oversized { 0 } else { size };
+    raw_header(out, h, &format!("PaxFiles/{suffix}"), "", field, b'0')
+}
+fn raw_header(
+    out: &mut File,
+    h: &mut TransportHash,
+    name: &str,
+    prefix: &str,
+    size: u64,
+    kind: u8,
+) -> Result<(), ExportError> {
+    let mut b = [0u8; 512];
+    put(&mut b[..100], name.as_bytes());
+    oct(&mut b[100..108], 0o644)?;
+    oct(&mut b[108..116], 0)?;
+    oct(&mut b[116..124], 0)?;
+    oct(&mut b[124..136], size)?;
+    oct(&mut b[136..148], 0)?;
+    b[148..156].fill(b' ');
+    b[156] = kind;
+    put(&mut b[257..263], b"ustar\0");
+    put(&mut b[263..265], b"00");
+    put(&mut b[345..500], prefix.as_bytes());
+    let sum: u64 = b.iter().map(|x| u64::from(*x)).sum();
+    b[148..156].copy_from_slice(format!("{sum:06o}\0 ").as_bytes());
+    out.write_all(&b).map_err(storage)?;
+    h.update(b);
+    Ok(())
+}
+fn split(p: &str) -> Result<(&str, &str), ExportError> {
+    if p.len() <= 100 {
+        return Ok((p, ""));
+    }
+    for (i, _) in p.match_indices('/').rev() {
+        let (pre, name) = p.split_at(i);
+        if pre.len() <= 155 && name.len() - 1 <= 100 {
+            return Ok((&name[1..], pre));
+        }
+    }
+    Err(err("GF_INVALID_PORTABLE_PATH", "path cannot fit ustar"))
+}
+fn oct(dst: &mut [u8], n: u64) -> Result<(), ExportError> {
+    let w = dst.len() - 1;
+    let s = format!("{n:0w$o}");
+    if s.len() > w {
+        return Err(limit("tar field overflow"));
+    }
+    dst[..w].copy_from_slice(s.as_bytes());
+    dst[w] = 0;
+    Ok(())
+}
+fn put(d: &mut [u8], s: &[u8]) {
+    d[..s.len()].copy_from_slice(s);
+}
+fn emit(o: &mut File, h: &mut TransportHash, b: &[u8]) -> Result<(), ExportError> {
+    o.write_all(b).map_err(storage)?;
+    h.update(b);
+    Ok(())
+}
+fn pad(output: &mut File, digest: &mut TransportHash, length: u64) -> Result<(), ExportError> {
+    let padding = ((512 - length % 512) % 512) as usize;
+    let zeroes = [0u8; 512];
+    emit(output, digest, &zeroes[..padding])
+}
+const INVENTORY_PATH: &str = "manifest-sha256.txt";
+/// Inventory rows are rendered and written in batches of about this many bytes.
+const INVENTORY_BATCH_BYTES: usize = 64 * 1024;
+
+/// Exact identity of a canonical payload inventory (`manifest-sha256.txt`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct InventoryIdentity {
+    length: u64,
+    digest: [u8; 32],
+    checksum: u64,
+}
+
+/// Render the canonical payload inventory, one `sha256  path` row per entry,
+/// into `sink` in bounded batches. The inventory is never held whole: memory
+/// is one batch plus one row, whatever the entry count (#900).
+fn render_inventory<'a>(
+    rows: impl Iterator<Item = (&'a str, [u8; 32])>,
+    mut sink: impl FnMut(&[u8]) -> Result<(), ExportError>,
+) -> Result<u64, ExportError> {
+    let mut batch = Vec::with_capacity(INVENTORY_BATCH_BYTES);
+    let mut length = 0_u64;
+    for (path, digest) in rows {
+        let row = 64 + 2 + path.len() + 1;
+        length = length
+            .checked_add(row as u64)
+            .ok_or_else(|| limit("payload inventory size overflow"))?;
+        if !batch.is_empty() && batch.len() + row > INVENTORY_BATCH_BYTES {
+            sink(&batch)?;
+            batch.clear();
+        }
+        batch.extend(hex(digest).bytes());
+        batch.extend(b"  ");
+        batch.extend(path.bytes());
+        batch.push(b'\n');
+    }
+    if !batch.is_empty() {
+        sink(&batch)?;
+    }
+    Ok(length)
+}
+
+/// Render the inventory into `write`, returning the identity of exactly the
+/// bytes passed to it.
+fn stream_inventory<'a>(
+    rows: impl Iterator<Item = (&'a str, [u8; 32])>,
+    mut write: impl FnMut(&[u8]) -> Result<(), ExportError>,
+) -> Result<InventoryIdentity, ExportError> {
+    let mut digest = ControlSha256::new();
+    let mut checksum = crate::corruption_checksum::Checksum::new();
+    let length = render_inventory(rows, |bytes| {
+        write(bytes)?;
+        digest.update(bytes);
+        checksum.update(bytes);
+        Ok(())
+    })?;
+    Ok(InventoryIdentity {
+        length,
+        digest: digest.finalize().into(),
+        checksum: checksum.finish(),
+    })
+}
+
+/// Identity of the inventory `rows` render to, computed without buffering it.
+fn inventory_identity<'a>(
+    rows: impl Iterator<Item = (&'a str, [u8; 32])>,
+) -> Result<InventoryIdentity, ExportError> {
+    stream_inventory(rows, |_| Ok(()))
+}
+
+/// Stream the inventory into the current bundle member.
+fn emit_inventory<'a>(
+    out: &mut File,
+    transport: &mut TransportHash,
+    rows: impl Iterator<Item = (&'a str, [u8; 32])>,
+    allocation: &mut ExportAllocationObserver,
+) -> Result<InventoryIdentity, ExportError> {
+    stream_inventory(rows, |bytes| {
+        observed_write_result(emit(out, transport, bytes), out, allocation)?;
+        allocation.observe(out)
+    })
+}
+
+/// Stream the inventory into the expanded package's `manifest-sha256.txt`.
+fn write_inventory<'a>(
+    root: &Path,
+    rows: impl Iterator<Item = (&'a str, [u8; 32])>,
+    allocation: &mut ExportAllocationObserver,
+) -> Result<InventoryIdentity, ExportError> {
+    let path = root.join(INVENTORY_PATH);
+    let mut file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&path)
+        .map_err(storage)?;
+    allocation.register(&path, &file)?;
+    let identity = stream_inventory(rows, |bytes| {
+        observed_write_result(file.write_all(bytes).map_err(storage), &file, allocation)?;
+        allocation.observe(&file)
+    })?;
+    crate::durable_commit::seal_file(&file).map_err(storage)?;
+    allocation.observe(&file)?;
+    Ok(identity)
+}
+
+/// Render `tagmanifest-sha256.txt`. It always has the same three rows; the
+/// reader retains it under `max_tag_manifest_bytes`, so the writer refuses
+/// what the reader would.
+fn tag_manifest(
+    rows: &[(String, u64, [u8; 32])],
+    limit_bytes: u64,
+) -> Result<Vec<u8>, ExportError> {
+    let mut o = Vec::new();
+    for (p, _, d) in rows {
+        let row_bytes = 64_u64
+            .checked_add(2)
+            .and_then(|value| value.checked_add(p.len() as u64))
+            .and_then(|value| value.checked_add(1))
+            .ok_or_else(|| limit("tag manifest size overflow"))?;
+        if (o.len() as u64).saturating_add(row_bytes) > limit_bytes {
+            return Err(limit("tag manifest exceeds configured limit"));
+        }
+        o.extend(hex(*d).bytes());
+        o.extend(b"  ");
+        o.extend(p.bytes());
+        o.push(b'\n');
+    }
+    Ok(o)
+}
+fn parent(p: &Path) -> Result<(), ExportError> {
+    fs::create_dir_all(p.parent().unwrap()).map_err(storage)
+}
+fn write_bytes(
+    root: &Path,
+    p: &str,
+    b: &[u8],
+    allocation: &mut ExportAllocationObserver,
+) -> Result<(), ExportError> {
+    let p = root.join(p);
+    parent(&p)?;
+    let mut f = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&p)
+        .map_err(storage)?;
+    allocation.register(&p, &f)?;
+    observed_write_result(f.write_all(b).map_err(storage), &f, allocation)?;
+    allocation.observe(&f)?;
+    crate::durable_commit::seal_file(&f).map_err(storage)?;
+    allocation.observe(&f)
+}
+fn sync_tree(root: &Path) -> Result<(), ExportError> {
+    let mut dirs = vec![root.into()];
+    let mut i = 0;
+    while i < dirs.len() {
+        for e in fs::read_dir(&dirs[i]).map_err(storage)? {
+            let e = e.map_err(storage)?;
+            if e.file_type().map_err(storage)?.is_dir() {
+                dirs.push(e.path());
+            }
+        }
+        i += 1;
+    }
+    dirs.sort_by_key(|p: &PathBuf| std::cmp::Reverse(p.components().count()));
+    for d in dirs {
+        sync_dir(&d)?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests;
+
+// The payload copy has one fixed-size buffer, independent of the planned length.
+// The consumer must finish each chunk before the next read reuses that buffer.
+fn copy_chunks(
+    reader: &mut impl Read,
+    size: usize,
+    cancelled: &impl Fn() -> bool,
+    mut consume: impl FnMut(&[u8]) -> Result<(), ExportError>,
+) -> Result<(), ExportError> {
+    if size == 0 {
+        return Err(limit("copy buffer is zero"));
+    }
+    let mut buffer = vec![0; size];
+    loop {
+        if cancelled() {
+            return Err(err("GF_CANCELLED", "portable export cancelled"));
+        }
+        let count = reader.read(&mut buffer).map_err(storage)?;
+        if count == 0 {
+            return Ok(());
+        }
+        consume(&buffer[..count])?;
+    }
+}
+
+#[cfg(test)]
+mod bounded_copy_tests {
+    use super::*;
+    struct GeneratedReader {
+        remaining: u64,
+        largest_requested: usize,
+    }
+    impl Read for GeneratedReader {
+        fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
+            self.largest_requested = self.largest_requested.max(output.len());
+            let n = self.remaining.min(output.len() as u64) as usize;
+            output[..n].fill(0x5a);
+            self.remaining -= n as u64;
+            Ok(n)
+        }
+    }
+    #[test]
+    fn payload_buffer_bound_does_not_scale_with_payload_size() {
+        const BUFFER: usize = 8192;
+        for length in [BUFFER as u64 * 2 + 1, BUFFER as u64 * 1024 + 17] {
+            let mut reader = GeneratedReader {
+                remaining: length,
+                largest_requested: 0,
+            };
+            let mut writer = std::io::sink();
+            let mut largest_written = 0;
+            let mut total = 0;
+            copy_chunks(&mut reader, BUFFER, &|| false, |chunk| {
+                largest_written = largest_written.max(chunk.len());
+                total += chunk.len() as u64;
+                writer.write_all(chunk).map_err(storage)
+            })
+            .unwrap();
+            assert_eq!(total, length);
+            assert_eq!(reader.remaining, 0);
+            assert_eq!(reader.largest_requested, BUFFER);
+            assert_eq!(largest_written, BUFFER);
+        }
+    }
+}

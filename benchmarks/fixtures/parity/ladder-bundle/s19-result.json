@@ -1,0 +1,27 @@
+{
+  "artifacts": {
+    "benchexec_sha256": "8b0f7ea4c88c0008b99ee1295a159c6276ba5766803b8faedd3d1166434afc5e",
+    "graphforge_sha256": "9ba9a00932115421589ad39cc3a9e1f3b5df946fb1de749349d070351eae5969",
+    "plan_sha256": "ba3d5996274296588bdb39a7e3eacd3a9849fdb4a3c9ac788cce691c652b5f86",
+    "rung_sha256": "4b8c269838729685330c6b6691890c0a6575185a6ea2a4208545b3ae976759ea"
+  },
+  "claim": "engineering_evidence_only",
+  "failure": null,
+  "identities": {
+    "benchexec_python_sha256": "52e0a13e60a981d8c4b6478be2ba5176f69da07948a056bf49cf6f077e30cb41",
+    "benchexec_version": "3.35",
+    "certify_sha256": "04b22c0e876d0ce292308097b71b9eb1a0bf5d94e5f896cf2bb5cf20dc0e8c49",
+    "commit": "114b1964874419b31d13820bfbdf72fe57286544",
+    "generator": "sha256:a7cd8397ce191c48094d8812eb43dfc894084645dd439e76fb8704b35bb61fdc",
+    "generator_executable_sha256": "0ba9603606493d8b204be5107ce76d01cd47471d6c6d1a29a843b28f1cd88458",
+    "gf_sha256": "427393c396b898516b5174c2055cb1098cf51aafa700214b35dd04c5f829ec56",
+    "host_profile_id": "local-linux-cgroups-v2",
+    "host_profile_sha256": "21cbcd01a0896ad8ed9d4aae1ab933cb143d41636fdf66297ead9bb89c3681bf",
+    "producer_sha256": "127ee9765230fc85cbb849d24bf7124764fba5e66d1ffe17586628dc19ac3c06",
+    "profile_id": "graph500-s19-local",
+    "profile_sha256": "9b06c9b86bc7481c52d9646ca555e045b5f4111203b156c94900cbdf8ac71c80"
+  },
+  "rung": "S19",
+  "schema": "graphforge-progressive-host-run-result/1",
+  "status": "passed"
+}
