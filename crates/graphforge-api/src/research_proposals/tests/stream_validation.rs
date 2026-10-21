@@ -992,7 +992,7 @@ fn an_expanded_package_with_saved_queries_and_an_ontology_verifies_like_its_bund
                 },
                 creator_uuid: Uuid::now_v7(),
                 created_at: 1,
-                label: "Queries and ontology".into(),
+                label: "Queries-and-ontology".into(),
             },
             &CancellationToken::new(),
         )

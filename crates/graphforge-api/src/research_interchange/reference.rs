@@ -148,7 +148,7 @@ mod tests {
                     },
                     creator_uuid: author,
                     created_at: 1,
-                    label: "Citable study".into(),
+                    label: "Citable-study".into(),
                 },
                 &cancellation,
             )

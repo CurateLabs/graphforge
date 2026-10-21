@@ -96,7 +96,7 @@ fn canonical_parent_and_branch_decisions_are_explicit_independent_and_durable() 
         },
         creator_uuid: Uuid::now_v7(),
         created_at: 11,
-        label: "alternative interpretation".into(),
+        label: "alternative-interpretation".into(),
     };
     g.create_research_branch(&branch, &CancellationToken::new())
         .unwrap();
@@ -806,7 +806,7 @@ fn child_inherits_frozen_suppression_while_sibling_and_parent_remain_visible() {
         },
         creator_uuid: Uuid::now_v7(),
         created_at: 40,
-        label: "Inherited suppression".into(),
+        label: "Inherited-suppression".into(),
     };
     g.create_research_branch(&child, &CancellationToken::new())
         .unwrap();

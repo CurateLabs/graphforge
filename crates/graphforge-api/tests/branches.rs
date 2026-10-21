@@ -311,7 +311,7 @@ fn slice_branch_preserves_selected_identity_without_parent_graph_membership() {
         source,
         creator_uuid: Uuid::now_v7(),
         created_at: 2,
-        label: "Selected character".into(),
+        label: "Selected-character".into(),
     };
     graph
         .create_research_branch(&request, &CancellationToken::new())
@@ -522,7 +522,7 @@ fn assertion_slice_branch_retains_only_selected_evidence_after_reopen() {
         source: BranchSource::Slice { frozen_ipc },
         creator_uuid: Uuid::now_v7(),
         created_at: 2,
-        label: "Selected assertion".into(),
+        label: "Selected-assertion".into(),
     };
     graph
         .create_research_branch(&request, &CancellationToken::new())
@@ -623,7 +623,7 @@ fn field_origins_and_contributions_survive_local_edits_and_slice_children() {
         .execute("CREATE (:Character {name:'Shared'})")
         .unwrap();
     let object = shared_uuid(&graph);
-    let parent = create(&mut graph, "parent branch");
+    let parent = create(&mut graph, "parent-branch");
     let baseline = graph
         .open_research_branch(parent.branch_uuid)
         .unwrap()
@@ -669,7 +669,7 @@ fn field_origins_and_contributions_survive_local_edits_and_slice_children() {
         },
         creator_uuid: Uuid::now_v7(),
         created_at: 4,
-        label: "Slice child".into(),
+        label: "Slice-child".into(),
     };
     graph
         .create_research_branch(&child, &CancellationToken::new())
@@ -755,7 +755,7 @@ fn source_only_slice_branch_has_empty_graph_and_selected_source_membership() {
         source: BranchSource::Slice { frozen_ipc },
         creator_uuid: Uuid::now_v7(),
         created_at: 2,
-        label: "Source only".into(),
+        label: "Source-only".into(),
     };
     graph
         .create_research_branch(&request, &CancellationToken::new())
@@ -1076,7 +1076,7 @@ fn selected_branch_releases_large_parent_after_evolution_and_cleanup() {
             },
             creator_uuid: Uuid::now_v7(),
             created_at: 2,
-            label: "Fixed character".into(),
+            label: "Fixed-character".into(),
         };
         std::fs::write(
             directory.path().join("request.json"),
@@ -1321,7 +1321,7 @@ fn required_roles_survive_branch_and_historical_branch_version_creation() {
         source: BranchSource::Slice { frozen_ipc },
         creator_uuid: Uuid::now_v7(),
         created_at: 2,
-        label: "Only edge active".into(),
+        label: "Only-edge-active".into(),
     };
     graph
         .create_research_branch(&parent, &CancellationToken::new())
@@ -1396,7 +1396,7 @@ fn required_roles_survive_branch_and_historical_branch_version_creation() {
             source,
             creator_uuid: Uuid::now_v7(),
             created_at: 3,
-            label: "Child preserves roles".into(),
+            label: "Child-preserves-roles".into(),
         };
         graph
             .create_research_branch(&child, &CancellationToken::new())
@@ -1566,5 +1566,86 @@ fn branch_cancel_stale_current_and_conflicting_retry_preserve_authority() {
                 .graph()
         ),
         2
+    );
+}
+
+fn create_request(graph: &GraphForge, label: &str) -> CreateResearchBranchRequest {
+    CreateResearchBranchRequest {
+        author: None,
+        committer: None,
+        operation_uuid: Uuid::now_v7(),
+        expected_generation_uuid: current(graph),
+        branch_uuid: Uuid::now_v7(),
+        version_uuid: Uuid::now_v7(),
+        source: BranchSource::Current {
+            origin_version_uuid: Uuid::now_v7(),
+            context_uuid: Uuid::now_v7(),
+        },
+        creator_uuid: Uuid::now_v7(),
+        created_at: 1,
+        label: label.into(),
+    }
+}
+
+#[test]
+fn branch_label_must_be_a_valid_unique_ref() {
+    let root = tempfile::tempdir().unwrap();
+    let mut graph = GraphForge::new(root.path().join("project").to_str()).unwrap();
+    graph.execute("CREATE (:Item {score:0})").unwrap();
+    let too_long = "x".repeat(4097);
+    for label in [
+        "",
+        "has space",
+        "a:b",
+        "a//b",
+        "/leading",
+        "trailing/",
+        "a..b",
+        "a?b",
+        "a#b",
+        "a~b",
+        "a^b",
+        "a\\b",
+        "control\u{1}",
+        too_long.as_str(),
+    ] {
+        let request = create_request(&graph, label);
+        let error = graph
+            .create_research_branch(&request, &CancellationToken::new())
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("GF_RESEARCH_BRANCH_LABEL_INVALID"),
+            "{label:?}: {error}"
+        );
+    }
+    assert!(
+        graph
+            .research_version_retention()
+            .unwrap()
+            .branches
+            .is_empty()
+    );
+
+    let first = create_request(&graph, "feature/score");
+    graph
+        .create_research_branch(&first, &CancellationToken::new())
+        .unwrap();
+    let second = create_request(&graph, "feature/score");
+    let error = graph
+        .create_research_branch(&second, &CancellationToken::new())
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("GF_RESEARCH_BRANCH_LABEL_TAKEN"),
+        "{error}"
+    );
+    // An exact replay of the accepted request is still its receipt, not a clash.
+    graph
+        .create_research_branch(&first, &CancellationToken::new())
+        .unwrap();
+    assert_eq!(
+        graph.research_version_retention().unwrap().branches.len(),
+        1
     );
 }

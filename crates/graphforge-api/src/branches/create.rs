@@ -28,13 +28,18 @@ impl GraphForge {
         if request.branch_uuid.is_nil()
             || request.version_uuid.is_nil()
             || request.creator_uuid.is_nil()
-            || request.label.is_empty()
-            || request.label.len() > 4096
         {
             return Err(GfError::Validation(
-                "Branch identity, creator or label is invalid".into(),
+                "Branch identity or creator is invalid".into(),
             ));
         }
+        // A Branch label is a ref (ADR 0061): clone, publish, push and pull all
+        // name the Branch by it.
+        graphforge_discovery::check_ref_name(&request.label).map_err(|_| {
+            GfError::Validation(
+                "GF_RESEARCH_BRANCH_LABEL_INVALID: a Branch label must be a valid ref name".into(),
+            )
+        })?;
         let command = publication::begin(
             self,
             request.operation_uuid,
@@ -44,6 +49,19 @@ impl GraphForge {
         )?;
         if let Some(receipt) = command.replay(self)? {
             return Ok(receipt);
+        }
+        let registry = graphforge_storage::research_versions::read_research_registry(
+            &graphforge_storage::resolve_project_generation(&command.root)?,
+        )?;
+        if registry
+            .branches
+            .values()
+            .any(|branch| branch.label == request.label)
+        {
+            return Err(GfError::Validation(
+                "GF_RESEARCH_BRANCH_LABEL_TAKEN: another Branch of this Project already has this label"
+                    .into(),
+            ));
         }
         let selected = super::selection::authenticate(self, &request.source, cancellation)?;
         let source = resolve_source(

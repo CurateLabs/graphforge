@@ -95,7 +95,7 @@ fn selected_artifact_bytes_external_limits_and_ontology_survive_reopen() {
                 },
                 creator_uuid: Uuid::now_v7(),
                 created_at: 1,
-                label: "Evidence study".into(),
+                label: "Evidence-study".into(),
             },
             &CancellationToken::new(),
         )
@@ -282,7 +282,7 @@ pub(crate) fn evidence_bundle(
                 },
                 creator_uuid: Uuid::now_v7(),
                 created_at: 1,
-                label: "Evidence study".into(),
+                label: "Evidence-study".into(),
             },
             &CancellationToken::new(),
         )

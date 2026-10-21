@@ -68,7 +68,7 @@ fn owner_with_pending_upstream() -> (
                 },
                 creator_uuid: Uuid::now_v7(),
                 created_at: 1,
-                label: "Pinned study".into(),
+                label: "Pinned-study".into(),
             },
             &CancellationToken::new(),
         )
@@ -241,7 +241,7 @@ fn adopting_a_source_preference_writes_the_private_view_and_no_published_tree() 
                 },
                 creator_uuid: Uuid::now_v7(),
                 created_at: 1,
-                label: "Source review".into(),
+                label: "Source-review".into(),
             },
             &cancel,
         )

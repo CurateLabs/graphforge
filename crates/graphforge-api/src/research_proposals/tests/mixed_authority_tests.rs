@@ -58,7 +58,7 @@ fn fork_local_branch_exports_mixed_project_acceptance_genealogy() {
             },
             creator_uuid: Uuid::now_v7(),
             created_at: 20,
-            label: "Local continuation".into(),
+            label: "Local-continuation".into(),
         },
         &CancellationToken::new(),
     )

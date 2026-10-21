@@ -26,7 +26,7 @@ fn complete_research_roundtrip_preserves_version_and_historical_genealogy() {
                 },
                 creator_uuid: Uuid::now_v7(),
                 created_at: 1,
-                label: "exported study".into(),
+                label: "exported-study".into(),
             },
             &cancellation,
         )
@@ -252,7 +252,7 @@ fn disjoint_and_redacted_exports_have_distinct_content_and_stable_transport_iden
                 },
                 creator_uuid: Uuid::now_v7(),
                 created_at: 1,
-                label: "selected study".into(),
+                label: "selected-study".into(),
             },
             &cancel,
         )
@@ -500,7 +500,7 @@ fn publication_export_uses_explicit_stage_without_changing_query_policy() {
                 },
                 creator_uuid: Uuid::now_v7(),
                 created_at: 1,
-                label: "stage regression".into(),
+                label: "stage-regression".into(),
             },
             &cancellation,
         )

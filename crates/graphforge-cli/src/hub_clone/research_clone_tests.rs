@@ -377,7 +377,7 @@ fn publish_history_shaped(
         BranchSource::Branch {
             branch_uuid: main_branch,
         },
-        "feature",
+        "feature/score",
     );
     let feature_head = edit(&mut fork, feature_branch, 2);
     // A Proposal: a frozen, field-selected projection of the feature head.
@@ -591,7 +591,11 @@ fn serve(published: &Published, lineage: &ResearchLineage) -> Hub {
         version: ProtocolVersion::CURRENT,
         repository,
         default_ref: "main".into(),
-        refs: ["feature/score", "main"]
+        refs: lineage
+            .branches
+            .iter()
+            .map(|branch| branch.ref_name.as_str())
+            .collect::<BTreeSet<_>>()
             .into_iter()
             .map(|name| RepositoryRef {
                 name: name.into(),
@@ -1232,6 +1236,33 @@ fn plain_clone_uses_advertised_default_research_branch_and_explicit_selectors_ov
                 .contains(&object_url(&published.project_package.0.object_digest))
         );
     }
+}
+
+#[test]
+fn clone_refuses_a_lineage_whose_label_differs_from_its_ref() {
+    let published = publish_history();
+    // The publisher wrote a ref name that is not the Branch label: the cloned
+    // Branch could not be pushed back under the ref it came from.
+    let mut request = lineage_request(&published);
+    request
+        .branch_ref_names
+        .insert(published.main_branch, "trunk".to_owned());
+    let lineage = published
+        .fork
+        .build_research_lineage_for_discovery(&request, &CancellationToken::new())
+        .unwrap();
+    let mut hub = serve(&published, &lineage);
+    default_ref(&mut hub, "trunk");
+    let root = tempfile::tempdir().unwrap();
+    let destination = root.path().join("trunk");
+    let error = clone_into(&hub, &destination, Some("trunk"), None).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("hub.malformed_lineage: Branch label differs from its ref name"),
+        "{error}"
+    );
+    assert!(!destination.exists());
 }
 
 fn branchless_hub(

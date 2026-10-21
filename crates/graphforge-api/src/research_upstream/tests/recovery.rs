@@ -17,7 +17,7 @@ pub(super) fn prepare(graph: &mut GraphForge) -> UpdateResearchBranchRequest {
         },
         creator_uuid: Uuid::now_v7(),
         created_at: 1,
-        label: "Recovered study".into(),
+        label: "Recovered-study".into(),
     };
     graph
         .create_research_branch(&branch, &CancellationToken::new())

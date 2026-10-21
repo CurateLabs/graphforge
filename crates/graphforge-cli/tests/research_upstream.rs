@@ -48,7 +48,7 @@ fn cli_upstream_review_reopens_and_replays_native_publication() {
                 },
                 creator_uuid: Uuid::now_v7(),
                 created_at: 1,
-                label: "CLI upstream".into(),
+                label: "CLI-upstream".into(),
             },
             &CancellationToken::new(),
         )

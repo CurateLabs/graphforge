@@ -101,7 +101,7 @@ mod tests {
                     },
                     creator_uuid: Uuid::now_v7(),
                     created_at: 1,
-                    label: "CLI research".into(),
+                    label: "CLI-research".into(),
                 },
                 &CancellationToken::new(),
             )

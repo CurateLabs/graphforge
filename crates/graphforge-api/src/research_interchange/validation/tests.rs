@@ -279,7 +279,7 @@ fn mapping_fixture() -> MappingFixture {
                 },
                 creator_uuid: Uuid::now_v7(),
                 created_at: 1,
-                label: "streaming mapping".into(),
+                label: "streaming-mapping".into(),
             },
             &CancellationToken::new(),
         )

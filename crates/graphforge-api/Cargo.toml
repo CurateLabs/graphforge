@@ -20,7 +20,7 @@ search = ["dep:graphforge-search"]
 provenance = ["dep:graphforge-provenance"]
 portable = ["dep:graphforge-portable-oci"]
 discovery = ["dep:graphforge-discovery"]
-research = ["knowledge", "portable"]
+research = ["knowledge", "portable", "discovery"]
 
 [dependencies]
 parking_lot = "0.12"

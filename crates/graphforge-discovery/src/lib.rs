@@ -1483,6 +1483,17 @@ fn validate_media_type(value: &str, limits: DiscoveryLimits) -> Result<(), Disco
     Ok(())
 }
 
+/// Check `value` against the discovery ref grammar with the default limits.
+///
+/// A research Branch label is a ref (ADR 0061), so Branch creation and publish
+/// share this one grammar with every discovery document.
+///
+/// # Errors
+/// Returns the discovery error naming the violated bound or grammar rule.
+pub fn check_ref_name(value: &str) -> Result<(), DiscoveryError> {
+    validate_ref_name(value, DiscoveryLimits::default())
+}
+
 pub(crate) fn validate_ref_name(
     value: &str,
     limits: DiscoveryLimits,

@@ -508,6 +508,13 @@ fn imported_branch_operation(
         .get(&branch_uuid)
         .ok_or_else(not_retained)?;
     require_discovered_branch(expected, branch, project_uuid)?;
+    // A ref is a Branch label (ADR 0061): a cloned Branch can only be pushed back
+    // under the ref it came from when the publisher's label is that ref.
+    if expected.label != expected.ref_name {
+        return Err(GfError::Validation(
+            "hub.malformed_lineage: Branch label differs from its ref name".into(),
+        ));
+    }
     let mut hash = sha2::Sha256::new();
     hash.update(b"graphforge-clone-branch-continuation/1");
     hash.update(branch_uuid.as_bytes());
