@@ -80,6 +80,14 @@ fn parse_limits(input: Option<PortableLimitsInput>) -> Result<PortableLimits> {
             Some(value) => crate::node_u64(Some(value), "maxTagManifestBytes")?,
             None => defaults.max_tag_manifest_bytes,
         },
+        max_retained_control_bytes: match input.max_retained_control_bytes {
+            Some(value) => crate::node_u64(Some(value), "maxRetainedControlBytes")?,
+            None => defaults.max_retained_control_bytes,
+        },
+        max_parquet_walk_bytes: match input.max_parquet_walk_bytes {
+            Some(value) => crate::node_u64(Some(value), "maxParquetWalkBytes")?,
+            None => defaults.max_parquet_walk_bytes,
+        },
         max_path_bytes: match input.max_path_bytes {
             Some(value) => crate::node_usize(Some(value), defaults.max_path_bytes, "maxPathBytes")?,
             None => defaults.max_path_bytes,
@@ -277,6 +285,10 @@ fn verify_report_output(report: graphforge_api::PortableVerifyResult) -> Portabl
             graphforge_api::PortableRepresentation::Expanded => "expanded".into(),
             graphforge_api::PortableRepresentation::Bundle => "bundle".into(),
         },
+        source: match report.source {
+            graphforge_api::PortableSource::File => "file".into(),
+            graphforge_api::PortableSource::Stream => "stream".into(),
+        },
         package_digest: report.package_digest,
         producing_core_version: report.producing_core_version,
         package_class: match report.package_class {
@@ -342,6 +354,11 @@ pub struct PortableLimitsInput {
     pub max_manifest_bytes: Option<BigInt>,
     pub max_semantic_manifest_bytes: Option<BigInt>,
     pub max_tag_manifest_bytes: Option<BigInt>,
+    /// Bytes the bundle reader may retain for controls it reads after the scan.
+    pub max_retained_control_bytes: Option<BigInt>,
+    /// Largest Parquet entry a stream holds in memory to walk its pages; a
+    /// larger one is staged in scratch.
+    pub max_parquet_walk_bytes: Option<BigInt>,
     pub max_path_bytes: Option<BigInt>,
     pub copy_buffer_bytes: Option<BigInt>,
 }
@@ -480,6 +497,8 @@ pub struct PortableVerifyOutput {
     pub research_entries: Vec<PortableResearchEntryOutput>,
     pub contract: String,
     pub representation: String,
+    /// How the verified bytes were read: `file` or `stream`.
+    pub source: String,
     pub package_digest: String,
     pub package_class: String,
     /// Exact GraphForge Core version the package manifest declares as producer.

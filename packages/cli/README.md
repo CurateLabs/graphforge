@@ -138,8 +138,9 @@ code and class (with a rerun resuming it). Other statuses fail at once. A retry 
 `Range`/`If-Range`, appends only an exact matching `206` response, and reads a
 full `200` response as the whole object again. Before downloading, clone checks
 that the destination filesystem is admissible (`GF_UNSUPPORTED_FILESYSTEM`) and
-has room for the package plus the import (about 3.25 times the package;
-`hub.insufficient_space`). Download, import target, and resume state live in an
+has room for the package plus the import (the package, plus a staged and a
+published copy of its payload, plus a validation copy and a rebuilt-Version copy
+of its research content when it has any; `hub.insufficient_space`). Download, import target, and resume state live in an
 owner-private, symlink-safe staging directory beside the destination, protected
 by an exclusive process lock. The destination is installed by one atomic
 no-replace rename only after transport size and SHA-256 checks, full

@@ -494,6 +494,29 @@ native research capability/registry version 6 and interchange manifest contract
 1, including exact reader/producer checks. An older reader refuses the new
 capability; no pre-v1 migration is implied.
 
+The components lay out as:
+
+```
+data/components/research/research-registry-<id>/participant.json
+data/components/research/research-retained/<version-uuid>/<sha256-hex>
+```
+
+Every Version's complete object closure (its participants, graph manifest
+nodes, graph files and local evidence) sits under that Version's own directory,
+named by its canonical lowercase `version_uuid`. An object that several
+Versions need is carried once per Version; the duplication is deliberate, so
+each directory is a self-contained unit. Import installs each distinct object
+once. Verification requires every directory to be a registry Version, to hold
+exactly that Version's closure with the registry's lengths, and refuses any
+other path, including the former `research-content/<digest>` shape, as
+`Incompatible`.
+
+The registry sorts before every retained object in canonical byte order
+(`research-registry-…` < `research-retained/`), and a Version's objects are
+contiguous (UUID text order equals the registry's key order). A reader that
+consumes the bundle in order therefore knows the registry, and the Version
+that owns each object, before the object arrives.
+
 The registry contains the selected immutable Version, required Version/proof
 payloads, identity-only ancestor citations, per-Version original Project
 citations, Branch genealogy, and exact accepted-contribution mappings. It does

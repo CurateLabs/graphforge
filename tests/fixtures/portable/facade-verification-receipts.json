@@ -2,6 +2,7 @@
   "full": {
     "contract": "graphforge-portable-verify/2",
     "representation": "bundle",
+    "source": "file",
     "package_digest": "sha256:d84a2db20ef881e857f5edd1d342f27da51bd280ade24aff2e78094c7fa0b06f",
     "package_class": "complete",
     "producing_core_version": "0.6.0-rc.5",
@@ -56,6 +57,7 @@
   "structure_only": {
     "contract": "graphforge-portable-verify/2",
     "representation": "bundle",
+    "source": "file",
     "package_digest": "sha256:d84a2db20ef881e857f5edd1d342f27da51bd280ade24aff2e78094c7fa0b06f",
     "package_class": "complete",
     "producing_core_version": "0.6.0-rc.5",

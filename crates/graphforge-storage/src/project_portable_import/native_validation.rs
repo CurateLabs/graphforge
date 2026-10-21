@@ -59,10 +59,45 @@ pub fn validate_research_package(
     Ok(report)
 }
 
+/// [`validate_research_package`] for a canonical bundle read once from a
+/// sequential reader.
+///
+/// The scan stages only the research files, `data/components/research/**`,
+/// because they are all native validation reads; the other components are
+/// authenticated and discarded. A package without research files writes
+/// nothing. The verdict equals [`validate_research_package`] on the same bytes
+/// in a file, and the report's `source` is `stream`.
+pub fn validate_research_package_stream(
+    source: &mut dyn std::io::Read,
+    scratch: Option<&Path>,
+    limits: PortableLimits,
+    cancelled: Option<&AtomicBool>,
+    validator: &mut NativeResearchValidator<'_>,
+) -> Result<graphforge_core::portable::PortableReport, PortableError> {
+    let scan = crate::project_portable::scan_stream(source, limits, cancelled, scratch)?;
+    let report = scan.report;
+    if report.research_interchange {
+        let (stage, captures) = scan.spill.authenticated(cancelled)?;
+        if let Some((registry, objects)) =
+            crate::project_portable::research::validate_stage(stage, &report, limits, cancelled)?
+        {
+            validate(
+                stage,
+                &registry,
+                &objects,
+                captures,
+                cancelled,
+                Some(validator),
+            )?;
+        }
+    }
+    Ok(report)
+}
+
 pub(super) fn validate(
     stage: &Path,
     registry: &ResearchRegistry,
-    objects: &BTreeMap<String, u64>,
+    objects: &BTreeMap<(Uuid, String), u64>,
     captures: &BTreeMap<String, crate::project_portable::MaterializedCapture>,
     cancelled: Option<&AtomicBool>,
     validator: Option<&mut NativeResearchValidator<'_>>,
@@ -166,5 +201,6 @@ pub fn import_complete_portable_with_native_validation(
         progress,
         allocation,
         Some(validator),
+        super::space::filesystem_available_space,
     )
 }

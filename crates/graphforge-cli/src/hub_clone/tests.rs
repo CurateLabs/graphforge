@@ -615,10 +615,25 @@ pub(super) fn clone_documents(
 /// A real complete portable bundle of an empty project and its
 /// semantic package digest.
 pub(super) fn real_bundle() -> (Vec<u8>, String) {
+    bundle_of_nodes(0)
+}
+
+/// A real complete portable bundle of a project holding `nodes` nodes of
+/// about 200 payload bytes each, and its semantic package digest.
+pub(super) fn bundle_of_nodes(nodes: u32) -> (Vec<u8>, String) {
     let root = tempfile::tempdir().unwrap();
     let source = root.path().join("source");
     std::fs::create_dir(&source).unwrap();
-    GraphForge::new(source.to_str()).unwrap();
+    let graph = GraphForge::new(source.to_str()).unwrap();
+    if nodes > 0 {
+        graph
+            .execute(&format!(
+                "UNWIND range(1, {nodes}) AS i CREATE (:Doc {{id: i, body: '{}'}})",
+                "x".repeat(200)
+            ))
+            .unwrap();
+    }
+    drop(graph);
     let generation = graphforge_storage::resolve_project_generation(&source).unwrap();
     let limits = PortableLimits::default();
     let plan = graphforge_storage::plan_complete_portable(&generation, limits).unwrap();

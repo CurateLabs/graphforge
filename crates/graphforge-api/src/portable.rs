@@ -199,6 +199,21 @@ pub struct PortableExportFacadeResult {
     pub allocation_physical_objects: u64,
 }
 
+/// Bytes the retry of an import operation into `project_root` frees by removing
+/// the stage an interrupted attempt of that operation left beside it.
+///
+/// This is the one credit both a clone's pre-download budget and the import's
+/// own admission use: only a stage whose ownership marker names the operation,
+/// only regular files with a single link, each at its actual allocation.
+#[must_use]
+pub fn portable_import_held_bytes(
+    project_root: &Path,
+    operation_id: &OperationId,
+    limits: graphforge_core::portable::PortableLimits,
+) -> u64 {
+    graphforge_storage::portable_import_held_bytes(project_root, operation_id.0, limits)
+}
+
 /// Verify portable content without admitting or mutating a destination Project.
 /// Research archives additionally run native owner checks in disposable private views.
 pub fn verify_portable(
@@ -227,6 +242,40 @@ pub fn verify_portable(
         ));
     }
     Ok(report)
+}
+
+/// Verify a canonical portable bundle read once from a sequential reader, in
+/// `Full` mode, and return the verdict [`verify_portable`] gives the same bytes
+/// in a file; only the report's `source` differs. Research archives run the
+/// same native owner checks, with their research files staged in a private
+/// directory inside `scratch` (the system temporary directory when `None`, as
+/// for research validation of a file); no other package writes anything.
+pub fn verify_portable_stream(
+    source: &mut dyn std::io::Read,
+    scratch: Option<&std::path::Path>,
+    limits: graphforge_core::portable::PortableLimits,
+    cancelled: Option<&AtomicBool>,
+) -> Result<PortableVerifyResult, graphforge_core::portable::PortableError> {
+    #[cfg(feature = "research")]
+    return graphforge_storage::validate_research_package_stream(
+        source,
+        scratch,
+        limits,
+        cancelled,
+        &mut crate::research_interchange::validation::validate,
+    );
+    #[cfg(not(feature = "research"))]
+    {
+        let report =
+            graphforge_storage::verify_portable_stream(source, scratch, limits, cancelled)?;
+        if report.research_interchange {
+            return Err(graphforge_core::portable::PortableError::new(
+                graphforge_core::portable::PortableErrorCode::Incompatible,
+                "research package validation requires the `research` feature",
+            ));
+        }
+        Ok(report)
+    }
 }
 
 /// Publish a verified portable package through an OCI Distribution registry.

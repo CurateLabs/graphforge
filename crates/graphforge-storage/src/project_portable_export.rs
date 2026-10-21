@@ -744,6 +744,7 @@ mod tests {
     mod parquet_profile;
     mod participant_files;
     mod payload_inventory;
+    mod research_layout;
     mod saved_queries;
     mod semantic_refusals;
     use super::planning::exact_identity;
@@ -2037,6 +2038,14 @@ mod tests {
                 let report =
                     verify_portable(&destination, PortableMode::Full, limits, None).unwrap();
                 assert!(report.ontology_composition.is_some());
+                if representation == PortableOutput::Bundle {
+                    let bytes = std::fs::read(&destination).unwrap();
+                    crate::project_portable::stream_tests::assert_stream_equals_file(&bytes);
+                    if index == 0 {
+                        crate::project_portable::stream_tests::assert_pool_bounds_retention(&bytes);
+                        crate::project_portable::stream_tests::assert_truncations_alike(&bytes);
+                    }
+                }
                 reports.push(report);
             }
             assert_eq!(reports[0].package_digest, reports[1].package_digest);
