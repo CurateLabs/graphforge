@@ -14,6 +14,8 @@ use graphforge_discovery::{
 };
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+#[path = "support/research_stream.rs"]
+mod research_stream;
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::fs;
@@ -164,6 +166,7 @@ fn publish() -> Published {
                 &cancellation,
             )
             .unwrap();
+        research_stream::assert_stream_matches_file(&output);
         packages.insert(
             version,
             (

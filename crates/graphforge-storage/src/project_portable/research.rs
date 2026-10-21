@@ -1,62 +1,94 @@
 //! Research component semantic admission before any destination publication.
 use super::{PortableError, PortableErrorCode, PortableLimits};
-use crate::research_versions::{ResearchRegistry, interchange::portable};
+use crate::research_versions::{ResearchRegistry, ResearchVersionRecord, interchange::portable};
 use std::{collections::BTreeMap, path::Path, sync::atomic::AtomicBool};
 use uuid::Uuid;
+
+pub(crate) mod stream;
 
 /// Every file of the research component lives here. Research validation reads
 /// no other path, so a bundle read in one pass stages exactly this prefix.
 pub(super) const NAMESPACE: &str = "data/components/research/";
-const PREFIX: &str = "data/components/research/research-retained/";
+/// Objects a Version's participants need (and evidence that is also one of
+/// them) sit under `research-retained/<version>/<sha256>`. A reader stages them.
+const RETAINED: &str = "data/components/research/research-retained/";
+/// Objects only a Version's local evidence needs sit under
+/// `research-retained-evidence/<version>/<sha256>`. Native validation never
+/// reads their bytes, so a reader authenticates them as they stream and never
+/// stages them; the path says so before the Version's closure is known. The
+/// directory sorts after the registry and before `research-retained/`
+/// (`-` < `/`), so the registry is still the first research entry.
+const EVIDENCE: &str = "data/components/research/research-retained-evidence/";
 
-/// The registry and every retained object with its length, keyed by the owning Version.
-type ResearchArchive = (ResearchRegistry, BTreeMap<(Uuid, String), u64>);
-
-fn retained_path(version: &Uuid, digest: &str) -> String {
-    format!("{PREFIX}{version}/{digest}")
+/// True for a path whose bytes only evidence needs: exactly
+/// `research-retained-evidence/<version-uuid>/<sha256>`. No decoder reads them,
+/// so nothing walks their Parquet pages.
+pub(super) fn is_evidence_only(path: &str) -> bool {
+    matches!(object_key(path), Some((_, _, true)))
 }
 
-/// Inverse of `retained_path`; only the canonical lowercase spelling is accepted.
-fn retained_key(path: &str) -> Option<(Uuid, String)> {
-    let (version, digest) = path.strip_prefix(PREFIX)?.split_once('/')?;
-    let version: Uuid = version.parse().ok()?;
-    (retained_path(&version, digest) == path).then(|| (version, digest.to_owned()))
+/// True for a path of a research object a reader stages
+/// (`research-retained/<version-uuid>/<sha256>`).
+pub(super) fn is_staged_object(path: &str) -> bool {
+    matches!(object_key(path), Some((_, _, false)))
 }
 
-/// Private stage holding the research files of a bundle that is read once and
-/// never re-read. Research validation opens each Version over its retained
-/// objects with random access, which a stream cannot give, so the files are
-/// staged on disk instead. The directory is created when the first research
-/// file arrives, so a package without research files writes nothing.
-pub(crate) struct Spill {
-    sink: super::materialization::CopySink<'static>,
+/// Nothing but a canonical evidence object may sit below
+/// `research-retained-evidence/`: a file there is exempt from the page profile,
+/// so any other would reach a decoder unwalked.
+pub(super) fn check_reserved_path(path: &str) -> Result<(), PortableError> {
+    if path.starts_with(EVIDENCE) && !is_evidence_only(path) {
+        return Err(PortableError::at(
+            PortableErrorCode::InvalidStructure,
+            path,
+            "research evidence directory holds only canonical evidence objects",
+        ));
+    }
+    Ok(())
 }
 
-impl Spill {
-    /// A stage that will live in a private directory inside `scratch`.
-    pub(super) fn new(scratch: &Path) -> Self {
-        Self {
-            sink: super::materialization::CopySink::staged_in(scratch.to_path_buf(), NAMESPACE),
-        }
-    }
-    pub(super) fn sink(&mut self) -> &mut super::materialization::CopySink<'static> {
-        &mut self.sink
-    }
-    pub(super) fn stage(&self) -> Option<&Path> {
-        self.sink.staged()
-    }
-    /// Authenticate the staged files and return the stage with the captures
-    /// that bind them. The stage lives as long as `self`.
-    pub(crate) fn authenticated(
-        &self,
-        cancelled: Option<&AtomicBool>,
-    ) -> Result<(&Path, &BTreeMap<String, super::MaterializedCapture>), PortableError> {
-        let stage = self.sink.staged().ok_or_else(|| {
-            PortableError::new(PortableErrorCode::Io, "research files were not staged")
-        })?;
-        self.sink.authenticate_and_sync(cancelled)?;
-        Ok((stage, self.sink.captures()))
-    }
+/// Directory names below `data/components/research/` that research objects own;
+/// no component may take one as its participant identity.
+pub(super) fn is_reserved_directory(participant_id: &str) -> bool {
+    matches!(
+        participant_id,
+        "research-retained" | "research-retained-evidence"
+    )
+}
+
+/// One retained object of a Version.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct Held {
+    pub(crate) length: u64,
+    /// The object lives under `research-retained-evidence/`: only evidence needs it.
+    pub(crate) evidence_only: bool,
+}
+
+/// Every retained object, keyed by the owning Version and digest.
+pub(crate) type Objects = BTreeMap<(Uuid, String), Held>;
+
+/// The registry and every retained object.
+type ResearchArchive = (ResearchRegistry, Objects);
+
+pub(crate) fn object_path(version: &Uuid, digest: &str, evidence_only: bool) -> String {
+    let prefix = if evidence_only { EVIDENCE } else { RETAINED };
+    format!("{prefix}{version}/{digest}")
+}
+
+/// Inverse of [`object_path`]; only the canonical lowercase spelling is accepted.
+fn object_key(path: &str) -> Option<(Uuid, String, bool)> {
+    [(RETAINED, false), (EVIDENCE, true)]
+        .into_iter()
+        .find_map(|(prefix, evidence_only)| {
+            let (version, digest) = path.strip_prefix(prefix)?.split_once('/')?;
+            let version: Uuid = version.parse().ok()?;
+            let sha256 = digest.len() == 64
+                && digest
+                    .bytes()
+                    .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+            (sha256 && object_path(&version, digest, evidence_only) == path)
+                .then(|| (version, digest.to_owned(), evidence_only))
+        })
 }
 
 pub(crate) fn validate_stage(
@@ -79,105 +111,161 @@ pub(super) fn validate_with_reader(
     if !report.research_interchange {
         return Ok(None);
     }
-    let registry_id =
-        crate::project_portable_export::planning::portable_participant_id("research", "registry");
-    let descriptors: Vec<_> = report
-        .research_entries
-        .iter()
-        .filter(|entry| entry.component_id == registry_id)
-        .collect();
-    // The registry's place is fixed so that it precedes every retained object in
-    // canonical order, whatever else the package holds.
-    if descriptors.len() != 1
-        || descriptors[0].path != format!("data/components/research/{registry_id}/participant.json")
-    {
-        return Err(invalid());
-    }
-    let descriptor = descriptors[0];
     let bytes = read(
-        &descriptor.path,
+        &registry_path(report)?,
         crate::research_versions::MAX_REGISTRY_BYTES as u64,
     )?;
     let registry = portable::portable_registry(&bytes).map_err(|_| invalid())?;
-    let mut provided: BTreeMap<(Uuid, String), u64> = BTreeMap::new();
-    for file in report
-        .research_entries
-        .iter()
-        .filter(|entry| entry.component_id != registry_id)
-    {
-        let key = retained_key(&file.path).ok_or_else(invalid)?;
-        if file.component_id != "research-content"
-            || key.1 != file.sha256
-            || !registry.versions.contains_key(&key.0)
-            || provided.insert(key, file.length).is_some()
-        {
-            return Err(invalid());
-        }
-    }
-    // Every Version carries its own complete closure; a shared object appears once per Version.
+    let provided = provided_by_report(report, &registry)?;
     for (id, version) in &registry.versions {
-        let length_of = |digest: &str| {
-            provided
-                .get(&(*id, digest.to_owned()))
-                .copied()
-                .ok_or_else(|| {
-                    graphforge_core::GfError::Validation("research object is missing".into())
-                })
-        };
-        let required = portable::version_objects_admitted(version, length_of, |digest, bound| {
-            super::check_cancel(cancelled).map_err(|_| {
-                graphforge_core::GfError::Validation("research verification cancelled".into())
-            })?;
-            if provided
-                .get(&(*id, digest.to_owned()))
-                .is_none_or(|length| *length > bound.min(limits.max_entry_bytes))
-            {
-                return Err(graphforge_core::GfError::Validation(
-                    "research object is missing or oversized".into(),
-                ));
-            }
-            read(
-                &retained_path(id, digest),
-                bound.min(limits.max_entry_bytes),
-            )
-            .map_err(|_| graphforge_core::GfError::Validation("research object unavailable".into()))
-        })
-        .map_err(|_| super::check_cancel(cancelled).err().unwrap_or_else(invalid))?;
-        let held = provided
-            .range((*id, String::new())..)
-            .take_while(|((v, _), _)| v == id);
-        if held.clone().count() != required.len()
-            || required.iter().any(|(digest, length)| {
-                provided
-                    .get(&(*id, digest.clone()))
-                    .is_none_or(|actual| length.is_some_and(|expected| expected != *actual))
-            })
-        {
-            return Err(invalid());
-        }
+        check_version(id, version, &provided, limits, cancelled, &mut read)?;
     }
     super::check_cancel(cancelled)?;
     Ok(Some((registry, provided)))
 }
 
+fn registry_id() -> String {
+    crate::project_portable_export::planning::portable_participant_id("research", "registry")
+}
+
+/// The registry's path, or a refusal unless the manifest names exactly one
+/// registry file and it is in its fixed place, which precedes every retained
+/// object in canonical order whatever else the package holds.
+fn registry_path(
+    report: &graphforge_core::portable::PortableReport,
+) -> Result<String, PortableError> {
+    let registry_id = registry_id();
+    let mut descriptors = report
+        .research_entries
+        .iter()
+        .filter(|entry| entry.component_id == registry_id);
+    let path = format!("{NAMESPACE}{registry_id}/participant.json");
+    match (descriptors.next(), descriptors.next()) {
+        (Some(descriptor), None) if descriptor.path == path => Ok(path),
+        _ => Err(invalid()),
+    }
+}
+
+/// Every retained object the manifest names, keyed by owning Version; each must
+/// sit in a registry Version's directory under its digest, once.
+fn provided_by_report(
+    report: &graphforge_core::portable::PortableReport,
+    registry: &ResearchRegistry,
+) -> Result<Objects, PortableError> {
+    let registry_id = registry_id();
+    let mut provided = Objects::new();
+    for file in report
+        .research_entries
+        .iter()
+        .filter(|entry| entry.component_id != registry_id)
+    {
+        let (version, digest, evidence_only) = object_key(&file.path).ok_or_else(invalid)?;
+        let held = Held {
+            length: file.length,
+            evidence_only,
+        };
+        if file.component_id != "research-content"
+            || digest != file.sha256
+            || !registry.versions.contains_key(&version)
+            || provided.insert((version, digest), held).is_some()
+        {
+            return Err(invalid());
+        }
+    }
+    Ok(provided)
+}
+
+/// One Version's closure against the objects `provided` for it: every object it
+/// needs is present with its exact length and nothing else is carried. An object
+/// under `research-retained-evidence/` must be evidence and no participant, graph file or
+/// manifest node. Every Version carries its own complete closure; a shared
+/// object appears once per Version.
+fn check_version(
+    id: &Uuid,
+    version: &ResearchVersionRecord,
+    provided: &Objects,
+    limits: PortableLimits,
+    cancelled: Option<&AtomicBool>,
+    read: &mut impl FnMut(&str, u64) -> Result<Vec<u8>, PortableError>,
+) -> Result<(), PortableError> {
+    let length_of = |digest: &str| {
+        provided
+            .get(&(*id, digest.to_owned()))
+            .map(|held| held.length)
+            .ok_or_else(|| {
+                graphforge_core::GfError::Validation("research object is missing".into())
+            })
+    };
+    let core = portable::core_objects_admitted(version, length_of, |digest, bound| {
+        super::check_cancel(cancelled).map_err(|_| {
+            graphforge_core::GfError::Validation("research verification cancelled".into())
+        })?;
+        if provided
+            .get(&(*id, digest.to_owned()))
+            .is_none_or(|held| held.length > bound.min(limits.max_entry_bytes))
+        {
+            return Err(graphforge_core::GfError::Validation(
+                "research object is missing or oversized".into(),
+            ));
+        }
+        read(
+            &object_path(id, digest, false),
+            bound.min(limits.max_entry_bytes),
+        )
+        .map_err(|_| graphforge_core::GfError::Validation("research object unavailable".into()))
+    })
+    .map_err(|_| super::check_cancel(cancelled).err().unwrap_or_else(invalid))?;
+    let evidence = portable::local_evidence(version).map_err(|_| invalid())?;
+    let mut required: BTreeMap<&String, Option<u64>> = core.iter().map(|(d, l)| (d, *l)).collect();
+    for (digest, length) in &evidence {
+        if required
+            .insert(digest, Some(*length))
+            .flatten()
+            .is_some_and(|old| old != *length)
+        {
+            return Err(invalid());
+        }
+    }
+    let mut held = 0;
+    for ((owner, digest), object) in provided.range((*id, String::new())..) {
+        if owner != id {
+            break;
+        }
+        held += 1;
+        let placed =
+            !object.evidence_only || (evidence.contains_key(digest) && !core.contains_key(digest));
+        if !placed
+            || required
+                .get(digest)
+                .is_none_or(|length| length.is_some_and(|l| l != object.length))
+        {
+            return Err(invalid());
+        }
+    }
+    if held != required.len() {
+        return Err(invalid());
+    }
+    Ok(())
+}
+
 pub(crate) fn install_captured_with_lease(
     stage: &Path,
     lease: &crate::GraphObjectPublicationLease,
-    objects: &BTreeMap<(Uuid, String), u64>,
+    objects: &Objects,
     captures: &BTreeMap<String, super::MaterializedCapture>,
     cancelled: Option<&AtomicBool>,
 ) -> Result<(), PortableError> {
     // A shared object is carried once per Version but installed once.
     let mut installed = std::collections::BTreeSet::new();
-    for ((version, digest), length) in objects {
+    for ((version, digest), held) in objects {
         super::check_cancel(cancelled)?;
         if !installed.insert(digest) {
             continue;
         }
-        let relative = retained_path(version, digest);
+        let relative = object_path(version, digest, held.evidence_only);
         let capture = captures.get(&relative).ok_or_else(invalid)?;
         let source = capture.open_source(&stage.join(relative))?;
-        if source.content_sha256() != digest || source.bytes() != *length {
+        if source.content_sha256() != digest || source.bytes() != held.length {
             return Err(invalid());
         }
         crate::graph_object_store::install_captured_portable_source_with_lease(

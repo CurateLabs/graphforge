@@ -186,6 +186,16 @@ pub(super) fn inspect(
             verify(root, guard, &hex(sha256), *byte_length)?;
         }
     }
+    inspect_participants(root, version, guard)
+}
+
+/// [`inspect`] without the local evidence objects, for a caller that has
+/// authenticated them itself and does not hold their bytes.
+pub(super) fn inspect_participants(
+    root: &Path,
+    version: &ResearchVersionRecord,
+    guard: Option<&crate::graph_object_store::GraphObjectGcGuard>,
+) -> Result<Vec<crate::ProjectParticipantSnapshot>, GfError> {
     let mut snapshots = Vec::new();
     let mut total = 0_u64;
     for p in &version.content.participants {

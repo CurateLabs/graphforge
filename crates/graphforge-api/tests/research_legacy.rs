@@ -7,7 +7,6 @@
 use graphforge_api::*;
 use graphforge_knowledge::research::{ResearchDecisionKind, ResearchSubjectKind};
 use graphforge_storage::research_versions::{RESEARCH_LEGACY_VERSION, RESEARCH_VERSION};
-use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 

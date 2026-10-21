@@ -45,6 +45,11 @@ impl Journey {
         .unwrap();
         assert_eq!(verified.package_digest, export.package_digest);
         assert!(verified.research_interchange);
+        super::research_stream::assert_complete_export_streams_alike(
+            &self.graph,
+            version,
+            self.owner.path(),
+        );
         self.output.json("complete-verification", &verified);
         let target = self.owner.path().join("imported");
         let import = PortableImportRequest {

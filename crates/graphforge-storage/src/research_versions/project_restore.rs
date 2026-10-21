@@ -109,6 +109,8 @@ pub fn materialize_research_project(
 
 /// Materialize authenticated prepared CAS content without requiring source history.
 /// The caller must validate the immutable Version identity before using this seam.
+/// The caller also authenticates the Version's local evidence objects: their
+/// bytes are neither required in `root` nor materialized into the Project.
 /// The transient graph workspace is created beside `target`, on its filesystem.
 pub fn materialize_prepared_research_version(
     root: &Path,
@@ -116,7 +118,7 @@ pub fn materialize_prepared_research_version(
     target: &Path,
 ) -> Result<ResolvedProjectGeneration, GfError> {
     let scratch = target.parent().unwrap_or_else(|| Path::new("."));
-    materialize_in(root, version, target, true, scratch)
+    materialize_in(root, version, target, true, false, scratch)
 }
 
 pub(super) fn materialize(
@@ -125,7 +127,7 @@ pub(super) fn materialize(
     target: &Path,
     prepared: bool,
 ) -> Result<ResolvedProjectGeneration, GfError> {
-    materialize_in(root, version, target, prepared, &std::env::temp_dir())
+    materialize_in(root, version, target, prepared, true, &std::env::temp_dir())
 }
 
 /// [`materialize`] with the transient graph workspace created in `scratch`.
@@ -134,11 +136,14 @@ fn materialize_in(
     version: &ResearchVersionRecord,
     target: &Path,
     prepared: bool,
+    with_evidence: bool,
     scratch: &Path,
 ) -> Result<ResolvedProjectGeneration, GfError> {
     let source_pin = crate::resolve_project_generation(root)?;
     validate_private_target(root, target)?;
-    let snapshots = if prepared {
+    let snapshots = if prepared && !with_evidence {
+        super::retained_content::inspect_participants(root, version, None)?
+    } else if prepared {
         super::retained_content::inspect(root, version, None)?
     } else {
         inspect_research_version(root, version)?
@@ -185,7 +190,9 @@ fn materialize_in(
             }
         }
     }
-    materialize_evidence(root, version, target)?;
+    if with_evidence {
+        materialize_evidence(root, version, target)?;
+    }
     let mut capabilities = BTreeMap::from([("workspace".to_owned(), 1), ("graph".to_owned(), 1)]);
     let mut participants = Vec::new();
     for p in snapshots {
