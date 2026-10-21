@@ -310,9 +310,11 @@ machine configuration cannot enter the semantic package identity.
 verifies it, and imports it as a new project (see the
 [CLI reference](https://github.com/CurateLabs/graphforge/blob/main/packages/cli/README.md)
 for identity forms, transport rules, and every error code's class). Without
-`--ref` or `--version-uuid`, clone follows the repository's default ref: when the
+`--ref`, `--version-uuid` or `--tag`, clone follows the repository's default ref: when the
 repository has research Branches, the default ref must name one and clone gets its
-head Version; a repository without Branches gets the Project package. `gf hub list OWNER/REPOSITORY` shows the refs, Branches,
+head Version; a repository without Branches gets the Project package. `--ref` names a Branch
+by its label, the same string the Hub serves as the ref; `--tag NAME` clones the Version a
+published tag names. `gf hub list OWNER/REPOSITORY` shows the refs, Branches,
 Versions, Fork origin, and Proposals before you choose. Everything in progress lives in a
 private staging directory beside the destination, `.DESTINATION.graphforge-clone`:
 the partial download, its resume checkpoint, and the import target. The project
