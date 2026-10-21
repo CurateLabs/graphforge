@@ -60,6 +60,11 @@ fn complete_research_roundtrip_preserves_version_and_historical_genealogy() {
     )
     .unwrap();
     assert!(report.research_interchange);
+    super::stream_parity::assert_complete_export_streams_alike(
+        &source,
+        version_uuid,
+        directory.path(),
+    );
     let target = directory.path().join("imported");
     let import = crate::PortableImportRequest {
         input: package,
