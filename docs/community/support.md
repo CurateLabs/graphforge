@@ -42,8 +42,9 @@ see [Scale and workload limits](../reference/scale-limits.md).
 ## How maintainers triage
 
 Bug reports arrive labeled `bug`, feature requests `enhancement`, and
-questions `question`. An issue with no milestone and no parent issue has not
-been triaged yet. Maintainers work through new issues in this order:
+questions `question`. An open issue with no milestone, no parent issue and
+no recorded outcome has not been triaged yet. Maintainers work through new
+issues in this order:
 
 1. **Safety first.** A report involving data loss, corruption, a crash, or a
    security boundary is read first. Security reports belong in the private
@@ -62,8 +63,8 @@ been triaged yet. Maintainers work through new issues in this order:
    a request for backward compatibility, migration of older project formats, or
    a legacy API is out of scope until a v1.0 compatibility decision.
 5. **Record the outcome** on the issue. Accepted work is attached to a
-   milestone or made a sub-issue of the issue it serves; that is what marks an
-   issue as triaged.
+   milestone or made a sub-issue of the issue it serves. Any other outcome is
+   a comment, and the issue is closed unless it awaits more information.
 
 Acceptance records that the problem is real and in scope. It does not promise
 a release date.
