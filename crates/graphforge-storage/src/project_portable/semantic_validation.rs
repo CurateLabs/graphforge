@@ -895,6 +895,12 @@ fn validate_runtime_map_contents(
         .iter()
         .map(|component| component.participant_id.as_str())
         .collect();
+    // Placement first: whatever else is wrong with a participant, one that sits
+    // outside its own component kind is reported as that, before any check
+    // that reads its payload's meaning (research included).
+    for participant in &runtime.participants {
+        validate_participant_placement(participant, manifest)?;
+    }
     validate_research_runtime(runtime, manifest)?;
     let mut prior = None;
     let mut runtime_ids = BTreeSet::new();
@@ -919,7 +925,6 @@ fn validate_runtime_map_contents(
                 "runtime participant mapping",
             ));
         }
-        validate_participant_placement(participant, manifest)?;
         let _ = participant.row_count;
         prior = Some(participant.participant_id.as_str());
     }

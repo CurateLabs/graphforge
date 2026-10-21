@@ -307,6 +307,85 @@ fn a_relocated_registry_is_refused() {
     );
 }
 
+/// A registry whose component and payload sit under `evidence`, its runtime
+/// mapping kept, is a misplaced runtime participant before it is anything the
+/// research checks have an opinion on: `InvalidStructure` from a directory, a
+/// bundle file and a stream alike.
+#[test]
+fn a_registry_in_an_evidence_component_is_refused_as_misplaced_everywhere() {
+    let fixture = two_versions_sharing_one_graph();
+    let mut plan =
+        plan_complete_portable(&fixture.generation, PortableExportLimits::default()).unwrap();
+    let registry = plan
+        .files
+        .iter()
+        .find(|file| file.path.starts_with(REGISTRY_PREFIX))
+        .unwrap()
+        .path
+        .clone();
+    let participant = registry
+        .strip_prefix("data/components/research/")
+        .and_then(|rest| rest.split('/').next())
+        .unwrap()
+        .to_owned();
+    rename_entry(
+        &mut plan,
+        &registry,
+        &format!("data/components/evidence/{participant}/participant.json"),
+    );
+    let mut manifest: Value = serde_json::from_slice(&plan.manifest).unwrap();
+    let capabilities = manifest["requirements"]["capabilities"]
+        .as_array_mut()
+        .unwrap();
+    capabilities.push("evidence@1".into());
+    capabilities.sort_by(|left, right| left.as_str().cmp(&right.as_str()));
+    let components = manifest["components"].as_array_mut().unwrap();
+    components
+        .iter_mut()
+        .find(|component| component["participant_id"] == participant.as_str())
+        .unwrap()["kind"] = "evidence".into();
+    components.sort_by(|left, right| {
+        let key = |component: &Value| {
+            (
+                component["kind"].as_str().unwrap().to_owned(),
+                component["participant_id"].as_str().unwrap().to_owned(),
+            )
+        };
+        key(left).cmp(&key(right))
+    });
+    plan.manifest = canonical_json(&manifest).unwrap();
+    resign_test_manifest(&mut plan);
+
+    let output = tempfile::tempdir().unwrap();
+    let (expanded, bundle) = write_test_representations(&plan, output.path());
+    let mut reader = std::io::BufReader::new(fs::File::open(&bundle).unwrap());
+    let streamed =
+        crate::verify_portable_stream(&mut reader, None, PortableLimits::default(), None)
+            .unwrap_err();
+    let verdicts = [
+        crate::verify_portable(
+            &expanded,
+            PortableMode::Full,
+            PortableLimits::default(),
+            None,
+        )
+        .unwrap_err(),
+        verify(&bundle).unwrap_err(),
+        streamed,
+    ];
+    for error in &verdicts {
+        assert_eq!(error.code, PortableErrorCode::InvalidStructure, "{error}");
+        assert!(
+            error
+                .to_string()
+                .contains("runtime participant outside its component kind"),
+            "{error}"
+        );
+    }
+    assert_eq!(verdicts[0].to_string(), verdicts[1].to_string());
+    assert_eq!(verdicts[1].to_string(), verdicts[2].to_string());
+}
+
 #[test]
 fn research_entries_out_of_canonical_order_are_refused() {
     let fixture = two_versions_sharing_one_graph();
