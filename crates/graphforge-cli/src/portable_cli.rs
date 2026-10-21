@@ -17,6 +17,7 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::canonical_uuid;
+use crate::hub_http::{HttpTransport, RangedObjectReader};
 
 /// The `--input` value that names standard input instead of a file.
 const STDIN_INPUT: &str = "-";
@@ -160,8 +161,11 @@ pub(crate) struct PortableExportArgs {
 #[derive(Args)]
 pub(crate) struct PortableVerifyArgs {
     /// Package path, or `-` to read a canonical bundle from standard input.
-    #[arg(long)]
-    input: PathBuf,
+    #[arg(long, required_unless_present = "url")]
+    input: Option<PathBuf>,
+    /// HTTPS object URL, including a presigned query string.
+    #[arg(long, conflicts_with = "input", required_unless_present = "input")]
+    url: Option<String>,
     #[arg(long, value_enum, default_value_t = VerifyMode::Full)]
     mode: VerifyMode,
 }
@@ -293,7 +297,24 @@ pub(crate) fn run_portable_without_graph(
             .into())
         }
         PortableCommand::Verify(args) => {
-            let report = if args.input == std::path::Path::new(STDIN_INPUT) {
+            let report = if let Some(url) = args.url {
+                let url = url::Url::parse(&url)
+                    .map_err(|_| graphforge_api::GfError::Validation("invalid URL".into()))?;
+                let transport = HttpTransport::new();
+                let mut reader = RangedObjectReader::open(&transport, url)?;
+                let result =
+                    verify_portable_stream(&mut reader, None, PortableLimits::default(), None);
+                match result {
+                    Ok(report) => report,
+                    Err(_) if reader.changed() => {
+                        return Err(map_portable(graphforge_api::PortableError::new(
+                            graphforge_api::PortableErrorCode::ConcurrentMutation,
+                            "remote object changed during verification",
+                        )));
+                    }
+                    Err(error) => return Err(map_portable(error)),
+                }
+            } else if args.input.as_deref() == Some(std::path::Path::new(STDIN_INPUT)) {
                 if !matches!(args.mode, VerifyMode::Full) {
                     return Err(graphforge_api::GfError::Validation(
                         "--input - verifies a stream and requires --mode full".into(),
@@ -306,17 +327,22 @@ pub(crate) fn run_portable_without_graph(
                     PortableLimits::default(),
                     None,
                 )
+                .map_err(map_portable)?
             } else {
                 verify_portable(
                     &PortableVerifyRequest {
-                        input: args.input,
+                        input: args.input.ok_or_else(|| {
+                            graphforge_api::GfError::Validation(
+                                "--input or --url is required".into(),
+                            )
+                        })?,
                         mode: args.mode.into(),
                         limits: PortableLimits::default(),
                     },
                     None,
                 )
-            }
-            .map_err(map_portable)?;
+                .map_err(map_portable)?
+            };
             if json {
                 write_json(&report, output)?;
             } else {

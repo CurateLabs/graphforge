@@ -7,7 +7,7 @@ use graphforge_discovery::RepositoryIdentity;
 use graphforge_hub_publish::{HubMethod, HubRequest, HubResponse};
 use sha2::{Digest as _, Sha256};
 use std::fmt::Write as _;
-use std::io::Read;
+use std::io::{self, Read};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::time::Duration;
 use ureq::unversioned::resolver::{DefaultResolver, ResolvedSocketAddrs, Resolver};
@@ -17,6 +17,9 @@ use ureq::unversioned::transport::{
 use url::Url;
 
 mod discovery_auth;
+#[cfg(test)]
+#[path = "hub_http_range_tests.rs"]
+mod hub_http_range_tests;
 mod repository_moves;
 pub(crate) use discovery_auth::{DiscoveryCredentials, fetch_discovery_with_attempts};
 pub(crate) use repository_moves::RepositoryMoveTransport;
@@ -104,6 +107,7 @@ pub(crate) struct HttpResponse {
     pub(crate) location: Option<String>,
     pub(crate) content_range: Option<String>,
     pub(crate) etag: Option<String>,
+    pub(crate) content_length: Option<u64>,
     /// `Retry-After` of an unsuccessful response, in whole seconds.
     pub(crate) retry_after: Option<u64>,
     pub(crate) body: Box<dyn Read + Send>,
@@ -338,6 +342,11 @@ impl HttpTransport {
             .get("etag")
             .and_then(|v| v.to_str().ok())
             .map(str::to_owned);
+        let content_length = response
+            .headers()
+            .get("content-length")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse().ok());
         let retry_after = response
             .headers()
             .get("retry-after")
@@ -354,9 +363,127 @@ impl HttpTransport {
             location,
             content_range,
             etag,
+            content_length,
             retry_after,
             body: Box::new(body.into_reader().take(limit.saturating_add(1))),
         })
+    }
+}
+
+/// Resumable reader for one immutable object URL. A resumed response is
+/// accepted only when both HTTP range metadata and the entity validator agree.
+pub(crate) struct RangedObjectReader<'a> {
+    transport: &'a dyn Transport,
+    url: Url,
+    body: Box<dyn Read + Send>,
+    etag: Option<String>,
+    total: Option<u64>,
+    consumed: u64,
+    resumes: u8,
+    done: bool,
+    changed: bool,
+}
+
+impl<'a> RangedObjectReader<'a> {
+    pub(crate) fn changed(&self) -> bool {
+        self.changed
+    }
+    pub(crate) fn open(
+        transport: &'a dyn Transport,
+        url: Url,
+    ) -> Result<Self, graphforge_api::GfError> {
+        validate_object_url(&url)?;
+        let response = transport.get(&url, None, None, u64::MAX)?;
+        if response.status != 200 {
+            return Err(network("object request did not return 200"));
+        }
+        Ok(Self {
+            transport,
+            url,
+            body: response.body,
+            etag: response.etag,
+            total: response.content_length,
+            consumed: 0,
+            resumes: 0,
+            done: false,
+            changed: false,
+        })
+    }
+
+    fn resume(&mut self) -> io::Result<()> {
+        if self.resumes == 8 {
+            return Err(io::Error::other("maximum ranged resumes exceeded"));
+        }
+        let etag = self
+            .etag
+            .as_deref()
+            .ok_or_else(|| io::Error::other("cannot safely resume object without ETag"))?;
+        let response = self
+            .transport
+            .get(&self.url, Some(self.consumed), Some(etag), u64::MAX)
+            .map_err(io::Error::other)?;
+        let conflict =
+            || io::Error::other("ConcurrentMutation: remote object changed during verification");
+        if response.status != 206 || response.etag.as_deref() != Some(etag) {
+            self.changed = true;
+            return Err(conflict());
+        }
+        let expected = format!("bytes {}-", self.consumed);
+        let Some(range) = response.content_range.as_deref() else {
+            self.changed = true;
+            return Err(conflict());
+        };
+        let parsed = range.strip_prefix(&expected).and_then(|suffix| {
+            suffix.split_once('/').and_then(|(end, total)| {
+                Some((end.parse::<u64>().ok()?, total.parse::<u64>().ok()?))
+            })
+        });
+        let Some((end, total)) = parsed else {
+            self.changed = true;
+            return Err(conflict());
+        };
+        let length = end.saturating_sub(self.consumed).saturating_add(1);
+        if end < self.consumed
+            || self.total.is_some_and(|known| known != total)
+            || response.content_length.is_some_and(|known| known != length)
+        {
+            self.changed = true;
+            return Err(conflict());
+        }
+        self.total = Some(total);
+        self.resumes += 1;
+        self.body = response.body;
+        Ok(())
+    }
+}
+
+/// Presigned object URLs carry their authorization in the query string;
+/// validate the same HTTPS, host, credential, and public-address rules while
+/// allowing that capability query.
+fn validate_object_url(url: &Url) -> Result<(), graphforge_api::GfError> {
+    let mut checked = url.clone();
+    checked.set_query(None);
+    validate_url(&checked)
+}
+
+impl Read for RangedObjectReader<'_> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        if buffer.is_empty() || self.done {
+            return Ok(0);
+        }
+        loop {
+            match self.body.read(buffer) {
+                Ok(0) if self.total.is_some_and(|total| self.consumed == total) => {
+                    self.done = true;
+                    return Ok(0);
+                }
+                Ok(0) | Err(_) => self.resume()?,
+                Ok(count) => {
+                    self.consumed += count as u64;
+                    return Ok(count);
+                }
+            }
+        }
     }
 }
 

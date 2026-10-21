@@ -301,6 +301,23 @@ file gives the same bytes; only the report's `source` is `stream` instead of
 `GF_VALIDATION`), and a bundle only: pass an expanded directory by path. To
 name a file called `-`, write `./-`.
 
+### Verify from a URL
+
+For an HTTPS object URL (including a Hub or R2 presigned URL), use:
+
+```text
+gf portable verify --url "$OBJECT_URL" --json
+```
+
+The URL must use HTTPS and resolve to public addresses. The report identifies
+the source as `stream`. If the connection drops, verification resumes with a
+ranged request bound to the original ETag; an object change is rejected.
+
+The manual container build is `docker build -f containers/portable-verify/Dockerfile -t graphforge-portable-verify .`.
+Run it with `docker run --rm -e GF_VERIFY_URL="$OBJECT_URL" --memory=1g --storage-opt size=2g graphforge-portable-verify`.
+The object URL is a capability, so provide a short lived presigned URL and
+avoid logging it. The container needs up to 2 GiB disk and 1 GiB memory.
+
 With `--json`, a verified package prints exactly one JSON document on stdout:
 the report, including `package_digest`, the component inventory,
 `bytes_by_kind`, and `plausibility`. A refusal, including a refused argument

@@ -136,6 +136,7 @@ pub(super) fn response(status: u16, content_range: Option<&str>, body: &[u8]) ->
         location: None,
         content_range: content_range.map(str::to_owned),
         etag: Some("\"fixture-1\"".to_owned()),
+        content_length: None,
         retry_after: None,
         body: Box::new(std::io::Cursor::new(body.to_vec())),
     }
