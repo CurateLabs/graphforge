@@ -2251,6 +2251,41 @@ mod tests {
     }
 
     #[test]
+    fn producing_core_version_is_an_optional_stamp_on_the_unchanged_manifest_version() {
+        let root = tempfile::tempdir().unwrap();
+        let generation = open_or_initialize_project(root.path()).unwrap();
+        assert_eq!(
+            generation.producing_core_version(),
+            Some(graphforge_core::manifest::GRAPHFORGE_VERSION)
+        );
+        let bytes = fs::read(generation.generation_root().join(MANIFEST_FILE)).unwrap();
+        let written: GenerationManifest = parse_generation_manifest(&bytes, "manifest").unwrap();
+        assert_eq!(written.format_version, GENERATION_MANIFEST_VERSION);
+        assert_eq!(GENERATION_MANIFEST_VERSION, 2);
+
+        // A generation written before the stamp existed has no field, keeps
+        // the same manifest version and stays canonical and valid.
+        let mut unstamped = written.clone();
+        unstamped.producing_core_version = None;
+        let unstamped_bytes = canonical_line(&unstamped);
+        assert!(!String::from_utf8_lossy(&unstamped_bytes).contains("producing_core_version"));
+        let parsed = parse_generation_manifest(&unstamped_bytes, "manifest").unwrap();
+        validate_manifest(&parsed, generation.generation_uuid()).unwrap();
+        assert_eq!(parsed.producing_core_version, None);
+
+        // Another Core's stamp round-trips through the same serializer.
+        let mut foreign = written;
+        foreign.producing_core_version = Some("0.0.1".into());
+        let parsed = parse_generation_manifest(&canonical_line(&foreign), "manifest").unwrap();
+        assert_eq!(parsed.producing_core_version.as_deref(), Some("0.0.1"));
+
+        // Unknown fields are still refused: a newer manifest fails on an older Core.
+        let mut future: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        future["added_by_a_future_core"] = serde_json::json!(true);
+        assert!(parse_generation_manifest(&canonical_line(&future), "manifest").is_err());
+    }
+
+    #[test]
     fn future_research_capability_refuses_publication_without_creating_files() {
         unsupported_research_capability_refuses_publication(
             crate::research_versions::RESEARCH_VERSION + 1,

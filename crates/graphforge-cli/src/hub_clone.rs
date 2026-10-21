@@ -1515,6 +1515,30 @@ fn run_clone_profiled(
     )
 }
 
+/// Run a clone and observe the Core version warning at the moment it is raised.
+#[cfg(test)]
+fn run_clone_observing_warnings(
+    transport: &dyn Transport,
+    args: CloneArgs,
+    json: bool,
+    output: &mut dyn Write,
+    warn: &mut dyn FnMut(&[graphforge_api::CoreVersionWarning]),
+) -> Result<(), graphforge_api::GfError> {
+    let mut env = CloneEnv {
+        warn: Some(warn),
+        ..CloneEnv::quiet()
+    };
+    run_clone_profiled_with_delays(
+        transport,
+        args,
+        json,
+        output,
+        &TelemetryRuntime::default(),
+        &CloneDelays::default(),
+        &mut env,
+    )
+}
+
 #[derive(Default)]
 struct CloneDelays {
     clock: CloneClock,
@@ -2592,6 +2616,8 @@ fn portable_error(error: DiscoveryPortableError) -> graphforge_api::GfError {
         ),
     }
 }
+#[cfg(test)]
+mod core_version_tests;
 #[cfg(test)]
 mod download_digest_tests;
 #[cfg(test)]
