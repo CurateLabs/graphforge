@@ -13,6 +13,29 @@ use super::*;
 #[path = "../../tests/support/core_version.rs"]
 mod relabel;
 
+/// Run a clone and observe the Core version warning at the moment it is raised.
+fn run_clone_observing_warnings(
+    transport: &dyn Transport,
+    args: CloneArgs,
+    json: bool,
+    output: &mut dyn Write,
+    warn: WarningSink<'_>,
+) -> Result<(), graphforge_api::GfError> {
+    let mut env = CloneEnv {
+        warn: Some(warn),
+        ..CloneEnv::quiet()
+    };
+    run_clone_profiled_with_delays(
+        transport,
+        args,
+        json,
+        output,
+        &TelemetryRuntime::default(),
+        &CloneDelays::default(),
+        &mut env,
+    )
+}
+
 const CORE_X: &str = "0.0.1";
 const PACKAGE_PATH: &str = "/objects/project.gfpb";
 
