@@ -11,6 +11,9 @@
     clippy::too_many_lines
 )]
 
+#[path = "contract_artifacts/history.rs"]
+mod history;
+
 use graphforge_discovery::{
     DISCOVERY_FORMAT, DiscoveryErrorCode, DiscoveryLimits, DiscoveryManifest, LineageBranch,
     LineageForkOrigin, LineageVersion, PORTABLE_FORMAT, PORTABLE_MEDIA_TYPE,
@@ -206,6 +209,8 @@ impl Object {
 /// Everything one publication sends, modelled independently of the Hub.
 #[derive(Clone)]
 struct Publication {
+    rewrite: bool,
+    prune: bool,
     repository: RepositoryIdentity,
     operation: Uuid,
     objects: Vec<Object>,
@@ -230,6 +235,8 @@ impl Publication {
             .unwrap()
             .digest();
         Self {
+            rewrite: false,
+            prune: false,
             repository: repository.clone(),
             operation,
             objects,
@@ -326,6 +333,8 @@ impl Publication {
 
     fn commitment(&self) -> String {
         PublishIntent {
+            rewrite: self.rewrite,
+            prune: self.prune,
             repository: self.repository.clone(),
             intent_digest: self.intent_digest(),
             objects: self.declarations(),
@@ -342,22 +351,33 @@ impl Publication {
     }
 
     fn open_body(&self) -> Value {
-        json!({
+        let mut value = json!({
             "format": "graphforge-hub-publish/1",
             "operation_uuid": self.operation,
             "request_commitment": self.commitment(),
             "intent_digest": self.intent_digest(),
             "repository": self.repository,
             "objects": self.declarations(),
-        })
+        });
+        if self.rewrite || self.prune {
+            value["requirements"] = json!([{"capability":"history-mutation","major":1}]);
+        }
+        value
     }
 
     fn commit_body(&self) -> Value {
-        json!({
+        let mut value = json!({
             "manifest": self.manifest(),
             "refs": self.refs,
             "expected_revision": self.expected_revision,
-        })
+        });
+        if self.rewrite {
+            value["rewrite"] = json!(true);
+        }
+        if self.prune {
+            value["prune"] = json!(true);
+        }
+        value
     }
 
     fn receipt(&self, revision: &str) -> Value {
@@ -787,7 +807,7 @@ fn v2(operation_id: u128, expected: Option<String>) -> Publication {
 
 fn corpus() -> Corpus {
     let repository = demo();
-    let mut cases = Vec::new();
+    let mut cases = history::cases();
 
     // Structural ancestry is checked by the server, independently of clients.
     for (descends, stale) in [(true, false), (false, false), (false, true)] {
@@ -828,8 +848,16 @@ fn corpus() -> Corpus {
         if descends {
             lineage.versions[0].parents = vec![old.versions[0].version_uuid.clone()];
         }
-        let mut ancestor = old.versions[0].clone();
-        ancestor.package = None;
+        let ancestor = old.versions[0].clone();
+        let package = ancestor.package.as_ref().unwrap().object_digest.0.clone();
+        next.objects.push(
+            first
+                .objects
+                .iter()
+                .find(|o| o.digest() == package)
+                .unwrap()
+                .clone(),
+        );
         lineage.versions.push(ancestor);
         lineage
             .versions
@@ -845,8 +873,7 @@ fn corpus() -> Corpus {
         } else {
             before.clone()
         });
-        steps.push(open_new(&next, "token", "next"));
-        steps.extend(upload_all(&next, "next"));
+        steps.extend(history::retained_open(&next, "next", &[&first]));
         let expectation = if stale {
             error(412, "ref_conflict")
         } else if descends {
@@ -857,6 +884,24 @@ fn corpus() -> Corpus {
         };
         steps.push(commit(&next, "token", "next", expectation));
         steps.push(get_refs(&repository, &model));
+        if descends && !stale {
+            // Ordinary metadata-only ancestor transport never schedules deletion.
+            let object = first
+                .objects
+                .iter()
+                .find(|o| {
+                    o.media_type == PORTABLE_MEDIA_TYPE && o.digest() != first.project_object_digest
+                })
+                .unwrap();
+            steps.push(act(Action::AdvanceClock { seconds: 900 }));
+            steps.push(send(
+                request(
+                    HubMethod::Get,
+                    format!("{}/.gf/objects/{}", repo_url(&repository), object.digest()),
+                ),
+                status(200).text(object.text()),
+            ));
+        }
         cases.push(case(
             if stale { "stale-lease-precedes-ancestry-refusal" } else if descends { "structural-fast-forward" } else { "structural-divergence-refused" },
             "Native ancestry must descend from the published head; stale leases retain their distinct refusal and refs remain atomic.",
@@ -877,7 +922,7 @@ fn corpus() -> Corpus {
                     {"capability": "publish-session", "major": 1},
                     {"capability": "resumable-upload", "major": 1},
                 ],
-                "capabilities": [{"capability": "device-authorization", "major": 1}, {"capability":"version-previews","major":1}],
+                "capabilities": [{"capability": "device-authorization", "major": 1}, {"capability":"version-previews","major":1}, {"capability":"history-mutation","major":1}],
                 "authorization": {
                     "device_authorization_endpoint": format!("{HUB}/.gf/oauth/device_authorization"),
                     "token_endpoint": format!("{HUB}/.gf/oauth/token"),
@@ -1750,6 +1795,7 @@ fn commit_request_schema() -> Value {
             "type": "object", "additionalProperties": false,
             "required": ["manifest", "refs", "expected_revision"],
             "properties": {
+                "rewrite": {"type": "boolean"}, "prune": {"type": "boolean"},
                 "manifest": {"$ref": "https://graphforge.sh/schemas/discovery/v1/manifest.schema.json"},
                 "refs": {"type": "array", "minItems": 1, "maxItems": 64, "uniqueItems": true,
                     "items": {"type": "string", "minLength": 1, "maxLength": 4096}},
@@ -1845,7 +1891,11 @@ fn generated() -> Vec<(&'static str, Vec<u8>)> {
         ),
         ("upload-status.schema.json", pretty(&upload_status_schema())),
         ("error.schema.json", pretty(&error_schema())),
-        ("conformance.json", pretty(&corpus())),
+        ("conformance.json", {
+            let mut bytes = serde_json::to_vec(&corpus()).unwrap();
+            bytes.push(b'\n');
+            bytes
+        }),
     ]
 }
 

@@ -953,10 +953,12 @@ impl DiscoveryManifest {
         Ok(())
     }
 
-    // Historical snapshots bind their own document/package inventory, while
-    // current refs bind a snapshot by its canonical validator. Do not pretend
-    // current refs are the historical snapshot's original ref set.
-    fn bind_lineage_document(&self, lineage: &ResearchLineage) -> Result<(), DiscoveryError> {
+    /// Bind the lineage identity and every Version/Proposal package to this
+    /// manifest inventory. This document-only check does not bind current refs
+    /// to Branch heads; use `bind_lineage` for that additional snapshot check.
+    /// Historical snapshots and publish admission can validate their own
+    /// document inventory without manufacturing an original refs snapshot.
+    pub fn bind_lineage_document(&self, lineage: &ResearchLineage) -> Result<(), DiscoveryError> {
         let reference = self.lineage.as_ref().ok_or_else(|| {
             DiscoveryError::new(
                 DiscoveryErrorCode::MissingObject,

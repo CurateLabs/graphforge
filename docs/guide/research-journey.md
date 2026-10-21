@@ -222,3 +222,22 @@ explicitly. The preview commitment includes this base. A local revert therefore
 remains a local change relative to the shared history, including after repeated
 remote incorporations. Immediate-parent reviews keep their existing field baseline
 and canonical preview identity.
+
+
+### Explicit history replacement and retention
+
+Normal `gf publish` refuses divergent history. After reviewing the replacement,
+`gf publish <repository> --ref main --rewrite` explicitly requests head replacement;
+add `--prune` only to remove unreachable published Versions. The Hub must offer
+`history-mutation@1`, authorize the repository operation and accept the current
+revision lease. A concurrent update remains a conflict, never permission to
+replace a newer head. Surviving refs and their history/dependencies remain live.
+The reference Hub collects unreferenced objects after its documented 900-second
+grace; local retained copies and independent Fork copies are unaffected.
+
+For an established independent Fork, `--check-fork-origin <repository URL>` is an
+optional origin diagnostic. A validated origin lineage missing the cited Version
+warns and proceeds with the local copy. The citation contains no origin host, so
+ordinary updates do not discover erasure automatically or probe another Hub.
+See [the publish contract](../adr/0053-hub-publish-wire-contract.md) for the precise
+lease, identity, dependency and refusal rules.

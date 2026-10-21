@@ -6,6 +6,8 @@
 //! configurable seed and are predictable. Control state is in memory; object
 //! bytes spill to unlinked temporary files.
 
+mod retention;
+
 use crate::canonical::{sha256_digest, validate_digest};
 use crate::error::{HubPublishError, HubPublishErrorCode, invalid};
 use crate::exchange::{HubExchange, HubMethod, HubRequest, HubResponse};
@@ -260,6 +262,7 @@ struct Repository {
     manifests: BTreeMap<String, Vec<u8>>,
     objects: BTreeMap<String, Blob>,
     history: Vec<String>,
+    retirement: retention::Retirement,
 }
 
 struct Reject {
@@ -449,6 +452,7 @@ impl ReferenceHub {
             capabilities: vec![
                 Capability::new("device-authorization", 1),
                 Capability::new("version-previews", 1),
+                Capability::new(crate::HISTORY_MUTATION_CAPABILITY, 1),
             ],
             authorization: PublishAuthorization {
                 client_id: self.config.authorization_client_id.clone(),
@@ -474,12 +478,24 @@ impl ReferenceHub {
         }
     }
 
+    /// Discovery parsing bounds that match this Hub's configured limits.
+    fn discovery_limits(&self) -> DiscoveryLimits {
+        let limits = self.config.limits;
+        DiscoveryLimits {
+            max_response_bytes: usize::try_from(limits.max_document_bytes).unwrap_or(usize::MAX),
+            max_objects: usize::try_from(limits.max_objects).unwrap_or(usize::MAX),
+            max_cumulative_object_bytes: limits.max_session_bytes,
+            ..DiscoveryLimits::default()
+        }
+    }
+
     /// Handle one request. Every state change happens under one lock.
     pub fn handle(&self, request: &HubRequest) -> HubResponse {
         let Ok(mut state) = self.state.lock() else {
             let error = HubPublishError::new(HubPublishErrorCode::Internal, "hub state poisoned");
             return json_response(500, &error.body());
         };
+        retention::collect(&mut state, self.discovery_limits());
         match self.route(&mut state, request) {
             Ok(response) => response,
             Err(rejected) => {
@@ -1031,16 +1047,22 @@ impl ReferenceHub {
             .filter(|session| &session.request.repository == repository)
             .ok_or_else(|| not_found("publish session is unknown"))?;
         let commit = CommitRequest::from_json(&request.body)?;
+        // Destructive semantics must be offered and required on this exact
+        // authenticated session before even a committed receipt can replay.
+        crate::require_history_capability(
+            &self.capabilities(repository),
+            commit.rewrite,
+            commit.prune,
+        )?;
+        crate::require_history_requirement(
+            &session.request.requirements,
+            commit.rewrite,
+            commit.prune,
+        )?;
 
         // Structural manifest validation is pure; it precedes the replay check
         // only because the commitment binds the manifest's canonical digest.
-        let limits = self.config.limits;
-        let discovery_limits = DiscoveryLimits {
-            max_response_bytes: usize::try_from(limits.max_document_bytes).unwrap_or(usize::MAX),
-            max_objects: usize::try_from(limits.max_objects).unwrap_or(usize::MAX),
-            max_cumulative_object_bytes: limits.max_session_bytes,
-            ..DiscoveryLimits::default()
-        };
+        let discovery_limits = self.discovery_limits();
         let manifest_bytes =
             serde_json::to_vec(&commit.manifest).map_err(|_| invalid("manifest is malformed"))?;
         let manifest = DiscoveryManifest::from_json(&manifest_bytes, discovery_limits).map_err(
@@ -1061,6 +1083,8 @@ impl ReferenceHub {
             .map_err(|_| invalid("manifest is not a valid discovery manifest"))?;
         let manifest_validator = sha256_digest(&manifest_document);
         let intent = PublishIntent {
+            rewrite: commit.rewrite,
+            prune: commit.prune,
             repository: repository.clone(),
             intent_digest: session.request.intent_digest.clone(),
             objects: session.request.objects.clone(),
@@ -1270,18 +1294,16 @@ impl ReferenceHub {
                 discovery_limits,
             )
             .map_err(|_| invalid("native lineage is invalid"))?;
-            if next.repository != *repository
-                || next.immutable_version != manifest.immutable_version
-                || next
-                    .canonical_digest()
-                    .map_err(|_| invalid("native lineage is invalid"))?
-                    != reference.lineage_digest
-            {
-                return Err(invalid("native lineage does not bind this publication").into());
-            }
+            // The exact manifest/session inventory was admitted above. Bind all
+            // advertised native packages before transition checks or retirement;
+            // merely retaining their lineage descriptors cannot retain bytes.
+            manifest
+                .bind_lineage_document(&next)
+                .map_err(|_| invalid("native lineage does not bind this publication inventory"))?;
             if let Some(stored) = current {
-                for name in &commit.refs {
-                    if let Some(old_ref) = stored.refs.get(name) {
+                let mut checked = BTreeSet::new();
+                for old_ref in stored.refs.values() {
+                    if checked.insert(old_ref.validator.0.clone()) {
                         let old_manifest = DiscoveryManifest::from_json(
                             &stored.manifests[&old_ref.validator.0],
                             discovery_limits,
@@ -1303,13 +1325,21 @@ impl ReferenceHub {
                                 discovery_limits,
                             )
                             .map_err(|_| invalid("stored lineage is invalid"))?;
-                            if !next.fast_forwards(&old, std::slice::from_ref(name)) {
-                                return Err(HubPublishError::new(
-                                    HubPublishErrorCode::NonFastForward,
-                                    "publication is not a structural fast-forward",
-                                )
-                                .into());
-                            }
+                            let authoritative_heads = stored
+                                .refs
+                                .iter()
+                                .filter(|(_, reference)| reference.validator == old_ref.validator)
+                                .map(|(name, _)| name.clone())
+                                .collect::<Vec<_>>();
+                            crate::history::validate_snapshot_history_transition(
+                                &old,
+                                &next,
+                                &commit.refs,
+                                &authoritative_heads,
+                                commit.rewrite,
+                                commit.prune,
+                                discovery_limits,
+                            )?;
                         }
                     }
                 }
@@ -1367,6 +1397,15 @@ impl ReferenceHub {
         let refs_document = ref_set
             .to_canonical_json()
             .map_err(|_| invalid("advanced refs are not valid discovery refs"))?;
+        let retirement = retention::schedule(
+            current,
+            &refs,
+            &manifest_validator,
+            &manifest,
+            state.now,
+            commit.prune,
+            discovery_limits,
+        )?;
         let revision = sha256_digest(&refs_document);
         let receipt = PublishReceipt {
             format: HUB_PUBLISH_FORMAT.to_owned(),
@@ -1407,7 +1446,9 @@ impl ReferenceHub {
                 manifests: BTreeMap::new(),
                 objects: BTreeMap::new(),
                 history: Vec::new(),
+                retirement: retention::Retirement::default(),
             });
+        stored.retirement = retirement;
         stored.objects.extend(objects);
         stored
             .manifests
@@ -1551,7 +1592,9 @@ impl ReferenceHub {
 
     /// Advance the Hub clock.
     pub fn advance_clock(&self, seconds: u64) {
-        self.state.lock().expect("hub state").now += seconds;
+        let mut state = self.state.lock().expect("hub state");
+        state.now = state.now.saturating_add(seconds);
+        retention::collect(&mut state, self.discovery_limits());
     }
 
     /// Approve a pending device authorization; `false` if `user_code` is unknown.
@@ -1663,6 +1706,7 @@ impl ReferenceHub {
             .to_canonical_json()
             .map_err(|_| invalid("re-homed refs are invalid"))?;
         let mut documents = Vec::new();
+        let mut live = retention::Live::default();
         for snapshot in result.snapshots {
             let validator = snapshot
                 .manifest
@@ -1673,6 +1717,13 @@ impl ReferenceHub {
                 .manifest
                 .to_canonical_json()
                 .map_err(|_| invalid("re-homed manifest is invalid"))?;
+            let lineage = snapshot
+                .lineage
+                .as_deref()
+                .map(|bytes| graphforge_discovery::ResearchLineage::from_json(bytes, limits))
+                .transpose()
+                .map_err(|_| invalid("re-homed lineage is invalid"))?;
+            live.mark(&validator, &snapshot.manifest, lineage.as_ref());
             let mut controls = Vec::new();
             for bytes in [snapshot.summary, snapshot.lineage].into_iter().flatten() {
                 let digest = sha256_digest(&bytes);
@@ -1701,6 +1752,9 @@ impl ReferenceHub {
             repository.manifests.insert(validator, manifest);
             repository.objects.extend(controls);
         }
+        // Regenerated controls can reuse the digest of an object that a prune
+        // already scheduled for retirement; whatever the new refs reach is live.
+        repository.retirement.cancel(&live);
         state.repositories.insert(new.clone(), repository);
         for current in state.moved.values_mut() {
             if current == old {
