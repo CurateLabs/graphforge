@@ -7,7 +7,10 @@ use arrow::{
 };
 use graphforge_storage::concurrency_attribution::ObservedSha256 as Sha256;
 use sha2::Digest;
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 use uuid::Uuid;
 pub(crate) type Key = (String, Uuid, String);
 pub(crate) type Fields = BTreeMap<Key, [u8; 32]>;
@@ -24,9 +27,116 @@ pub(crate) fn read_selected(
     selected: Option<&Objects>,
     cancellation: &CancellationToken,
 ) -> Result<Fields, GfError> {
-    let mut fields = Fields::new();
-    let mut bytes = 0;
-    let mut scanned = 0_usize;
+    let mut sink = MapSink::new();
+    visit(graph, selected, true, cancellation, &mut sink)?;
+    if let Some(selected) = selected {
+        sink.fields
+            .retain(|key, _| key.0 != "reference" || selected.contains(&(key.0.clone(), key.1)));
+    }
+    Ok(sink.fields)
+}
+
+/// Which streaming scan a decoded batch belongs to. The object scan and the
+/// owner-qualified semantic scan each keep their own cumulative bound.
+#[derive(Clone, Copy)]
+pub(crate) enum Scan {
+    Objects,
+    Semantic,
+}
+
+/// Receiver for the typed semantic fields decoded by one streaming scan.
+/// Implementations own their own bounds; [`MapSink`] reproduces the whole-map
+/// write-path budgets, [`KeySink`] retains only the requested keys.
+pub(crate) trait FieldSink {
+    /// A later emission of a key replaces an earlier one.
+    fn field(&mut self, key: Key, digest: [u8; 32]) -> Result<(), GfError>;
+    /// Account cumulative decoded Arrow bytes of one streaming scan.
+    fn scanned(&mut self, scan: Scan, bytes: usize) -> Result<(), GfError>;
+    /// Keys this sink retains; the knowledge-domain whole-map ceiling counts them.
+    fn len(&self) -> usize;
+    /// Most owner-qualified keys the semantic scan may buffer at once to check
+    /// owner conflicts. `None` buffers them all, as the whole-map write paths do.
+    fn conflict_keys(&self) -> Option<usize>;
+}
+
+/// Whole-graph field map collector for Branch write paths, reproducing the
+/// cumulative scanned bounds and the reserved 64 MiB map budget byte for byte.
+pub(crate) struct MapSink {
+    pub(crate) fields: Fields,
+    pub(crate) bytes: usize,
+    scanned: [usize; 2],
+}
+impl MapSink {
+    pub(crate) fn new() -> Self {
+        Self {
+            fields: Fields::new(),
+            bytes: 0,
+            scanned: [0; 2],
+        }
+    }
+}
+impl FieldSink for MapSink {
+    fn field(&mut self, key: Key, digest: [u8; 32]) -> Result<(), GfError> {
+        insert(&mut self.fields, &mut self.bytes, key, digest)
+    }
+    fn scanned(&mut self, scan: Scan, bytes: usize) -> Result<(), GfError> {
+        let total = &mut self.scanned[scan as usize];
+        *total = total.saturating_add(bytes);
+        if *total > 64 * 1024 * 1024 {
+            return Err(limit());
+        }
+        Ok(())
+    }
+    fn len(&self) -> usize {
+        self.fields.len()
+    }
+    fn conflict_keys(&self) -> Option<usize> {
+        None
+    }
+}
+
+/// Owner-qualified keys a streaming lookup buffers at once to check owner
+/// conflicts across every key of the graph; larger graphs are checked in
+/// hash partitions of the objects.
+const OWNER_CONFLICT_KEYS: usize = 65_536;
+
+/// Streaming lookup of requested keys. Every other field is still decoded, so
+/// malformed values refuse as they do on the write paths, but only the
+/// requested keys are retained: memory is the request plus one engine batch,
+/// and scanned bytes are not charged separately because the opened view's
+/// private query pool already bounds every batch.
+pub(super) struct KeySink<'a> {
+    pub(super) wanted: &'a BTreeSet<Key>,
+    pub(super) seen: BTreeMap<Key, [u8; 32]>,
+}
+impl FieldSink for KeySink<'_> {
+    fn field(&mut self, key: Key, digest: [u8; 32]) -> Result<(), GfError> {
+        if self.wanted.contains(&key) {
+            self.seen.insert(key, digest);
+        }
+        Ok(())
+    }
+    fn scanned(&mut self, _scan: Scan, _bytes: usize) -> Result<(), GfError> {
+        Ok(())
+    }
+    fn len(&self) -> usize {
+        self.seen.len()
+    }
+    fn conflict_keys(&self) -> Option<usize> {
+        Some(OWNER_CONFLICT_KEYS)
+    }
+}
+
+/// Decode every typed semantic field of the selected objects into `sink`.
+/// Budgeted scans keep the shared Branch default slice budget; verification of
+/// retained Versions streams under cancellation only.
+fn visit(
+    graph: &GraphForge,
+    selected: Option<&Objects>,
+    budgeted: bool,
+    cancellation: &CancellationToken,
+    sink: &mut dyn FieldSink,
+) -> Result<(), GfError> {
     for (kind, pattern, identity, returns) in [
         (
             "node",
@@ -49,63 +159,66 @@ pub(crate) fn read_selected(
                     graphforge_ir::IrLiteral::Uuid(*id.as_bytes()),
                 )]);
                 let query = format!("MATCH {pattern} WHERE {identity} = $id RETURN {returns}");
-                crate::slices::stream_branch_params(
-                    graph,
-                    &query,
-                    &params,
-                    cancellation,
-                    |batch| {
-                        collect(
-                            batch,
-                            kind,
-                            &mut fields,
-                            &mut bytes,
-                            &mut scanned,
-                            cancellation,
-                        )
-                    },
-                )?;
+                stream(graph, &query, &params, budgeted, cancellation, |batch| {
+                    collect(batch, kind, cancellation, sink)
+                })?;
             }
         } else {
-            crate::slices::stream_branch(
+            stream(
                 graph,
                 &format!("MATCH {pattern} RETURN {returns}"),
+                &std::collections::HashMap::new(),
+                budgeted,
                 cancellation,
-                |batch| {
-                    collect(
-                        batch,
-                        kind,
-                        &mut fields,
-                        &mut bytes,
-                        &mut scanned,
-                        cancellation,
-                    )
-                },
+                |batch| collect(batch, kind, cancellation, sink),
             )?;
         }
     }
-    super::semantic_fields::read(graph, selected, &mut fields, &mut bytes, cancellation)?;
-    domain_objects(graph, &mut fields, &mut bytes, selected, cancellation)?;
-    super::claim_fields::read(graph, &mut fields, &mut bytes, selected, cancellation)?;
-    super::source_fields::read(graph, &mut fields, &mut bytes, selected, cancellation)?;
-    super::context_fields::read(graph, &mut fields, &mut bytes, cancellation)?;
-    if let Some(selected) = selected {
-        fields.retain(|key, _| key.0 != "reference" || selected.contains(&(key.0.clone(), key.1)));
+    super::semantic_fields::read(graph, selected, budgeted, sink, cancellation)?;
+    domain_objects(graph, sink, selected, cancellation)?;
+    super::claim_fields::read(graph, sink, selected, cancellation)?;
+    super::source_fields::read(graph, sink, selected, cancellation)?;
+    super::context_fields::read(graph, sink, cancellation)?;
+    Ok(())
+}
+
+/// The effective value, as [`read`] would hold it, of each requested key that
+/// is present. Streams every field once under cancellation only, retaining
+/// only the requested keys, so a Version of any field count is readable.
+pub(crate) fn read_keys(
+    graph: &GraphForge,
+    wanted: &BTreeSet<Key>,
+    cancellation: &CancellationToken,
+) -> Result<BTreeMap<Key, [u8; 32]>, GfError> {
+    let mut sink = KeySink {
+        wanted,
+        seen: BTreeMap::new(),
+    };
+    visit(graph, None, false, cancellation, &mut sink)?;
+    Ok(sink.seen)
+}
+
+fn stream(
+    graph: &GraphForge,
+    query: &str,
+    params: &std::collections::HashMap<String, graphforge_ir::IrLiteral>,
+    budgeted: bool,
+    cancellation: &CancellationToken,
+    consume: impl FnMut(&RecordBatch) -> Result<(), GfError>,
+) -> Result<(), GfError> {
+    if budgeted {
+        crate::slices::stream_branch_params(graph, query, params, cancellation, consume)
+    } else {
+        crate::slices::stream_branch_unbudgeted(graph, query, params, cancellation, consume)
     }
-    Ok(fields)
 }
 fn collect(
     batch: &RecordBatch,
     kind: &str,
-    fields: &mut Fields,
-    bytes: &mut usize,
-    scanned: &mut usize,
     cancellation: &CancellationToken,
+    sink: &mut dyn FieldSink,
 ) -> Result<(), GfError> {
-    *scanned = scanned.saturating_add(batch.get_array_memory_size());
-    if *scanned > 64 * 1024 * 1024 {
-        return Err(limit());
-    }
+    sink.scanned(Scan::Objects, batch.get_array_memory_size())?;
     let ids = batch
         .column_by_name("object_uuid")
         .and_then(|a| a.as_any().downcast_ref::<FixedSizeBinaryArray>())
@@ -113,9 +226,7 @@ fn collect(
     for row in 0..batch.num_rows() {
         cancellation.checkpoint()?;
         let id = Uuid::from_slice(ids.value(row)).map_err(|_| invalid())?;
-        insert(
-            fields,
-            bytes,
+        sink.field(
             (kind.into(), id, "$object".into()),
             Sha256::digest(b"present").into(),
         )?;
@@ -124,17 +235,10 @@ fn collect(
                 "object_uuid" => {}
                 "properties" => {
                     for (name, digest) in properties(array.as_ref(), row)? {
-                        insert(
-                            fields,
-                            bytes,
-                            (kind.into(), id, format!("property:{name}")),
-                            digest,
-                        )?;
+                        sink.field((kind.into(), id, format!("property:{name}")), digest)?;
                     }
                 }
-                name => insert(
-                    fields,
-                    bytes,
+                name => sink.field(
                     (kind.into(), id, format!("${name}")),
                     fingerprint(array.slice(row, 1))?,
                 )?,
@@ -250,8 +354,7 @@ pub(super) fn limit() -> GfError {
 
 fn domain_objects(
     graph: &GraphForge,
-    fields: &mut Fields,
-    field_bytes: &mut usize,
+    sink: &mut dyn FieldSink,
     selected: Option<&Objects>,
     cancellation: &CancellationToken,
 ) -> Result<(), GfError> {
@@ -276,21 +379,17 @@ fn domain_objects(
                 if selected.is_some_and(|set| !set.contains(&(kind.into(), id))) {
                     continue;
                 }
-                insert(
-                    fields,
-                    field_bytes,
+                sink.field(
                     (kind.into(), id, "$object".into()),
                     Sha256::digest(b"present").into(),
                 )?;
                 for (field, array) in batch.schema().fields().iter().zip(batch.columns()) {
-                    insert(
-                        fields,
-                        field_bytes,
+                    sink.field(
                         (kind.into(), id, field.name().clone()),
                         fingerprint(array.slice(row, 1))?,
                     )?;
                 }
-                if fields.len() > 1_000_000 {
+                if sink.len() > 1_000_000 {
                     return Err(limit());
                 }
             }
@@ -351,5 +450,74 @@ mod tests {
             }
         }
         panic!("domain fields exceeded bounded allocation");
+    }
+    fn resource_limit(error: &GfError) -> bool {
+        matches!(
+            error,
+            GfError::Project {
+                code: graphforge_core::ProjectErrorCode::ResourceLimit,
+                ..
+            }
+        )
+    }
+    fn key(i: usize) -> Key {
+        ("node".into(), Uuid::from_u128(i as u128), "field".into())
+    }
+    #[test]
+    fn key_sink_stays_bounded_where_the_map_sink_refuses() {
+        let wanted: BTreeSet<Key> = (0..3).map(key).collect();
+        let mut keys = KeySink {
+            wanted: &wanted,
+            seen: BTreeMap::new(),
+        };
+        for i in 0..200_000 {
+            keys.field(key(i), [1; 32]).unwrap();
+        }
+        assert_eq!(keys.seen.len(), 3);
+        assert_eq!(keys.len(), 3);
+
+        let mut map = MapSink::new();
+        let refused = (0..200_000).find_map(|i| map.field(key(i), [1; 32]).err());
+        assert!(resource_limit(&refused.expect("map sink must refuse")));
+        assert!(map.fields.len() < 44_000);
+    }
+    #[test]
+    fn key_sink_holds_each_requested_key_once_at_its_last_value() {
+        let wanted: BTreeSet<Key> = [key(1), key(2)].into();
+        let mut sink = KeySink {
+            wanted: &wanted,
+            seen: BTreeMap::new(),
+        };
+        // One key streamed twice (as the generic and semantic scans may) while
+        // the other never appears: the repeat must not stand in for it.
+        sink.field(key(1), [1; 32]).unwrap();
+        sink.field(key(1), [2; 32]).unwrap();
+        sink.field(key(9), [3; 32]).unwrap();
+        assert_eq!(sink.seen, BTreeMap::from([(key(1), [2; 32])]));
+
+        // Requesting only the repeated key is satisfied by the repeat.
+        let wanted: BTreeSet<Key> = [key(1)].into();
+        let mut sink = KeySink {
+            wanted: &wanted,
+            seen: BTreeMap::new(),
+        };
+        sink.field(key(1), [1; 32]).unwrap();
+        sink.field(key(1), [1; 32]).unwrap();
+        assert_eq!(sink.seen, BTreeMap::from([(key(1), [1; 32])]));
+    }
+    #[test]
+    fn map_sink_bounds_each_scan_by_itself() {
+        const MIB: usize = 1024 * 1024;
+        let mut sink = MapSink::new();
+        sink.scanned(Scan::Objects, 40 * MIB).unwrap();
+        sink.scanned(Scan::Semantic, 40 * MIB).unwrap();
+        assert!(resource_limit(
+            &sink.scanned(Scan::Objects, 40 * MIB).unwrap_err()
+        ));
+        let mut sink = MapSink::new();
+        sink.scanned(Scan::Semantic, 40 * MIB).unwrap();
+        assert!(resource_limit(
+            &sink.scanned(Scan::Semantic, 40 * MIB).unwrap_err()
+        ));
     }
 }

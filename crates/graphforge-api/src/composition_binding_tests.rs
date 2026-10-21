@@ -15,7 +15,10 @@ use graphforge_ontology::{
 use super::GraphForge;
 use graphforge_core::OntologyMode;
 
-fn install_composition_authority(forge: &GraphForge, context: &CompositionBindingContext) {
+pub(crate) fn install_composition_authority(
+    forge: &GraphForge,
+    context: &CompositionBindingContext,
+) {
     use graphforge_storage::{
         ProjectCapability, ProjectGenerationRequest, ProjectParticipant, ProjectStageOutcome,
     };
@@ -143,7 +146,7 @@ fn module(name: &str, entities: &[&str]) -> AuthoredModule {
     }
 }
 
-fn composed_fixture(
+pub(crate) fn composed_fixture(
     default: ActivationMode,
 ) -> (
     Arc<CompositionBindingContext>,

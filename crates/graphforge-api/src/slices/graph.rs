@@ -113,10 +113,15 @@ pub(super) fn stream(
     view: &GraphForge,
     query: &str,
     params: &HashMap<String, IrLiteral>,
-    budget: &mut Budget<'_>,
+    mut budget: Option<&mut Budget<'_>>,
+    cancellation: Option<&CancellationToken>,
     mut consume: impl FnMut(&RecordBatch) -> Result<(), GfError>,
 ) -> Result<(), GfError> {
-    checkpoint(budget.cancellation)?;
+    let cancellation = budget
+        .as_ref()
+        .and_then(|charged| charged.cancellation)
+        .or(cancellation);
+    checkpoint(cancellation)?;
     let mut stream = view.execute_stream_with_params(query, params).map_err(
         |error| match error {
             GfError::Parse { .. } | GfError::Bind { .. } | GfError::Validation(_) => invalid(
@@ -126,23 +131,25 @@ pub(super) fn stream(
         },
     )?;
     loop {
-        checkpoint(budget.cancellation)?;
+        checkpoint(cancellation)?;
         let next = view.block_on(async {
             // Poll cancellation even while an executor is building its next batch.
             loop {
                 tokio::select! {
                     batch = stream.next() => return Ok(batch),
-                    () = tokio::time::sleep(std::time::Duration::from_millis(10)) => checkpoint(budget.cancellation)?,
+                    () = tokio::time::sleep(std::time::Duration::from_millis(10)) => checkpoint(cancellation)?,
                 }
             }
         })?;
         let Some(batch) = next else { break };
         let batch = batch.map_err(GfError::from_execution_error)?;
-        // Charge conservatively for decoded rows, strings and ordered-map entries.
-        budget.charge(
-            batch.num_rows() as u64,
-            batch.get_array_memory_size() as u64 + batch.num_rows() as u64 * 256,
-        )?;
+        if let Some(budget) = budget.as_deref_mut() {
+            // Charge conservatively for decoded rows, strings and ordered-map entries.
+            budget.charge(
+                batch.num_rows() as u64,
+                batch.get_array_memory_size() as u64 + batch.num_rows() as u64 * 256,
+            )?;
+        }
         consume(&batch)?;
     }
     Ok(())
@@ -170,13 +177,17 @@ pub(super) struct Topology {
     pub nodes: BTreeMap<Uuid, Vec<String>>,
     pub edges: BTreeMap<Uuid, Edge>,
 }
-pub(super) fn topology(view: &GraphForge, budget: &mut Budget<'_>) -> Result<Topology, GfError> {
+pub(super) fn topology(
+    view: &GraphForge,
+    mut budget: &mut Budget<'_>,
+) -> Result<Topology, GfError> {
     let mut topology = Topology::default();
     stream(
         view,
         "MATCH (n) RETURN n.node_uuid AS node_uuid, labels(n) AS labels",
         &HashMap::new(),
-        budget,
+        Some(&mut budget),
+        None,
         |batch| {
             let labels = batch
                 .column_by_name("labels")
@@ -202,7 +213,8 @@ pub(super) fn topology(view: &GraphForge, budget: &mut Budget<'_>) -> Result<Top
         view,
         "MATCH (src)-[r]->(dst) RETURN r.edge_uuid AS edge_uuid, src.node_uuid AS source_uuid, dst.node_uuid AS target_uuid, type(r) AS relationship_type",
         &HashMap::new(),
-        budget,
+        Some(&mut budget),
+        None,
         |batch| {
             let labels = batch
                 .column_by_name("relationship_type")
@@ -222,4 +234,58 @@ pub(super) fn topology(view: &GraphForge, budget: &mut Budget<'_>) -> Result<Top
         },
     )?;
     Ok(topology)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::{SliceMembers, SliceSelector};
+    use super::*;
+
+    #[test]
+    fn unbudgeted_stream_passes_the_row_cap_that_refuses_a_budgeted_one() {
+        let graph = GraphForge::new(None).unwrap();
+        graph
+            .execute("UNWIND range(1, 500) AS i CREATE (:Row {i: i})")
+            .unwrap();
+        let request = SliceRequest {
+            request_uuid: Uuid::now_v7(),
+            source: SliceSource::Current,
+            selector: SliceSelector::Direct {
+                members: SliceMembers::default(),
+            },
+            include: SliceMembers::default(),
+            exclude: SliceMembers::default(),
+            limits: SliceLimits {
+                scanned_rows: 100,
+                ..SliceLimits::default()
+            },
+        };
+        let query = "MATCH (n:Row) RETURN n.i";
+        let mut budget = Budget::new(&request, None);
+        let refused = stream(
+            &graph,
+            query,
+            &HashMap::new(),
+            Some(&mut budget),
+            None,
+            |_| Ok(()),
+        );
+        assert!(refused.is_err(), "budgeted stream must enforce the row cap");
+
+        let cancellation = CancellationToken::new();
+        let mut rows = 0;
+        stream(
+            &graph,
+            query,
+            &HashMap::new(),
+            None,
+            Some(&cancellation),
+            |batch| {
+                rows += batch.num_rows();
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(rows, 500);
+    }
 }
