@@ -7,15 +7,20 @@
 
 ## Executive Summary
 
-GraphForge v0.5.0 implements the openCypher language on a Rust core with Arrow
-results and Parquet-backed projects. Authoritative TCK status lives in
-[TCK Compliance](tck-compliance.md) and the CI-enforced coverage matrix.
+GraphForge v0.5.0 implements openCypher clauses, functions, operators and
+patterns (partial MERGE support — see [Writing clauses](#writing-clauses)) on a
+Rust core with Arrow results and Parquet-backed projects. Authoritative TCK
+status lives in [TCK Compliance](tck-compliance.md) and the CI-enforced
+coverage matrix.
 
 ### Design Philosophy
 
 GraphForge prioritizes:
 
-- ✅ **Full openCypher language** — clauses, functions, operators, patterns
+- ✅ **openCypher clauses, functions, operators and patterns** — the TCK baseline
+  in [TCK Compliance](tck-compliance.md) is authoritative; MERGE supports single
+  nodes and relationships between bound endpoints only (see
+  [Writing clauses](#writing-clauses))
 - ✅ **Parquet-backed projects** with generation-based durability
 - ✅ **Zero-configuration** embedded usage
 - ✅ **Temporal/spatial types** — nanosecond precision, IANA timezones, extreme years
