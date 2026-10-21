@@ -25,15 +25,12 @@ fn person(value: Option<&Value>) -> &str {
 
 /// `<short uuid> (<tags>) <author> <date> <subject>`
 pub(crate) fn log_line(entry: &LogEntry) -> String {
-    let mut line: String = entry.version_uuid.chars().take(8).collect();
+    let mut parts: Vec<String> = vec![entry.version_uuid.chars().take(8).collect()];
     if !entry.tags.is_empty() {
-        line.push_str(&format!(" ({})", entry.tags.join(", ")));
+        parts.push(format!("({})", entry.tags.join(", ")));
     }
-    line.push_str(&format!(" {}", person(entry.author.as_ref())));
-    if let Some(micros) = entry.created_at {
-        line.push(' ');
-        line.push_str(&date(micros));
-    }
+    parts.push(person(entry.author.as_ref()).to_owned());
+    parts.extend(entry.created_at.map(date));
     let subject = entry
         .description
         .as_deref()
@@ -41,10 +38,9 @@ pub(crate) fn log_line(entry: &LogEntry) -> String {
         .or(entry.label.as_deref())
         .unwrap_or("");
     if !subject.is_empty() {
-        line.push(' ');
-        line.push_str(subject);
+        parts.push(subject.to_owned());
     }
-    line
+    parts.join(" ")
 }
 
 /// UTC `YYYY-MM-DD` of a microsecond timestamp.

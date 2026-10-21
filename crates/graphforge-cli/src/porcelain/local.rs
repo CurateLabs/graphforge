@@ -120,26 +120,29 @@ fn status(
         "tags": tags,
         "warnings": warnings,
     });
-    let mut text = format!("On branch {} (head {})", record.label, short(&head));
+    let mut lines = vec![format!(
+        "On branch {} (head {})",
+        record.label,
+        short(&head)
+    )];
     if let Some(remote) = upstream {
         value["upstream"] = json!({
             "repository_url": remote.repository_url,
             "ref": remote.ref_name,
             "head_version_uuid": remote.head_version_uuid,
         });
-        text.push_str(&format!(
-            "\nUpstream {} {} at {}, ahead {ahead}",
+        lines.push(format!(
+            "Upstream {} {} at {}, ahead {ahead}",
             remote.repository_url,
             remote.ref_name,
             short(&remote.head_version_uuid)
         ));
     }
     if !tags.is_empty() {
-        text.push_str(&format!("\nTags on head: {}", tags.join(", ")));
+        lines.push(format!("Tags on head: {}", tags.join(", ")));
     }
-    for warning in &warnings {
-        text.push_str(&format!("\nwarning: {warning}"));
-    }
+    lines.extend(warnings.iter().map(|warning| format!("warning: {warning}")));
+    let text = lines.join("\n");
     emit(output, json_output, &value, &text)
 }
 

@@ -222,15 +222,16 @@ fn quote(value: &str) -> String {
 }
 
 fn render_config(config: &UserConfig) -> String {
+    use std::fmt::Write as _;
     let mut out = String::new();
     for (table, signature) in [("user", &config.user), ("committer", &config.committer)] {
         let Some(signature) = signature else { continue };
-        out.push_str(&format!("[{table}]\nname = {}\n", quote(&signature.name)));
+        let _ = writeln!(out, "[{table}]\nname = {}", quote(&signature.name));
         if let Some(email) = &signature.email {
-            out.push_str(&format!("email = {}\n", quote(email)));
+            let _ = writeln!(out, "email = {}", quote(email));
         }
         if let Some(orcid) = &signature.orcid {
-            out.push_str(&format!("orcid = {}\n", quote(orcid)));
+            let _ = writeln!(out, "orcid = {}", quote(orcid));
         }
         out.push('\n');
     }

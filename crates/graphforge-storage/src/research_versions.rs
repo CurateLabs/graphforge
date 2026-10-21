@@ -1057,30 +1057,11 @@ fn apply_mutation(
             restore_context(root, registry, mutation)?
         }
         ResearchMutation::RetainRoot { root } => {
-            if registry
-                .roots
-                .get(&root.root_uuid)
-                .is_some_and(|old| old != root)
-            {
-                return Err(error(
-                    ProjectErrorCode::TransactionConflict,
-                    "retention root identity has conflicting dependencies",
-                ));
-            }
-            registry.roots.insert(root.root_uuid, root.clone());
+            retain_root(registry, root)?;
             None
         }
         ResearchMutation::ReleaseRoot { root_uuid } => {
-            let root = registry
-                .roots
-                .get(root_uuid)
-                .ok_or_else(|| invalid("retention root is unavailable"))?;
-            if root.kind == ResearchRootKind::AcceptedProvenance {
-                return Err(invalid(
-                    "accepted provenance cannot be released by research history cleanup",
-                ));
-            }
-            registry.roots.remove(root_uuid);
+            release_root(registry, root_uuid)?;
             None
         }
         ResearchMutation::SetTag { name, version_uuid } => {
@@ -1097,6 +1078,38 @@ fn apply_mutation(
         }
     };
     Ok(version_uuid)
+}
+
+fn retain_root(
+    registry: &mut ResearchRegistry,
+    root: &ResearchRetentionRoot,
+) -> Result<(), GfError> {
+    if registry
+        .roots
+        .get(&root.root_uuid)
+        .is_some_and(|old| old != root)
+    {
+        return Err(error(
+            ProjectErrorCode::TransactionConflict,
+            "retention root identity has conflicting dependencies",
+        ));
+    }
+    registry.roots.insert(root.root_uuid, root.clone());
+    Ok(())
+}
+
+fn release_root(registry: &mut ResearchRegistry, root_uuid: &Uuid) -> Result<(), GfError> {
+    let root = registry
+        .roots
+        .get(root_uuid)
+        .ok_or_else(|| invalid("retention root is unavailable"))?;
+    if root.kind == ResearchRootKind::AcceptedProvenance {
+        return Err(invalid(
+            "accepted provenance cannot be released by research history cleanup",
+        ));
+    }
+    registry.roots.remove(root_uuid);
+    Ok(())
 }
 
 fn delete_version(registry: &mut ResearchRegistry, version_uuid: Uuid) -> Result<(), GfError> {

@@ -1185,6 +1185,46 @@ fn adopt_verified_credit(
     Ok(())
 }
 
+/// Prune unreferenced history; a tag on pruned history goes with it.
+fn prune_history(next: &mut ResearchLineage) {
+    graphforge_hub_publish::prune_unreferenced_history(next);
+    let kept: BTreeSet<_> = next
+        .versions
+        .iter()
+        .map(|version| version.version_uuid.clone())
+        .collect();
+    next.tags.retain(|tag| kept.contains(&tag.version_uuid));
+}
+
+/// Served tags are never removed. A local tag on another Version than the served
+/// one is a moved tag: a non-fast-forward unless the publisher rewrites history.
+fn merge_tags(
+    previous: &ResearchLineage,
+    next: &mut ResearchLineage,
+    rewrite: bool,
+) -> Result<(), GfError> {
+    let mut tags: BTreeMap<String, _> = previous
+        .tags
+        .iter()
+        .map(|tag| (tag.name.clone(), tag.clone()))
+        .collect();
+    for tag in next.tags.drain(..) {
+        if !rewrite
+            && tags
+                .get(&tag.name)
+                .is_some_and(|served| served.version_uuid != tag.version_uuid)
+        {
+            return Err(GfError::Validation(format!(
+                "GF_HUB_TAG_CONFLICT: the repository already serves tag '{}' on another Version; publish with --rewrite to move it",
+                tag.name
+            )));
+        }
+        tags.insert(tag.name.clone(), tag);
+    }
+    next.tags = tags.into_values().collect();
+    Ok(())
+}
+
 fn merge_lineage(
     previous: Option<&ResearchLineage>,
     mut next: ResearchLineage,
@@ -1274,27 +1314,7 @@ fn merge_lineage(
     next.versions = versions.into_values().collect();
     next.branches = branches.into_values().collect();
     next.proposals.clone_from(&previous.proposals);
-    // Served tags are never removed. A local tag on another Version than the served
-    // one is a moved tag: a non-fast-forward unless the publisher rewrites history.
-    let mut tags: BTreeMap<String, _> = previous
-        .tags
-        .iter()
-        .map(|tag| (tag.name.clone(), tag.clone()))
-        .collect();
-    for tag in next.tags.drain(..) {
-        if !rewrite
-            && tags
-                .get(&tag.name)
-                .is_some_and(|served| served.version_uuid != tag.version_uuid)
-        {
-            return Err(GfError::Validation(format!(
-                "GF_HUB_TAG_CONFLICT: the repository already serves tag '{}' on another Version; publish with --rewrite to move it",
-                tag.name
-            )));
-        }
-        tags.insert(tag.name.clone(), tag);
-    }
-    next.tags = tags.into_values().collect();
+    merge_tags(previous, &mut next, rewrite)?;
     let refs = next
         .branches
         .iter()
@@ -1303,14 +1323,7 @@ fn merge_lineage(
         .into_iter()
         .collect::<Vec<_>>();
     if prune {
-        graphforge_hub_publish::prune_unreferenced_history(&mut next);
-        // A tag on pruned history goes with it.
-        let kept: BTreeSet<_> = next
-            .versions
-            .iter()
-            .map(|version| version.version_uuid.clone())
-            .collect();
-        next.tags.retain(|tag| kept.contains(&tag.version_uuid));
+        prune_history(&mut next);
     }
     graphforge_hub_publish::validate_history_transition(
         previous,

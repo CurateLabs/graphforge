@@ -492,11 +492,14 @@ fn prepare_research_clone(
     manifest: &DiscoveryManifest,
     refs: &RefSet,
     limits: DiscoveryLimits,
-    git_ref: Option<&str>,
-    version_uuid: Option<&str>,
-    tag: Option<&str>,
+    args: &CloneArgs,
     retry: &RetryPolicy,
 ) -> Result<Option<(ObjectDescriptor, ResearchCloneContext)>, graphforge_api::GfError> {
+    let (git_ref, version_uuid, tag) = (
+        args.git_ref.as_deref(),
+        args.version_uuid.as_deref(),
+        args.tag.as_deref(),
+    );
     let (lineage_bytes, lineage) = read_lineage(transport, manifest, refs, limits, retry)?;
     // A tag names a Version through the lineage, then follows the `--version-uuid` path.
     let tagged = tag
@@ -2102,16 +2105,8 @@ fn clone_into_staging(
             HandoffKind::Call,
             None,
         );
-        let prepared = prepare_research_clone(
-            transport,
-            manifest,
-            &refs,
-            limits,
-            args.git_ref.as_deref(),
-            args.version_uuid.as_deref(),
-            args.tag.as_deref(),
-            &env.retry,
-        )?;
+        let prepared =
+            prepare_research_clone(transport, manifest, &refs, limits, args, &env.retry)?;
         profile.handoff(
             ComponentKind::NetworkTransport,
             ComponentKind::Discovery,

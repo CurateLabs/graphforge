@@ -916,6 +916,7 @@ fn handle_revert_before_open(
     Ok(false)
 }
 
+#[allow(clippy::too_many_lines)] // one arm per repository command
 fn run_repository(
     command: Command,
     project_dir: Option<PathBuf>,
