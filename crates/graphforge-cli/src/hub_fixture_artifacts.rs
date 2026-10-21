@@ -417,6 +417,7 @@ pub fn generate(source: &Path, destination: &Path, location_base: &str) -> Resul
         package: PortablePackageReference {
             format: PORTABLE_FORMAT.into(),
             package_digest: Sha256Digest(exported_package_digest.clone()),
+            producing_core_version: derived.summary.package.producing_core_version.clone(),
             object_digest: project_object.digest.clone(),
         },
         summary: Some(summary_reference(&derived, &summary_object)),

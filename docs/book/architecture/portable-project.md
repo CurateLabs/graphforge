@@ -14,6 +14,13 @@ Four identities are deliberately distinct:
   identity.
 - `participant_id` is a stable portable component identity, globally unique
   within the package; it is never a runtime catalog ID.
+- `producing_core_version` is the exact GraphForge Core version that wrote the
+  package (the same value as the Project manifest's `graphforge_version` for a
+  Project created by that build). It is part of the manifest and therefore of
+  `package_digest`, so two Core versions never export one package identity. It is
+  an opaque exact label: readers compare it for equality, and never order or
+  parse it. Verification and inspection report it; before v1 a package runs only
+  on the Core version that wrote it (ADR 0054 section 9).
 - `source_generation` identifies the committed GraphForge generation from
   which selection occurred. It proves provenance, not package identity or an
   import target generation.

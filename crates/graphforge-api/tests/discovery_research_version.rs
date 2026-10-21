@@ -162,6 +162,7 @@ fn publish() -> Published {
                 PortablePackageReference {
                     format: PORTABLE_FORMAT.into(),
                     package_digest: Sha256Digest(exported.package_digest),
+                    producing_core_version: graphforge_core::manifest::GRAPHFORGE_VERSION.into(),
                     object_digest: digest(marker),
                 },
                 output,
@@ -248,6 +249,7 @@ fn documents(lineage: &ResearchLineage) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
         package: PortablePackageReference {
             format: PORTABLE_FORMAT.into(),
             package_digest: digest('9'),
+            producing_core_version: graphforge_core::manifest::GRAPHFORGE_VERSION.into(),
             object_digest: digest('e'),
         },
         summary: None,
@@ -365,6 +367,25 @@ fn research_package_digest_mismatch_fails_without_acceptance() {
 }
 
 #[test]
+fn research_package_producer_mismatch_fails_without_acceptance() {
+    let published = publish();
+    // Only the advertised producer differs; the semantic package digest agrees.
+    let mut lineage = published.lineage.clone();
+    version_mut(&mut lineage, published.head)
+        .package
+        .as_mut()
+        .unwrap()
+        .producing_core_version = "0.0.1".into();
+    let (_, path) = &published.packages[&published.head];
+    assert!(matches!(
+        verify(&lineage, &published.repository, published.head, path),
+        Err(DiscoveryResearchVersionError::ReferenceMismatch(
+            DiscoveryPortableMismatch::ProducingCoreVersion
+        ))
+    ));
+}
+
+#[test]
 fn version_identity_must_match_the_verified_research_registry() {
     let published = publish();
     let (_, head_path) = &published.packages[&published.head];
@@ -401,6 +422,13 @@ fn package_without_research_interchange_never_proves_a_version() {
         .as_mut()
         .unwrap()
         .package_digest = Sha256Digest(package_digest);
+    // The hand-built package declares the template's producer, so only the
+    // missing research identity can refuse it.
+    version_mut(&mut lineage, published.head)
+        .package
+        .as_mut()
+        .unwrap()
+        .producing_core_version = "0.6.0".into();
     assert!(matches!(
         verify(
             &lineage,

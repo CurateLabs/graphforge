@@ -20,8 +20,9 @@ downloaded portable package.
 6. Pass the complete local package to `graphforge-storage`'s portable
    verifier. Only that verifier decides package integrity, compatibility, and
    authenticity.
-7. Require the verifier's semantic `package_digest` to equal the discovery
-   manifest's `package.package_digest` before returning an accepted selection.
+7. Require the verifier's semantic `package_digest` and `producing_core_version`
+   to equal the discovery manifest's `package.package_digest` and
+   `package.producing_core_version` before returning an accepted selection.
 
 Failure at any step MUST return no accepted repository/package result. Discovery
 `package.object_digest` and inventory object digests protect downloaded object
@@ -51,7 +52,8 @@ A Hub reads a Project summary without package I/O:
 4. Parse with `ProjectSummary::from_json`. An unknown required capability or
    format major fails `unsupported_future` here, before any metadata is read.
 5. Call `DiscoveryManifest::bind_summary`. It requires the summary's repository,
-   `immutable_version`, and `package_digest` to equal the manifest's, its
+   `immutable_version`, `package_digest`, and `producing_core_version` to equal
+   the manifest's, its
    canonical digest to equal `summary.summary_digest`, and its ontology
    composition to match the manifest's `ontology` inventory.
 
