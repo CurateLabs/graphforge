@@ -25,9 +25,11 @@ pub(crate) fn portable_registry(bytes: &[u8]) -> Result<ResearchRegistry, GfErro
     Ok(registry)
 }
 
-/// Authenticate one Version's participant control bytes and derive its exact exported
-/// object set. File contents are also covered by the outer verifier's streaming digest checks.
-pub(crate) fn version_objects(
+/// Authenticate one Version's participant control bytes and derive the objects its
+/// participants need: the participants, graph manifest nodes and graph files. Local
+/// evidence is separate (see [`local_evidence`]). File contents are also covered by the
+/// outer verifier's streaming digest checks.
+pub(crate) fn core_objects(
     version: &ResearchVersionRecord,
     mut read: impl FnMut(&str, u64) -> Result<Vec<u8>, GfError>,
 ) -> Result<BTreeMap<String, Option<u64>>, GfError> {
@@ -72,14 +74,27 @@ pub(crate) fn version_objects(
             }
         }
     }
+    Ok(objects)
+}
+
+/// The Version's local evidence objects with their lengths. A digest can be both
+/// evidence and a participant, graph file or manifest node of the same Version.
+/// Two references to one digest must agree on its length.
+pub(crate) fn local_evidence(
+    version: &ResearchVersionRecord,
+) -> Result<BTreeMap<String, u64>, GfError> {
+    let mut objects = BTreeMap::new();
     for evidence in &version.content.evidence {
         if let super::super::ResearchEvidenceReference::Local {
             sha256,
             byte_length,
             ..
         } = evidence
+            && objects
+                .insert(hex(sha256), *byte_length)
+                .is_some_and(|old| old != *byte_length)
         {
-            add(&mut objects, hex(sha256), Some(*byte_length))?;
+            return Err(invalid("research object has conflicting lengths"));
         }
     }
     Ok(objects)
@@ -99,10 +114,10 @@ fn add(
     Ok(())
 }
 
-/// Derive one Version's closure from identities authenticated by the outer portable scanner.
+/// Derive one Version's core closure (see [`core_objects`]) from identities authenticated by the outer portable scanner.
 /// Only settings, saved definitions, graph inventories and manifest nodes need decoding;
 /// Arrow/Parquet participant bodies are not composition metadata.
-pub(crate) fn version_objects_admitted(
+pub(crate) fn core_objects_admitted(
     version: &ResearchVersionRecord,
     mut length: impl FnMut(&str) -> Result<u64, GfError>,
     mut read_control: impl FnMut(&str, u64) -> Result<Vec<u8>, GfError>,
@@ -157,39 +172,47 @@ pub(crate) fn version_objects_admitted(
             }
         }
     }
-    for evidence in &version.content.evidence {
-        if let super::super::ResearchEvidenceReference::Local {
-            sha256,
-            byte_length,
-            ..
-        } = evidence
-        {
-            add(&mut objects, hex(sha256), Some(*byte_length))?;
-        }
-    }
     Ok(objects)
 }
 
-/// Each Version's complete object closure, keyed by `version_uuid`. A shared object
+/// One Version's exported objects, by role.
+pub(crate) struct VersionObjects {
+    /// Participants, graph manifest nodes and graph files.
+    pub(crate) core: BTreeSet<String>,
+    /// Local evidence; may overlap `core`.
+    pub(crate) evidence: BTreeSet<String>,
+}
+
+/// Each Version's complete object set, keyed by `version_uuid`. A shared object
 /// appears in every Version that needs it.
 pub(crate) fn object_inventory(
     generation: &crate::ResolvedProjectGeneration,
-) -> Result<BTreeMap<Uuid, BTreeSet<String>>, GfError> {
+) -> Result<BTreeMap<Uuid, VersionObjects>, GfError> {
     let snapshot = generation
         .participant_snapshot("research", "registry")?
         .ok_or_else(|| invalid("portable research registry is unavailable"))?;
     let registry = portable_registry(&snapshot.bytes)?;
     let mut inventory = BTreeMap::new();
     for (id, version) in &registry.versions {
-        let objects = version_objects(version, |digest, limit| {
+        let objects = core_objects(version, |digest, limit| {
             crate::read_graph_object_by_digest(generation.container_root(), digest, limit)
         })?;
+        let evidence = local_evidence(version)?;
         for (digest, length) in &objects {
             if let Some(length) = length {
                 crate::verify_graph_object(generation.container_root(), digest, *length)?;
             }
         }
-        inventory.insert(*id, objects.into_keys().collect());
+        for (digest, length) in &evidence {
+            crate::verify_graph_object(generation.container_root(), digest, *length)?;
+        }
+        inventory.insert(
+            *id,
+            VersionObjects {
+                core: objects.into_keys().collect(),
+                evidence: evidence.into_keys().collect(),
+            },
+        );
     }
     Ok(inventory)
 }

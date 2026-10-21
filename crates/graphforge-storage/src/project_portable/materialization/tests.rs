@@ -440,7 +440,13 @@ fn research_captured_cas_counts_real_bytes_reuses_authority_and_refuses_corrupti
     let research_path = stage.join(&relative);
     fs::create_dir_all(research_path.parent().unwrap()).unwrap();
     fs::rename(path, &research_path).unwrap();
-    let objects = BTreeMap::from([((version, digest.clone()), 2)]);
+    let objects = BTreeMap::from([(
+        (version, digest.clone()),
+        super::super::research::Held {
+            length: 2,
+            evidence_only: false,
+        },
+    )]);
     let captures = BTreeMap::from([(relative, capture)]);
     let target = tempfile::tempdir().unwrap();
     crate::open_or_initialize_project(target.path()).unwrap();

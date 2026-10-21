@@ -23,6 +23,10 @@ pub(super) enum Reopen<'a> {
     /// reads of an already scanned package at the offsets the scan recorded.
     /// Verification never uses this.
     Indexed(&'a Path),
+    /// Research files were validated per Version while they streamed past and
+    /// none is read back. Other controls the scan did not retain are read from
+    /// the expanded package's root, when it has one.
+    Driven(Option<&'a Path>),
 }
 
 /// Authentication for untrusted bytes, or corruption refusal against evidence
@@ -100,9 +104,11 @@ pub(super) fn validate_semantics(
         }
         Ok(value)
     })?;
-    research::validate_with_reader(report, limits, cancelled, |path, bound| {
-        read(source, entries, path, bound, cancelled)
-    })?;
+    if !matches!(source, Reopen::Driven(_)) {
+        research::validate_with_reader(report, limits, cancelled, |path, bound| {
+            read(source, entries, path, bound, cancelled)
+        })?;
+    }
     Ok(())
 }
 
@@ -207,14 +213,15 @@ fn locate(source: Reopen<'_>, path: &str) -> Result<std::path::PathBuf, Portable
         Reopen::Indexed(bundle) => bundle.to_path_buf(),
         Reopen::BundleFile(bundle) if path.starts_with(research::NAMESPACE) => bundle.to_path_buf(),
         Reopen::Bundle(Some(stage)) if path.starts_with(research::NAMESPACE) => stage.join(path),
-        Reopen::Bundle(None) if path.starts_with(research::NAMESPACE) => {
+        Reopen::Driven(Some(root)) if !path.starts_with(research::NAMESPACE) => root.join(path),
+        Reopen::Bundle(None) | Reopen::Driven(_) if path.starts_with(research::NAMESPACE) => {
             return Err(PortableError::at(
                 PortableErrorCode::Io,
                 path,
                 "research file was not staged",
             ));
         }
-        Reopen::Bundle(_) | Reopen::BundleFile(_) => {
+        Reopen::Bundle(_) | Reopen::BundleFile(_) | Reopen::Driven(_) => {
             return Err(PortableError::at(
                 PortableErrorCode::LimitExceeded,
                 path,
@@ -269,6 +276,7 @@ impl parquet::file::reader::ChunkReader for EntryWindow {
 /// the verdict does not depend on the source or on the entry's size. The
 /// scratch file has no name and is gone when the walk is dropped.
 pub(super) struct ParquetWalk<'a> {
+    skipped: bool,
     path: &'a str,
     threshold: u64,
     scratch: &'a Path,
@@ -281,6 +289,7 @@ impl<'a> ParquetWalk<'a> {
     pub(super) fn new(path: &'a str, size: u64, threshold: u64, scratch: &'a Path) -> Self {
         let capacity = usize::try_from(size.min(threshold)).unwrap_or(0);
         Self {
+            skipped: false,
             path,
             threshold,
             scratch,
@@ -289,7 +298,15 @@ impl<'a> ParquetWalk<'a> {
             tail: [0; 4],
         }
     }
+    /// The entry is kept by the sink and walked there: keep nothing here.
+    pub(super) fn skip(&mut self) {
+        self.skipped = true;
+        self.kept = Vec::new();
+    }
     pub(super) fn update(&mut self, chunk: &[u8]) -> Result<(), PortableError> {
+        if self.skipped {
+            return Ok(());
+        }
         let stage = |_: std::io::Error| {
             PortableError::at(
                 PortableErrorCode::Io,
@@ -321,7 +338,7 @@ impl<'a> ParquetWalk<'a> {
         Ok(())
     }
     pub(super) fn finish(self) -> Result<(), PortableError> {
-        if &self.tail != b"PAR1" {
+        if self.skipped || &self.tail != b"PAR1" {
             return Ok(());
         }
         match self.spill {
@@ -345,6 +362,32 @@ fn walk_entry(file: &fs::File, base: u64, length: u64, path: &str) -> Result<(),
     };
     crate::parquet_encoding_profile::admit_pages(&window)
         .map_err(|error| refuse_profile(path, error))
+}
+
+/// True when a package entry's bytes can reach a decoder, so the Parquet page
+/// profile must admit them. Opaque component files, which no decoder reads
+/// (objects only a research Version's evidence needs), return false. The one
+/// rule for the streamed walk and for the walk of a file or directory.
+pub(super) fn reaches_a_decoder(entry_path: &str) -> bool {
+    entry_path.starts_with("data/components/") && !research::is_evidence_only(entry_path)
+}
+
+/// Walk the pages of an entry a sink kept as the file at `path`.
+pub(super) fn walk_staged(path: &Path, length: u64, entry: &str) -> Result<(), PortableError> {
+    if length < 12 {
+        return Ok(());
+    }
+    let unreadable =
+        |_| PortableError::at(PortableErrorCode::Io, entry, "cannot read the staged entry");
+    let mut file = fs::File::open(path).map_err(unreadable)?;
+    let mut tail = [0_u8; 4];
+    file.seek(SeekFrom::Start(length - 4))
+        .and_then(|_| file.read_exact(&mut tail))
+        .map_err(unreadable)?;
+    if &tail == b"PAR1" {
+        walk_entry(&file, 0, length, entry)?;
+    }
+    Ok(())
 }
 
 /// The refusal for a Parquet entry the funded decoder profile does not admit.
@@ -371,17 +414,24 @@ pub(super) fn refuse_profile(
 ///
 /// An entry is Parquet when it ends in the `PAR1` footer magic, which is all the
 /// Parquet reader requires; paths and declared encodings are not trusted.
+///
+/// `driven` is true when the research driver answers for the staged research
+/// objects (it walked each as it was staged, and a refused Version's remaining
+/// objects are never decoded): they are skipped here so one rule orders their
+/// refusal against the rest of the scan.
 pub(super) fn validate_parquet_profile(
     source: &Path,
     entries: &[Entry],
+    driven: bool,
     cancelled: Option<&AtomicBool>,
 ) -> Result<(), PortableError> {
     use crate::parquet_encoding_profile::admit_pages;
 
-    for entry in entries
-        .iter()
-        .filter(|entry| entry.path.starts_with("data/components/") && entry.length >= 12)
-    {
+    for entry in entries.iter().filter(|entry| {
+        reaches_a_decoder(&entry.path)
+            && entry.length >= 12
+            && !(driven && research::is_staged_object(&entry.path))
+    }) {
         check_cancel(cancelled)?;
         if let Some(bytes) = &entry.bytes {
             if bytes.ends_with(b"PAR1") {

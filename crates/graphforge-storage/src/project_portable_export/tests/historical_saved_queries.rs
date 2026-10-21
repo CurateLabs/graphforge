@@ -196,6 +196,59 @@ fn archived_queries() -> (
     (root, generation, archive, definitions)
 }
 
+/// The selected Version of this package holds no object at all; the Version it
+/// requires holds the saved queries. Both are validated, with their native
+/// owner, from a bundle file, an expanded directory and a stream.
+#[test]
+fn a_version_with_no_retained_object_is_validated_on_every_path() {
+    let (_root, generation, archive, _definitions) = archived_queries();
+    let limits = PortableLimits::default();
+    let plan = plan_complete_portable(&generation, limits).unwrap();
+    let outputs = tempfile::tempdir().unwrap();
+    let (expanded, bundle) = write_test_representations(&plan, outputs.path());
+    let scratch = tempfile::tempdir().unwrap();
+    let expected: Vec<Uuid> = archive.versions.keys().copied().collect();
+    assert_eq!(expected.len(), 2);
+    let mut seen = Vec::new();
+    for source in ["expanded", "bundle", "stream"] {
+        seen.clear();
+        let mut validator =
+            |_: &ResolvedProjectGeneration,
+             version: &ResearchVersionRecord,
+             _: &crate::research_versions::ResearchRegistry| {
+                seen.push(version.version_uuid);
+                Ok(())
+            };
+        match source {
+            "expanded" => crate::validate_research_package(
+                &expanded,
+                Some(scratch.path()),
+                limits,
+                None,
+                &mut validator,
+            ),
+            "bundle" => crate::validate_research_package(
+                &bundle,
+                Some(scratch.path()),
+                limits,
+                None,
+                &mut validator,
+            ),
+            _ => crate::validate_research_package_stream(
+                &mut std::fs::File::open(&bundle).unwrap(),
+                Some(scratch.path()),
+                limits,
+                None,
+                &mut validator,
+            ),
+        }
+        .unwrap_or_else(|error| panic!("{source}: {error:?}"));
+        seen.sort();
+        assert_eq!(seen, expected, "{source}");
+    }
+    assert_eq!(std::fs::read_dir(scratch.path()).unwrap().count(), 0);
+}
+
 #[test]
 fn full_package_verification_and_import_decode_required_historical_saved_queries() {
     let (_root, generation, mut archive, mut definitions) = archived_queries();
