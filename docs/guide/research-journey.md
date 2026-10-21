@@ -173,9 +173,11 @@ recorded on Versions are always published, and the Project people list in the
 summary is derived from them.
 
 Use [portable projects](portable-projects.md) for actual transfer and Hub clone.
-History, fast-forward publication, rewrite, and prune behavior are specified in
-[#1771](https://github.com/CurateLabs/graphforge/issues/1771); check the installed
-CLI and current reference before using a developing collaboration surface.
+History, fast-forward publication, rewrite, and prune behavior are implemented
+in the native research API and the installed CLI; the sections below walk each
+operation against a conforming Hub, and the
+[publish contract](../adr/0053-hub-publish-wire-contract.md) states the precise
+refusal rules.
 
 ## For integrators
 
@@ -188,6 +190,10 @@ usability or observed human comprehension. Use
 those entry experiences.
 
 ## Continue a published Branch
+
+The following sections walk the collaboration cycle: clone a published Branch,
+commit to the clone, publish back, incorporate a divergent remote head, and
+rewrite or prune published history.
 
 Against a conforming publish-capable Hub, clone a named Branch, edit it through
 the native research Branch API, then publish that same ref back. The clone keeps
