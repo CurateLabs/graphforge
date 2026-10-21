@@ -48,6 +48,13 @@ fn reader(pool: &Arc<dyn MemoryPool>) -> MemoryReservation {
     MemoryConsumer::new("SpillReaderDecode").register(pool)
 }
 
+/// The consumer of a sort's merge of its spills: its reserve, then its pass.
+fn sort_merge(pool: &Arc<dyn MemoryPool>, partition: usize) -> MemoryReservation {
+    MemoryConsumer::new(format!("{SORT_MERGE_CONSUMER_PREFIX}{partition}]"))
+        .with_can_spill(true)
+        .register(pool)
+}
+
 fn is_refused(result: Result<()>) -> bool {
     result.is_err_and(|error| error.to_string().contains("Resources exhausted"))
 }
@@ -78,7 +85,7 @@ fn a_spilled_aggregate_keeps_its_floor_whatever_the_sibling_asks() {
     let pool = query_pool(64 * MIB);
     let spilling = aggregate(&pool, 0);
     let sibling = aggregate(&pool, 1);
-    sibling.try_grow(38 * MIB).unwrap();
+    sibling.try_grow(40 * MIB).unwrap();
     spilling.try_grow(8 * MIB).unwrap();
     spilling.shrink(8 * MIB);
     let error = sibling.try_grow(8 * MIB).unwrap_err().to_string();
@@ -86,9 +93,9 @@ fn a_spilled_aggregate_keeps_its_floor_whatever_the_sibling_asks() {
     assert!(error.contains("6.0 MB remain available"), "{error}");
     sibling.try_grow(6 * MIB).unwrap();
     spilling.try_grow(10 * MIB).unwrap();
-    assert_eq!(pool.reserved(), 54 * MIB);
+    assert_eq!(pool.reserved(), 56 * MIB);
     let reader = reader(&pool);
-    reader.try_grow(10 * MIB).unwrap();
+    reader.try_grow(8 * MIB).unwrap();
     assert_eq!(pool.reserved(), 64 * MIB);
 }
 
@@ -112,6 +119,125 @@ fn a_spilling_aggregate_reserves_the_memory_it_released_whatever_the_sibling_too
     let other = aggregate(&pool, 2);
     other.try_grow(MIB).unwrap();
     assert!(is_refused(other.try_grow(MIB)));
+}
+
+/// A fresh aggregate's first state is served at the limit of the pool less the
+/// loans, as a request of a consumer that cannot spill is, into the floors of
+/// the spilled aggregates and the floor kept for the readers of spilled data:
+/// a refusal would fail its query (there is nothing to spill), and keeping the
+/// readers' floor from it refused the second final aggregate's 64 B first
+/// state in 4 of 100 runs at a 2 MiB pool, where that floor is half the pool
+/// until an aggregate has spilled (#2173, round 4). The floors apply from its
+/// next request on, and the spiller still takes its own floor, past the pool.
+#[test]
+fn a_first_state_is_served_before_the_readers_floor_is() {
+    let pool = query_pool(64 * MIB);
+    let spiller = spilled(&pool, 0);
+    let exchange = exchange(&pool, 0);
+    exchange.try_grow(46 * MIB).unwrap();
+    assert!(is_refused(exchange.try_grow(1)));
+    let first = aggregate(&pool, 1);
+    first.try_grow(10 * MIB).unwrap();
+    let second = aggregate(&pool, 2);
+    second.try_grow(8 * MIB).unwrap();
+    assert_eq!(pool.reserved(), 64 * MIB);
+    assert!(is_refused(second.try_grow(1)));
+    spiller.try_grow(10 * MIB).unwrap();
+    assert_eq!(pool.reserved(), 74 * MIB);
+}
+
+/// The readers' floor is a spiller's floor within an eighth of the pool,
+/// never below half a MiB, whatever the number of spillers. In a 16 MiB pool
+/// with no aggregate in the spiller map, the sort's merge reservation (a
+/// consumer that can spill, but not a sort by name) asks 2 MiB with 10.4 MiB
+/// held by others: CI run 39486593196 refused it with the floor at half the
+/// pool, a quarter of the pool refused it too, and main serves it. It is
+/// admitted, and refused only within the readers' floor, 2 MiB here, which a
+/// reader then takes. In a 64 MiB pool the floor is 8 MiB, with or without a
+/// spiller; in a 2 MiB pool it is half a MiB, not an eighth.
+#[test]
+fn the_readers_floor_is_an_eighth_of_a_small_pool_whatever_the_spillers() {
+    let pool = query_pool(16 * MIB);
+    let others = reader(&pool);
+    others.try_grow(10 * MIB + 400 * 1024).unwrap();
+    let merge = MemoryConsumer::new("ExternalSorterMerge[0]")
+        .with_can_spill(true)
+        .register(&pool);
+    merge.try_grow(2 * MIB).unwrap();
+    merge.try_grow(14 * MIB - pool.reserved()).unwrap();
+    assert!(is_refused(merge.try_grow(1)));
+    let late = reader(&pool);
+    late.try_grow(2 * MIB).unwrap();
+    assert_eq!(pool.reserved(), 16 * MIB);
+
+    let pool = query_pool(64 * MIB);
+    let wide = exchange(&pool, 0);
+    wide.try_grow(56 * MIB).unwrap();
+    assert!(is_refused(wide.try_grow(1)));
+    let _spilled = spilled(&pool, 0);
+    assert!(is_refused(wide.try_grow(1)));
+    let last = reader(&pool);
+    last.try_grow(8 * MIB).unwrap();
+    assert_eq!(pool.reserved(), 64 * MIB);
+
+    let pool = query_pool(2 * MIB);
+    let small = exchange(&pool, 0);
+    small.try_grow(3 * MIB / 2).unwrap();
+    assert!(is_refused(small.try_grow(1)));
+    let tail = reader(&pool);
+    tail.try_grow(MIB / 2).unwrap();
+    assert_eq!(pool.reserved(), 2 * MIB);
+}
+
+/// The reserve a sort keeps for the merge of its spills (6 MiB at 48 MiB) is
+/// the readers' reserve: within the readers' floor it is served at the pool's
+/// limit. A sibling sort's final pass had selected up to the pool less the
+/// readers' floor, where its selection backs off, and the reserve the other
+/// sort asked at its next spill was refused by the floor it is for, which
+/// fails that sort (a sort-merge join of two 86 MiB sides over a 48 MiB
+/// pool, 5 runs in 5). Past the floor the merge sees the floors; a consumer
+/// that can spill and is not a sort's merge sees them for the same bytes.
+#[test]
+fn a_sorts_merge_reserve_within_the_readers_floor_is_served_at_the_pools_limit() {
+    let pool = query_pool(48 * MIB);
+    let pass = sort_merge(&pool, 0);
+    pass.try_grow(42 * MIB).unwrap();
+    assert!(is_refused(pass.try_grow(1)));
+    let reserve = sort_merge(&pool, 1);
+    reserve.try_grow(6 * MIB).unwrap();
+    assert_eq!(pool.reserved(), 48 * MIB);
+    assert!(is_refused(reserve.try_grow(1)));
+    reserve.shrink(6 * MIB);
+    pass.shrink(MIB);
+    assert!(is_refused(reserve.try_grow(6 * MIB + 1)));
+    let other = exchange(&pool, 0);
+    assert!(is_refused(other.try_grow(6 * MIB)));
+    reserve.try_grow(6 * MIB).unwrap();
+    assert_eq!(pool.reserved(), 47 * MIB);
+}
+
+/// A sort holding nothing has nothing to spill, and a refusal of its first
+/// batch fails it: the batch is served at the pool's limit, whatever floors
+/// the pool keeps (a sibling's pass and merge reserve had left less than
+/// the readers' floor beside the batch, and main serves it). Its second
+/// batch sees the floors and the sort's headroom, and the sort spills.
+#[test]
+fn a_sorts_first_batch_is_served_at_the_pools_limit() {
+    let pool = query_pool(48 * MIB);
+    let pass = sort_merge(&pool, 0);
+    pass.try_grow(42 * MIB).unwrap();
+    let sort = MemoryConsumer::new(format!("{SORT_CONSUMER_PREFIX}1]"))
+        .with_can_spill(true)
+        .register(&pool);
+    sort.try_grow(5 * MIB).unwrap();
+    assert_eq!(pool.reserved(), 47 * MIB);
+    assert!(is_refused(sort.try_grow(MIB)));
+    assert!(is_refused(sort.try_grow(1)));
+    let exchange = exchange(&pool, 0);
+    assert!(is_refused(exchange.try_grow(1)));
+    sort.shrink(5 * MIB);
+    sort.try_grow(6 * MIB).unwrap();
+    assert_eq!(pool.reserved(), 48 * MIB);
 }
 
 /// A spill makes small requests (emitting, resetting its state) between the
@@ -160,7 +286,7 @@ fn the_restart_after_a_sort_served_from_the_grant_is_served_too() {
     spilling.try_grow(30 * MIB).unwrap();
     spilling.shrink(30 * MIB - 1792 * 1024);
     // The sibling takes what the floor leaves it.
-    sibling.try_grow(20 * MIB).unwrap();
+    sibling.try_grow(22 * MIB).unwrap();
     assert!(is_refused(sibling.try_grow(MIB)));
     // The sort is served from the grant, and released when the batch is written.
     spilling.try_grow(36 * MIB).unwrap();
@@ -204,7 +330,7 @@ fn a_loan_is_repaid_by_releasing_what_was_lent() {
     let spilling = spilled(&pool, 0);
     let sibling = aggregate(&pool, 1);
     spilling.try_grow(20 * MIB).unwrap();
-    sibling.try_grow(34 * MIB).unwrap();
+    sibling.try_grow(36 * MIB).unwrap();
     spilling.try_grow(MIB).unwrap();
     spilling.shrink(512 * 1024);
     assert!(is_refused(spilling.try_grow(64 * 1024)));
@@ -256,7 +382,7 @@ fn only_a_bulk_release_by_a_spilling_aggregate_grants_anything() {
     let partial = aggregate(&pool, 3);
     partial.try_grow(8 * MIB).unwrap();
     partial.shrink(MIB);
-    sibling.try_grow(47 * MIB).unwrap();
+    sibling.try_grow(49 * MIB).unwrap();
     assert!(partial.try_grow(MIB).is_err());
 }
 
@@ -277,13 +403,13 @@ fn a_restarted_aggregate_is_not_starved_by_a_sibling_that_filled_the_pool() {
 fn ordinary_growth_is_bounded_by_the_budget() {
     let pool = query_pool(64 * MIB);
     let one = aggregate(&pool, 0);
-    one.try_grow(50 * MIB).unwrap();
+    one.try_grow(52 * MIB).unwrap();
     let error = one.try_grow(5 * MIB).unwrap_err().to_string();
     assert!(error.contains("Resources exhausted"), "{error}");
     // The pool less the 10 MiB reserved for the readers of spilled data.
     assert!(error.contains("4.0 MB remain available"), "{error}");
     one.grow(15 * MIB);
-    assert_eq!(pool.reserved(), 65 * MIB);
+    assert_eq!(pool.reserved(), 67 * MIB);
 }
 
 /// The merge of an aggregate's spill files with the pool full, in the order
@@ -320,7 +446,7 @@ fn others_are_refused_beyond_the_pool_less_the_unfilled_floors() {
     let _first = spilled(&pool, 0);
     let second = spilled(&pool, 1);
     let repartition = exchange(&pool, 0);
-    repartition.try_grow(34 * MIB).unwrap();
+    repartition.try_grow(36 * MIB).unwrap();
     assert!(is_refused(repartition.try_grow(1)));
     // The floor of the second fills as it is used, and a request within it is
     // served although the pool is full.
@@ -333,7 +459,7 @@ fn others_are_refused_beyond_the_pool_less_the_unfilled_floors() {
     let big = spilled(&pool, 0);
     big.try_grow(20 * MIB).unwrap();
     let repartition = exchange(&pool, 0);
-    repartition.try_grow(34 * MIB).unwrap();
+    repartition.try_grow(36 * MIB).unwrap();
     assert!(is_refused(repartition.try_grow(1)));
 }
 
@@ -350,8 +476,8 @@ fn a_consumer_that_cannot_spill_is_refused_only_at_the_limit_of_the_pool() {
     let idle = spilled(&pool, 1);
     idle.try_grow(7 * MIB).unwrap();
     let repartition = exchange(&pool, 0);
-    repartition.try_grow(16 * MIB).unwrap();
-    assert_eq!(pool.reserved(), 51 * MIB);
+    repartition.try_grow(18 * MIB).unwrap();
+    assert_eq!(pool.reserved(), 53 * MIB);
 
     // The idle aggregate has 3 MiB of its floor to fill, and 10 MiB are kept
     // for the readers of spilled data. The exchange, which spills when it is
@@ -361,7 +487,7 @@ fn a_consumer_that_cannot_spill_is_refused_only_at_the_limit_of_the_pool() {
     // The counting aggregate, which cannot spill, is served up to the pool.
     let counting = MemoryConsumer::new("AggregateStream[1]").register(&pool);
     counting.try_grow(8).unwrap();
-    counting.try_grow(13 * MIB - 8).unwrap();
+    counting.try_grow(11 * MIB - 8).unwrap();
     assert_eq!(pool.reserved(), 64 * MIB);
     assert!(is_refused(counting.try_grow(1)));
 
@@ -521,8 +647,8 @@ fn the_floors_together_stay_within_half_the_pool() {
         let _spilled: Vec<_> = (0..spillers).map(|n| spilled(&pool, n)).collect();
         let repartition = exchange(&pool, 0);
         // One floor for each spilled aggregate and one for the readers.
-        let floor = SPILLER_FLOOR_BYTES.min(32 * MIB / (spillers + 1));
-        let others_get = 64 * MIB - (spillers + 1) * floor;
+        let floor = SPILLER_FLOOR_BYTES.min((32 * MIB - 8 * MIB) / spillers);
+        let others_get = 64 * MIB - spillers * floor - 8 * MIB;
         assert!(others_get >= 32 * MIB, "{spillers} spilled aggregates");
         repartition.try_grow(others_get).unwrap();
         assert!(
@@ -557,11 +683,11 @@ fn a_consumer_that_goes_away_takes_its_floor_and_grant_with_it() {
     spilling.shrink(8 * MIB);
     assert_eq!(pool.locked().spillers.len(), 1);
     let repartition = exchange(&dynamic, 0);
-    assert!(is_refused(repartition.try_grow(50 * MIB)));
+    assert!(is_refused(repartition.try_grow(47 * MIB)));
     drop(spilling);
     assert!(pool.locked().spillers.is_empty());
     assert_eq!(pool.reserved(), 0);
-    repartition.try_grow(50 * MIB).unwrap();
+    repartition.try_grow(47 * MIB).unwrap();
 }
 
 /// Records the name of every spilling consumer registered with it.
@@ -804,9 +930,9 @@ fn a_spilling_consumer_leaves_the_last_floor_to_the_readers_of_spilled_data() {
     let pool = query_pool(64 * MIB);
     let busy = aggregate(&pool, 0);
     while busy.try_grow(2 * MIB).is_ok() {}
-    assert_eq!(busy.size(), 54 * MIB);
+    assert_eq!(busy.size(), 56 * MIB);
     let reader = reader(&pool);
-    reader.try_grow(10 * MIB).unwrap();
+    reader.try_grow(8 * MIB).unwrap();
     assert_eq!(pool.reserved(), 64 * MIB);
 }
 
@@ -1066,7 +1192,7 @@ async fn a_merge_pass_with_a_field_cursor_asks_the_pool_for_nothing_after_its_se
 async fn merge_passes_that_write_intermediate_files_ask_the_pool_for_nothing_after_their_selection()
 {
     for keys in [&["k", "j"][..], &["j"][..], &["k"][..]] {
-        let run = merge_of_spilled_sort(keys, 48 * MIB).await;
+        let run = merge_of_spilled_sort(keys, 46 * MIB).await;
         assert!(run.passes > 2, "{keys:?}: {} passes", run.passes);
         assert_the_passes_ask_for_nothing_after_their_selection(&run);
     }
@@ -1230,10 +1356,10 @@ fn an_aggregate_that_has_not_spilled_is_served_its_first_state_within_the_pool_a
     busy.try_grow(32_296_140).unwrap();
     let exchanges = [exchange(&pool, 0), exchange(&pool, 1)];
     exchanges[0].try_grow(1_835_418).unwrap();
-    exchanges[1].try_grow(957_415).unwrap();
+    exchanges[1].try_grow(957_415 + 2 * MIB).unwrap();
     let writer = reader(&pool);
     writer.try_grow(1_060_557).unwrap();
-    assert_eq!(pool.reserved(), 39_950_746);
+    assert_eq!(pool.reserved(), 39_950_746 + 2 * MIB);
     // The first state of the late final aggregate: one batch of groups with
     // the sort headroom. Served; the floors apply from the next request.
     let late = aggregate(&pool, 1);
@@ -1262,7 +1388,7 @@ fn a_partial_aggregate_holds_no_floor_and_takes_no_loan() {
     partial.try_grow(15_138_880).unwrap();
     partial.shrink(13_238_272);
     let exchange = exchange(&pool, 0);
-    exchange.try_grow(64 * MIB - 10 * MIB - 1_900_608).unwrap();
+    exchange.try_grow(64 * MIB - 8 * MIB - 1_900_608).unwrap();
     assert!(is_refused(exchange.try_grow(1)));
     assert!(is_refused(partial.try_grow(MIB)));
 }

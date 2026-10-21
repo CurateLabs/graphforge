@@ -2,6 +2,7 @@
 //! can hold at once; after it no reader, writer or copy asks the pool (#2173).
 //! These controls run real spill files through `StreamingMergeBuilder`.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -64,6 +65,8 @@ struct Recorder {
     sponsor_shrinks: Mutex<Vec<(usize, usize, usize)>>,
     registered: Mutex<Vec<String>>,
     sponsor_peak: AtomicUsize,
+    /// Bytes each consumer holds, by name.
+    held: Mutex<HashMap<String, usize>>,
 }
 
 impl Recorder {
@@ -75,7 +78,18 @@ impl Recorder {
             sponsor_shrinks: Mutex::default(),
             registered: Mutex::default(),
             sponsor_peak: AtomicUsize::new(0),
+            held: Mutex::default(),
         })
+    }
+    fn held(&self, name: &str) -> usize {
+        self.held.lock().unwrap().get(name).copied().unwrap_or(0)
+    }
+    fn hold(&self, reservation: &MemoryReservation, more: usize, less: usize) {
+        let mut held = self.held.lock().unwrap();
+        let bytes = held
+            .entry(reservation.consumer().name().to_string())
+            .or_default();
+        *bytes = (*bytes + more) - less;
     }
     fn fresh(&self, prefix: &str) -> Vec<(String, usize)> {
         self.requests
@@ -113,9 +127,11 @@ impl MemoryPool for Recorder {
         self.inner.unregister(consumer);
     }
     fn grow(&self, reservation: &MemoryReservation, additional: usize) {
+        self.hold(reservation, additional, 0);
         self.inner.grow(reservation, additional);
     }
     fn shrink(&self, reservation: &MemoryReservation, shrink: usize) {
+        self.hold(reservation, 0, shrink);
         if reservation.consumer().name() == SPONSOR {
             let made = self.requests.lock().unwrap().len();
             self.sponsor_shrinks
@@ -137,6 +153,9 @@ impl MemoryPool for Recorder {
                 .lock()
                 .unwrap()
                 .push((name.to_string(), additional));
+        }
+        if result.is_ok() {
+            self.hold(reservation, additional, 0);
         }
         if result.is_ok() && name == SPONSOR {
             self.sponsor_peak
@@ -469,10 +488,10 @@ async fn a_narrower_retry_keeps_the_pass_pre_reserve() {
 }
 
 /// Every pass of a multi-level merge opens with its narrowest form as one
-/// request (#2173): six files in a pool that admits four of them at two
-/// batches write one intermediate file, and the second pass (two files and the
-/// intermediate) is admitted by one request before its first reader exists,
-/// not one request per file.
+/// request (#2173): six files in a pool whose half admits four of them at two
+/// batches (where a pass stops growing) write one intermediate file, and the
+/// second pass (two files and the intermediate) is admitted by one request
+/// before its first reader exists, not one request per file.
 #[tokio::test]
 async fn a_later_pass_opens_with_its_minimum_in_one_request() {
     const ROWS: usize = 256;
@@ -506,7 +525,7 @@ async fn a_later_pass_opens_with_its_minimum_in_one_request() {
     .unwrap()
     .expect("a flat schema has a writer bound");
     drop(pool);
-    let limit = four + writer;
+    let limit = 2 * (four + writer);
     let pool = Recorder::new(Arc::new(GreedyMemoryPool::new(limit)));
     let dynamic: Arc<dyn MemoryPool> = Arc::clone(&pool) as Arc<dyn MemoryPool>;
     let directory = tempfile::tempdir().unwrap();
@@ -604,4 +623,266 @@ async fn a_spilled_aggregate_merges_beside_a_full_exchange_on_one_request() {
 #[tokio::test]
 async fn a_merge_without_a_pre_reserve_beside_a_full_exchange_is_carried_by_the_loan() {
     merge_beside_a_full_exchange(false).await;
+}
+
+/// Spill files whose batches are narrower than the output batch. A merge of
+/// two files of 24 batches of 100 rows at a batch size of 8192 would hold every
+/// batch of both files before its first output, while the pass credits each
+/// reader four batches: the merge emits what it holds before a stream's second
+/// refill instead, so no output is built from more than two batches of a
+/// stream, and the readers stay within the bank without asking the pool. (An
+/// output wider than the largest input batch is a copy past the working set,
+/// whose excess asks the pool as every copy did before the working set.)
+#[tokio::test]
+async fn a_merge_of_batches_narrower_than_its_output_stays_within_its_pass() {
+    const FILES: usize = 2;
+    const ROWS: usize = 100;
+    let pool = Recorder::new(Arc::new(GreedyMemoryPool::new(256 * MIB)));
+    let dynamic: Arc<dyn MemoryPool> = Arc::clone(&pool) as Arc<dyn MemoryPool>;
+    let directory = tempfile::tempdir().unwrap();
+    let manager = spill_manager(&dynamic, &directory);
+    let files = spill_files(&manager, FILES, 24, ROWS, |largest| largest);
+    let sponsor = MemoryConsumer::new(SPONSOR).register(&dynamic);
+    let mut stream = merge(manager, files.files, sponsor, 8192);
+    let mut expected = 0_i64;
+    while let Some(batch) = stream.next().await {
+        let batch = batch.unwrap();
+        assert!(
+            batch.num_rows() <= 2 * FILES * ROWS,
+            "an output of {} rows was built from more than two batches of a stream",
+            batch.num_rows()
+        );
+        let keys = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        for key in keys.values() {
+            assert_eq!(*key, expected);
+            expected += 1;
+        }
+    }
+    assert_eq!(expected as usize, files.total_rows);
+    let fresh = pool.fresh("SpillReader");
+    assert!(fresh.is_empty(), "readers asked the pool: {fresh:?}");
+}
+
+/// An output the merge's consumer keeps is charged, as the merge builds the
+/// next one, to a consumer that cannot spill, `MergeOutput`, and leaves the
+/// sponsor: the sponsor's reservation peaks where it does when every output
+/// is dropped, whatever the consumer retains, and the retained result is
+/// refused only at the pool's limit, not at the limit less the floors the
+/// pool keeps from a consumer that can spill (a sort's `collect`, #2173). The
+/// outputs the working set carries beside the copies' workspace stay within
+/// it, as they did, until the merge retires with them.
+#[tokio::test]
+async fn an_output_the_consumer_retains_is_charged_to_the_output_consumer() {
+    const FILES: usize = 2;
+    const BATCHES: usize = 12;
+    const ROWS: usize = 2048;
+    let output = "MergeOutput";
+    let run = |retain: bool| {
+        async move {
+            let pool = Recorder::new(Arc::new(GreedyMemoryPool::new(256 * MIB)));
+            let dynamic: Arc<dyn MemoryPool> = Arc::clone(&pool) as Arc<dyn MemoryPool>;
+            let directory = tempfile::tempdir().unwrap();
+            let manager = spill_manager(&dynamic, &directory);
+            let files = spill_files(&manager, FILES, BATCHES, ROWS, |largest| largest);
+            let sponsor = MemoryConsumer::new(SPONSOR)
+                .with_can_spill(true)
+                .register(&dynamic);
+            let mut stream = merge(manager, files.files, sponsor, ROWS);
+            let mut retained = Vec::new();
+            let mut rows = 0;
+            while let Some(batch) = stream.next().await {
+                let batch = batch.unwrap();
+                rows += batch.num_rows();
+                if retain {
+                    retained.push(batch);
+                }
+            }
+            assert_eq!(rows, files.total_rows);
+            let kept = retained
+                .iter()
+                .map(|batch| batch.get_array_memory_size())
+                .sum::<usize>();
+            drop(stream);
+            // The merge has retired: the sponsor holds what its working set
+            // carries (two copies of the largest batch: the last outputs,
+            // their claims and their headers' metadata) and the output
+            // consumer's registration; the output consumer holds the rest.
+            let working_set = 4 * files.maximum;
+            assert!(
+                pool.held(SPONSOR) <= working_set + 64 * 1024,
+                "the sponsor holds {} beyond its working set of {working_set}",
+                pool.held(SPONSOR)
+            );
+            assert!(
+                pool.held(output) + pool.held(SPONSOR) >= kept,
+                "{} and {} hold less than the {kept} retained bytes",
+                pool.held(output),
+                pool.held(SPONSOR)
+            );
+            assert_eq!(
+                pool.fresh(output).is_empty(),
+                !retain,
+                "the output consumer asked the pool: {:?}",
+                pool.fresh(output)
+            );
+            drop(retained);
+            assert_eq!(pool.held(output), 0);
+            assert_eq!(pool.held(SPONSOR), 0);
+            assert_eq!(dynamic.reserved(), 0);
+            pool.sponsor_peak.load(Ordering::SeqCst)
+        }
+    };
+    let dropped = run(false).await;
+    let retained = run(true).await;
+    assert_eq!(
+        retained, dropped,
+        "retaining every output raised the sponsor's peak from {dropped} to {retained}"
+    );
+}
+
+/// Beyond its minimum a pass grows within half the pool, and leaves the other
+/// half to a sibling's narrowest pass or merge reserve, which is fatal when
+/// refused: six files in a pool twice the four-file pass are merged four at a
+/// time, then the remaining two and the intermediate file, where a pass that
+/// grew to the pool's limit would read all six at once (and did, in a join of
+/// two spilling sorts over a 48 MiB pool, whose second sort could then not
+/// open its pass).
+#[tokio::test]
+async fn a_pass_grows_beyond_its_minimum_within_half_the_pool() {
+    const ROWS: usize = 256;
+    const BATCH_SIZE: usize = 256;
+    let four = {
+        let pool = Recorder::new(Arc::new(GreedyMemoryPool::new(256 * MIB)));
+        let dynamic: Arc<dyn MemoryPool> = Arc::clone(&pool) as Arc<dyn MemoryPool>;
+        let directory = tempfile::tempdir().unwrap();
+        let manager = spill_manager(&dynamic, &directory);
+        let set = spill_files(&manager, 4, 24, ROWS, |largest| largest);
+        let sponsor = MemoryConsumer::new(SPONSOR).register(&dynamic);
+        drain(
+            merge(manager, set.files, sponsor, BATCH_SIZE),
+            set.total_rows,
+        )
+        .await
+        .unwrap();
+        pool.sponsor_peak.load(Ordering::SeqCst)
+    };
+    let pool = Recorder::new(Arc::new(GreedyMemoryPool::new(256 * MIB)));
+    let dynamic: Arc<dyn MemoryPool> = Arc::clone(&pool) as Arc<dyn MemoryPool>;
+    let directory = tempfile::tempdir().unwrap();
+    let manager = spill_manager(&dynamic, &directory);
+    let writer = datafusion::physical_plan::spill::writer_pass_bound(
+        &schema(),
+        spill_files(&manager, 1, 24, ROWS, |largest| largest).maximum,
+        BATCH_SIZE,
+        SpillCompression::Uncompressed,
+    )
+    .unwrap()
+    .expect("a flat schema has a writer bound");
+    drop(pool);
+    // Half the pool admits four files and the intermediate writer; the pool
+    // admits six.
+    let limit = 2 * (four + writer);
+    let pool = Recorder::new(Arc::new(GreedyMemoryPool::new(limit)));
+    let dynamic: Arc<dyn MemoryPool> = Arc::clone(&pool) as Arc<dyn MemoryPool>;
+    let directory = tempfile::tempdir().unwrap();
+    let manager = spill_manager(&dynamic, &directory);
+    let set = spill_files(&manager, 6, 24, ROWS, |largest| largest);
+    let sponsor = MemoryConsumer::new(SPONSOR).register(&dynamic);
+    drain(
+        merge(manager, set.files, sponsor, BATCH_SIZE),
+        set.total_rows,
+    )
+    .await
+    .unwrap();
+    let readers = pool
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(name, _)| name == "register:SpillReaderMetadata")
+        .count();
+    assert_eq!(readers, 4 + 3, "a pass of four files, then of three");
+    assert!(
+        pool.sponsor_peak.load(Ordering::SeqCst) <= limit / 2,
+        "the pass grew past half the pool: {} of {limit}",
+        pool.sponsor_peak.load(Ordering::SeqCst)
+    );
+    assert!(pool.refused.lock().unwrap().is_empty());
+}
+
+/// A reader's share of the bank goes back to the pool once the reader is
+/// exhausted and the merge holds none of its batches, while the readers still
+/// reading keep theirs: files whose key ranges do not overlap are read one
+/// after another, and the sponsor's reservation falls by a reader's share as
+/// each file ends. (The sort test of #2173 reads twelve such files, whose
+/// readers end at 6%, 16%, ... 99% of its output; main's readers release what
+/// they asked per batch as they go.)
+#[tokio::test]
+async fn an_exhausted_reader_gives_its_share_back() {
+    const FILES: usize = 4;
+    const BATCHES: usize = 8;
+    const ROWS: usize = 1024;
+    let pool = Recorder::new(Arc::new(GreedyMemoryPool::new(256 * MIB)));
+    let dynamic: Arc<dyn MemoryPool> = Arc::clone(&pool) as Arc<dyn MemoryPool>;
+    let directory = tempfile::tempdir().unwrap();
+    let manager = spill_manager(&dynamic, &directory);
+    // File `f` holds the keys from `f * BATCHES * ROWS`, sorted: the merge
+    // exhausts file 0, then file 1, ...
+    let mut files = Vec::new();
+    let mut maximum = 0;
+    for file in 0..FILES {
+        let mut writer = manager.create_in_progress_file("share control").unwrap();
+        let mut largest = 0;
+        for index in 0..BATCHES {
+            let first = ((file * BATCHES + index) * ROWS) as i64;
+            largest = largest.max(writer.append_batch(&batch(first, 1, ROWS, 100)).unwrap());
+        }
+        maximum = maximum.max(largest);
+        files.push(SortedSpillFile {
+            file: writer.finish().unwrap().unwrap(),
+            max_record_batch_memory: largest,
+        });
+    }
+    // A roomy pool selects two buffered batches a reader.
+    let share = reader_pass_bound(&schema(), maximum, ROWS, SpillCompression::Uncompressed, 2)
+        .unwrap()
+        .expect("a flat schema has a reader bound");
+    let sponsor = MemoryConsumer::new(SPONSOR).register(&dynamic);
+    let mut stream = merge(manager, files, sponsor, ROWS);
+    let mut expected = 0_i64;
+    let mut held = Vec::new();
+    while let Some(batch) = stream.next().await {
+        let batch = batch.unwrap();
+        let keys = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        for key in keys.values() {
+            assert_eq!(*key, expected);
+            expected += 1;
+        }
+        held.push(pool.held(SPONSOR));
+    }
+    assert_eq!(expected as usize, FILES * BATCHES * ROWS);
+    let start = held[0];
+    let end = *held.last().unwrap();
+    // Every file but the last ended before the last output, and the merge
+    // held nothing of theirs by the output after: their shares are out.
+    assert!(
+        end + (FILES - 1) * share <= start,
+        "the sponsor held {start} at the first output and {end} at the last, with a reader's share of {share}"
+    );
+    // Nothing is given back twice: the sponsor never falls below the live
+    // readers' shares.
+    assert!(
+        end >= share,
+        "the sponsor held {end} with a reader still live, whose share is {share}"
+    );
+    let fresh = pool.fresh("SpillReader");
+    assert!(fresh.is_empty(), "readers asked the pool: {fresh:?}");
 }

@@ -28,12 +28,17 @@ use arrow::record_batch::RecordBatch;
 use arrow_buffer::{Buffer, MemoryPool, MemoryReservation as ArrowReservation};
 use arrow_data::ArrayData;
 use datafusion_common::{DataFusionError, Result};
-use datafusion_execution::memory_pool::MemoryReservation;
+use datafusion_execution::memory_pool::{
+    MemoryConsumer, MemoryPool as DataFusionPool, MemoryReservation,
+};
 use std::alloc::Layout;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
+/// The consumer the outputs of a merge of spill files are charged to once
+/// they escape the merge; it cannot spill them.
+pub(super) const OUTPUT_CONSUMER: &str = "MergeOutput";
 fn bound_error() -> DataFusionError {
     DataFusionError::ResourcesExhausted("Merge copy exceeds its admitted envelope".into())
 }
@@ -46,8 +51,20 @@ enum FieldLifetime {
 #[derive(Debug)]
 struct State {
     authority: MemoryReservation,
+    /// The outputs that escaped the merge and are still held by whoever
+    /// consumes them. The merge cannot spill them, so they are charged to a
+    /// consumer that cannot spill ([`OUTPUT_CONSUMER`]), which the pool
+    /// refuses only at its limit, while the authority keeps the pass's working
+    /// set with the floors the pool keeps from a consumer that can spill. An
+    /// output is charged there at the merge's next operation, as its bytes
+    /// grew the authority before: until then it is within the working set.
+    output: MemoryReservation,
     rows: usize,
+    /// Bytes of every live output.
     outputs: usize,
+    /// Bytes of the live outputs charged to `output`; the rest are within
+    /// the authority.
+    charged: usize,
     active: bool,
     preparing: bool,
     field: FieldLifetime,
@@ -70,6 +87,7 @@ pub(super) struct ChargedCopyAdmission {
     working_set: usize,
     capability: CopyCapability,
     state: Mutex<State>,
+    _registration: MemoryReservation,
 }
 
 #[derive(Debug)]
@@ -81,7 +99,11 @@ pub(super) struct CopyAdmission {
     working_set: usize,
     capability: CopyCapability,
     state: Mutex<State>,
+    /// The registration of the output consumer, paid from the authority and
+    /// held through the last output.
+    _registration: MemoryReservation,
     diagnostic_piece: od::Piece,
+    diagnostic_output_piece: od::Piece,
     diagnostic: od::Life,
 }
 impl CopyAdmission {
@@ -91,6 +113,8 @@ impl CopyAdmission {
     fn observe(&self, state: &State) {
         self.diagnostic_piece
             .refresh(&state.authority, self.diagnostic.id());
+        self.diagnostic_output_piece
+            .refresh(&state.output, self.diagnostic.id());
         self.diagnostic.update(|o| {
             o.piece = self.diagnostic_piece.id();
             o.object = self.envelope as u64;
@@ -125,17 +149,22 @@ impl CopyAdmission {
     /// that reads with a Field cursor (zero for any other).
     pub(super) fn new(
         authority: MemoryReservation,
+        pool: &Arc<dyn DataFusionPool>,
         working_set: usize,
     ) -> Result<Arc<Self>> {
-        let envelope = authority.size().saturating_sub(working_set);
         // Preserve sufficient original authority. Admit any missing known
-        // control bytes BEFORE the first Mutex lock or Arc allocation.
-        let missing_control = Self::control_bytes().saturating_sub(envelope);
+        // control bytes, and the output consumer's registration, BEFORE the
+        // first Mutex lock or Arc allocation.
+        let missing_control = add(Self::control_bytes(), Self::registration_bytes()?)?
+            .saturating_sub(authority.size().saturating_sub(working_set));
         if missing_control > 0 {
             authority.try_grow(missing_control)?;
         }
+        let (output, registration) = Self::output_consumer(&authority, pool)?;
+        let envelope = authority.size().saturating_sub(working_set);
         let diagnostic = od::Life::inherited(od::Kind::Copy);
         let diagnostic_piece = od::Piece::new(&authority, diagnostic.id());
+        let diagnostic_output_piece = od::Piece::new(&output, diagnostic.id());
         diagnostic.update(|o| {
             o.piece = diagnostic_piece.id();
             o.object = envelope as u64;
@@ -145,8 +174,10 @@ impl CopyAdmission {
         });
         let state = Mutex::new(State {
             authority,
+            output,
             rows: 0,
             outputs: 0,
+            charged: 0,
             active: false,
             preparing: false,
             field: FieldLifetime::None,
@@ -161,12 +192,33 @@ impl CopyAdmission {
             working_set,
             capability: CopyCapability::Legacy,
             state,
+            _registration: registration,
             diagnostic,
             diagnostic_piece,
+            diagnostic_output_piece,
         }))
+    }
+    /// What registering the output consumer takes, which the pass admits
+    /// with the copies' metadata.
+    pub(super) fn registration_bytes() -> Result<usize> {
+        crate::spill::resident_metadata::literal_registration_bytes(OUTPUT_CONSUMER)
+            .ok_or_else(bound_error)
+    }
+    /// The consumer the merge's escaped outputs are charged to, registered
+    /// on the sponsor's pool with its registration split from the authority,
+    /// which admitted it, and kept apart from the authority's bytes as a
+    /// bank's control is.
+    fn output_consumer(
+        authority: &MemoryReservation,
+        pool: &Arc<dyn DataFusionPool>,
+    ) -> Result<(MemoryReservation, MemoryReservation)> {
+        let registration = authority.split(Self::registration_bytes()?);
+        let output = MemoryConsumer::new(OUTPUT_CONSUMER).register(pool);
+        Ok((output, registration))
     }
     pub(super) fn preparing(
         authority: MemoryReservation,
+        pool: &Arc<dyn DataFusionPool>,
         metadata: usize,
         capability: CopyCapability,
         working_set: usize,
@@ -177,8 +229,10 @@ impl CopyAdmission {
         // The working set was admitted at file selection and stays held.
         let heap = crate::spill::resident_metadata::std_mutex_heap_bound().unwrap_or(0);
         authority.try_resize(add(add(metadata, heap)?, working_set)?)?;
+        let (output, registration) = Self::output_consumer(&authority, pool)?;
         let diagnostic = od::Life::inherited(od::Kind::Copy);
         let diagnostic_piece = od::Piece::new(&authority, diagnostic.id());
+        let diagnostic_output_piece = od::Piece::new(&output, diagnostic.id());
         diagnostic.update(|o| {
             o.piece = diagnostic_piece.id();
             o.object = envelope as u64;
@@ -196,8 +250,10 @@ impl CopyAdmission {
         });
         let state = Mutex::new(State {
             authority,
+            output,
             rows: 0,
             outputs: 0,
+            charged: 0,
             active: false,
             preparing: true,
             field: FieldLifetime::None,
@@ -211,8 +267,10 @@ impl CopyAdmission {
             working_set,
             capability,
             state,
+            _registration: registration,
             diagnostic,
             diagnostic_piece,
+            diagnostic_output_piece,
         }))
     }
     pub(super) fn encoded_width(&self) -> Option<usize> {
@@ -254,9 +312,32 @@ impl CopyAdmission {
             resident
         })
     }
-    /// What is live: the resident bytes and the outputs still held.
+    /// The bytes of the live outputs not charged to the output consumer yet.
+    fn pending_outputs(state: &State) -> usize {
+        state.outputs - state.charged
+    }
+    /// What the authority has live: the resident bytes and the outputs not
+    /// charged to the output consumer yet.
     fn live(&self, state: &State) -> usize {
-        self.base(state, state.rows) + state.outputs
+        self.base(state, state.rows) + Self::pending_outputs(state)
+    }
+    /// Charges the outputs the authority holds beyond what its floor carries
+    /// beside the operation's workspace to the output consumer (the working
+    /// set is sized for one live output, which rides within it as before): a
+    /// request a consumer that cannot spill makes, refused only at the pool's
+    /// limit, and fatal then, as the growth of the authority by the same
+    /// bytes was. The authority keeps them until the operation's target takes
+    /// them out.
+    fn charge_outputs(&self, state: &mut State, workspace: usize) -> Result<()> {
+        let room = state
+            .floor
+            .saturating_sub(add(self.base(state, state.rows), workspace)?);
+        let charge = Self::pending_outputs(state).saturating_sub(room);
+        if charge > 0 {
+            state.output.try_grow(charge)?;
+            state.charged += charge;
+        }
+        Ok(())
     }
     /// What the authority keeps between operations: the live bytes, and never
     /// less than the floor.
@@ -365,7 +446,12 @@ impl CopyAdmission {
         if state.active {
             return Err(bound_error());
         }
-        // Escaped previous outputs cannot pay for another kernel invocation.
+        // Escaped previous outputs cannot pay for another kernel invocation:
+        // those the floor cannot carry move to the output consumer, and the
+        // operation's target no longer counts them.
+        if !state.preparing {
+            self.charge_outputs(&mut state, workspace.unwrap_or(0))?;
+        }
         let target = if state.preparing {
             state.authority.size()
         } else if state.field != FieldLifetime::None {
@@ -375,11 +461,16 @@ impl CopyAdmission {
         } else {
             add(
                 self.envelope.max(add(self.control(&state), state.rows)?),
-                state.outputs,
+                Self::pending_outputs(&state),
             )?
         };
-        if target > state.authority.size() {
-            state.authority.try_grow(target - state.authority.size())?;
+        match target.cmp(&state.authority.size()) {
+            std::cmp::Ordering::Greater => {
+                state.authority.try_grow(target - state.authority.size())?;
+            }
+            // Outputs charged to the output consumer leave the authority.
+            std::cmp::Ordering::Less => state.authority.shrink(state.authority.size() - target),
+            std::cmp::Ordering::Equal => {}
         }
         state.active = true;
         self.observe(&state);
@@ -404,7 +495,7 @@ impl CopyAdmission {
         } else {
             add(
                 self.checked_base(&state, add(state.rows, bytes)?)?,
-                state.outputs,
+                Self::pending_outputs(&state),
             )?
         };
         if !state.active || total > state.authority.size() {
@@ -461,6 +552,13 @@ impl Drop for Resident {
         let mut state = self.admission.state.lock().unwrap();
         let bytes = self.bytes.load(Ordering::Relaxed);
         if self.output {
+            // The output consumer gives back what it was charged; an output
+            // not charged yet leaves the authority with the shrink below.
+            let charged = bytes.min(state.charged);
+            if charged > 0 {
+                state.output.shrink(charged);
+                state.charged -= charged;
+            }
             state.outputs -= bytes;
         } else {
             state.rows -= bytes;
@@ -505,7 +603,7 @@ impl Phase {
         let total = add(
             self.admission
                 .checked_base(&state, add(state.rows - old, bytes)?)?,
-            state.outputs,
+            CopyAdmission::pending_outputs(&state),
         )?;
         if !state.active || resident.output || total > state.authority.size() {
             return Err(bound_error());

@@ -328,6 +328,25 @@ impl BatchBuilder {
         self.indices.is_empty()
     }
 
+    /// Whether a batch of `stream_idx` earlier than its current one is still
+    /// held: one is kept only while rows pending in the output refer to it,
+    /// and every batch is pruned to the stream's current one when the output
+    /// is built, so this is whether the stream was refilled since then.
+    pub(super) fn holds_an_earlier_batch(&self, stream_idx: usize) -> bool {
+        self.batches
+            .iter()
+            .filter(|input| input.stream_idx == stream_idx)
+            .count()
+            >= 2
+    }
+
+    /// Whether any batch of `stream_idx` is still held.
+    pub(super) fn holds_a_batch_of(&self, stream_idx: usize) -> bool {
+        self.batches
+            .iter()
+            .any(|input| input.stream_idx == stream_idx)
+    }
+
     /// Returns the schema of this [`BatchBuilder`]
     pub fn schema(&self) -> &SchemaRef {
         &self.schema

@@ -44,7 +44,7 @@ macro_rules! primitive_merge_helper {
 }
 
 macro_rules! merge_helper {
-    ($t:ty, $sort:ident, $streams:ident, $schema:ident, $tracking_metrics:ident, $batch_size:ident, $fetch:ident, $reservation:ident, $enable_round_robin_tie_breaker:ident, $copy:ident) => {{
+    ($t:ty, $sort:ident, $streams:ident, $schema:ident, $tracking_metrics:ident, $batch_size:ident, $fetch:ident, $reservation:ident, $enable_round_robin_tie_breaker:ident, $bounded_inputs:ident, $copy:ident) => {{
         if let Some(copy) = $copy.as_ref() {
             // Actual Field dispatch, without qualifying key evaluation/GC for
             // dynamic progress. Its complete original guard stays live.
@@ -74,6 +74,7 @@ macro_rules! merge_helper {
                 $fetch,
                 $reservation,
                 $enable_round_robin_tie_breaker,
+                $bounded_inputs,
                 Some(Arc::clone(copy)),
             )?;
             copy.finish_preparing();
@@ -89,8 +90,19 @@ macro_rules! merge_helper {
             $fetch,
             $reservation,
             $enable_round_robin_tie_breaker,
+            $bounded_inputs,
         )));
     }};
+}
+
+/// The bank a pass admitted for the readers of its spill files, and each
+/// stream's share of it (zero for a stream that is not a spill reader).
+/// The merge gives a reader's share back once it is exhausted and the merge
+/// holds none of its batches.
+#[derive(Debug)]
+pub(crate) struct ReaderShares {
+    pub(crate) credit: Arc<crate::spill::admission::Credit>,
+    pub(crate) shares: Vec<usize>,
 }
 
 pub struct SortedSpillFile {
@@ -124,6 +136,8 @@ pub struct StreamingMergeBuilder<'a> {
     reservation: Option<MemoryReservation>,
     enable_round_robin_tie_breaker: bool,
     copy: Option<Arc<CopyAdmission>>,
+    /// The streams read spill files under a bank admitted for the pass.
+    bounded_inputs: Option<ReaderShares>,
 }
 
 impl<'a> StreamingMergeBuilder<'a> {
@@ -202,8 +216,12 @@ impl<'a> StreamingMergeBuilder<'a> {
     /// Bypass the mempool and avoid using the memory reservation.
     ///
     /// This is not marked as `pub` because it is not recommended to use this method
-    pub(super) fn with_bypass_mempool(self) -> Self {
+    pub(super) fn with_bypass_mempool(mut self, shares: ReaderShares) -> Self {
         let mem_pool: Arc<dyn MemoryPool> = Arc::new(UnboundedMemoryPool::default());
+        // The readers of the pass draw on its bank, the merge keeps the
+        // envelope the bank assumes and gives each reader's share back once
+        // it holds nothing of that reader.
+        self.bounded_inputs = Some(shares);
 
         self.with_reservation(
             MemoryConsumer::new("merge stream mock memory").register(&mem_pool),
@@ -248,6 +266,7 @@ impl<'a> StreamingMergeBuilder<'a> {
             expressions,
             enable_round_robin_tie_breaker,
             copy,
+            bounded_inputs,
         } = self;
 
         // Early return if expressions are empty:
@@ -316,6 +335,7 @@ impl<'a> StreamingMergeBuilder<'a> {
                 fetch,
                 reservation,
                 enable_round_robin_tie_breaker,
+                bounded_inputs,
                 Some(Arc::clone(copy)),
             )?;
             copy.finish_preparing();
@@ -327,12 +347,12 @@ impl<'a> StreamingMergeBuilder<'a> {
             let sort = expressions[0].clone();
             let data_type = sort.expr.data_type(schema.as_ref())?;
             downcast_primitive! {
-                data_type => (primitive_merge_helper, sort, streams, schema, metrics, batch_size, fetch, reservation, enable_round_robin_tie_breaker, copy),
-                DataType::Utf8 => merge_helper!(StringArray, sort, streams, schema, metrics, batch_size, fetch, reservation, enable_round_robin_tie_breaker, copy)
-                DataType::Utf8View => merge_helper!(StringViewArray, sort, streams, schema, metrics, batch_size, fetch, reservation, enable_round_robin_tie_breaker, copy)
-                DataType::LargeUtf8 => merge_helper!(LargeStringArray, sort, streams, schema, metrics, batch_size, fetch, reservation, enable_round_robin_tie_breaker, copy)
-                DataType::Binary => merge_helper!(BinaryArray, sort, streams, schema, metrics, batch_size, fetch, reservation, enable_round_robin_tie_breaker, copy)
-                DataType::LargeBinary => merge_helper!(LargeBinaryArray, sort, streams, schema, metrics, batch_size, fetch, reservation, enable_round_robin_tie_breaker, copy)
+                data_type => (primitive_merge_helper, sort, streams, schema, metrics, batch_size, fetch, reservation, enable_round_robin_tie_breaker, bounded_inputs, copy),
+                DataType::Utf8 => merge_helper!(StringArray, sort, streams, schema, metrics, batch_size, fetch, reservation, enable_round_robin_tie_breaker, bounded_inputs, copy)
+                DataType::Utf8View => merge_helper!(StringViewArray, sort, streams, schema, metrics, batch_size, fetch, reservation, enable_round_robin_tie_breaker, bounded_inputs, copy)
+                DataType::LargeUtf8 => merge_helper!(LargeStringArray, sort, streams, schema, metrics, batch_size, fetch, reservation, enable_round_robin_tie_breaker, bounded_inputs, copy)
+                DataType::Binary => merge_helper!(BinaryArray, sort, streams, schema, metrics, batch_size, fetch, reservation, enable_round_robin_tie_breaker, bounded_inputs, copy)
+                DataType::LargeBinary => merge_helper!(LargeBinaryArray, sort, streams, schema, metrics, batch_size, fetch, reservation, enable_round_robin_tie_breaker, bounded_inputs, copy)
                 _ => {}
             }
         }
@@ -352,6 +372,7 @@ impl<'a> StreamingMergeBuilder<'a> {
             fetch,
             reservation,
             enable_round_robin_tie_breaker,
+            bounded_inputs,
             copy.clone(),
         )?;
         if let Some(copy) = &copy {

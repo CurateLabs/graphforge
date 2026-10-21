@@ -103,12 +103,17 @@
 //! within a batch of the limit left an exchange's reader 95 KiB for a 398 KiB
 //! batch, #2173).
 //!
-//! The consumers that can spill are therefore admitted only while one more
-//! floor of the pool remains unreserved, on top of the unfilled floors of the
+//! The consumers that can spill are therefore admitted only while a floor for
+//! the readers remains unreserved, on top of the unfilled floors of the
 //! spilled aggregates. A consumer that cannot spill sees the whole pool, and
-//! takes that floor. The floors, that one among them, are
-//! [`SPILLER_FLOOR_BYTES`] each, lowered so that all of them together stay
-//! within half the pool.
+//! takes that floor. The readers' floor is a spiller's floor
+//! ([`SPILLER_FLOOR_BYTES`]) within an eighth of the pool, never below half a
+//! MiB, whatever the number of spillers, and the spillers' floors share the
+//! rest of the half: counted as one more spiller's floor it was half of a
+//! 16 MiB pool before any aggregate had spilled, and refused the sort's merge
+//! reservation where the greedy pool served it; kept beside spiller floors of
+//! a full share each, the floors together were three quarters of a 2 MiB pool
+//! and refused a partial aggregate's first 5 KiB.
 //!
 //! # The headroom of the sorts
 //!
@@ -169,6 +174,17 @@ const SORT_POOL_SHARE_DENOMINATOR: usize = 4;
 /// the reserve DataFusion's sort sets aside to merge its spills
 /// (`sort_spill_reservation_bytes`).
 const SPILLER_FLOOR_BYTES: usize = 10 * 1024 * 1024;
+
+/// The least the pool keeps for the readers and writers of spilled data in a
+/// small pool: an eighth of a 2 MiB pool, 256 KiB, was taken by the readers
+/// and encoders already there and refused an encoder 36 KiB; half a MiB kept
+/// that pool served in 300 runs.
+const READERS_FLOOR_MINIMUM_BYTES: usize = 512 * 1024;
+
+/// The consumer a sort registers for the merge of its spills: it holds the
+/// reserve the sort keeps for that merge (`sort_spill_reservation_bytes`),
+/// which the merge's readers draw on first, and the merge pass's selection.
+const SORT_MERGE_CONSUMER_PREFIX: &str = "ExternalSorterMerge[";
 
 /// A greedy memory pool of `pool_size` bytes with the floors and the grant
 /// described in the module documentation.
@@ -256,6 +272,10 @@ impl QueryMemoryPool {
         consumer.can_spill() && consumer.name().starts_with(SORT_CONSUMER_PREFIX)
     }
 
+    fn is_sort_merge(consumer: &MemoryConsumer) -> bool {
+        consumer.can_spill() && consumer.name().starts_with(SORT_MERGE_CONSUMER_PREFIX)
+    }
+
     /// Keep buffered sorts short of the producer share. An empty reservation
     /// cannot spill, so its first bounded input must see the real pool limit.
     fn headroom(&self, reservation: &MemoryReservation, state: &State) -> usize {
@@ -268,11 +288,25 @@ impl QueryMemoryPool {
         }
     }
 
-    /// The bytes the pool reserves for each of `spillers` aggregates, and for
-    /// the readers of spilled data besides: these floors together never pass
-    /// half the pool, so the other consumers keep the rest.
+    /// The bytes the pool reserves for each of `spillers` aggregates: the
+    /// floors together, the readers' among them, never pass half the pool, so
+    /// the other consumers keep the rest.
     fn floor(&self, spillers: usize) -> usize {
-        SPILLER_FLOOR_BYTES.min(self.pool_size / 2 / (spillers + 1))
+        SPILLER_FLOOR_BYTES.min((self.pool_size / 2 - self.readers_floor()) / spillers.max(1))
+    }
+
+    /// The bytes the pool keeps for the readers and writers of spilled data:
+    /// a spiller's floor, within an eighth of the pool and never below
+    /// [`READERS_FLOOR_MINIMUM_BYTES`], whatever the number of spillers. What
+    /// they hold is data-dependent (a decoded batch each, under 1 MiB in every
+    /// refusal seen; a spill's encoder, 2.6 MB and 9.4 MB in the two seen), so
+    /// the floor is the one size the pool already keeps for a merge, and the
+    /// cap is what a small pool can spare: a quarter of a 16 MiB pool refused
+    /// the sort's merge reservation its 2 MiB with 10.4 MB held, and half the
+    /// pool, the share one more spiller's floor took before any aggregate had
+    /// spilled, refused it with 8.4 MB held, where the greedy pool served it.
+    fn readers_floor(&self) -> usize {
+        SPILLER_FLOOR_BYTES.min((self.pool_size / 8).max(READERS_FLOOR_MINIMUM_BYTES))
     }
 
     /// The bytes lent to the spillers, which the reserved total counts beyond
@@ -373,25 +407,39 @@ impl MemoryPool for QueryMemoryPool {
         // first request sees the limit of the pool alone, as that consumer's
         // requests do; the floors apply from its next request on. An aggregate
         // that has spilled holds a floor and a loan for its restart instead.
-        let first_state = Self::is_spilling_aggregate(reservation.consumer())
-            && !state.spillers.contains_key(&id)
-            && reservation.size() == 0;
+        // A sort holding nothing is in the same position (its first batch
+        // cannot spill, and the sort fails on its refusal), and holds no
+        // loan: its first batch sees the limit of the pool alone, as its
+        // headroom does.
+        let first_state = reservation.size() == 0
+            && ((Self::is_spilling_aggregate(reservation.consumer())
+                && !state.spillers.contains_key(&id))
+                || Self::is_sort(reservation.consumer()));
+        // The reserve a sort keeps for the merge of its spills is the readers'
+        // reserve itself: the merge's readers draw on it first, and a refusal
+        // fails the sort (the sort asks it again at every spill). Within the
+        // readers' floor it is served at the limit of the pool; the merge's
+        // selection, which grows past the floor and backs off at a refusal,
+        // sees the floors as every consumer that can spill does.
+        let readers_reserve = Self::is_sort_merge(reservation.consumer())
+            && reservation.size().saturating_add(additional) <= self.readers_floor();
         // A consumer that can spill recovers from a refusal by spilling, so
         // the floors are kept from it. One that cannot spill fails its query
         // on a refusal, so it is refused only at the limit of the pool, which
         // the loans do not count against: they are bytes the pool stopped
         // counting and took back, and they are repaid within a spill.
-        let (reserved, others) = if reservation.consumer().can_spill() && !first_state {
-            (
-                state.reserved,
-                self.unfilled_floors_except(&state, id)
-                    .saturating_add(self.headroom(reservation, &state))
-                    // One more floor stays with the readers of spilled data.
-                    .saturating_add(self.floor(state.spillers.len())),
-            )
-        } else {
-            (state.reserved.saturating_sub(Self::lent(&state)), 0)
-        };
+        let (reserved, others) =
+            if reservation.consumer().can_spill() && !first_state && !readers_reserve {
+                (
+                    state.reserved,
+                    self.unfilled_floors_except(&state, id)
+                        .saturating_add(self.headroom(reservation, &state))
+                        // The readers' floor stays with the readers of spilled data.
+                        .saturating_add(self.readers_floor()),
+                )
+            } else {
+                (state.reserved.saturating_sub(Self::lent(&state)), 0)
+            };
         // A request that keeps a spiller within its floor is served, whatever
         // else the pool holds: the floor is reserved for it. Any other request
         // is served while it leaves the floors of the other spillers unfilled

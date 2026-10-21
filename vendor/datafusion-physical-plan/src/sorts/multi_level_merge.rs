@@ -29,12 +29,12 @@ use std::task::{Context, Poll};
 
 use arrow::datatypes::SchemaRef;
 use datafusion_common::Result;
-use datafusion_execution::memory_pool::MemoryReservation;
+use datafusion_execution::memory_pool::{MemoryLimit, MemoryReservation};
 
 use crate::sorts::builder::try_grow_reservation_to_at_least;
 use crate::sorts::copy_admission::{CopyAdmission, CopyCapability};
 use crate::sorts::sort::get_reserved_bytes_for_record_batch_size;
-use crate::sorts::streaming_merge::{SortedSpillFile, StreamingMergeBuilder};
+use crate::sorts::streaming_merge::{ReaderShares, SortedSpillFile, StreamingMergeBuilder};
 use crate::spill::admission::Credit;
 use crate::stream::RecordBatchStreamAdapter;
 use datafusion_execution::{RecordBatchStream, SendableRecordBatchStream};
@@ -284,6 +284,7 @@ impl MultiLevelMergeBuilder {
                     true,
                     true,
                     None,
+                    None,
                 )
                 .map(|stream| (stream, None))
             }
@@ -418,7 +419,13 @@ impl MultiLevelMergeBuilder {
                         Some(authority_piece.transfer_to(
                             self.diagnostic.id(),
                             od::Kind::Copy as u64,
-                            || CopyAdmission::new(authority, working_set),
+                            || {
+                                CopyAdmission::new(
+                                    authority,
+                                    self.spill_manager.memory_pool(),
+                                    working_set,
+                                )
+                            },
                         )?)
                     } else {
                         let metadata = self.copy_metadata(
@@ -433,6 +440,7 @@ impl MultiLevelMergeBuilder {
                             || {
                                 CopyAdmission::preparing(
                                     authority,
+                                    self.spill_manager.memory_pool(),
                                     metadata,
                                     capability,
                                     working_set,
@@ -444,7 +452,11 @@ impl MultiLevelMergeBuilder {
                     None
                 };
 
+                // Each stream's share of the readers' bank: nothing for an
+                // in-memory stream, the reader's credit for a spill file.
+                let mut shares = vec![0; sorted_streams.len()];
                 for spill in sorted_spill_files {
+                    shares.push(self.credit_bytes(spill.max_record_batch_memory, buffer_size)?);
                     let stream = self
                         .spill_manager
                         .clone()
@@ -463,6 +475,10 @@ impl MultiLevelMergeBuilder {
                     self.sorted_spill_files.is_empty(),
                     is_only_merging_memory_streams,
                     copy.clone(),
+                    Some(ReaderShares {
+                        credit: input_credit,
+                        shares,
+                    }),
                 )?;
 
                 // If we're only merging memory streams, we don't need to attach the memory reservation
@@ -499,6 +515,7 @@ impl MultiLevelMergeBuilder {
         is_output: bool,
         all_in_memory: bool,
         copy: Option<Arc<CopyAdmission>>,
+        shares: Option<ReaderShares>,
     ) -> Result<SendableRecordBatchStream> {
         let mut builder = StreamingMergeBuilder::new()
             .with_schema(Arc::clone(&self.schema))
@@ -520,7 +537,9 @@ impl MultiLevelMergeBuilder {
             // (reserving memory for the biggest batch in each stream)
             // TODO - avoid this hack as this can be broken easily when `SortPreservingMergeStream`
             //        changes the implementation to use more/less memory
-            builder = builder.with_bypass_mempool();
+            builder = builder.with_bypass_mempool(
+                shares.expect("a merge of spill files has the readers' bank"),
+            );
         } else {
             // If we are only merging in-memory streams, we need to use the memory reservation
             // because we don't know the maximum size of the batches in the streams.
@@ -556,6 +575,13 @@ impl MultiLevelMergeBuilder {
     /// merge and its buffers shrink until the pass fits, and nothing the pass
     /// does afterwards asks the pool. The working set and the writer's bytes
     /// are returned (zero where the pass has none).
+    ///
+    /// Beyond its minimum streams the pass grows within half the pool: the
+    /// pass holds what it admitted for as long as it runs, and a sibling's
+    /// narrowest pass or merge reserve, which is fatal when refused, must
+    /// find the other half (two spilling sorts feeding one join: the first
+    /// pass took every file up to the floor the pool keeps, and the second
+    /// sort could not open its pass).
     fn get_sorted_spill_files_to_merge(
         &mut self,
         buffer_len: usize,
@@ -585,6 +611,10 @@ impl MultiLevelMergeBuilder {
         let mut input_bytes: usize = 0;
         let mut largest: usize = 0;
         let heap = crate::spill::resident_metadata::std_mutex_heap_bound().unwrap_or(0);
+        let half = match self.spill_manager.memory_pool().memory_limit() {
+            MemoryLimit::Finite(limit) => limit / 2,
+            MemoryLimit::Infinite | MemoryLimit::Unknown => usize::MAX,
+        };
 
         for (index, spill) in self.sorted_spill_files.iter().enumerate() {
             let max = spill.max_record_batch_memory;
@@ -622,9 +652,12 @@ impl MultiLevelMergeBuilder {
                 )?;
             }
 
-            // For memory pools that are not shared this is good, for other
-            // this is not and there should be some upper limit to memory
-            // reservation so we won't starve the system.
+            // Past its minimum, the pass stops at half the pool (see above).
+            if number_of_spills_to_read_for_current_phase >= minimum_number_of_required_streams
+                && needed > half
+            {
+                break;
+            }
             match try_grow_reservation_to_at_least(reservation, needed) {
                 Ok(_) => {
                     number_of_spills_to_read_for_current_phase += 1;
@@ -882,8 +915,11 @@ fn copy_metadata_bound(
         crate::spill::admission::add(
             merge,
             crate::spill::admission::add(
-                crate::spill::admission::schema_bound(schema)?,
-                crate::spill::admission::mul(files, size_of::<SortedSpillFile>())?,
+                crate::spill::admission::add(
+                    crate::spill::admission::schema_bound(schema)?,
+                    crate::spill::admission::mul(files, size_of::<SortedSpillFile>())?,
+                )?,
+                CopyAdmission::registration_bytes()?,
             )?,
         )?,
     )

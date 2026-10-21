@@ -430,10 +430,14 @@ fn reader_fixed_bound(schema: &Schema) -> Result<usize> {
 }
 /// Every byte one reader of a spill file whose largest batch is `max` can hold
 /// alive at once, with `buffer_len` batches buffered. One reader keeps
-/// `buffer_len` batches in its channel, one in flight in its producer (which
-/// polls the next decode only after sending), and the merge keeps its current
-/// batch and one earlier batch whose rows are still pending in the output.
-/// `None` for a schema without a derivable bound.
+/// `buffer_len` batches between its channel and its producer (the producer
+/// reserves a slot of the channel before it decodes, `spawn_buffered`, so a
+/// decoded batch is never in flight outside the channel's capacity), and the
+/// merge keeps its current batch and one earlier batch whose rows are still
+/// pending in the output: a merge of spill files emits what it holds before a
+/// stream's second refill within one output batch
+/// (`SortPreservingMergeStream`), so batches narrower than the output never
+/// pile up beyond that. `None` for a schema without a derivable bound.
 pub fn reader_pass_bound(
     schema: &Schema,
     max: usize,
@@ -447,7 +451,7 @@ pub fn reader_pass_bound(
     add(
         reader_fixed_bound(schema)?,
         mul(
-            add(buffer_len, 3)?,
+            add(buffer_len, 2)?,
             reader_batch_bound(schema, max, rows, codec)?,
         )?,
     )

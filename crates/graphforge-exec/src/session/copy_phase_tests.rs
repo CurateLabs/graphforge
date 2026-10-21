@@ -279,12 +279,22 @@ impl std::fmt::Display for CopyWorkspacePool {
         write!(f, "copy workspace observation")
     }
 }
+impl CopyWorkspacePool {
+    /// The merge's requests: its sponsor's, and those of the consumer its
+    /// escaped outputs are charged to.
+    fn copy(reservation: &MemoryReservation) -> bool {
+        matches!(
+            reservation.consumer().name(),
+            "serial copy phase control" | "MergeOutput"
+        )
+    }
+}
 impl MemoryPool for CopyWorkspacePool {
     fn name(&self) -> &str {
         "copy workspace observation"
     }
     fn grow(&self, reservation: &MemoryReservation, bytes: usize) {
-        if bytes != 0 && reservation.consumer().name() == "serial copy phase control" {
+        if bytes != 0 && Self::copy(reservation) {
             self.attempts.fetch_add(1, Ordering::Relaxed);
             self.admitted.fetch_add(1, Ordering::Relaxed);
         }
@@ -294,7 +304,7 @@ impl MemoryPool for CopyWorkspacePool {
         self.inner.shrink(reservation, bytes);
     }
     fn try_grow(&self, reservation: &MemoryReservation, bytes: usize) -> Result<()> {
-        let copy = bytes != 0 && reservation.consumer().name() == "serial copy phase control";
+        let copy = bytes != 0 && Self::copy(reservation);
         if copy {
             self.attempts.fetch_add(1, Ordering::Relaxed);
         }
@@ -348,7 +358,10 @@ async fn copy_phase_workspace_refusal_precedes_copy_and_keeps_prior_output() -> 
     observed.admitted.store(0, Ordering::Relaxed);
     // The first output has already loaded both IPC sources and their row
     // cursors. The next copy must admit its complete workspace, including the
-    // wide schema's output claims, before creating its ledger or Arrow output.
+    // wide schema's output claims, before creating its ledger or Arrow output;
+    // the escaped first output, which the working set cannot carry beside the
+    // workspace, is charged to the output consumer first, and that request
+    // is the one refused here.
     let error =
         stream.next().await.unwrap().expect_err(
             "the complete copy workspace must be admitted before allocating its output",
@@ -357,10 +370,7 @@ async fn copy_phase_workspace_refusal_precedes_copy_and_keeps_prior_output() -> 
         error.find_root(),
         DataFusionError::ResourcesExhausted(_)
     ));
-    assert!(
-        error.to_string().contains("serial copy phase control"),
-        "{error}"
-    );
+    assert!(error.to_string().contains("MergeOutput"), "{error}");
     assert!(
         !error.to_string().contains("Merge output reconciliation"),
         "refusal must precede the kernel and its output ownership handoff: {error}"

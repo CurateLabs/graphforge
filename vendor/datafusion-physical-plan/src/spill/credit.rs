@@ -16,7 +16,8 @@
 // under the License.
 
 //! A private prepaid bank: numeric tickets recycle while real producers live.
-//! Retirement releases unused credit; escaped buffers retain only their tickets.
+//! A reader's share goes back once the merge holds nothing of it; retirement
+//! releases unused credit; escaped buffers retain only their tickets.
 use super::admission::{add, mul};
 use crate::terminal_ownership as od;
 use datafusion_common::{DataFusionError, Result};
@@ -39,6 +40,11 @@ struct State {
     /// A bank admitted for a bounded pass: what it cannot lend is an error
     /// of the pass's bound, never a request to the pool.
     exact: bool,
+    /// Whether an exhausted reader's share goes back before the bank ends:
+    /// not for a spilling aggregate's bank, whose sponsor holds a loan that
+    /// a shrink the pool reads as a spill would arm again; a sort's merge
+    /// and a sponsor that cannot spill hold none.
+    returns_shares: bool,
 }
 // Exact pre-observation layouts used by all existing admission formulas.
 #[allow(dead_code)]
@@ -133,6 +139,11 @@ impl Credit {
             o.c = producers as u64;
             o.flags |= 4;
         });
+        let returns_shares = !authority.consumer().can_spill()
+            || authority
+                .consumer()
+                .name()
+                .starts_with(crate::sorts::sort::SORT_MERGE_CONSUMER_PREFIX);
         let state = Mutex::new(State {
             available: authority.size(),
             authority,
@@ -140,6 +151,7 @@ impl Credit {
             producers,
             lifecycle: Lifecycle::Open,
             exact,
+            returns_shares,
         });
         if control.is_some() {
             // A pthread-backed mutex can lazily allocate on its first lock.
@@ -184,9 +196,11 @@ impl Credit {
     }
     /// A bank whose sponsor keeps its own lifecycle, loans and floors: nothing
     /// retires it early, so it lends to its borrowers until its last holder
-    /// drops it, and gives everything back then. A spilling sponsor's merge
-    /// pass and the writer of its intermediate file borrow from such a bank.
-    /// Its control is paid from the authority like a retiring bank's.
+    /// drops it, and gives everything back then (a sort's bank gives an
+    /// exhausted reader's share back before that, see [`Self::retire_share`]).
+    /// A spilling sponsor's merge pass and the writer of its intermediate
+    /// file borrow from such a bank. Its control is paid from the authority
+    /// like a retiring bank's.
     pub(crate) fn held(authority: MemoryReservation, exact: bool) -> Result<Arc<Self>> {
         Self::with_control(authority, 0, 0, exact).map(|(credit, _)| credit)
     }
@@ -282,6 +296,27 @@ impl Credit {
                 state.lifecycle = Lifecycle::Closed;
             }
         }
+        debug_assert_eq!(state.authority.size(), state.available + state.outstanding);
+        self.observe(&state);
+    }
+    /// A reader's share of the bank (`bytes`, what the pass credited it) goes
+    /// back to the pool once the reader is exhausted and the merge holds none
+    /// of its batches: what the bank can spare now, which is the share when
+    /// every other reader is within its own (an output that still aliases a
+    /// batch keeps that much lent). The other readers' shares, which bound
+    /// what they hold, stay.
+    pub(crate) fn retire_share(&self, bytes: usize) {
+        let _transition = od::Transition::begin();
+        let mut state = self.state.lock().unwrap();
+        if state.lifecycle != Lifecycle::Open || !state.returns_shares {
+            return;
+        }
+        let spare = bytes.min(state.available);
+        if spare == 0 {
+            return;
+        }
+        state.available -= spare;
+        state.authority.shrink(spare);
         debug_assert_eq!(state.authority.size(), state.available + state.outstanding);
         self.observe(&state);
     }

@@ -26,6 +26,7 @@ use arrow::record_batch::RecordBatch;
 use datafusion_common::{DataFusionError, Result, config::SpillCompression};
 use datafusion_execution::SendableRecordBatchStream;
 use datafusion_execution::disk_manager::RefCountedTempFile;
+use datafusion_execution::memory_pool::MemoryPool;
 use datafusion_execution::runtime_env::RuntimeEnv;
 use std::borrow::Borrow;
 use std::sync::Arc;
@@ -48,6 +49,12 @@ pub struct SpillManager {
 }
 
 impl SpillManager {
+    /// The pool the spills' readers and writers, and the consumers a merge
+    /// of spill files registers beside its sponsor, are served from.
+    pub(crate) fn memory_pool(&self) -> &Arc<dyn MemoryPool> {
+        &self.env.memory_pool
+    }
+
     pub fn new(env: Arc<RuntimeEnv>, metrics: SpillMetrics, schema: SchemaRef) -> Self {
         Self {
             env,
