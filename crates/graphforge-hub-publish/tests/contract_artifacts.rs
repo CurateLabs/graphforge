@@ -846,8 +846,16 @@ fn corpus() -> Corpus {
         if descends {
             lineage.versions[0].parents = vec![old.versions[0].version_uuid.clone()];
         }
-        let mut ancestor = old.versions[0].clone();
-        ancestor.package = None;
+        let ancestor = old.versions[0].clone();
+        let package = ancestor.package.as_ref().unwrap().object_digest.0.clone();
+        next.objects.push(
+            first
+                .objects
+                .iter()
+                .find(|o| o.digest() == package)
+                .unwrap()
+                .clone(),
+        );
         lineage.versions.push(ancestor);
         lineage
             .versions
@@ -863,8 +871,7 @@ fn corpus() -> Corpus {
         } else {
             before.clone()
         });
-        steps.push(open_new(&next, "token", "next"));
-        steps.extend(upload_all(&next, "next"));
+        steps.extend(history::retained_open(&next, "next", &[&first]));
         let expectation = if stale {
             error(412, "ref_conflict")
         } else if descends {

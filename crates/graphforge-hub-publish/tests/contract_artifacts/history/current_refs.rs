@@ -1,7 +1,11 @@
 //! Actual authenticated reference commits, with independent current ref snapshots.
 use super::*;
 
-fn execute(hub: &ReferenceHub, steps: Vec<Step>, variables: &mut BTreeMap<String, String>) {
+pub(super) fn execute(
+    hub: &ReferenceHub,
+    steps: Vec<Step>,
+    variables: &mut BTreeMap<String, String>,
+) {
     for (index, step) in steps.into_iter().enumerate() {
         match step {
             Step::Request { request, expect } => {

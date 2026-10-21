@@ -30,13 +30,22 @@ fn next(previous: &Publication, operation: u128, head: u128) -> Publication {
     lineage.branches[0] = old.branches[0].clone();
     lineage.branches[0].head_version_uuid = head;
     lineage.versions[0].parents = vec![old.branches[0].base_version_uuid.clone()];
-    let mut base = old
+    let base = old
         .versions
         .iter()
         .find(|v| v.version_uuid == old.branches[0].base_version_uuid)
         .unwrap()
         .clone();
-    base.package = None;
+    // A retained Version keeps its published package, and the manifest keeps its bytes.
+    let package = base.package.as_ref().unwrap().object_digest.0.clone();
+    publication.objects.push(
+        previous
+            .objects
+            .iter()
+            .find(|o| o.digest() == package)
+            .unwrap()
+            .clone(),
+    );
     lineage.versions.push(base);
     lineage
         .versions
@@ -113,10 +122,62 @@ pub(super) fn cases() -> Vec<Case> {
                 request(HubMethod::Get, &url),
                 error(404, "invalid_input"),
             ));
+            // The Branch base/origin stays a retained Version, so its published
+            // package stays reachable after the replacement's grace.
+            let kept = read(&base).versions[0]
+                .package
+                .as_ref()
+                .unwrap()
+                .object_digest
+                .0
+                .clone();
+            let bytes = base.objects.iter().find(|o| o.digest() == kept).unwrap();
+            steps.push(send(
+                request(
+                    HubMethod::Get,
+                    format!("{}/.gf/objects/{kept}", repo_url(&base.repository)),
+                ),
+                status(200).text(String::from_utf8(bytes.bytes.clone()).unwrap()),
+            ));
         }
         cases.push(case(name,"Explicit committed history intent preserves the revision lease and native dependencies; unreachable bytes have a fixed 900-second reference grace.",steps));
     }
+    cases.push(package_strip_case());
     cases
+}
+
+/// A retained Version never loses its published package: retention only
+/// treats lineage-referenced packages as reachable.
+fn package_strip_case() -> Case {
+    let base = research_publication(v1(1300), 3100, 3101, 3102, 'c', None);
+    let mut model = RepoModel::default();
+    let mut steps = vec![token(&base.repository, "token")];
+    steps.extend(publish(&base, "token", "base", &mut model));
+    let mut stripped = next(&base, 1301, 3103);
+    let mut lineage = read(&stripped);
+    let retained = lineage.branches[0].base_version_uuid.clone();
+    let version = lineage
+        .versions
+        .iter_mut()
+        .find(|v| v.version_uuid == retained)
+        .unwrap();
+    let package = version.package.take().unwrap().object_digest.0;
+    replace(&mut stripped, lineage);
+    stripped.objects.retain(|o| o.digest() != package);
+    stripped.expected_revision = Some(model.revision(&base.repository));
+    steps.extend(retained_open(&stripped, "stripped", &[&base]));
+    steps.push(commit(
+        &stripped,
+        "token",
+        "stripped",
+        error(400, "invalid_input"),
+    ));
+    steps.push(get_refs(&base.repository, &model));
+    case(
+        "retained-version-package-strip-refused",
+        "A publication that drops the published package of a Version it retains is refused before any ref or retirement change.",
+        steps,
+    )
 }
 
 fn inventory_cases() -> Vec<Case> {
@@ -133,9 +194,8 @@ fn inventory_cases() -> Vec<Case> {
         let retained_version = lineage.versions.iter_mut().find(|v| v.version_uuid == original.version_uuid).unwrap();
         *retained_version = original;
         replace(&mut candidate, lineage);
-        if retained {
-            candidate.objects.push(bytes.clone());
-            candidate.objects.sort_by_key(Object::digest);
+        if !retained {
+            candidate.objects.retain(|o| o.digest() != digest);
         }
         candidate.prune = true;
         candidate.expected_revision = Some(model.revision(&base.repository));
@@ -156,7 +216,11 @@ fn inventory_cases() -> Vec<Case> {
     }).collect()
 }
 
-fn retained_open(publication: &Publication, prefix: &str, previous: &[&Publication]) -> Vec<Step> {
+pub(super) fn retained_open(
+    publication: &Publication,
+    prefix: &str,
+    previous: &[&Publication],
+) -> Vec<Step> {
     let retained: BTreeSet<_> = previous
         .iter()
         .flat_map(|p| p.objects.iter().map(Object::digest))
@@ -184,3 +248,5 @@ fn retained_open(publication: &Publication, prefix: &str, previous: &[&Publicati
 
 #[path = "history/current_refs.rs"]
 mod current_refs;
+#[path = "history/move_retention.rs"]
+mod move_retention;

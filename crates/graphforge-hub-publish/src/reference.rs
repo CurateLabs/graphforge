@@ -478,13 +478,24 @@ impl ReferenceHub {
         }
     }
 
+    /// Discovery parsing bounds that match this Hub's configured limits.
+    fn discovery_limits(&self) -> DiscoveryLimits {
+        let limits = self.config.limits;
+        DiscoveryLimits {
+            max_response_bytes: usize::try_from(limits.max_document_bytes).unwrap_or(usize::MAX),
+            max_objects: usize::try_from(limits.max_objects).unwrap_or(usize::MAX),
+            max_cumulative_object_bytes: limits.max_session_bytes,
+            ..DiscoveryLimits::default()
+        }
+    }
+
     /// Handle one request. Every state change happens under one lock.
     pub fn handle(&self, request: &HubRequest) -> HubResponse {
         let Ok(mut state) = self.state.lock() else {
             let error = HubPublishError::new(HubPublishErrorCode::Internal, "hub state poisoned");
             return json_response(500, &error.body());
         };
-        retention::collect(&mut state);
+        retention::collect(&mut state, self.discovery_limits());
         match self.route(&mut state, request) {
             Ok(response) => response,
             Err(rejected) => {
@@ -1051,13 +1062,7 @@ impl ReferenceHub {
 
         // Structural manifest validation is pure; it precedes the replay check
         // only because the commitment binds the manifest's canonical digest.
-        let limits = self.config.limits;
-        let discovery_limits = DiscoveryLimits {
-            max_response_bytes: usize::try_from(limits.max_document_bytes).unwrap_or(usize::MAX),
-            max_objects: usize::try_from(limits.max_objects).unwrap_or(usize::MAX),
-            max_cumulative_object_bytes: limits.max_session_bytes,
-            ..DiscoveryLimits::default()
-        };
+        let discovery_limits = self.discovery_limits();
         let manifest_bytes =
             serde_json::to_vec(&commit.manifest).map_err(|_| invalid("manifest is malformed"))?;
         let manifest = DiscoveryManifest::from_json(&manifest_bytes, discovery_limits).map_err(
@@ -1589,7 +1594,7 @@ impl ReferenceHub {
     pub fn advance_clock(&self, seconds: u64) {
         let mut state = self.state.lock().expect("hub state");
         state.now = state.now.saturating_add(seconds);
-        retention::collect(&mut state);
+        retention::collect(&mut state, self.discovery_limits());
     }
 
     /// Approve a pending device authorization; `false` if `user_code` is unknown.
@@ -1701,6 +1706,7 @@ impl ReferenceHub {
             .to_canonical_json()
             .map_err(|_| invalid("re-homed refs are invalid"))?;
         let mut documents = Vec::new();
+        let mut live = retention::Live::default();
         for snapshot in result.snapshots {
             let validator = snapshot
                 .manifest
@@ -1711,6 +1717,13 @@ impl ReferenceHub {
                 .manifest
                 .to_canonical_json()
                 .map_err(|_| invalid("re-homed manifest is invalid"))?;
+            let lineage = snapshot
+                .lineage
+                .as_deref()
+                .map(|bytes| graphforge_discovery::ResearchLineage::from_json(bytes, limits))
+                .transpose()
+                .map_err(|_| invalid("re-homed lineage is invalid"))?;
+            live.mark(&validator, &snapshot.manifest, lineage.as_ref());
             let mut controls = Vec::new();
             for bytes in [snapshot.summary, snapshot.lineage].into_iter().flatten() {
                 let digest = sha256_digest(&bytes);
@@ -1739,6 +1752,9 @@ impl ReferenceHub {
             repository.manifests.insert(validator, manifest);
             repository.objects.extend(controls);
         }
+        // Regenerated controls can reuse the digest of an object that a prune
+        // already scheduled for retirement; whatever the new refs reach is live.
+        repository.retirement.cancel(&live);
         state.repositories.insert(new.clone(), repository);
         for current in state.moved.values_mut() {
             if current == old {

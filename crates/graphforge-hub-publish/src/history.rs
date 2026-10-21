@@ -113,13 +113,19 @@ pub(crate) fn validate_snapshot_history_transition(
     for old in &previous.versions {
         if let Some(new) = versions.get(old.version_uuid.as_str()) {
             let mut immutable = (**new).clone();
-            // Optional transport references are not native identity. Preserve
-            // the existing ordinary metadata-only ancestor wire behavior; only
-            // explicit prune can retire unreachable repository bytes.
             let mut prior = old.clone();
-            if old.package.is_none() || immutable.package.is_none() {
+            // A Version published without a payload may gain one later (the CLI
+            // supplies it explicitly), but a published payload is never
+            // dropped: retention treats only lineage-referenced packages as
+            // reachable, so a stripped package would be collected while the
+            // Version, and every Branch creation depending on it, stays live.
+            if old.package.is_none() {
                 immutable.package = None;
                 prior.package = None;
+            } else if new.package.is_none() {
+                return Err(invalid(
+                    "publication removes the published package of a retained Version",
+                ));
             }
             if immutable != prior {
                 return Err(invalid(
