@@ -307,12 +307,121 @@ fn a_relocated_registry_is_refused() {
     );
 }
 
-/// A registry whose component and payload sit under `evidence`, its runtime
-/// mapping kept, is a misplaced runtime participant before it is anything the
-/// research checks have an opinion on: `InvalidStructure` from a directory, a
-/// bundle file and a stream alike.
+/// A research package reports its byte totals and footer signals alike from every
+/// path the research driver takes (expanded directory, bundle file, stream) and
+/// from the plain scan: one report, apart from `source`.
 #[test]
-fn a_registry_in_an_evidence_component_is_refused_as_misplaced_everywhere() {
+fn a_research_package_reports_the_same_facts_from_every_path() {
+    let fixture = two_versions_sharing_one_graph();
+    let plan =
+        plan_complete_portable(&fixture.generation, PortableExportLimits::default()).unwrap();
+    let output = tempfile::tempdir().unwrap();
+    let (expanded, bundle) = write_test_representations(&plan, output.path());
+    let driven = |path: &Path| {
+        crate::project_portable::research::stream::validate_research_path(
+            path,
+            None,
+            PortableLimits::default(),
+            None,
+            None,
+        )
+        .unwrap()
+    };
+    let mut reader = std::io::BufReader::new(fs::File::open(&bundle).unwrap());
+    let streamed =
+        crate::verify_portable_stream(&mut reader, None, PortableLimits::default(), None).unwrap();
+    let plain =
+        crate::verify_portable(&bundle, PortableMode::Full, PortableLimits::default(), None)
+            .unwrap();
+    // Every report equals the bundle file's, but for `source`; the directory's
+    // also differs in `representation` and has no `transport_digest`.
+    let without = |report: &crate::PortableReport, fields: &[&str]| {
+        let mut value = serde_json::to_value(report).unwrap();
+        for field in fields {
+            value.as_object_mut().unwrap().remove(*field).unwrap();
+        }
+        value
+    };
+    let reports = [driven(&expanded), driven(&bundle), streamed, plain];
+    let bundle_report = without(&reports[1], &["source"]);
+    for report in &reports[2..] {
+        assert_eq!(without(report, &["source"]), bundle_report);
+    }
+    let directory_fields = ["source", "representation", "transport_digest"];
+    assert_eq!(
+        without(&reports[0], &directory_fields),
+        without(&reports[1], &directory_fields)
+    );
+    let report = &reports[0];
+    assert!(report.research_interchange);
+    assert_eq!(
+        report.bytes_by_kind.values().sum::<u64>(),
+        report.payload_bytes
+    );
+    assert!(report.bytes_by_kind["research"] > 0);
+    let parquet = report.plausibility.parquet.expect("a full verification");
+    assert!(
+        parquet.files_with_footer > 0,
+        "the graph tree carries Parquet"
+    );
+    assert!(parquet.files_with_footer <= parquet.files);
+}
+
+/// A graph tree file declared outside the graph tree directory (here in the
+/// opaque `evidence` directory) would reach a decoder unwalked; it is refused
+/// `InvalidStructure`, naming the file, by the placement rule on every path and
+/// whether or not any other rule also covers its location.
+#[test]
+fn a_graph_tree_file_outside_the_graph_tree_directory_is_refused_everywhere() {
+    let fixture = two_versions_sharing_one_graph();
+    let mut plan =
+        plan_complete_portable(&fixture.generation, PortableExportLimits::default()).unwrap();
+    let shard = plan
+        .files
+        .iter()
+        .find(|file| {
+            file.path
+                .starts_with("data/components/graph-data/graph-tree/")
+        })
+        .unwrap()
+        .path
+        .clone();
+    let moved = "data/components/evidence/shard.parquet";
+    rename_entry(&mut plan, &shard, moved);
+    let output = tempfile::tempdir().unwrap();
+    let (expanded, bundle) = write_test_representations(&plan, output.path());
+    let mut reader = std::io::BufReader::new(fs::File::open(&bundle).unwrap());
+    let streamed =
+        crate::verify_portable_stream(&mut reader, None, PortableLimits::default(), None)
+            .unwrap_err();
+    let driven = |path: &Path| {
+        crate::project_portable::research::stream::validate_research_path(
+            path,
+            None,
+            PortableLimits::default(),
+            None,
+            None,
+        )
+        .unwrap_err()
+    };
+    for error in [driven(&expanded), driven(&bundle), streamed] {
+        assert_eq!(error.code, PortableErrorCode::InvalidStructure, "{error}");
+        assert_eq!(error.entry.as_deref(), Some(moved), "{error}");
+        assert!(
+            error
+                .to_string()
+                .contains("graph tree file outside the graph tree directory"),
+            "{error}"
+        );
+    }
+}
+
+/// The exporter's research package with its registry component made an
+/// `evidence` component, its runtime mapping kept; `move_payload` also moves
+/// the registry's file under `data/components/evidence/`. Refused
+/// `InvalidStructure` from a directory, a bundle file and a stream alike, with
+/// one message, which must contain `detail`.
+fn assert_registry_refused_everywhere(move_payload: bool, detail: &str) {
     let fixture = two_versions_sharing_one_graph();
     let mut plan =
         plan_complete_portable(&fixture.generation, PortableExportLimits::default()).unwrap();
@@ -328,11 +437,13 @@ fn a_registry_in_an_evidence_component_is_refused_as_misplaced_everywhere() {
         .and_then(|rest| rest.split('/').next())
         .unwrap()
         .to_owned();
-    rename_entry(
-        &mut plan,
-        &registry,
-        &format!("data/components/evidence/{participant}/participant.json"),
-    );
+    if move_payload {
+        rename_entry(
+            &mut plan,
+            &registry,
+            &format!("data/components/evidence/{participant}/participant.json"),
+        );
+    }
     let mut manifest: Value = serde_json::from_slice(&plan.manifest).unwrap();
     let capabilities = manifest["requirements"]["capabilities"]
         .as_array_mut()
@@ -362,28 +473,40 @@ fn a_registry_in_an_evidence_component_is_refused_as_misplaced_everywhere() {
     let streamed =
         crate::verify_portable_stream(&mut reader, None, PortableLimits::default(), None)
             .unwrap_err();
-    let verdicts = [
-        crate::verify_portable(
-            &expanded,
-            PortableMode::Full,
+    // A research package is verified by the research driver on every path, as
+    // the facade's `verify_portable` does, so refusals rank alike.
+    let driven = |path: &Path| {
+        crate::project_portable::research::stream::validate_research_path(
+            path,
+            None,
             PortableLimits::default(),
             None,
+            None,
         )
-        .unwrap_err(),
-        verify(&bundle).unwrap_err(),
-        streamed,
-    ];
+        .unwrap_err()
+    };
+    let verdicts = [driven(&expanded), driven(&bundle), streamed];
     for error in &verdicts {
         assert_eq!(error.code, PortableErrorCode::InvalidStructure, "{error}");
-        assert!(
-            error
-                .to_string()
-                .contains("runtime participant outside its component kind"),
-            "{error}"
-        );
+        assert!(error.to_string().contains(detail), "{error}");
     }
     assert_eq!(verdicts[0].to_string(), verdicts[1].to_string());
     assert_eq!(verdicts[1].to_string(), verdicts[2].to_string());
+}
+
+/// The registry's component and payload both sit under `evidence`: the research
+/// driver, which keys the registry by its path, refuses the scan itself.
+#[test]
+fn a_registry_moved_into_evidence_is_refused_everywhere() {
+    assert_registry_refused_everywhere(true, "research content precedes the registry");
+}
+
+/// Only the registry's component kind is `evidence`; its file keeps the research
+/// path, so the scan is content with it. The placement rule, which runs before
+/// any research check, is what refuses it.
+#[test]
+fn an_evidence_kind_registry_component_is_refused_as_misplaced_everywhere() {
+    assert_registry_refused_everywhere(false, "runtime participant outside its component kind");
 }
 
 #[test]

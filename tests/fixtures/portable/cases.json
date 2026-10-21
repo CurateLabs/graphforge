@@ -51,8 +51,9 @@
   "research_layout": {
     "registry": "data/components/research/research-registry-6fc2f9a45fb9/participant.json",
     "retained": "data/components/research/research-retained/{version_uuid}/{sha256}",
+    "evidence_only": "data/components/research/research-retained-evidence/{version_uuid}/{sha256}",
     "former_retained": "data/components/research/research-content/{sha256}",
-    "order": "the registry precedes every retained object; each Version's objects are contiguous; a shared object is carried once per Version",
+    "order": "the registry precedes every retained object; each Version's staged objects are contiguous; an object only the Version's evidence needs is carried under evidence_only; a shared object is carried once per Version",
     "former_layout_result": "GF_INCOMPATIBLE"
   },
   "structural_cases": [{"name":"billion-edge-structural","logical_edges":1000000000,"payload_bytes":17179869184,"requires_incremental_io":true,"max_copy_buffer_bytes":8388608},{"name":"padded-evidence","evidence_bytes":3221225472,"requires_incremental_io":true,"graph_data_ratio_ppm_below":10000}]

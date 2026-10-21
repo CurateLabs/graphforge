@@ -78,6 +78,11 @@ fn fork_local_branch_exports_mixed_project_acceptance_genealogy() {
         &CancellationToken::new(),
     )
     .unwrap();
+    crate::research_interchange::stream_parity::assert_complete_export_streams_alike(
+        &fork,
+        local_version,
+        dir.path(),
+    );
     let imported_root = dir.path().join("reimport");
     GraphForge::import_portable(
         &imported_root,

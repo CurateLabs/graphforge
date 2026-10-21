@@ -14,6 +14,13 @@ Four identities are deliberately distinct:
   identity.
 - `participant_id` is a stable portable component identity, globally unique
   within the package; it is never a runtime catalog ID.
+- `producing_core_version` is the exact GraphForge Core version that wrote the
+  package (the same value as the Project manifest's `graphforge_version` for a
+  Project created by that build). It is part of the manifest and therefore of
+  `package_digest`, so two Core versions never export one package identity. It is
+  an opaque exact label: readers compare it for equality, and never order or
+  parse it. Verification and inspection report it; before v1 a package runs only
+  on the Core version that wrote it (ADR 0054 section 9).
 - `source_generation` identifies the committed GraphForge generation from
   which selection occurred. It proves provenance, not package identity or an
   import target generation.
@@ -491,24 +498,39 @@ The components lay out as:
 
 ```
 data/components/research/research-registry-<id>/participant.json
+data/components/research/research-retained-evidence/<version-uuid>/<sha256-hex>
 data/components/research/research-retained/<version-uuid>/<sha256-hex>
 ```
 
 Every Version's complete object closure (its participants, graph manifest
 nodes, graph files and local evidence) sits under that Version's own directory,
-named by its canonical lowercase `version_uuid`. An object that several
+named by its canonical lowercase `version_uuid`. A local evidence object that
+no participant, graph manifest node or graph file of the Version also is sits
+under `research-retained-evidence/` instead; an object with any other role is
+one object under `research-retained/`, whatever else it is. The path therefore
+states, before the Version's closure is known, whether a reader needs the
+object's bytes. An object that several
 Versions need is carried once per Version; the duplication is deliberate, so
 each directory is a self-contained unit. Import installs each distinct object
 once. Verification requires every directory to be a registry Version, to hold
-exactly that Version's closure with the registry's lengths, and refuses any
-other path, including the former `research-content/<digest>` shape, as
+exactly that Version's closure with the registry's lengths, to place under
+`research-retained-evidence/` only objects that nothing but evidence needs, and
+refuses any other path, including the former `research-content/<digest>` shape, as
 `Incompatible`.
 
 The registry sorts before every retained object in canonical byte order
-(`research-registry-…` < `research-retained/`), and a Version's objects are
-contiguous (UUID text order equals the registry's key order). A reader that
+(`research-registry-…` < `research-retained-evidence/` < `research-retained/`),
+and a Version's staged objects are contiguous (UUID text order equals the registry's key order). A reader that
 consumes the bundle in order therefore knows the registry, and the Version
 that owns each object, before the object arrives.
+
+Native verification uses that order. One driver, over a bundle file, an
+expanded directory or a stream alike, stages a Version's objects under
+`research-retained/`, validates the Version with the native owners and removes
+it before the next Version arrives, so temporary disk is bounded by
+`max_research_version_bytes` and not by the package; objects under
+`research-retained-evidence/` are authenticated as they stream and never staged. The Version's closure check and the end-of-scan comparison of the
+objects seen against the manifest replace the whole-package closure check.
 
 The registry contains the selected immutable Version, required Version/proof
 payloads, identity-only ancestor citations, per-Version original Project

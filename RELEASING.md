@@ -51,6 +51,13 @@ v0.6.0 development cycle, use `python3 scripts/set_release_version.py 0.6.0-dev`
 and `make release-version-check`. This sets Cargo to `0.6.0-dev`, Python to
 `0.6.0.dev0`, and npm packages to `0.6.0-dev.0`.
 
+Portable packages and the Hub fixture declare the exact Core version that
+produced them (`producing_core_version`), so changing the version, including
+`set_release_version.py`, makes `crates/graphforge-cli/tests/hub_fixture.rs` fail
+until the fixture and its verification receipts are regenerated from the new
+build (`tests/fixtures/hub/README.md`). A release candidate's fixture is never
+relabeled as the final version's data.
+
 Subsequent commits keep that development version until the release preparation
 change sets an explicit candidate such as `0.6.0-rc.1`. The development version
 does not identify a unique build; record the source commit when reporting local

@@ -1,6 +1,8 @@
 //! Composed public-facade evidence for the two-story analyst journey.
 #[path = "research_journey/fixture.rs"]
 mod fixture;
+#[path = "support/research_stream.rs"]
+mod research_stream;
 #[path = "research_journey/review.rs"]
 mod review;
 #[path = "research_journey/sharing.rs"]

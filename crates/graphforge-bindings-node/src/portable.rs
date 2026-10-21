@@ -92,6 +92,10 @@ fn parse_limits(input: Option<PortableLimitsInput>) -> Result<PortableLimits> {
             Some(value) => crate::node_u64(Some(value), "maxParquetFooterBytes")?,
             None => defaults.max_parquet_footer_bytes,
         },
+        max_research_version_bytes: match input.max_research_version_bytes {
+            Some(value) => crate::node_u64(Some(value), "maxResearchVersionBytes")?,
+            None => defaults.max_research_version_bytes,
+        },
         max_path_bytes: match input.max_path_bytes {
             Some(value) => crate::node_usize(Some(value), defaults.max_path_bytes, "maxPathBytes")?,
             None => defaults.max_path_bytes,
@@ -294,6 +298,7 @@ fn verify_report_output(report: graphforge_api::PortableVerifyResult) -> Portabl
             graphforge_api::PortableSource::Stream => "stream".into(),
         },
         package_digest: report.package_digest,
+        producing_core_version: report.producing_core_version,
         package_class: match report.package_class {
             graphforge_api::PortablePackageClass::Complete => "complete".into(),
             graphforge_api::PortablePackageClass::OntologyOnly => "ontology_only".into(),
@@ -387,6 +392,8 @@ pub struct PortableLimitsInput {
     pub max_parquet_walk_bytes: Option<BigInt>,
     /// Largest Parquet footer whose row counts the report carries.
     pub max_parquet_footer_bytes: Option<BigInt>,
+    /// Bytes of one research Version's objects that native validation stages on disk.
+    pub max_research_version_bytes: Option<BigInt>,
     pub max_path_bytes: Option<BigInt>,
     pub copy_buffer_bytes: Option<BigInt>,
 }
@@ -529,6 +536,8 @@ pub struct PortableVerifyOutput {
     pub source: String,
     pub package_digest: String,
     pub package_class: String,
+    /// Exact GraphForge Core version the package manifest declares as producer.
+    pub producing_core_version: String,
     pub component_count: BigInt,
     pub entry_count: BigInt,
     pub payload_bytes: BigInt,

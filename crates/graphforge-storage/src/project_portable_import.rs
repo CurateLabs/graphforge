@@ -1,6 +1,7 @@
 //! Verification-first, bounded portable project import.
 
 mod native_validation;
+pub(crate) use native_validation::validate_version;
 pub use native_validation::{
     NativeResearchValidator, import_complete_portable_with_native_validation,
     validate_research_package, validate_research_package_stream,

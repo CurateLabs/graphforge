@@ -14,6 +14,7 @@ mod recovery;
 mod restore;
 mod results;
 mod retention;
+mod stream_validation;
 mod two_stories;
 use crate::*;
 use arrow::array::{FixedSizeBinaryArray, Int64Array};

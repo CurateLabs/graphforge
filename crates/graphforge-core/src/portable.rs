@@ -54,6 +54,20 @@ pub struct PortableLimits {
     /// package still verifies; the file simply reports no footer signals, so
     /// `files_with_footer` does not count it.
     pub max_parquet_footer_bytes: u64,
+    /// Bytes of one research Version's retained objects that native validation
+    /// may stage on disk: the sum over its entries under
+    /// `data/components/research/research-retained/<version>/`. Objects only
+    /// evidence needs (`research-retained-evidence/`) are authenticated as they
+    /// stream and never staged, so they do not count. The default is no limit:
+    /// verification accepts every package it accepted before. A Version is
+    /// validated and its scratch removed before the next Version is read, so
+    /// temporary disk is bounded by the largest Version, not by the package. An
+    /// operator who sets a limit bounds that scratch: validating a Version holds
+    /// the stage plus the further copies that
+    /// [`PortableImportFootprint::VALIDATION_RESEARCH_COPIES`] counts, so peak
+    /// temporary disk is that many times the limit plus one. A Version over it is
+    /// refused with `LimitExceeded`, from a file and from a stream alike.
+    pub max_research_version_bytes: u64,
     /// UTF-8 bytes in one portable path.
     pub max_path_bytes: usize,
     /// Bytes in the streaming copy buffer.
@@ -102,6 +116,7 @@ impl Default for PortableLimits {
             max_retained_control_bytes: 256 * 1024 * 1024,
             max_parquet_walk_bytes: 64 * 1024 * 1024,
             max_parquet_footer_bytes: 16 * 1024 * 1024,
+            max_research_version_bytes: u64::MAX,
             max_path_bytes: 4096,
             copy_buffer_bytes: 1024 * 1024,
         }
@@ -176,6 +191,9 @@ pub struct PortableReport {
     pub source: PortableSource,
     pub package_digest: String,
     pub package_class: PortablePackageClass,
+    /// Exact GraphForge Core version that produced the package, as declared by
+    /// its authenticated manifest.
+    pub producing_core_version: String,
     pub component_count: u64,
     pub entry_count: u64,
     pub payload_bytes: u64,

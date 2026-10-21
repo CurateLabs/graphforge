@@ -25,6 +25,10 @@ pub(super) enum Reopen<'a> {
     /// reads of an already scanned package at the offsets the scan recorded.
     /// Verification never uses this.
     Indexed(&'a Path),
+    /// Research files were validated per Version while they streamed past and
+    /// none is read back. Other controls the scan did not retain are read from
+    /// the expanded package's root, when it has one.
+    Driven(Option<&'a Path>),
 }
 
 /// Authentication for untrusted bytes, or corruption refusal against evidence
@@ -102,9 +106,11 @@ pub(super) fn validate_semantics(
         }
         Ok(value)
     })?;
-    research::validate_with_reader(report, limits, cancelled, |path, bound| {
-        read(source, entries, path, bound, cancelled)
-    })?;
+    if !matches!(source, Reopen::Driven(_)) {
+        research::validate_with_reader(report, limits, cancelled, |path, bound| {
+            read(source, entries, path, bound, cancelled)
+        })?;
+    }
     Ok(())
 }
 
@@ -209,14 +215,15 @@ fn locate(source: Reopen<'_>, path: &str) -> Result<std::path::PathBuf, Portable
         Reopen::Indexed(bundle) => bundle.to_path_buf(),
         Reopen::BundleFile(bundle) if path.starts_with(research::NAMESPACE) => bundle.to_path_buf(),
         Reopen::Bundle(Some(stage)) if path.starts_with(research::NAMESPACE) => stage.join(path),
-        Reopen::Bundle(None) if path.starts_with(research::NAMESPACE) => {
+        Reopen::Driven(Some(root)) if !path.starts_with(research::NAMESPACE) => root.join(path),
+        Reopen::Bundle(None) | Reopen::Driven(_) if path.starts_with(research::NAMESPACE) => {
             return Err(PortableError::at(
                 PortableErrorCode::Io,
                 path,
                 "research file was not staged",
             ));
         }
-        Reopen::Bundle(_) | Reopen::BundleFile(_) => {
+        Reopen::Bundle(_) | Reopen::BundleFile(_) | Reopen::Driven(_) => {
             return Err(PortableError::at(
                 PortableErrorCode::LimitExceeded,
                 path,
@@ -266,26 +273,32 @@ impl parquet::file::reader::ChunkReader for EntryWindow {
 /// Whether the engine can ever hand `entry_path` to a Parquet decoder, which
 /// is exactly the set of entries the page walk must cover: the walk exists so
 /// that no decoder sees an unwalked page, and an entry no decoder opens needs
-/// neither the walk nor the scratch it costs a stream.
+/// neither the walk nor the scratch it costs a stream. The one rule for the
+/// streamed walk ([`ParquetWalk`]) and for the walk of a file or directory
+/// ([`validate_parquet_profile`]).
 ///
-/// Only component entries are candidates; the package controls are JSON and
-/// text. Among components, `evidence` is opaque data authored outside the
-/// engine, and that is enforced rather than assumed: `component_kind` never
-/// yields it, semantic validation requires every runtime participant's
-/// component and files to sit in the kind and directory `component_kind`
-/// gives it (`validate_participant_placement`), and import finds a
-/// participant's payload only there (`find_participant_file`) and opens other
-/// Parquet only under the graph tree (`package_graph_tree`). So no reader is
-/// pointed into an evidence directory. Everything else may be decoded, so it
-/// is walked: when unsure, walk.
+/// It is false for:
 ///
-/// Both walks use this one function: [`ParquetWalk`] for a stream and
-/// [`validate_parquet_profile`] for a file or directory.
+/// * anything outside `data/components/`: the package controls are JSON and text;
+/// * the `evidence` component kind, opaque data authored outside the engine.
+///   That is enforced rather than assumed: `component_kind` never yields it,
+///   semantic validation requires every runtime participant's component and
+///   files to sit in the kind and directory `component_kind` gives it
+///   (`validate_participant_placement`), and import finds a participant's
+///   payload only there (`find_participant_file`) and opens other Parquet only
+///   under the graph tree (`package_graph_tree`);
+/// * the canonical `research-retained-evidence/<version>/<sha256>` objects,
+///   which only a research Version's evidence needs
+///   (`research::is_evidence_only`); `research::check_reserved_path` refuses
+///   anything else below that directory, so nothing decodable hides there.
+///
+/// Everything else may be decoded, so it is walked: when unsure, walk.
 pub(super) fn reaches_a_decoder(entry_path: &str) -> bool {
     entry_path
         .strip_prefix("data/components/")
         .and_then(|rest| rest.split('/').next())
         .is_some_and(|kind| kind != "evidence")
+        && !research::is_evidence_only(entry_path)
 }
 
 /// What the Parquet page walk needs of one streamed entry. A stream cannot be
@@ -296,6 +309,7 @@ pub(super) fn reaches_a_decoder(entry_path: &str) -> bool {
 /// the verdict does not depend on the source or on the entry's size. The
 /// scratch file has no name and is gone when the walk is dropped.
 pub(super) struct ParquetWalk<'a> {
+    skipped: bool,
     path: &'a str,
     threshold: u64,
     scratch: &'a Path,
@@ -308,6 +322,7 @@ impl<'a> ParquetWalk<'a> {
     pub(super) fn new(path: &'a str, size: u64, threshold: u64, scratch: &'a Path) -> Self {
         let capacity = usize::try_from(size.min(threshold)).unwrap_or(0);
         Self {
+            skipped: false,
             path,
             threshold,
             scratch,
@@ -316,7 +331,15 @@ impl<'a> ParquetWalk<'a> {
             tail: [0; 4],
         }
     }
+    /// The entry is kept by the sink and walked there: keep nothing here.
+    pub(super) fn skip(&mut self) {
+        self.skipped = true;
+        self.kept = Vec::new();
+    }
     pub(super) fn update(&mut self, chunk: &[u8]) -> Result<(), PortableError> {
+        if self.skipped {
+            return Ok(());
+        }
         let stage = |_: std::io::Error| {
             PortableError::at(
                 PortableErrorCode::Io,
@@ -348,9 +371,10 @@ impl<'a> ParquetWalk<'a> {
         Ok(())
     }
     /// The footer shape of the walked entry, or `None` for an entry that does
-    /// not end in the footer magic and so was not walked.
+    /// not end in the footer magic (or that a sink kept and walked) and so was
+    /// not walked here.
     pub(super) fn finish(self) -> Result<Option<ParquetShape>, PortableError> {
-        if &self.tail != b"PAR1" {
+        if self.skipped || &self.tail != b"PAR1" {
             return Ok(None);
         }
         match self.spill {
@@ -382,6 +406,24 @@ fn walk_entry(
         .map_err(|error| refuse_profile(path, error))
 }
 
+/// Walk the pages of an entry a sink kept as the file at `path`.
+pub(super) fn walk_staged(path: &Path, length: u64, entry: &str) -> Result<(), PortableError> {
+    if length < 12 {
+        return Ok(());
+    }
+    let unreadable =
+        |_| PortableError::at(PortableErrorCode::Io, entry, "cannot read the staged entry");
+    let mut file = fs::File::open(path).map_err(unreadable)?;
+    let mut tail = [0_u8; 4];
+    file.seek(SeekFrom::Start(length - 4))
+        .and_then(|_| file.read_exact(&mut tail))
+        .map_err(unreadable)?;
+    if &tail == b"PAR1" {
+        walk_entry(&file, 0, length, entry)?;
+    }
+    Ok(())
+}
+
 /// The refusal for a Parquet entry the funded decoder profile does not admit.
 pub(super) fn refuse_profile(
     path: &str,
@@ -409,19 +451,24 @@ pub(super) fn refuse_profile(
 ///
 /// Returns the footer facts of the graph Parquet entries, which a stream
 /// collects from the same walk as each entry passes ([`ParquetWalk`]).
+///
+/// `driven` is true when the research driver answers for the staged research
+/// objects (it walked each as it was staged, and a refused Version's remaining
+/// objects are never decoded): they are skipped here so one rule orders their
+/// refusal against the rest of the scan.
 pub(super) fn validate_parquet_profile(
     source: &Path,
     entries: &[Entry],
     limits: PortableLimits,
+    driven: bool,
     cancelled: Option<&AtomicBool>,
 ) -> Result<ParquetSignals, PortableError> {
     use crate::parquet_encoding_profile::admit_pages;
 
     let mut signals = ParquetSignals::new(limits.max_parquet_footer_bytes);
-    for entry in entries
-        .iter()
-        .filter(|entry| reaches_a_decoder(&entry.path))
-    {
+    for entry in entries.iter().filter(|entry| {
+        reaches_a_decoder(&entry.path) && !(driven && research::is_staged_object(&entry.path))
+    }) {
         check_cancel(cancelled)?;
         if entry.length < 12 {
             signals.observe(&entry.path, None);

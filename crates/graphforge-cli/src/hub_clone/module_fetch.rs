@@ -786,6 +786,21 @@ mod tests {
             root.path(),
             &[],
         );
+
+        // A package whose verified manifest names another producer than the
+        // advertisement is refused, even though its digest matches.
+        let manifest = changed_fixture_manifest(|manifest| {
+            manifest["ontology"]["modules"][0]["package"]["producing_core_version"] =
+                serde_json::json!("0.0.1");
+        });
+        let transport = module_transport(&manifest, &package);
+        assert_module_fetch_fails(
+            "hub.package.producing_core_version_mismatch",
+            &transport,
+            &args,
+            root.path(),
+            &[],
+        );
     }
 
     #[test]

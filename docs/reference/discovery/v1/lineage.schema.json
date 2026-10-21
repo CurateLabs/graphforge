@@ -54,6 +54,12 @@
       ],
       "type": "object"
     },
+    "coreVersion": {
+      "maxLength": 4096,
+      "minLength": 1,
+      "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$",
+      "type": "string"
+    },
     "digest": {
       "pattern": "^sha256:[0-9a-f]{64}$",
       "type": "string"
@@ -116,11 +122,15 @@
         },
         "package_digest": {
           "$ref": "#/$defs/digest"
+        },
+        "producing_core_version": {
+          "$ref": "#/$defs/coreVersion"
         }
       },
       "required": [
         "format",
         "package_digest",
+        "producing_core_version",
         "object_digest"
       ],
       "type": "object"

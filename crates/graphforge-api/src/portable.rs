@@ -220,6 +220,19 @@ pub fn verify_portable(
     request: &PortableVerifyRequest,
     cancelled: Option<&AtomicBool>,
 ) -> Result<PortableVerifyResult, graphforge_core::portable::PortableError> {
+    // A full verification is one scan: the research driver authenticates every
+    // entry and validates each Version as the scan reaches it, so a bundle file,
+    // an expanded directory and a stream rank their refusals the same way.
+    #[cfg(feature = "research")]
+    if request.mode == graphforge_core::portable::PortableMode::Full {
+        return graphforge_storage::validate_research_package(
+            &request.input,
+            None,
+            request.limits,
+            cancelled,
+            &mut crate::research_interchange::validation::validate,
+        );
+    }
     let report = graphforge_storage::verify_portable(
         &request.input,
         request.mode,
@@ -757,6 +770,133 @@ mod tests {
         assert_eq!(first_label.side_effects.unwrap().labels_added, 1);
         let existing_label = reopened.execute("CREATE (:ImportedLabel)").unwrap();
         assert_eq!(existing_label.side_effects.unwrap().labels_added, 0);
+    }
+
+    #[test]
+    fn exported_package_declares_and_verification_reports_the_producing_core_version() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source");
+        std::fs::create_dir(&source).unwrap();
+        let graph = GraphForge::new(source.to_str()).unwrap();
+        let limits = graphforge_core::portable::PortableLimits::default();
+        let export = |name: &str, representation| {
+            let output_path = root.path().join(name);
+            graph
+                .export_portable(
+                    &PortableExportRequest {
+                        selection: PortableSelection::Current,
+                        output_path: output_path.clone(),
+                        representation,
+                        profile: graphforge_core::portable::PortableSelectionProfile::Complete,
+                        subset: None,
+                        limits,
+                    },
+                    None,
+                    |_| {},
+                )
+                .unwrap();
+            output_path
+        };
+        let expanded = export(
+            "expanded",
+            graphforge_core::portable::PortableOutput::Expanded,
+        );
+        let bundle = export(
+            "complete.gfpb",
+            graphforge_core::portable::PortableOutput::Bundle,
+        );
+
+        // The package manifest itself states the producer.
+        let manifest_path = expanded.join("data/graphforge-project.json");
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+        assert_eq!(
+            manifest["producing_core_version"],
+            graphforge_core::manifest::GRAPHFORGE_VERSION
+        );
+
+        // Full verification and inspection both report it, for both forms.
+        for (input, mode) in [
+            (&bundle, graphforge_core::portable::PortableMode::Full),
+            (&expanded, graphforge_core::portable::PortableMode::Full),
+            (
+                &bundle,
+                graphforge_core::portable::PortableMode::StructureOnly,
+            ),
+            (
+                &expanded,
+                graphforge_core::portable::PortableMode::StructureOnly,
+            ),
+        ] {
+            let report = verify_portable(
+                &PortableVerifyRequest {
+                    input: input.clone(),
+                    mode,
+                    limits,
+                },
+                None,
+            )
+            .unwrap();
+            assert_eq!(
+                report.producing_core_version,
+                graphforge_core::manifest::GRAPHFORGE_VERSION
+            );
+        }
+
+        // The declaration is inside `package_digest`: relabel the producer, keep
+        // the original `package_digest`, and refresh every outer BagIt checksum so
+        // only the package digest can refuse the package.
+        let mut forged = manifest;
+        forged["producing_core_version"] = serde_json::json!("0.0.1");
+        let forged_bytes = serde_json::to_vec(&forged).unwrap();
+        std::fs::write(&manifest_path, &forged_bytes).unwrap();
+        let sha = |bytes: &[u8]| {
+            use sha2::Digest as _;
+            let digest = sha2::Sha256::digest(bytes);
+            digest
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        };
+        let data_manifest_path = expanded.join("manifest-sha256.txt");
+        let data_manifest = std::fs::read_to_string(&data_manifest_path)
+            .unwrap()
+            .lines()
+            .map(|line| match line.split_once("  ") {
+                Some((_, "data/graphforge-project.json")) => {
+                    format!("{}  data/graphforge-project.json\n", sha(&forged_bytes))
+                }
+                _ => format!("{line}\n"),
+            })
+            .collect::<String>();
+        std::fs::write(&data_manifest_path, &data_manifest).unwrap();
+        let tag_manifest_path = expanded.join("tagmanifest-sha256.txt");
+        let tag_manifest = std::fs::read_to_string(&tag_manifest_path)
+            .unwrap()
+            .lines()
+            .map(|line| match line.split_once("  ") {
+                Some((_, "manifest-sha256.txt")) => {
+                    format!("{}  manifest-sha256.txt\n", sha(data_manifest.as_bytes()))
+                }
+                _ => format!("{line}\n"),
+            })
+            .collect::<String>();
+        std::fs::write(&tag_manifest_path, tag_manifest).unwrap();
+        let error = verify_portable(
+            &PortableVerifyRequest {
+                input: expanded,
+                mode: graphforge_core::portable::PortableMode::StructureOnly,
+                limits,
+            },
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.code,
+            graphforge_core::portable::PortableErrorCode::DigestMismatch
+        );
+        assert_eq!(error.entry.as_deref(), Some("data/graphforge-project.json"));
+        assert_eq!(error.to_string(), "portable DigestMismatch: package digest");
     }
 
     #[test]

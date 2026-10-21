@@ -15,6 +15,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::AtomicBool;
 use unicode_normalization::UnicodeNormalization;
 
+/// Longest `producing_core_version` a manifest may declare.
+pub(super) const MAX_PRODUCING_CORE_VERSION_BYTES: usize = 128;
+
 pub(super) fn admit_composition_features(bytes: &[u8]) -> Result<(), PortableError> {
     let control: PortableOntologyComposition = serde_json::from_slice(bytes).map_err(|_| {
         PortableError::at(
@@ -236,6 +239,7 @@ pub(super) fn validate_semantics(
         last = Some(key);
         if !valid_kind(&c.kind)
             || !valid_id(&c.participant_id)
+            || super::research::is_reserved_directory(&c.participant_id)
             || !ids.insert(c.participant_id.as_str())
         {
             return Err(PortableError::new(
@@ -299,6 +303,7 @@ pub(super) fn validate_semantics(
             "unknown selection root",
         ));
     }
+    m.producing_core_version()?;
     let generation = uuid::Uuid::parse_str(&m.source_generation.generation_uuid).map_err(|_| {
         PortableError::new(PortableErrorCode::Incompatible, "source generation UUID")
     })?;
@@ -865,22 +870,49 @@ fn validate_participant_placement(
         &participant.record_family_id,
     );
     let directory = format!("data/components/{kind}/{}/", participant.participant_id);
+    let component = manifest
+        .components
+        .iter()
+        .find(|component| component.participant_id == participant.participant_id);
+    // The entry named is the offending file when there is one, else the map.
+    let misplaced = component.and_then(|component| {
+        component
+            .files
+            .iter()
+            .find(|file| !file.path.starts_with(&directory))
+            .map(|file| Some(file.path.as_str()))
+            .or_else(|| (component.kind != kind).then_some(None))
+    });
+    if let Some(entry) = misplaced {
+        return Err(PortableError::at(
+            PortableErrorCode::InvalidStructure,
+            entry.unwrap_or(RUNTIME_MAP_PATH),
+            "runtime participant outside its component kind",
+        ));
+    }
+    Ok(())
+}
+
+/// The graph tree component's files all sit under `data/components/graph-data/graph-tree/`,
+/// the one directory import opens as a graph tree (`package_graph_tree`). The
+/// graph tree is decoded, so a file of it declared anywhere else, an exempt
+/// directory included, would reach a decoder unwalked.
+fn validate_graph_tree_placement(
+    component_id: &str,
+    manifest: &Manifest,
+) -> Result<(), PortableError> {
+    const GRAPH_TREE: &str = "data/components/graph-data/graph-tree/";
     let misplaced = manifest
         .components
         .iter()
-        .filter(|component| component.participant_id == participant.participant_id)
-        .any(|component| {
-            component.kind != kind
-                || component
-                    .files
-                    .iter()
-                    .any(|file| !file.path.starts_with(&directory))
-        });
-    if misplaced {
+        .filter(|component| component.participant_id == component_id)
+        .flat_map(|component| &component.files)
+        .find(|file| !file.path.starts_with(GRAPH_TREE));
+    if let Some(file) = misplaced {
         return Err(PortableError::at(
             PortableErrorCode::InvalidStructure,
-            RUNTIME_MAP_PATH,
-            "runtime participant outside its component kind",
+            &file.path,
+            "graph tree file outside the graph tree directory",
         ));
     }
     Ok(())
@@ -900,6 +932,9 @@ fn validate_runtime_map_contents(
     // that reads its payload's meaning (research included).
     for participant in &runtime.participants {
         validate_participant_placement(participant, manifest)?;
+    }
+    if let Some(graph) = &runtime.graph_tree {
+        validate_graph_tree_placement(&graph.component_id, manifest)?;
     }
     validate_research_runtime(runtime, manifest)?;
     let mut prior = None;

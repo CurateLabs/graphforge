@@ -180,14 +180,15 @@ pub(crate) fn assert_pool_bounds_retention(bytes: &[u8]) {
 fn a_package_without_research_files_writes_no_stage() {
     let scratch = tempfile::tempdir().unwrap();
     let mut source = Cursor::new(ontology_only_bundle());
-    let scan = scan_stream(
+    let report = super::research::stream::scan_stream(
         &mut source,
         PortableLimits::default(),
         None,
         Some(scratch.path()),
+        None,
     )
     .unwrap();
-    assert!(!scan.report.research_interchange);
+    assert!(!report.research_interchange);
     let staged = fs::read_dir(scratch.path())
         .unwrap()
         .map(|entry| entry.unwrap().path())
