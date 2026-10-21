@@ -19,9 +19,11 @@ mod participant_files;
 pub(crate) mod pax;
 pub use participant_files::{PortableFileRef, PortablePackageIndex};
 mod import_footprint;
+mod manifest;
 pub(crate) mod research;
 use import_footprint::footprint_of_manifest;
 pub use import_footprint::portable_import_footprint;
+use manifest::{Manifest, ManifestComponent, ManifestFile};
 mod semantic_validation;
 pub(crate) use semantic_validation::decode_runtime_map;
 use semantic_validation::{
@@ -56,54 +58,6 @@ pub use graphforge_core::portable::*;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Manifest {
-    format: String,
-    package_digest: String,
-    package_class: String,
-    source_generation: SourceGeneration,
-    selection: Selection,
-    components: Vec<ManifestComponent>,
-    requirements: Requirements,
-    states: States,
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct SourceGeneration {
-    generation_uuid: String,
-    manifest_sha256: String,
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Selection {
-    roots: Vec<String>,
-    omissions: Vec<String>,
-    redactions: Vec<String>,
-    graph_subset: Option<GraphSubset>,
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct GraphSubset {
-    selector: String,
-    closure: String,
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ManifestComponent {
-    kind: String,
-    participant_id: String,
-    required_dependencies: Vec<String>,
-    files: Vec<ManifestFile>,
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ManifestFile {
-    media_type: String,
-    path: String,
-    length: u64,
-    sha256: String,
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 pub(crate) struct RuntimeGenerationMap {
     pub(crate) contract: String,
     pub(crate) capabilities: Vec<RuntimeCapability>,
@@ -133,19 +87,6 @@ pub(crate) struct RuntimeParticipant {
 pub(crate) struct RuntimeGraphTree {
     pub(crate) component_id: String,
     pub(crate) inventory_participant_id: String,
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Requirements {
-    capabilities: Vec<String>,
-    dependency_rule: String,
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct States {
-    integrity: String,
-    compatibility: String,
-    authenticity: String,
 }
 
 struct Entry {
@@ -1263,6 +1204,7 @@ fn validate_package(
         source,
         package_digest: manifest.package_digest.clone(),
         package_class: package_class(&manifest.package_class)?,
+        producing_core_version: manifest.producing_core_version()?.to_owned(),
         component_count: manifest.components.len() as u64,
         entry_count: entries.len() as u64,
         payload_bytes: entries.iter().map(|e| e.length).sum(),
@@ -2287,7 +2229,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             full.package_digest,
-            "sha256:869da25f99c90864c321bf8c42aa3f1f3642c877b92bc34255c900d3083a525d"
+            "sha256:c20ff8c5533161824e2e7b7c296b166151e4fb2688636031cdae20b1c39c58b3"
         );
         assert_eq!(full.integrity, PortableIntegrity::Verified);
         assert_eq!(structure.integrity, PortableIntegrity::NotChecked);

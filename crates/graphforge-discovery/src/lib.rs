@@ -273,7 +273,7 @@ pub struct ProtocolVersion {
 
 impl ProtocolVersion {
     /// Version implemented by this crate.
-    pub const CURRENT: Self = Self { major: 1, minor: 1 };
+    pub const CURRENT: Self = Self { major: 1, minor: 2 };
 
     fn validate(self) -> Result<(), DiscoveryError> {
         if self.major != Self::CURRENT.major {
@@ -351,6 +351,9 @@ pub struct PortablePackageReference {
     pub format: String,
     /// Portable semantic package identity, distinct from transport/object identities.
     pub package_digest: Sha256Digest,
+    /// Exact GraphForge Core version that produced the package. An opaque exact
+    /// label: readers compare it for equality and never order or parse it.
+    pub producing_core_version: String,
     /// Transport object digest selecting exactly one entry from `objects`.
     ///
     /// This is the digest of downloaded bytes, not the semantic portable
@@ -443,7 +446,7 @@ pub struct OntologyInventory {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProjectSummaryReference {
-    /// Must be [`PROJECT_SUMMARY_FORMAT`] in discovery v1.1.
+    /// Must be [`PROJECT_SUMMARY_FORMAT`] in discovery v1.2.
     pub format: String,
     /// Canonical digest of the summary document (semantic identity).
     pub summary_digest: Sha256Digest,
@@ -556,6 +559,11 @@ impl DiscoveryManifest {
             );
         }
         self.package.package_digest.validate()?;
+        check_core_version(
+            &self.package.producing_core_version,
+            "package.producing_core_version",
+            limits,
+        )?;
         self.package.object_digest.validate()?;
         validate_semantics(
             &self.requirements,
@@ -690,6 +698,11 @@ impl DiscoveryManifest {
             });
         }
         package.package_digest.validate()?;
+        check_core_version(
+            &package.producing_core_version,
+            "ontology.modules.package.producing_core_version",
+            limits,
+        )?;
         package.object_digest.validate()?;
         // `validate_objects` has already proven the inventory strictly
         // ascending by digest, so each module lookup is a binary search rather
@@ -851,6 +864,9 @@ impl DiscoveryManifest {
         }
         if summary.package.package_digest != self.package.package_digest {
             return Err(mismatch("summary.package.package_digest"));
+        }
+        if summary.package.producing_core_version != self.package.producing_core_version {
+            return Err(mismatch("summary.package.producing_core_version"));
         }
         if summary.canonical_digest()? != reference.summary_digest {
             return Err(mismatch("summary.summary_digest"));
@@ -1330,6 +1346,24 @@ fn check_identity_text(
     check_string(version, field, limits)
 }
 
+/// Bound a producing Core version label. It is opaque: no syntax beyond a
+/// non-empty, bounded, control-free string is imposed on the wire.
+pub(crate) fn check_core_version(
+    value: &str,
+    field: &'static str,
+    limits: DiscoveryLimits,
+) -> Result<(), DiscoveryError> {
+    check_string(value, field, limits)?;
+    if value.chars().any(char::is_control) {
+        return Err(DiscoveryError::new(
+            DiscoveryErrorCode::MalformedResponse,
+            Some(field),
+            "producing core version contains control characters",
+        ));
+    }
+    Ok(())
+}
+
 fn check_capability_name(value: &str, limits: DiscoveryLimits) -> Result<(), DiscoveryError> {
     check_string(value, "capability", limits)?;
     if !valid_slug(value, 128) {
@@ -1682,6 +1716,7 @@ mod tests {
             package: PortablePackageReference {
                 format: PORTABLE_FORMAT.to_owned(),
                 package_digest: digest('b'),
+                producing_core_version: "0.6.0".to_owned(),
                 object_digest: digest('c'),
             },
             requirements: vec![ProtocolRequirement {

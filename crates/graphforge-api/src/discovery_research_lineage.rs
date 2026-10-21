@@ -183,7 +183,7 @@ pub fn build_research_lineage_from_registry(
 
     let lineage = ResearchLineage {
         format: RESEARCH_LINEAGE_FORMAT.into(),
-        version: ProtocolVersion { major: 1, minor: 1 },
+        version: ProtocolVersion::CURRENT,
         repository: request.repository.clone(),
         immutable_version: request.immutable_version.clone(),
         project_uuid: request.project_uuid.to_string(),
@@ -303,6 +303,7 @@ mod tests {
         PortablePackageReference {
             format: PORTABLE_FORMAT.into(),
             package_digest: Sha256Digest(package_digest.into()),
+            producing_core_version: "0.6.0".into(),
             object_digest: Sha256Digest(object_digest.into()),
         }
     }

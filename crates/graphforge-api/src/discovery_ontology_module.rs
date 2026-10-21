@@ -102,6 +102,11 @@ pub fn resolve_discovered_ontology_module(
             DiscoveryPortableMismatch::PackageDigest,
         ));
     }
+    if report.producing_core_version != advertised.producing_core_version {
+        return Err(DiscoveryPortableError::ReferenceMismatch(
+            DiscoveryPortableMismatch::ProducingCoreVersion,
+        ));
+    }
 
     let module = request.module;
     let identity_matches = |id: &str, version: &str, content_digest: &str| {

@@ -23,6 +23,9 @@ pub enum DiscoveryPortableMismatch {
     ImmutableVersion,
     /// The verified portable package digest differs from the discovery reference.
     PackageDigest,
+    /// The verified package declares a different producing Core version than the
+    /// discovery reference advertises.
+    ProducingCoreVersion,
     /// The verified package does not carry the requested exact ontology module.
     ModuleIdentity,
     /// The module document's recomputed canonical digest differs from its identity.
@@ -154,6 +157,11 @@ pub fn verify_discovered_portable(
     if report.package_digest != manifest.package.package_digest.0 {
         return Err(DiscoveryPortableError::ReferenceMismatch(
             DiscoveryPortableMismatch::PackageDigest,
+        ));
+    }
+    if report.producing_core_version != manifest.package.producing_core_version {
+        return Err(DiscoveryPortableError::ReferenceMismatch(
+            DiscoveryPortableMismatch::ProducingCoreVersion,
         ));
     }
     Ok(DiscoveredPortable {

@@ -42,6 +42,11 @@ URL with a public host, no query or fragment, and a trailing `/`. Check mode
 rejects a different base or a changed location, even if the manifest digest is
 recomputed. No flags still checks the production fixture at the default base.
 
+The source, bundle, summary and manifest each declare the Core version that built
+them (`producing_core_version`, from `graphforge_core::manifest::GRAPHFORGE_VERSION`),
+so any change of the workspace version requires `--rebuild-source` followed by
+`--update` and regenerated receipts. Never edit the version by hand.
+
 After the artifacts change, regenerate the shared verification receipts as
 described in `tests/fixtures/portable/README.md`.
 

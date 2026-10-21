@@ -15,6 +15,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::AtomicBool;
 use unicode_normalization::UnicodeNormalization;
 
+/// Longest `producing_core_version` a manifest may declare.
+pub(super) const MAX_PRODUCING_CORE_VERSION_BYTES: usize = 128;
+
 pub(super) fn admit_composition_features(bytes: &[u8]) -> Result<(), PortableError> {
     let control: PortableOntologyComposition = serde_json::from_slice(bytes).map_err(|_| {
         PortableError::at(
@@ -299,6 +302,7 @@ pub(super) fn validate_semantics(
             "unknown selection root",
         ));
     }
+    m.producing_core_version()?;
     let generation = uuid::Uuid::parse_str(&m.source_generation.generation_uuid).map_err(|_| {
         PortableError::new(PortableErrorCode::Incompatible, "source generation UUID")
     })?;
