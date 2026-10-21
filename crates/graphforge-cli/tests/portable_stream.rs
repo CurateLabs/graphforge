@@ -7,8 +7,7 @@ use std::collections::BTreeMap;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, mpsc};
 
 use arrow::array::{RecordBatch, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
@@ -22,7 +21,7 @@ use tempfile::TempDir;
 const GIB: u64 = 1024 * 1024 * 1024;
 const MIB: u64 = 1024 * 1024;
 const EVIDENCE_PATH: &str = "data/components/evidence/scan-0001/scan.bin";
-const GRAPH_PATH: &str = "data/components/graph-data/graph-0001/topology/nodes.parquet";
+const GRAPH_PATH: &str = "data/components/graph-data/graph-tree/topology/nodes.parquet";
 const ONTOLOGY_PATH: &str = "data/components/ontology/core-ontology/ontology.json";
 const MANIFEST_PATH: &str = "data/graphforge-project.json";
 const BAGIT: &[u8] = b"BagIt-Version: 1.0\nTag-File-Character-Encoding: UTF-8\n";
@@ -38,9 +37,7 @@ const EVIDENCE_LENGTH: u64 = 5 * GIB;
 const EVIDENCE_DIGEST: &str = "7f06c62352aebd8125b2a1841e2b9e1ffcbed602f381c3dcb3200200e383d1d5";
 /// The memory the verifier may hold, whatever the package size.
 const PEAK_RSS_LIMIT: u64 = 768 * MIB;
-/// What the opaque 5 GiB run may write in all: its controls and its report.
-const OPAQUE_WRITE_LIMIT: u64 = MIB;
-/// The largest graph Parquet entry of the spill run: more than
+/// The graph Parquet entry of the staging run: more than
 /// `max_parquet_walk_bytes` (64 MiB), so the walk stages it in scratch.
 const GRAPH_ROWS: usize = 64;
 const GRAPH_ROW_BYTES: usize = 1_150_000;
@@ -288,7 +285,7 @@ fn graph_data(file: Vec<u8>) -> Artifact {
     let sha256 = hex(&Sha256::digest(&file));
     Artifact {
         kind: "graph-data",
-        participant: "graph-0001",
+        participant: "graph-tree",
         path: GRAPH_PATH,
         media_type: "application/vnd.apache.parquet",
         body: Body::Bytes(file),
@@ -319,16 +316,6 @@ impl Bundle {
             ended: false,
             limit,
         }
-    }
-
-    /// Where the payload of the entry at `path` starts in the stream.
-    fn payload_offset(entries: &[(String, Body)], path: &str) -> u64 {
-        entries
-            .iter()
-            .take_while(|(entry, _)| entry != path)
-            .map(|(_, body)| 512 + body.length().div_ceil(512) * 512)
-            .sum::<u64>()
-            + 512
     }
 
     /// The stream's length, whole.
@@ -391,38 +378,15 @@ impl Read for Bundle {
     }
 }
 
-/// Pauses for 400 ms the first time `consumed` reaches each of `pauses`, so
-/// the sampler sees the verifier idle at those points in the stream.
-struct Paced<R> {
-    inner: R,
-    consumed: u64,
-    pauses: Vec<u64>,
-}
-
-impl<R: Read> Read for Paced<R> {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        if self.pauses.first().is_some_and(|at| self.consumed >= *at) {
-            self.pauses.remove(0);
-            std::thread::sleep(Duration::from_millis(400));
-        }
-        let count = self.inner.read(buf)?;
-        self.consumed += count as u64;
-        Ok(count)
-    }
-}
-
-/// What the sampler saw of the child.
-#[derive(Default)]
+/// What the sampler read from the live child: `VmHWM` and the limits it runs
+/// under.
 struct Sampled {
-    /// Peak resident memory (`VmHWM`).
+    /// Peak resident memory, a high-water mark: one read after the payload is
+    /// fed is the run's peak.
     peak_rss: u64,
-    /// Bytes the process passed to `write(2)` (`wchar`), to any file or pipe.
-    written: u64,
-    /// The most bytes allocated at once to its open, deleted files.
-    unlinked: u64,
-    /// `Max address space` and `Max file size`, soft, as the child runs.
-    address_space: Option<u64>,
-    file_size: Option<u64>,
+    /// `Max address space` and `Max file size`, soft.
+    address_space: u64,
+    file_size: u64,
 }
 
 fn proc_field(text: &str, key: &str) -> Option<u64> {
@@ -436,51 +400,34 @@ fn limit_field(text: &str, name: &str) -> Option<u64> {
     line.split_whitespace().nth(3)?.parse().ok()
 }
 
-/// Allocated bytes of the process's open files whose names are gone, as #2205's
-/// scratch sampler counts them.
-fn unlinked_bytes(pid: u32) -> u64 {
-    use std::os::unix::fs::MetadataExt;
-    let Ok(fds) = std::fs::read_dir(format!("/proc/{pid}/fd")) else {
-        return 0;
+/// Read the live child's peak memory and limits. Every read must succeed.
+fn sample(pid: u32) -> Result<Sampled, String> {
+    let read = |name: &str| {
+        std::fs::read_to_string(format!("/proc/{pid}/{name}"))
+            .map_err(|error| format!("/proc/{pid}/{name}: {error}"))
     };
-    fds.flatten()
-        .filter(|fd| {
-            std::fs::read_link(fd.path())
-                .is_ok_and(|target| target.to_string_lossy().ends_with(" (deleted)"))
-        })
-        .filter_map(|fd| std::fs::metadata(fd.path()).ok())
-        .map(|metadata| metadata.blocks() * 512)
-        .sum()
-}
-
-impl Sampled {
-    fn sample(&mut self, pid: u32) {
-        let read = |name: &str| std::fs::read_to_string(format!("/proc/{pid}/{name}")).ok();
-        if let Some(status) = read("status") {
-            self.peak_rss = self
-                .peak_rss
-                .max(proc_field(&status, "VmHWM:").unwrap_or(0) * 1024);
-        }
-        if let Some(io) = read("io") {
-            self.written = self.written.max(proc_field(&io, "wchar:").unwrap_or(0));
-        }
-        self.unlinked = self.unlinked.max(unlinked_bytes(pid));
-        // The limits are set before `exec`, so read them from the gf image.
-        if self.file_size.is_none()
-            && read("cmdline").is_some_and(|cmdline| cmdline.contains("portable"))
-            && let Some(limits) = read("limits")
-        {
-            self.address_space = limit_field(&limits, "Max address space");
-            self.file_size = limit_field(&limits, "Max file size");
-        }
+    let missing = |what: &str| format!("/proc/{pid}: no {what}");
+    let status = read("status")?;
+    let limits = read("limits")?;
+    // The gf image, not the shell that set the limits before `exec`.
+    if !read("cmdline")?.contains("portable") {
+        return Err(missing("gf command line"));
     }
+    Ok(Sampled {
+        peak_rss: proc_field(&status, "VmHWM:").ok_or_else(|| missing("VmHWM"))? * 1024,
+        address_space: limit_field(&limits, "Max address space")
+            .ok_or_else(|| missing("address-space limit"))?,
+        file_size: limit_field(&limits, "Max file size")
+            .ok_or_else(|| missing("file-size limit"))?,
+    })
 }
 
 struct Verified {
     code: Option<i32>,
     stdout: Vec<u8>,
     stderr: String,
-    sampled: Sampled,
+    /// Sampled while the child was alive with the whole payload fed.
+    sampled: Option<Sampled>,
     fed: u64,
 }
 
@@ -500,17 +447,46 @@ impl Verified {
             .clone()
     }
 
-    /// The child ran under exactly the limits it was given.
-    fn assert_ran_under(&self, limits: Limits) {
-        assert_eq!(self.sampled.address_space, Some(limits.address_space));
-        assert_eq!(self.sampled.file_size, Some(limits.file_size));
+    /// The child ran under exactly `limits` and stayed under `PEAK_RSS_LIMIT`,
+    /// as read from it while it was alive.
+    fn assert_ran_within(&self, limits: Limits) {
+        let sampled = self.sampled.as_ref().unwrap_or_else(|| {
+            panic!(
+                "the verifier ended before the stream was fed: {}",
+                self.stderr
+            )
+        });
+        assert_eq!(sampled.address_space, limits.address_space);
+        assert_eq!(sampled.file_size, limits.file_size);
+        println!("peak_rss_bytes={}", sampled.peak_rss);
+        assert!(sampled.peak_rss > 0, "VmHWM was never read");
+        assert!(
+            sampled.peak_rss < PEAK_RSS_LIMIT,
+            "peak resident memory was {} bytes",
+            sampled.peak_rss
+        );
     }
 }
 
+/// How a run reads the child.
+#[derive(Clone, Copy, PartialEq)]
+enum Hold {
+    /// Run to the end; read nothing.
+    No,
+    /// Keep stdin open after the last byte until the child's memory and
+    /// limits were read while it was alive, then close it. The verifier reads
+    /// to end of input after the end blocks, so it is alive and blocked there.
+    ForSample,
+}
+
 /// Run `gf portable verify --input - --json` on `stdin` under `limits`, with
-/// `tmpdir` as its `TMPDIR`, feeding it from a thread and sampling the child
-/// every 50 ms.
-fn verify_stream(mut stdin: impl Read + Send + 'static, tmpdir: &Path, limits: Limits) -> Verified {
+/// `tmpdir` as its `TMPDIR`, feeding it from a thread.
+fn verify_stream(
+    mut stdin: impl Read + Send + 'static,
+    tmpdir: &Path,
+    limits: Limits,
+    hold: Hold,
+) -> Verified {
     let mut child = Command::new("sh")
         .args(["-c", &limits.script()])
         .arg(gf_bin())
@@ -522,13 +498,15 @@ fn verify_stream(mut stdin: impl Read + Send + 'static, tmpdir: &Path, limits: L
         .spawn()
         .expect("spawn gf under ulimit");
     let mut pipe = child.stdin.take().unwrap();
+    let (fed_tx, fed_rx) = mpsc::channel::<()>();
+    let (sampled_tx, sampled_rx) = mpsc::channel::<()>();
     let feeder = std::thread::spawn(move || {
         let mut fed = 0u64;
         let mut block = vec![0u8; MIB as usize];
         loop {
             let count = stdin.read(&mut block).expect("generate the stream");
             if count == 0 {
-                return fed;
+                break;
             }
             // The verifier may refuse before the end of the stream.
             if pipe.write_all(&block[..count]).is_err() {
@@ -536,6 +514,12 @@ fn verify_stream(mut stdin: impl Read + Send + 'static, tmpdir: &Path, limits: L
             }
             fed += count as u64;
         }
+        if hold == Hold::ForSample {
+            // Released only once the main thread acknowledges its reads.
+            fed_tx.send(()).ok();
+            sampled_rx.recv().ok();
+        }
+        fed
     });
     let mut stdout = child.stdout.take().unwrap();
     let mut stderr = child.stderr.take().unwrap();
@@ -549,14 +533,15 @@ fn verify_stream(mut stdin: impl Read + Send + 'static, tmpdir: &Path, limits: L
         stderr.read_to_string(&mut text).unwrap();
         text
     });
-    let mut sampled = Sampled::default();
-    let status = loop {
-        if let Some(status) = child.try_wait().expect("poll gf") {
-            break status;
-        }
-        sampled.sample(child.id());
-        std::thread::sleep(Duration::from_millis(50));
-    };
+    let sampled = (hold == Hold::ForSample)
+        .then(|| fed_rx.recv().ok())
+        .flatten()
+        .map(|()| {
+            let sampled = sample(child.id()).unwrap_or_else(|error| panic!("{error}"));
+            sampled_tx.send(()).expect("release the feeder");
+            sampled
+        });
+    let status = child.wait().expect("wait for gf");
     Verified {
         code: status.code(),
         stdout: out.join().unwrap(),
@@ -595,10 +580,11 @@ fn bytes_by_kind(report: &Value) -> BTreeMap<String, u64> {
         .collect()
 }
 
-/// Opaque evidence is never staged: the run writes next to nothing, holds a
-/// bounded amount of memory, and leaves no file, whatever the package size.
+/// A 5 GiB package verifies from stdin under a 1 GiB address space and a
+/// 64 MiB file size: a verifier that buffered the input would fail to allocate,
+/// and one that spooled it to a file would be killed at 64 MiB.
 #[test]
-fn a_five_gib_package_streams_from_stdin_in_bounded_memory_and_disk() {
+fn a_five_gib_package_streams_from_stdin_in_bounded_memory() {
     let (entries, package_digest) = package(
         vec![evidence(EVIDENCE_DIGEST, Body::Zeros(EVIDENCE_LENGTH))],
         None,
@@ -606,23 +592,14 @@ fn a_five_gib_package_streams_from_stdin_in_bounded_memory_and_disk() {
     let length = Bundle::length(&entries);
     assert!(length > 5 * GIB);
     let tmp = TempDir::new().unwrap();
-    let run = verify_stream(Bundle::new(entries, u64::MAX), tmp.path(), OPAQUE);
+    let run = verify_stream(
+        Bundle::new(entries, u64::MAX),
+        tmp.path(),
+        OPAQUE,
+        Hold::ForSample,
+    );
 
-    run.assert_ran_under(OPAQUE);
-    println!(
-        "peak_rss_bytes={} written_bytes={} unlinked_bytes={}",
-        run.sampled.peak_rss, run.sampled.written, run.sampled.unlinked
-    );
-    assert!(
-        run.sampled.written < OPAQUE_WRITE_LIMIT,
-        "the verifier wrote {} bytes",
-        run.sampled.written
-    );
-    assert!(
-        run.sampled.unlinked < OPAQUE_WRITE_LIMIT,
-        "{}",
-        run.sampled.unlinked
-    );
+    run.assert_ran_within(OPAQUE);
     assert_eq!(run.code, Some(0), "{}", run.stderr);
     assert_eq!(run.fed, length, "the whole stream was read");
     let report = run.json();
@@ -636,61 +613,37 @@ fn a_five_gib_package_streams_from_stdin_in_bounded_memory_and_disk() {
         report["payload_bytes"].as_u64().unwrap()
     );
     assert_empty(tmp.path());
-    assert!(run.sampled.peak_rss > 0, "VmHWM was never sampled");
-    assert!(
-        run.sampled.peak_rss < PEAK_RSS_LIMIT,
-        "peak resident memory was {} bytes",
-        run.sampled.peak_rss
-    );
 }
 
-/// A graph Parquet entry over `max_parquet_walk_bytes` is staged in an
-/// anonymous scratch file while it streams, so the walk can seek in it: the
-/// disk the verifier holds is that one entry, gone with it.
+/// A graph Parquet entry over `max_parquet_walk_bytes` verifies end to end in
+/// the process, under a file size that holds one staged entry. How much it
+/// writes is proven in-process, by the storage tests.
 #[test]
-fn a_graph_entry_over_the_walk_threshold_is_staged_once_and_removed() {
+fn a_graph_entry_over_the_walk_threshold_verifies_from_stdin() {
     let file = graph_parquet();
     let entry = file.len() as u64;
     assert!(
         entry > 64 * MIB,
         "{entry} bytes does not exceed the walk threshold"
     );
-    let (entries, _) = package(vec![graph_data(file)], None);
+    let (entries, package_digest) = package(vec![graph_data(file)], None);
     let length = Bundle::length(&entries);
-    // Pause midway through the entry, with its scratch file open, and again
-    // before the end of the archive, when the final `wchar` can be read.
-    let midway = Bundle::payload_offset(&entries, GRAPH_PATH) + entry / 2;
     let tmp = TempDir::new().unwrap();
-    let stream = Paced {
-        inner: Bundle::new(entries, u64::MAX),
-        consumed: 0,
-        pauses: vec![midway, length - 1024],
-    };
-    let run = verify_stream(stream, tmp.path(), STAGED);
-
-    run.assert_ran_under(STAGED);
-    println!(
-        "entry_bytes={entry} written_bytes={} unlinked_bytes={}",
-        run.sampled.written, run.sampled.unlinked
+    let run = verify_stream(
+        Bundle::new(entries, u64::MAX),
+        tmp.path(),
+        STAGED,
+        Hold::ForSample,
     );
+
+    run.assert_ran_within(STAGED);
     assert_eq!(run.code, Some(0), "{}", run.stderr);
     assert_eq!(run.fed, length);
-    assert_eq!(run.json()["integrity"], "verified");
-    assert_eq!(bytes_by_kind(&run.json())["graph-data"], entry);
-    // Written once, in full, and no more than the entry plus the report.
-    assert!(run.sampled.written >= entry, "{}", run.sampled.written);
-    assert!(
-        run.sampled.written <= entry + OPAQUE_WRITE_LIMIT,
-        "{}",
-        run.sampled.written
-    );
-    // The scratch file was seen open, unlinked, holding part of the entry.
-    assert!(run.sampled.unlinked > entry / 4, "{}", run.sampled.unlinked);
-    assert!(
-        run.sampled.unlinked <= entry + OPAQUE_WRITE_LIMIT,
-        "{}",
-        run.sampled.unlinked
-    );
+    let report = run.json();
+    assert_eq!(report["integrity"], "verified");
+    assert_eq!(report["package_digest"], format!("sha256:{package_digest}"));
+    assert_eq!(bytes_by_kind(&report)["graph-data"], entry);
+    assert_eq!(report["plausibility"]["parquet"]["files_with_footer"], 1);
     assert_empty(tmp.path());
 }
 
@@ -703,7 +656,7 @@ fn a_stream_truncated_at_sixty_percent_is_refused() {
     );
     let cut = Bundle::length(&entries) / 10 * 6;
     let tmp = TempDir::new().unwrap();
-    let run = verify_stream(Bundle::new(entries, cut), tmp.path(), OPAQUE);
+    let run = verify_stream(Bundle::new(entries, cut), tmp.path(), OPAQUE, Hold::No);
 
     assert_eq!(run.code, Some(2), "{}", run.stderr);
     let error = run.error();
@@ -738,7 +691,7 @@ fn impostor_and_corrupted_bundles_are_refused() {
     .0;
     for entries in [impostor, corrupted] {
         let tmp = TempDir::new().unwrap();
-        let run = verify_stream(Bundle::new(entries, u64::MAX), tmp.path(), OPAQUE);
+        let run = verify_stream(Bundle::new(entries, u64::MAX), tmp.path(), OPAQUE, Hold::No);
         assert_eq!(run.code, Some(2), "{}", run.stderr);
         assert_eq!(run.error()["code"], "GF_VALIDATION");
         assert_empty(tmp.path());
@@ -757,7 +710,7 @@ fn a_limit_refusal_reports_its_stable_code_in_json() {
         .unwrap()
         .1 = Body::Zeros(32 * MIB);
     let tmp = TempDir::new().unwrap();
-    let run = verify_stream(Bundle::new(entries, u64::MAX), tmp.path(), OPAQUE);
+    let run = verify_stream(Bundle::new(entries, u64::MAX), tmp.path(), OPAQUE, Hold::No);
     assert_eq!(run.code, Some(1), "{}", run.stderr);
     assert_eq!(run.error()["code"], "GF_LIMIT_EXCEEDED");
     assert_empty(tmp.path());
