@@ -95,15 +95,18 @@ Native query/selection and semantic-field preparation use 64 MiB working bounds;
 prepared immutable participant transfer is bounded to 256 MiB. Baseline reads
 preflight uncompressed Parquet and field allocation before decoding/expansion.
 These are bounded operations, not streaming arbitrary-sized whole-Project
-Branch creation. Native validation and export of a research Version are the
-exception: they stream every typed field once, decoding all of them, but retain
-only the keys the registry's accepted mappings name. They are bounded by the
-opened Version's private query pool (one decode batch) plus the registry, never
-a whole-graph field map, so a Version whose fields exceed the Branch field-map
-budget still verifies, exports, imports and clones. Owner-qualified property
-conflicts are checked for the retained keys only; Branch preparation, which
-holds the whole map, still refuses any conflict and keeps the 64 MiB working
-bound.
+Branch creation. Native validation of a research Version and the export-time
+comparison of its accepted mappings are the exception: they stream every typed
+field once, decoding all of them and checking owner conflicts across every key,
+but retain only the keys the registry's accepted mappings name. Their memory
+is the opened Version's private query pool (one decode batch), the registry,
+and a fixed bound on buffered owner-qualified keys (larger graphs are checked
+in hash partitions of the objects, rescanning per partition), never a
+whole-graph field map, so a Version whose fields exceed the Branch field-map
+budget still verifies, imports and clones. Exporting a Version that carries a
+selected acceptance mapping also prepares that mapping's proof source, which
+still reads that source's whole field map and keeps its 64 MiB size refusal.
+Branch preparation holds the whole map and keeps the 64 MiB working bound.
 Materializing a selected view can copy its selected closure;
 there is no zero-copy claim. The native retention regression grows unrelated
 parent content, measures selected payload and retained CAS after parent evolution

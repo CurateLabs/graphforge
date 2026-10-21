@@ -54,9 +54,9 @@ pub(crate) trait FieldSink {
     fn scanned(&mut self, scan: Scan, bytes: usize) -> Result<(), GfError>;
     /// Keys this sink retains; the knowledge-domain whole-map ceiling counts them.
     fn len(&self) -> usize;
-    /// Whether the sink needs this key's owner-qualified property value, so the
-    /// semantic scan buffers only what its owner-conflict check must compare.
-    fn wants(&self, key: &Key) -> bool;
+    /// Most owner-qualified keys the semantic scan may buffer at once to check
+    /// owner conflicts. `None` buffers them all, as the whole-map write paths do.
+    fn conflict_keys(&self) -> Option<usize>;
 }
 
 /// Whole-graph field map collector for Branch write paths, reproducing the
@@ -90,19 +90,24 @@ impl FieldSink for MapSink {
     fn len(&self) -> usize {
         self.fields.len()
     }
-    fn wants(&self, _key: &Key) -> bool {
-        true
+    fn conflict_keys(&self) -> Option<usize> {
+        None
     }
 }
+
+/// Owner-qualified keys a streaming lookup buffers at once to check owner
+/// conflicts across every key of the graph; larger graphs are checked in
+/// hash partitions of the objects.
+const OWNER_CONFLICT_KEYS: usize = 65_536;
 
 /// Streaming lookup of requested keys. Every other field is still decoded, so
 /// malformed values refuse as they do on the write paths, but only the
 /// requested keys are retained: memory is the request plus one engine batch,
 /// and scanned bytes are not charged separately because the opened view's
 /// private query pool already bounds every batch.
-struct KeySink<'a> {
-    wanted: &'a BTreeSet<Key>,
-    seen: BTreeMap<Key, [u8; 32]>,
+pub(super) struct KeySink<'a> {
+    pub(super) wanted: &'a BTreeSet<Key>,
+    pub(super) seen: BTreeMap<Key, [u8; 32]>,
 }
 impl FieldSink for KeySink<'_> {
     fn field(&mut self, key: Key, digest: [u8; 32]) -> Result<(), GfError> {
@@ -117,8 +122,8 @@ impl FieldSink for KeySink<'_> {
     fn len(&self) -> usize {
         self.seen.len()
     }
-    fn wants(&self, key: &Key) -> bool {
-        self.wanted.contains(key)
+    fn conflict_keys(&self) -> Option<usize> {
+        Some(OWNER_CONFLICT_KEYS)
     }
 }
 
@@ -489,7 +494,6 @@ mod tests {
         sink.field(key(1), [2; 32]).unwrap();
         sink.field(key(9), [3; 32]).unwrap();
         assert_eq!(sink.seen, BTreeMap::from([(key(1), [2; 32])]));
-        assert!(sink.wants(&key(2)) && !sink.wants(&key(9)));
 
         // Requesting only the repeated key is satisfied by the repeat.
         let wanted: BTreeSet<Key> = [key(1)].into();
