@@ -236,7 +236,7 @@ mod tests {
         ) {
             Ok(code) => (code == 0, output),
             Err(error) => {
-                crate::write_runtime_error(&error, true, &mut output).unwrap();
+                crate::write_runtime_error(&error, true, &mut output, &[]).unwrap();
                 (false, output)
             }
         }

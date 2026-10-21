@@ -106,8 +106,7 @@ fn a_failed_publish_still_carries_the_open_warning_in_its_one_error_document() {
     assert_eq!(failed.diagnostics_stderr, "");
 
     let mut rendered = Vec::new();
-    crate::write_runtime_error_with_warnings(&error.into(), true, &mut rendered, &failed.warnings)
-        .unwrap();
+    crate::write_runtime_error(&error.into(), true, &mut rendered, &failed.warnings).unwrap();
     let document: serde_json::Value = serde_json::from_slice(&rendered).unwrap();
     assert!(document["error"]["code"].is_string(), "{document}");
     assert_eq!(document["warnings"][0]["producing_core_version"], CORE_X);

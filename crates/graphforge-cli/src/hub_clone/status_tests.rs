@@ -111,7 +111,7 @@ impl Transport for Routed {
 /// Render `error` as the CLI does: the JSON error and the process exit code.
 fn rendered(error: graphforge_api::GfError) -> (serde_json::Value, i32) {
     let mut stderr = Vec::new();
-    crate::write_error(&error, true, &mut stderr).unwrap();
+    crate::write_error(&error, true, &mut stderr, &[]).unwrap();
     let exit = crate::error_exit_code(&crate::CliRuntimeError::Core(error));
     (serde_json::from_slice(&stderr).unwrap(), exit)
 }

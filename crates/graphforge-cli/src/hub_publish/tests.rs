@@ -570,7 +570,7 @@ fn run_publish_with_bypass(
     };
     match &result {
         Ok(outcome) => write_outcome(outcome, true, &mut stdout).unwrap(),
-        Err(error) => crate::write_error(error, true, &mut stderr).unwrap(),
+        Err(error) => crate::write_error(error, true, &mut stderr, &[]).unwrap(),
     }
     Run {
         result,
@@ -593,7 +593,7 @@ fn publish_ok(hub: &LoopbackHub, graph: &GraphForge, args: &PublishArgs) -> Run 
 
 fn error_code(error: &GfError) -> String {
     let mut rendered = Vec::new();
-    crate::write_error(error, true, &mut rendered).unwrap();
+    crate::write_error(error, true, &mut rendered, &[]).unwrap();
     let value: serde_json::Value = serde_json::from_slice(&rendered).unwrap();
     value["error"]["details"]["semantic_code"]
         .as_str()

@@ -78,7 +78,7 @@ impl<'a> WarningOutput<'a> {
     /// with the warnings; a failed one keeps its output as written, because its
     /// error document carries them.
     pub(crate) fn finish(
-        mut self,
+        self,
         succeeded: bool,
         diagnostics: &mut Diagnostics<'_>,
     ) -> io::Result<()> {
@@ -89,19 +89,18 @@ impl<'a> WarningOutput<'a> {
         let stamped = succeeded
             .then(|| stamp_warnings(&self.held, &warnings))
             .flatten();
-        match stamped {
-            Some(bytes) => self.inner.write_all(&bytes)?,
-            None => {
-                self.inner.write_all(&self.held)?;
-                if succeeded {
-                    // Output that is not a JSON document cannot carry them.
-                    for warning in &warnings {
-                        let _ = writeln!(
-                            diagnostics.sink,
-                            "warning {}: {}",
-                            warning.code, warning.message
-                        );
-                    }
+        if let Some(bytes) = stamped {
+            self.inner.write_all(&bytes)?;
+        } else {
+            self.inner.write_all(&self.held)?;
+            if succeeded {
+                // Output that is not a JSON document cannot carry them.
+                for warning in &warnings {
+                    let _ = writeln!(
+                        diagnostics.sink,
+                        "warning {}: {}",
+                        warning.code, warning.message
+                    );
                 }
             }
         }
@@ -134,7 +133,7 @@ impl Write for WarningOutput<'_> {
 fn stamp_warnings(held: &[u8], warnings: &[CoreVersionWarning]) -> Option<Vec<u8>> {
     let list = serde_json::to_value(warnings).ok()?;
     if let Ok(document) = serde_json::from_slice::<Value>(held) {
-        return encode(stamped(document, &list));
+        return encode(&stamped(document, &list));
     }
     let text = std::str::from_utf8(held).ok()?;
     let (first, rest) = text.split_once('\n')?;
@@ -142,7 +141,7 @@ fn stamp_warnings(held: &[u8], warnings: &[CoreVersionWarning]) -> Option<Vec<u8
     if !first.is_object() {
         return None;
     }
-    let mut bytes = encode(stamped(first, &list))?;
+    let mut bytes = encode(&stamped(first, &list))?;
     bytes.extend_from_slice(rest.as_bytes());
     Some(bytes)
 }
@@ -157,7 +156,7 @@ fn stamped(document: Value, list: &Value) -> Value {
     }
 }
 
-fn encode(document: Value) -> Option<Vec<u8>> {
+fn encode(document: &Value) -> Option<Vec<u8>> {
     let mut bytes = serde_json::to_vec(&document).ok()?;
     bytes.push(b'\n');
     Some(bytes)

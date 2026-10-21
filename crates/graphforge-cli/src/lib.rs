@@ -1076,9 +1076,9 @@ impl From<graphforge_api::MultiOntologyError> for CliRuntimeError {
     }
 }
 
-#[allow(clippy::too_many_lines)]
 use diagnostics::{Diagnostics, WarningOutput};
 
+#[allow(clippy::too_many_lines)]
 fn run(
     cli: Cli,
     output: &mut dyn Write,
@@ -1424,7 +1424,7 @@ where
     let exit_code = match result {
         Ok(exit_code) => exit_code,
         Err(error) => {
-            write_runtime_error_with_warnings(&error, json, &mut stderr, &warnings)
+            write_runtime_error(&error, json, &mut stderr, &warnings)
                 .expect("writing to Vec cannot fail");
             error_exit_code(&error)
         }
@@ -1437,14 +1437,6 @@ where
 }
 
 fn write_error(
-    error: &graphforge_api::GfError,
-    json: bool,
-    output: &mut dyn Write,
-) -> io::Result<()> {
-    write_error_with_warnings(error, json, output, &[])
-}
-
-fn write_error_with_warnings(
     error: &graphforge_api::GfError,
     json: bool,
     output: &mut dyn Write,
@@ -1467,23 +1459,15 @@ fn write_error_with_warnings(
     }
 }
 
-fn write_runtime_error(
-    error: &CliRuntimeError,
-    json: bool,
-    output: &mut dyn Write,
-) -> io::Result<()> {
-    write_runtime_error_with_warnings(error, json, output, &[])
-}
-
 /// The one error document, carrying the warnings raised before the failure.
-fn write_runtime_error_with_warnings(
+fn write_runtime_error(
     error: &CliRuntimeError,
     json: bool,
     output: &mut dyn Write,
     warnings: &[graphforge_api::CoreVersionWarning],
 ) -> io::Result<()> {
     match error {
-        CliRuntimeError::Core(error) => write_error_with_warnings(error, json, output, warnings),
+        CliRuntimeError::Core(error) => write_error(error, json, output, warnings),
         CliRuntimeError::MultiOntology(error) if json => {
             #[derive(serde::Serialize)]
             struct Envelope<'a> {
@@ -1670,7 +1654,7 @@ pub fn run_process() {
         Ok(_) => {}
         Err(error) => {
             let _ = output.flush();
-            write_runtime_error_with_warnings(&error, json, &mut stderr.lock(), &warnings)
+            write_runtime_error(&error, json, &mut stderr.lock(), &warnings)
                 .expect("write CLI stderr");
             std::process::exit(error_exit_code(&error));
         }
@@ -1927,7 +1911,7 @@ mod tests {
         for (error, code, kind, exit_code) in cases {
             let message = error.to_string();
             let mut output = Vec::new();
-            write_error(&error, true, &mut output).unwrap();
+            write_error(&error, true, &mut output, &[]).unwrap();
             let serialized = String::from_utf8(output.clone()).unwrap();
             assert!(
                 serialized.starts_with(&format!("{{\"error\":{{\"code\":\"{code}\",\"message\":"))
@@ -1952,7 +1936,7 @@ mod tests {
             "dependency.in_use: exact module has bounded dependants".into(),
         );
         let mut output = Vec::new();
-        write_error(&error, true, &mut output).unwrap();
+        write_error(&error, true, &mut output, &[]).unwrap();
         let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
         assert_eq!(
             value["error"]["details"]["semantic_code"],
@@ -2348,7 +2332,7 @@ mod tests {
         for (error, expected) in cases {
             assert_eq!(runtime_error_kind(&error), expected);
             let mut output = Vec::new();
-            write_error(&error, false, &mut output).unwrap();
+            write_error(&error, false, &mut output, &[]).unwrap();
             assert!(!output.is_empty());
             assert_eq!(error_exit_code(&CliRuntimeError::Core(error)), 1);
         }
