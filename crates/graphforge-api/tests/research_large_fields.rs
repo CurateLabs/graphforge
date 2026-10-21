@@ -108,24 +108,41 @@ fn branch_write_paths_keep_the_whole_map_field_bound() {
     let mut source = GraphForge::new(None).unwrap();
     ingest_large_workspace(&mut source);
     let error = source
-        .create_research_branch(
-            &CreateResearchBranchRequest {
-                author: None,
-                committer: None,
-                operation_uuid: Uuid::now_v7(),
-                expected_generation_uuid: current_generation(&source),
-                branch_uuid: Uuid::now_v7(),
-                version_uuid: Uuid::now_v7(),
-                source: BranchSource::Current {
-                    origin_version_uuid: Uuid::now_v7(),
-                    context_uuid: Uuid::now_v7(),
-                },
-                creator_uuid: Uuid::now_v7(),
-                created_at: 1,
-                label: "refused".into(),
-            },
-            &cancellation,
-        )
+        .create_research_branch(&large_branch_request(&source), &cancellation)
         .unwrap_err();
     assert_eq!(error.code(), "GF_RESOURCE_LIMIT");
+
+    // With small rows the whole-graph map reserve itself is the operative
+    // bound: 62 keys per node at 1,536 B each exceeds 64 MiB after about 700
+    // nodes while scanned Arrow bytes stay far below it.
+    let mut narrow = GraphForge::new(None).unwrap();
+    let properties = (0..60)
+        .map(|i| format!("p{i}: i"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    narrow
+        .execute(&format!(
+            "UNWIND range(1, 750) AS i CREATE (:Row {{{properties}}})"
+        ))
+        .unwrap();
+
+    assert_eq!(error.code(), "GF_RESOURCE_LIMIT");
+}
+
+fn large_branch_request(graph: &GraphForge) -> CreateResearchBranchRequest {
+    CreateResearchBranchRequest {
+        author: None,
+        committer: None,
+        operation_uuid: Uuid::now_v7(),
+        expected_generation_uuid: current_generation(graph),
+        branch_uuid: Uuid::now_v7(),
+        version_uuid: Uuid::now_v7(),
+        source: BranchSource::Current {
+            origin_version_uuid: Uuid::now_v7(),
+            context_uuid: Uuid::now_v7(),
+        },
+        creator_uuid: Uuid::now_v7(),
+        created_at: 1,
+        label: "refused".into(),
+    }
 }
