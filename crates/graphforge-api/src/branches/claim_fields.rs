@@ -1,14 +1,13 @@
 //! Include immutable knowledge changes in the existing typed Branch field baseline.
-use super::fields::{Fields, insert};
+use super::fields::{FieldSink, Objects};
 use crate::{CancellationToken, GfError, GraphForge, knowledge::knowledge_error};
 use arrow::array::FixedSizeBinaryArray;
 use uuid::Uuid;
 
 pub(super) fn read(
     graph: &GraphForge,
-    fields: &mut Fields,
-    bytes: &mut usize,
-    selected: Option<&super::fields::Objects>,
+    sink: &mut dyn FieldSink,
+    selected: Option<&Objects>,
     cancellation: &CancellationToken,
 ) -> Result<(), GfError> {
     let generation = graph.generation_for_read()?;
@@ -17,9 +16,7 @@ pub(super) fn read(
         if selected.is_some_and(|set| !set.contains(&("assertion".into(), row.assertion_uuid))) {
             continue;
         }
-        insert(
-            fields,
-            bytes,
+        sink.field(
             (
                 "assertion".into(),
                 row.assertion_uuid,
@@ -34,9 +31,7 @@ pub(super) fn read(
         {
             continue;
         }
-        insert(
-            fields,
-            bytes,
+        sink.field(
             (
                 "assertion".into(),
                 row.source_assertion_uuid,
@@ -94,9 +89,7 @@ pub(super) fn read(
                 let event = Uuid::from_slice(events.value(row)).map_err(|_| invalid())?;
                 let digest = crate::canonical_arrow::result_fingerprint(&[batch.slice(row, 1)])
                     .map_err(|e| GfError::Validation(e.to_string()))?;
-                insert(
-                    fields,
-                    bytes,
+                sink.field(
                     ("assertion".into(), id, format!("${family}:{event}")),
                     digest,
                 )?;

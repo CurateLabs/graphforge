@@ -1,5 +1,5 @@
 //! Owner-qualified property inspection for composition-bound research.
-use super::fields::{self, Fields, Objects};
+use super::fields::{self, FieldSink, Objects};
 use crate::{CancellationToken, GfError, GraphForge, IrLiteral};
 use arrow::array::FixedSizeBinaryArray;
 use std::collections::{BTreeMap, HashMap};
@@ -8,8 +8,8 @@ use uuid::Uuid;
 pub(super) fn read(
     graph: &GraphForge,
     selected: Option<&Objects>,
-    fields: &mut Fields,
-    bytes: &mut usize,
+    budgeted: bool,
+    sink: &mut dyn FieldSink,
     cancellation: &CancellationToken,
 ) -> Result<(), GfError> {
     let bindings = graph
@@ -21,7 +21,6 @@ pub(super) fn read(
         return Ok(());
     };
     let mut semantic = BTreeMap::new();
-    let mut scanned = 0usize;
     for binding in &bindings.bindings {
         let (kind, object, identity, pattern) = match binding.route_kind {
             graphforge_storage::SemanticRouteKind::Entity => (
@@ -66,11 +65,8 @@ pub(super) fn read(
             let query = format!(
                 "MATCH {pattern}{filter} RETURN {object}.{identity} AS object_uuid, properties({object}) AS properties"
             );
-            crate::slices::stream_branch_params(graph, &query, &params, cancellation, |batch| {
-                scanned = scanned.saturating_add(batch.get_array_memory_size());
-                if scanned > 64 * 1024 * 1024 {
-                    return Err(fields::limit());
-                }
+            let consume = |batch: &arrow::record_batch::RecordBatch| {
+                sink.scanned(batch.get_array_memory_size())?;
                 let ids = batch
                     .column_by_name("object_uuid")
                     .and_then(|a| a.as_any().downcast_ref::<FixedSizeBinaryArray>())
@@ -94,11 +90,22 @@ pub(super) fn read(
                     }
                 }
                 Ok(())
-            })?;
+            };
+            if budgeted {
+                crate::slices::stream_branch_params(graph, &query, &params, cancellation, consume)?;
+            } else {
+                crate::slices::stream_branch_unbudgeted(
+                    graph,
+                    &query,
+                    &params,
+                    cancellation,
+                    consume,
+                )?;
+            }
         }
     }
     for (key, digest) in semantic {
-        fields::insert(fields, bytes, key, digest)?;
+        sink.field(key, digest)?;
     }
     Ok(())
 }

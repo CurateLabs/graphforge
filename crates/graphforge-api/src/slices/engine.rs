@@ -143,7 +143,7 @@ fn select_query(
     budget: &mut Budget<'_>,
 ) -> Result<(), GfError> {
     let limits = budget.limits.clone();
-    graph::stream(view, query, params, budget, |batch| {
+    graph::stream(view, query, params, Some(budget), None, |batch| {
         let names: Vec<_> = ["node_uuid", "edge_uuid"]
             .into_iter()
             .filter(|name| batch.column_by_name(name).is_some())

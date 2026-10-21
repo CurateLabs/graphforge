@@ -95,7 +95,13 @@ Native query/selection and semantic-field preparation use 64 MiB working bounds;
 prepared immutable participant transfer is bounded to 256 MiB. Baseline reads
 preflight uncompressed Parquet and field allocation before decoding/expansion.
 These are bounded operations, not streaming arbitrary-sized whole-Project
-Branch creation. Materializing a selected view can copy its selected closure;
+Branch creation. Native validation of a research Version is the exception: it
+streams every typed field once through a comparison sink that holds only the
+registry's accepted mappings, bounded by the opened Version's private query
+pool (one decode batch) plus the registry — never a whole-graph field map — so
+a Version whose fields exceed the Branch field-map budget still verifies,
+imports and clones. Branch preparation itself keeps the 64 MiB working bound.
+Materializing a selected view can copy its selected closure;
 there is no zero-copy claim. The native retention regression grows unrelated
 parent content, measures selected payload and retained CAS after parent evolution
 and cleanup, releases the source Version, then reopens the Branch and its frozen
