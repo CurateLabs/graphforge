@@ -450,7 +450,7 @@ def validate_semantics(
         raise EvidenceError("semantic package and transport identities must be distinct")
     package = evidence.get("package", {})
     expected_package = {
-        "contract": "graphforge-portable-verify/2",
+        "contract": "graphforge-portable-verify/1",
         "format": "portable-project-v2-bundle",
         "class": "complete",
         "integrity": "verified",

@@ -470,7 +470,7 @@ fn research_ref_without_lineage_stops_before_project_download() {
             "package_digest":format!("sha256:{}", "b".repeat(64)),
             "object_digest":format!("sha256:{}", "c".repeat(64))
         },
-        "requirements":[{"capability":"portable-v2","major":1}],"capabilities":[],
+        "requirements":[{"capability":"portable","major":1}],"capabilities":[],
         "objects":[{
             "digest":format!("sha256:{}", "c".repeat(64)),"length":1,
             "media_type":graphforge_discovery::PORTABLE_MEDIA_TYPE,
@@ -568,6 +568,66 @@ fn unsupported_future_manifest_stops_before_object_access() {
     );
 }
 
+#[test]
+fn retired_capability_name_stops_before_object_access() {
+    let repository = serde_json::json!({"owner":"openalex","repository":"openalex"});
+    let immutable = format!("sha256:{}", "a".repeat(64));
+    let refs = serde_json::to_vec(&serde_json::json!({
+        "format":"graphforge-discovery/1","version":{"major":1,"minor":0},
+        "repository":repository.clone(),"default_ref":"main",
+        "refs":[{"name":"main","target":immutable,"validator":format!("sha256:{}", "d".repeat(64))}]
+    }))
+    .unwrap();
+    let manifest = serde_json::to_vec(&serde_json::json!({
+        "format":"graphforge-discovery/1","version":{"major":1,"minor":0},
+        "repository":repository,"default_ref":"main","resolved_ref":"main",
+        "immutable_version":format!("sha256:{}", "a".repeat(64)),
+        "package":{
+            "format":"graphforge-project/2",
+            "package_digest":format!("sha256:{}", "b".repeat(64)),
+            "object_digest":format!("sha256:{}", "c".repeat(64))
+        },
+        "requirements":[{"capability":concat!("portable-", "v2"),"major":1}],"capabilities":[],
+        "objects":[{
+            "digest":format!("sha256:{}", "c".repeat(64)),"length":1,
+            "media_type":graphforge_discovery::PORTABLE_MEDIA_TYPE,
+            "locations":["https://objects.example/project.gfpb"]
+        }]
+    }))
+    .unwrap();
+    let transport = Scripted::new(vec![
+        response(200, None, &refs),
+        response(200, None, &manifest),
+        response(200, None, b"must not be read"),
+    ]);
+    let root = tempfile::tempdir().unwrap();
+    let error = run_clone_with(
+        &transport,
+        CloneArgs {
+            hub: None,
+            token_env: None,
+            protection_bypass_env: None,
+            repository: "openalex/openalex".into(),
+            destination: Some(root.path().join("project")),
+            telemetry_endpoint: None,
+            git_ref: None,
+            version_uuid: None,
+        },
+        true,
+        &mut Vec::new(),
+    )
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("hub.unsupported_future"),
+        "{error}"
+    );
+    assert_eq!(
+        transport.remaining(),
+        1,
+        "object endpoint was never requested"
+    );
+}
+
 pub(super) fn clone_script(bundle: &[u8], package_digest: &str) -> Scripted {
     let (refs, manifest) = clone_documents(bundle, package_digest, &[]);
     Scripted::new(vec![
@@ -604,7 +664,7 @@ pub(super) fn clone_documents(
         "repository":repository,"default_ref":"main","resolved_ref":"main",
         "immutable_version":immutable,
         "package":{"format":"graphforge-project/2","package_digest":package_digest,"object_digest":object_digest},
-        "requirements":[{"capability":"portable-v2","major":1}],"capabilities":[{"capability":"range-requests","major":1}],
+        "requirements":[{"capability":"portable","major":1}],"capabilities":[{"capability":"range-requests","major":1}],
         "objects":objects
     })).unwrap();
     (refs, manifest)
@@ -613,10 +673,25 @@ pub(super) fn clone_documents(
 /// A real complete portable bundle of an empty project and its
 /// semantic package digest.
 pub(super) fn real_bundle() -> (Vec<u8>, String) {
+    bundle_of_nodes(0)
+}
+
+/// A real complete portable bundle of a project holding `nodes` nodes of
+/// about 200 payload bytes each, and its semantic package digest.
+pub(super) fn bundle_of_nodes(nodes: u32) -> (Vec<u8>, String) {
     let root = tempfile::tempdir().unwrap();
     let source = root.path().join("source");
     std::fs::create_dir(&source).unwrap();
-    GraphForge::new(source.to_str()).unwrap();
+    let graph = GraphForge::new(source.to_str()).unwrap();
+    if nodes > 0 {
+        graph
+            .execute(&format!(
+                "UNWIND range(1, {nodes}) AS i CREATE (:Doc {{id: i, body: '{}'}})",
+                "x".repeat(200)
+            ))
+            .unwrap();
+    }
+    drop(graph);
     let generation = graphforge_storage::resolve_project_generation(&source).unwrap();
     let limits = PortableLimits::default();
     let plan = graphforge_storage::plan_complete_portable(&generation, limits).unwrap();

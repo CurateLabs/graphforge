@@ -1,5 +1,5 @@
 {
-  "contract": "graphforge-portable-v2-fixtures/1",
+  "contract": "graphforge-portable-fixtures/1",
   "positive_package_classes": ["complete", "ontology-only", "component-selective", "graph-data-subset"],
   "representations": ["expanded", "bundle"],
   "canonicalization": ["rfc8785-key-order", "unicode-nfc-path", "semantic-digest-domain-separation", "component-order", "dependency-order"],

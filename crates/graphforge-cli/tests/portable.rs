@@ -67,7 +67,7 @@ fn current_export_and_import_round_trip_with_stable_json() {
             bundle.to_str().unwrap(),
         ],
     ));
-    assert_eq!(exported["contract"], "graphforge-portable-export/2");
+    assert_eq!(exported["contract"], "graphforge-portable-export/1");
     assert_eq!(exported["source"], "current");
     assert!(exported["checkpoint"].is_null());
     assert!(
@@ -89,7 +89,7 @@ fn current_export_and_import_round_trip_with_stable_json() {
             "00000000-0000-0000-0000-000000000229",
         ],
     ));
-    assert_eq!(imported["contract"], "graphforge-portable-import/2");
+    assert_eq!(imported["contract"], "graphforge-portable-import/1");
     assert_eq!(imported["package_digest"], exported["package_digest"]);
     assert_eq!(imported["idempotent_replay"], false);
 
@@ -245,7 +245,7 @@ fn portable_export_verify_and_import_round_trip() {
             bundle.to_str().unwrap(),
         ],
     ));
-    assert_eq!(exported["contract"], "graphforge-portable-export/2");
+    assert_eq!(exported["contract"], "graphforge-portable-export/1");
     assert_eq!(exported["representation"], "bundle");
     assert!(
         exported.get("output").is_none(),
@@ -280,7 +280,7 @@ fn portable_export_verify_and_import_round_trip() {
             "00000000-0000-0000-0000-000000000744",
         ],
     ));
-    assert_eq!(imported["contract"], "graphforge-portable-import/2");
+    assert_eq!(imported["contract"], "graphforge-portable-import/1");
     assert_eq!(imported["package_digest"], package_digest);
     assert_eq!(imported["idempotent_replay"], false);
 
@@ -961,7 +961,7 @@ fn primary_streaming_current_and_checkpoint_reopen_with_exact_query_results() {
         args.extend(selector);
         args.extend(["--format", "bundle", "--output", bundle.to_str().unwrap()]);
         let exported = json(&gf(&project, &args));
-        assert_eq!(exported["contract"], "graphforge-portable-export/2");
+        assert_eq!(exported["contract"], "graphforge-portable-export/1");
         let target = root.path().join(format!("{name}-imported"));
         let operation = uuid::Uuid::new_v4().to_string();
         let imported = json(&gf(
@@ -991,4 +991,161 @@ fn primary_streaming_current_and_checkpoint_reopen_with_exact_query_results() {
             expected as i64
         );
     }
+}
+
+/// JCS-style canonical JSON: sorted keys, no whitespace, as the package
+/// manifest and its digest preimage are written.
+fn canonical_json(value: &Value, out: &mut String) {
+    match value {
+        Value::Object(map) => {
+            out.push('{');
+            let mut keys: Vec<_> = map.keys().collect();
+            keys.sort();
+            for (index, key) in keys.into_iter().enumerate() {
+                if index != 0 {
+                    out.push(',');
+                }
+                out.push_str(&serde_json::to_string(key).unwrap());
+                out.push(':');
+                canonical_json(&map[key], out);
+            }
+            out.push('}');
+        }
+        Value::Array(values) => {
+            out.push('[');
+            for (index, value) in values.iter().enumerate() {
+                if index != 0 {
+                    out.push(',');
+                }
+                canonical_json(value, out);
+            }
+            out.push(']');
+        }
+        other => out.push_str(&serde_json::to_string(other).unwrap()),
+    }
+}
+
+/// An expanded complete package whose manifest declares eight tebibytes of payload (under the per-file bound)
+/// and is resealed, so its controls are admitted and only the disk can refuse
+/// it. Nothing about the files on disk is inflated.
+fn package_too_large_for_any_disk(root: &Path) -> std::path::PathBuf {
+    use sha2::{Digest as _, Sha256};
+    let source_project = root.join("source");
+    fs::create_dir(&source_project).unwrap();
+    let package = root.join("too-large.gfproject");
+    json(&gf(
+        &source_project,
+        &[
+            "--json",
+            "export",
+            "--current",
+            "--format",
+            "expanded",
+            "--profile",
+            "complete",
+            "--output",
+            package.to_str().unwrap(),
+        ],
+    ));
+    let manifest_path = package.join("data/graphforge-project.json");
+    let mut manifest: Value = serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+    manifest.as_object_mut().unwrap().remove("package_digest");
+    let length = &mut manifest["components"][0]["files"][0]["length"];
+    *length = (length.as_u64().unwrap() + (1_u64 << 43)).into();
+    let mut preimage = String::new();
+    canonical_json(&manifest, &mut preimage);
+    let digest =
+        Sha256::digest([b"graphforge-project/2\0".as_slice(), preimage.as_bytes()].concat());
+    manifest["package_digest"] = format!(
+        "sha256:{}",
+        digest
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    )
+    .into();
+    let mut sealed = String::new();
+    canonical_json(&manifest, &mut sealed);
+    fs::write(&manifest_path, sealed).unwrap();
+    package
+}
+
+fn refused_import(destination: &Path, package: &Path) -> (Option<i32>, Value) {
+    let output = gf(
+        destination,
+        &[
+            "--json",
+            "import",
+            "--input",
+            package.to_str().unwrap(),
+            "--idempotency-key",
+            "00000000-0000-0000-0000-000000000770",
+        ],
+    );
+    assert!(!output.status.success());
+    let error: Value = serde_json::from_slice(&output.stderr).unwrap_or_else(|_| {
+        panic!(
+            "JSON error, got {}",
+            String::from_utf8_lossy(&output.stderr)
+        )
+    });
+    (output.status.code(), error)
+}
+
+fn assert_nothing_written(parent: &Path, destination: &Path) {
+    assert!(!destination.exists());
+    let staged: Vec<_> = fs::read_dir(parent)
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.contains(".portable-"))
+        .collect();
+    assert!(staged.is_empty(), "left staging behind: {staged:?}");
+}
+
+#[test]
+fn an_import_the_disk_cannot_hold_is_refused_as_a_storage_error_before_extraction() {
+    let root = TempDir::new().unwrap();
+    let package = package_too_large_for_any_disk(root.path());
+    let destination = root.path().join("destination");
+    let (code, error) = refused_import(&destination, &package);
+    assert_eq!(code, Some(3), "{error}");
+    assert_eq!(error["error"]["code"], "GF_STORAGE", "{error}");
+    assert_eq!(
+        error["error"]["diagnostics"][0]["code"], "storage.insufficient_space",
+        "{error}"
+    );
+    let message = error["error"]["diagnostics"][0]["message"]
+        .as_str()
+        .unwrap();
+    assert!(
+        message.contains("bytes available beside the target"),
+        "{message}"
+    );
+    assert_nothing_written(root.path(), &destination);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn an_import_onto_an_unsupported_filesystem_keeps_its_code_and_exit_class() {
+    let root = TempDir::new().unwrap();
+    let package = package_too_large_for_any_disk(root.path());
+    // `/dev/shm` is tmpfs, which the durable-publication contract does not admit.
+    let shm = TempDir::new_in("/dev/shm").unwrap();
+    let destination = shm.path().join("destination");
+    let (code, error) = refused_import(&destination, &package);
+    assert_eq!(code, Some(3), "{error}");
+    assert_eq!(
+        error["error"]["code"], "GF_UNSUPPORTED_FILESYSTEM",
+        "{error}"
+    );
+    assert_eq!(
+        error["error"]["diagnostics"][0]["code"], "storage.unsupported_filesystem",
+        "{error}"
+    );
+    let message = error["error"]["diagnostics"][0]["message"]
+        .as_str()
+        .unwrap();
+    assert!(message.contains("GF_UNSUPPORTED_FILESYSTEM"), "{message}");
+    assert_nothing_written(shm.path(), &destination);
 }

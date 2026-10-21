@@ -290,13 +290,27 @@ redirects. See the CLI reference above for requirements.
 ### Large projects
 
 **Disk space.** Clone needs free space on the destination's filesystem, not in
-the system temporary directory: the package itself plus about 2.25 times the
-package for the import's transient peak, roughly 3.25 times the package in all
-(less whatever a previous run already downloaded or staged for the import; a
-rerun after the import committed needs only about one more package length). Clone checks this, and that
-the filesystem is admissible (`ext4`, `xfs`, `btrfs`, APFS, or NTFS), before it
-downloads anything. When the import finishes, the staging directory and the
-package are removed and only the project remains.
+the system temporary directory: the package itself, plus the import's peak. The
+import extracts the payload into a private stage and then publishes a second
+copy of it into the project while the stage still exists, so a project package
+needs about two more payload lengths. A research package is also validated
+before it is published: its research files are copied into a validation store,
+and each archived Version is rebuilt (an expanded graph through a temporary copy
+of the tree, then into the Version's own project), so it may need up to four
+payload lengths for the import when research content fills the package. A package that carries an ontology composition also writes
+two generated controls, each about the size of its authored ontologies, into the
+stage and again into the project. A package without an adjacency index spills additionally while
+the import derives one, which this estimate does not cover. Less is needed for
+whatever a previous run already downloaded or staged for the import; a rerun
+after the import committed needs only about one more package length. Clone
+checks this, and that the filesystem is admissible (`ext4`, `xfs`, `btrfs`,
+APFS, or NTFS), before it
+downloads anything. An import of a package you already hold makes the same two
+checks before it extracts a byte. It refuses with `GF_UNSUPPORTED_FILESYSTEM`
+(diagnostic `storage.unsupported_filesystem`), or with `GF_STORAGE` (diagnostic
+`storage.insufficient_space`, whose message gives the free and needed bytes);
+the CLI exits with status 3 for both. When the import finishes,
+the staging directory and the package are removed and only the project remains.
 
 **Interruptions and resume.** Rerun the same command. A network stall is
 detected when no bytes arrive for a minute; each phase of a request has its own
@@ -417,8 +431,8 @@ For the normative layout, identity, resource, compatibility, and security
 contract, see [Portable project architecture](../book/architecture/portable-project.md)
 and [ADR 0021](../adr/0021-portable-project.md).
 
-Primary `export` and `import` reuse the streaming `graphforge-portable-export/2`
-and `graphforge-portable-import/2` JSON receipts. Package and transport digests
+Primary `export` and `import` reuse the streaming `graphforge-portable-export/1`
+and `graphforge-portable-import/1` JSON receipts. Package and transport digests
 remain distinct; retired envelope digest/count fields are not compatibility aliases.
 The duplicate `portable export` and `portable import` verbs are removed.
 

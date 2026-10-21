@@ -21,7 +21,7 @@ use transport::{bundle, expanded};
 type ExportError = PortableError;
 
 const BAGIT: &[u8] = b"BagIt-Version: 1.0\nTag-File-Character-Encoding: UTF-8\n";
-const BAG_INFO: &[u8] = b"Bag-Software-Agent: GraphForge portable-v2\nBagging-Date: 1970-01-01\n";
+const BAG_INFO: &[u8] = b"Bag-Software-Agent: GraphForge portable\nBagging-Date: 1970-01-01\n";
 
 /// Finite planner and streaming-writer budgets.
 pub type PortableExportLimits = PortableLimits;
@@ -1947,7 +1947,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             ledger["contract"],
-            "graphforge-portable-v2-multi-ontology-interchange-cases/1"
+            "graphforge-portable-multi-ontology-interchange-cases/1"
         );
         assert_eq!(
             ledger["representations"],
@@ -2038,6 +2038,14 @@ mod tests {
                 let report =
                     verify_portable(&destination, PortableMode::Full, limits, None).unwrap();
                 assert!(report.ontology_composition.is_some());
+                if representation == PortableOutput::Bundle {
+                    let bytes = std::fs::read(&destination).unwrap();
+                    crate::project_portable::stream_tests::assert_stream_equals_file(&bytes);
+                    if index == 0 {
+                        crate::project_portable::stream_tests::assert_pool_bounds_retention(&bytes);
+                        crate::project_portable::stream_tests::assert_truncations_alike(&bytes);
+                    }
+                }
                 reports.push(report);
             }
             assert_eq!(reports[0].package_digest, reports[1].package_digest);

@@ -91,7 +91,7 @@ def storage_attribution(scale: int) -> dict:
             "transient_peak_allocated_bytes": 300,
         },
         "portable_package": {
-            "contract": "graphforge-portable-export/2",
+            "contract": "graphforge-portable-export/1",
             "allocation_logical_bytes": 0,
             "allocation_allocated_bytes": 0,
             "allocation_physical_objects": 0,

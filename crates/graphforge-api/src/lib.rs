@@ -338,11 +338,11 @@ mod write_modes;
 pub use graphforge_core::portable::{
     PortableAuthenticity, PortableCompatibility, PortableError, PortableErrorCode,
     PortableExactIdentity, PortableExportProgress, PortableGraphSelector, PortableGraphSubsetMeta,
-    PortableIntegrity, PortableLimits, PortableMode, PortableOutput, PortablePackageClass,
-    PortableParticipantId, PortablePropertyProjection, PortableRepresentation,
-    PortableSelectionEntry, PortableSelectionPlan, PortableSelectionProfile,
-    PortableSelectionReason, PortableSelectionRequest, PortableSubsetClosure,
-    PortableSubsetPreview as PortableSubsetPlan, PortableSubsetRequest,
+    PortableImportFootprint, PortableIntegrity, PortableLimits, PortableMode, PortableOutput,
+    PortablePackageClass, PortableParticipantId, PortablePropertyProjection,
+    PortableRepresentation, PortableSelectionEntry, PortableSelectionPlan,
+    PortableSelectionProfile, PortableSelectionReason, PortableSelectionRequest, PortableSource,
+    PortableSubsetClosure, PortableSubsetPreview as PortableSubsetPlan, PortableSubsetRequest,
 };
 pub use graphforge_core::storage_receipt::{
     ArtifactCategory, ArtifactStorageTotals, StorageAttributionReceipt,
@@ -360,9 +360,9 @@ pub use portable::{
     PortableImportRequest, PortableImportResult, PortableOciPublishFacadeRequest,
     PortableOciPullFacadeRequest, PortableRepackRequest, PortableRepackResult, PortableSelection,
     PortableSelectionPreviewRequest, PortableSubsetPreviewRequest, PortableVerifyRequest,
-    PortableVerifyResult, publish_portable_oci, publish_portable_oci_with_registry,
-    pull_portable_oci, pull_portable_oci_with_registry, repack_verified_expanded_portable,
-    verify_portable,
+    PortableVerifyResult, portable_import_held_bytes, publish_portable_oci,
+    publish_portable_oci_with_registry, pull_portable_oci, pull_portable_oci_with_registry,
+    repack_verified_expanded_portable, verify_portable, verify_portable_stream,
 };
 pub use repository::{
     GitProvenance, InfraCapabilityCompatibility, InfraNotChecked, InfraPlan, InfraStaticValidity,
