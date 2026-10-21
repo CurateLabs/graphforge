@@ -98,7 +98,7 @@ pub(crate) fn raw_bytes_arc_bound() -> Option<usize> {
 /// public MemoryConsumer value. A freshly constructed literal-name consumer
 /// owns an exact-length String; arbitrary existing consumer names do not
 /// establish that capacity provenance. Splits share this registration.
-pub(super) fn literal_registration_bytes(name: &str) -> Option<usize> {
+pub(crate) fn literal_registration_bytes(name: &str) -> Option<usize> {
     let registration = Layout::new::<Arc<dyn MemoryPool>>()
         .extend(Layout::new::<MemoryConsumer>())
         .ok()?

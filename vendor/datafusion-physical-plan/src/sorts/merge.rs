@@ -29,6 +29,7 @@ use crate::sorts::builder::BatchBuilder;
 use crate::sorts::copy_admission::{CopyAdmission, Resident};
 use crate::sorts::cursor::{Cursor, CursorValues};
 use crate::sorts::stream::PartitionedStream;
+use crate::sorts::streaming_merge::ReaderShares;
 use crate::spill::admission::{add, mul};
 
 use arrow::datatypes::SchemaRef;
@@ -131,6 +132,23 @@ pub(super) struct ChargedSortPreservingMergeStream<C: CursorValues> {
     /// consume the data if they weren't selected as winners. This resulted in
     /// inefficient buffer usage.
     enable_round_robin_tie_breaker: bool,
+
+    /// The inputs are read under a bank admitted for the pass (spill files):
+    /// the merge keeps at most one earlier batch of a stream beside its
+    /// current one, as the bank assumes, by emitting what it holds before a
+    /// stream's second refill within one output batch, and gives a reader's
+    /// share of the bank back once the reader is exhausted and no batch of
+    /// its is held.
+    bounded_inputs: Option<ReaderShares>,
+
+    /// Per stream: whether it has returned its last batch, and whether its
+    /// share of the bank was given back.
+    exhausted: Vec<bool>,
+    returned: Vec<bool>,
+
+    /// The bytes of the rows pending in the output, counted only while the
+    /// output is capped (`ReaderShares::output_cap`).
+    pending_bytes: usize,
 
     /// Flag indicating whether we are in the mode of round-robin
     /// tie breaker for the loser tree winners.
@@ -249,6 +267,23 @@ pub(crate) struct SortPreservingMergeStream<C: CursorValues> {
     /// inefficient buffer usage.
     enable_round_robin_tie_breaker: bool,
 
+    /// The inputs are read under a bank admitted for the pass (spill files):
+    /// the merge keeps at most one earlier batch of a stream beside its
+    /// current one, as the bank assumes, by emitting what it holds before a
+    /// stream's second refill within one output batch, and gives a reader's
+    /// share of the bank back once the reader is exhausted and no batch of
+    /// its is held.
+    bounded_inputs: Option<ReaderShares>,
+
+    /// Per stream: whether it has returned its last batch, and whether its
+    /// share of the bank was given back.
+    exhausted: Vec<bool>,
+    returned: Vec<bool>,
+
+    /// The bytes of the rows pending in the output, counted only while the
+    /// output is capped (`ReaderShares::output_cap`).
+    pending_bytes: usize,
+
     /// Flag indicating whether we are in the mode of round-robin
     /// tie breaker for the loser tree winners.
     round_robin_tie_breaker_mode: bool,
@@ -299,6 +334,7 @@ impl<C: CursorValues> SortPreservingMergeStream<C> {
         fetch: Option<usize>,
         reservation: MemoryReservation,
         enable_round_robin_tie_breaker: bool,
+        bounded_inputs: Option<ReaderShares>,
     ) -> Self {
         let stream_count = streams.partitions();
         let diagnostic = od::Life::inherited(od::Kind::Merge);
@@ -329,7 +365,11 @@ impl<C: CursorValues> SortPreservingMergeStream<C> {
             produced: 0,
             uninitiated_partitions: (0..stream_count).collect(),
             copy_resident: None,
+            exhausted: vec![false; stream_count],
+            returned: vec![false; stream_count],
+            pending_bytes: 0,
             enable_round_robin_tie_breaker,
+            bounded_inputs,
         }
     }
 
@@ -341,6 +381,7 @@ impl<C: CursorValues> SortPreservingMergeStream<C> {
         fetch: Option<usize>,
         reservation: MemoryReservation,
         enable_round_robin_tie_breaker: bool,
+        bounded_inputs: Option<ReaderShares>,
         copy: Option<Arc<CopyAdmission>>,
     ) -> Result<Self> {
         let phase = copy.as_ref().map(|copy| copy.begin()).transpose()?;
@@ -352,6 +393,7 @@ impl<C: CursorValues> SortPreservingMergeStream<C> {
             fetch,
             reservation,
             enable_round_robin_tie_breaker,
+            bounded_inputs,
         );
         if let (Some(copy), Some(phase)) = (copy, phase.as_ref()) {
             stream.in_progress.attach_copy(copy, phase)?;
@@ -401,14 +443,16 @@ impl<C: CursorValues> SortPreservingMergeStream<C> {
         // Release dead sealed input owners before a refill can allocate its
         // next body. Pending rows and future cursors remain pinned by builder.
         self.in_progress.release_consumed_inputs();
+        self.return_idle_shares();
         match futures::ready!(self.streams.poll_next(cx, idx)) {
             None => {
-                if self.in_progress.uses_row_copy() {
-                    // Actual fused EOF cannot produce another key to compare
-                    // with this one. Pending output indices own batch payload,
-                    // independently of these encoded key Rows and their lease.
-                    self.prev_cursors[idx].take();
-                }
+                self.exhausted[idx] = true;
+                // Actual fused EOF cannot produce another key to compare
+                // with this one. Pending output indices own batch payload,
+                // independently of encoded key Rows and their lease, and of
+                // a Field cursor's key column, which keeps its batch alive
+                // and so its share of the bank.
+                self.prev_cursors[idx].take();
                 Poll::Ready(Ok(()))
             }
             Some(Err(e)) => Poll::Ready(Err(e)),
@@ -424,10 +468,40 @@ impl<C: CursorValues> SortPreservingMergeStream<C> {
         }
     }
 
+    /// Gives back the share of every reader that is exhausted and of which
+    /// no batch is held any more.
+    fn return_idle_shares(&mut self) {
+        let Some(bank) = &self.bounded_inputs else {
+            return;
+        };
+        for idx in 0..self.exhausted.len() {
+            if self.exhausted[idx]
+                && !self.returned[idx]
+                && !self.in_progress.holds_a_batch_of(idx)
+            {
+                self.returned[idx] = true;
+                bank.credit.retire_share(bank.shares[idx]);
+            }
+        }
+    }
+
+    fn output_cap(&self) -> Option<usize> {
+        self.bounded_inputs
+            .as_ref()
+            .and_then(|bank| bank.output_cap)
+    }
+
     fn emit_in_progress_batch(&mut self) -> Result<Option<RecordBatch>> {
         let rows_before = self.in_progress.len();
         let result = self.in_progress.build_record_batch();
         self.produced += rows_before - self.in_progress.len();
+        if self.output_cap().is_some() {
+            self.pending_bytes = if self.in_progress.is_empty() {
+                0
+            } else {
+                self.in_progress.pending_bytes()
+            };
+        }
         result
     }
 
@@ -506,6 +580,19 @@ impl<C: CursorValues> SortPreservingMergeStream<C> {
             // Adjust the loser tree if necessary, returning control if needed
             if !self.loser_tree_adjusted {
                 let winner = self.loser_tree[0];
+                // The bank of a pass covers one earlier batch of a stream
+                // beside its current one. A refill of a stream that already
+                // holds an earlier batch with rows pending would make a third
+                // alive: emit the rows pending first (every row still to come
+                // from any stream is no smaller than they are) and refill
+                // on the next poll.
+                if self.bounded_inputs.is_some()
+                    && self.cursors[winner].is_none()
+                    && !self.in_progress.is_empty()
+                    && self.in_progress.holds_an_earlier_batch(winner)
+                {
+                    return Poll::Ready(self.emit_in_progress_batch().transpose());
+                }
                 if let Err(e) = ready!(self.maybe_poll_stream(cx, winner)) {
                     self.done = true;
                     return Poll::Ready(Some(Err(e)));
@@ -514,9 +601,24 @@ impl<C: CursorValues> SortPreservingMergeStream<C> {
             }
 
             let stream_idx = self.loser_tree[0];
+            let exhausted = self.cursors[stream_idx].is_none();
+            // An output written to an intermediate spill file holds at most
+            // the bytes its writer was admitted for: emit what is pending
+            // before a row that would pass them.
+            let row_bytes = match self.output_cap() {
+                Some(cap) if !exhausted => {
+                    let row = self.in_progress.next_row_bytes(stream_idx);
+                    if !self.in_progress.is_empty() && self.pending_bytes + row > cap {
+                        return Poll::Ready(self.emit_in_progress_batch().transpose());
+                    }
+                    row
+                }
+                _ => 0,
+            };
             if self.advance_cursors(stream_idx) {
                 self.loser_tree_adjusted = false;
                 self.in_progress.push_row(stream_idx);
+                self.pending_bytes += row_bytes;
 
                 // stop sorting if fetch has been reached
                 if self.fetch_reached() {
@@ -527,7 +629,12 @@ impl<C: CursorValues> SortPreservingMergeStream<C> {
                 }
             }
 
-            return Poll::Ready(self.emit_in_progress_batch().transpose());
+            let batch = self.emit_in_progress_batch();
+            if exhausted && self.in_progress.is_empty() {
+                // Every input is exhausted and the last output is built.
+                self.in_progress.finish();
+            }
+            return Poll::Ready(batch.transpose());
         }
     }
 

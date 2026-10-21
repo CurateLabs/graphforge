@@ -355,8 +355,14 @@ async fn spill_admission_flat_view_payload_preserves_its_complete_source_alias()
     Ok(())
 }
 
+/// Sixty-four one-row source batches at a batch size of 128: the merge emits
+/// before a stream's second refill (the readers' bank covers one earlier
+/// batch of a stream beside its current one), so no output is built from
+/// more than two batches of a stream and the builder's initial `2 * streams`
+/// slots never grow; every row arrives once, in order, and an output that
+/// aliases a source keeps that source admitted until it is dropped.
 #[tokio::test]
-async fn spill_admission_builder_vector_growth_keeps_old_and_new_capacity_admitted() -> Result<()> {
+async fn spill_admission_builder_slots_hold_narrow_sources_without_growing() -> Result<()> {
     const ROWS: usize = 32;
     let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(2 * 1024 * 1024));
     let schema = Arc::new(Schema::new(vec![
@@ -405,21 +411,29 @@ async fn spill_admission_builder_vector_growth_keeps_old_and_new_capacity_admitt
         .with_batch_size(128)
         .with_reservation(reservation)
         .build()?;
-    // 64 one-row batches must coexist before the first output. The builder's
-    // initial 2*streams=4 slots therefore grows repeatedly, including realloc.
-    let output = stream.next().await.unwrap()?;
-    assert_eq!(output.num_rows(), 2 * ROWS);
-    let values = output
-        .column(1)
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .unwrap();
-    for index in 0..2 * ROWS {
-        assert_eq!(values.value(index), format!("row-{index:03}"));
+    let mut outputs = Vec::new();
+    let mut index = 0;
+    while let Some(output) = stream.next().await {
+        let output = output?;
+        assert!(
+            output.num_rows() <= 4,
+            "{} rows from two one-row streams",
+            output.num_rows()
+        );
+        let values = output
+            .column(1)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        for row in 0..output.num_rows() {
+            assert_eq!(values.value(row), format!("row-{index:03}"));
+            index += 1;
+        }
+        outputs.push(output);
     }
-    assert!(stream.next().await.is_none());
-    let alias = output.column(1).slice(0, 1);
-    drop(output);
+    assert_eq!(index, 2 * ROWS);
+    let alias = outputs[0].column(1).slice(0, 1);
+    drop(outputs);
     drop(stream);
     assert!(pool.reserved() >= alias.to_data().buffers()[1].capacity());
     drop(alias);
@@ -761,7 +775,7 @@ fn primitive_field_batch(parity: usize, rows: usize) -> RecordBatch {
 struct AggregateCopyPool {
     inner: Arc<crate::query_pool::QueryMemoryPool>,
     pressure: std::sync::Mutex<datafusion::execution::memory_pool::MemoryReservation>,
-    reading: std::sync::atomic::AtomicBool,
+    readers: std::sync::atomic::AtomicUsize,
     pressured: std::sync::atomic::AtomicBool,
 }
 impl AggregateCopyPool {
@@ -790,28 +804,26 @@ impl MemoryPool for AggregateCopyPool {
         r: &datafusion::execution::memory_pool::MemoryReservation,
         bytes: usize,
     ) -> Result<()> {
-        if r.consumer().name() == "SpillReaderMetadata" {
-            self.reading
-                .store(true, std::sync::atomic::Ordering::Release);
-        }
-        // The IPC readers and constructor are already live. Fill the pool at
-        // the first payload-sized copy request: a repartition can take this
-        // space immediately before the aggregate needs its one progress loan.
-        if r.consumer()
-            .name()
-            .starts_with("GroupedHashAggregateStream[1]")
-            && bytes >= 32 * 1024
-            && self.reading.load(std::sync::atomic::Ordering::Acquire)
-            && !self
-                .pressured
-                .swap(true, std::sync::atomic::Ordering::AcqRel)
+        let served = self.inner.try_grow(r, bytes);
+        // Both IPC readers are live once their metadata is admitted, and the
+        // merge has admitted everything it copies with. A repartition can take
+        // the rest of the pool at any time after that: fill it, as the exchange
+        // of a busy partition does, and require the merge to need none of it.
+        if served.is_ok()
+            && r.consumer().name() == "SpillReaderMetadata"
+            && self
+                .readers
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel)
+                == 1
         {
+            self.pressured
+                .store(true, std::sync::atomic::Ordering::Release);
             self.pressure
                 .lock()
                 .unwrap()
-                .try_grow(Self::LIMIT - self.inner.reserved())?;
+                .grow(Self::LIMIT - self.inner.reserved());
         }
-        self.inner.try_grow(r, bytes)
+        served
     }
     fn reserved(&self) -> usize {
         self.inner.reserved()
@@ -819,8 +831,8 @@ impl MemoryPool for AggregateCopyPool {
 }
 
 #[tokio::test]
-async fn spill_admission_aggregate_merge_keeps_one_grant_through_output_reconciliation()
--> Result<()> {
+async fn spill_admission_aggregate_merge_needs_no_grant_through_output_reconciliation() -> Result<()>
+{
     const LIMIT: usize = AggregateCopyPool::LIMIT;
     let inner = Arc::new(crate::query_pool::QueryMemoryPool::new(LIMIT));
     let underlying: Arc<dyn MemoryPool> = inner.clone();
@@ -831,7 +843,7 @@ async fn spill_admission_aggregate_merge_keeps_one_grant_through_output_reconcil
                 .with_can_spill(true)
                 .register(&underlying),
         ),
-        reading: std::sync::atomic::AtomicBool::new(false),
+        readers: std::sync::atomic::AtomicUsize::new(0),
         pressured: std::sync::atomic::AtomicBool::new(false),
     });
     let pool: Arc<dyn MemoryPool> = observed.clone();
@@ -860,8 +872,9 @@ async fn spill_admission_aggregate_merge_keeps_one_grant_through_output_reconcil
         .with_can_spill(true)
         .register(&pool);
     // A real bulk state release arms one progress grant. Keep this consumer
-    // above its 10 MiB floor through a separate live reservation, so the floor
-    // cannot fund another request after the payload copy consumes that grant.
+    // above its 10 MiB floor through a separate live reservation, so neither
+    // the floor nor the grant could fund a request of the payload copy: the
+    // merge must have admitted its working set before it reads.
     reservation.try_grow(24 * 1024 * 1024 + prepaid)?;
     reservation.shrink(12 * 1024 * 1024 + prepaid);
     let retained_partition = reservation.split(12 * 1024 * 1024);
@@ -892,8 +905,8 @@ async fn spill_admission_aggregate_merge_keeps_one_grant_through_output_reconcil
             .load(std::sync::atomic::Ordering::Acquire)
     );
     assert!(
-        pool.reserved() > LIMIT,
-        "the copy consumed the single progress loan"
+        pool.reserved() <= LIMIT,
+        "the copy needed neither free memory nor a progress loan"
     );
     assert_eq!(output, expected);
     let alias = output.column(1).slice(511, 1);
@@ -1017,8 +1030,11 @@ async fn spill_admission_primitive_field_constructor_refuses_before_prefetch() -
     Ok(())
 }
 
+/// The same envelope under a primitive Field cursor: narrow sources are
+/// emitted before a stream's second refill, the builder's slots never grow,
+/// and the last output's alias keeps its source admitted until it is dropped.
 #[tokio::test]
-async fn spill_admission_primitive_field_builder_grows_with_live_sources_and_output_alias()
+async fn spill_admission_primitive_field_builder_holds_narrow_sources_and_output_alias()
 -> Result<()> {
     use arrow::array::Int64Array;
     const ROWS: usize = 32;
@@ -1065,20 +1081,30 @@ async fn spill_admission_primitive_field_builder_grows_with_live_sources_and_out
         .with_batch_size(128)
         .with_reservation(reservation)
         .build()?;
-    // Sixty-four one-row source batches grow the initial four builder slots.
-    let output = stream.next().await.unwrap()?;
-    assert_eq!(output.num_rows(), 2 * ROWS);
-    let text = output
-        .column(1)
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .unwrap();
-    for row in 0..2 * ROWS {
-        assert_eq!(text.value(row), format!("row-{row:03}"));
+    let mut outputs = Vec::new();
+    let mut index = 0;
+    while let Some(output) = stream.next().await {
+        let output = output?;
+        assert!(
+            output.num_rows() <= 4,
+            "{} rows from two one-row streams",
+            output.num_rows()
+        );
+        let text = output
+            .column(1)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        for row in 0..output.num_rows() {
+            assert_eq!(text.value(row), format!("row-{index:03}"));
+            index += 1;
+        }
+        outputs.push(output);
     }
-    assert!(stream.next().await.is_none());
-    let alias = output.column(1).slice(2 * ROWS - 1, 1);
-    drop(output);
+    assert_eq!(index, 2 * ROWS);
+    let last = outputs.last().unwrap();
+    let alias = last.column(1).slice(last.num_rows() - 1, 1);
+    drop(outputs);
     drop(stream);
     assert!(pool.reserved() >= alias.to_data().buffers()[1].capacity());
     drop(alias);
