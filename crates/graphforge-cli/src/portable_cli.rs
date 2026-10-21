@@ -1,6 +1,6 @@
 //! CLI surfaces for portable, OCI promotion, streaming query sinks, and staged ingest (#744).
 
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -37,18 +37,14 @@ pub(crate) fn verify_portable_url(
             graphforge_api::PortableErrorCode::ConcurrentMutation,
             "remote object changed during verification",
         ))),
-        Err(_) if reader.io_failure().is_some() => Err(graphforge_api::GfError::Storage(
-            reader
-                .io_failure()
-                .unwrap_or("remote object read failed")
-                .to_owned(),
-        )
-        .into()),
-        Err(error) if error.code == graphforge_api::PortableErrorCode::Io => {
-            Err(graphforge_api::GfError::Storage(error.to_string()).into())
-        }
         Err(error) => Err(map_portable(error)),
     }
+}
+
+pub(crate) fn verify_portable_stdin(
+    source: &mut dyn Read,
+) -> Result<graphforge_api::PortableVerifyResult, crate::CliRuntimeError> {
+    verify_portable_stream(source, None, PortableLimits::default(), None).map_err(map_portable)
 }
 
 fn write_json(
@@ -334,13 +330,7 @@ pub(crate) fn run_portable_without_graph(
                     )
                     .into());
                 }
-                verify_portable_stream(
-                    &mut std::io::stdin().lock(),
-                    None,
-                    PortableLimits::default(),
-                    None,
-                )
-                .map_err(map_portable)?
+                verify_portable_stdin(&mut std::io::stdin().lock())?
             } else {
                 verify_portable(
                     &PortableVerifyRequest {

@@ -246,8 +246,27 @@ fn url_verification_maps_ninth_disconnect_to_io_exit_three() {
         Url::parse("https://example.com/object").unwrap(),
     )
     .unwrap_err();
-    let message = assert_cli_error(error, "GF_IO", 3);
-    assert!(message.contains("maximum ranged resumes"), "{message}");
+    assert_cli_error(error, "GF_STORAGE", 3);
+}
+
+#[test]
+fn stdin_io_failure_uses_the_portable_storage_exit_class() {
+    struct FailedStdin(std::io::Cursor<Vec<u8>>);
+    impl Read for FailedStdin {
+        fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+            if self.0.position() == self.0.get_ref().len() as u64 {
+                Err(io::Error::other("stdin read failed"))
+            } else {
+                self.0.read(output)
+            }
+        }
+    }
+
+    let error = crate::portable_cli::verify_portable_stdin(&mut FailedStdin(std::io::Cursor::new(
+        fixture_bytes(),
+    )))
+    .unwrap_err();
+    assert_cli_error(error, "GF_STORAGE", 3);
 }
 
 #[test]

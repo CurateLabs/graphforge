@@ -382,7 +382,6 @@ pub(crate) struct RangedObjectReader<'a> {
     resumes: u8,
     done: bool,
     changed: bool,
-    io_failure: Option<String>,
 }
 
 impl<'a> RangedObjectReader<'a> {
@@ -390,9 +389,6 @@ impl<'a> RangedObjectReader<'a> {
         self.changed
     }
 
-    pub(crate) fn io_failure(&self) -> Option<&str> {
-        self.io_failure.as_deref()
-    }
     pub(crate) fn open(
         transport: &'a dyn Transport,
         url: Url,
@@ -417,20 +413,15 @@ impl<'a> RangedObjectReader<'a> {
             resumes: 0,
             done: false,
             changed: false,
-            io_failure: None,
         })
     }
 
     fn resume(&mut self) -> io::Result<()> {
         if self.resumes == 8 {
-            let message = "maximum ranged resumes exceeded";
-            self.io_failure = Some(message.into());
-            return Err(io::Error::other(message));
+            return Err(io::Error::other("maximum ranged resumes exceeded"));
         }
         let Some(etag) = self.etag.as_deref() else {
-            let message = "cannot safely resume object without ETag";
-            self.io_failure = Some(message.into());
-            return Err(io::Error::other(message));
+            return Err(io::Error::other("cannot safely resume object without ETag"));
         };
         let response =
             match self
@@ -438,11 +429,7 @@ impl<'a> RangedObjectReader<'a> {
                 .get(&self.url, Some(self.consumed), Some(etag), u64::MAX)
             {
                 Ok(response) => response,
-                Err(error) => {
-                    let message = error.to_string();
-                    self.io_failure = Some(message.clone());
-                    return Err(io::Error::other(message));
-                }
+                Err(error) => return Err(io::Error::other(error)),
             };
         let conflict =
             || io::Error::other("ConcurrentMutation: remote object changed during verification");
