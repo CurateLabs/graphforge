@@ -90,7 +90,7 @@ impl<'a> Client<'a> {
             "resolved_ref": "main",
             "immutable_version": plan.package_digest,
             "package": {"format": "graphforge-project/2", "package_digest": plan.package_digest, "producing_core_version": "0.6.0", "object_digest": object.digest},
-            "requirements": [{"capability": "portable-v2", "major": 1}],
+            "requirements": [{"capability": "portable", "major": 1}],
             "capabilities": [],
             "objects": [{"digest": object.digest, "length": object.length, "media_type": object.media_type,
                 "locations": [self.capabilities.object_location(&object.digest)]}],

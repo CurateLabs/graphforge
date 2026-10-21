@@ -761,7 +761,7 @@ mod tests {
 
     fn query_fingerprint(rows: &[String]) -> String {
         let mut digest = Sha256::new();
-        digest.update(b"graphforge-portable-v2-query-result/1\0");
+        digest.update(b"graphforge-portable-query-result/1\0");
         digest.update(serde_json::to_vec(rows).unwrap());
         format!("sha256:{}", hex(digest.finalize().into()))
     }

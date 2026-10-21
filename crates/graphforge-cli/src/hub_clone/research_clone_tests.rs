@@ -578,7 +578,7 @@ fn serve(published: &Published, lineage: &ResearchLineage) -> Hub {
             object_digest: lineage_object,
         }),
         requirements: vec![ProtocolRequirement {
-            capability: "portable-v2".into(),
+            capability: "portable".into(),
             major: 1,
         }],
         capabilities: vec![],
@@ -960,7 +960,7 @@ fn unknown_required_lineage_capability_fails_before_package_reads_or_project_mut
     }))
     .unwrap();
     let (hub, package_url) = minimal_documents(
-        serde_json::json!([{"capability":"portable-v2","major":1}]),
+        serde_json::json!([{"capability":"portable","major":1}]),
         Some(&lineage),
     );
     let root = tempfile::tempdir().unwrap();
@@ -987,7 +987,7 @@ fn unknown_required_lineage_capability_fails_before_package_reads_or_project_mut
 fn unknown_required_manifest_research_capability_fails_before_any_object_read() {
     let (hub, _) = minimal_documents(
         serde_json::json!([
-            {"capability":"portable-v2","major":1},
+            {"capability":"portable","major":1},
             {"capability":"research-lineage","major":3}
         ]),
         None,
@@ -1280,7 +1280,7 @@ fn branchless_hub(
             object_digest: lineage_digest.clone(),
         }),
         requirements: vec![ProtocolRequirement {
-            capability: "portable-v2".into(),
+            capability: "portable".into(),
             major: 1,
         }],
         capabilities: vec![],

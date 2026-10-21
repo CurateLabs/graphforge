@@ -47,7 +47,7 @@
                 "owner": "openalex",
                 "repository": "demo"
               },
-              "request_commitment": "sha256:9ecc9b1641359ed2cf1bc89853db7836832d141fbefe6682c6ec5bd13eb259c7"
+              "request_commitment": "sha256:77cc83f82ceb8ccab2a2fdc456da539c703d22b9c334d3905310e895aebe8e7f"
             }
           },
           "expect": {
@@ -210,7 +210,7 @@
                 },
                 "requirements": [
                   {
-                    "capability": "portable-v2",
+                    "capability": "portable",
                     "major": 1
                   }
                 ],
@@ -230,7 +230,7 @@
             "json": {
               "receipt": {
                 "format": "graphforge-hub-publish/1",
-                "manifest_validator": "sha256:c288fcd59921fb5c29835ea74cf3eb439b75aa7b6aab46cb2b9558e07bdb46b6",
+                "manifest_validator": "sha256:a9b37bd0926165083954ae677c7d5a63b8f46cec63f91432d96bde30869ee026",
                 "operation_uuid": "00000000-0000-7000-8000-0000000003f2",
                 "previous_revision": null,
                 "refs": [
@@ -240,8 +240,8 @@
                   "owner": "openalex",
                   "repository": "demo"
                 },
-                "request_commitment": "sha256:9ecc9b1641359ed2cf1bc89853db7836832d141fbefe6682c6ec5bd13eb259c7",
-                "revision": "sha256:d636af68914b8986651bcc8701de809f8d5bd0ce7250a5bb7fe95ba8ed668cea"
+                "request_commitment": "sha256:77cc83f82ceb8ccab2a2fdc456da539c703d22b9c334d3905310e895aebe8e7f",
+                "revision": "sha256:0c5b5f5e18cc69abb56d62c0cd9b746fe9abcd35d2e3c318e2ac6fec89d0ca6f"
               },
               "state": "complete"
             }
@@ -280,7 +280,7 @@
                 "owner": "openalex",
                 "repository": "demo"
               },
-              "request_commitment": "sha256:1e85c4b522ad4f282f85953a2a3237eb1acfeac330a1994d1079d0a9be2db52a"
+              "request_commitment": "sha256:c6515b656a0a32b5eeba61790fb48cc8cb0f44ab1ef28b4005c813f075722c93"
             }
           },
           "expect": {
@@ -389,7 +389,7 @@
               "content-type": "application/json"
             },
             "json": {
-              "expected_revision": "sha256:d636af68914b8986651bcc8701de809f8d5bd0ce7250a5bb7fe95ba8ed668cea",
+              "expected_revision": "sha256:0c5b5f5e18cc69abb56d62c0cd9b746fe9abcd35d2e3c318e2ac6fec89d0ca6f",
               "manifest": {
                 "capabilities": [
                   {
@@ -443,7 +443,7 @@
                 },
                 "requirements": [
                   {
-                    "capability": "portable-v2",
+                    "capability": "portable",
                     "major": 1
                   }
                 ],
@@ -463,9 +463,9 @@
             "json": {
               "receipt": {
                 "format": "graphforge-hub-publish/1",
-                "manifest_validator": "sha256:ee8af0774afe88e224c8aa1ba62c7a0121bd9a565aeaad7bc07b04355da30416",
+                "manifest_validator": "sha256:e624bed8198580f698287adaa1b9936fc0fbe75741aeaf7a5d72d503afc3bc2f",
                 "operation_uuid": "00000000-0000-7000-8000-0000000003f3",
-                "previous_revision": "sha256:d636af68914b8986651bcc8701de809f8d5bd0ce7250a5bb7fe95ba8ed668cea",
+                "previous_revision": "sha256:0c5b5f5e18cc69abb56d62c0cd9b746fe9abcd35d2e3c318e2ac6fec89d0ca6f",
                 "refs": [
                   "main"
                 ],
@@ -473,8 +473,8 @@
                   "owner": "openalex",
                   "repository": "demo"
                 },
-                "request_commitment": "sha256:1e85c4b522ad4f282f85953a2a3237eb1acfeac330a1994d1079d0a9be2db52a",
-                "revision": "sha256:cd29b8056f2856b08ec8ba618431240a7170b2bf6e9a6e2dee6b93a9975ab5ec"
+                "request_commitment": "sha256:c6515b656a0a32b5eeba61790fb48cc8cb0f44ab1ef28b4005c813f075722c93",
+                "revision": "sha256:85d8ec83239d116a28de4f6a94c6880cdbf910d2837b887149d5f7926159e67a"
               },
               "state": "complete"
             }
@@ -488,9 +488,9 @@
           "expect": {
             "status": 200,
             "headers": {
-              "etag": "\"sha256:cd29b8056f2856b08ec8ba618431240a7170b2bf6e9a6e2dee6b93a9975ab5ec\""
+              "etag": "\"sha256:85d8ec83239d116a28de4f6a94c6880cdbf910d2837b887149d5f7926159e67a\""
             },
-            "body_text": "{\"default_ref\":\"main\",\"format\":\"graphforge-discovery/1\",\"refs\":[{\"name\":\"main\",\"target\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"validator\":\"sha256:ee8af0774afe88e224c8aa1ba62c7a0121bd9a565aeaad7bc07b04355da30416\"}],\"repository\":{\"owner\":\"openalex\",\"repository\":\"demo\"},\"version\":{\"major\":1,\"minor\":2}}"
+            "body_text": "{\"default_ref\":\"main\",\"format\":\"graphforge-discovery/1\",\"refs\":[{\"name\":\"main\",\"target\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"validator\":\"sha256:e624bed8198580f698287adaa1b9936fc0fbe75741aeaf7a5d72d503afc3bc2f\"}],\"repository\":{\"owner\":\"openalex\",\"repository\":\"demo\"},\"version\":{\"major\":1,\"minor\":2}}"
           }
         }
       ]
@@ -540,7 +540,7 @@
                 "owner": "openalex",
                 "repository": "demo"
               },
-              "request_commitment": "sha256:9ecc9b1641359ed2cf1bc89853db7836832d141fbefe6682c6ec5bd13eb259c7"
+              "request_commitment": "sha256:77cc83f82ceb8ccab2a2fdc456da539c703d22b9c334d3905310e895aebe8e7f"
             }
           },
           "expect": {
@@ -703,7 +703,7 @@
                 },
                 "requirements": [
                   {
-                    "capability": "portable-v2",
+                    "capability": "portable",
                     "major": 1
                   }
                 ],
@@ -723,7 +723,7 @@
             "json": {
               "receipt": {
                 "format": "graphforge-hub-publish/1",
-                "manifest_validator": "sha256:c288fcd59921fb5c29835ea74cf3eb439b75aa7b6aab46cb2b9558e07bdb46b6",
+                "manifest_validator": "sha256:a9b37bd0926165083954ae677c7d5a63b8f46cec63f91432d96bde30869ee026",
                 "operation_uuid": "00000000-0000-7000-8000-0000000003f2",
                 "previous_revision": null,
                 "refs": [
@@ -733,8 +733,8 @@
                   "owner": "openalex",
                   "repository": "demo"
                 },
-                "request_commitment": "sha256:9ecc9b1641359ed2cf1bc89853db7836832d141fbefe6682c6ec5bd13eb259c7",
-                "revision": "sha256:d636af68914b8986651bcc8701de809f8d5bd0ce7250a5bb7fe95ba8ed668cea"
+                "request_commitment": "sha256:77cc83f82ceb8ccab2a2fdc456da539c703d22b9c334d3905310e895aebe8e7f",
+                "revision": "sha256:0c5b5f5e18cc69abb56d62c0cd9b746fe9abcd35d2e3c318e2ac6fec89d0ca6f"
               },
               "state": "complete"
             }
@@ -773,7 +773,7 @@
                 "owner": "openalex",
                 "repository": "demo"
               },
-              "request_commitment": "sha256:6baa5a5b392e07d174297eded66800b37c2ede8b43bdcc880f7ebca9e27781ae"
+              "request_commitment": "sha256:7e21a4c92097a7117b45de1f13378c9e3e601f6af6b4e4b6acfb5dcd95d0f0ec"
             }
           },
           "expect": {
@@ -882,7 +882,7 @@
               "content-type": "application/json"
             },
             "json": {
-              "expected_revision": "sha256:d636af68914b8986651bcc8701de809f8d5bd0ce7250a5bb7fe95ba8ed668cea",
+              "expected_revision": "sha256:0c5b5f5e18cc69abb56d62c0cd9b746fe9abcd35d2e3c318e2ac6fec89d0ca6f",
               "manifest": {
                 "capabilities": [
                   {
@@ -936,7 +936,7 @@
                 },
                 "requirements": [
                   {
-                    "capability": "portable-v2",
+                    "capability": "portable",
                     "major": 1
                   }
                 ],
@@ -964,9 +964,9 @@
           "expect": {
             "status": 200,
             "headers": {
-              "etag": "\"sha256:d636af68914b8986651bcc8701de809f8d5bd0ce7250a5bb7fe95ba8ed668cea\""
+              "etag": "\"sha256:0c5b5f5e18cc69abb56d62c0cd9b746fe9abcd35d2e3c318e2ac6fec89d0ca6f\""
             },
-            "body_text": "{\"default_ref\":\"main\",\"format\":\"graphforge-discovery/1\",\"refs\":[{\"name\":\"main\",\"target\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"validator\":\"sha256:c288fcd59921fb5c29835ea74cf3eb439b75aa7b6aab46cb2b9558e07bdb46b6\"}],\"repository\":{\"owner\":\"openalex\",\"repository\":\"demo\"},\"version\":{\"major\":1,\"minor\":2}}"
+            "body_text": "{\"default_ref\":\"main\",\"format\":\"graphforge-discovery/1\",\"refs\":[{\"name\":\"main\",\"target\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"validator\":\"sha256:a9b37bd0926165083954ae677c7d5a63b8f46cec63f91432d96bde30869ee026\"}],\"repository\":{\"owner\":\"openalex\",\"repository\":\"demo\"},\"version\":{\"major\":1,\"minor\":2}}"
           }
         }
       ]
@@ -1016,7 +1016,7 @@
                 "owner": "openalex",
                 "repository": "demo"
               },
-              "request_commitment": "sha256:9ecc9b1641359ed2cf1bc89853db7836832d141fbefe6682c6ec5bd13eb259c7"
+              "request_commitment": "sha256:77cc83f82ceb8ccab2a2fdc456da539c703d22b9c334d3905310e895aebe8e7f"
             }
           },
           "expect": {
@@ -1179,7 +1179,7 @@
                 },
                 "requirements": [
                   {
-                    "capability": "portable-v2",
+                    "capability": "portable",
                     "major": 1
                   }
                 ],
@@ -1199,7 +1199,7 @@
             "json": {
               "receipt": {
                 "format": "graphforge-hub-publish/1",
-                "manifest_validator": "sha256:c288fcd59921fb5c29835ea74cf3eb439b75aa7b6aab46cb2b9558e07bdb46b6",
+                "manifest_validator": "sha256:a9b37bd0926165083954ae677c7d5a63b8f46cec63f91432d96bde30869ee026",
                 "operation_uuid": "00000000-0000-7000-8000-0000000003f2",
                 "previous_revision": null,
                 "refs": [
@@ -1209,8 +1209,8 @@
                   "owner": "openalex",
                   "repository": "demo"
                 },
-                "request_commitment": "sha256:9ecc9b1641359ed2cf1bc89853db7836832d141fbefe6682c6ec5bd13eb259c7",
-                "revision": "sha256:d636af68914b8986651bcc8701de809f8d5bd0ce7250a5bb7fe95ba8ed668cea"
+                "request_commitment": "sha256:77cc83f82ceb8ccab2a2fdc456da539c703d22b9c334d3905310e895aebe8e7f",
+                "revision": "sha256:0c5b5f5e18cc69abb56d62c0cd9b746fe9abcd35d2e3c318e2ac6fec89d0ca6f"
               },
               "state": "complete"
             }
@@ -1249,7 +1249,7 @@
                 "owner": "openalex",
                 "repository": "demo"
               },
-              "request_commitment": "sha256:296396888046d575cfee2163d1e6bd68c46260c777ee23927f281942455182fd"
+              "request_commitment": "sha256:c92db83409504bd6ffba13ac46455a2db90b987ab6565badc4af19380c3c1eda"
             }
           },
           "expect": {
@@ -1412,7 +1412,7 @@
                 },
                 "requirements": [
                   {
-                    "capability": "portable-v2",
+                    "capability": "portable",
                     "major": 1
                   }
                 ],
@@ -1440,9 +1440,9 @@
           "expect": {
             "status": 200,
             "headers": {
-              "etag": "\"sha256:d636af68914b8986651bcc8701de809f8d5bd0ce7250a5bb7fe95ba8ed668cea\""
+              "etag": "\"sha256:0c5b5f5e18cc69abb56d62c0cd9b746fe9abcd35d2e3c318e2ac6fec89d0ca6f\""
             },
-            "body_text": "{\"default_ref\":\"main\",\"format\":\"graphforge-discovery/1\",\"refs\":[{\"name\":\"main\",\"target\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"validator\":\"sha256:c288fcd59921fb5c29835ea74cf3eb439b75aa7b6aab46cb2b9558e07bdb46b6\"}],\"repository\":{\"owner\":\"openalex\",\"repository\":\"demo\"},\"version\":{\"major\":1,\"minor\":2}}"
+            "body_text": "{\"default_ref\":\"main\",\"format\":\"graphforge-discovery/1\",\"refs\":[{\"name\":\"main\",\"target\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"validator\":\"sha256:a9b37bd0926165083954ae677c7d5a63b8f46cec63f91432d96bde30869ee026\"}],\"repository\":{\"owner\":\"openalex\",\"repository\":\"demo\"},\"version\":{\"major\":1,\"minor\":2}}"
           }
         }
       ]
@@ -1637,7 +1637,7 @@
                 "owner": "openalex",
                 "repository": "demo"
               },
-              "request_commitment": "sha256:cc16cd702133a6c89b2cf50cf9df19ef95f9cf9ba96111d471f11757005fdce9",
+              "request_commitment": "sha256:6132e6416abb6f20cd6b6eebf12884444687038783ba343bf374c4316d57af01",
               "requirements": [
                 {
                   "capability": "publish-negotiation",
@@ -1726,7 +1726,7 @@
                 "owner": "openalex",
                 "repository": "demo"
               },
-              "request_commitment": "sha256:3d29dd4b137ac45c911e1bfe5726b273f33a75b861013aeef6185ece4d0d8f92",
+              "request_commitment": "sha256:a3c75cc41fa96c69de63316c206a1b7b5ff94072e453d79d67077695f8ee1303",
               "requirements": [
                 {
                   "capability": "publish-negotiation",
@@ -1823,7 +1823,7 @@
                 },
                 "requirements": [
                   {
-                    "capability": "portable-v2",
+                    "capability": "portable",
                     "major": 1
                   }
                 ],
@@ -1872,7 +1872,7 @@
               "operation_uuid": "00000000-0000-7000-8000-000000001776",
               "receipt": {
                 "format": "graphforge-hub-publish/1",
-                "manifest_validator": "sha256:fd0d106d4181d5b04a6e3ca3033df9f00a972cfbda80a43a257b679f1a8c52f3",
+                "manifest_validator": "sha256:c9220e21ab92d8e61464b7f97224cab0bf31713136d2ec3c01668e269f442640",
                 "operation_uuid": "00000000-0000-7000-8000-000000001776",
                 "previous_revision": null,
                 "refs": [
@@ -1882,8 +1882,8 @@
                   "owner": "openalex",
                   "repository": "demo"
                 },
-                "request_commitment": "sha256:3d29dd4b137ac45c911e1bfe5726b273f33a75b861013aeef6185ece4d0d8f92",
-                "revision": "sha256:048466779c3b5b7437ae80f35f2ede520fd900a3388bcf23113a5c3b256b5b9c"
+                "request_commitment": "sha256:a3c75cc41fa96c69de63316c206a1b7b5ff94072e453d79d67077695f8ee1303",
+                "revision": "sha256:5db71905e8a08dd819c77be02f63d4cdec582a01650a5e27cd4211708fa2af15"
               },
               "repository": {
                 "owner": "openalex",
@@ -1900,9 +1900,9 @@
           "expect": {
             "status": 200,
             "headers": {
-              "etag": "\"sha256:048466779c3b5b7437ae80f35f2ede520fd900a3388bcf23113a5c3b256b5b9c\""
+              "etag": "\"sha256:5db71905e8a08dd819c77be02f63d4cdec582a01650a5e27cd4211708fa2af15\""
             },
-            "body_text": "{\"default_ref\":\"main\",\"format\":\"graphforge-discovery/1\",\"refs\":[{\"name\":\"main\",\"target\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"validator\":\"sha256:fd0d106d4181d5b04a6e3ca3033df9f00a972cfbda80a43a257b679f1a8c52f3\"}],\"repository\":{\"owner\":\"openalex\",\"repository\":\"demo\"},\"version\":{\"major\":1,\"minor\":2}}"
+            "body_text": "{\"default_ref\":\"main\",\"format\":\"graphforge-discovery/1\",\"refs\":[{\"name\":\"main\",\"target\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"validator\":\"sha256:c9220e21ab92d8e61464b7f97224cab0bf31713136d2ec3c01668e269f442640\"}],\"repository\":{\"owner\":\"openalex\",\"repository\":\"demo\"},\"version\":{\"major\":1,\"minor\":2}}"
           }
         }
       ]
@@ -1942,7 +1942,7 @@
                 "owner": "openalex",
                 "repository": "demo"
               },
-              "request_commitment": "sha256:cc16cd702133a6c89b2cf50cf9df19ef95f9cf9ba96111d471f11757005fdce9"
+              "request_commitment": "sha256:6132e6416abb6f20cd6b6eebf12884444687038783ba343bf374c4316d57af01"
             }
           },
           "expect": {
@@ -2028,7 +2028,7 @@
                 },
                 "requirements": [
                   {
-                    "capability": "portable-v2",
+                    "capability": "portable",
                     "major": 1
                   }
                 ],
@@ -2048,7 +2048,7 @@
             "json": {
               "receipt": {
                 "format": "graphforge-hub-publish/1",
-                "manifest_validator": "sha256:fd0d106d4181d5b04a6e3ca3033df9f00a972cfbda80a43a257b679f1a8c52f3",
+                "manifest_validator": "sha256:c9220e21ab92d8e61464b7f97224cab0bf31713136d2ec3c01668e269f442640",
                 "operation_uuid": "00000000-0000-7000-8000-000000000001",
                 "previous_revision": null,
                 "refs": [
@@ -2058,8 +2058,8 @@
                   "owner": "openalex",
                   "repository": "demo"
                 },
-                "request_commitment": "sha256:cc16cd702133a6c89b2cf50cf9df19ef95f9cf9ba96111d471f11757005fdce9",
-                "revision": "sha256:048466779c3b5b7437ae80f35f2ede520fd900a3388bcf23113a5c3b256b5b9c"
+                "request_commitment": "sha256:6132e6416abb6f20cd6b6eebf12884444687038783ba343bf374c4316d57af01",
+                "revision": "sha256:5db71905e8a08dd819c77be02f63d4cdec582a01650a5e27cd4211708fa2af15"
               },
               "state": "complete"
             }
@@ -2073,9 +2073,9 @@
           "expect": {
             "status": 200,
             "headers": {
-              "etag": "\"sha256:048466779c3b5b7437ae80f35f2ede520fd900a3388bcf23113a5c3b256b5b9c\""
+              "etag": "\"sha256:5db71905e8a08dd819c77be02f63d4cdec582a01650a5e27cd4211708fa2af15\""
             },
-            "body_text": "{\"default_ref\":\"main\",\"format\":\"graphforge-discovery/1\",\"refs\":[{\"name\":\"main\",\"target\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"validator\":\"sha256:fd0d106d4181d5b04a6e3ca3033df9f00a972cfbda80a43a257b679f1a8c52f3\"}],\"repository\":{\"owner\":\"openalex\",\"repository\":\"demo\"},\"version\":{\"major\":1,\"minor\":2}}"
+            "body_text": "{\"default_ref\":\"main\",\"format\":\"graphforge-discovery/1\",\"refs\":[{\"name\":\"main\",\"target\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"validator\":\"sha256:c9220e21ab92d8e61464b7f97224cab0bf31713136d2ec3c01668e269f442640\"}],\"repository\":{\"owner\":\"openalex\",\"repository\":\"demo\"},\"version\":{\"major\":1,\"minor\":2}}"
           }
         },
         {
@@ -2086,9 +2086,9 @@
           "expect": {
             "status": 200,
             "headers": {
-              "etag": "\"sha256:fd0d106d4181d5b04a6e3ca3033df9f00a972cfbda80a43a257b679f1a8c52f3\""
+              "etag": "\"sha256:c9220e21ab92d8e61464b7f97224cab0bf31713136d2ec3c01668e269f442640\""
             },
-            "body_text": "{\"capabilities\":[{\"capability\":\"range-requests\",\"major\":1}],\"default_ref\":\"main\",\"format\":\"graphforge-discovery/1\",\"immutable_version\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"objects\":[{\"digest\":\"sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60\",\"length\":47,\"locations\":[\"https://hub.example/openalex/demo/.gf/objects/sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60\"],\"media_type\":\"application/vnd.graphforge.project\"}],\"package\":{\"format\":\"graphforge-project/2\",\"object_digest\":\"sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60\",\"package_digest\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"producing_core_version\":\"0.6.0\"},\"repository\":{\"owner\":\"openalex\",\"repository\":\"demo\"},\"requirements\":[{\"capability\":\"portable-v2\",\"major\":1}],\"resolved_ref\":\"main\",\"version\":{\"major\":1,\"minor\":2}}"
+            "body_text": "{\"capabilities\":[{\"capability\":\"range-requests\",\"major\":1}],\"default_ref\":\"main\",\"format\":\"graphforge-discovery/1\",\"immutable_version\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"objects\":[{\"digest\":\"sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60\",\"length\":47,\"locations\":[\"https://hub.example/openalex/demo/.gf/objects/sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60\"],\"media_type\":\"application/vnd.graphforge.project\"}],\"package\":{\"format\":\"graphforge-project/2\",\"object_digest\":\"sha256:14263f9ee169b2b468f3ed0264a60717012bf82e4d92e6f49e0a948407e39e60\",\"package_digest\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"producing_core_version\":\"0.6.0\"},\"repository\":{\"owner\":\"openalex\",\"repository\":\"demo\"},\"requirements\":[{\"capability\":\"portable\",\"major\":1}],\"resolved_ref\":\"main\",\"version\":{\"major\":1,\"minor\":2}}"
           }
         },
         {
@@ -2173,7 +2173,7 @@
                 "owner": "openalex",
                 "repository": "demo"
               },
-              "request_commitment": "sha256:3aacaa2588af96ddebb49ec1f738c5c5fea58950135894211045863b19a7611f"
+              "request_commitment": "sha256:49c1c73223a2abd05b5ed7a997db939bdeaf620852d822b8b53bfc170ce04018"
             }
           },
           "expect": {
@@ -2259,7 +2259,7 @@
                 },
                 "requirements": [
                   {
-                    "capability": "portable-v2",
+                    "capability": "portable",
                     "major": 1
                   }
                 ],
@@ -2279,7 +2279,7 @@
             "json": {
               "receipt": {
                 "format": "graphforge-hub-publish/1",
-                "manifest_validator": "sha256:fd0d106d4181d5b04a6e3ca3033df9f00a972cfbda80a43a257b679f1a8c52f3",
+                "manifest_validator": "sha256:c9220e21ab92d8e61464b7f97224cab0bf31713136d2ec3c01668e269f442640",
                 "operation_uuid": "00000000-0000-7000-8000-000000000002",
                 "previous_revision": null,
                 "refs": [
@@ -2289,8 +2289,8 @@
                   "owner": "openalex",
                   "repository": "demo"
                 },
-                "request_commitment": "sha256:3aacaa2588af96ddebb49ec1f738c5c5fea58950135894211045863b19a7611f",
-                "revision": "sha256:048466779c3b5b7437ae80f35f2ede520fd900a3388bcf23113a5c3b256b5b9c"
+                "request_commitment": "sha256:49c1c73223a2abd05b5ed7a997db939bdeaf620852d822b8b53bfc170ce04018",
+                "revision": "sha256:5db71905e8a08dd819c77be02f63d4cdec582a01650a5e27cd4211708fa2af15"
               },
               "state": "complete"
             }
@@ -2319,7 +2319,7 @@
                 "owner": "openalex",
                 "repository": "demo"
               },
-              "request_commitment": "sha256:3aacaa2588af96ddebb49ec1f738c5c5fea58950135894211045863b19a7611f"
+              "request_commitment": "sha256:49c1c73223a2abd05b5ed7a997db939bdeaf620852d822b8b53bfc170ce04018"
             }
           },
           "expect": {
@@ -2327,7 +2327,7 @@
             "json": {
               "receipt": {
                 "format": "graphforge-hub-publish/1",
-                "manifest_validator": "sha256:fd0d106d4181d5b04a6e3ca3033df9f00a972cfbda80a43a257b679f1a8c52f3",
+                "manifest_validator": "sha256:c9220e21ab92d8e61464b7f97224cab0bf31713136d2ec3c01668e269f442640",
                 "operation_uuid": "00000000-0000-7000-8000-000000000002",
                 "previous_revision": null,
                 "refs": [
@@ -2337,8 +2337,8 @@
                   "owner": "openalex",
                   "repository": "demo"
                 },
-                "request_commitment": "sha256:3aacaa2588af96ddebb49ec1f738c5c5fea58950135894211045863b19a7611f",
-                "revision": "sha256:048466779c3b5b7437ae80f35f2ede520fd900a3388bcf23113a5c3b256b5b9c"
+                "request_commitment": "sha256:49c1c73223a2abd05b5ed7a997db939bdeaf620852d822b8b53bfc170ce04018",
+                "revision": "sha256:5db71905e8a08dd819c77be02f63d4cdec582a01650a5e27cd4211708fa2af15"
               },
               "state": "complete"
             }
@@ -2386,7 +2386,7 @@
                 },
                 "requirements": [
                   {
-                    "capability": "portable-v2",
+                    "capability": "portable",
                     "major": 1
                   }
                 ],
@@ -2406,7 +2406,7 @@
             "json": {
               "receipt": {
                 "format": "graphforge-hub-publish/1",
-                "manifest_validator": "sha256:fd0d106d4181d5b04a6e3ca3033df9f00a972cfbda80a43a257b679f1a8c52f3",
+                "manifest_validator": "sha256:c9220e21ab92d8e61464b7f97224cab0bf31713136d2ec3c01668e269f442640",
                 "operation_uuid": "00000000-0000-7000-8000-000000000002",
                 "previous_revision": null,
                 "refs": [
@@ -2416,8 +2416,8 @@
                   "owner": "openalex",
                   "repository": "demo"
                 },
-                "request_commitment": "sha256:3aacaa2588af96ddebb49ec1f738c5c5fea58950135894211045863b19a7611f",
-                "revision": "sha256:048466779c3b5b7437ae80f35f2ede520fd900a3388bcf23113a5c3b256b5b9c"
+                "request_commitment": "sha256:49c1c73223a2abd05b5ed7a997db939bdeaf620852d822b8b53bfc170ce04018",
+                "revision": "sha256:5db71905e8a08dd819c77be02f63d4cdec582a01650a5e27cd4211708fa2af15"
               },
               "state": "complete"
             }
@@ -2431,9 +2431,9 @@
           "expect": {
             "status": 200,
             "headers": {
-              "etag": "\"sha256:048466779c3b5b7437ae80f35f2ede520fd900a3388bcf23113a5c3b256b5b9c\""
+              "etag": "\"sha256:5db71905e8a08dd819c77be02f63d4cdec582a01650a5e27cd4211708fa2af15\""
             },
-            "body_text": "{\"default_ref\":\"main\",\"format\":\"graphforge-discovery/1\",\"refs\":[{\"name\":\"main\",\"target\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"validator\":\"sha256:fd0d106d4181d5b04a6e3ca3033df9f00a972cfbda80a43a257b679f1a8c52f3\"}],\"repository\":{\"owner\":\"openalex\",\"repository\":\"demo\"},\"version\":{\"major\":1,\"minor\":2}}"
+            "body_text": "{\"default_ref\":\"main\",\"format\":\"graphforge-discovery/1\",\"refs\":[{\"name\":\"main\",\"target\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"validator\":\"sha256:c9220e21ab92d8e61464b7f97224cab0bf31713136d2ec3c01668e269f442640\"}],\"repository\":{\"owner\":\"openalex\",\"repository\":\"demo\"},\"version\":{\"major\":1,\"minor\":2}}"
           }
         }
       ]
@@ -2486,7 +2486,7 @@
                 "owner": "openalex",
                 "repository": "demo"
               },
-              "request_commitment": "sha256:57380fbd467c9552f931cd9072b8ce6619621206b539797c280684fa720e6bed"
+              "request_commitment": "sha256:ffcfac5441274a29085ab726d4a74058f51692ab071d63feb18b6ecce17cc99f"
             }
           },
           "expect": {
@@ -2572,7 +2572,7 @@
                 },
                 "requirements": [
                   {
-                    "capability": "portable-v2",
+                    "capability": "portable",
                     "major": 1
                   }
                 ],
@@ -2592,7 +2592,7 @@
             "json": {
               "receipt": {
                 "format": "graphforge-hub-publish/1",
-                "manifest_validator": "sha256:fd0d106d4181d5b04a6e3ca3033df9f00a972cfbda80a43a257b679f1a8c52f3",
+                "manifest_validator": "sha256:c9220e21ab92d8e61464b7f97224cab0bf31713136d2ec3c01668e269f442640",
                 "operation_uuid": "00000000-0000-7000-8000-000000000015",
                 "previous_revision": null,
                 "refs": [
@@ -2602,8 +2602,8 @@
                   "owner": "openalex",
                   "repository": "demo"
                 },
-                "request_commitment": "sha256:57380fbd467c9552f931cd9072b8ce6619621206b539797c280684fa720e6bed",
-                "revision": "sha256:048466779c3b5b7437ae80f35f2ede520fd900a3388bcf23113a5c3b256b5b9c"
+                "request_commitment": "sha256:ffcfac5441274a29085ab726d4a74058f51692ab071d63feb18b6ecce17cc99f",
+                "revision": "sha256:5db71905e8a08dd819c77be02f63d4cdec582a01650a5e27cd4211708fa2af15"
               },
               "state": "complete"
             }
@@ -2625,7 +2625,7 @@
               "operation_uuid": "00000000-0000-7000-8000-000000000015",
               "receipt": {
                 "format": "graphforge-hub-publish/1",
-                "manifest_validator": "sha256:fd0d106d4181d5b04a6e3ca3033df9f00a972cfbda80a43a257b679f1a8c52f3",
+                "manifest_validator": "sha256:c9220e21ab92d8e61464b7f97224cab0bf31713136d2ec3c01668e269f442640",
                 "operation_uuid": "00000000-0000-7000-8000-000000000015",
                 "previous_revision": null,
                 "refs": [
@@ -2635,8 +2635,8 @@
                   "owner": "openalex",
                   "repository": "demo"
                 },
-                "request_commitment": "sha256:57380fbd467c9552f931cd9072b8ce6619621206b539797c280684fa720e6bed",
-                "revision": "sha256:048466779c3b5b7437ae80f35f2ede520fd900a3388bcf23113a5c3b256b5b9c"
+                "request_commitment": "sha256:ffcfac5441274a29085ab726d4a74058f51692ab071d63feb18b6ecce17cc99f",
+                "revision": "sha256:5db71905e8a08dd819c77be02f63d4cdec582a01650a5e27cd4211708fa2af15"
               },
               "repository": {
                 "owner": "openalex",
@@ -2692,7 +2692,7 @@
                 "owner": "openalex",
                 "repository": "demo"
               },
-              "request_commitment": "sha256:fe82aaa9a481f75a69d2c13786a7b3ea573e1b2a12dce823afaf4bb3aa00ff7a"
+              "request_commitment": "sha256:70e304d767fc904edea987fed83a91667a8c0213e2cac723428912d415fe5e6d"
             }
           },
           "expect": {
@@ -2778,7 +2778,7 @@
                 },
                 "requirements": [
                   {
-                    "capability": "portable-v2",
+                    "capability": "portable",
                     "major": 1
                   }
                 ],
@@ -2798,7 +2798,7 @@
             "json": {
               "receipt": {
                 "format": "graphforge-hub-publish/1",
-                "manifest_validator": "sha256:fd0d106d4181d5b04a6e3ca3033df9f00a972cfbda80a43a257b679f1a8c52f3",
+                "manifest_validator": "sha256:c9220e21ab92d8e61464b7f97224cab0bf31713136d2ec3c01668e269f442640",
                 "operation_uuid": "00000000-0000-7000-8000-000000000003",
                 "previous_revision": null,
                 "refs": [
@@ -2808,8 +2808,8 @@
                   "owner": "openalex",
                   "repository": "demo"
                 },
-                "request_commitment": "sha256:fe82aaa9a481f75a69d2c13786a7b3ea573e1b2a12dce823afaf4bb3aa00ff7a",
-                "revision": "sha256:048466779c3b5b7437ae80f35f2ede520fd900a3388bcf23113a5c3b256b5b9c"
+                "request_commitment": "sha256:70e304d767fc904edea987fed83a91667a8c0213e2cac723428912d415fe5e6d",
+                "revision": "sha256:5db71905e8a08dd819c77be02f63d4cdec582a01650a5e27cd4211708fa2af15"
               },
               "state": "complete"
             }
@@ -2838,7 +2838,7 @@
                 "owner": "openalex",
                 "repository": "demo"
               },
-              "request_commitment": "sha256:5301d5f448b6f804a935da1ee2401652c59b5495a83c4d2da81df28887ceecef"
+              "request_commitment": "sha256:a74b58001210e5de6ee6dce255e088b3f22ed97fa314fb1acdee748674944f2c"
             }
           },
           "expect": {
@@ -2854,9 +2854,9 @@
           "expect": {
             "status": 200,
             "headers": {
-              "etag": "\"sha256:048466779c3b5b7437ae80f35f2ede520fd900a3388bcf23113a5c3b256b5b9c\""
+              "etag": "\"sha256:5db71905e8a08dd819c77be02f63d4cdec582a01650a5e27cd4211708fa2af15\""
             },
-            "body_text": "{\"default_ref\":\"main\",\"format\":\"graphforge-discovery/1\",\"refs\":[{\"name\":\"main\",\"target\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"validator\":\"sha256:fd0d106d4181d5b04a6e3ca3033df9f00a972cfbda80a43a257b679f1a8c52f3\"}],\"repository\":{\"owner\":\"openalex\",\"repository\":\"demo\"},\"version\":{\"major\":1,\"minor\":2}}"
+            "body_text": "{\"default_ref\":\"main\",\"format\":\"graphforge-discovery/1\",\"refs\":[{\"name\":\"main\",\"target\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"validator\":\"sha256:c9220e21ab92d8e61464b7f97224cab0bf31713136d2ec3c01668e269f442640\"}],\"repository\":{\"owner\":\"openalex\",\"repository\":\"demo\"},\"version\":{\"major\":1,\"minor\":2}}"
           }
         }
       ]
@@ -2896,7 +2896,7 @@
                 "owner": "openalex",
                 "repository": "demo"
               },
-              "request_commitment": "sha256:92b0e73df5618e4222d9fb0985e3d0028cdf31d7fa2e887fbc74559caa2fc407"
+              "request_commitment": "sha256:9e68cd3c40fa6be4d346432d1180b21d63896990cfc124175229cd8c4aadea48"
             }
           },
           "expect": {
@@ -2982,7 +2982,7 @@
                 },
                 "requirements": [
                   {
-                    "capability": "portable-v2",
+                    "capability": "portable",
                     "major": 1
                   }
                 ],
@@ -3049,7 +3049,7 @@
                 "owner": "openalex",
                 "repository": "demo"
               },
-              "request_commitment": "sha256:9d065cd5d69774bde8477d45ae48ea555b8cc4ece0d3de5c19e1e5a12f94128c"
+              "request_commitment": "sha256:9f26572e7d398326e1100238eff7eb57dc504e31e171dc89308de123c936ec26"
             }
           },
           "expect": {
@@ -3116,7 +3116,7 @@
                 "owner": "openalex",
                 "repository": "demo"
               },
-              "request_commitment": "sha256:a054b35625d98cd9e6ec406231bd311446914b2a865f41571fb754adb88cd398"
+              "request_commitment": "sha256:7bd36995f43a85b9508b73c18946af3f1160f80937e64b56495a9745dbcc34fe"
             }
           },
           "expect": {
@@ -3212,7 +3212,7 @@
                 },
                 "requirements": [
                   {
-                    "capability": "portable-v2",
+                    "capability": "portable",
                     "major": 1
                   }
                 ],
@@ -3274,7 +3274,7 @@
                 },
                 "requirements": [
                   {
-                    "capability": "portable-v2",
+                    "capability": "portable",
                     "major": 1
                   }
                 ],
@@ -3295,7 +3295,7 @@
             "json": {
               "receipt": {
                 "format": "graphforge-hub-publish/1",
-                "manifest_validator": "sha256:fd0d106d4181d5b04a6e3ca3033df9f00a972cfbda80a43a257b679f1a8c52f3",
+                "manifest_validator": "sha256:c9220e21ab92d8e61464b7f97224cab0bf31713136d2ec3c01668e269f442640",
                 "operation_uuid": "00000000-0000-7000-8000-000000000016",
                 "previous_revision": null,
                 "refs": [
@@ -3306,8 +3306,8 @@
                   "owner": "openalex",
                   "repository": "demo"
                 },
-                "request_commitment": "sha256:a054b35625d98cd9e6ec406231bd311446914b2a865f41571fb754adb88cd398",
-                "revision": "sha256:9bc54d82a3ede2e8325a789e5eb49a8f22be1e66f8356d5b73f40cf9bc4f6f9d"
+                "request_commitment": "sha256:7bd36995f43a85b9508b73c18946af3f1160f80937e64b56495a9745dbcc34fe",
+                "revision": "sha256:67294b9f33df6664dfa2a752c2d2b4a0c494dfcac7895f1eef4e873367f5c50e"
               },
               "state": "complete"
             }
@@ -3321,9 +3321,9 @@
           "expect": {
             "status": 200,
             "headers": {
-              "etag": "\"sha256:9bc54d82a3ede2e8325a789e5eb49a8f22be1e66f8356d5b73f40cf9bc4f6f9d\""
+              "etag": "\"sha256:67294b9f33df6664dfa2a752c2d2b4a0c494dfcac7895f1eef4e873367f5c50e\""
             },
-            "body_text": "{\"default_ref\":\"main\",\"format\":\"graphforge-discovery/1\",\"refs\":[{\"name\":\"main\",\"target\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"validator\":\"sha256:fd0d106d4181d5b04a6e3ca3033df9f00a972cfbda80a43a257b679f1a8c52f3\"},{\"name\":\"stable\",\"target\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"validator\":\"sha256:fd0d106d4181d5b04a6e3ca3033df9f00a972cfbda80a43a257b679f1a8c52f3\"}],\"repository\":{\"owner\":\"openalex\",\"repository\":\"demo\"},\"version\":{\"major\":1,\"minor\":2}}"
+            "body_text": "{\"default_ref\":\"main\",\"format\":\"graphforge-discovery/1\",\"refs\":[{\"name\":\"main\",\"target\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"validator\":\"sha256:c9220e21ab92d8e61464b7f97224cab0bf31713136d2ec3c01668e269f442640\"},{\"name\":\"stable\",\"target\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"validator\":\"sha256:c9220e21ab92d8e61464b7f97224cab0bf31713136d2ec3c01668e269f442640\"}],\"repository\":{\"owner\":\"openalex\",\"repository\":\"demo\"},\"version\":{\"major\":1,\"minor\":2}}"
           }
         }
       ]
@@ -3363,7 +3363,7 @@
                 "owner": "openalex",
                 "repository": "demo"
               },
-              "request_commitment": "sha256:82d02bbbf6533e5fae0dc02c40348e520ca7c572f040b16b8a03ec632f66c521"
+              "request_commitment": "sha256:12a269289270cefbc8e4340969877cfc980f03eef7d008612ee0899cf65c04ec"
             }
           },
           "expect": {
@@ -3461,7 +3461,7 @@
                 "owner": "openalex",
                 "repository": "demo"
               },
-              "request_commitment": "sha256:82d02bbbf6533e5fae0dc02c40348e520ca7c572f040b16b8a03ec632f66c521"
+              "request_commitment": "sha256:12a269289270cefbc8e4340969877cfc980f03eef7d008612ee0899cf65c04ec"
             }
           },
           "expect": {
@@ -3543,7 +3543,7 @@
                 },
                 "requirements": [
                   {
-                    "capability": "portable-v2",
+                    "capability": "portable",
                     "major": 1
                   }
                 ],
@@ -3563,7 +3563,7 @@
             "json": {
               "receipt": {
                 "format": "graphforge-hub-publish/1",
-                "manifest_validator": "sha256:fd0d106d4181d5b04a6e3ca3033df9f00a972cfbda80a43a257b679f1a8c52f3",
+                "manifest_validator": "sha256:c9220e21ab92d8e61464b7f97224cab0bf31713136d2ec3c01668e269f442640",
                 "operation_uuid": "00000000-0000-7000-8000-000000000005",
                 "previous_revision": null,
                 "refs": [
@@ -3573,8 +3573,8 @@
                   "owner": "openalex",
                   "repository": "demo"
                 },
-                "request_commitment": "sha256:82d02bbbf6533e5fae0dc02c40348e520ca7c572f040b16b8a03ec632f66c521",
-                "revision": "sha256:048466779c3b5b7437ae80f35f2ede520fd900a3388bcf23113a5c3b256b5b9c"
+                "request_commitment": "sha256:12a269289270cefbc8e4340969877cfc980f03eef7d008612ee0899cf65c04ec",
+                "revision": "sha256:5db71905e8a08dd819c77be02f63d4cdec582a01650a5e27cd4211708fa2af15"
               },
               "state": "complete"
             }
@@ -3588,9 +3588,9 @@
           "expect": {
             "status": 200,
             "headers": {
-              "etag": "\"sha256:048466779c3b5b7437ae80f35f2ede520fd900a3388bcf23113a5c3b256b5b9c\""
+              "etag": "\"sha256:5db71905e8a08dd819c77be02f63d4cdec582a01650a5e27cd4211708fa2af15\""
             },
-            "body_text": "{\"default_ref\":\"main\",\"format\":\"graphforge-discovery/1\",\"refs\":[{\"name\":\"main\",\"target\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"validator\":\"sha256:fd0d106d4181d5b04a6e3ca3033df9f00a972cfbda80a43a257b679f1a8c52f3\"}],\"repository\":{\"owner\":\"openalex\",\"repository\":\"demo\"},\"version\":{\"major\":1,\"minor\":2}}"
+            "body_text": "{\"default_ref\":\"main\",\"format\":\"graphforge-discovery/1\",\"refs\":[{\"name\":\"main\",\"target\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"validator\":\"sha256:c9220e21ab92d8e61464b7f97224cab0bf31713136d2ec3c01668e269f442640\"}],\"repository\":{\"owner\":\"openalex\",\"repository\":\"demo\"},\"version\":{\"major\":1,\"minor\":2}}"
           }
         }
       ]
@@ -3630,7 +3630,7 @@
                 "owner": "openalex",
                 "repository": "demo"
               },
-              "request_commitment": "sha256:218b21330c5daf486987d035aab09128dc2ac647e00cd1d590678286fd204edd"
+              "request_commitment": "sha256:71cd6ee7fb8f8b98404d06576ccff09487ed933e7fadb310b337a36a122989a4"
             }
           },
           "expect": {
@@ -3716,7 +3716,7 @@
                 },
                 "requirements": [
                   {
-                    "capability": "portable-v2",
+                    "capability": "portable",
                     "major": 1
                   }
                 ],
@@ -3736,7 +3736,7 @@
             "json": {
               "receipt": {
                 "format": "graphforge-hub-publish/1",
-                "manifest_validator": "sha256:fd0d106d4181d5b04a6e3ca3033df9f00a972cfbda80a43a257b679f1a8c52f3",
+                "manifest_validator": "sha256:c9220e21ab92d8e61464b7f97224cab0bf31713136d2ec3c01668e269f442640",
                 "operation_uuid": "00000000-0000-7000-8000-000000000006",
                 "previous_revision": null,
                 "refs": [
@@ -3746,8 +3746,8 @@
                   "owner": "openalex",
                   "repository": "demo"
                 },
-                "request_commitment": "sha256:218b21330c5daf486987d035aab09128dc2ac647e00cd1d590678286fd204edd",
-                "revision": "sha256:048466779c3b5b7437ae80f35f2ede520fd900a3388bcf23113a5c3b256b5b9c"
+                "request_commitment": "sha256:71cd6ee7fb8f8b98404d06576ccff09487ed933e7fadb310b337a36a122989a4",
+                "revision": "sha256:5db71905e8a08dd819c77be02f63d4cdec582a01650a5e27cd4211708fa2af15"
               },
               "state": "complete"
             }
@@ -3776,7 +3776,7 @@
                 "owner": "openalex",
                 "repository": "demo"
               },
-              "request_commitment": "sha256:26cb543d92d620a553d1aa1588f714f3ccb4640e4b4047c4f367b1e8b62762cc"
+              "request_commitment": "sha256:f92b35d3410f213596b1f35a907c5507e4aab670dea393db0cfae9524184a20c"
             }
           },
           "expect": {
@@ -3838,7 +3838,7 @@
               "content-type": "application/json"
             },
             "json": {
-              "expected_revision": "sha256:048466779c3b5b7437ae80f35f2ede520fd900a3388bcf23113a5c3b256b5b9c",
+              "expected_revision": "sha256:5db71905e8a08dd819c77be02f63d4cdec582a01650a5e27cd4211708fa2af15",
               "manifest": {
                 "capabilities": [
                   {
@@ -3871,7 +3871,7 @@
                 },
                 "requirements": [
                   {
-                    "capability": "portable-v2",
+                    "capability": "portable",
                     "major": 1
                   }
                 ],
@@ -3899,9 +3899,9 @@
           "expect": {
             "status": 200,
             "headers": {
-              "etag": "\"sha256:048466779c3b5b7437ae80f35f2ede520fd900a3388bcf23113a5c3b256b5b9c\""
+              "etag": "\"sha256:5db71905e8a08dd819c77be02f63d4cdec582a01650a5e27cd4211708fa2af15\""
             },
-            "body_text": "{\"default_ref\":\"main\",\"format\":\"graphforge-discovery/1\",\"refs\":[{\"name\":\"main\",\"target\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"validator\":\"sha256:fd0d106d4181d5b04a6e3ca3033df9f00a972cfbda80a43a257b679f1a8c52f3\"}],\"repository\":{\"owner\":\"openalex\",\"repository\":\"demo\"},\"version\":{\"major\":1,\"minor\":2}}"
+            "body_text": "{\"default_ref\":\"main\",\"format\":\"graphforge-discovery/1\",\"refs\":[{\"name\":\"main\",\"target\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"validator\":\"sha256:c9220e21ab92d8e61464b7f97224cab0bf31713136d2ec3c01668e269f442640\"}],\"repository\":{\"owner\":\"openalex\",\"repository\":\"demo\"},\"version\":{\"major\":1,\"minor\":2}}"
           }
         }
       ]
@@ -3941,7 +3941,7 @@
                 "owner": "openalex",
                 "repository": "demo"
               },
-              "request_commitment": "sha256:2d3f7e5bdcefc46b63b5fe616dd9b9a7a1fabcf9e64af7223e5579977c6fbbac"
+              "request_commitment": "sha256:5b7b7826121774008731f396e8ab3458af94a689b0f7769281dcb4ba1d403e44"
             }
           },
           "expect": {
@@ -4033,7 +4033,7 @@
                 },
                 "requirements": [
                   {
-                    "capability": "portable-v2",
+                    "capability": "portable",
                     "major": 1
                   }
                 ],
@@ -4100,7 +4100,7 @@
                 "owner": "openalex",
                 "repository": "demo"
               },
-              "request_commitment": "sha256:ec56b51ab6667ec93627ebffb65e6e409cdd55d3e86df0bbf0a66b550330d627"
+              "request_commitment": "sha256:3a92091d04a97530bf5d6f27ee50269b902e9c3231e5bdd58e27da89a7e86e2f"
             }
           },
           "expect": {
@@ -4186,7 +4186,7 @@
                 },
                 "requirements": [
                   {
-                    "capability": "portable-v2",
+                    "capability": "portable",
                     "major": 1
                   }
                 ],
@@ -4206,7 +4206,7 @@
             "json": {
               "receipt": {
                 "format": "graphforge-hub-publish/1",
-                "manifest_validator": "sha256:fd0d106d4181d5b04a6e3ca3033df9f00a972cfbda80a43a257b679f1a8c52f3",
+                "manifest_validator": "sha256:c9220e21ab92d8e61464b7f97224cab0bf31713136d2ec3c01668e269f442640",
                 "operation_uuid": "00000000-0000-7000-8000-000000000009",
                 "previous_revision": null,
                 "refs": [
@@ -4216,8 +4216,8 @@
                   "owner": "openalex",
                   "repository": "demo"
                 },
-                "request_commitment": "sha256:ec56b51ab6667ec93627ebffb65e6e409cdd55d3e86df0bbf0a66b550330d627",
-                "revision": "sha256:048466779c3b5b7437ae80f35f2ede520fd900a3388bcf23113a5c3b256b5b9c"
+                "request_commitment": "sha256:3a92091d04a97530bf5d6f27ee50269b902e9c3231e5bdd58e27da89a7e86e2f",
+                "revision": "sha256:5db71905e8a08dd819c77be02f63d4cdec582a01650a5e27cd4211708fa2af15"
               },
               "state": "complete"
             }
@@ -4246,7 +4246,7 @@
                 "owner": "openalex",
                 "repository": "demo"
               },
-              "request_commitment": "sha256:6e8af4a73345453e574576cb548cd2c6a138d26a3a07a2a628005c3e302e4e97"
+              "request_commitment": "sha256:5da09de41bc25c1538519c03c02f56c544b22957197b6c8a75e03389d4a1b5ac"
             }
           },
           "expect": {
@@ -4299,7 +4299,7 @@
               "content-type": "application/json"
             },
             "json": {
-              "expected_revision": "sha256:048466779c3b5b7437ae80f35f2ede520fd900a3388bcf23113a5c3b256b5b9c",
+              "expected_revision": "sha256:5db71905e8a08dd819c77be02f63d4cdec582a01650a5e27cd4211708fa2af15",
               "manifest": {
                 "capabilities": [
                   {
@@ -4332,7 +4332,7 @@
                 },
                 "requirements": [
                   {
-                    "capability": "portable-v2",
+                    "capability": "portable",
                     "major": 1
                   }
                 ],
@@ -4352,9 +4352,9 @@
             "json": {
               "receipt": {
                 "format": "graphforge-hub-publish/1",
-                "manifest_validator": "sha256:886a829bb153a801aea821b66ae29ca8ec1ae52206ab51d633924f0cdc6e04c3",
+                "manifest_validator": "sha256:3bcecfdc35d7c16b01698e5cba55412062e49c56915c1d52efec718ee4e0be80",
                 "operation_uuid": "00000000-0000-7000-8000-00000000000a",
-                "previous_revision": "sha256:048466779c3b5b7437ae80f35f2ede520fd900a3388bcf23113a5c3b256b5b9c",
+                "previous_revision": "sha256:5db71905e8a08dd819c77be02f63d4cdec582a01650a5e27cd4211708fa2af15",
                 "refs": [
                   "main"
                 ],
@@ -4362,8 +4362,8 @@
                   "owner": "openalex",
                   "repository": "demo"
                 },
-                "request_commitment": "sha256:6e8af4a73345453e574576cb548cd2c6a138d26a3a07a2a628005c3e302e4e97",
-                "revision": "sha256:9aca18c60a48fd151c12c0f35f77b7337c794f1a12683482f683fb7111893640"
+                "request_commitment": "sha256:5da09de41bc25c1538519c03c02f56c544b22957197b6c8a75e03389d4a1b5ac",
+                "revision": "sha256:81e9502ecc2262d1e279a6e28305053416b050e9431496875281efc1384a789b"
               },
               "state": "complete"
             }
@@ -4392,7 +4392,7 @@
                 "owner": "openalex",
                 "repository": "demo"
               },
-              "request_commitment": "sha256:a01619a61f9da7ee83f13467927d13b460577385071c15c4c5df55aa0a3b7c99"
+              "request_commitment": "sha256:72ce21e5572479f59bd0e55e97aec1db06172250a889a2fb0cd74fac8b73aa4a"
             }
           },
           "expect": {
@@ -4445,7 +4445,7 @@
               "content-type": "application/json"
             },
             "json": {
-              "expected_revision": "sha256:048466779c3b5b7437ae80f35f2ede520fd900a3388bcf23113a5c3b256b5b9c",
+              "expected_revision": "sha256:5db71905e8a08dd819c77be02f63d4cdec582a01650a5e27cd4211708fa2af15",
               "manifest": {
                 "capabilities": [
                   {
@@ -4478,7 +4478,7 @@
                 },
                 "requirements": [
                   {
-                    "capability": "portable-v2",
+                    "capability": "portable",
                     "major": 1
                   }
                 ],
@@ -4506,9 +4506,9 @@
           "expect": {
             "status": 200,
             "headers": {
-              "etag": "\"sha256:9aca18c60a48fd151c12c0f35f77b7337c794f1a12683482f683fb7111893640\""
+              "etag": "\"sha256:81e9502ecc2262d1e279a6e28305053416b050e9431496875281efc1384a789b\""
             },
-            "body_text": "{\"default_ref\":\"main\",\"format\":\"graphforge-discovery/1\",\"refs\":[{\"name\":\"main\",\"target\":\"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"validator\":\"sha256:886a829bb153a801aea821b66ae29ca8ec1ae52206ab51d633924f0cdc6e04c3\"}],\"repository\":{\"owner\":\"openalex\",\"repository\":\"demo\"},\"version\":{\"major\":1,\"minor\":2}}"
+            "body_text": "{\"default_ref\":\"main\",\"format\":\"graphforge-discovery/1\",\"refs\":[{\"name\":\"main\",\"target\":\"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"validator\":\"sha256:3bcecfdc35d7c16b01698e5cba55412062e49c56915c1d52efec718ee4e0be80\"}],\"repository\":{\"owner\":\"openalex\",\"repository\":\"demo\"},\"version\":{\"major\":1,\"minor\":2}}"
           }
         }
       ]
@@ -4566,7 +4566,7 @@
                 "owner": "openalex",
                 "repository": "demo"
               },
-              "request_commitment": "sha256:6b337c8b528ae77cfff6eea3bf5409479b1485cc7d4d7616a80ded0022fe796e"
+              "request_commitment": "sha256:3a025855098ebbc85ecd5d7e36c64080388cc8c2708bd9cfb56edbca9f1cb535"
             }
           },
           "expect": {
@@ -4729,7 +4729,7 @@
                 },
                 "requirements": [
                   {
-                    "capability": "portable-v2",
+                    "capability": "portable",
                     "major": 1
                   }
                 ],
@@ -4749,7 +4749,7 @@
             "json": {
               "receipt": {
                 "format": "graphforge-hub-publish/1",
-                "manifest_validator": "sha256:e7d872e23954bd0a310b4a943b56374dfdb239807beff47ec848f061c34cb6af",
+                "manifest_validator": "sha256:ac17f43f53d0abe4be5015396f2b93d1fd0bc75fce2194b85cf49feff244eee8",
                 "operation_uuid": "00000000-0000-7000-8000-00000000000c",
                 "previous_revision": null,
                 "refs": [
@@ -4759,8 +4759,8 @@
                   "owner": "openalex",
                   "repository": "demo"
                 },
-                "request_commitment": "sha256:6b337c8b528ae77cfff6eea3bf5409479b1485cc7d4d7616a80ded0022fe796e",
-                "revision": "sha256:85cb5d4adf0a0375b2e6bbaaed7df77ae55a14588d483d977027cb8a35284b26"
+                "request_commitment": "sha256:3a025855098ebbc85ecd5d7e36c64080388cc8c2708bd9cfb56edbca9f1cb535",
+                "revision": "sha256:8e89e09123b42a9f715c058d37c29773e47af000ee87af02a5480cbe3c36dcbd"
               },
               "state": "complete"
             }
@@ -4784,7 +4784,7 @@
                   "media_type": "application/vnd.graphforge.project"
                 },
                 {
-                  "digest": "sha256:553790f9b7ed65cf110ea48961e4b9d5ea5692e144eb15d71012b20645702afa",
+                  "digest": "sha256:1d6cefb925a106d7d3896f88ce373ee91ba7acb76cdbeae1ea3354f672f8ffff",
                   "length": 1725,
                   "media_type": "application/vnd.graphforge.research-lineage+json"
                 },
@@ -4799,7 +4799,7 @@
                 "owner": "alice",
                 "repository": "demo-fork"
               },
-              "request_commitment": "sha256:1c8b405716d54728ceb064a820d055f56ca4a0cb01aafe16150928cd8e63ee9a"
+              "request_commitment": "sha256:3ef290e10980b6b4b4bc11c5acd325ae4030777bcac6132647bc57a475c26119"
             }
           },
           "expect": {
@@ -4815,7 +4815,7 @@
                   "upload_url": "${fork_upload_0}"
                 },
                 {
-                  "digest": "sha256:553790f9b7ed65cf110ea48961e4b9d5ea5692e144eb15d71012b20645702afa",
+                  "digest": "sha256:1d6cefb925a106d7d3896f88ce373ee91ba7acb76cdbeae1ea3354f672f8ffff",
                   "length": 1725,
                   "received": 0,
                   "upload_url": "${fork_upload_1}"
@@ -4864,7 +4864,7 @@
             "headers": {
               "content-range": "bytes 0-1724/1725"
             },
-            "body_text": "{\"boundary_anchors\":[],\"branches\":[{\"base_version_uuid\":\"00000000-0000-7000-8000-000000000068\",\"branch_uuid\":\"00000000-0000-7000-8000-000000000067\",\"head_version_uuid\":\"00000000-0000-7000-8000-000000000068\",\"label\":\"main\",\"origin_version_uuid\":\"00000000-0000-7000-8000-000000000068\",\"project_uuid\":\"00000000-0000-7000-8000-000000000066\",\"ref_name\":\"main\",\"selection_sha256\":\"sha256:1b7643d1e40a56a711760b58ee093e011adb9824ddf7862da8ba3e2d04c7aa25\"}],\"capabilities\":[],\"extensions\":{\"x-origin-revision\":\"sha256:85cb5d4adf0a0375b2e6bbaaed7df77ae55a14588d483d977027cb8a35284b26\"},\"fork\":{\"origin_project_uuid\":\"00000000-0000-7000-8000-000000000064\",\"origin_repository\":{\"owner\":\"openalex\",\"repository\":\"demo\"},\"origin_version_identity\":\"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"origin_version_uuid\":\"00000000-0000-7000-8000-000000000065\"},\"format\":\"graphforge-research-lineage/2\",\"immutable_version\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"project_uuid\":\"00000000-0000-7000-8000-000000000066\",\"proposals\":[],\"repository\":{\"owner\":\"alice\",\"repository\":\"demo-fork\"},\"requirements\":[{\"capability\":\"research-lineage\",\"major\":2}],\"version\":{\"major\":1,\"minor\":2},\"versions\":[{\"branch_uuid\":\"00000000-0000-7000-8000-000000000067\",\"identity_digest\":\"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\",\"kind\":\"complete\",\"package\":{\"format\":\"graphforge-project/2\",\"object_digest\":\"sha256:6be86b70aed7fedd320c7d5d6512e11932341110f62ee11b06fe9a94c46c7065\",\"package_digest\":\"sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"producing_core_version\":\"0.6.0\"},\"parents\":[],\"version_uuid\":\"00000000-0000-7000-8000-000000000068\"}]}"
+            "body_text": "{\"boundary_anchors\":[],\"branches\":[{\"base_version_uuid\":\"00000000-0000-7000-8000-000000000068\",\"branch_uuid\":\"00000000-0000-7000-8000-000000000067\",\"head_version_uuid\":\"00000000-0000-7000-8000-000000000068\",\"label\":\"main\",\"origin_version_uuid\":\"00000000-0000-7000-8000-000000000068\",\"project_uuid\":\"00000000-0000-7000-8000-000000000066\",\"ref_name\":\"main\",\"selection_sha256\":\"sha256:1b7643d1e40a56a711760b58ee093e011adb9824ddf7862da8ba3e2d04c7aa25\"}],\"capabilities\":[],\"extensions\":{\"x-origin-revision\":\"sha256:8e89e09123b42a9f715c058d37c29773e47af000ee87af02a5480cbe3c36dcbd\"},\"fork\":{\"origin_project_uuid\":\"00000000-0000-7000-8000-000000000064\",\"origin_repository\":{\"owner\":\"openalex\",\"repository\":\"demo\"},\"origin_version_identity\":\"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"origin_version_uuid\":\"00000000-0000-7000-8000-000000000065\"},\"format\":\"graphforge-research-lineage/2\",\"immutable_version\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"project_uuid\":\"00000000-0000-7000-8000-000000000066\",\"proposals\":[],\"repository\":{\"owner\":\"alice\",\"repository\":\"demo-fork\"},\"requirements\":[{\"capability\":\"research-lineage\",\"major\":2}],\"version\":{\"major\":1,\"minor\":2},\"versions\":[{\"branch_uuid\":\"00000000-0000-7000-8000-000000000067\",\"identity_digest\":\"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\",\"kind\":\"complete\",\"package\":{\"format\":\"graphforge-project/2\",\"object_digest\":\"sha256:6be86b70aed7fedd320c7d5d6512e11932341110f62ee11b06fe9a94c46c7065\",\"package_digest\":\"sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"producing_core_version\":\"0.6.0\"},\"parents\":[],\"version_uuid\":\"00000000-0000-7000-8000-000000000068\"}]}"
           },
           "expect": {
             "status": 200,
@@ -4872,7 +4872,7 @@
               "upload-offset": "1725"
             },
             "json": {
-              "digest": "sha256:553790f9b7ed65cf110ea48961e4b9d5ea5692e144eb15d71012b20645702afa",
+              "digest": "sha256:1d6cefb925a106d7d3896f88ce373ee91ba7acb76cdbeae1ea3354f672f8ffff",
               "length": 1725,
               "received": 1725
             }
@@ -4921,8 +4921,8 @@
                 "immutable_version": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
                 "lineage": {
                   "format": "graphforge-research-lineage/2",
-                  "lineage_digest": "sha256:553790f9b7ed65cf110ea48961e4b9d5ea5692e144eb15d71012b20645702afa",
-                  "object_digest": "sha256:553790f9b7ed65cf110ea48961e4b9d5ea5692e144eb15d71012b20645702afa"
+                  "lineage_digest": "sha256:1d6cefb925a106d7d3896f88ce373ee91ba7acb76cdbeae1ea3354f672f8ffff",
+                  "object_digest": "sha256:1d6cefb925a106d7d3896f88ce373ee91ba7acb76cdbeae1ea3354f672f8ffff"
                 },
                 "objects": [
                   {
@@ -4934,10 +4934,10 @@
                     "media_type": "application/vnd.graphforge.project"
                   },
                   {
-                    "digest": "sha256:553790f9b7ed65cf110ea48961e4b9d5ea5692e144eb15d71012b20645702afa",
+                    "digest": "sha256:1d6cefb925a106d7d3896f88ce373ee91ba7acb76cdbeae1ea3354f672f8ffff",
                     "length": 1725,
                     "locations": [
-                      "https://hub.example/alice/demo-fork/.gf/objects/sha256:553790f9b7ed65cf110ea48961e4b9d5ea5692e144eb15d71012b20645702afa"
+                      "https://hub.example/alice/demo-fork/.gf/objects/sha256:1d6cefb925a106d7d3896f88ce373ee91ba7acb76cdbeae1ea3354f672f8ffff"
                     ],
                     "media_type": "application/vnd.graphforge.research-lineage+json"
                   },
@@ -4962,7 +4962,7 @@
                 },
                 "requirements": [
                   {
-                    "capability": "portable-v2",
+                    "capability": "portable",
                     "major": 1
                   }
                 ],
@@ -4982,7 +4982,7 @@
             "json": {
               "receipt": {
                 "format": "graphforge-hub-publish/1",
-                "manifest_validator": "sha256:59f869b86ed4f9fd637586d212ef4bbe19c8dac2f6caddc66ae7f0de4f24c93d",
+                "manifest_validator": "sha256:96c360660f9ff11a5aeefe89aa2896272726b6225c37a86859b9030e08d30d8c",
                 "operation_uuid": "00000000-0000-7000-8000-00000000000d",
                 "previous_revision": null,
                 "refs": [
@@ -4992,8 +4992,8 @@
                   "owner": "alice",
                   "repository": "demo-fork"
                 },
-                "request_commitment": "sha256:1c8b405716d54728ceb064a820d055f56ca4a0cb01aafe16150928cd8e63ee9a",
-                "revision": "sha256:aa1baf5fb62a3c38b8c87cf3a203fff573ac87dde42815844c917cfc07a2e137"
+                "request_commitment": "sha256:3ef290e10980b6b4b4bc11c5acd325ae4030777bcac6132647bc57a475c26119",
+                "revision": "sha256:928fd06ed74c15277160d71dce6ab84f16f4804eb445b04d2a5397e4b69f4e26"
               },
               "state": "complete"
             }
@@ -5007,19 +5007,19 @@
           "expect": {
             "status": 200,
             "headers": {
-              "etag": "\"sha256:aa1baf5fb62a3c38b8c87cf3a203fff573ac87dde42815844c917cfc07a2e137\""
+              "etag": "\"sha256:928fd06ed74c15277160d71dce6ab84f16f4804eb445b04d2a5397e4b69f4e26\""
             },
-            "body_text": "{\"default_ref\":\"main\",\"format\":\"graphforge-discovery/1\",\"refs\":[{\"name\":\"main\",\"target\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"validator\":\"sha256:59f869b86ed4f9fd637586d212ef4bbe19c8dac2f6caddc66ae7f0de4f24c93d\"}],\"repository\":{\"owner\":\"alice\",\"repository\":\"demo-fork\"},\"version\":{\"major\":1,\"minor\":2}}"
+            "body_text": "{\"default_ref\":\"main\",\"format\":\"graphforge-discovery/1\",\"refs\":[{\"name\":\"main\",\"target\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"validator\":\"sha256:96c360660f9ff11a5aeefe89aa2896272726b6225c37a86859b9030e08d30d8c\"}],\"repository\":{\"owner\":\"alice\",\"repository\":\"demo-fork\"},\"version\":{\"major\":1,\"minor\":2}}"
           }
         },
         {
           "request": {
             "method": "GET",
-            "url": "https://hub.example/alice/demo-fork/.gf/objects/sha256:553790f9b7ed65cf110ea48961e4b9d5ea5692e144eb15d71012b20645702afa"
+            "url": "https://hub.example/alice/demo-fork/.gf/objects/sha256:1d6cefb925a106d7d3896f88ce373ee91ba7acb76cdbeae1ea3354f672f8ffff"
           },
           "expect": {
             "status": 200,
-            "body_text": "{\"boundary_anchors\":[],\"branches\":[{\"base_version_uuid\":\"00000000-0000-7000-8000-000000000068\",\"branch_uuid\":\"00000000-0000-7000-8000-000000000067\",\"head_version_uuid\":\"00000000-0000-7000-8000-000000000068\",\"label\":\"main\",\"origin_version_uuid\":\"00000000-0000-7000-8000-000000000068\",\"project_uuid\":\"00000000-0000-7000-8000-000000000066\",\"ref_name\":\"main\",\"selection_sha256\":\"sha256:1b7643d1e40a56a711760b58ee093e011adb9824ddf7862da8ba3e2d04c7aa25\"}],\"capabilities\":[],\"extensions\":{\"x-origin-revision\":\"sha256:85cb5d4adf0a0375b2e6bbaaed7df77ae55a14588d483d977027cb8a35284b26\"},\"fork\":{\"origin_project_uuid\":\"00000000-0000-7000-8000-000000000064\",\"origin_repository\":{\"owner\":\"openalex\",\"repository\":\"demo\"},\"origin_version_identity\":\"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"origin_version_uuid\":\"00000000-0000-7000-8000-000000000065\"},\"format\":\"graphforge-research-lineage/2\",\"immutable_version\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"project_uuid\":\"00000000-0000-7000-8000-000000000066\",\"proposals\":[],\"repository\":{\"owner\":\"alice\",\"repository\":\"demo-fork\"},\"requirements\":[{\"capability\":\"research-lineage\",\"major\":2}],\"version\":{\"major\":1,\"minor\":2},\"versions\":[{\"branch_uuid\":\"00000000-0000-7000-8000-000000000067\",\"identity_digest\":\"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\",\"kind\":\"complete\",\"package\":{\"format\":\"graphforge-project/2\",\"object_digest\":\"sha256:6be86b70aed7fedd320c7d5d6512e11932341110f62ee11b06fe9a94c46c7065\",\"package_digest\":\"sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"producing_core_version\":\"0.6.0\"},\"parents\":[],\"version_uuid\":\"00000000-0000-7000-8000-000000000068\"}]}"
+            "body_text": "{\"boundary_anchors\":[],\"branches\":[{\"base_version_uuid\":\"00000000-0000-7000-8000-000000000068\",\"branch_uuid\":\"00000000-0000-7000-8000-000000000067\",\"head_version_uuid\":\"00000000-0000-7000-8000-000000000068\",\"label\":\"main\",\"origin_version_uuid\":\"00000000-0000-7000-8000-000000000068\",\"project_uuid\":\"00000000-0000-7000-8000-000000000066\",\"ref_name\":\"main\",\"selection_sha256\":\"sha256:1b7643d1e40a56a711760b58ee093e011adb9824ddf7862da8ba3e2d04c7aa25\"}],\"capabilities\":[],\"extensions\":{\"x-origin-revision\":\"sha256:8e89e09123b42a9f715c058d37c29773e47af000ee87af02a5480cbe3c36dcbd\"},\"fork\":{\"origin_project_uuid\":\"00000000-0000-7000-8000-000000000064\",\"origin_repository\":{\"owner\":\"openalex\",\"repository\":\"demo\"},\"origin_version_identity\":\"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"origin_version_uuid\":\"00000000-0000-7000-8000-000000000065\"},\"format\":\"graphforge-research-lineage/2\",\"immutable_version\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"project_uuid\":\"00000000-0000-7000-8000-000000000066\",\"proposals\":[],\"repository\":{\"owner\":\"alice\",\"repository\":\"demo-fork\"},\"requirements\":[{\"capability\":\"research-lineage\",\"major\":2}],\"version\":{\"major\":1,\"minor\":2},\"versions\":[{\"branch_uuid\":\"00000000-0000-7000-8000-000000000067\",\"identity_digest\":\"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\",\"kind\":\"complete\",\"package\":{\"format\":\"graphforge-project/2\",\"object_digest\":\"sha256:6be86b70aed7fedd320c7d5d6512e11932341110f62ee11b06fe9a94c46c7065\",\"package_digest\":\"sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"producing_core_version\":\"0.6.0\"},\"parents\":[],\"version_uuid\":\"00000000-0000-7000-8000-000000000068\"}]}"
           }
         },
         {
@@ -5045,7 +5045,7 @@
                 "owner": "openalex",
                 "repository": "demo"
               },
-              "request_commitment": "sha256:e31f326b07bc444c3847b648b13547e834da5212fbe68c9ace981936135848d1"
+              "request_commitment": "sha256:71a0b325bc77c6c1c237b331f1240dec64bfa702da410b7068292a1a0390a437"
             }
           },
           "expect": {
@@ -5131,7 +5131,7 @@
                 },
                 "requirements": [
                   {
-                    "capability": "portable-v2",
+                    "capability": "portable",
                     "major": 1
                   }
                 ],
@@ -5159,9 +5159,9 @@
           "expect": {
             "status": 200,
             "headers": {
-              "etag": "\"sha256:85cb5d4adf0a0375b2e6bbaaed7df77ae55a14588d483d977027cb8a35284b26\""
+              "etag": "\"sha256:8e89e09123b42a9f715c058d37c29773e47af000ee87af02a5480cbe3c36dcbd\""
             },
-            "body_text": "{\"default_ref\":\"main\",\"format\":\"graphforge-discovery/1\",\"refs\":[{\"name\":\"main\",\"target\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"validator\":\"sha256:e7d872e23954bd0a310b4a943b56374dfdb239807beff47ec848f061c34cb6af\"}],\"repository\":{\"owner\":\"openalex\",\"repository\":\"demo\"},\"version\":{\"major\":1,\"minor\":2}}"
+            "body_text": "{\"default_ref\":\"main\",\"format\":\"graphforge-discovery/1\",\"refs\":[{\"name\":\"main\",\"target\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"validator\":\"sha256:ac17f43f53d0abe4be5015396f2b93d1fd0bc75fce2194b85cf49feff244eee8\"}],\"repository\":{\"owner\":\"openalex\",\"repository\":\"demo\"},\"version\":{\"major\":1,\"minor\":2}}"
           }
         }
       ]
@@ -5201,7 +5201,7 @@
                 "owner": "openalex",
                 "repository": "demo"
               },
-              "request_commitment": "sha256:b3e4260e7551ad22ba96fc84a6a5386ca4e3e4f610ba8161116413e95cfeb93d",
+              "request_commitment": "sha256:80b11775a9a08795ed7afbaa5f4dea5865845083447d86e61d18b1ef98a9bfba",
               "requirements": [
                 {
                   "capability": "server-side-merge",
@@ -5238,7 +5238,7 @@
                 "owner": "openalex",
                 "repository": "demo"
               },
-              "request_commitment": "sha256:b3e4260e7551ad22ba96fc84a6a5386ca4e3e4f610ba8161116413e95cfeb93d",
+              "request_commitment": "sha256:80b11775a9a08795ed7afbaa5f4dea5865845083447d86e61d18b1ef98a9bfba",
               "unknown_future_member": true
             }
           },
@@ -5270,7 +5270,7 @@
                 "owner": "openalex",
                 "repository": "demo"
               },
-              "request_commitment": "sha256:b3e4260e7551ad22ba96fc84a6a5386ca4e3e4f610ba8161116413e95cfeb93d"
+              "request_commitment": "sha256:80b11775a9a08795ed7afbaa5f4dea5865845083447d86e61d18b1ef98a9bfba"
             }
           },
           "expect": {
@@ -5331,7 +5331,7 @@
                 "owner": "openalex",
                 "repository": "demo"
               },
-              "request_commitment": "sha256:4033dbdce70966087a0a4a3e126a0e90014ddf9c7ac3f08886d7a8df6bb08078"
+              "request_commitment": "sha256:976965e6441add20ccb43ebb38b711660300b26ecbf00cf9fea902fcbf24c6a5"
             }
           },
           "expect": {
@@ -5365,7 +5365,7 @@
                 "owner": "openalex",
                 "repository": "demo"
               },
-              "request_commitment": "sha256:4033dbdce70966087a0a4a3e126a0e90014ddf9c7ac3f08886d7a8df6bb08078"
+              "request_commitment": "sha256:976965e6441add20ccb43ebb38b711660300b26ecbf00cf9fea902fcbf24c6a5"
             }
           },
           "expect": {
@@ -5407,7 +5407,7 @@
                 "owner": "openalex",
                 "repository": "demo"
               },
-              "request_commitment": "sha256:4033dbdce70966087a0a4a3e126a0e90014ddf9c7ac3f08886d7a8df6bb08078"
+              "request_commitment": "sha256:976965e6441add20ccb43ebb38b711660300b26ecbf00cf9fea902fcbf24c6a5"
             }
           },
           "expect": {
@@ -5455,7 +5455,7 @@
                 "owner": "openalex",
                 "repository": "demo"
               },
-              "request_commitment": "sha256:4033dbdce70966087a0a4a3e126a0e90014ddf9c7ac3f08886d7a8df6bb08078"
+              "request_commitment": "sha256:976965e6441add20ccb43ebb38b711660300b26ecbf00cf9fea902fcbf24c6a5"
             }
           },
           "expect": {
@@ -5494,7 +5494,7 @@
                 "owner": "openalex",
                 "repository": "demo"
               },
-              "request_commitment": "sha256:4033dbdce70966087a0a4a3e126a0e90014ddf9c7ac3f08886d7a8df6bb08078"
+              "request_commitment": "sha256:976965e6441add20ccb43ebb38b711660300b26ecbf00cf9fea902fcbf24c6a5"
             }
           },
           "expect": {
@@ -5554,7 +5554,7 @@
                 "owner": "openalex",
                 "repository": "demo"
               },
-              "request_commitment": "sha256:7f627617844e065b0fd501fb9844b5c11894a2a6d762dadb5dfa71da88feb2c4"
+              "request_commitment": "sha256:b19fc0a9882a89ab5c59fe84a1bf23465dae4e0bd37cea077604a5eb78690467"
             }
           },
           "expect": {
@@ -5585,7 +5585,7 @@
                 "owner": "openalex",
                 "repository": "demo"
               },
-              "request_commitment": "sha256:7f627617844e065b0fd501fb9844b5c11894a2a6d762dadb5dfa71da88feb2c4"
+              "request_commitment": "sha256:b19fc0a9882a89ab5c59fe84a1bf23465dae4e0bd37cea077604a5eb78690467"
             }
           },
           "expect": {
@@ -5652,7 +5652,7 @@
                 "owner": "openalex",
                 "repository": "demo"
               },
-              "request_commitment": "sha256:48c99b24552964cccc82f99676252d29b3f6a39f12f84cf913cb62813c95be6a"
+              "request_commitment": "sha256:5dc09826356823b468362f95e4e09721b5ab99214be987b819bb40d68bd3d863"
             }
           },
           "expect": {
@@ -5707,7 +5707,7 @@
                 "owner": "openalex",
                 "repository": "demo"
               },
-              "request_commitment": "sha256:eb9ea832bb35c012e10dbc7d851ee87a36694c1c8d84b8e6887f9a1a03d05156"
+              "request_commitment": "sha256:168696dc3acb030e8a047ae8cc1f533a3299a0c7dcced9748f9c069199893f62"
             }
           },
           "expect": {
@@ -5793,7 +5793,7 @@
                 },
                 "requirements": [
                   {
-                    "capability": "portable-v2",
+                    "capability": "portable",
                     "major": 1
                   }
                 ],
@@ -5972,7 +5972,7 @@
                 "owner": "openalex",
                 "repository": "demo"
               },
-              "request_commitment": "sha256:2106a44b0afe8dc86088606f1c822c6b10e757bfee918eb54803008bc8cc244d"
+              "request_commitment": "sha256:61e152c811fe030f1e558f72ab08f481c1b1a9f0d9fee29bce466ab0724a2385"
             }
           },
           "expect": {

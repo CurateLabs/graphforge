@@ -34,6 +34,8 @@ from graphforge_bench.hybrid_cgroup_v2 import measure_hybrid_pressure
 from graphforge_bench.local_admission import qualify_local_host
 from graphforge_bench.phase_cgroup import EVIDENCE_NAME as PHASE_SWAP_EVIDENCE
 from graphforge_bench.phase_cgroup import PhaseSwapSampler
+from graphforge_bench.portable_receipt_contracts import CURRENT as CURRENT_PORTABLE_CONTRACTS
+from graphforge_bench.portable_receipt_contracts import PortableContracts, stray_contracts
 from graphforge_bench.progressive_qualification import QualificationError, load_profiles, project
 from graphforge_bench.progressive_queries import ORDERED_LIMIT_ROW_COUNT
 
@@ -1183,8 +1185,10 @@ def _construction_metrics(
     )
 
 
-def _portable_allocation(graphforge: Mapping[str, Any]) -> Mapping[str, Any]:
-    receipt = _phase_bound_receipt(graphforge, "export", "graphforge-portable-export/2")
+def _portable_allocation(
+    graphforge: Mapping[str, Any], contracts: PortableContracts
+) -> Mapping[str, Any]:
+    receipt = _phase_bound_receipt(graphforge, "export", contracts.export)
     names = (
         "allocation_logical_bytes",
         "allocation_allocated_bytes",
@@ -1203,9 +1207,16 @@ def assemble_rung_evidence(
     benchexec: Mapping[str, Any],
     profile_id: str | None = None,
     source: str = "progressive_profile",
+    contracts: PortableContracts = CURRENT_PORTABLE_CONTRACTS,
 ) -> dict[str, Any]:
     if graphforge.get("status") != "passed" or benchexec.get("outcome") != "passed":
         raise ControllerError("a failed execution cannot produce passed rung evidence")
+    stray = stray_contracts(graphforge, contracts)
+    if stray:
+        raise ControllerError(
+            f"portable receipt contracts {sorted(set(stray))} are not the required "
+            f"{contracts.export}, {contracts.import_}, {contracts.verify}"
+        )
     committed_import = _phase_bound_receipt(
         graphforge,
         "ingest",
@@ -1221,7 +1232,7 @@ def assemble_rung_evidence(
     construction, application_io, construction_staging, staging_peak = _construction_metrics(
         committed_import
     )
-    portable_allocation = _portable_allocation(graphforge)
+    portable_allocation = _portable_allocation(graphforge, contracts)
     lifecycle_application_io = _lifecycle_application_io(graphforge)
     expected_edges = 16 * (1 << scale)
     source_counts = _query_receipts(graphforge, "recount", 2)

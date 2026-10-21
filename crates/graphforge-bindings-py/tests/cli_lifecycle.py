@@ -353,7 +353,7 @@ def main() -> None:
             ["export", "--current", "--output", str(bundle)],
             source,
         )
-        assert exported["contract"] == "graphforge-portable-export/2"
+        assert exported["contract"] == "graphforge-portable-export/1"
         assert exported["source"] == "current"
         assert exported["checkpoint"] is None
         assert bundle.is_file()
@@ -379,7 +379,7 @@ def main() -> None:
             ],
             destination,
         )
-        assert imported["contract"] == "graphforge-portable-import/2"
+        assert imported["contract"] == "graphforge-portable-import/1"
         assert imported["package_digest"] == exported["package_digest"]
         assert imported["idempotent_replay"] is False
         destination_current = (destination / ".graphforge/state/CURRENT").read_bytes()

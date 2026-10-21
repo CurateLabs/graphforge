@@ -324,7 +324,7 @@ fn base_manifest() -> Value {
         "format":"graphforge-discovery/1","version":{"major":1,"minor":0},"repository":{"owner":"openalex","repository":"openalex"},
         "default_ref":"main","resolved_ref":"main","immutable_version":digest('a'),
         "package":{"format":"graphforge-project/2","package_digest":digest('b'),"producing_core_version":"0.6.0","object_digest":digest('c')},
-        "requirements":[{"capability":"portable-v2","major":1}],"capabilities":[{"capability":"range-requests","major":1}],
+        "requirements":[{"capability":"portable","major":1}],"capabilities":[{"capability":"range-requests","major":1}],
         "objects":[{"digest":digest('c'),"length":42,"media_type":"application/vnd.graphforge.project","locations":["https://data.graphforge.sh/objects/c"]}],
         "extensions":{"x-example":{"z":1,"a":true}}
     })
@@ -712,7 +712,10 @@ fn corpus() -> Corpus {
             Document::Manifest,
             "duplicate",
             Some("requirements"),
-            |v| v["requirements"] = json!([{"capability":"portable-v2","major":1},{"capability":"portable-v2","major":1}]),
+            |v| {
+                v["requirements"] =
+                    json!([{"capability":"portable","major":1},{"capability":"portable","major":1}])
+            },
         ),
         (
             "invalid-ref-name",

@@ -249,7 +249,7 @@ def evidence(scale=26, unit=1):
             "transport": DIGEST_B,
         },
         "package": {
-            "contract": "graphforge-portable-verify/2",
+            "contract": "graphforge-portable-verify/1",
             "format": "portable-project-v2-bundle",
             "class": "complete",
             "integrity": "verified",

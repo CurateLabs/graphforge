@@ -1,5 +1,5 @@
 {
-  "contract": "graphforge-portable-v2-bundle-bytes/1",
+  "contract": "graphforge-portable-bundle-bytes/1",
   "vectors": [
     {
       "name": "canonical-bagit-header-payload-padding-and-end",

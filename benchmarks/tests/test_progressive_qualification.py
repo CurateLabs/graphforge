@@ -120,7 +120,7 @@ def storage_attribution(scale: int, multiplier: int) -> dict:
             "transient_peak_allocated_bytes": 1_500_000 * multiplier,
         },
         "portable_package": {
-            "contract": "graphforge-portable-export/2",
+            "contract": "graphforge-portable-export/1",
             "allocation_logical_bytes": 300_000 * multiplier,
             "allocation_allocated_bytes": 300_000 * multiplier,
             "allocation_physical_objects": 1,

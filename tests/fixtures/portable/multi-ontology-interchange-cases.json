@@ -1,5 +1,5 @@
 {
-  "contract": "graphforge-portable-v2-multi-ontology-interchange-cases/1",
+  "contract": "graphforge-portable-multi-ontology-interchange-cases/1",
   "representations": ["expanded", "bundle"],
   "positive_package_classes": [
     "complete",
@@ -11,25 +11,25 @@
     {
       "package_class": "complete",
       "expected_query_rows": ["00000000-0000-0000-0000-000000000001", "00000000-0000-0000-0000-000000000002", "00000000-0000-0000-0000-000000000003"],
-      "expected_query_fingerprint": "sha256:bbb672f255891facbe5850b261c02d8b771ffc370d64c6c4387b7689aeb754a4",
+      "expected_query_fingerprint": "sha256:b0c69f045067a2c5016e726fffbd485594951483c63f4d0cc20447eb5602cbb6",
       "expected_data_fingerprint": "sha256:f6895f68ffba0161ba9376616123fdb256abe1c59544f1292b61e8b3c042e8af"
     },
     {
       "package_class": "ontology-only",
       "expected_query_rows": [],
-      "expected_query_fingerprint": "sha256:b0e3df4931dc2a3c11b43a8b4a753e85b65f4997432004e4fd4fe76b913a222d",
+      "expected_query_fingerprint": "sha256:26ad2be6aba41b77f6d07fcff72456b1ed21cb9fc93d78f1cd886875237a0964",
       "expected_data_fingerprint": null
     },
     {
       "package_class": "component-selective",
       "expected_query_rows": [],
-      "expected_query_fingerprint": "sha256:b0e3df4931dc2a3c11b43a8b4a753e85b65f4997432004e4fd4fe76b913a222d",
+      "expected_query_fingerprint": "sha256:26ad2be6aba41b77f6d07fcff72456b1ed21cb9fc93d78f1cd886875237a0964",
       "expected_data_fingerprint": null
     },
     {
       "package_class": "graph-data-subset",
       "expected_query_rows": ["00000000-0000-0000-0000-000000000001", "00000000-0000-0000-0000-000000000002"],
-      "expected_query_fingerprint": "sha256:02b3d933c8fc1f7c934e370928830e31043adae4b13fc3ae00efd06a59490148",
+      "expected_query_fingerprint": "sha256:779c7b5eed338402d9a3b1123c95f60c37f3eead33b7f16a34a8292766b8ba9e",
       "expected_data_fingerprint": "sha256:5e55c435eb42b32d4bafc2cfe5afeb46e4a91d8fc21dfec92814f18e84dcfa43"
     }
   ],
