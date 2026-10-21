@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://graphforge.sh/contracts/graphforge-ontology-composition-v1.schema.json",
-  "title": "GraphForge portable-v2 ontology composition compatibility control",
+  "title": "GraphForge portable ontology composition compatibility control",
   "type": "object",
   "additionalProperties": false,
   "required": ["contract", "activation_profile", "modules", "bridge_sets", "required_features", "optional_features", "composition_digest"],

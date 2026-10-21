@@ -8,11 +8,11 @@
 
 use crate::{
     BridgeSetDescriptor, DiscoveryError, DiscoveryErrorCode, DiscoveryLimits,
-    DiscoveryVersionDetails, DiscoveryVersionSubject, PORTABLE_V2_FORMAT,
-    PROJECT_SUMMARY_CAPABILITY, PROJECT_SUMMARY_FORMAT, PROJECT_SUMMARY_FORMAT_NAME,
-    ProtocolCapability, ProtocolRequirement, ProtocolVersion, RepositoryIdentity, Sha256Digest,
-    canonical_json, check_ascending, check_identity_text, check_string, format_major, limit,
-    parse_unique_json, sha256_digest, validate_extensions, validate_semantics,
+    DiscoveryVersionDetails, DiscoveryVersionSubject, PORTABLE_FORMAT, PROJECT_SUMMARY_CAPABILITY,
+    PROJECT_SUMMARY_FORMAT, PROJECT_SUMMARY_FORMAT_NAME, ProtocolCapability, ProtocolRequirement,
+    ProtocolVersion, RepositoryIdentity, Sha256Digest, canonical_json, check_ascending,
+    check_identity_text, check_string, format_major, limit, parse_unique_json, sha256_digest,
+    validate_extensions, validate_semantics,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -49,7 +49,7 @@ const ONTOLOGY_MODES: [&str; 3] = ["none", "advisory", "strict"];
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SummaryPackageReference {
-    /// Must be [`PORTABLE_V2_FORMAT`] in summary v1.
+    /// Must be [`PORTABLE_FORMAT`] in summary v1.
     pub format: String,
     /// Portable semantic package identity.
     pub package_digest: Sha256Digest,
@@ -280,7 +280,7 @@ impl ProjectSummary {
     }
 
     fn validate_package(&self) -> Result<(), DiscoveryError> {
-        if self.package.format != PORTABLE_V2_FORMAT {
+        if self.package.format != PORTABLE_FORMAT {
             let error = DiscoveryError::new(
                 DiscoveryErrorCode::UnsupportedFuture,
                 Some("package.format"),

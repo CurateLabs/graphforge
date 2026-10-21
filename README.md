@@ -21,18 +21,48 @@
 ## Why GraphForge?
 
 Build a graph, ask it questions, and keep what you learn, without running a
-database server. GraphForge is for analysts working with an agent and for
-developers who write their own code.
+database server. GraphForge runs inside your Python or Node process or through
+the `gf` command.
 
-- **Good fit:** inspecting a citation network, analyzing dependencies, or
-  connecting an inquiry to its evidence.
-- **Not a fit:** a centrally hosted application with many concurrent users.
-  Evaluate an operational database against that workload;
-  [scale guidance](docs/reference/scale-limits.md) gives the measured limits.
+**Who it is for.** v0.6.0 serves technical analysts and integrators most
+completely: people who write Python or Node, or direct a coding agent. It is
+designed for analysts working with an agent, which still needs that help to
+install and run software. See [Who GraphForge is for](docs/guide/audience-and-fit.md).
+
+**Two jobs you can complete today:**
+
+1. Explore a connected dataset (a citation network, a dependency graph,
+   evidence for an inquiry) with openCypher or the analyst verbs, and keep the
+   graph as a durable project.
+2. Bulk-load a large relationship table, reopen it, and move it by verified
+   export and import.
+
+**Not a fit:** a centrally hosted application with many concurrent users;
+durable storage on a network or container-overlay filesystem; anything that
+needs backward compatibility between versions. Evaluate an operational
+database for those.
 
 Start with plain graph construction and querying. Saved analyses, challenged
 hypotheses, research history, and collaboration are there when you need them,
 and none of them is required to begin.
+
+## Status and limits
+
+- **Pre-v1.** APIs and project formats can change. There is no
+  backward-compatibility or migration guarantee; GraphForge opens only
+  supported current-format projects.
+- **Durable projects** need ext4, xfs, or btrfs on Linux (`GF_UNSUPPORTED_FILESYSTEM`
+  otherwise). In-memory projects (`GraphForge()`) run the full engine anywhere
+  a native package exists.
+- **Crates.io builds** lack two DataFusion fixes that the Python wheel and Node
+  packages carry. Prefer those packages unless you need the Rust crates.
+- **Measured scale:** one run reached 1,073,741,824 live edges on a documented
+  host; the 1,000,000 edges/s ingest target is not met. Every number, its
+  workload, host, command, and limits are in
+  [Scale and workload limits](docs/reference/scale-limits.md#claims-and-their-evidence).
+  Benchmark results are unaudited.
+
+Details: [installation status and limits](docs/guide/installation.md#status-and-limits).
 
 ## Installation
 
@@ -100,6 +130,14 @@ Built-in open-dataset loaders (SNAP, LDBC, NetworkRepository) are a backlog
 extension and not part of the core release; build graphs with the construction
 APIs or Cypher. The full documentation is at
 [docs.graphforge.sh](https://docs.graphforge.sh/).
+
+## Get help
+
+Ask in [GitHub Discussions](https://github.com/CurateLabs/graphforge/discussions)
+or open an [issue from a template](https://github.com/CurateLabs/graphforge/issues/new/choose).
+[Get help and report a problem](docs/community/support.md) explains what to
+include in a minimal reproduction and how maintainers triage reports. Support
+is best-effort; there is no service-level agreement.
 
 ## Architecture
 

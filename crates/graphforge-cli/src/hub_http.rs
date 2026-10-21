@@ -104,6 +104,8 @@ pub(crate) struct HttpResponse {
     pub(crate) location: Option<String>,
     pub(crate) content_range: Option<String>,
     pub(crate) etag: Option<String>,
+    /// `Retry-After` of an unsuccessful response, in whole seconds.
+    pub(crate) retry_after: Option<u64>,
     pub(crate) body: Box<dyn Read + Send>,
 }
 
@@ -336,12 +338,23 @@ impl HttpTransport {
             .get("etag")
             .and_then(|v| v.to_str().ok())
             .map(str::to_owned);
+        let retry_after = response
+            .headers()
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |elapsed| elapsed.as_secs());
+                retry_after_seconds(v, now)
+            });
         let (_, body) = response.into_parts();
         Ok(HttpResponse {
             status,
             location,
             content_range,
             etag,
+            retry_after,
             body: Box::new(body.into_reader().take(limit.saturating_add(1))),
         })
     }
@@ -628,17 +641,18 @@ pub(crate) fn validate_url(url: &Url) -> Result<(), graphforge_api::GfError> {
 /// Bounded in-process retry for transient read failures.
 ///
 /// A retry follows a failed connection, a failed or truncated response body,
-/// or a `408`, `429`, or `5xx` status. Only consecutive failures without
-/// progress count toward `attempts`; a body read that advances the durable
-/// download offset resets the count, so a long transfer survives any number of
-/// separated interruptions while a dead one fails promptly.
+/// or a status of the retry class ([`StatusClass::transient`]). Only
+/// consecutive failures without progress count toward `attempts`; a body read
+/// that advances the durable download offset resets the count, so a long
+/// transfer survives any number of separated interruptions while a dead one
+/// fails promptly.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct RetryPolicy {
     /// Requests allowed for one step without progress.
     pub(crate) attempts: u32,
     /// Wait before the first retry; each later wait doubles.
     pub(crate) initial_backoff: Duration,
-    /// Upper bound on one wait.
+    /// Upper bound on one wait, including one a Hub asks for with `Retry-After`.
     pub(crate) max_backoff: Duration,
 }
 
@@ -657,19 +671,242 @@ impl RetryPolicy {
             .saturating_mul(1_u32 << doublings)
             .min(self.max_backoff)
     }
+
+    /// The wait before retry number `failures` after a failure whose response
+    /// asked for `retry_after` seconds: the longer of that and the backoff.
+    /// `None` when the Hub asks for a longer pause than one wait may last, so
+    /// the caller reports the failure instead of retrying early.
+    pub(crate) fn wait(&self, failures: u32, retry_after: Option<u64>) -> Option<Duration> {
+        let backoff = self.backoff(failures);
+        match retry_after.map(Duration::from_secs) {
+            Some(asked) if asked > self.max_backoff => None,
+            Some(asked) => Some(asked.max(backoff)),
+            None => Some(backoff),
+        }
+    }
 }
 
-/// Whether an HTTP status is worth retrying.
-fn transient_status(status: u16) -> bool {
-    matches!(status, 408 | 429 | 500..=599)
+/// `Retry-After` as the number of seconds to wait from `now` (seconds since
+/// the Unix epoch): delta-seconds, or one of the three HTTP-date forms of
+/// RFC 9110. A delta too large for `u64` saturates, so it exceeds any cap. A
+/// date that is not in the future, or a value that is neither form, asks for
+/// no particular wait and the ordinary backoff applies.
+pub(crate) fn retry_after_seconds(value: &str, now: u64) -> Option<u64> {
+    let value = value.trim();
+    if !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Some(value.parse().unwrap_or(u64::MAX));
+    }
+    http_date_unix(value, now)?
+        .checked_sub(now)
+        .filter(|wait| *wait > 0)
 }
 
-/// One request failure; `transient` marks a failure a retry may cure, and
-/// `status` is the HTTP status of an unsuccessful response.
+/// Seconds since the Unix epoch of an IMF-fixdate (`Sun, 06 Nov 1994 08:49:37
+/// GMT`), an obsolete RFC 850 date (`Sunday, 06-Nov-94 08:49:37 GMT`), or an
+/// asctime date (`Sun Nov  6 08:49:37 1994`), read at `now` (seconds since the
+/// epoch). The weekday must be a real weekday name but is not checked against
+/// the date. Anything that is not a valid calendar instant from 1970 through
+/// 9999 is `None`.
+fn http_date_unix(value: &str, now: u64) -> Option<u64> {
+    const MONTHS: [&str; 12] = [
+        "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec",
+    ];
+    const WEEKDAYS: [(&str, &str); 7] = [
+        ("mon", "monday"),
+        ("tue", "tuesday"),
+        ("wed", "wednesday"),
+        ("thu", "thursday"),
+        ("fri", "friday"),
+        ("sat", "saturday"),
+        ("sun", "sunday"),
+    ];
+    let tokens: Vec<&str> = value
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .collect();
+    let weekday = tokens.first()?.to_ascii_lowercase();
+    if !WEEKDAYS
+        .iter()
+        .any(|(short, long)| weekday == *short || weekday == *long)
+    {
+        return None;
+    }
+    let number = |token: &str| {
+        token
+            .bytes()
+            .all(|byte| byte.is_ascii_digit())
+            .then(|| token.parse::<u64>().ok())
+            .flatten()
+    };
+    let month_number = |token: &str| {
+        let lower = token.to_ascii_lowercase();
+        MONTHS
+            .iter()
+            .position(|name| *name == lower)
+            .map(|m| m as u64 + 1)
+    };
+    // `Err(yy)` is an RFC 850 two-digit year, resolved against `now` below.
+    let (day, month, year, clock) = match tokens[..] {
+        // IMF-fixdate and RFC 850 share a shape: day, month, year, clock, zone.
+        [_, day, month, year, h, m, s, zone] if zone.eq_ignore_ascii_case("GMT") => {
+            let year = match year.len() {
+                4 => Ok(number(year)?),
+                2 => Err(number(year)?),
+                _ => return None,
+            };
+            (number(day)?, month_number(month)?, year, [h, m, s])
+        }
+        [_, month, day, h, m, s, year] if year.len() == 4 => (
+            number(day)?,
+            month_number(month)?,
+            Ok(number(year)?),
+            [h, m, s],
+        ),
+        _ => return None,
+    };
+    let [h, m, s] = clock.map(number);
+    let (h, m, s) = (h?, m?, s?);
+    if h > 23 || m > 59 || s > 60 {
+        return None;
+    }
+    let instant = |year: u64| {
+        if !(1970..=9999).contains(&year) || !(1..=days_in_month(year, month)).contains(&day) {
+            return None;
+        }
+        days_from_civil(year, month, day)?
+            .checked_mul(86_400)?
+            .checked_add(h * 3600 + m * 60 + s)
+    };
+    match year {
+        Ok(year) => instant(year),
+        Err(yy) => {
+            // RFC 9110 §5.6.7: an instant more than 50 years after `now` (its
+            // civil date plus 50 years, same month, day and time) is read in
+            // the previous century.
+            let (current, now_month, now_day) = civil_date(now / 86_400)?;
+            let limit = days_from_civil(current.checked_add(50)?, now_month, now_day)?
+                .checked_mul(86_400)?
+                .checked_add(now % 86_400)?;
+            let candidate = current / 100 * 100 + yy;
+            let this_century = instant(candidate)?;
+            if this_century > limit {
+                instant(candidate.checked_sub(100)?)
+            } else {
+                Some(this_century)
+            }
+        }
+    }
+}
+
+fn days_in_month(year: u64, month: u64) -> u64 {
+    match month {
+        2 if year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400)) => {
+            29
+        }
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    }
+}
+
+/// Days since 1970-01-01 of a proleptic Gregorian date (after Howard Hinnant).
+fn days_from_civil(year: u64, month: u64, day: u64) -> Option<u64> {
+    let y = if month <= 2 {
+        year.checked_sub(1)?
+    } else {
+        year
+    };
+    let era = y / 400;
+    let yoe = y - era * 400;
+    let mp = (month + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era.checked_mul(146_097)?
+        .checked_add(doe)?
+        .checked_sub(719_468)
+}
+
+/// The Gregorian (year, month, day) of `days` since 1970-01-01 (after Howard
+/// Hinnant).
+fn civil_date(days: u64) -> Option<(u64, u64, u64)> {
+    let z = days.checked_add(719_468)?;
+    let era = z / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = era.checked_mul(400)?.checked_add(yoe)?;
+    Some((if month <= 2 { year + 1 } else { year }, month, day))
+}
+
+/// What an unsuccessful Hub status means to the caller. The class decides both
+/// the in-process retry and the error: retry-class statuses are storage errors
+/// (`GF_IO`, exit 3), the rest validation errors (`GF_VALIDATION`, exit 2).
+/// Messages carry only the status number, never the Hub's response body.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum StatusClass {
+    /// `404`, `410`: no such repository or object. Fix the input.
+    NotFound,
+    /// `401`, `403`: the Hub refuses this read. Ask a human for access.
+    AccessDenied,
+    /// `429`: too many requests. Retry later, after `Retry-After`.
+    RateLimited,
+    /// `408`, `502`, `503`, `504`: the Hub is temporarily unavailable. Retry.
+    Unavailable,
+    /// Any other status: a protocol or Hub failure. Ask a human.
+    Unexpected,
+}
+
+impl StatusClass {
+    pub(crate) const fn of(status: u16) -> Self {
+        match status {
+            404 | 410 => Self::NotFound,
+            401 | 403 => Self::AccessDenied,
+            429 => Self::RateLimited,
+            408 | 502..=504 => Self::Unavailable,
+            _ => Self::Unexpected,
+        }
+    }
+
+    /// The stable semantic code.
+    pub(crate) const fn code(self) -> &'static str {
+        match self {
+            Self::NotFound => "hub.not_found",
+            Self::AccessDenied => "hub.access_denied",
+            Self::RateLimited => "hub.rate_limited",
+            Self::Unavailable => "hub.unavailable",
+            Self::Unexpected => "hub.unexpected_status",
+        }
+    }
+
+    /// Whether a retry may cure the failure.
+    pub(crate) const fn transient(self) -> bool {
+        matches!(self, Self::RateLimited | Self::Unavailable)
+    }
+
+    fn error(self, status: u16, retry_after: Option<u64>) -> graphforge_api::GfError {
+        let mut message = format!("{}: Hub returned HTTP status {status}", self.code());
+        if let Some(seconds) = retry_after {
+            let _ = write!(message, "; retry after {seconds} s");
+        }
+        if self.transient() {
+            graphforge_api::GfError::Storage(message)
+        } else {
+            graphforge_api::GfError::Validation(message)
+        }
+    }
+}
+
+/// One request failure; `transient` marks a failure a retry may cure,
+/// `status` is the HTTP status of an unsuccessful response, and `retry_after`
+/// its `Retry-After` seconds.
 pub(crate) struct FetchFailure {
     pub(crate) error: graphforge_api::GfError,
     pub(crate) transient: bool,
     pub(crate) status: Option<u16>,
+    pub(crate) retry_after: Option<u64>,
 }
 
 impl From<graphforge_api::GfError> for FetchFailure {
@@ -678,6 +915,7 @@ impl From<graphforge_api::GfError> for FetchFailure {
             error,
             transient: false,
             status: None,
+            retry_after: None,
         }
     }
 }
@@ -719,10 +957,13 @@ fn retry_read(
             Ok(response) => return Ok(response),
             Err(failure) => {
                 failures += 1;
-                if !failure.transient || failures >= policy.attempts {
-                    return Err(failure.error);
+                let wait = policy.wait(failures, failure.retry_after);
+                match wait {
+                    Some(wait) if failure.transient && failures < policy.attempts => {
+                        std::thread::sleep(wait);
+                    }
+                    _ => return Err(failure.error),
                 }
-                std::thread::sleep(policy.backoff(failures));
             }
         }
     }
@@ -768,6 +1009,7 @@ fn fetch_once_inner(
             transient: is_network(&error),
             error,
             status: None,
+            retry_after: None,
         })?;
         if matches!(response.status, 301 | 302 | 303 | 307 | 308) {
             if hop == MAX_REDIRECTS {
@@ -783,10 +1025,12 @@ fn fetch_once_inner(
             continue;
         }
         if !(200..300).contains(&response.status) {
+            let class = StatusClass::of(response.status);
             return Err(FetchFailure {
-                error: network(&format!("Hub returned HTTP status {}", response.status)),
-                transient: transient_status(response.status),
+                error: class.error(response.status, response.retry_after),
+                transient: class.transient(),
                 status: Some(response.status),
+                retry_after: response.retry_after,
             });
         }
         return Ok(response);
@@ -887,22 +1131,46 @@ pub(crate) fn limit_error(message: &str) -> graphforge_api::GfError {
 pub(crate) fn storage(error: impl std::fmt::Display) -> graphforge_api::GfError {
     graphforge_api::GfError::Storage(error.to_string())
 }
-pub(crate) fn hash_reader(reader: &mut impl Read) -> Result<String, graphforge_api::GfError> {
-    let mut hash = Sha256::new();
-    let mut buffer = vec![0_u8; 64 * 1024].into_boxed_slice();
-    loop {
-        let read = reader.read(&mut buffer).map_err(storage)?;
-        if read == 0 {
-            break;
-        }
-        hash.update(&buffer[..read]);
+/// An incremental SHA-256 rendered as `sha256:<hex>`, the form every Hub
+/// object digest and portable transport digest uses.
+pub(crate) struct RunningDigest(Sha256);
+
+impl RunningDigest {
+    pub(crate) fn new() -> Self {
+        Self(Sha256::new())
     }
-    let digest = hash.finalize();
-    let hex = digest
-        .iter()
-        .fold(String::with_capacity(64), |mut hex, byte| {
-            write!(hex, "{byte:02x}").expect("writing to a string cannot fail");
-            hex
-        });
-    Ok(format!("sha256:{hex}"))
+
+    pub(crate) fn update(&mut self, bytes: &[u8]) {
+        self.0.update(bytes);
+    }
+
+    /// Hash everything `reader` still yields.
+    pub(crate) fn absorb(&mut self, reader: &mut impl Read) -> Result<(), graphforge_api::GfError> {
+        let mut buffer = vec![0_u8; 64 * 1024].into_boxed_slice();
+        loop {
+            let read = reader.read(&mut buffer).map_err(storage)?;
+            if read == 0 {
+                return Ok(());
+            }
+            self.0.update(&buffer[..read]);
+        }
+    }
+
+    pub(crate) fn finish(self) -> String {
+        let hex = self
+            .0
+            .finalize()
+            .iter()
+            .fold(String::with_capacity(64), |mut hex, byte| {
+                write!(hex, "{byte:02x}").expect("writing to a string cannot fail");
+                hex
+            });
+        format!("sha256:{hex}")
+    }
+}
+
+pub(crate) fn hash_reader(reader: &mut impl Read) -> Result<String, graphforge_api::GfError> {
+    let mut digest = RunningDigest::new();
+    digest.absorb(reader)?;
+    Ok(digest.finish())
 }

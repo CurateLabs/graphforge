@@ -1,14 +1,14 @@
-//! Discovery lineage binding into the storage-owned portable-v2 verifier, with
+//! Discovery lineage binding into the storage-owned portable verifier, with
 //! real research interchange packages exported through the facade.
 
 use graphforge_api::{
     BranchSource, BuildResearchLineageRequest, CancellationToken, CreateResearchBranchRequest,
-    DiscoveryPortableV2Mismatch, DiscoveryResearchVersionError, DiscoveryResearchVersionRequest,
-    ExecuteResearchBranchRequest, ExportResearchRequest, GraphForge, PortableV2Limits,
-    PortableV2Mode, verify_discovered_research_version,
+    DiscoveryPortableMismatch, DiscoveryResearchVersionError, DiscoveryResearchVersionRequest,
+    ExecuteResearchBranchRequest, ExportResearchRequest, GraphForge, PortableLimits, PortableMode,
+    verify_discovered_research_version,
 };
 use graphforge_discovery::{
-    DISCOVERY_FORMAT, DiscoveryLimits, DiscoveryManifest, ObjectDescriptor, PORTABLE_V2_FORMAT,
+    DISCOVERY_FORMAT, DiscoveryLimits, DiscoveryManifest, ObjectDescriptor, PORTABLE_FORMAT,
     PortablePackageReference, ProtocolRequirement, ProtocolVersion, RefSet, RepositoryIdentity,
     RepositoryRef, ResearchLineage, ResearchLineageReference, Sha256Digest,
 };
@@ -41,7 +41,7 @@ fn digest(marker: char) -> Sha256Digest {
 fn package() -> (tempfile::TempDir, String) {
     let root = tempfile::tempdir().unwrap();
     let mut value: Value = serde_json::from_str(include_str!(
-        "../../../tests/fixtures/portable-v2/ontology-only.manifest.json"
+        "../../../tests/fixtures/portable/ontology-only.manifest.json"
     ))
     .unwrap();
     value.as_object_mut().unwrap().remove("package_digest");
@@ -160,7 +160,7 @@ fn publish() -> Published {
             version,
             (
                 PortablePackageReference {
-                    format: PORTABLE_V2_FORMAT.into(),
+                    format: PORTABLE_FORMAT.into(),
                     package_digest: Sha256Digest(exported.package_digest),
                     object_digest: digest(marker),
                 },
@@ -246,7 +246,7 @@ fn documents(lineage: &ResearchLineage) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
         resolved_ref: "main".into(),
         immutable_version: lineage.immutable_version.clone(),
         package: PortablePackageReference {
-            format: PORTABLE_V2_FORMAT.into(),
+            format: PORTABLE_FORMAT.into(),
             package_digest: digest('9'),
             object_digest: digest('e'),
         },
@@ -299,8 +299,8 @@ fn verify(
         version_uuid: &version_uuid.to_string(),
         package,
         discovery_limits: DiscoveryLimits::default(),
-        portable_limits: PortableV2Limits::default(),
-        mode: PortableV2Mode::Full,
+        portable_limits: PortableLimits::default(),
+        mode: PortableMode::Full,
         cancelled: None,
         scratch: None,
     })
@@ -331,8 +331,8 @@ fn valid_lineage_version_maps_to_the_storage_verified_package() {
             version_uuid: &version.to_string(),
             package: path,
             discovery_limits: DiscoveryLimits::default(),
-            portable_limits: PortableV2Limits::default(),
-            mode: PortableV2Mode::Full,
+            portable_limits: PortableLimits::default(),
+            mode: PortableMode::Full,
             cancelled: None,
             scratch: None,
         })
@@ -359,7 +359,7 @@ fn research_package_digest_mismatch_fails_without_acceptance() {
     assert!(matches!(
         verify(&lineage, &published.repository, published.head, path),
         Err(DiscoveryResearchVersionError::ReferenceMismatch(
-            DiscoveryPortableV2Mismatch::PackageDigest
+            DiscoveryPortableMismatch::PackageDigest
         ))
     ));
 }
@@ -374,7 +374,7 @@ fn version_identity_must_match_the_verified_research_registry() {
     assert!(matches!(
         verify(&lineage, &published.repository, published.head, head_path),
         Err(DiscoveryResearchVersionError::ReferenceMismatch(
-            DiscoveryPortableV2Mismatch::ResearchVersionIdentity
+            DiscoveryPortableMismatch::ResearchVersionIdentity
         ))
     ));
     // The base Version advertised with the head's package: the package digest
@@ -386,7 +386,7 @@ fn version_identity_must_match_the_verified_research_registry() {
     assert!(matches!(
         verify(&lineage, &published.repository, published.base, head_path),
         Err(DiscoveryResearchVersionError::ReferenceMismatch(
-            DiscoveryPortableV2Mismatch::ResearchVersionIdentity
+            DiscoveryPortableMismatch::ResearchVersionIdentity
         ))
     ));
 }
@@ -409,7 +409,7 @@ fn package_without_research_interchange_never_proves_a_version() {
             package.path()
         ),
         Err(DiscoveryResearchVersionError::ReferenceMismatch(
-            DiscoveryPortableV2Mismatch::ResearchVersionIdentity
+            DiscoveryPortableMismatch::ResearchVersionIdentity
         ))
     ));
 }
@@ -422,7 +422,7 @@ fn repository_mismatch_fails_before_package_acceptance() {
     assert!(matches!(
         verify(&published.lineage, &other, published.head, path),
         Err(DiscoveryResearchVersionError::ReferenceMismatch(
-            DiscoveryPortableV2Mismatch::Repository
+            DiscoveryPortableMismatch::Repository
         ))
     ));
 }

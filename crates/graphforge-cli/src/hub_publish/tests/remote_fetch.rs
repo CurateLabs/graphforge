@@ -4,7 +4,7 @@ use super::*;
 use graphforge_api::{
     DiscoveryResearchVersionRequest, FetchResearchBranchRequest, FetchedResearchBranch,
 };
-use graphforge_api::{PortableV2Limits, PortableV2Mode};
+use graphforge_api::{PortableLimits, PortableMode};
 
 struct Package {
     manifest: Vec<u8>,
@@ -54,8 +54,8 @@ impl Package {
                     version_uuid: &self.head,
                     package: &self.path,
                     discovery_limits: DiscoveryLimits::default(),
-                    portable_limits: PortableV2Limits::default(),
-                    mode: PortableV2Mode::Full,
+                    portable_limits: PortableLimits::default(),
+                    mode: PortableMode::Full,
                     cancelled: None,
                     scratch: None,
                 },
@@ -110,8 +110,8 @@ fn verified_same_branch_fetch_preserves_local_head_workspace_and_exact_receipt_r
                     version_uuid: &package.head,
                     package: &package.path,
                     discovery_limits: DiscoveryLimits::default(),
-                    portable_limits: PortableV2Limits::default(),
-                    mode: PortableV2Mode::Full,
+                    portable_limits: PortableLimits::default(),
+                    mode: PortableMode::Full,
                     cancelled: None,
                     scratch: None,
                 },

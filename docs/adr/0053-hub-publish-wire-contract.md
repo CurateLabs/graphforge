@@ -19,7 +19,7 @@ plumbing with `gf clone` (`hub_http.rs`) and discovery derivation with the Hub
 fixture generator (`hub_publication.rs`). Python and Node reach it through the
 same Rust CLI entry point as `gf clone`.
 
-**Related:** #1749, #1748, #906, ADR 0021 (portable project v2), ADR 0030 (portable OCI boundary), ADR 0038 (determinism at the publication boundary), ADR 0039 (research version publication), ADR 0045 (ingest authentication regime), ADR 0049 (published payload checksums), `graphforge-discovery` (clone/read contract).
+**Related:** #1749, #1748, #906, ADR 0021 (portable project v2; its 2026-10-20 amendment records that published bundle objects stay uncompressed), ADR 0030 (portable OCI boundary), ADR 0038 (determinism at the publication boundary), ADR 0039 (research version publication), ADR 0045 (ingest authentication regime), ADR 0049 (published payload checksums), `graphforge-discovery` (clone/read contract).
 
 ## Context
 
@@ -176,7 +176,7 @@ whole next snapshot locally:
   participant of the exported generation except the `research` capability: a
   `Custom` selection built from the `Complete` selection preview with research
   participants removed, so participants added later are published without a
-  change here. `export_portable_v2` with `Complete` refuses a Project with
+  change here. `export_portable` with `Complete` refuses a Project with
   research Branches, because its research registry carries operational heads
   and is not a single interchange archive (`portable_registry`). Research
   travels only through the research interchange packages. Plain `gf clone`

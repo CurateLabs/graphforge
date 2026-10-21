@@ -4,22 +4,26 @@ This directory holds **read-only** sanitized rung bundles produced by issue #900
 Do not generate synthetic ladder evidence here and do not rerun S18–S26 solely for parity.
 Ingestion is optional engineering evidence for parent **#952**; it is **not** a #959 closure prerequisite.
 
-## Expected layout
+## Current bundle
 
-Each completed rung from the Fly progressive ladder should be copied as:
+The native OVHC-AGENCY host ladder (`progressive_host_run`, `local-linux-cgroups-v2`) at
+merged commit `114b1964874419b31d13820bfbdf72fe57286544`, rungs S18, S19, S20, S22, S24,
+S25 and S26, copied by `make -C benchmarks ingest-ladder-bundle`:
 
 ```text
 ladder-bundle/
-  manifest.json                 # immutable identities for commit, image, profiles, region
-  s18-rung.json                 # graphforge-progressive-qualification-rung-evidence/1
-  s19-rung.json
-  ...
-  teardown-inventory.json       # graphforge-progressive-provider-teardown-inventory/1
+  s<N>-plan.json                # graphforge-progressive-host-run-plan/1
+  s<N>-projection.json          # admission decision for rung N (S20 onward)
+  s<N>-benchexec.json           # BenchExec authority evidence
+  s<N>-graphforge.json          # graphforge-public-certification/1
+  s<N>-rung.json                # graphforge-progressive-qualification-rung-evidence/1
+  s<N>-result.json              # graphforge-progressive-host-run-result/1
+  work-root-inventory.json      # graphforge-host-work-root-inventory/2, empty after teardown
 ```
 
-`manifest.json` must record the exact merged commit SHA, OCI digest, generator identity,
-BenchExec version, and maximum authorized scale. Rung files must validate against
-`benchmarks/schemas/progressive-qualification-rung-evidence.json`.
+Rung files must validate against
+`benchmarks/schemas/progressive-qualification-rung-evidence.json`. Replace the whole
+directory when a new complete ladder is ingested.
 
 ## Parity usage
 

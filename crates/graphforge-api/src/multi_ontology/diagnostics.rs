@@ -108,61 +108,81 @@ pub(super) fn dependency_blocked_error(preview: &graphforge_ontology::DeletePrev
     }
 }
 
-pub(super) fn portable_error(error: graphforge_storage::PortableV2Error) -> GfError {
-    use graphforge_storage::PortableV2ErrorCode;
-    // PortableV2Error's Display is deliberately limited to its static,
+pub(super) fn portable_error(error: graphforge_storage::PortableError) -> GfError {
+    use graphforge_storage::PortableErrorCode;
+    // PortableError's Display is deliberately limited to its static,
     // path-free detail (the optional entry is never rendered). Preserve that
     // typed producer diagnosis instead of collapsing every storage failure to
     // the same generic interchange message.
-    let diagnostic_message = bounded_text(&error.to_string());
+    let mut diagnostic_message = error.to_string();
+    // A refusal before extraction is only actionable with its numbers and
+    // probe classes; the cause is sanitized and path-free.
+    if matches!(
+        error.code,
+        PortableErrorCode::UnsupportedFilesystem | PortableErrorCode::InsufficientSpace
+    ) && let Some(cause) = &error.cause
+    {
+        diagnostic_message = format!("{diagnostic_message}: {cause}");
+    }
+    let diagnostic_message = bounded_text(&diagnostic_message);
     let (outer, diagnostic, remediation) = match error.code {
-        PortableV2ErrorCode::Cancelled => (
+        PortableErrorCode::UnsupportedFilesystem => (
+            "GF_UNSUPPORTED_FILESYSTEM",
+            "storage.unsupported_filesystem",
+            "import onto a local ext4, xfs, btrfs, APFS, or NTFS volume",
+        ),
+        PortableErrorCode::InsufficientSpace => (
+            "GF_STORAGE",
+            "storage.insufficient_space",
+            "free space beside the target or import onto a larger volume",
+        ),
+        PortableErrorCode::Cancelled => (
             "GF_CANCELLED",
             "lifecycle.cancelled",
             "retry with an active cancellation token",
         ),
-        PortableV2ErrorCode::UnsupportedProjectFormat => (
+        PortableErrorCode::UnsupportedProjectFormat => (
             "GF_UNSUPPORTED_PROJECT_FORMAT",
             "interchange.unsupported_format",
             "export a streaming portable package with a supported producer",
         ),
-        PortableV2ErrorCode::UnsupportedFuture => (
+        PortableErrorCode::UnsupportedFuture => (
             "GF_UNSUPPORTED_FUTURE",
             "interchange.unsupported_future",
-            "upgrade GraphForge or use a supported portable-v2 producer",
+            "upgrade GraphForge or use a supported portable producer",
         ),
-        PortableV2ErrorCode::LimitExceeded => (
+        PortableErrorCode::LimitExceeded => (
             "GF_LIMIT_EXCEEDED",
             "resource.bytes",
             "raise an explicit bounded limit or reduce the package",
         ),
-        PortableV2ErrorCode::ConcurrentMutation => (
+        PortableErrorCode::ConcurrentMutation => (
             "GF_IDEMPOTENCY_CONFLICT",
             "inventory.generation_conflict",
             "refresh the exact authority state and retry",
         ),
-        PortableV2ErrorCode::Incompatible => (
+        PortableErrorCode::Incompatible => (
             "GF_VALIDATION",
             "interchange.selection",
-            "select a compatible portable-v2 ontology candidate",
+            "select a compatible portable ontology candidate",
         ),
-        PortableV2ErrorCode::Io | PortableV2ErrorCode::InvalidPath => (
+        PortableErrorCode::Io | PortableErrorCode::InvalidPath => (
             "GF_STORAGE",
             "interchange.io",
             "verify the portable staging authority and retry",
         ),
-        PortableV2ErrorCode::DigestMismatch
-        | PortableV2ErrorCode::DuplicateEntry
-        | PortableV2ErrorCode::InvalidStructure => (
+        PortableErrorCode::DigestMismatch
+        | PortableErrorCode::DuplicateEntry
+        | PortableErrorCode::InvalidStructure => (
             "GF_VALIDATION",
             "interchange.integrity",
-            "repair and re-import the portable-v2 package",
+            "repair and re-import the portable package",
         ),
     };
     let subjects = error.entry.into_iter().collect::<Vec<_>>();
     MultiOntologyError {
         code: outer.into(),
-        message: "portable-v2 ontology staging failed".into(),
+        message: "portable ontology staging failed".into(),
         diagnostics: vec![MultiOntologyDiagnostic {
             code: diagnostic.into(),
             phase: "interchange".into(),

@@ -1242,7 +1242,7 @@ class ProgressiveRunControllerTests(unittest.TestCase):
 
     def test_fly_s18_s19_ladder_bundle_refuses_s20_until_rss_plateaus(self) -> None:
         """Real #900 Fly evidence must not authorize S20 while RSS grows across rungs."""
-        bundle = ROOT / "fixtures" / "parity" / "ladder-bundle"
+        bundle = ROOT / "tests" / "fixtures" / "rungs" / "fly-rss-growth"
         for scale in (18, 19):
             source = bundle / f"s{scale}-rung.json"
             (self.output / source.name).write_text(source.read_text(encoding="utf-8"))

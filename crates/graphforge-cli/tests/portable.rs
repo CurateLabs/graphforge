@@ -225,7 +225,7 @@ fn portable_verify_skips_repository_discovery() {
 }
 
 #[test]
-fn portable_v2_export_verify_and_import_round_trip() {
+fn portable_export_verify_and_import_round_trip() {
     let root = TempDir::new().expect("temp root");
     let source_project = root.path().join("source");
     fs::create_dir(&source_project).expect("source project");
@@ -311,9 +311,9 @@ fn portable_v2_export_verify_and_import_round_trip() {
 #[test]
 fn portable_facade_and_same_binary_preserve_complete_receipts() {
     use graphforge_api::{
-        GraphForge, PortableSelection, PortableV2ExportRequest, PortableV2Limits, PortableV2Mode,
-        PortableV2Output, PortableV2SelectionPreviewRequest, PortableV2SelectionProfile,
-        PortableV2SelectionRequest, PortableVerifyRequest,
+        GraphForge, PortableExportRequest, PortableLimits, PortableMode, PortableOutput,
+        PortableSelection, PortableSelectionPreviewRequest, PortableSelectionProfile,
+        PortableSelectionRequest, PortableVerifyRequest,
     };
     let root = TempDir::new().unwrap();
     let project = root.path().join("source");
@@ -348,21 +348,21 @@ fn portable_facade_and_same_binary_preserve_complete_receipts() {
         let cli_preview = json(&gf(&project, &args));
         let graph = GraphForge::new(project.to_str()).unwrap();
         let preview = graph
-            .preview_portable_v2_selection(&PortableV2SelectionPreviewRequest {
+            .preview_portable_selection(&PortableSelectionPreviewRequest {
                 selection: selection.clone(),
-                request: PortableV2SelectionRequest {
-                    profile: PortableV2SelectionProfile::Complete,
+                request: PortableSelectionRequest {
+                    profile: PortableSelectionProfile::Complete,
                     strict: false,
                 },
-                limits: PortableV2Limits::default(),
+                limits: PortableLimits::default(),
             })
             .unwrap();
         assert_eq!(cli_preview, serde_json::to_value(&preview).unwrap());
         assert_eq!(cli_preview["include_graph_tree"], true);
         drop(graph);
         for (format, representation) in [
-            ("bundle", PortableV2Output::Bundle),
-            ("expanded", PortableV2Output::Expanded),
+            ("bundle", PortableOutput::Bundle),
+            ("expanded", PortableOutput::Expanded),
         ] {
             let package = root.path().join("package");
             let mut args = vec!["--json", "--diagnostics", "export"];
@@ -377,8 +377,8 @@ fn portable_facade_and_same_binary_preserve_complete_receipts() {
             ]);
             let cli_export = json(&gf(&project, &args));
             for (mode_flag, mode) in [
-                ("full", PortableV2Mode::Full),
-                ("inspect", PortableV2Mode::StructureOnly),
+                ("full", PortableMode::Full),
+                ("inspect", PortableMode::StructureOnly),
             ] {
                 let cli_verify = json(&gf(
                     &project,
@@ -392,11 +392,11 @@ fn portable_facade_and_same_binary_preserve_complete_receipts() {
                         package.to_str().unwrap(),
                     ],
                 ));
-                let report = graphforge_api::verify_portable_v2(
+                let report = graphforge_api::verify_portable(
                     &PortableVerifyRequest {
                         input: package.clone(),
                         mode,
-                        limits: PortableV2Limits::default(),
+                        limits: PortableLimits::default(),
                     },
                     None,
                 )
@@ -409,15 +409,15 @@ fn portable_facade_and_same_binary_preserve_complete_receipts() {
                 fs::remove_file(&package).unwrap();
             }
             let graph = GraphForge::new(project.to_str()).unwrap();
-            let request = PortableV2ExportRequest {
+            let request = PortableExportRequest {
                 selection: selection.clone(),
                 output_path: package.clone(),
                 representation,
-                profile: PortableV2SelectionProfile::Complete,
+                profile: PortableSelectionProfile::Complete,
                 subset: None,
-                limits: PortableV2Limits::default(),
+                limits: PortableLimits::default(),
             };
-            let exported = graph.export_portable_v2(&request, None, |_| {}).unwrap();
+            let exported = graph.export_portable(&request, None, |_| {}).unwrap();
             // #1389 adds process-scoped per-phase I/O attribution to the CLI
             // receipt. It is observability the package receipt does not model,
             // so it is asserted separately and the package contract below stays
@@ -437,10 +437,8 @@ fn portable_facade_and_same_binary_preserve_complete_receipts() {
                 cli_package,
                 serde_json::to_value(exported.receipt()).unwrap()
             );
-            let denied = graph
-                .export_portable_v2(&request, None, |_| {})
-                .unwrap_err();
-            assert_eq!(denied.code, graphforge_api::PortableV2ErrorCode::Io);
+            let denied = graph.export_portable(&request, None, |_| {}).unwrap_err();
+            assert_eq!(denied.code, graphforge_api::PortableErrorCode::Io);
             drop(graph);
             if package.is_dir() {
                 fs::remove_dir_all(&package).unwrap();
@@ -461,23 +459,22 @@ fn shared_verification_golden_matches_real_facade_and_cli() {
     fs::copy(&fixture, &package).unwrap();
     assert_eq!(fs::read(&package).unwrap(), fs::read(&fixture).unwrap());
     let expected: Value = serde_json::from_slice(
-        &fs::read(root.join("tests/fixtures/portable-v2/facade-verification-receipts.json"))
-            .unwrap(),
+        &fs::read(root.join("tests/fixtures/portable/facade-verification-receipts.json")).unwrap(),
     )
     .unwrap();
     for (key, flag, mode) in [
-        ("full", "full", graphforge_api::PortableV2Mode::Full),
+        ("full", "full", graphforge_api::PortableMode::Full),
         (
             "structure_only",
             "inspect",
-            graphforge_api::PortableV2Mode::StructureOnly,
+            graphforge_api::PortableMode::StructureOnly,
         ),
     ] {
-        let report = graphforge_api::verify_portable_v2(
+        let report = graphforge_api::verify_portable(
             &graphforge_api::PortableVerifyRequest {
                 input: package.clone(),
                 mode,
-                limits: graphforge_api::PortableV2Limits::default(),
+                limits: graphforge_api::PortableLimits::default(),
             },
             None,
         )
@@ -994,4 +991,161 @@ fn primary_streaming_current_and_checkpoint_reopen_with_exact_query_results() {
             expected as i64
         );
     }
+}
+
+/// JCS-style canonical JSON: sorted keys, no whitespace, as the package
+/// manifest and its digest preimage are written.
+fn canonical_json(value: &Value, out: &mut String) {
+    match value {
+        Value::Object(map) => {
+            out.push('{');
+            let mut keys: Vec<_> = map.keys().collect();
+            keys.sort();
+            for (index, key) in keys.into_iter().enumerate() {
+                if index != 0 {
+                    out.push(',');
+                }
+                out.push_str(&serde_json::to_string(key).unwrap());
+                out.push(':');
+                canonical_json(&map[key], out);
+            }
+            out.push('}');
+        }
+        Value::Array(values) => {
+            out.push('[');
+            for (index, value) in values.iter().enumerate() {
+                if index != 0 {
+                    out.push(',');
+                }
+                canonical_json(value, out);
+            }
+            out.push(']');
+        }
+        other => out.push_str(&serde_json::to_string(other).unwrap()),
+    }
+}
+
+/// An expanded complete package whose manifest declares eight tebibytes of payload (under the per-file bound)
+/// and is resealed, so its controls are admitted and only the disk can refuse
+/// it. Nothing about the files on disk is inflated.
+fn package_too_large_for_any_disk(root: &Path) -> std::path::PathBuf {
+    use sha2::{Digest as _, Sha256};
+    let source_project = root.join("source");
+    fs::create_dir(&source_project).unwrap();
+    let package = root.join("too-large.gfproject");
+    json(&gf(
+        &source_project,
+        &[
+            "--json",
+            "export",
+            "--current",
+            "--format",
+            "expanded",
+            "--profile",
+            "complete",
+            "--output",
+            package.to_str().unwrap(),
+        ],
+    ));
+    let manifest_path = package.join("data/graphforge-project.json");
+    let mut manifest: Value = serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+    manifest.as_object_mut().unwrap().remove("package_digest");
+    let length = &mut manifest["components"][0]["files"][0]["length"];
+    *length = (length.as_u64().unwrap() + (1_u64 << 43)).into();
+    let mut preimage = String::new();
+    canonical_json(&manifest, &mut preimage);
+    let digest =
+        Sha256::digest([b"graphforge-project/2\0".as_slice(), preimage.as_bytes()].concat());
+    manifest["package_digest"] = format!(
+        "sha256:{}",
+        digest
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    )
+    .into();
+    let mut sealed = String::new();
+    canonical_json(&manifest, &mut sealed);
+    fs::write(&manifest_path, sealed).unwrap();
+    package
+}
+
+fn refused_import(destination: &Path, package: &Path) -> (Option<i32>, Value) {
+    let output = gf(
+        destination,
+        &[
+            "--json",
+            "import",
+            "--input",
+            package.to_str().unwrap(),
+            "--idempotency-key",
+            "00000000-0000-0000-0000-000000000770",
+        ],
+    );
+    assert!(!output.status.success());
+    let error: Value = serde_json::from_slice(&output.stderr).unwrap_or_else(|_| {
+        panic!(
+            "JSON error, got {}",
+            String::from_utf8_lossy(&output.stderr)
+        )
+    });
+    (output.status.code(), error)
+}
+
+fn assert_nothing_written(parent: &Path, destination: &Path) {
+    assert!(!destination.exists());
+    let staged: Vec<_> = fs::read_dir(parent)
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.contains("portable-v2"))
+        .collect();
+    assert!(staged.is_empty(), "left staging behind: {staged:?}");
+}
+
+#[test]
+fn an_import_the_disk_cannot_hold_is_refused_as_a_storage_error_before_extraction() {
+    let root = TempDir::new().unwrap();
+    let package = package_too_large_for_any_disk(root.path());
+    let destination = root.path().join("destination");
+    let (code, error) = refused_import(&destination, &package);
+    assert_eq!(code, Some(3), "{error}");
+    assert_eq!(error["error"]["code"], "GF_STORAGE", "{error}");
+    assert_eq!(
+        error["error"]["diagnostics"][0]["code"], "storage.insufficient_space",
+        "{error}"
+    );
+    let message = error["error"]["diagnostics"][0]["message"]
+        .as_str()
+        .unwrap();
+    assert!(
+        message.contains("bytes available beside the target"),
+        "{message}"
+    );
+    assert_nothing_written(root.path(), &destination);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn an_import_onto_an_unsupported_filesystem_keeps_its_code_and_exit_class() {
+    let root = TempDir::new().unwrap();
+    let package = package_too_large_for_any_disk(root.path());
+    // `/dev/shm` is tmpfs, which the durable-publication contract does not admit.
+    let shm = TempDir::new_in("/dev/shm").unwrap();
+    let destination = shm.path().join("destination");
+    let (code, error) = refused_import(&destination, &package);
+    assert_eq!(code, Some(3), "{error}");
+    assert_eq!(
+        error["error"]["code"], "GF_UNSUPPORTED_FILESYSTEM",
+        "{error}"
+    );
+    assert_eq!(
+        error["error"]["diagnostics"][0]["code"], "storage.unsupported_filesystem",
+        "{error}"
+    );
+    let message = error["error"]["diagnostics"][0]["message"]
+        .as_str()
+        .unwrap();
+    assert!(message.contains("GF_UNSUPPORTED_FILESYSTEM"), "{message}");
+    assert_nothing_written(shm.path(), &destination);
 }

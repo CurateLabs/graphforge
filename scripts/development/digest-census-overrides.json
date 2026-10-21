@@ -1692,7 +1692,7 @@
       ]
     },
     {
-      "path": "crates/graphforge-storage/src/project_portable_v2.rs",
+      "path": "crates/graphforge-storage/src/project_portable.rs",
       "function": "admit_manifest",
       "role": "control_authentication",
       "input_contract": "Domain plus canonical package manifest excluding its digest authenticates package authority metadata.",
@@ -1701,7 +1701,7 @@
       ]
     },
     {
-      "path": "crates/graphforge-storage/src/project_portable_v2.rs",
+      "path": "crates/graphforge-storage/src/project_portable.rs",
       "function": "expanded_transport",
       "role": "contract_identity",
       "input_contract": "Ordered entry path/length/already computed digests plus tagmanifest bytes define expanded transport identity.",
@@ -1710,7 +1710,7 @@
       ]
     },
     {
-      "path": "crates/graphforge-storage/src/project_portable_v2.rs",
+      "path": "crates/graphforge-storage/src/project_portable.rs",
       "function": "hash_file",
       "role": "portable_authentication",
       "input_contract": "Existing portable regular member bytes are fully authenticated for package verification/import, separate from subsequent durable participant naming.",
@@ -1719,7 +1719,7 @@
       ]
     },
     {
-      "path": "crates/graphforge-storage/src/project_portable_v2.rs",
+      "path": "crates/graphforge-storage/src/project_portable.rs",
       "function": "hash_payload",
       "role": "portable_authentication",
       "input_contract": "Each complete archive member is cryptographically authenticated against its portable manifest identity; the enclosing archive producer separately counts all physical transport bytes.",
@@ -1728,7 +1728,7 @@
       ]
     },
     {
-      "path": "crates/graphforge-storage/src/project_portable_v2.rs",
+      "path": "crates/graphforge-storage/src/project_portable.rs",
       "function": "require_exact",
       "role": "control_authentication",
       "input_contract": "Exact expected portable control tag bytes are authenticated against tag entry digest.",
@@ -1737,7 +1737,7 @@
       ]
     },
     {
-      "path": "crates/graphforge-storage/src/project_portable_v2.rs",
+      "path": "crates/graphforge-storage/src/project_portable.rs",
       "function": "validate_package",
       "role": "control_authentication",
       "input_contract": "Domain plus canonical package manifest excluding its digest authenticates package authority metadata.",
@@ -1746,7 +1746,7 @@
       ]
     },
     {
-      "path": "crates/graphforge-storage/src/project_portable_v2.rs",
+      "path": "crates/graphforge-storage/src/project_portable.rs",
       "function": "verify_bundle",
       "role": "caller_selected",
       "input_contract": "Full archive headers/member bytes/padding form the genuine transport identity; the separate path-only digest chooses a canonical PAX name.",
@@ -1755,7 +1755,7 @@
       ]
     },
     {
-      "path": "crates/graphforge-storage/src/project_portable_v2/authenticated_entries.rs",
+      "path": "crates/graphforge-storage/src/project_portable/authenticated_entries.rs",
       "function": "new",
       "role": "portable_authentication",
       "input_contract": "Untrusted archive/member buffers select genuine Portable SHA; private writer authority selects XXH instead, never a new SHA pass.",
@@ -1764,7 +1764,7 @@
       ]
     },
     {
-      "path": "crates/graphforge-storage/src/project_portable_v2/authenticated_entries.rs",
+      "path": "crates/graphforge-storage/src/project_portable/authenticated_entries.rs",
       "function": "read",
       "role": "control_authentication",
       "input_contract": "Bounded semantic control bytes are reauthenticated against the previously admitted member digest and native source identity.",
@@ -1773,7 +1773,7 @@
       ]
     },
     {
-      "path": "crates/graphforge-storage/src/project_portable_v2/participant_files.rs",
+      "path": "crates/graphforge-storage/src/project_portable/participant_files.rs",
       "function": "read",
       "role": "control_authentication",
       "input_contract": "Bounded manifest-listed file bytes are reauthenticated against the listed SHA-256 and length before a semantic consumer receives them; no additional whole-package pass.",
@@ -1782,7 +1782,7 @@
       ]
     },
     {
-      "path": "crates/graphforge-storage/src/project_portable_v2/materialization/compact_root.rs",
+      "path": "crates/graphforge-storage/src/project_portable/materialization/compact_root.rs",
       "function": "publish_compact_import_root",
       "role": "control_authentication",
       "input_contract": "The factory encodes bounded canonical GraphFilesRootV2 JSON itself, names that control with SHA once, publishes its own bytes and checks actual output checksum/native identity before minting private capture. It receives no caller-provided payload digest tuple and never hashes Arrow/Parquet rows.",
@@ -1791,7 +1791,7 @@
       ]
     },
     {
-      "path": "crates/graphforge-storage/src/project_portable_v2/materialization/composition_control.rs",
+      "path": "crates/graphforge-storage/src/project_portable/materialization/composition_control.rs",
       "function": "write_control",
       "role": "control_authentication",
       "input_contract": "Only typed ontology staging/composition canonical encoders reach this private writer. Enforced manifest byte bound precedes genuine ControlSHA naming; completed output CRC/native identity/length/link/allocation validation mints the exact-byte private capture.",
@@ -1800,7 +1800,7 @@
       ]
     },
     {
-      "path": "crates/graphforge-storage/src/project_portable_v2/materialization/derived.rs",
+      "path": "crates/graphforge-storage/src/project_portable/materialization/derived.rs",
       "function": "hash_uncaptured",
       "role": "durable_artifact",
       "input_contract": "Actual just-derived files without a writer capture receive one bounded real naming SHA and XXH from consumed buffers; sealed private proof forwards that identity into checksum-only copy.",
@@ -1809,7 +1809,7 @@
       ]
     },
     {
-      "path": "crates/graphforge-storage/src/project_portable_v2/semantic_validation.rs",
+      "path": "crates/graphforge-storage/src/project_portable/semantic_validation.rs",
       "function": "validate_ontology_composition",
       "role": "control_authentication",
       "input_contract": "Domain plus bounded canonical composition JSON authenticates the declared composition control authority; no data-bearing member is hashed here.",
@@ -1818,7 +1818,7 @@
       ]
     },
     {
-      "path": "crates/graphforge-storage/src/project_portable_v2_export/planning.rs",
+      "path": "crates/graphforge-storage/src/project_portable_export/planning.rs",
       "function": "inline_control",
       "role": "control_authentication",
       "input_contract": "Canonical authored ontology module and bridge definitions, composition descriptors, runtime maps and graph inventories supply bounded package control member commitments; no graph data payload bytes are hashed here.",
@@ -1827,7 +1827,7 @@
       ]
     },
     {
-      "path": "crates/graphforge-storage/src/project_portable_v2_export/planning.rs",
+      "path": "crates/graphforge-storage/src/project_portable_export/planning.rs",
       "function": "inspect",
       "role": "portable_authentication",
       "input_contract": "Complete existing regular-file member bytes are authenticated for portable export planning, preserving original byte work.",
@@ -1836,8 +1836,8 @@
       ]
     },
     {
-      "path": "crates/graphforge-storage/src/project_portable_v2_export/planning.rs",
-      "function": "plan_selected_portable_v2",
+      "path": "crates/graphforge-storage/src/project_portable_export/planning.rs",
+      "function": "plan_selected_portable",
       "role": "caller_selected",
       "input_contract": "Canonical registry interchange metadata defines selection contract identity; domain plus canonical package manifest defines package control authority.",
       "function_bodies_sha256": [
@@ -1845,7 +1845,7 @@
       ]
     },
     {
-      "path": "crates/graphforge-storage/src/project_portable_v2_export/planning.rs",
+      "path": "crates/graphforge-storage/src/project_portable_export/planning.rs",
       "function": "portable_participant_id",
       "role": "contract_identity",
       "input_contract": "Capability/family text bytes determine stable portable member identifier.",
@@ -1854,7 +1854,7 @@
       ]
     },
     {
-      "path": "crates/graphforge-storage/src/project_portable_v2_export/planning.rs",
+      "path": "crates/graphforge-storage/src/project_portable_export/planning.rs",
       "function": "project_ontology_composition",
       "role": "control_authentication",
       "input_contract": "Domain plus canonical composition descriptors/module identities/activation controls authenticates portable composition authority.",
@@ -1863,7 +1863,7 @@
       ]
     },
     {
-      "path": "crates/graphforge-storage/src/project_portable_v2_export/planning.rs",
+      "path": "crates/graphforge-storage/src/project_portable_export/planning.rs",
       "function": "replace_graph_tree_with_subset",
       "role": "control_authentication",
       "input_contract": "Canonical package manifest metadata or registry interchange metadata binds authored export package authority.",
@@ -1872,7 +1872,7 @@
       ]
     },
     {
-      "path": "crates/graphforge-storage/src/project_portable_v2_export/transport.rs",
+      "path": "crates/graphforge-storage/src/project_portable_export/transport.rs",
       "function": "bundle",
       "role": "control_authentication",
       "input_contract": "Bounded resident canonical tag/control bytes receive their emitted member identity; actual enclosing transport SHA is owned separately by TransportHash.",
@@ -1881,7 +1881,7 @@
       ]
     },
     {
-      "path": "crates/graphforge-storage/src/project_portable_v2_export/transport.rs",
+      "path": "crates/graphforge-storage/src/project_portable_export/transport.rs",
       "function": "capture_controls",
       "role": "control_authentication",
       "input_contract": "Bounded resident canonical portable control/tag bytes are genuinely authenticated once to capture their emitted identity for later private checksum readback.",
@@ -1890,7 +1890,7 @@
       ]
     },
     {
-      "path": "crates/graphforge-storage/src/project_portable_v2_export/transport.rs",
+      "path": "crates/graphforge-storage/src/project_portable_export/transport.rs",
       "function": "copy",
       "role": "caller_selected",
       "input_contract": "Bounded resident canonical control bytes select explicit ControlSha256; uncaptured regular-file members select genuine Portable SHA and admitted writer sources use actual copy CRC.",
@@ -1899,7 +1899,7 @@
       ]
     },
     {
-      "path": "crates/graphforge-storage/src/project_portable_v2_export/transport.rs",
+      "path": "crates/graphforge-storage/src/project_portable_export/transport.rs",
       "function": "digest",
       "role": "producer_delegate",
       "input_contract": "Private WrittenPackage getter returns stored exact writer-produced digest bytes; it invokes no hash implementation.",
@@ -1908,7 +1908,7 @@
       ]
     },
     {
-      "path": "crates/graphforge-storage/src/project_portable_v2_export/transport.rs",
+      "path": "crates/graphforge-storage/src/project_portable_export/transport.rs",
       "function": "entries",
       "role": "control_authentication",
       "input_contract": "Manifest/tag/inventory control bytes or ordered path/length/digest metadata form authenticated portable namespace; aggregate identity distinguished separately.",
@@ -1917,7 +1917,7 @@
       ]
     },
     {
-      "path": "crates/graphforge-storage/src/project_portable_v2_export/transport.rs",
+      "path": "crates/graphforge-storage/src/project_portable_export/transport.rs",
       "function": "expanded",
       "role": "caller_selected",
       "input_contract": "Manifest and fixed tag/control inventory bytes authenticate package controls; ordered path/length/already-computed digests define expanded transport contract identity.",
@@ -1926,7 +1926,7 @@
       ]
     },
     {
-      "path": "crates/graphforge-storage/src/project_portable_v2_export/transport.rs",
+      "path": "crates/graphforge-storage/src/project_portable_export/transport.rs",
       "function": "header",
       "role": "contract_identity",
       "input_contract": "Long portable path bytes derive deterministic PAX header suffix.",
@@ -1935,7 +1935,7 @@
       ]
     },
     {
-      "path": "crates/graphforge-storage/src/project_portable_v2_export/transport.rs",
+      "path": "crates/graphforge-storage/src/project_portable_export/transport.rs",
       "function": "new",
       "role": "portable_authentication",
       "input_contract": "Genuine SHA over actual canonical transport buffers emitted by the private writer, captured together with XXH for checksum readback.",
@@ -1944,7 +1944,7 @@
       ]
     },
     {
-      "path": "crates/graphforge-storage/src/project_portable_v2_export/transport.rs",
+      "path": "crates/graphforge-storage/src/project_portable_export/transport.rs",
       "function": "stream",
       "role": "caller_selected",
       "input_contract": "Bounded resident canonical control bytes select explicit ControlSha256; uncaptured regular-file members select genuine Portable SHA and admitted writer sources use actual copy CRC.",
@@ -1953,7 +1953,7 @@
       ]
     },
     {
-      "path": "crates/graphforge-storage/src/project_portable_v2_import.rs",
+      "path": "crates/graphforge-storage/src/project_portable_import.rs",
       "function": "build_staged_composition",
       "role": "producer_delegate",
       "input_contract": "Typed canonical staging composition delegates to the bounded actual control writer; no additional SHA byte pass.",
@@ -1962,7 +1962,7 @@
       ]
     },
     {
-      "path": "crates/graphforge-storage/src/project_portable_v2_import/materialized_graph.rs",
+      "path": "crates/graphforge-storage/src/project_portable_import/materialized_graph.rs",
       "function": "capture_graph_sources",
       "role": "durable_artifact",
       "input_contract": "Generic private/test untrusted tree boundary computes actual bounded file naming SHA; production requires complete scanner/writer private captures and does not enter this branch.",
@@ -1971,7 +1971,7 @@
       ]
     },
     {
-      "path": "crates/graphforge-storage/src/project_portable_v2_import/materialized_graph.rs",
+      "path": "crates/graphforge-storage/src/project_portable_import/materialized_graph.rs",
       "function": "prepare_compact_import_graph_with_allocation",
       "role": "control_authentication",
       "input_contract": "Bounded canonical graph root participant JSON authenticates the radix graph manifest authority; opaque payloads use their private consumed-byte captures.",
@@ -1980,7 +1980,7 @@
       ]
     },
     {
-      "path": "crates/graphforge-storage/src/project_portable_v2_selection.rs",
+      "path": "crates/graphforge-storage/src/project_portable_selection.rs",
       "function": "fingerprint",
       "role": "contract_identity",
       "input_contract": "Domain plus canonical selection metadata defines portable selection identity.",
@@ -1989,7 +1989,7 @@
       ]
     },
     {
-      "path": "crates/graphforge-storage/src/project_portable_v2_subset.rs",
+      "path": "crates/graphforge-storage/src/project_portable_subset.rs",
       "function": "selector_digest",
       "role": "contract_identity",
       "input_contract": "Domain plus canonical signed subset/selector metadata defines portable request identity.",
@@ -1998,7 +1998,7 @@
       ]
     },
     {
-      "path": "crates/graphforge-storage/src/project_portable_v2_subset.rs",
+      "path": "crates/graphforge-storage/src/project_portable_subset.rs",
       "function": "subset_fingerprint",
       "role": "contract_identity",
       "input_contract": "Domain plus canonical signed subset/selector metadata defines portable request identity.",

@@ -263,7 +263,7 @@ class GraphForge:
         max_output_bytes: int = 268_435_456,
         cancellation: CancellationToken | None = None,
     ) -> dict[str, Any]: ...
-    def preview_portable_v2_selection(
+    def preview_portable_selection(
         self,
         *,
         checkpoint: str | None = None,
@@ -272,14 +272,14 @@ class GraphForge:
         strict: bool = False,
         limits: dict[str, Any] | None = None,
     ) -> dict[str, Any]: ...
-    def preview_portable_v2_graph_subset(
+    def preview_portable_graph_subset(
         self,
         *,
         subset: dict[str, Any],
         checkpoint: str | None = None,
         limits: dict[str, Any] | None = None,
     ) -> dict[str, Any]: ...
-    def export_portable_v2(
+    def export_portable(
         self,
         *,
         output_path: str,
@@ -293,7 +293,7 @@ class GraphForge:
         progress: Callable[[dict[str, int]], object] | None = None,
     ) -> dict[str, Any]: ...
     @staticmethod
-    def verify_portable_v2(
+    def verify_portable(
         input: str,
         *,
         mode: str = "full",
@@ -301,7 +301,7 @@ class GraphForge:
         cancellation: CancellationToken | None = None,
     ) -> dict[str, Any]: ...
     @staticmethod
-    def import_portable_v2(
+    def import_portable(
         project_root: str,
         *,
         input: str,
@@ -310,7 +310,7 @@ class GraphForge:
         cancellation: CancellationToken | None = None,
     ) -> dict[str, Any]: ...
     @staticmethod
-    def publish_portable_v2_oci(
+    def publish_portable_oci(
         *,
         package_path: str,
         registry: str,
@@ -324,7 +324,7 @@ class GraphForge:
         cancellation: CancellationToken | None = None,
     ) -> dict[str, Any]: ...
     @staticmethod
-    def pull_portable_v2_oci(
+    def pull_portable_oci(
         *,
         registry: str,
         repository: str,

@@ -142,9 +142,9 @@ fn selected_artifact_bytes_external_limits_and_ontology_survive_reopen() {
         .unwrap();
     assert_no_private_payload(&package);
     let target = owner.path().join("imported");
-    GraphForge::import_portable_v2(
+    GraphForge::import_portable(
         &target,
-        &PortableV2ImportRequest {
+        &PortableImportRequest {
             input: package,
             operation_id: OperationId(Uuid::now_v7()),
             limits: Default::default(),

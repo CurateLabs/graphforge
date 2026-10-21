@@ -32,6 +32,8 @@ npx @curatelabs/graphforge-cli config resolve --json
 npx @curatelabs/graphforge-cli infra validate --target production --json
 npx @curatelabs/graphforge-cli clone openalex/openalex
 npx @curatelabs/graphforge-cli clone https://graphforge.sh/openalex/openalex openalex-copy
+npx @curatelabs/graphforge-cli hub list curate/claims
+npx @curatelabs/graphforge-cli clone curate/claims --ref feature/score claims-feature
 npx @curatelabs/graphforge-cli ontology module fetch openalex/openalex \
   --ontology-id https://openalex.org/ontology/works --version 2026.01 \
   --digest f1f475dfcf01bdfe7a578afb0203bac26831dc0b48f4cd009bdc418b506981b4 \
@@ -112,20 +114,37 @@ and repository-token exchange. Redirects, off-origin OAuth endpoints, object
 reads, and capability-upload `HEAD`/`PUT` requests receive no bypass. Uploads
 never receive identity or publish credentials, even when hosted at the Hub origin.
 
+Without `--ref` or `--version-uuid`, clone follows the repository's
+`default_ref`. When the repository advertises a research lineage with Branches,
+the default ref must name one of them: clone gets that Branch's head Version
+through the research path, exactly as `--ref <default ref>` would, and a default
+ref that names none fails with `hub.missing_ref` rather than downloading another
+package. A repository without lineage, or whose lineage has no Branches, gets the
+Project package. `--ref NAME` clones another Branch's head and
+`--version-uuid UUID` one exact published Version. A research clone's JSON
+result adds `resolved_ref` (the Branch ref it followed, absent for
+`--version-uuid`), `research_branch_uuid`, `research_version_uuid`,
+`research_version_kind`, and `research_version_identity` (the Version identity
+digest the lineage advertises).
+
 Downloads use finite response, object (1 TiB), redirect, and connection
 limits, and an idle bound instead of a whole-transfer deadline: a slow transfer
 continues as long as bytes keep arriving. Transient failures (a failed
-connection, a cut body, or a `408`, `429`, or `5xx` status) are retried in the
-same invocation with backoff. A retry uses a strong ETag with
+connection, a cut body, or a `408`, `429`, `502`, `503`, or `504` status) are
+retried in the same invocation with backoff; a `Retry-After` (seconds or an HTTP date) sets a
+longer wait, up to 30 seconds, and a longer one ends the retries with the wait in
+the message. A download cut short by a retryable status keeps that status's
+code and class (with a rerun resuming it). Other statuses fail at once. A retry uses a strong ETag with
 `Range`/`If-Range`, appends only an exact matching `206` response, and reads a
 full `200` response as the whole object again. Before downloading, clone checks
 that the destination filesystem is admissible (`GF_UNSUPPORTED_FILESYSTEM`) and
-has room for the package plus the import (about 3.25 times the package;
-`hub.insufficient_space`). Download, import target, and resume state live in an
+has room for the package plus the import (the package, plus a staged and a
+published copy of its payload, plus a validation copy and a rebuilt-Version copy
+of its research content when it has any; `hub.insufficient_space`). Download, import target, and resume state live in an
 owner-private, symlink-safe staging directory beside the destination, protected
 by an exclusive process lock. The destination is installed by one atomic
 no-replace rename only after transport size and SHA-256 checks, full
-portable-v2 verification, semantic package identity comparison, import, and
+portable verification, semantic package identity comparison, import, and
 reopen through the GraphForge facade. After a kill, a failed import, or Ctrl-C,
 rerunning the same command resumes or finishes the clone; import failures keep
 their `hub.package.*` code. Byte progress goes to standard error. The
@@ -134,7 +153,89 @@ covers disk needs, resume, limits, and errors for large projects.
 Redirects and DNS answers are rechecked against the public-network-only policy;
 HTTP, credential-bearing URLs, private/link-local/loopback addresses, corrupt
 objects, and ambiguous package references fail closed. JSON mode returns the
-`graphforge-hub-clone/1` result contract and stable `hub.*` semantic errors.
+`graphforge-hub-clone/1` result contract and stable `hub.*` semantic errors
+(see [Hub error classes](#hub-error-classes)).
+
+`hub list OWNER/REPOSITORY [--hub URL]` (alias `hub ls`) shows a published
+repository without cloning it: its refs and default ref, and, when it advertises
+a research lineage, its Branches (ref, head, base, and parent Branch), Versions
+(kind, the source Version of a projection, and whether a package is published),
+the Fork origin, and Proposals. It reads only `/.gf/refs`, `/.gf/manifest`, and
+the lineage document, through the same reads and verifier as `clone`: a lineage
+whose bytes disagree with their digest, that is bound to another snapshot, or
+that requires an unsupported capability fails the listing with the same code it
+fails `clone`. `--hub` replaces the default `https://graphforge.sh` base for an
+`OWNER/REPOSITORY` name.
+
+```text
+$ gf hub list curate/claims-fork
+curate/claims-fork (default ref main)
+Refs: feature, main
+Forked from curate/claims Version 01a10003-3e9b-7c71-9d6e-0c0f2e5a2b10
+Branches:
+  main  head 01a10003-4664-77df-8712-03523e788b5e  base 01a10003-45d2-7b4e-a3f1-6a5d0e3c9f21
+  feature  head 01a10003-47af-723a-8696-f43d163d7494  base 01a10003-4701-7e88-b1c2-2f4a9d8e6c33  parent main
+Versions:
+  01a10003-4664-77df-8712-03523e788b5e  complete  main  package
+  01a10003-47af-723a-8696-f43d163d7494  complete  feature  package
+```
+
+JSON mode returns the `graphforge-hub-listing/1` contract:
+
+```json
+{
+  "contract": "graphforge-hub-listing/1",
+  "repository": "curate/claims-fork",
+  "default_ref": "main",
+  "immutable_version": "sha256:...",
+  "package_digest": "sha256:...",
+  "refs": [{ "name": "main", "target": "sha256:..." }],
+  "lineage": {
+    "project_uuid": "...",
+    "fork": {
+      "repository": "curate/claims",
+      "project_uuid": "...",
+      "version_uuid": "...",
+      "version_identity": "sha256:..."
+    },
+    "branches": [
+      {
+        "ref": "main",
+        "branch_uuid": "...",
+        "label": "main",
+        "head_version_uuid": "...",
+        "base_version_uuid": "...",
+        "parent_branch_uuid": null
+      }
+    ],
+    "versions": [
+      {
+        "version_uuid": "...",
+        "kind": "complete",
+        "branch_uuid": "...",
+        "identity_digest": "sha256:...",
+        "source_version_uuid": null,
+        "package_digest": "sha256:..."
+      }
+    ],
+    "proposals": [
+      {
+        "proposal_uuid": "...",
+        "source_branch_uuid": "...",
+        "source_version_uuid": "...",
+        "payload_version_uuid": "...",
+        "package_digest": "sha256:..."
+      }
+    ]
+  }
+}
+```
+
+A repository that moved reports `moved_from` and `moved_to`, as `clone` does.
+`lineage` is `null` for a repository without research lineage; `fork`,
+`parent_branch_uuid`, `source_version_uuid`, and a Version's `package_digest` are
+`null` when absent. `gf publish` does not publish Proposals, so `proposals` is
+empty unless another publisher added them.
 
 `ontology module fetch OWNER/REPOSITORY --ontology-id ID --version VERSION
 --digest HEX --output FILE [--hub URL]` retrieves one exact ontology module from
@@ -152,7 +253,7 @@ The fetch applies the same transport rules as `clone`: HTTPS only, no
 credentials, public-network addresses only (rechecked on redirects and DNS),
 and finite response, redirect, connection, and operation limits. The module
 package is also bounded to 64 MiB. The downloaded package must match its
-discovery object digest and length, pass full portable-v2 verification, carry the
+discovery object digest and length, pass full portable verification, carry the
 advertised `package_digest`, and contain the requested module, whose canonical
 content digest is recomputed from the document. Only then is the module document
 written, byte for byte, to `--output`: through a private staging file next to it
@@ -185,7 +286,9 @@ the `graphforge-hub-module-fetch/1` receipt:
 prefix; `package_digest` identifies the carrying package, differs between
 Projects that publish the same module, and keeps its `sha256:` prefix. Failures
 carry a stable `hub.*` code: `hub.invalid_identity` (malformed repository, Hub,
-or `--digest`), `hub.unsafe_location`, `hub.network`, `hub.missing_ref`,
+or `--digest`), `hub.unsafe_location`, `hub.network`, the HTTP status codes
+(`hub.not_found`, `hub.access_denied`, `hub.rate_limited`, `hub.unavailable`,
+`hub.unexpected_status`), `hub.missing_ref`,
 `hub.missing_object` (the repository does not advertise that exact module with a
 package), `hub.limit_exceeded` (object larger than the bound), `hub.interrupted`
 (short body), `hub.integrity` (bytes disagree with their digest),
@@ -196,6 +299,43 @@ as for `clone`: `hub.malformed_response`, `hub.unsupported_future`,
 `hub.duplicate` and `hub.integrity_failure` (invalid or future discovery
 documents), and `hub.concurrent_clone` (another fetch is already using the
 staging directory for the same `--output`).
+
+### Hub error classes
+
+`clone`, `hub list`, and `ontology module fetch` fail with a stable `hub.*`
+semantic code (`details.semantic_code` in JSON mode). Each code belongs to one
+class: **retry** (rerun the same command, later), **fix input** (change the
+command or the local state), or **ask a human** (the repository or Hub must
+change). Messages never repeat the Hub's response body. Exit status 3
+(`GF_IO`) marks a failure a plain rerun may cure; exit status 2
+(`GF_VALIDATION`) one it will not.
+
+| Code                                                               | Class       | Exit                      | Meaning                                                                                   |
+| ------------------------------------------------------------------ | ----------- | ------------------------- | ----------------------------------------------------------------------------------------- |
+| `hub.network`                                                      | retry       | 3                         | The Hub could not be reached or the connection failed                                     |
+| `hub.unavailable`                                                  | retry       | 3                         | `408`, `502`, `503`, or `504` after every in-process retry                                |
+| `hub.rate_limited`                                                 | retry       | 3                         | `429`; the message gives the `Retry-After` wait when the Hub sent one                     |
+| `hub.interrupted`                                                  | retry       | 2                         | The download stopped or was cancelled; a rerun resumes it                                 |
+| `hub.integrity`                                                    | retry       | 2                         | Downloaded bytes disagree with their digest (removed), or a range response does not match |
+| `hub.concurrent_clone`                                             | retry       | 2                         | Another run is using the same staging directory; wait for it                              |
+| `hub.package.io`, `hub.package.cancelled`                          | retry       | 3 (2 during verification) | The import or verification hit an I/O failure or was cancelled                            |
+| `hub.auth_denied`                                                  | fix input   | 2                         | A `--token-env` or `--protection-bypass-env` secret is missing, empty, or invalid         |
+| `hub.not_found`                                                    | fix input   | 2                         | `404` or `410`: no such repository or object; check the name and `--hub`                  |
+| `hub.invalid_identity`                                             | fix input   | 2                         | Malformed repository, Hub URL, `--digest`, or both `--ref` and `--version-uuid`           |
+| `hub.unsafe_location`                                              | fix input   | 2                         | A URL is not credential-free public HTTPS (a Hub redirect there is refused too)           |
+| `hub.missing_ref`                                                  | fix input   | 2                         | The `--ref` Branch is not published (or the Hub's refs omit a ref its documents name)     |
+| `hub.missing_object`                                               | fix input   | 2                         | The `--version-uuid` Version, module, or package is not published                         |
+| `hub.destination_conflict`                                         | fix input   | 2                         | The destination or `--output` exists, or its directory cannot hold the result             |
+| `hub.insufficient_space`                                           | fix input   | 3                         | Not enough free space beside the destination                                              |
+| `hub.access_denied`                                                | ask a human | 2                         | `401` or `403`: ask the repository owner for access                                       |
+| `hub.unexpected_status`                                            | ask a human | 2                         | Any other unsuccessful status, named in the message                                       |
+| `hub.malformed_response`, `hub.duplicate`, `hub.integrity_failure` | ask a human | 2                         | The Hub serves invalid, duplicated, or mutually inconsistent discovery documents          |
+| `hub.unsupported_future`                                           | ask a human | 2                         | The repository requires a newer protocol or capability; upgrade `gf` or ask the publisher |
+| `hub.limit_exceeded`                                               | ask a human | 2                         | An object exceeds its size bound                                                          |
+| `hub.package.*`, `hub.module.*` (others)                           | ask a human | 2                         | The package or module failed verification                                                 |
+
+`GF_UNSUPPORTED_FILESYSTEM` (exit 1) is a fix-input failure: clone onto a
+supported local volume.
 
 Clone does not initialize or contact a telemetry exporter. Neither does module fetch. The future opt-in
 GraphForge OpenTelemetry lifecycle will remain Rust-owned and must not attach
