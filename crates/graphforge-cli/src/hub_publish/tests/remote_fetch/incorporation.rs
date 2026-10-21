@@ -38,6 +38,8 @@ fn review(graph: &GraphForge, fetched: &FetchedResearchBranch) -> UpdateResearch
         .downcast_ref::<arrow::array::FixedSizeBinaryArray>()
         .unwrap();
     UpdateResearchBranchRequest {
+        label: None,
+        description: None,
         operation_uuid: Uuid::now_v7(),
         expected_generation_uuid: generation(graph),
         version_uuid: Uuid::now_v7(),

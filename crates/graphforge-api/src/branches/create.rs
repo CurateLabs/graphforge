@@ -79,7 +79,7 @@ impl GraphForge {
             selection: None,
             required_versions: BTreeSet::new(),
             label: Some(request.label.clone()),
-            description: None,
+            description: request.description.clone(),
             created_at: request.created_at,
             evidence: source.evidence,
         };

@@ -103,6 +103,7 @@ fn create_branch(
     graph
         .create_research_branch(
             &CreateResearchBranchRequest {
+                description: None,
                 author: None,
                 committer: None,
                 operation_uuid: Uuid::now_v7(),
@@ -124,6 +125,8 @@ fn edit(graph: &mut GraphForge, branch_uuid: Uuid, score: i64) -> Uuid {
     graph
         .execute_research_branch(
             &ExecuteResearchBranchRequest {
+                label: None,
+                description: None,
                 author: None,
                 committer: None,
                 operation_uuid: Uuid::now_v7(),
@@ -1602,6 +1605,8 @@ fn branch_activation_retries_exact_native_receipt_but_never_resets_advanced_stag
                 graph
                     .execute_research_branch(
                         &ExecuteResearchBranchRequest {
+                            label: None,
+                            description: None,
                             author: None,
                             committer: None,
                             operation_uuid: Uuid::now_v7(),

@@ -30,6 +30,29 @@ pub(crate) fn commit(
     Ok(())
 }
 
+/// Record an optional citation label and description on a new Version. Absent
+/// values leave the prepared record as it is; present values are bounded here.
+pub(crate) fn describe(
+    version: &mut ResearchVersionRecord,
+    label: Option<&str>,
+    description: Option<&str>,
+) -> Result<(), GfError> {
+    if label.is_some_and(|text| text.len() > 4096)
+        || description.is_some_and(|text| text.len() > 4096)
+    {
+        return Err(GfError::Validation(
+            "Version label or description exceeds 4096 bytes".into(),
+        ));
+    }
+    if let Some(label) = label {
+        version.label = Some(label.to_owned());
+    }
+    if let Some(description) = description {
+        version.description = Some(description.to_owned());
+    }
+    Ok(())
+}
+
 pub(crate) struct Command {
     pub root: PathBuf,
     pub registry: ResearchRegistry,

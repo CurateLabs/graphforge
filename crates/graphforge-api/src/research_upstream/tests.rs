@@ -16,6 +16,7 @@ fn preview_is_pinned_read_only_and_requires_explicit_conflict_selection() {
     let current = |g: &GraphForge| g.generation_for_read().unwrap().generation_uuid();
     let cancel = CancellationToken::new();
     let branch = CreateResearchBranchRequest {
+        description: None,
         author: None,
         committer: None,
         operation_uuid: Uuid::now_v7(),
@@ -58,6 +59,8 @@ fn preview_is_pinned_read_only_and_requires_explicit_conflict_selection() {
         digest
     );
     let mut update = UpdateResearchBranchRequest {
+        label: None,
+        description: None,
         author: None,
         committer: None,
         operation_uuid: Uuid::now_v7(),
@@ -76,6 +79,8 @@ fn preview_is_pinned_read_only_and_requires_explicit_conflict_selection() {
     graph
         .execute_research_branch(
             &ExecuteResearchBranchRequest {
+                label: None,
+                description: None,
                 author: None,
                 committer: None,
                 operation_uuid: Uuid::now_v7(),
@@ -242,6 +247,7 @@ fn preference_only_source_update_is_visible_without_changing_immutable_source() 
     let current = |g: &GraphForge| g.generation_for_read().unwrap().generation_uuid();
     let cancel = CancellationToken::new();
     let branch = CreateResearchBranchRequest {
+        description: None,
         author: None,
         committer: None,
         operation_uuid: Uuid::now_v7(),
@@ -258,6 +264,7 @@ fn preference_only_source_update_is_visible_without_changing_immutable_source() 
     };
     graph.create_research_branch(&branch, &cancel).unwrap();
     let child = CreateResearchBranchRequest {
+        description: None,
         author: None,
         committer: None,
         operation_uuid: Uuid::now_v7(),
@@ -339,6 +346,8 @@ fn preference_only_source_update_is_visible_without_changing_immutable_source() 
     assert_eq!(preferences.events[0].artifact_uuid, first);
     drop(old);
     let mut update = UpdateResearchBranchRequest {
+        label: None,
+        description: None,
         author: None,
         committer: None,
         operation_uuid: Uuid::now_v7(),
@@ -462,6 +471,8 @@ fn preference_only_source_update_is_visible_without_changing_immutable_source() 
         })
         .collect();
     let child_update = UpdateResearchBranchRequest {
+        label: None,
+        description: None,
         author: None,
         committer: None,
         operation_uuid: Uuid::now_v7(),

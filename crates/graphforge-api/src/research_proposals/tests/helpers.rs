@@ -5,6 +5,7 @@ pub(super) fn branch(graph: &mut GraphForge) -> Uuid {
     graph
         .create_research_branch(
             &CreateResearchBranchRequest {
+                description: None,
                 author: None,
                 committer: None,
                 operation_uuid: Uuid::now_v7(),

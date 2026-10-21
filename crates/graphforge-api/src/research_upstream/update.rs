@@ -64,6 +64,11 @@ impl GraphForge {
             request.committer.as_ref(),
             None,
         )?;
+        crate::branches::publication::describe(
+            &mut prepared.version,
+            request.label.as_deref(),
+            request.description.as_deref(),
+        )?;
         // Register any newly created local explanatory fields, then advance only reviewed keys.
         baseline::update(self, &graph, &mut prepared, request.operation_uuid, cancel)?;
         let prepared_graph = crate::branches::private_view::open(self, &prepared)?;

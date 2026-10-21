@@ -84,6 +84,7 @@ fn canonical_parent_and_branch_decisions_are_explicit_independent_and_durable() 
     assert_eq!(current(&g), published);
     assert_eq!(count(&g), 1);
     let branch = CreateResearchBranchRequest {
+        description: None,
         author: None,
         committer: None,
         operation_uuid: Uuid::now_v7(),
@@ -280,6 +281,7 @@ fn claim_provenance(g: &GraphForge, id: Uuid) -> Uuid {
 }
 fn create_branch(g: &mut GraphForge) -> Uuid {
     let request = CreateResearchBranchRequest {
+        description: None,
         author: None,
         committer: None,
         operation_uuid: Uuid::now_v7(),
@@ -795,6 +797,7 @@ fn child_inherits_frozen_suppression_while_sibling_and_parent_remain_visible() {
     g.change_research_branch_claim(&suppress, &CancellationToken::new())
         .unwrap();
     let child = CreateResearchBranchRequest {
+        description: None,
         author: None,
         committer: None,
         operation_uuid: Uuid::now_v7(),

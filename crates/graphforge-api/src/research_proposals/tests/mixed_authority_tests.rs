@@ -47,6 +47,7 @@ fn fork_local_branch_exports_mixed_project_acceptance_genealogy() {
     let local_version = Uuid::now_v7();
     fork.create_research_branch(
         &CreateResearchBranchRequest {
+            description: None,
             author: None,
             committer: None,
             operation_uuid: Uuid::now_v7(),

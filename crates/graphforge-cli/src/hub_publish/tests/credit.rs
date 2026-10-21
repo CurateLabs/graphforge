@@ -26,6 +26,8 @@ pub(super) fn edit_credited(
     graph
         .execute_research_branch(
             &ExecuteResearchBranchRequest {
+                label: None,
+                description: None,
                 author: Some(author),
                 committer: Some(committer),
                 operation_uuid: Uuid::now_v7(),

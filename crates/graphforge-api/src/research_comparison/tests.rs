@@ -88,6 +88,7 @@ fn unregistered_projection_cannot_certify_project_acceptance_even_with_same_cont
     let current = |g: &GraphForge| g.generation_for_read().unwrap().generation_uuid();
     let token = CancellationToken::new();
     let b = CreateResearchBranchRequest {
+        description: None,
         author: None,
         committer: None,
         operation_uuid: Uuid::now_v7(),
@@ -104,6 +105,8 @@ fn unregistered_projection_cannot_certify_project_acceptance_even_with_same_cont
     };
     g.create_research_branch(&b, &token).unwrap();
     let edit = ExecuteResearchBranchRequest {
+        label: None,
+        description: None,
         author: None,
         committer: None,
         operation_uuid: Uuid::now_v7(),

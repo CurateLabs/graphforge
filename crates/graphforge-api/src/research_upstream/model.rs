@@ -104,6 +104,12 @@ pub struct UpdateResearchBranchRequest {
     /// Credited committer of the new Version; recorded, not authenticated.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub committer: Option<graphforge_storage::research_versions::ResearchSignature>,
+    /// Optional immutable citation label of the new Version (ADR 0061).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// Optional immutable description of the new Version; a commit message (ADR 0061).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 /// Bounded inspection of permanent upstream decisions for one Branch.

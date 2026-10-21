@@ -62,6 +62,8 @@ fn branch_edit_leaves_every_published_generation_tree_byte_identical() {
 fn branch_edit_private_parent_generation_matches_its_recorded_inventory() {
     let (_temp, _root, graph, branch) = project_with_branch();
     let request = ExecuteResearchBranchRequest {
+        label: None,
+        description: None,
         author: None,
         committer: None,
         operation_uuid: Uuid::now_v7(),
@@ -205,6 +207,8 @@ fn prepared_branch_content_never_opens_a_pinned_alias_over_a_tree_backed_owner()
     let (_temp, root, graph, branch) = project_with_branch();
     assert_tree_backed_owner(&graph);
     let request = ExecuteResearchBranchRequest {
+        label: None,
+        description: None,
         author: None,
         committer: None,
         operation_uuid: Uuid::now_v7(),

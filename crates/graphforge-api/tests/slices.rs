@@ -845,6 +845,7 @@ fn selected_branch_decision_context_reads_exact_version_after_parent_change_reop
         .freeze_slice(&selection, &CancellationToken::new())
         .unwrap();
     let branch = CreateResearchBranchRequest {
+        description: None,
         author: None,
         committer: None,
         operation_uuid: Uuid::now_v7(),

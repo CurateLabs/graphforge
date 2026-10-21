@@ -36,6 +36,7 @@ fn cli_upstream_review_reopens_and_replays_native_publication() {
     graph
         .create_research_branch(
             &CreateResearchBranchRequest {
+                description: None,
                 author: None,
                 committer: None,
                 operation_uuid: Uuid::now_v7(),
@@ -85,6 +86,8 @@ fn cli_upstream_review_reopens_and_replays_native_publication() {
         .downcast_ref::<arrow::array::FixedSizeBinaryArray>()
         .unwrap();
     let request = UpdateResearchBranchRequest {
+        label: None,
+        description: None,
         author: None,
         committer: None,
         operation_uuid: Uuid::now_v7(),

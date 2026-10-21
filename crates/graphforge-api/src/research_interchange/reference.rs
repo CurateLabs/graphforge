@@ -133,6 +133,7 @@ mod tests {
         graph
             .create_research_branch(
                 &CreateResearchBranchRequest {
+                    description: None,
                     author: None,
                     committer: None,
                     operation_uuid: Uuid::now_v7(),
@@ -166,6 +167,8 @@ mod tests {
         graph
             .execute_research_branch(
                 &ExecuteResearchBranchRequest {
+                    label: None,
+                    description: None,
                     author: None,
                     committer: None,
                     operation_uuid: Uuid::now_v7(),

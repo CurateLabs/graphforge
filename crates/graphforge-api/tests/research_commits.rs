@@ -133,6 +133,7 @@ fn branch_operations_record_their_specified_parents() {
     // Create from current research: the base descends from the captured origin.
     let origin = Uuid::now_v7();
     let create = CreateResearchBranchRequest {
+        description: None,
         operation_uuid: Uuid::now_v7(),
         expected_generation_uuid: current(&graph),
         branch_uuid: Uuid::now_v7(),
@@ -155,6 +156,8 @@ fn branch_operations_record_their_specified_parents() {
     assert_eq!(base.committer, Some(signature("Grace")));
     // Execute: the prior head; signatures are the request's, never inherited.
     let execute = ExecuteResearchBranchRequest {
+        label: None,
+        description: None,
         operation_uuid: Uuid::now_v7(),
         expected_generation_uuid: current(&graph),
         branch_uuid: branch,
@@ -288,6 +291,7 @@ fn invalid_signatures_are_refused_before_publication() {
     let error = graph
         .create_research_branch(
             &CreateResearchBranchRequest {
+                description: None,
                 operation_uuid: Uuid::now_v7(),
                 expected_generation_uuid: before,
                 branch_uuid: Uuid::now_v7(),
@@ -321,6 +325,8 @@ fn requests_without_signatures_keep_their_serialized_intent() {
     // Absent signatures are omitted, so existing callers' request bytes (and
     // their replay intent digests) are unchanged.
     let request = ExecuteResearchBranchRequest {
+        label: None,
+        description: None,
         operation_uuid: Uuid::nil(),
         expected_generation_uuid: Uuid::nil(),
         branch_uuid: Uuid::nil(),
@@ -353,6 +359,7 @@ fn exported_research_carries_the_walkable_descent_of_released_versions() {
     let cancel = CancellationToken::new();
     let origin = Uuid::now_v7();
     let create = CreateResearchBranchRequest {
+        description: None,
         operation_uuid: Uuid::now_v7(),
         expected_generation_uuid: current(&source),
         branch_uuid: Uuid::now_v7(),
@@ -371,6 +378,8 @@ fn exported_research_carries_the_walkable_descent_of_released_versions() {
     let mut edits = Vec::new();
     for n in 1..=2 {
         let request = ExecuteResearchBranchRequest {
+            label: None,
+            description: None,
             operation_uuid: Uuid::now_v7(),
             expected_generation_uuid: current(&source),
             branch_uuid: create.branch_uuid,
@@ -443,6 +452,7 @@ fn exported_bring_preserves_provenance_outside_its_ancestry() {
     graph.execute("CREATE (:Item {n: 1})").unwrap();
     let cancel = CancellationToken::new();
     let create = CreateResearchBranchRequest {
+        description: None,
         operation_uuid: Uuid::now_v7(),
         expected_generation_uuid: current(&graph),
         branch_uuid: Uuid::now_v7(),
