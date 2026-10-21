@@ -235,3 +235,57 @@ pub(super) fn topology(
     )?;
     Ok(topology)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::{SliceMembers, SliceSelector};
+    use super::*;
+
+    #[test]
+    fn unbudgeted_stream_passes_the_row_cap_that_refuses_a_budgeted_one() {
+        let graph = GraphForge::new(None).unwrap();
+        graph
+            .execute("UNWIND range(1, 500) AS i CREATE (:Row {i: i})")
+            .unwrap();
+        let request = SliceRequest {
+            request_uuid: Uuid::now_v7(),
+            source: SliceSource::Current,
+            selector: SliceSelector::Direct {
+                members: SliceMembers::default(),
+            },
+            include: SliceMembers::default(),
+            exclude: SliceMembers::default(),
+            limits: SliceLimits {
+                scanned_rows: 100,
+                ..SliceLimits::default()
+            },
+        };
+        let query = "MATCH (n:Row) RETURN n.i";
+        let mut budget = Budget::new(&request, None);
+        let refused = stream(
+            &graph,
+            query,
+            &HashMap::new(),
+            Some(&mut budget),
+            None,
+            |_| Ok(()),
+        );
+        assert!(refused.is_err(), "budgeted stream must enforce the row cap");
+
+        let cancellation = CancellationToken::new();
+        let mut rows = 0;
+        stream(
+            &graph,
+            query,
+            &HashMap::new(),
+            None,
+            Some(&cancellation),
+            |batch| {
+                rows += batch.num_rows();
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(rows, 500);
+    }
+}

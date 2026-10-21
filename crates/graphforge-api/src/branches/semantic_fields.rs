@@ -1,5 +1,5 @@
 //! Owner-qualified property inspection for composition-bound research.
-use super::fields::{self, FieldSink, Objects};
+use super::fields::{self, FieldSink, Objects, Scan};
 use crate::{CancellationToken, GfError, GraphForge, IrLiteral};
 use arrow::array::FixedSizeBinaryArray;
 use std::collections::{BTreeMap, HashMap};
@@ -66,7 +66,7 @@ pub(super) fn read(
                 "MATCH {pattern}{filter} RETURN {object}.{identity} AS object_uuid, properties({object}) AS properties"
             );
             let consume = |batch: &arrow::record_batch::RecordBatch| {
-                sink.scanned(batch.get_array_memory_size())?;
+                sink.scanned(Scan::Semantic, batch.get_array_memory_size())?;
                 let ids = batch
                     .column_by_name("object_uuid")
                     .and_then(|a| a.as_any().downcast_ref::<FixedSizeBinaryArray>())
@@ -82,6 +82,9 @@ pub(super) fn read(
                         row,
                     )? {
                         let key = (kind.into(), id, format!("property:{property}"));
+                        if !sink.wants(&key) {
+                            continue;
+                        }
                         // A single native field cannot represent two distinct owner values.
                         if semantic.get(&key).is_some_and(|prior| *prior != digest) {
                             return Err(invalid());
@@ -196,4 +199,74 @@ pub(crate) fn property_pattern(
 }
 fn invalid() -> GfError {
     GfError::Validation("research property has ambiguous or invalid semantic owner context".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::branches::fields::Key;
+
+    #[derive(Default)]
+    struct Recorder {
+        wants: bool,
+        fields: Vec<Key>,
+    }
+    impl FieldSink for Recorder {
+        fn field(&mut self, key: Key, _digest: [u8; 32]) -> Result<(), GfError> {
+            self.fields.push(key);
+            Ok(())
+        }
+        fn scanned(&mut self, _scan: Scan, _bytes: usize) -> Result<(), GfError> {
+            Ok(())
+        }
+        fn len(&self) -> usize {
+            self.fields.len()
+        }
+        fn wants(&self, _key: &Key) -> bool {
+            self.wants
+        }
+    }
+
+    #[test]
+    fn semantic_scan_buffers_and_emits_only_the_keys_the_sink_wants() {
+        use crate::composition_binding_tests::{composed_fixture, install_composition_authority};
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("project");
+        let path_text = path.to_str().unwrap();
+        let first = GraphForge::new(Some(path_text)).unwrap();
+        let (context, _, _) = composed_fixture(graphforge_ontology::ActivationMode::Strict);
+        install_composition_authority(&first, &context);
+        drop(first);
+        let forge = GraphForge::new(Some(path_text)).unwrap();
+        forge
+            .execute_with_composition(
+                "CREATE (n:`research:Person` {name: 'Ada'})",
+                context.clone(),
+            )
+            .unwrap();
+        drop(forge);
+        let graph = GraphForge::new(Some(path_text)).unwrap();
+        graph
+            .install_generation_composition_context(&context)
+            .unwrap();
+
+        let cancel = CancellationToken::new();
+        let mut unwanted = Recorder::default();
+        read(&graph, None, true, &mut unwanted, &cancel).unwrap();
+        assert!(unwanted.fields.is_empty(), "unwanted keys were retained");
+
+        let mut wanted = Recorder {
+            wants: true,
+            ..Recorder::default()
+        };
+        read(&graph, None, true, &mut wanted, &cancel).unwrap();
+        assert!(
+            wanted
+                .fields
+                .iter()
+                .any(|key| key.0 == "node" && key.2 == "property:name"),
+            "wanted owner-qualified property was not emitted: {:?}",
+            wanted.fields
+        );
+    }
 }

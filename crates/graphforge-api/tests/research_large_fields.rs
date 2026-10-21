@@ -39,8 +39,11 @@ fn research_version_fields_over_the_whole_map_budget_verify_import_and_reopen() 
     let mut source = GraphForge::new(None).unwrap();
     ingest_large_workspace(&mut source);
 
-    // 4 field keys per node keep the whole-graph map over its 64 MiB reserve
-    // (96,000 keys) and the scanned Arrow bytes over 64 MiB.
+    // 4 field keys per node put the whole-graph map past its 64 MiB reserve
+    // (96,000 keys) and the 3 KiB strings put the scanned Arrow bytes past
+    // 64 MiB. The 1,000,000-row slice cap and the 1,000,000 knowledge-domain
+    // key ceiling are not reached here; the streaming path no longer applies
+    // them (unit tests in slices/graph.rs and branches/fields.rs).
     let version_uuid = Uuid::now_v7();
     let prepared = source
         .prepare_research_version(PrepareResearchVersionRequest {
@@ -125,7 +128,9 @@ fn branch_write_paths_keep_the_whole_map_field_bound() {
             "UNWIND range(1, 750) AS i CREATE (:Row {{{properties}}})"
         ))
         .unwrap();
-
+    let error = narrow
+        .create_research_branch(&large_branch_request(&narrow), &cancellation)
+        .unwrap_err();
     assert_eq!(error.code(), "GF_RESOURCE_LIMIT");
 }
 

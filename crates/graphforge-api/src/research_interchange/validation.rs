@@ -1,5 +1,5 @@
 //! Native historical validation before portable target admission.
-use crate::{GfError, GraphForge};
+use crate::{CancellationToken, GfError, GraphForge};
 use graphforge_storage::{
     ResolvedProjectGeneration,
     research_versions::{ResearchRegistry, ResearchVersionRecord},
@@ -50,43 +50,43 @@ pub(crate) fn validate(
         options,
         resource_policy,
     )?;
-    let mut expected = std::collections::BTreeMap::new();
-    for archive in registry.interchange.values() {
-        for mapping in archive.accepted.values() {
-            if archive.proof_exports.get(&mapping.proof_version_uuid) != Some(&version.version_uuid)
-            {
-                continue;
-            }
-            let Some(digest) = mapping.value_sha256 else {
-                // Such a mapping can never match a scanned commitment.
-                return Err(invalid());
-            };
-            let key = (
-                mapping.unit.object_kind.clone(),
-                mapping.unit.object_uuid,
-                mapping.unit.field.clone(),
-            );
-            // Two accepted mappings for one key must commit the same value.
-            match expected.entry(key) {
-                std::collections::btree_map::Entry::Vacant(entry) => {
-                    entry.insert(digest);
-                }
-                std::collections::btree_map::Entry::Occupied(entry) if *entry.get() == digest => {}
-                std::collections::btree_map::Entry::Occupied(_) => return Err(invalid()),
-            }
-        }
-    }
-    // Streaming comparison against the registry's accepted mappings: memory is
-    // the expected set plus one engine batch, never a whole-graph field map.
-    if crate::branches::fields::verify_expected(&graph, &expected)? != expected.len() {
-        return Err(invalid());
-    }
+    // Streaming comparison: retain only the keys the registry commits for this
+    // Version, never a whole-graph field map.
+    let commitments = || {
+        registry
+            .interchange
+            .values()
+            .flat_map(|archive| {
+                archive.accepted.values().filter(|mapping| {
+                    archive.proof_exports.get(&mapping.proof_version_uuid)
+                        == Some(&version.version_uuid)
+                })
+            })
+            .map(|mapping| {
+                (
+                    (
+                        mapping.unit.object_kind.clone(),
+                        mapping.unit.object_uuid,
+                        mapping.unit.field.clone(),
+                    ),
+                    mapping.value_sha256,
+                )
+            })
+    };
+    let wanted = commitments().map(|(key, _)| key).collect();
+    let fields = crate::branches::fields::read_keys(&graph, &wanted, &CancellationToken::new())?;
     for row in crate::branches::baseline::read(&graph)?.values() {
         if !registry.identities.contains_key(&row.origin)
             || row
                 .incorporated
                 .is_some_and(|id| !registry.identities.contains_key(&id))
         {
+            return Err(invalid());
+        }
+    }
+    // An absent value commits a deleted or missing field and must stay absent.
+    for (key, digest) in commitments() {
+        if fields.get(&key) != digest.as_ref() {
             return Err(invalid());
         }
     }

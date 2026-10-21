@@ -39,7 +39,7 @@ fn archived_native_baseline_rejects_unknown_origin_without_mutating_source() {
         directory.path(),
     )
     .unwrap();
-    validate(&historical, &version, &registry).unwrap();
+    validate(historical, &version, &registry).unwrap();
     let origin = registry
         .branches
         .values()
@@ -47,7 +47,7 @@ fn archived_native_baseline_rejects_unknown_origin_without_mutating_source() {
         .unwrap()
         .origin_version_uuid;
     let identity = registry.identities.remove(&origin).unwrap();
-    assert!(validate(&historical, &version, &registry).is_err());
+    assert!(validate(historical, &version, &registry).is_err());
     registry.identities.insert(origin, identity);
     unsupported_historical_capability_is_rejected(&historical, &version, &registry);
     malformed_owner_is_rejected(&historical, &version, &registry);
@@ -249,8 +249,18 @@ fn unsupported_historical_capability_is_rejected(
     assert!(error.to_string().contains("capability is unsupported"));
 }
 
-#[test]
-fn accepted_proof_mappings_stream_compare_against_retained_fields() {
+struct MappingFixture {
+    _graph: GraphForge,
+    _directory: tempfile::TempDir,
+    historical: graphforge_storage::ResolvedProjectGeneration,
+    registry: graphforge_storage::research_versions::ResearchRegistry,
+    version: graphforge_storage::research_versions::ResearchVersionRecord,
+    version_uuid: Uuid,
+    key: (String, Uuid, String),
+    digest: [u8; 32],
+}
+
+fn mapping_fixture() -> MappingFixture {
     let mut graph = GraphForge::new(None).unwrap();
     graph.execute("CREATE (:Item {score:7})").unwrap();
     let version_uuid = Uuid::now_v7();
@@ -290,8 +300,36 @@ fn accepted_proof_mappings_stream_compare_against_retained_fields() {
         .iter()
         .find(|(key, _)| key.0 == "node" && key.2 == "property:score")
         .expect("fixture node property field");
-    let mut altered = *digest;
+    let (key, digest) = (key.clone(), *digest);
+    MappingFixture {
+        _graph: graph,
+        _directory: directory,
+        historical,
+        registry,
+        version,
+        version_uuid,
+        key,
+        digest,
+    }
+}
+
+fn altered(digest: [u8; 32]) -> [u8; 32] {
+    let mut altered = digest;
     altered[0] ^= 0xff;
+    altered
+}
+
+#[test]
+fn accepted_proof_mappings_stream_compare_against_retained_fields() {
+    let fixture = mapping_fixture();
+    let (historical, registry, version) = (
+        &fixture.historical,
+        fixture.registry.clone(),
+        fixture.version.clone(),
+    );
+    let (version_uuid, key, digest) = (fixture.version_uuid, &fixture.key, fixture.digest);
+    let altered = altered(digest);
+    let digest = &digest;
 
     // A mapping committing the exact retained value verifies.
     let mut matching = registry.clone();
@@ -300,9 +338,9 @@ fn accepted_proof_mappings_stream_compare_against_retained_fields() {
         version_uuid,
         Uuid::now_v7(),
         key.clone(),
-        *digest,
+        Some(*digest),
     );
-    validate(&historical, &version, &matching).unwrap();
+    validate(historical, &version, &matching).unwrap();
 
     // A changed digest refuses.
     let mut changed = registry.clone();
@@ -311,9 +349,9 @@ fn accepted_proof_mappings_stream_compare_against_retained_fields() {
         version_uuid,
         Uuid::now_v7(),
         key.clone(),
-        altered,
+        Some(altered),
     );
-    assert!(validate(&historical, &version, &changed).is_err());
+    assert!(validate(historical, &version, &changed).is_err());
 
     // A mapping whose key is absent from the Version refuses.
     let mut absent = registry.clone();
@@ -322,9 +360,9 @@ fn accepted_proof_mappings_stream_compare_against_retained_fields() {
         version_uuid,
         Uuid::now_v7(),
         ("node".into(), Uuid::now_v7(), "property:absent".into()),
-        *digest,
+        Some(*digest),
     );
-    assert!(validate(&historical, &version, &absent).is_err());
+    assert!(validate(historical, &version, &absent).is_err());
 
     // A mapping exported as a different proof Version is ignored.
     let mut foreign = registry;
@@ -333,9 +371,83 @@ fn accepted_proof_mappings_stream_compare_against_retained_fields() {
         Uuid::now_v7(),
         Uuid::now_v7(),
         key.clone(),
-        altered,
+        Some(altered),
     );
-    validate(&historical, &version, &foreign).unwrap();
+    validate(historical, &version, &foreign).unwrap();
+}
+
+#[test]
+fn a_deletion_commitment_matches_only_an_absent_field() {
+    let f = mapping_fixture();
+    let absent = (
+        "node".to_string(),
+        Uuid::now_v7(),
+        "property:gone".to_string(),
+    );
+
+    // A mapping that commits no value (a deleted field) verifies when the
+    // field is absent from the Version.
+    let mut deleted = f.registry.clone();
+    insert_accepted_mapping(&mut deleted, f.version_uuid, Uuid::now_v7(), absent, None);
+    validate(&f.historical, &f.version, &deleted).unwrap();
+
+    // ... and refuses when the field still exists.
+    let mut present = f.registry.clone();
+    insert_accepted_mapping(&mut present, f.version_uuid, Uuid::now_v7(), f.key, None);
+    assert!(validate(&f.historical, &f.version, &present).is_err());
+}
+
+#[test]
+fn one_matching_mapping_cannot_stand_in_for_a_missing_one() {
+    let f = mapping_fixture();
+    let mut registry = f.registry.clone();
+    let proof = Uuid::now_v7();
+    insert_accepted_mapping(
+        &mut registry,
+        f.version_uuid,
+        proof,
+        f.key.clone(),
+        Some(f.digest),
+    );
+    insert_accepted_mapping(
+        &mut registry,
+        f.version_uuid,
+        proof,
+        ("node".into(), Uuid::now_v7(), "property:absent".into()),
+        Some(f.digest),
+    );
+    assert!(validate(&f.historical, &f.version, &registry).is_err());
+
+    // The same retained key committed twice is a valid repeat.
+    let mut repeated = f.registry.clone();
+    let proof = Uuid::now_v7();
+    for _ in 0..2 {
+        insert_accepted_mapping(
+            &mut repeated,
+            f.version_uuid,
+            proof,
+            f.key.clone(),
+            Some(f.digest),
+        );
+    }
+    validate(&f.historical, &f.version, &repeated).unwrap();
+}
+
+#[test]
+fn contradictory_duplicate_commitments_for_one_field_refuse() {
+    let f = mapping_fixture();
+    let mut registry = f.registry.clone();
+    let proof = Uuid::now_v7();
+    for digest in [f.digest, altered(f.digest)] {
+        insert_accepted_mapping(
+            &mut registry,
+            f.version_uuid,
+            proof,
+            f.key.clone(),
+            Some(digest),
+        );
+    }
+    assert!(validate(&f.historical, &f.version, &registry).is_err());
 }
 
 fn insert_accepted_mapping(
@@ -343,7 +455,7 @@ fn insert_accepted_mapping(
     exported_version_uuid: Uuid,
     proof_version_uuid: Uuid,
     key: (String, Uuid, String),
-    digest: [u8; 32],
+    digest: Option<[u8; 32]>,
 ) {
     use graphforge_storage::research_versions::{
         ResearchAcceptedMapping, ResearchInterchangeManifest, ResearchProposalDestination,
@@ -387,7 +499,7 @@ fn insert_accepted_mapping(
             field: key.2,
         },
         contribution_uuid: Uuid::now_v7(),
-        value_sha256: Some(digest),
+        value_sha256: digest,
         source_branch_uuid: Uuid::now_v7(),
         source_version_uuid: Uuid::now_v7(),
         destination_version_uuid: exported_version_uuid,

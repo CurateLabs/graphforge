@@ -126,25 +126,28 @@ fn selected_mappings(
     cancel: &CancellationToken,
 ) -> Result<BTreeMap<Uuid, ResearchAcceptedMapping>, GfError> {
     let baseline = baseline::read(selected)?;
-    let mut accepted = BTreeMap::new();
-    let all: Vec<_> = registry
-        .proposals
-        .accepted
-        .values()
-        .chain(
+    let all = || {
+        registry.proposals.accepted.values().chain(
             registry
                 .interchange
                 .values()
                 .flat_map(|a| a.accepted.values()),
         )
+    };
+    // Only the candidates' own fields are compared, so stream the Version and
+    // retain just those keys instead of building a whole-graph field map.
+    let wanted = all()
+        .map(|mapping| {
+            (
+                mapping.unit.object_kind.clone(),
+                mapping.unit.object_uuid,
+                mapping.unit.field.clone(),
+            )
+        })
         .collect();
-    if all.is_empty() {
-        // No candidate provenance can be selected; a mapping-free main-workspace
-        // Version must export without its unbounded whole-graph field scan.
-        return Ok(accepted);
-    }
-    let values = fields::read(selected, cancel)?;
-    for mapping in all {
+    let values = fields::read_keys(selected, &wanted, cancel)?;
+    let mut accepted = BTreeMap::new();
+    for mapping in all() {
         let key = (
             mapping.unit.object_kind.clone(),
             mapping.unit.object_uuid,
