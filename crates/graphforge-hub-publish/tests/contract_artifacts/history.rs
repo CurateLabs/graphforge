@@ -55,10 +55,11 @@ fn next(previous: &Publication, operation: u128, head: u128) -> Publication {
 }
 pub(super) fn cases() -> Vec<Case> {
     let mut cases = inventory_cases();
-    for (name, stale, dependent) in [
-        ("explicit-rewrite-prune-grace", false, false),
-        ("rewrite-stale-lease-refused", true, false),
-        ("prune-branch-origin-refused", false, true),
+    for (name, stale, dependent, proposal) in [
+        ("explicit-rewrite-prune-grace", false, false, false),
+        ("rewrite-stale-lease-refused", true, false, false),
+        ("prune-branch-origin-refused", false, true, false),
+        ("prune-proposal-source-refused", false, false, true),
     ] {
         let base = research_publication(v1(1100), 3100, 3101, 3102, 'c', None);
         let mut model = RepoModel::default();
@@ -92,6 +93,42 @@ pub(super) fn cases() -> Vec<Case> {
             lineage.versions[0].parents.clear();
             replace(&mut replacement, lineage);
         }
+        if proposal {
+            // A Proposal whose frozen source is the replaced head survives the
+            // rewrite, and its payload projection stays a listed Version; the
+            // pruned head remains their dependency.
+            let mut lineage = read(&replacement);
+            let payload = Object::package("research Version package fixture: proposal payload");
+            let package = PortablePackageReference {
+                format: PORTABLE_FORMAT.into(),
+                package_digest: Sha256Digest(digest_of('e')),
+                producing_core_version: "0.6.0".into(),
+                object_digest: Sha256Digest(payload.digest()),
+            };
+            lineage.versions.push(LineageVersion {
+                parents: vec![],
+                version_uuid: operation(3105).to_string(),
+                identity_digest: Sha256Digest(digest_of('9')),
+                kind: "projection".into(),
+                branch_uuid: lineage.branches[0].branch_uuid.clone(),
+                source_version_uuid: Some(operation(3103).to_string()),
+                author: None,
+                committer: None,
+                package: Some(package.clone()),
+            });
+            lineage
+                .versions
+                .sort_by(|a, b| a.version_uuid.cmp(&b.version_uuid));
+            lineage.proposals.push(LineageProposal {
+                proposal_uuid: operation(3106).to_string(),
+                source_branch_uuid: lineage.branches[0].branch_uuid.clone(),
+                source_version_uuid: operation(3103).to_string(),
+                payload_version_uuid: operation(3105).to_string(),
+                package,
+            });
+            replacement.objects.push(payload);
+            replace(&mut replacement, lineage);
+        }
         replacement.rewrite = true;
         replacement.prune = true;
         replacement.expected_revision = Some(if stale {
@@ -102,7 +139,7 @@ pub(super) fn cases() -> Vec<Case> {
         steps.extend(retained_open(&replacement, "replacement", &[&base, &old]));
         let expect = if stale {
             error(412, "ref_conflict")
-        } else if dependent {
+        } else if dependent || proposal {
             error(400, "invalid_input")
         } else {
             model.advance(&replacement);
@@ -110,7 +147,7 @@ pub(super) fn cases() -> Vec<Case> {
         };
         steps.push(commit(&replacement, "token", "replacement", expect));
         steps.push(get_refs(&base.repository, &model));
-        if !stale && !dependent {
+        if !stale && !dependent && !proposal {
             let url = format!("{}/.gf/objects/{orphan}", repo_url(&base.repository));
             let bytes = old.objects.iter().find(|o| o.digest() == orphan).unwrap();
             steps.push(send(

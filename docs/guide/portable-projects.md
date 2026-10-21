@@ -503,5 +503,8 @@ carries the cited Version's credit. Reopen and inspect historical records with
 The other advertised refs remain read-only remote citations. Immutable-Version
 clones stay detached. Publishing divergent work is refused as `non_fast_forward`;
 a stale repository revision is still `ref_conflict`. Neither refusal moves a ref.
-Merge and explicit rewrite/prune are separate operations. Production hosted write
-availability is independent of this native protocol behavior.
+Merge and explicit rewrite/prune are separate operations: `gf publish --rewrite`
+replaces a divergent head under the expected-revision lease, and
+`gf publish --rewrite --prune` also drops now-unreferenced Versions.
+[Research journey](research-journey.md) walks the full cycle. Production hosted
+write availability is independent of this native protocol behavior.
