@@ -445,7 +445,7 @@ of decision.
   already is the Branch label); the other three requests gain `label` and
   `description`.
 - **Operation identity.** A caller-supplied `--operation-uuid` must be a UUIDv7.
-  The creation time derives from it. A rerun is a replay only when its complete
+  The creation time derives from it. A rerun, `gf switch` to the current Branch included, is a replay only when its complete
   request matches the original, otherwise it is refused as
   `GF_IDEMPOTENCY_CONFLICT`. `commit`, `branch` and `pull` bind a digest of the
   whole request (kind, Branch, message, query digest, credit, `--from`,
@@ -461,18 +461,25 @@ of decision.
 - **Upstream record.** A publication the Hub confirmed (`gf push`, `gf publish
   --ref`) records the published head as the Branch's remote citation, the record
   clone and fetch maintain (`ResearchMutation::RecordPublishedBranch`, built by
-  `record_research_publication` from native Branch authority and the typed Hub
-  receipt, which must be for the repository and carry the Branch's ref; the
-  generic operation entry refuses it). It is local tracking state, not shared
-  history. A publication's intent binds `publication_content_identity`, which
-  leaves out the remote citations and receipts a publication itself writes, so
-  rerunning a completed `gf push --operation-uuid` replays it. A Branch's first confirmed publication therefore
-  makes it track that repository and ref, and `ahead N` is `0` right after a push.
-  A failed or refused publication leaves the record unchanged, and a Version
-  publication records nothing.
+  `record_research_publication`; the generic operation entry refuses it). The head
+  is not a caller field. The call takes the Hub's receipt with the manifest and
+  lineage it commits to (`manifest_validator` is the manifest's digest, which names
+  the lineage's), and records the Branch's head in that lineage, provided it is
+  the Branch head or an ancestor with the identity the lineage names. A
+  replayed publication supplies the served documents when they still are the ones
+  the receipt names, and records nothing otherwise. A citation the Project already
+  holds is left alone, so repeated replays write no receipts. It is local tracking
+  state, not shared history. A publication's intent binds
+  `publication_content_identity`: every participant except the research registry,
+  and the registry without the remote citations and receipts a publication itself
+  writes, so rerunning a completed `gf push --operation-uuid` replays it while a
+  tag, Version, canonical decision or Project change does not.
 - **Tags on clone and pull.** A lineage tag is installed with the Version it
-  names: at clone for Versions the cloned history contains, after `gf pull` for the
-  rest. Tags on other Versions stay on the Hub.
+  names. At clone, for Versions the cloned history contains; at `gf pull`, by the
+  fetch itself (`tags` in the fetch binding), in the same publication as the
+  admission of the fetched Versions, so a pull interrupted before or after the
+  update never leaves served tags half applied. Tags on other Versions stay on the
+  Hub.
 - **Pull conflicts.** `conflict` and `dependency_unavailable` preview rows refuse
   the pull before any update; the fetch is durable. The evidence acknowledgement is
   the union required by the adopted rows.
