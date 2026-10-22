@@ -7,26 +7,23 @@ use std::collections::BTreeMap;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use arrow::array::{RecordBatch, StringArray};
-use arrow::datatypes::{DataType, Field, Schema};
-use parquet::arrow::ArrowWriter;
-use parquet::basic::{Compression, Encoding};
-use parquet::file::properties::WriterProperties;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
+
+#[path = "support/portable_package.rs"]
+mod portable_package;
+use portable_package::{
+    Component, DeclaredFile, MANIFEST_PATH, controls, graph_parquet, hex, staged_entry_length,
+    tar_header, write_large_package,
+};
 
 const GIB: u64 = 1024 * 1024 * 1024;
 const MIB: u64 = 1024 * 1024;
 const EVIDENCE_PATH: &str = "data/components/evidence/scan-0001/scan.bin";
 const GRAPH_PATH: &str = "data/components/graph-data/graph-tree/topology/nodes.parquet";
-const ONTOLOGY_PATH: &str = "data/components/ontology/core-ontology/ontology.json";
-const MANIFEST_PATH: &str = "data/graphforge-project.json";
-const BAGIT: &[u8] = b"BagIt-Version: 1.0\nTag-File-Character-Encoding: UTF-8\n";
-const BAG_INFO: &[u8] = b"Bag-Software-Agent: GraphForge portable\nBagging-Date: 1970-01-01\n";
 const HUB_BUNDLE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../tests/fixtures/hub/generated/v1/objects/openalex-openalex.gfpb"
@@ -80,43 +77,6 @@ fn gf_bin() -> PathBuf {
     std::fs::canonicalize(env!("CARGO_BIN_EXE_gf")).expect("resolve same-build gf binary")
 }
 
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
-}
-
-/// RFC 8785-shaped canonical JSON for the strings, integers and containers a
-/// manifest holds: sorted keys, no whitespace.
-fn canonical(value: &Value) -> Vec<u8> {
-    match value {
-        Value::Object(map) => {
-            let sorted: BTreeMap<_, _> = map.iter().collect();
-            let mut out = vec![b'{'];
-            for (index, (key, value)) in sorted.into_iter().enumerate() {
-                if index > 0 {
-                    out.push(b',');
-                }
-                out.extend(serde_json::to_vec(key).unwrap());
-                out.push(b':');
-                out.extend(canonical(value));
-            }
-            out.push(b'}');
-            out
-        }
-        Value::Array(values) => {
-            let mut out = vec![b'['];
-            for (index, value) in values.iter().enumerate() {
-                if index > 0 {
-                    out.push(b',');
-                }
-                out.extend(canonical(value));
-            }
-            out.push(b']');
-            out
-        }
-        scalar => serde_json::to_vec(scalar).unwrap(),
-    }
-}
-
 /// One entry of a package under construction.
 enum Body {
     Bytes(Vec<u8>),
@@ -130,32 +90,6 @@ impl Body {
             Body::Zeros(length) => *length,
         }
     }
-}
-
-fn octal(field: &mut [u8], value: u64) {
-    field.fill(0);
-    let digits = format!("{:0width$o}", value, width = field.len() - 1);
-    field[..digits.len()].copy_from_slice(digits.as_bytes());
-}
-
-/// The canonical ustar header of a regular entry of `size` bytes at `path`
-/// (every path here fits the 100-byte name field).
-fn tar_header(path: &str, size: u64) -> Vec<u8> {
-    assert!(path.len() <= 100);
-    let mut header = [0u8; 512];
-    header[..path.len()].copy_from_slice(path.as_bytes());
-    octal(&mut header[100..108], 0o644);
-    octal(&mut header[108..116], 0);
-    octal(&mut header[116..124], 0);
-    octal(&mut header[124..136], size);
-    octal(&mut header[136..148], 0);
-    header[148..156].fill(b' ');
-    header[156] = b'0';
-    header[257..263].copy_from_slice(b"ustar\0");
-    header[263..265].copy_from_slice(b"00");
-    let sum: u64 = header.iter().map(|byte| u64::from(*byte)).sum();
-    header[148..156].copy_from_slice(format!("{sum:06o}\0 ").as_bytes());
-    header.to_vec()
 }
 
 /// A component added to the fixture package: one file of `kind`.
@@ -186,103 +120,37 @@ fn evidence(sha256: &str, body: Body) -> Artifact {
 /// semantic manifest bytes when given (an impostor), with the inventories
 /// describing it. Returns the entries in canonical order and `package_digest`.
 fn package(artifacts: Vec<Artifact>, manifest: Option<Vec<u8>>) -> (Vec<(String, Body)>, String) {
-    let mut document: Value = serde_json::from_str(include_str!(
-        "../../../tests/fixtures/portable/ontology-only.manifest.json"
-    ))
-    .unwrap();
-    let object = document.as_object_mut().unwrap();
-    object.remove("package_digest");
-    object.insert("package_class".into(), "component-selective".into());
-    let mut capabilities = vec!["ontology@1".to_owned()];
-    let mut roots = vec!["core-ontology".to_owned()];
-    let mut components = document["components"].as_array().unwrap().clone();
-    for artifact in &artifacts {
-        capabilities.push(format!("{}@1", artifact.kind));
-        roots.push(artifact.participant.to_owned());
-        components.push(serde_json::json!({
-            "kind": artifact.kind,
-            "files": [{
-                "length": artifact.body.length(),
-                "media_type": artifact.media_type,
-                "path": artifact.path,
-                "sha256": artifact.sha256,
-            }],
-            "participant_id": artifact.participant,
-            "required_dependencies": [],
-        }));
-    }
-    capabilities.sort();
-    roots.sort();
-    components.sort_by_key(|component| {
-        (
-            component["kind"].as_str().unwrap().to_owned(),
-            component["participant_id"].as_str().unwrap().to_owned(),
-        )
-    });
-    document["requirements"]["capabilities"] = capabilities.into();
-    document["selection"]["roots"] = roots.into();
-    document["components"] = components.into();
-    let package_digest = hex(&Sha256::digest(
-        [b"graphforge-project/2\0".as_slice(), &canonical(&document)].concat(),
-    ));
-    document["package_digest"] = format!("sha256:{package_digest}").into();
-    let manifest = manifest.unwrap_or_else(|| canonical(&document));
-
-    let mut data = BTreeMap::from([
-        (ONTOLOGY_PATH.to_owned(), hex(&Sha256::digest(b"{}"))),
-        (MANIFEST_PATH.to_owned(), hex(&Sha256::digest(&manifest))),
-    ]);
-    let mut entries = vec![
-        ("bag-info.txt".to_owned(), Body::Bytes(BAG_INFO.to_vec())),
-        ("bagit.txt".to_owned(), Body::Bytes(BAGIT.to_vec())),
-        (ONTOLOGY_PATH.to_owned(), Body::Bytes(b"{}".to_vec())),
-        (MANIFEST_PATH.to_owned(), Body::Bytes(manifest)),
-    ];
-    for artifact in artifacts {
-        data.insert(artifact.path.to_owned(), artifact.sha256);
-        entries.push((artifact.path.to_owned(), artifact.body));
-    }
-    let inventory: String = data
+    let components: Vec<_> = artifacts
         .iter()
-        .map(|(path, digest)| format!("{digest}  {path}\n"))
+        .map(|artifact| Component {
+            kind: artifact.kind,
+            participant: artifact.participant,
+            files: vec![DeclaredFile {
+                path: artifact.path.to_owned(),
+                media_type: artifact.media_type,
+                length: artifact.body.length(),
+                sha256: artifact.sha256.clone(),
+            }],
+        })
         .collect();
-    let tags = format!(
-        "{}  bag-info.txt\n{}  bagit.txt\n{}  manifest-sha256.txt\n",
-        hex(&Sha256::digest(BAG_INFO)),
-        hex(&Sha256::digest(BAGIT)),
-        hex(&Sha256::digest(inventory.as_bytes()))
+    let controls = controls(&components, manifest);
+    let mut entries: Vec<_> = controls
+        .entries
+        .into_iter()
+        .map(|(path, bytes)| (path, Body::Bytes(bytes)))
+        .collect();
+    entries.extend(
+        artifacts
+            .into_iter()
+            .map(|artifact| (artifact.path.to_owned(), artifact.body)),
     );
-    entries.push(("manifest-sha256.txt".into(), Body::Bytes(inventory.into())));
-    entries.push(("tagmanifest-sha256.txt".into(), Body::Bytes(tags.into())));
     entries.sort_by(|left, right| left.0.cmp(&right.0));
-    (entries, package_digest)
+    (entries, controls.package_digest)
 }
 
-/// A valid graph Parquet file of about 70 MiB: plain-encoded, uncompressed,
-/// one page per row, so it passes the encoding profile and is walked.
-fn graph_parquet() -> Vec<u8> {
-    let schema = Arc::new(Schema::new(vec![Field::new(
-        "value",
-        DataType::Utf8,
-        false,
-    )]));
-    let values = StringArray::from_iter_values(
-        (0..GRAPH_ROWS).map(|row| format!("{row:02}{}", "x".repeat(GRAPH_ROW_BYTES))),
-    );
-    let batch = RecordBatch::try_new(Arc::clone(&schema), vec![Arc::new(values)]).unwrap();
-    let properties = WriterProperties::builder()
-        .set_compression(Compression::UNCOMPRESSED)
-        .set_dictionary_enabled(false)
-        .set_encoding(Encoding::PLAIN)
-        .set_write_batch_size(1)
-        .set_data_page_row_count_limit(1)
-        .set_max_row_group_row_count(Some(GRAPH_ROWS))
-        .build();
-    let mut file = Vec::new();
-    let mut writer = ArrowWriter::try_new(&mut file, schema, Some(properties)).unwrap();
-    writer.write(&batch).unwrap();
-    writer.close().unwrap();
-    file
+/// A valid graph Parquet file of about 70 MiB, walked by the page profile.
+fn large_graph_parquet() -> Vec<u8> {
+    graph_parquet(GRAPH_ROWS, GRAPH_ROW_BYTES, "")
 }
 
 fn graph_data(file: Vec<u8>) -> Artifact {
@@ -637,7 +505,7 @@ fn a_five_gib_package_streams_from_stdin_in_bounded_memory() {
 /// writes is proven in-process, by the storage tests.
 #[test]
 fn a_graph_entry_over_the_walk_threshold_verifies_from_stdin() {
-    let file = graph_parquet();
+    let file = large_graph_parquet();
     let entry = file.len() as u64;
     assert!(
         entry > 64 * MIB,
@@ -885,6 +753,40 @@ fn help_and_version_print_normally() {
         assert!(
             serde_json::from_str::<Value>(&text).is_err(),
             "{args:?}: {text}"
+        );
+    }
+}
+
+/// The generated package reaches the requested size from its graph entries
+/// alone, whatever the request, and verifies. The sizes straddle the first
+/// walked file (`staged + 1`) and the 4 MiB the generator once reserved for
+/// controls, which are far smaller.
+#[test]
+fn a_generated_package_is_never_short_of_the_requested_size() {
+    let staged = staged_entry_length();
+    for size in [
+        staged - 1,
+        staged,
+        staged + 1,
+        staged + 4 * MIB - 1,
+        staged + 4 * MIB,
+        staged + 4 * MIB + 1,
+    ] {
+        let mut bundle = Vec::new();
+        let package = write_large_package(size, 7, &mut bundle, |_, _, _| {}).unwrap();
+        assert_eq!(package.written, bundle.len() as u64);
+        assert!(
+            package.written >= size,
+            "{size} requested, {} written",
+            package.written
+        );
+        let run = gf(&["portable", "verify", "--input", "-", "--json"], &bundle);
+        assert_eq!(run.code, Some(0), "{size}: {}", run.stderr);
+        let report = one_document(&run.stdout);
+        assert_eq!(report["integrity"], "verified", "{size}");
+        assert_eq!(
+            report["package_digest"],
+            format!("sha256:{}", package.package_digest)
         );
     }
 }
