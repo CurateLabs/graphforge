@@ -72,13 +72,7 @@ fn argument_refusal_is_fix_input_with_the_parser_source() {
 #[test]
 fn invalid_publish_identity_is_a_fix_input_validation() {
     let refused = gf()
-        .args([
-            "--json",
-            "publish",
-            "Not An Identity",
-            "--ref",
-            "main",
-        ])
+        .args(["--json", "publish", "Not An Identity", "--ref", "main"])
         .env_remove(PUBLISH_TOKEN_ENV)
         .output()
         .unwrap();
@@ -152,16 +146,27 @@ fn missing_publish_token_fails_fix_input_before_any_request() {
 
 #[test]
 fn publish_env_token_reaches_the_request_and_is_never_logged() {
-    // With the token set, the run passes the credential gate and uses the
-    // token on the discovery request; the reserved Hub name then fails the
-    // transport after the CLI's own retries. That failure is the documented
-    // retry class: rerunning the same command may succeed.
-    let run = gf()
-        .args(["--json", "publish", DEAD_HUB_REPOSITORY, "--ref", "main"])
-        .env(PUBLISH_TOKEN_ENV, SECRET)
-        .output()
-        .unwrap();
-    assert_eq!(run.status.code(), Some(3), "transport failures exit 3");
+    let _guard = ENV_SERIAL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // SAFETY: the environment is only read or written under `ENV_SERIAL`.
+    unsafe {
+        std::env::set_var(PUBLISH_TOKEN_ENV, SECRET);
+    }
+    // In the captured runner a set token is the only way past the credential
+    // gate: without the environment read this run fails `auth_denied`
+    // (exit 2) before any request. With it, the run uses the token on the
+    // discovery request and only the reserved Hub name's transport failure
+    // remains — the documented retry class, where rerunning may succeed.
+    let run = graphforge_cli::execute([
+        "gf",
+        "--json",
+        "publish",
+        DEAD_HUB_REPOSITORY,
+        "--ref",
+        "main",
+    ]);
+    assert_eq!(run.exit_code, 3, "transport failures exit 3");
     let stderr = String::from_utf8_lossy(&run.stderr);
     let document: Value = serde_json::from_str(stderr.trim()).expect("one JSON error document");
     let document = &document["error"];
@@ -174,7 +179,10 @@ fn publish_env_token_reaches_the_request_and_is_never_logged() {
             .any(|window| window == SECRET.as_bytes()),
         "the token never reaches stdout"
     );
-    assert!(!stderr.contains(SECRET), "the token never reaches stderr: {stderr}");
+    assert!(
+        !stderr.contains(SECRET),
+        "the token never reaches stderr: {stderr}"
+    );
 }
 
 #[test]
@@ -190,7 +198,12 @@ fn idempotency_conflict_asks_for_a_human_decision() {
             .success()
     );
     let init = gf()
-        .args(["--project-dir", root.path().to_str().unwrap(), "--json", "init"])
+        .args([
+            "--project-dir",
+            root.path().to_str().unwrap(),
+            "--json",
+            "init",
+        ])
         .output()
         .unwrap();
     assert!(
@@ -201,19 +214,18 @@ fn idempotency_conflict_asks_for_a_human_decision() {
 
     let key = "41414141-4141-4141-4141-414141414141";
     let sync = |actor: &str| {
-        gf()
-            .args([
-                "--project-dir",
-                root.path().to_str().unwrap(),
-                "--json",
-                "sync",
-                "--idempotency-key",
-                key,
-                "--actor-uuid",
-                actor,
-            ])
-            .output()
-            .unwrap()
+        gf().args([
+            "--project-dir",
+            root.path().to_str().unwrap(),
+            "--json",
+            "sync",
+            "--idempotency-key",
+            key,
+            "--actor-uuid",
+            actor,
+        ])
+        .output()
+        .unwrap()
     };
     let first = sync("42424242-4242-4242-4242-424242424242");
     assert!(
@@ -276,6 +288,9 @@ fn doc_publish_code_table_matches_the_code_owned_list() {
             continue;
         }
         let wire = HubPublishError::new(code, "").wire_code();
-        assert!(doc.contains(&format!("| `{wire}` |")), "missing row: {wire}");
+        assert!(
+            doc.contains(&format!("| `{wire}` |")),
+            "missing row: {wire}"
+        );
     }
 }
