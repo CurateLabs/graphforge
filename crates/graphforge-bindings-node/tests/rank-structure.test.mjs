@@ -13,7 +13,7 @@ function checkCelf() {
       "(a)-[:KNOWS]->(b), (b)-[:KNOWS]->(c), " +
       "(a)-[:OTHER]->(c), (a)-[:OTHER]->(c), (c)-[:OTHER]->(c)",
   );
-  const table = tableFromIPC(forge.rank("Person", "celf", "KNOWS"));
+  const table = tableFromIPC(forge.rank("Person", "celf", { via: "KNOWS" }));
   assert.deepEqual(
     table.schema.fields.map((field) => field.name),
     ["node_uuid", "score", "name"],
@@ -32,12 +32,14 @@ function checkCelf() {
   );
   assert.ok(Math.abs(scores[3] - 1) <= 1e-12);
   assert.deepEqual(scores, [
-    ...tableFromIPC(forge.rank("Person", "celf", "KNOWS"))
+    ...tableFromIPC(forge.rank("Person", "celf", { via: "KNOWS" }))
       .getChild("score")
       .toArray(),
   ]);
   const undirected = [
-    ...tableFromIPC(forge.rank("Person", "celf", "KNOWS", false))
+    ...tableFromIPC(
+      forge.rank("Person", "celf", { via: "KNOWS", directed: false }),
+    )
       .getChild("score")
       .toArray(),
   ];
@@ -53,8 +55,12 @@ function checkCelf() {
   );
   assert.notDeepEqual(allEdges, scores);
   assert.equal(
-    tableFromIPC(forge.rank("Person", "celf", undefined, true, "celf_score"))
-      .numRows,
+    tableFromIPC(
+      forge.rank("Person", "celf", {
+        directed: true,
+        writeProperty: "celf_score",
+      }),
+    ).numRows,
     4,
   );
   assert.equal(
@@ -81,7 +87,7 @@ function checkClusteringCoefficient() {
       "(c)-[:KNOWS]->(c), (d)-[:KNOWS]->(e), (a)-[:OTHER]->(d)",
   );
   const table = tableFromIPC(
-    forge.rank("Person", "clustering_coefficient", "KNOWS"),
+    forge.rank("Person", "clustering_coefficient", { via: "KNOWS" }),
   );
   assert.deepEqual(
     table.schema.fields.map((field) => field.name),
@@ -102,7 +108,7 @@ function checkClusteringCoefficient() {
   assert.deepEqual(
     [
       ...tableFromIPC(
-        forge.rank("Person", "local_clustering_coefficient", "KNOWS"),
+        forge.rank("Person", "local_clustering_coefficient", { via: "KNOWS" }),
       )
         .getChild("score")
         .toArray(),
@@ -112,7 +118,10 @@ function checkClusteringCoefficient() {
   assert.deepEqual(
     [
       ...tableFromIPC(
-        forge.rank("Person", "clustering_coefficient", "KNOWS", false),
+        forge.rank("Person", "clustering_coefficient", {
+          via: "KNOWS",
+          directed: false,
+        }),
       )
         .getChild("score")
         .toArray(),
@@ -129,13 +138,10 @@ function checkClusteringCoefficient() {
   );
   assert.equal(
     tableFromIPC(
-      forge.rank(
-        "Person",
-        "clustering_coefficient",
-        undefined,
-        true,
-        "clustering",
-      ),
+      forge.rank("Person", "clustering_coefficient", {
+        directed: true,
+        writeProperty: "clustering",
+      }),
     ).numRows,
     5,
   );
@@ -165,7 +171,9 @@ function checkTriangles() {
       "(d)-[:KNOWS]->(a), (c)-[:KNOWS]->(c), (e)-[:KNOWS]->(f), " +
       "(b)-[:OTHER]->(d)",
   );
-  const table = tableFromIPC(forge.rank("Person", "triangles", "KNOWS"));
+  const table = tableFromIPC(
+    forge.rank("Person", "triangles", { via: "KNOWS" }),
+  );
   assert.deepEqual(
     table.schema.fields.map((field) => field.name),
     ["node_uuid", "score", "name"],
@@ -181,7 +189,7 @@ function checkTriangles() {
   assert.deepEqual(scores, [2, 1, 2, 1, 0, 0]);
   assert.deepEqual(
     [
-      ...tableFromIPC(forge.rank("Person", "triangles", "KNOWS"))
+      ...tableFromIPC(forge.rank("Person", "triangles", { via: "KNOWS" }))
         .getChild("score")
         .toArray(),
     ],
@@ -189,7 +197,9 @@ function checkTriangles() {
   );
   assert.deepEqual(
     [
-      ...tableFromIPC(forge.rank("Person", "triangles", "KNOWS", false))
+      ...tableFromIPC(
+        forge.rank("Person", "triangles", { via: "KNOWS", directed: false }),
+      )
         .getChild("score")
         .toArray(),
     ],
@@ -205,7 +215,10 @@ function checkTriangles() {
   );
   assert.equal(
     tableFromIPC(
-      forge.rank("Person", "triangles", undefined, true, "triangle_count"),
+      forge.rank("Person", "triangles", {
+        directed: true,
+        writeProperty: "triangle_count",
+      }),
     ).numRows,
     6,
   );
@@ -238,7 +251,7 @@ function checkKCore() {
       "(h)-[:KNOWS]->(i), (i)-[:KNOWS]->(j), (j)-[:KNOWS]->(h), " +
       "(f)-[:OTHER]->(a)",
   );
-  const table = tableFromIPC(forge.rank("Person", "k_core", "KNOWS"));
+  const table = tableFromIPC(forge.rank("Person", "k_core", { via: "KNOWS" }));
   assert.deepEqual(
     table.schema.fields.map((field) => field.name),
     ["node_uuid", "score", "name"],
@@ -251,7 +264,7 @@ function checkKCore() {
   assert.deepEqual(scores, [3, 3, 3, 3, 1, 1, 0, 2, 2, 2]);
   assert.deepEqual(
     [
-      ...tableFromIPC(forge.rank("Person", "k_core", "KNOWS"))
+      ...tableFromIPC(forge.rank("Person", "k_core", { via: "KNOWS" }))
         .getChild("score")
         .toArray(),
     ],
@@ -259,7 +272,9 @@ function checkKCore() {
   );
   assert.deepEqual(
     [
-      ...tableFromIPC(forge.rank("Person", "k_core", "KNOWS", false))
+      ...tableFromIPC(
+        forge.rank("Person", "k_core", { via: "KNOWS", directed: false }),
+      )
         .getChild("score")
         .toArray(),
     ],
@@ -274,8 +289,9 @@ function checkKCore() {
     [3, 3, 3, 3, 2, 2, 0, 2, 2, 2],
   );
   assert.equal(
-    tableFromIPC(forge.rank("Person", "k_core", undefined, true, "core"))
-      .numRows,
+    tableFromIPC(
+      forge.rank("Person", "k_core", { directed: true, writeProperty: "core" }),
+    ).numRows,
     10,
   );
   assert.equal(

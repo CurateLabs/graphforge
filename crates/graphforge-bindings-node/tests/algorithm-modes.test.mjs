@@ -30,19 +30,20 @@ test("PageRank controls survive ordinary, descriptor and recorded dispatch", asy
   forge.execute(
     "CREATE (a:Person {name:'A'}), (b:Person {name:'B'}), (a)-[:LINK]->(b)",
   );
-  const result = forge.rank(
-    "Person",
-    "pagerank",
-    "LINK",
-    true,
-    undefined,
-    0.5,
-    1,
-  );
+  const result = forge.rank("Person", "pagerank", {
+    via: "LINK",
+    directed: true,
+    damping: 0.5,
+    iterations: 1,
+  });
   assert.deepEqual(scores(result), { A: 0.375, B: 0.625 });
   assert.deepEqual(
     scores(
-      forge.rank("Person", "pagerank", "LINK", true, undefined, undefined, 0),
+      forge.rank("Person", "pagerank", {
+        via: "LINK",
+        directed: true,
+        iterations: 0,
+      }),
     ),
     { A: 0.5, B: 0.5 },
   );
@@ -85,33 +86,26 @@ test("directed neighbor-edge LCC preserves the default Fagiolo mode", () => {
     "CREATE (a:Person {name:'A'}), (b:Person {name:'B'}), (c:Person {name:'C'}), (d:Person {name:'D'}), (a)-[:LINK]->(b), (b)-[:LINK]->(a), (a)-[:LINK]->(c), (a)-[:LINK]->(d), (b)-[:LINK]->(c), (c)-[:LINK]->(b)",
   );
   const defaults = scores(
-    forge.rank("Person", "clustering_coefficient", "LINK", true),
+    forge.rank("Person", "clustering_coefficient", {
+      via: "LINK",
+      directed: true,
+    }),
   );
   assert.deepEqual(
     scores(
-      forge.rank(
-        "Person",
-        "clustering_coefficient",
-        "LINK",
-        true,
-        undefined,
-        undefined,
-        undefined,
-        "fagiolo",
-      ),
+      forge.rank("Person", "clustering_coefficient", {
+        via: "LINK",
+        directed: true,
+        clusteringNormalization: "fagiolo",
+      }),
     ),
     defaults,
   );
-  const explicit = forge.rank(
-    "Person",
-    "clustering_coefficient",
-    "LINK",
-    true,
-    undefined,
-    undefined,
-    undefined,
-    "neighbor_edges",
-  );
+  const explicit = forge.rank("Person", "clustering_coefficient", {
+    via: "LINK",
+    directed: true,
+    clusteringNormalization: "neighbor_edges",
+  });
   assert.equal(scores(explicit).A, 1 / 3);
   assert.equal(defaults.A, 0.4);
   const descriptor = forge.prepareRankInvocation(
@@ -134,29 +128,21 @@ test("synchronous labels retain integer identities across descriptor dispatch", 
   forge.execute(
     "CREATE (a:Person {name:'A', external_id:10}), (b:Person {name:'B', external_id:20}), (a)-[:LINK]->(b), (b)-[:LINK]->(a)",
   );
-  const result = forge.cluster(
-    "Person",
-    "label_propagation",
-    "LINK",
-    true,
-    undefined,
-    undefined,
-    1,
-    "external_id",
-  );
+  const result = forge.cluster("Person", "label_propagation", {
+    via: "LINK",
+    directed: true,
+    synchronousIterations: 1,
+    initialLabelProperty: "external_id",
+  });
   assert.deepEqual(communities(result), [20, 10]);
   assert.deepEqual(
     communities(
-      forge.cluster(
-        "Person",
-        "label_propagation",
-        "LINK",
-        true,
-        undefined,
-        undefined,
-        2,
-        "external_id",
-      ),
+      forge.cluster("Person", "label_propagation", {
+        via: "LINK",
+        directed: true,
+        synchronousIterations: 2,
+        initialLabelProperty: "external_id",
+      }),
     ),
     [10, 20],
   );
@@ -179,16 +165,10 @@ test("synchronous labels retain integer identities across descriptor dispatch", 
   );
   for (const call of [
     () =>
-      forge.rank(
-        "Person",
-        "clustering_coefficient",
-        undefined,
-        true,
-        undefined,
-        undefined,
-        undefined,
-        "invalid",
-      ),
+      forge.rank("Person", "clustering_coefficient", {
+        directed: true,
+        clusteringNormalization: "invalid",
+      }),
     () =>
       forge.prepareRankInvocation(
         "Person",
@@ -200,16 +180,10 @@ test("synchronous labels retain integer identities across descriptor dispatch", 
         "invalid",
       ),
     () =>
-      forge.cluster(
-        "Person",
-        "label_propagation",
-        undefined,
-        true,
-        undefined,
-        undefined,
-        undefined,
-        "external_id",
-      ),
+      forge.cluster("Person", "label_propagation", {
+        directed: true,
+        initialLabelProperty: "external_id",
+      }),
     () =>
       forge.prepareClusterInvocation(
         "Person",
@@ -312,15 +286,11 @@ test("algorithm iteration counts reject JavaScript truncation and wrapping", () 
   for (const invalid of [-1, 0.5, NaN, Infinity, 2 ** 32]) {
     for (const call of [
       () =>
-        forge.rank(
-          "Person",
-          "pagerank",
-          undefined,
-          true,
-          undefined,
-          0.85,
-          invalid,
-        ),
+        forge.rank("Person", "pagerank", {
+          directed: true,
+          damping: 0.85,
+          iterations: invalid,
+        }),
       () =>
         forge.prepareRankInvocation(
           "Person",
@@ -331,15 +301,10 @@ test("algorithm iteration counts reject JavaScript truncation and wrapping", () 
           invalid,
         ),
       () =>
-        forge.cluster(
-          "Person",
-          "label_propagation",
-          undefined,
-          false,
-          undefined,
-          undefined,
-          invalid,
-        ),
+        forge.cluster("Person", "label_propagation", {
+          directed: false,
+          synchronousIterations: invalid,
+        }),
       () =>
         forge.prepareClusterInvocation(
           "Person",

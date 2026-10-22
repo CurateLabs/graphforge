@@ -5,6 +5,7 @@ use crate::CompositeTransactionInput;
 use crate::Env;
 use crate::GraphForge;
 use crate::Object;
+use crate::OperationId;
 use crate::Result;
 use crate::Unknown;
 use crate::bulk_edge_publication_error;
@@ -80,6 +81,19 @@ impl EdgeHandle {
 
 #[napi]
 impl GraphForge {
+    /// Resolve the caller-supplied operation identity, minting a Rust-owned
+    /// UUIDv7 when omitted. Explicit identities keep their canonical
+    /// validation so replay and conflict behavior is unchanged.
+    fn resolve_operation_id(operation_uuid: Option<String>) -> Result<OperationId> {
+        match operation_uuid {
+            Some(value) => canonical_operation_id(&value),
+            None => Ok(OperationId(graphforge_api::new_v7())),
+        }
+    }
+}
+
+#[napi]
+impl GraphForge {
     /// Add a node through the Rust facade and return its graph-owned UUID handle.
     #[napi]
     pub fn add_node(
@@ -118,9 +132,17 @@ impl GraphForge {
     }
 
     /// Publish one atomic bulk node batch (Arrow IPC) through the Rust contract.
+    ///
+    /// When `operationUuid` is omitted, Rust mints a UUIDv7 identity and
+    /// returns it in the receipt's `operation_uuid` column for explicit
+    /// idempotent retries.
     #[napi]
-    pub fn publish_bulk_nodes(&self, operation_uuid: String, data: Buffer) -> Result<Buffer> {
-        let operation_uuid = canonical_operation_id(&operation_uuid)?;
+    pub fn publish_bulk_nodes(
+        &self,
+        data: Buffer,
+        operation_uuid: Option<String>,
+    ) -> Result<Buffer> {
+        let operation_uuid = Self::resolve_operation_id(operation_uuid)?;
         let batch = ipc_to_record_batch(&data)?;
         let graph = self.open_guard()?;
         let receipt = graph
@@ -132,9 +154,17 @@ impl GraphForge {
     }
 
     /// Publish one atomic bulk edge batch (Arrow IPC) through the Rust contract.
+    ///
+    /// When `operationUuid` is omitted, Rust mints a UUIDv7 identity and
+    /// returns it in the receipt's `operation_uuid` column for explicit
+    /// idempotent retries.
     #[napi]
-    pub fn publish_bulk_edges(&self, operation_uuid: String, data: Buffer) -> Result<Buffer> {
-        let operation_uuid = canonical_operation_id(&operation_uuid)?;
+    pub fn publish_bulk_edges(
+        &self,
+        data: Buffer,
+        operation_uuid: Option<String>,
+    ) -> Result<Buffer> {
+        let operation_uuid = Self::resolve_operation_id(operation_uuid)?;
         let batch = ipc_to_record_batch(&data)?;
         let graph = self.open_guard()?;
         let receipt = graph
