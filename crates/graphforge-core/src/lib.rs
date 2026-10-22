@@ -20,6 +20,7 @@ pub use parse_error::{ParseError, ParseErrorKind};
 
 pub mod algorithms;
 pub mod canonical;
+pub mod core_version;
 pub mod embedding_options;
 pub mod identifier;
 pub mod manifest;

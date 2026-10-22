@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 
 use graphforge_core::GfError;
+use graphforge_core::core_version::{CoreVersionWarning, check_core_version};
 #[cfg(test)]
 use graphforge_core::hash_observation::ArtifactSha256 as Sha256;
 use graphforge_ontology::{
@@ -67,6 +68,8 @@ pub struct PortableImportReceipt {
     /// Ordered peak of claimed staging and lifecycle-admitted destination resources.
     /// Validation scratch projects and pre-admission target activity are excluded.
     pub transient_peak_allocated_bytes: u64,
+    /// Package from another Core version, found before the target is touched.
+    pub core_version_warning: Option<CoreVersionWarning>,
 }
 
 /// Exact cleanup receipt for private portable-import materialization.
@@ -294,7 +297,7 @@ pub fn import_complete_portable_with_allocation(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn import_complete_portable_native(
     source: impl AsRef<Path>,
     target: impl AsRef<Path>,
@@ -347,6 +350,7 @@ fn import_complete_portable_native(
         bytes: report.payload_bytes,
         package_digest: Some(report.package_digest.clone()),
     });
+    let core_version_warning = check_core_version(Some(&report.producing_core_version));
     let allocation_on_error = materialized_identity_allocated_bytes.clone();
     // Files the derived adjacency build adds to the stage (#1388); the stage
     // identity walks below are bounded by the entry count and must include them.
@@ -368,6 +372,7 @@ fn import_complete_portable_native(
     )
     .map(|mut receipt| {
         receipt.materialized_identity_allocated_bytes = materialized_identity_allocated_bytes;
+        receipt.core_version_warning = core_version_warning;
         receipt
     })
     .map_err(|error| {
@@ -1387,6 +1392,7 @@ fn import_materialized(
         .physical_identity_allocated_bytes,
         materialized_cleanup: PortableImportCleanupReceipt::default(),
         transient_peak_allocated_bytes: 0,
+        core_version_warning: None,
     })
 }
 

@@ -269,6 +269,10 @@ required-features = ["knowledge", "portable"]
 
 # Measures real portable export/import through the Rust facade.
 [[test]]
+name = "core_version_warning"
+required-features = ["portable"]
+
+[[test]]
 name = "portable_payload_identity"
 required-features = ["portable"]
 
