@@ -122,6 +122,8 @@ function wrap(name, parameters) {
 const doc = (label) => ["json", label];
 const limits = ["optional", "limits"];
 
+export const parse_item_id = wrap("parse_item_id", [["string", "reference"]]);
+export const has_item_id_shape = wrap("has_item_id_shape", [["string", "name"]]);
 export const validate_manifest = wrap("validate_manifest", [doc("manifest"), limits]);
 export const validate_refs = wrap("validate_refs", [doc("refs"), limits]);
 export const validate_summary = wrap("validate_summary", [doc("summary"), limits]);

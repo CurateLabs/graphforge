@@ -1,9 +1,9 @@
 //! WebAssembly adapter over the Rust-owned Hub discovery and publish validators.
 //!
-//! Every export takes only primitives: JSON text (`&str`), a media type or UUID
-//! (`&str`), image bytes (`&[u8]`). Rust never reads a JavaScript object, so
-//! user-supplied objects, proxies and getters cannot run code under a Rust
-//! frame. The package's `index.js` wrapper turns a plain-object argument into
+//! Every export takes only primitives: JSON text, item references, names,
+//! media types or UUIDs (`&str`), and image bytes (`&[u8]`). Rust never reads a
+//! JavaScript object, so user-supplied objects, proxies and getters cannot run
+//! code under a Rust frame. The package's `index.js` wrapper turns a plain-object argument into
 //! JSON text with `JSON.stringify` before calling an export, so an object and its
 //! JSON text always reach Rust as the same string.
 //!
@@ -83,6 +83,21 @@ fn run_unit(call: impl FnOnce() -> Outcome<()>) -> Result<(), JsValue> {
 
 fn resolve_limits(value: Option<&str>) -> Outcome<graphforge_discovery::DiscoveryLimits> {
     engine::limits(value.map(str::as_bytes))
+}
+
+// ------------------------------------------------------------- permanent IDs
+
+/// Parse a bare permanent ID or canonical URI, folding ASCII case only.
+#[wasm_bindgen(unchecked_return_type = "ParsedItemId")]
+pub fn parse_item_id(reference: &str) -> Result<JsValue, JsValue> {
+    run(|| engine::parse_item_id(reference))
+}
+
+/// Whether a name has canonical lowercase ID shape, including unknown prefixes.
+#[must_use]
+#[wasm_bindgen]
+pub fn has_item_id_shape(name: &str) -> bool {
+    engine::has_item_id_shape(name)
 }
 
 // ------------------------------------------------------------------ discovery
