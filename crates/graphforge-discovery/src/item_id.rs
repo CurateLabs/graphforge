@@ -383,7 +383,7 @@ mod tests {
             "https://graphforge.sh/ont_7k2m9x4q8r3t5v1w/2026.01",
             "https://graphforge.sh/ont_7k2m9x4q8r3t5v1w?x=1",
             "https://graphforge.sh/ont_7k2m9x4q8r3t5v1w#frag",
-            "https://openalex.org/ontology/works",
+            "https://example.org/ontology/works",
             "graphforge.sh/ont_7k2m9x4q8r3t5v1w",
             "https://graphforge.sé",
             "https:",
