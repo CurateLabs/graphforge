@@ -974,12 +974,7 @@ fn emit_created(
         }
         let bytes = serde_json::to_vec_pretty(document)
             .map_err(|error| graphforge_api::GfError::Execution(error.to_string()))?;
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(path)
-            .map_err(|error| graphforge_api::GfError::Execution(error.to_string()))?;
-        file.write_all(&bytes)
+        write_created_output(path, |file| file.write_all(&bytes))
             .map_err(|error| graphforge_api::GfError::Execution(error.to_string()))?;
     }
     if json_output {
@@ -989,6 +984,22 @@ fn emit_created(
     } else {
         Ok(())
     }
+}
+
+/// Publish completed bytes without leaving a partial destination on failure.
+fn write_created_output(
+    path: &Path,
+    write: impl FnOnce(&mut fs::File) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let mut file = tempfile::NamedTempFile::new_in(parent)?;
+    write(file.as_file_mut())?;
+    file.flush()?;
+    file.persist_noclobber(path).map_err(|error| error.error)?;
+    Ok(())
 }
 
 fn module_candidate_from_args(
@@ -1214,6 +1225,41 @@ mod tests {
     use clap::Parser as _;
     use tempfile::tempdir;
     use uuid::Uuid;
+
+    #[test]
+    fn created_output_failure_cleans_up_and_allows_retry() {
+        let root = tempdir().unwrap();
+        let path = root.path().join("completed.json");
+        let error = write_created_output(&path, |file| {
+            file.write_all(b"{\"ontology_id\":")?;
+            Err(std::io::Error::new(
+                std::io::ErrorKind::WriteZero,
+                "injected failure after a partial write",
+            ))
+        })
+        .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::WriteZero);
+        assert!(
+            !path.exists(),
+            "a failed write must not publish partial JSON"
+        );
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
+
+        let document = b"{\"ontology_id\":\"https://example.org/ontology\"}";
+        write_created_output(&path, |file| file.write_all(document)).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), document);
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn created_output_preserves_existing_destination() {
+        let root = tempdir().unwrap();
+        let path = root.path().join("completed.json");
+        fs::write(&path, b"existing contents").unwrap();
+        assert!(write_created_output(&path, |file| file.write_all(b"new contents")).is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"existing contents");
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
+    }
 
     #[test]
     fn exact_selectors_require_complete_identity() {
