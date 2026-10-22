@@ -1633,10 +1633,11 @@ fn error_exit_code(error: &CliRuntimeError) -> i32 {
         CliRuntimeError::Core(error) if error.code() == "GF_VALIDATION" => 2,
         CliRuntimeError::Core(graphforge_api::GfError::Storage(_)) => 3,
         CliRuntimeError::MultiOntology(error) if error.code == "GF_VALIDATION" => 2,
-        // A portable import refused before it extracted anything because the
-        // target's filesystem or free space cannot hold it: the storage class.
+        // Portable I/O, unsupported filesystems, and insufficient target
+        // storage all use the storage exit class regardless of input source.
         CliRuntimeError::MultiOntology(error)
             if error.code == "GF_UNSUPPORTED_FILESYSTEM"
+                || error.code == "GF_STORAGE"
                 || error
                     .diagnostics
                     .iter()

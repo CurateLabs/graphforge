@@ -301,12 +301,35 @@ file gives the same bytes; only the report's `source` is `stream` instead of
 `GF_VALIDATION`), and a bundle only: pass an expanded directory by path. To
 name a file called `-`, write `./-`.
 
+### Verify from a URL
+
+For an HTTPS object URL (including a Hub or R2 presigned URL), use:
+
+```text
+gf portable verify --url "$OBJECT_URL" --json
+```
+
+The URL must use HTTPS and resolve to public addresses. The report identifies
+the source as `stream`. If the connection drops, verification resumes with a
+ranged request bound to the original ETag; an object change is rejected.
+
+The manual container build is `docker build -f containers/portable-verify/Dockerfile -t graphforge-portable-verify .`.
+Run it with `docker run --rm -e GF_VERIFY_URL="$OBJECT_URL" --memory=1g --storage-opt size=2g graphforge-portable-verify`.
+The object URL is a capability, so provide a short lived presigned URL and
+avoid logging it. Verification streams the package, so memory stays bounded,
+but it stages on disk the largest single research Version (its retained files)
+and any graph Parquet entry above the page-walk threshold. Size the container's
+disk to hold the largest of those; a graph package without research history
+needs only that one entry.
+
 With `--json`, a verified package prints exactly one JSON document on stdout:
 the report, including `package_digest`, the component inventory,
 `bytes_by_kind`, and `plausibility`. A refusal, including a refused argument
 list, prints one JSON error document on stderr and nothing on stdout. The exit code is `0` for a verified package
 and `2` for a package that is not valid (an impostor manifest, a truncated
 stream, a digest mismatch, a structural fault); any other refusal exits `1`.
+The storage class `GF_STORAGE` exits `3` for every input source. It covers I/O
+failures, invalid paths, and insufficient space.
 
 A package that exceeds a resource limit (the retained control bytes, the
 entry count, a declared size) is refused with the stable code

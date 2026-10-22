@@ -3,8 +3,8 @@
 use super::{
     AtomicBool, ControlSha256, Digest, Entry, Path, PortableError, PortableErrorCode,
     PortableLimits, PortableReport, Read, Seek, SeekFrom, Sha256, canonical_json, check_cancel, fs,
-    has_multiple_links, hex, modified, plausibility::ParquetSignals, research, same_identity,
-    semantic_validation,
+    has_multiple_links, hex, modified, plausibility::ParquetSignals, read_failure, research,
+    same_identity, semantic_validation,
 };
 use crate::parquet_encoding_profile::ParquetShape;
 use std::io::Write;
@@ -175,11 +175,15 @@ pub(super) fn read(
         PortableError::at(PortableErrorCode::LimitExceeded, path, "control allocation")
     })?;
     let mut bytes = vec![0; length];
-    file.read_exact(&mut bytes).map_err(|_| {
-        PortableError::at(
-            PortableErrorCode::ConcurrentMutation,
-            path,
-            "control truncated",
+    file.read_exact(&mut bytes).map_err(|error| {
+        read_failure(
+            &error,
+            PortableError::at(
+                PortableErrorCode::ConcurrentMutation,
+                path,
+                "control truncated",
+            ),
+            PortableError::at(PortableErrorCode::Io, path, "cannot read control"),
         )
     })?;
     check_cancel(cancelled)?;
@@ -396,9 +400,13 @@ fn walk_entry(
     path: &str,
 ) -> Result<ParquetShape, PortableError> {
     let window = EntryWindow {
-        file: file
-            .try_clone()
-            .map_err(|_| PortableError::at(PortableErrorCode::Io, path, "cannot read entry"))?,
+        file: file.try_clone().map_err(|error| {
+            read_failure(
+                &error,
+                PortableError::at(PortableErrorCode::Io, path, "cannot read entry"),
+                PortableError::at(PortableErrorCode::Io, path, "cannot read entry"),
+            )
+        })?,
         base,
         length,
     };
@@ -411,8 +419,13 @@ pub(super) fn walk_staged(path: &Path, length: u64, entry: &str) -> Result<(), P
     if length < 12 {
         return Ok(());
     }
-    let unreadable =
-        |_| PortableError::at(PortableErrorCode::Io, entry, "cannot read the staged entry");
+    let unreadable = |error: std::io::Error| {
+        read_failure(
+            &error,
+            PortableError::at(PortableErrorCode::Io, entry, "cannot read the staged entry"),
+            PortableError::at(PortableErrorCode::Io, entry, "cannot read the staged entry"),
+        )
+    };
     let mut file = fs::File::open(path).map_err(unreadable)?;
     let mut tail = [0_u8; 4];
     file.seek(SeekFrom::Start(length - 4))
@@ -436,6 +449,9 @@ pub(super) fn refuse_profile(
             path,
             "parquet page encoding is outside the funded decoder profile",
         ),
+        PageAdmissionError::Io => {
+            PortableError::at(PortableErrorCode::Io, path, "cannot read Parquet entry")
+        }
         PageAdmissionError::Malformed(message) => {
             PortableError::at(PortableErrorCode::InvalidStructure, path, message)
         }
@@ -511,11 +527,19 @@ pub(super) fn validate_parquet_profile(
         let mut tail = [0_u8; 4];
         file.seek(SeekFrom::Start(base + entry.length - 4))
             .and_then(|_| file.read_exact(&mut tail))
-            .map_err(|_| {
-                PortableError::at(
-                    PortableErrorCode::ConcurrentMutation,
-                    &entry.path,
-                    "entry truncated",
+            .map_err(|error| {
+                read_failure(
+                    &error,
+                    PortableError::at(
+                        PortableErrorCode::ConcurrentMutation,
+                        &entry.path,
+                        "entry truncated",
+                    ),
+                    PortableError::at(
+                        PortableErrorCode::Io,
+                        &entry.path,
+                        "cannot reread authenticated entry",
+                    ),
                 )
             })?;
         let shape = if &tail == b"PAR1" {
