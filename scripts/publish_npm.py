@@ -2,8 +2,8 @@
 """Publish the packed GraphForge npm tarballs in dependency order.
 
 The native packages go first, then the main package that depends on them, then
-the CLI, the agent skills, and the WebAssembly protocol validators. Re-running is safe: a package whose version is
-already on the registry is skipped. Publishing uses npm trusted publishing
+the CLI, the agent skills, and the WebAssembly protocol validators. Re-running is
+safe: a package whose version is already on the registry is skipped. Publishing uses npm trusted publishing
 (OIDC) with provenance, so no token is read here.
 
 npm assigns the ``latest`` dist-tag whenever ``npm publish`` runs without
