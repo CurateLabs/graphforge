@@ -1,7 +1,7 @@
 {
   "contract_version": 1,
   "scope": "Rust non-Cypher public release surface",
-  "public_method_digest": "9b736e5bef2319334e3d5a9fd03ae09fdb8fb50825dfa78d954423099f001419",
+  "public_method_digest": "ba3e90af4a1bc4926439c8625e1ee8f287614fcb6444df0b72efaeb689796a77",
   "method_policy": {
     "receiver_defaults": {
       "PortableImportResult": "release-tested",
@@ -1087,8 +1087,10 @@
     "portable-facade": {
       "ids": [
         "GraphForge.export_portable",
+        "GraphForge.portable_ontology_composition",
         "GraphForge.preview_portable_graph_subset",
         "GraphForge.preview_portable_selection",
+        "GraphForge.research_version_portable_ontology_composition",
         "PortableImportResult.transient_peak_allocated_bytes",
         "PortableExportFacadeResult.receipt",
         "crate.verify_discovered_portable",
@@ -1103,6 +1105,10 @@
         "GraphForge.fetch_research_branch"
       ],
       "test_refs": [
+        {
+          "path": "crates/graphforge-cli/src/hub_publish/tests/composition_proof.rs",
+          "symbol": "matching_composition_inspection_preserves_replay_and_staging"
+        },
         {
           "path": "crates/graphforge-api/src/portable.rs",
           "symbol": "public_v2_export_preview_and_verify_agree_on_package_digest"

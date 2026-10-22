@@ -27,8 +27,8 @@ production_source = runpy.run_path(str(Path(__file__).with_name("native_sources.
     "production_source"
 ]
 PYO3_SOURCE = ROOT / "crates/graphforge-bindings-py/src/lib.rs"
-EXPECTED_RUST_DIGEST = "9b736e5bef2319334e3d5a9fd03ae09fdb8fb50825dfa78d954423099f001419"
-EXPECTED_RELEASE_DIGEST = "f6d38f2a05020d48c2f889016218a1d502d55aaa9e546a5700a723a5427e193e"
+EXPECTED_RUST_DIGEST = "ba3e90af4a1bc4926439c8625e1ee8f287614fcb6444df0b72efaeb689796a77"
+EXPECTED_RELEASE_DIGEST = "4b25765db6b59d2efa30c9647ae7b8f00577543a65ccb6b80057fec6e59a52ae"
 
 PYTHON_ONLY_METHODS = frozenset(
     {
@@ -290,7 +290,7 @@ def _classification_report() -> dict[str, object]:
         for group in manifest["method_evidence_groups"].values()
         for method_id in group["ids"]
     }
-    assert len(release_methods) == 357
+    assert len(release_methods) == 359
     assert _digest(release_methods) == EXPECTED_RELEASE_DIGEST
     assert set(EVIDENCE) == set(manifest["method_evidence_groups"])
 
@@ -416,6 +416,12 @@ def _classification_report() -> dict[str, object]:
         elif rust_id == "GraphForge.publication_payload_bytes":
             classification = "not-exposed"
             reason = "native filesystem sizing is a Rust/CLI publication preflight diagnostic"
+        elif rust_id in {
+            "GraphForge.portable_ontology_composition",
+            "GraphForge.research_version_portable_ontology_composition",
+        }:
+            classification = "not-exposed"
+            reason = "bounded ontology composition inspection is native CLI publication admission"
         elif rust_id == "GraphImportSession.operation_timings":
             classification = "not-exposed"
             reason = "per-operation timing observations are Rust/CLI diagnostics"
@@ -462,6 +468,12 @@ def _classification_report() -> dict[str, object]:
     assert classifications["GraphForge.execute_saved_query"]["classification"] == "equivalent"
     assert classifications["GraphForge.execute_saved_query_json"]["classification"] == "not-exposed"
     assert classifications["GraphForge.execute_saved_query_json"]["python_id"] == ""
+    for method in (
+        "GraphForge.portable_ontology_composition",
+        "GraphForge.research_version_portable_ontology_composition",
+    ):
+        assert classifications[method]["classification"] == "not-exposed"
+        assert classifications[method]["python_id"] == ""
     assert classifications["GraphForge.saved_query_at"]["python_id"] == "GraphForge.saved_query"
     assert classifications["GraphForge.saved_queries_at"]["python_id"] == "GraphForge.saved_queries"
     assert classifications["DecisionBatchV1.validate"] == {
