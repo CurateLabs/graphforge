@@ -1313,7 +1313,7 @@
         },
         {
           "path": "crates/graphforge-cli/src/hub_publish/tests/porcelain.rs",
-          "symbol": "publication_records_only_what_the_receipt_confirmed"
+          "symbol": "publication_record_is_bound_to_the_asserted_documents"
         },
         {
           "path": "crates/graphforge-api/tests/branches.rs",

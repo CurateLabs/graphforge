@@ -5,15 +5,15 @@ use super::{
     BranchSelect, HubFlags, LogArgs, PullArgs, PushArgs, bound_uuid, created_at, derived_uuid,
     emit, idempotency_conflict, intent_digest, operation_uuid, receipt_json, resolve_branch, short,
 };
-use crate::hub_clone::remote_read::{RemoteRepository, RemoteRequest, read_remote};
+use crate::hub_clone::remote_read::{RemoteHead, RemoteRepository, RemoteRequest, read_remote};
 use crate::hub_http::Transport;
 use crate::hub_publish::PublishArgs;
 use arrow::array::{Array as _, StringArray};
 use graphforge_api::{
-    CancellationToken, DiscoveryResearchVersionRequest, FetchResearchBranchRequest, GfError,
-    GraphForge, PortableLimits, PortableMode, PreviewResearchUpstreamRequest, ResearchRegistry,
-    ResearchUpstreamScope, ResearchUpstreamSelection, SetResearchTagRequest,
-    UpdateResearchBranchRequest,
+    CancellationToken, DiscoveryResearchVersionRequest, FetchResearchBranchRequest,
+    FetchedResearchBranch, GfError, GraphForge, PortableLimits, PortableMode,
+    PreviewResearchUpstreamRequest, ResearchRegistry, ResearchUpstreamScope,
+    ResearchUpstreamSelection, SetResearchTagRequest, UpdateResearchBranchRequest,
 };
 use graphforge_hub_publish::PublishToken;
 use serde_json::json;
@@ -209,6 +209,41 @@ fn column<'a>(
         .ok_or_else(|| GfError::Execution(format!("the upstream preview has no {name} column")))
 }
 
+/// The durable first step of a pull: admit the Hub's head of the ref, with the tags
+/// it serves. Its operation identity derives from the pull's, so a pull that was
+/// interrupted after this step resumes from the fetch it recorded.
+pub(crate) fn fetch_step(
+    graph: &mut GraphForge,
+    branch: Uuid,
+    remote: &RemoteRepository,
+    head: &RemoteHead,
+    operation: Uuid,
+    cancel: &CancellationToken,
+) -> Result<FetchedResearchBranch, GfError> {
+    graph.fetch_research_branch(
+        &FetchResearchBranchRequest {
+            operation_uuid: derived_uuid(operation, "fetch"),
+            expected_generation_uuid: graph.committed_generation_identity()?.generation_uuid,
+            branch_uuid: branch,
+            repository_url: &remote.repository_url,
+            discovery: DiscoveryResearchVersionRequest {
+                manifest_json: &remote.manifest_bytes,
+                refs_json: &remote.refs_bytes,
+                lineage_json: &remote.lineage_bytes,
+                expected_repository: &remote.identity,
+                version_uuid: &head.version_uuid,
+                package: &head.package,
+                discovery_limits: remote.limits,
+                portable_limits: PortableLimits::default(),
+                mode: PortableMode::Full,
+                cancelled: None,
+                scratch: None,
+            },
+        },
+        cancel,
+    )
+}
+
 /// `gf pull`: fetch the Hub's head of the Branch's ref, preview it as an upstream
 /// and record a Version that incorporates every compatible change.
 #[allow(clippy::too_many_lines)]
@@ -292,28 +327,7 @@ pub(crate) fn pull(
         );
     }
     let cancel = CancellationToken::new();
-    let fetched = graph.fetch_research_branch(
-        &FetchResearchBranchRequest {
-            operation_uuid: derived_uuid(operation, "fetch"),
-            expected_generation_uuid: graph.committed_generation_identity()?.generation_uuid,
-            branch_uuid: branch,
-            repository_url: &remote.repository_url,
-            discovery: DiscoveryResearchVersionRequest {
-                manifest_json: &remote.manifest_bytes,
-                refs_json: &remote.refs_bytes,
-                lineage_json: &remote.lineage_bytes,
-                expected_repository: &remote.identity,
-                version_uuid: &head.version_uuid,
-                package: &head.package,
-                discovery_limits: remote.limits,
-                portable_limits: PortableLimits::default(),
-                mode: PortableMode::Full,
-                cancelled: None,
-                scratch: None,
-            },
-        },
-        &cancel,
-    )?;
+    let fetched = fetch_step(graph, branch, &remote, &head, operation, &cancel)?;
     let preview_request = PreviewResearchUpstreamRequest {
         branch_uuid: branch,
         scope: ResearchUpstreamScope::Branch,

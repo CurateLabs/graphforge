@@ -299,18 +299,7 @@ pub(super) fn preserve(
             || after.remote_branches.keys().any(|key| {
                 !before.remote_branches.contains_key(key) && Some(key) != refreshed.as_ref()
             })
-            || fetch
-                .binding
-                .tags
-                .iter()
-                .any(|(name, target)| after.tags.get(name) != Some(target))
-            || after.tags.iter().any(|(name, target)| {
-                before
-                    .tags
-                    .get(name)
-                    .or_else(|| fetch.binding.tags.get(name))
-                    != Some(target)
-            })
+            || !tags_preserved(&before.tags, &after.tags, &fetch.binding.tags)
         {
             return Err(invalid(
                 "fetch changed local authority or differs from its native receipt",
@@ -318,6 +307,58 @@ pub(super) fn preserve(
         }
     }
     Ok(())
+}
+
+/// A fetch leaves every existing tag as it was and adds exactly the tags its binding
+/// names: none may disappear, change, or appear without the binding.
+fn tags_preserved(
+    before: &std::collections::BTreeMap<String, Uuid>,
+    after: &std::collections::BTreeMap<String, Uuid>,
+    installed: &std::collections::BTreeMap<String, Uuid>,
+) -> bool {
+    let mut expected = before.clone();
+    for (name, target) in installed {
+        if *expected.entry(name.clone()).or_insert(*target) != *target {
+            return false;
+        }
+    }
+    *after == expected
+}
+
+#[cfg(test)]
+mod tag_tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    fn tags(items: &[(&str, u128)]) -> BTreeMap<String, Uuid> {
+        items
+            .iter()
+            .map(|(name, id)| ((*name).to_owned(), Uuid::from_u128(*id)))
+            .collect()
+    }
+
+    #[test]
+    fn a_fetch_keeps_every_tag_and_adds_exactly_the_bound_ones() {
+        let keep = tags(&[("keep", 1)]);
+        let bound = tags(&[("served", 2)]);
+        let both = tags(&[("keep", 1), ("served", 2)]);
+        assert!(tags_preserved(&keep, &keep, &BTreeMap::new()));
+        assert!(tags_preserved(&keep, &both, &bound));
+        // An unrelated tag disappearing, with no bound tags at all.
+        assert!(!tags_preserved(&keep, &BTreeMap::new(), &BTreeMap::new()));
+        // ... or disappearing while the bound ones are added.
+        assert!(!tags_preserved(&keep, &bound, &bound));
+        // An existing tag moved, a tag added that no binding names, a bound tag missing.
+        assert!(!tags_preserved(
+            &keep,
+            &tags(&[("keep", 9)]),
+            &BTreeMap::new()
+        ));
+        assert!(!tags_preserved(&keep, &both, &BTreeMap::new()));
+        assert!(!tags_preserved(&keep, &keep, &bound));
+        // A bound tag that disagrees with an existing one is not an addition.
+        assert!(!tags_preserved(&keep, &keep, &tags(&[("keep", 5)])));
+    }
 }
 
 /// Copy only authenticated immutable research content while holding its native CAS lease.

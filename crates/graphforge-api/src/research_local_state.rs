@@ -29,14 +29,15 @@ pub struct SetResearchTagRequest {
     pub version_uuid: Option<Uuid>,
 }
 
-/// Local tracking of a publication a Hub confirmed: the repository and ref a
-/// Branch now tracks, and the head the Hub's receipt says it serves.
+/// Local tracking of a publication, as asserted by the caller: the repository and
+/// ref a Branch now tracks, and the head the supplied documents say the Hub serves.
 ///
-/// This is bookkeeping about a remote, not shared history and not authentication
-/// of the Hub. The head is not a caller field: it is read from the published
-/// documents, which the Hub's receipt commits to (its `manifest_validator` is the
-/// digest of `manifest`, which commits to `lineage`), so only what the receipt
-/// confirmed can be recorded.
+/// This is bookkeeping about a remote, not shared history, and nothing here
+/// authenticates the Hub: the receipt, manifest and lineage are the caller's
+/// assertion. The CLI supplies the Hub's actual responses. The head is not a
+/// separate caller field; it is read from the supplied documents, which must be
+/// consistent with each other and with the Branch (the receipt's
+/// `manifest_validator` is the manifest's digest, which names the lineage's).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RecordResearchPublicationRequest {
@@ -159,15 +160,18 @@ impl GraphForge {
         )
     }
 
-    /// Record a publication the Hub's receipt confirmed as the remote citation of
-    /// its Branch, the record clone and fetch maintain. Returns `None` when the
+    /// Record, as the remote citation of its Branch, the publication the supplied
+    /// receipt, manifest and lineage describe: local tracking state asserted by the
+    /// caller, the record clone and fetch maintain. Nothing here authenticates the
+    /// Hub; the CLI passes the responses it received. Returns `None` when the
     /// Project already holds exactly that citation, so repeating a completed
     /// publication writes nothing.
     ///
-    /// The receipt must be for the named repository and carry the Branch's ref;
-    /// the manifest and lineage must be the ones it commits to; the recorded head
-    /// is the Branch's published head in that lineage, and it must be the Branch
-    /// head or an ancestor of it with the identity the lineage names.
+    /// The documents must agree with each other and with the Branch: the receipt is
+    /// for the named repository and carries the Branch's ref, the manifest and
+    /// lineage are the ones it names, and the recorded head, the Branch's head in
+    /// that lineage, is the Branch head or an ancestor with the identity the
+    /// lineage names.
     pub fn record_research_publication(
         &mut self,
         request: &RecordResearchPublicationRequest,

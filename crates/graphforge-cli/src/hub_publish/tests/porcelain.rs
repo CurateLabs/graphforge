@@ -736,7 +736,7 @@ fn push_replays_a_completed_publication_and_refuses_another_request() {
 }
 
 #[test]
-fn publication_records_only_what_the_receipt_confirmed() {
+fn publication_record_is_bound_to_the_asserted_documents() {
     let hub = LoopbackHub::start();
     let root = tempfile::tempdir().unwrap();
     let alice = seeded(root.path(), "alice");
@@ -837,6 +837,118 @@ fn an_interrupted_publication_is_recorded_when_it_is_replayed() {
     let status = ok(&hub, &alice, &["status"]);
     assert_eq!(status["upstream"]["ref"], "main");
     assert_eq!(status["ahead"], 0);
+}
+
+#[test]
+fn an_interrupted_republication_is_recorded_when_it_is_replayed() {
+    let hub = LoopbackHub::start();
+    let root = tempfile::tempdir().unwrap();
+    let alice = seeded(root.path(), "alice");
+    ok(&hub, &alice, &["branch", "main", "--author", ALICE]);
+    ok(&hub, &alice, &["push", REPOSITORY]);
+    let first = ok(&hub, &alice, &["status"])["head_version_uuid"].clone();
+    let second = commit(&hub, &alice, ALICE, "second", 2)["version_uuid"].clone();
+
+    // The Hub commits the second publication, but the process dies before it is
+    // recorded: the Project still tracks the first head.
+    let o = Uuid::now_v7().to_string();
+    let mut interrupted = on_ref("curate/claims", "main");
+    interrupted.operation_uuid = Some(o.clone());
+    let graph = GraphForge::new(alice.to_str()).unwrap();
+    publish_ok(&hub, &graph, &interrupted).result.unwrap();
+    drop(graph);
+    let stale = ok(&hub, &alice, &["status"]);
+    assert_eq!(stale["upstream"]["head_version_uuid"], first);
+    assert_eq!(stale["ahead"], 1);
+
+    // Rerunning the operation replays it and records the head it committed.
+    ok(&hub, &alice, &["push", "--operation-uuid", &o]);
+    let recovered = ok(&hub, &alice, &["status"]);
+    assert_eq!(recovered["upstream"]["head_version_uuid"], second);
+    assert_eq!(recovered["ahead"], 0);
+
+    // Replaying an older operation never moves the recorded head backwards.
+    let receipts = |project: &Path| {
+        GraphForge::new(project.to_str())
+            .unwrap()
+            .research_version_retention()
+            .unwrap()
+            .receipts
+            .len()
+    };
+    let count = receipts(&alice);
+    ok(&hub, &alice, &["push", "--operation-uuid", &o]);
+    assert_eq!(receipts(&alice), count);
+}
+
+#[test]
+fn an_interrupted_pull_resumes_from_its_recorded_fetch() {
+    use crate::hub_clone::remote_read::{RemoteRequest, read_remote};
+    let hub = LoopbackHub::start();
+    let root = tempfile::tempdir().unwrap();
+    let alice = seeded(root.path(), "alice");
+    ok(&hub, &alice, &["branch", "main", "--author", ALICE]);
+    ok(&hub, &alice, &["push", REPOSITORY]);
+    let bob = root.path().join("bob");
+    ok(
+        &hub,
+        &bob,
+        &["clone", REPOSITORY, bob.to_str().unwrap(), "--ref", "main"],
+    );
+    commit(&hub, &alice, ALICE, "alice", 3);
+    ok(&hub, &alice, &["push"]);
+
+    // The fetch step commits under the pull's identity; the process dies before the
+    // incorporation, leaving CURRENT one generation past the fetch's precondition.
+    let o = Uuid::now_v7();
+    let mut graph = GraphForge::new(bob.to_str()).unwrap();
+    let branch = *graph
+        .research_version_retention()
+        .unwrap()
+        .branches
+        .keys()
+        .next()
+        .unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let (remote, head) = read_remote(
+        &hub.transport(),
+        &RemoteRequest {
+            repository: REPOSITORY,
+            hub: None,
+            token_env: None,
+            protection_bypass_env: None,
+        },
+        Some(("main", scratch.path())),
+    )
+    .unwrap();
+    let before = generation(&graph);
+    crate::porcelain::remote::fetch_step(
+        &mut graph,
+        branch,
+        &remote,
+        &head.unwrap(),
+        o,
+        &CancellationToken::new(),
+    )
+    .unwrap();
+    assert_ne!(generation(&graph), before);
+    drop(graph);
+
+    // Rerunning the pull under the same identity resumes and completes the merge.
+    let o = o.to_string();
+    let merged = ok(
+        &hub,
+        &bob,
+        &["pull", "--author", BOB, "--operation-uuid", &o],
+    );
+    assert_eq!(merged["parents"].as_array().unwrap().len(), 2);
+    assert_eq!(score(&bob), 3);
+    // A different request under the identity is still refused.
+    assert_conflict(gf(
+        &hub,
+        &bob,
+        &["pull", "--author", ALICE, "--operation-uuid", &o],
+    ));
 }
 
 #[test]

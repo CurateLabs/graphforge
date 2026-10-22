@@ -71,8 +71,25 @@ impl crate::GraphForge {
             &registry,
             crate::research_claims::authority::project_uuid(&current)?,
         )?;
-        if registry.receipts.contains_key(&request.operation_uuid) {
-            let receipt = fetch.authenticate_receipt(&registry)?;
+        if let Some(known) = registry.receipts.get(&request.operation_uuid) {
+            let mut fetch = fetch;
+            // The fetch binds the CURRENT it was made against. A rerun after the fetch
+            // committed asks with a newer CURRENT, so resume from the recorded one:
+            // the parent of the generation the fetch installed.
+            let receipt = match fetch.authenticate_receipt(&registry) {
+                Ok(receipt) => receipt,
+                Err(mismatch) => {
+                    let original = graphforge_storage::resolve_generation_by_uuid(
+                        &root,
+                        known.generation_uuid,
+                    )
+                    .ok()
+                    .and_then(|installed| installed.parent_generation_uuid())
+                    .ok_or(mismatch)?;
+                    fetch.binding.expected_generation_uuid = original;
+                    fetch.authenticate_receipt(&registry)?
+                }
+            };
             self.refresh_research_authority(
                 &root,
                 &Ok(receipt.clone()),

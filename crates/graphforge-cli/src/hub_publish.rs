@@ -183,6 +183,8 @@ pub(crate) struct PublishOutcome {
 #[derive(Debug, PartialEq)]
 pub(crate) struct PublishedHead {
     pub branch_uuid: Uuid,
+    /// The Version this publication named as the ref's head.
+    pub version_uuid: Uuid,
     /// Canonical HTTPS repository URL, the key of the local remote Branch citation.
     pub repository_url: String,
     /// The documents the Hub's receipt commits to; absent when they are no longer
@@ -370,9 +372,10 @@ pub(crate) fn publish_with_credentials(
 /// already holds is left alone, so repeating a completed publication writes nothing.
 ///
 /// A replayed publication carries no documents (the replay derives none). When the
-/// Project has no citation yet, which is the case after an interrupted first run,
-/// the served documents are read and used if they still are the ones the receipt
-/// commits to; a repository that cannot be read or has moved on records nothing.
+/// Project does not track the head it published, which is the case after an
+/// interrupted run whether or not an earlier head is tracked, the served documents
+/// are read and used if they still are the ones the receipt commits to; a
+/// repository that cannot be read or has moved on records nothing.
 fn record_upstream(
     graph: &mut GraphForge,
     transport: &dyn Transport,
@@ -385,6 +388,7 @@ fn record_upstream(
     let documents = match &head.documents {
         Some(documents) => documents.clone(),
         None if outcome.replayed => {
+            // Nothing to recover when the Project already tracks this very head.
             let tracked = graph
                 .research_version_retention()?
                 .remote_branches
@@ -392,6 +396,7 @@ fn record_upstream(
                 .any(|citation| {
                     citation.branch_uuid == head.branch_uuid
                         && citation.repository_url == head.repository_url
+                        && citation.head_version_uuid == head.version_uuid
                 });
             if tracked {
                 return Ok(());
@@ -411,6 +416,7 @@ fn record_upstream(
             };
             let Some(documents) = PublishedHead {
                 branch_uuid: head.branch_uuid,
+                version_uuid: head.version_uuid,
                 repository_url: head.repository_url.clone(),
                 documents: None,
             }
@@ -2035,6 +2041,7 @@ pub(crate) fn publish(
         .branch_uuid
         .map(|branch_uuid| PublishedHead {
             branch_uuid,
+            version_uuid: selection.version_uuid,
             repository_url: format!(
                 "{}/{}",
                 base.origin().ascii_serialization(),

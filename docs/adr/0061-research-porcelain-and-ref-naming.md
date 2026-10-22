@@ -461,14 +461,18 @@ of decision.
 - **Upstream record.** A publication the Hub confirmed (`gf push`, `gf publish
   --ref`) records the published head as the Branch's remote citation, the record
   clone and fetch maintain (`ResearchMutation::RecordPublishedBranch`, built by
-  `record_research_publication`; the generic operation entry refuses it). The head
-  is not a caller field. The call takes the Hub's receipt with the manifest and
-  lineage it commits to (`manifest_validator` is the manifest's digest, which names
-  the lineage's), and records the Branch's head in that lineage, provided it is
-  the Branch head or an ancestor with the identity the lineage names. A
-  replayed publication supplies the served documents when they still are the ones
-  the receipt names, and records nothing otherwise. A citation the Project already
-  holds is left alone, so repeated replays write no receipts. It is local tracking
+  `record_research_publication`; the generic operation entry refuses it). It is
+  local tracking state asserted by the caller; the CLI supplies the Hub's actual
+  responses and nothing authenticates the Hub. The head is not a separate caller
+  field. The call takes the receipt with the manifest and lineage it names
+  (`manifest_validator` is the manifest's digest, which names the lineage's),
+  requires them to agree with each other and with the Branch, and records the
+  Branch's head in that lineage, provided it is the Branch head or an ancestor
+  with the identity the lineage names. A replayed publication supplies the served
+  documents when the Project does not track the head it published and they still
+  are the ones the receipt names, and records nothing otherwise, so an interrupted
+  first or later publication is recovered by rerunning it. A citation the Project
+  already holds is left alone, so repeated replays write no receipts. It is local
   state, not shared history. A publication's intent binds
   `publication_content_identity`: every participant except the research registry,
   and the registry without the remote citations and receipts a publication itself
@@ -480,6 +484,12 @@ of decision.
   admission of the fetched Versions, so a pull interrupted before or after the
   update never leaves served tags half applied. Tags on other Versions stay on the
   Hub.
+- **Resuming a pull.** The fetch's operation identity derives from the pull's. A
+  rerun after the fetch committed resumes from it: the fetch binds the CURRENT it
+  was made against, recovered as the parent of the generation the fetch installed,
+  so the recorded binding is reused rather than rebuilt from the newer CURRENT. If
+  that generation has been reclaimed the rerun is refused and a fresh pull
+  (without the identity) starts over.
 - **Pull conflicts.** `conflict` and `dependency_unavailable` preview rows refuse
   the pull before any update; the fetch is durable. The evidence acknowledgement is
   the union required by the adopted rows.
