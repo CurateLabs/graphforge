@@ -2821,6 +2821,7 @@ version = "0.6.0-rc.5"
 dependencies = [
  "arrow",
  "graphforge-core",
+ "graphforge-discovery",
  "graphforge-value",
  "parquet",
  "serde",
@@ -2830,6 +2831,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "unicode-normalization",
+ "url",
 ]
 
 [[package]]

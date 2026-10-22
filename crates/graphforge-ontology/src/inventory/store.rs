@@ -253,6 +253,18 @@ impl OntologyInventory {
     /// Validate a document without mutating authority or staging.
     pub fn validate_document(&self, doc: &OntologyDoc) -> Result<(), CompositionError> {
         let dlimit = self.diag_limit();
+        crate::item_identity::validate_item_identity(
+            &doc.ontology_id,
+            graphforge_discovery::ItemKind::OntologyModule,
+        )
+        .map_err(|message| {
+            CompositionError::one(CompositionDiagnostic::with_subjects(
+                DiagnosticCode::InventoryMalformed,
+                message,
+                vec![doc.ontology_id.clone()],
+                dlimit,
+            ))
+        })?;
         OntologyValidator::validate(doc).map_err(|errors| {
             CompositionError::one(CompositionDiagnostic::with_subjects(
                 DiagnosticCode::InventoryMalformed,

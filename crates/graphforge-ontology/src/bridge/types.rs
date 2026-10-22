@@ -187,7 +187,9 @@ fn default_true() -> bool {
 /// Canonical bridge-set document (digest domain: `graphforge-ontology-bridge/1`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BridgeDocument {
-    /// Globally unique NFC-normalized bridge URI.
+    /// Globally unique NFC-normalized bridge URI. May be omitted only before
+    /// create, which fills a permanent `https://graphforge.sh/brg_…` URI.
+    #[serde(default)]
     pub bridge_id: String,
     /// Opaque NFC authored version.
     pub authored_version: String,

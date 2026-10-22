@@ -732,6 +732,18 @@ fn validate_module_identity(
     id: &OntologyModuleId,
     dlimit: DiagnosticLimit,
 ) -> Result<(), CompositionError> {
+    crate::item_identity::validate_item_identity(
+        &id.ontology_id,
+        graphforge_discovery::ItemKind::OntologyModule,
+    )
+    .map_err(|message| {
+        CompositionError::one(CompositionDiagnostic::with_subjects(
+            DiagnosticCode::InventoryMalformed,
+            message,
+            vec![id.ontology_id.clone()],
+            dlimit,
+        ))
+    })?;
     require_nfc(&id.ontology_id, "ontology_id", dlimit)?;
     require_nfc(&id.authored_version, "authored_version", dlimit)?;
     require_digest(&id.canonical_digest, dlimit)?;
@@ -751,6 +763,18 @@ fn validate_bridge_identity(
     id: &BridgeSetId,
     dlimit: DiagnosticLimit,
 ) -> Result<(), CompositionError> {
+    crate::item_identity::validate_item_identity(
+        &id.bridge_id,
+        graphforge_discovery::ItemKind::BridgeSet,
+    )
+    .map_err(|message| {
+        CompositionError::one(CompositionDiagnostic::with_subjects(
+            DiagnosticCode::InventoryMalformed,
+            message,
+            vec![id.bridge_id.clone()],
+            dlimit,
+        ))
+    })?;
     require_nfc(&id.bridge_id, "bridge_id", dlimit)?;
     require_nfc(&id.authored_version, "authored_version", dlimit)?;
     require_digest(&id.canonical_digest, dlimit)?;

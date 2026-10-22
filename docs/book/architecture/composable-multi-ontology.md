@@ -27,6 +27,29 @@ assertion names exact qualified endpoints, a relation (`equivalent`,
 Bridge ownership is independent: activating, updating, or deleting a bridge
 does not rewrite a module or imply reciprocal/equivalent meaning.
 
+### Creating permanent item IDs
+
+The Rust facade's `create_ontology_module` and `create_ontology_bridge` MUST mint
+an ID for a document without `ontology_id` or `bridge_id`, respectively, and
+return the completed document in the candidate. They use the shared
+`graphforge-discovery::ItemId` grammar and the operating system CSPRNG: 80 random
+bits encoded as 16 lowercase Crockford base32 characters. Modules use
+`https://graphforge.sh/ont_…`; bridge sets use `https://graphforge.sh/brg_…`.
+An existing document ID MUST be retained. Authors MUST save the completed
+document before adopting it; adopt, update, and module migration MUST reject a
+missing ID with a create-first hint and MUST NOT mint one.
+
+For any ID whose scheme and host are `https://graphforge.sh`, validation MUST
+require the exact canonical lowercase URI and the correct item kind. Other IRIs
+and existing short or legacy IDs (including `core` and `legacy:<digest>`) retain
+their authored values. Authors using their own IRI SHOULD control its domain.
+
+`gf ontology module|bridge create --input FILE` emits the completed JSON document
+to stdout, or writes a new `--output FILE`. It MUST NOT rewrite the input.
+`--json` emits the candidate receipt with the minted ID and completed document.
+`--id` supplies a permanent token/URI or own-domain IRI, canonicalizes permanent
+ID input, and MUST fail if it disagrees with the document.
+
 ## Inventory, closure, and composition identity
 
 An inventory contains unique exact module IDs and bridge IDs. Required module
