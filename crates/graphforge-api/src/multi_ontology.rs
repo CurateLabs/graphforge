@@ -780,8 +780,11 @@ impl GraphForge {
         format: ImportFormatHint,
         dependencies: Vec<OntologyModuleId>,
     ) -> Result<ModuleCandidate, GfError> {
-        let document = staged_module_document(text, format)?;
-        if document.ontology_id.trim().is_empty() {
+        let document = staged_module_document(text, format);
+        if document
+            .as_ref()
+            .is_ok_and(|document| document.ontology_id.trim().is_empty())
+        {
             return Err(GfError::Validation(
                 "missing ontology_id; run ontology module create first",
             ));
@@ -790,6 +793,9 @@ impl GraphForge {
         let id = inventory
             .import_text(text, format, dependencies.clone(), "candidate")
             .map_err(composition_error)?;
+        // Malformed imports retain the inventory's structured diagnostic;
+        // only successfully parsed, ID-less documents get the create-first hint.
+        let document = document?;
         Ok(ModuleCandidate {
             id,
             document,
@@ -2204,11 +2210,21 @@ mod tests {
     fn conformance_no_partial_import_or_authority_change() {
         let mut graph = GraphForge::new(None).unwrap();
         let before = graph.ontology_authority_state().unwrap();
-        assert!(
-            graph
-                .import_ontology_module("{bad", ImportFormatHint::Json, Vec::new())
-                .is_err()
-        );
+        for (text, format) in [
+            ("{", ImportFormatHint::Json),
+            ("{bad", ImportFormatHint::Json),
+            ("ontology_id: [", ImportFormatHint::Yaml),
+            ("{", ImportFormatHint::Auto),
+            ("ontology_id: [", ImportFormatHint::Auto),
+            (r#"{"ontology_id":17}"#, ImportFormatHint::Json),
+        ] {
+            let error = graph
+                .import_ontology_module(text, format, Vec::new())
+                .unwrap_err();
+            assert_eq!(error.code, "GF_ONTOLOGY_DIAGNOSTIC");
+            assert_eq!(error.diagnostics[0].code, "inventory.malformed");
+            assert_eq!(graph.ontology_authority_state().unwrap(), before);
+        }
         assert_eq!(graph.ontology_authority_state().unwrap(), before);
         assert!(
             graph
