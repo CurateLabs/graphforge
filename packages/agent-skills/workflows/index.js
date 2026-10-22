@@ -985,7 +985,10 @@ function invokeRetrieve(graph, request) {
         ),
       );
     }
-    return graph.rank(algorithm.label, algorithm.algorithm, algorithm.via, algorithm.directed);
+    return graph.rank(algorithm.label, algorithm.algorithm, {
+      via: algorithm.via,
+      directed: algorithm.directed,
+    });
   }
   if (surface === "cluster") {
     if (typeof graph.prepareClusterInvocation === "function") {
@@ -999,13 +1002,11 @@ function invokeRetrieve(graph, request) {
         ),
       );
     }
-    return graph.cluster(
-      algorithm.label,
-      algorithm.algorithm,
-      algorithm.via,
-      algorithm.directed,
-      algorithm.vectorProperty,
-    );
+    return graph.cluster(algorithm.label, algorithm.algorithm, {
+      via: algorithm.via,
+      directed: algorithm.directed,
+      vectorProperty: algorithm.vectorProperty,
+    });
   }
   if (surface === "paths") {
     if (typeof graph.preparePathsInvocation === "function") {
