@@ -91,8 +91,53 @@ def check_bulk_operation_id_is_optional(project: Path) -> None:
         forge.add_nodes("Person", [{"name": "Knuth"}], operation_uuid=minted)
     except g.GraphForgeError as exc:
         assert exc.code == "GF_IDEMPOTENCY_CONFLICT", exc.code
+        assert exc.operation_uuid == minted, exc.operation_uuid
     else:
         raise SystemExit("expected idempotency conflict for changed bulk reuse")
+    assert project_digest(project) == before
+
+    forge.close()
+
+
+def check_errors_carry_the_generated_operation_id(project: Path) -> None:
+    """An error after an omitted id was minted exposes it for a safe retry.
+
+    No seam forces a failure after the native commit, so this exercises the two
+    reachable error paths after generation: a refusal raised before the native
+    call (input conversion) and a refusal raised by the native contract
+    (missing edge endpoints). Both go through the same wrapper that attaches
+    the identity.
+    """
+    forge = g.GraphForge(str(project))
+    before = project_digest(project)
+
+    try:
+        forge.add_nodes("Person", "not-a-container")
+    except Exception as exc:
+        converted = exc.operation_uuid
+    else:
+        raise SystemExit("expected input conversion failure")
+    assert uuid.UUID(converted).version == 7, converted
+
+    missing = [{"src_id": uuid.uuid4().bytes, "dst_id": uuid.uuid4().bytes}]
+    try:
+        forge.add_edges("KNOWS", missing)
+    except g.GraphForgeError as exc:
+        refused = exc.operation_uuid
+        assert exc.code == "GF_VALIDATION", exc.code
+    else:
+        raise SystemExit("expected missing-endpoint refusal")
+    assert uuid.UUID(refused).version == 7, refused
+    assert refused != converted
+
+    # Retrying with the carried identity reproduces the same refusal for the
+    # same identity rather than minting another one.
+    try:
+        forge.add_edges("KNOWS", missing, operation_uuid=refused)
+    except g.GraphForgeError as exc:
+        assert exc.operation_uuid == refused, exc.operation_uuid
+    else:
+        raise SystemExit("expected the same refusal on retry")
     assert project_digest(project) == before
 
     forge.close()
@@ -102,4 +147,6 @@ if __name__ == "__main__":
     check_documented_quickstart()
     with tempfile.TemporaryDirectory(prefix="gf-first-use-py-") as directory:
         check_bulk_operation_id_is_optional(Path(directory))
+    with tempfile.TemporaryDirectory(prefix="gf-first-use-py-err-") as directory:
+        check_errors_carry_the_generated_operation_id(Path(directory))
     print("first_use_ergonomics: ok")

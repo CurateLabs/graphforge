@@ -192,7 +192,9 @@ test("bulk publication mints and exposes an optional operation id", () => {
     assert.throws(
       () =>
         forge.publishBulkNodes(tableToIpc(nodeBulkTable(["Knuth"])), minted),
-      (error) => error?.code === "GF_IDEMPOTENCY_CONFLICT",
+      (error) =>
+        error?.code === "GF_IDEMPOTENCY_CONFLICT" &&
+        error.operationUuid === minted,
     );
     assert.equal(projectDigest(project), before);
 
@@ -200,4 +202,32 @@ test("bulk publication mints and exposes an optional operation id", () => {
   } finally {
     rmSync(project, { recursive: true, force: true });
   }
+});
+
+test("errors after an omitted id was minted carry it for a safe retry", () => {
+  const forge = new GraphForge();
+
+  // No seam forces a failure after the native commit, so this uses the
+  // reachable error path after generation: input conversion failing before the
+  // native call. It goes through the same wrapper that attaches the identity.
+  let carried;
+  assert.throws(
+    () => forge.publishBulkNodes(Buffer.from("not-ipc")),
+    (error) => {
+      carried = error.operationUuid;
+      return typeof error.code === "string" && error.message.length > 0;
+    },
+  );
+  assert.match(
+    carried,
+    /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+  );
+
+  // The carried identity is accepted for the retry and is reported again.
+  assert.throws(
+    () => forge.publishBulkNodes(Buffer.from("not-ipc"), carried),
+    (error) => error.operationUuid === carried,
+  );
+
+  forge.close();
 });

@@ -202,7 +202,9 @@ bulk receipt table (`entity_uuid`, `row_ordinal`, generation identity, …).
 When `operation_uuid` is omitted, Rust mints a UUIDv7 identity and returns it in
 the receipt's `operation_uuid` column. Pass that identity back explicitly to
 retry the same batch idempotently; reusing it with changed input still fails
-with `GF_IDEMPOTENCY_CONFLICT`.
+with `GF_IDEMPOTENCY_CONFLICT`. An exception raised after the identity was minted
+carries it as `error.operation_uuid` (Node: `error.operationUuid`); on any error,
+retry with that identity.
 
 ```python
 receipt = forge.publish_bulk_nodes(node_table, operation_uuid)

@@ -150,15 +150,20 @@ The `operation_uuid` is optional: when omitted, GraphForge mints a UUIDv7
 operation identity in Rust and returns it in the receipt's `operation_uuid`
 column. Pass that identity back explicitly to retry the same batch; reuse with
 changed input fails with `GF_IDEMPOTENCY_CONFLICT` and does not mutate storage.
+Each publication needs its own identity: reusing the node load's identity for
+the edge load is a conflicting reuse.
+
+If a call raises after the identity was minted, the exception carries it as
+`error.operation_uuid`. On any error, retry with
+`operation_uuid=error.operation_uuid` (and the same input) rather than omitting
+it: the commit may have succeeded before the failure, and a retry with a new
+identity would load the data twice.
 
 ```python
-import uuid
-
 nodes = forge.add_nodes(
     "Person",
     [{"name": "Alice"}, {"name": "Bob"}],
 )
-edge_op = str(uuid.UUID(bytes=nodes.column("operation_uuid")[0].as_py()))
 
 edges = forge.add_edges(
     "KNOWS",
@@ -168,7 +173,6 @@ edges = forge.add_edges(
             "dst_id": nodes.column("entity_uuid")[1].as_py(),
         }
     ],
-    operation_uuid=edge_op,
 )
 assert nodes.num_rows == 2 and edges.num_rows == 1
 ```
@@ -196,7 +200,9 @@ at the boundary. Both bindings accept an omitted operation identity and mint a
 Rust-owned UUIDv7; Node passes it as the optional second argument,
 `publishBulkNodes(batch, operationUuid?)`. An explicitly supplied identity must
 still be a **UUIDv7**; a UUIDv4 is rejected with
-`GF_BULK_VALIDATION(invalid_uuid)`.
+`GF_BULK_VALIDATION(invalid_uuid)`. A thrown error carries the identity as
+`error.operationUuid` (Python: `error.operation_uuid`); on any error, retry with
+that identity.
 
 Node intentionally exposes only `publishBulkNodes` / `publishBulkEdges` for
 bulk construction. The Python-only `add_nodes` / `add_edges` helpers normalize

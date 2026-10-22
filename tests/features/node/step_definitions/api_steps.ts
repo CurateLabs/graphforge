@@ -818,7 +818,7 @@ When(
 
 When('I bulk add nodes with label "Person" and 2 records', function (this: GraphForgeWorld) {
   _catch(this, () =>
-    this.forge!.publishBulkNodes(BDD_NODE_OPERATION, tableToIpc(bulkNodeTable(["Alice", "Bob"]))),
+    this.forge!.publishBulkNodes(tableToIpc(bulkNodeTable(["Alice", "Bob"])), BDD_NODE_OPERATION),
   );
 });
 
@@ -827,7 +827,7 @@ When(
   function (this: GraphForgeWorld) {
     const names = [0, 1, 2, 3, 4].map((i) => String.fromCharCode(65 + i));
     _catch(this, () =>
-      this.forge!.publishBulkNodes(BDD_NODE_TABLE_OPERATION, tableToIpc(bulkNodeTable(names))),
+      this.forge!.publishBulkNodes(tableToIpc(bulkNodeTable(names)), BDD_NODE_TABLE_OPERATION),
     );
   },
 );
@@ -842,8 +842,8 @@ When(
     }
     _catch(this, () =>
       this.forge!.publishBulkEdges(
-        BDD_EDGE_OPERATION,
         tableToIpc(bulkEdgeTable(nodes[0].uuid, nodes[1].uuid)),
+        BDD_EDGE_OPERATION,
       ),
     );
   },
@@ -860,21 +860,21 @@ When(
 When(
   /^I rank "([^"]*)" by "([^"]*)" writing result to property "([^"]*)"$/,
   function (this: GraphForgeWorld, label: string, algorithm: string, prop: string) {
-    _catch(this, () => this.forge!.rank(label, algorithm, undefined, undefined, prop));
+    _catch(this, () => this.forge!.rank(label, algorithm, { writeProperty: prop }));
   },
 );
 
 When(
   /^I rank "([^"]*)" by "([^"]*)" via relationship type "([^"]*)"$/,
   function (this: GraphForgeWorld, label: string, algorithm: string, via: string) {
-    _catch(this, () => this.forge!.rank(label, algorithm, via));
+    _catch(this, () => this.forge!.rank(label, algorithm, { via }));
   },
 );
 
 When(
   /^I rank "([^"]*)" by "([^"]*)" treating edges as directed$/,
   function (this: GraphForgeWorld, label: string, algorithm: string) {
-    _catch(this, () => this.forge!.rank(label, algorithm, undefined, true));
+    _catch(this, () => this.forge!.rank(label, algorithm, { directed: true }));
     this.extra["rank_directed"] = this.result;
     this.extra["rank_directed_error"] = this.error;
   },
@@ -883,7 +883,7 @@ When(
 When(
   /^I rank "([^"]*)" by "([^"]*)" treating edges as undirected$/,
   function (this: GraphForgeWorld, label: string, algorithm: string) {
-    _catch(this, () => this.forge!.rank(label, algorithm, undefined, false));
+    _catch(this, () => this.forge!.rank(label, algorithm, { directed: false }));
     this.extra["rank_undirected"] = this.result;
     this.extra["rank_undirected_error"] = this.error;
   },
@@ -899,7 +899,7 @@ When(
 When(
   /^I cluster "([^"]*)" by "([^"]*)" writing result to property "([^"]*)"$/,
   function (this: GraphForgeWorld, label: string, algorithm: string, prop: string) {
-    _catch(this, () => this.forge!.cluster(label, algorithm, undefined, undefined, prop));
+    _catch(this, () => this.forge!.cluster(label, algorithm, { writeProperty: prop }));
   },
 );
 

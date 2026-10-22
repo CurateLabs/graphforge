@@ -12,15 +12,29 @@ use pyo3::types::PyDict;
 use pyo3::types::PyList;
 
 /// Resolve the caller-supplied operation identity, minting a Rust-owned
-/// UUIDv7 when omitted. Explicit identities keep their canonical validation so
-/// replay and conflict behavior is unchanged.
-fn resolve_operation_id(
+/// UUIDv7 when omitted, then run `publish` with it. Explicit identities keep
+/// their canonical validation so replay and conflict behavior is unchanged.
+///
+/// Every error raised once the identity exists carries it as the exception's
+/// `operation_uuid` attribute, so a caller that omitted the id can retry the
+/// same publication with `operation_uuid=error.operation_uuid` instead of
+/// minting a second identity (and a duplicate load) if the commit succeeded
+/// before the failure.
+fn publish_with_operation_id<T>(
+    py: Python<'_>,
     operation_uuid: Option<&Bound<'_, PyAny>>,
-) -> Result<OperationId, graphforge_api::GfError> {
-    match operation_uuid {
+    publish: impl FnOnce(OperationId) -> PyResult<T>,
+) -> PyResult<T> {
+    let operation_uuid = match operation_uuid {
         Some(value) => py_operation_id(value),
         None => Ok(OperationId(new_v7())),
     }
+    .map_err(|error| to_pyerr(py, &error))?;
+    publish(operation_uuid).inspect_err(|error| {
+        let _ = error
+            .value(py)
+            .setattr("operation_uuid", operation_uuid.0.hyphenated().to_string());
+    })
 }
 
 /// UUID-backed node handle returned by [`GraphForge::add_node`].
@@ -160,7 +174,8 @@ impl GraphForge {
     /// `data` may be a `pyarrow.Table`, Arrow-compatible DataFrame, or
     /// `list[dict]` of canonical node rows. When `operation_uuid` is omitted,
     /// Rust mints a UUIDv7 identity and returns it in the receipt's
-    /// `operation_uuid` column for explicit idempotent retries.
+    /// `operation_uuid` column for explicit idempotent retries. Any error
+    /// raised after the identity exists carries it as `error.operation_uuid`.
     #[pyo3(signature = (data, operation_uuid=None))]
     fn publish_bulk_nodes(
         &self,
@@ -169,13 +184,13 @@ impl GraphForge {
         operation_uuid: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Py<PyAny>> {
         let native = self.ensure_open()?;
-        let operation_uuid =
-            resolve_operation_id(operation_uuid).map_err(|error| to_pyerr(py, &error))?;
-        let batch = py_bulk_input_to_batch(py, data)?;
-        let receipt = py
-            .detach(|| native.publish_bulk_nodes(operation_uuid, &[batch]))
-            .map_err(|error| bulk_node_publication_error(py, error))?;
-        record_batch_to_pyarrow_table(py, &receipt)
+        publish_with_operation_id(py, operation_uuid, |operation_uuid| {
+            let batch = py_bulk_input_to_batch(py, data)?;
+            let receipt = py
+                .detach(|| native.publish_bulk_nodes(operation_uuid, &[batch]))
+                .map_err(|error| bulk_node_publication_error(py, error))?;
+            record_batch_to_pyarrow_table(py, &receipt)
+        })
     }
 
     /// Publish one atomic bulk edge batch through the Rust-owned Arrow contract.
@@ -183,7 +198,8 @@ impl GraphForge {
     /// `data` may be a `pyarrow.Table`, Arrow-compatible DataFrame, or
     /// `list[dict]` of canonical edge rows. When `operation_uuid` is omitted,
     /// Rust mints a UUIDv7 identity and returns it in the receipt's
-    /// `operation_uuid` column for explicit idempotent retries.
+    /// `operation_uuid` column for explicit idempotent retries. Any error
+    /// raised after the identity exists carries it as `error.operation_uuid`.
     #[pyo3(signature = (data, operation_uuid=None))]
     fn publish_bulk_edges(
         &self,
@@ -192,13 +208,13 @@ impl GraphForge {
         operation_uuid: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Py<PyAny>> {
         let native = self.ensure_open()?;
-        let operation_uuid =
-            resolve_operation_id(operation_uuid).map_err(|error| to_pyerr(py, &error))?;
-        let batch = py_bulk_input_to_batch(py, data)?;
-        let receipt = py
-            .detach(|| native.publish_bulk_edges(operation_uuid, &[batch]))
-            .map_err(|error| bulk_edge_publication_error(py, error))?;
-        record_batch_to_pyarrow_table(py, &receipt)
+        publish_with_operation_id(py, operation_uuid, |operation_uuid| {
+            let batch = py_bulk_input_to_batch(py, data)?;
+            let receipt = py
+                .detach(|| native.publish_bulk_edges(operation_uuid, &[batch]))
+                .map_err(|error| bulk_edge_publication_error(py, error))?;
+            record_batch_to_pyarrow_table(py, &receipt)
+        })
     }
 
     /// Bulk-add nodes by normalizing convenience containers onto
@@ -217,13 +233,13 @@ impl GraphForge {
         operation_uuid: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Py<PyAny>> {
         let native = self.ensure_open()?;
-        let operation_uuid =
-            resolve_operation_id(operation_uuid).map_err(|error| to_pyerr(py, &error))?;
-        let batch = ensure_bulk_node_batch(py, label, data)?;
-        let receipt = py
-            .detach(|| native.publish_bulk_nodes(operation_uuid, &[batch]))
-            .map_err(|error| bulk_node_publication_error(py, error))?;
-        record_batch_to_pyarrow_table(py, &receipt)
+        publish_with_operation_id(py, operation_uuid, |operation_uuid| {
+            let batch = ensure_bulk_node_batch(py, label, data)?;
+            let receipt = py
+                .detach(|| native.publish_bulk_nodes(operation_uuid, &[batch]))
+                .map_err(|error| bulk_node_publication_error(py, error))?;
+            record_batch_to_pyarrow_table(py, &receipt)
+        })
     }
 
     /// Bulk-add edges by normalizing convenience containers onto
@@ -244,13 +260,13 @@ impl GraphForge {
         dst: &str,
     ) -> PyResult<Py<PyAny>> {
         let native = self.ensure_open()?;
-        let operation_uuid =
-            resolve_operation_id(operation_uuid).map_err(|error| to_pyerr(py, &error))?;
-        let batch = ensure_bulk_edge_batch(py, rel_type, data, src, dst)?;
-        let receipt = py
-            .detach(|| native.publish_bulk_edges(operation_uuid, &[batch]))
-            .map_err(|error| bulk_edge_publication_error(py, error))?;
-        record_batch_to_pyarrow_table(py, &receipt)
+        publish_with_operation_id(py, operation_uuid, |operation_uuid| {
+            let batch = ensure_bulk_edge_batch(py, rel_type, data, src, dst)?;
+            let receipt = py
+                .detach(|| native.publish_bulk_edges(operation_uuid, &[batch]))
+                .map_err(|error| bulk_edge_publication_error(py, error))?;
+            record_batch_to_pyarrow_table(py, &receipt)
+        })
     }
 
     /// Remove all nodes and edges (in-memory instances only).
