@@ -16,7 +16,8 @@ use tempfile::TempDir;
 #[path = "support/portable_package.rs"]
 mod portable_package;
 use portable_package::{
-    Component, DeclaredFile, MANIFEST_PATH, controls, graph_parquet, hex, tar_header,
+    Component, DeclaredFile, MANIFEST_PATH, controls, graph_parquet, hex, staged_entry_length,
+    tar_header, write_large_package,
 };
 
 const GIB: u64 = 1024 * 1024 * 1024;
@@ -752,6 +753,40 @@ fn help_and_version_print_normally() {
         assert!(
             serde_json::from_str::<Value>(&text).is_err(),
             "{args:?}: {text}"
+        );
+    }
+}
+
+/// The generated package reaches the requested size from its graph entries
+/// alone, whatever the request, and verifies. The sizes straddle the first
+/// walked file (`staged + 1`) and the 4 MiB the generator once reserved for
+/// controls, which are far smaller.
+#[test]
+fn a_generated_package_is_never_short_of_the_requested_size() {
+    let staged = staged_entry_length();
+    for size in [
+        staged - 1,
+        staged,
+        staged + 1,
+        staged + 4 * MIB - 1,
+        staged + 4 * MIB,
+        staged + 4 * MIB + 1,
+    ] {
+        let mut bundle = Vec::new();
+        let package = write_large_package(size, 7, &mut bundle, |_, _, _| {}).unwrap();
+        assert_eq!(package.written, bundle.len() as u64);
+        assert!(
+            package.written >= size,
+            "{size} requested, {} written",
+            package.written
+        );
+        let run = gf(&["portable", "verify", "--input", "-", "--json"], &bundle);
+        assert_eq!(run.code, Some(0), "{size}: {}", run.stderr);
+        let report = one_document(&run.stdout);
+        assert_eq!(report["integrity"], "verified", "{size}");
+        assert_eq!(
+            report["package_digest"],
+            format!("sha256:{}", package.package_digest)
         );
     }
 }

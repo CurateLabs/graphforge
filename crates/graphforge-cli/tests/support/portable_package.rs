@@ -8,6 +8,7 @@
 #![allow(dead_code)]
 
 use std::collections::BTreeMap;
+use std::io::{self, Write};
 use std::sync::Arc;
 
 use arrow::array::{RecordBatch, StringArray};
@@ -218,4 +219,97 @@ pub fn graph_parquet(rows: usize, row_bytes: usize, tag: &str) -> Vec<u8> {
     writer.write(&batch).unwrap();
     writer.close().unwrap();
     file
+}
+
+const LARGE_GRAPH_DIR: &str = "data/components/graph-data/graph-tree/topology/";
+/// Rows of 1,150,000 bytes, one page per row. 40 rows are about 46 MB, under
+/// the 64 MiB walk threshold; 64 rows are about 74 MB, over it.
+const LARGE_ROW_BYTES: usize = 1_150_000;
+const WALKED_ROWS: usize = 40;
+const STAGED_ROWS: usize = 64;
+
+/// The bytes a tar entry of `length` payload bytes takes: header, payload and
+/// padding.
+pub fn entry_length(length: u64) -> u64 {
+    512 + length.div_ceil(512) * 512
+}
+
+fn write_entry(out: &mut impl Write, path: &str, bytes: &[u8]) -> io::Result<u64> {
+    let size = bytes.len() as u64;
+    out.write_all(&tar_header(path, size))?;
+    out.write_all(bytes)?;
+    out.write_all(&vec![0u8; (size.div_ceil(512) * 512 - size) as usize])?;
+    Ok(entry_length(size))
+}
+
+/// The bytes the graph entry over the page-walk threshold takes in a bundle.
+pub fn staged_entry_length() -> u64 {
+    entry_length(graph_parquet(STAGED_ROWS, LARGE_ROW_BYTES, "").len() as u64)
+}
+
+/// A graph bundle written by [`write_large_package`].
+pub struct LargePackage {
+    pub package_digest: String,
+    /// Bytes written, controls and end-of-archive blocks included.
+    pub written: u64,
+}
+
+/// Stream a valid graph bundle of at least `size_bytes` to `out`,
+/// deterministically from `seed`, holding one Parquet file at a time: a graph
+/// tree of one file over the 64 MiB page-walk threshold and as many files under
+/// it as `size_bytes` needs. The graph entries alone reach `size_bytes`, so the
+/// controls only add to it. The semantic manifest, payload inventory and tag
+/// manifest sort after the graph tree, so their digests are known when they are
+/// written. `progress` is called with the graph files written so far and their
+/// total.
+pub fn write_large_package(
+    size_bytes: u64,
+    seed: u64,
+    out: &mut impl Write,
+    mut progress: impl FnMut(u64, u64, u64),
+) -> io::Result<LargePackage> {
+    let walked_length = entry_length(graph_parquet(WALKED_ROWS, LARGE_ROW_BYTES, "").len() as u64);
+    let walked_files = size_bytes
+        .saturating_sub(staged_entry_length())
+        .div_ceil(walked_length);
+
+    let mut files = Vec::new();
+    // `bag-info.txt` and `bagit.txt` sort before the graph tree and do not
+    // depend on its digests; every other control sorts after it.
+    let mut written = write_entry(out, "bag-info.txt", BAG_INFO)?;
+    written += write_entry(out, "bagit.txt", BAGIT)?;
+    for index in 0..=walked_files {
+        let rows = if index == 0 { STAGED_ROWS } else { WALKED_ROWS };
+        let tag = format!("{seed:016x}{index:08x}");
+        let bytes = graph_parquet(rows, LARGE_ROW_BYTES, &tag);
+        let path = format!("{LARGE_GRAPH_DIR}nodes-{index:08}.parquet");
+        written += write_entry(out, &path, &bytes)?;
+        files.push(DeclaredFile {
+            path,
+            media_type: "application/vnd.apache.parquet",
+            length: bytes.len() as u64,
+            sha256: hex(&Sha256::digest(&bytes)),
+        });
+        progress(index, walked_files, written);
+    }
+    let component = Component {
+        kind: "graph-data",
+        participant: "graph-tree",
+        files,
+    };
+    let package = controls(std::slice::from_ref(&component), None);
+    let mut rest: Vec<_> = package
+        .entries
+        .into_iter()
+        .filter(|(path, _)| path != "bag-info.txt" && path != "bagit.txt")
+        .collect();
+    rest.sort();
+    for (path, bytes) in rest {
+        written += write_entry(out, &path, &bytes)?;
+    }
+    out.write_all(&[0u8; 1024])?;
+    Ok(LargePackage {
+        package_digest: package.package_digest,
+        written: written + 1024,
+    })
 }

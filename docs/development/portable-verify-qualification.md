@@ -122,18 +122,21 @@ error. The package builder is `crates/graphforge-cli/tests/support/portable_pack
 shared with the stdin tests.
 
 ```bash
+export CARGO_TARGET_DIR=$HOME/gf-target-large-package
+GF=$CARGO_TARGET_DIR/release/gf
 cargo build --release -p graphforge-cli --bin gf --example generate_large_portable_package
-generate_large_portable_package --size-bytes 107374182400 --seed 1 --output package.gfpb
+$CARGO_TARGET_DIR/release/examples/generate_large_portable_package \
+  --size-bytes 107374182400 --seed 1 --output package.gfpb
 
 # File mode: the reference verdict.
-/usr/bin/time -v gf --json portable verify --input package.gfpb --mode full > file.json
+/usr/bin/time -v "$GF" --json portable verify --input package.gfpb --mode full > file.json
 
 # Stream mode: 1 GiB of memory, 2 GiB of scratch, one cgroup holding only gf.
-truncate -s 2G scratch.img && mkfs.ext4 -q scratch.img
-sudo mount -o loop scratch.img tmp && sudo chown "$USER" tmp
+truncate -s 2G scratch.img && sudo mkfs.ext4 -q -F scratch.img
+mkdir -p tmp && sudo mount -o loop scratch.img tmp && sudo chown "$USER" tmp
 cat package.gfpb | sudo systemd-run --scope --quiet -p MemoryMax=1G -p MemorySwapMax=0 \
   --uid="$USER" --setenv=TMPDIR="$PWD/tmp" \
-  /usr/bin/time -v gf --json portable verify --input - --mode full > stream.json
+  /usr/bin/time -v "$GF" --json portable verify --input - --mode full > stream.json
 
 # Same verdict: only `source` differs.
 diff <(jq -S 'del(.source)' file.json) <(jq -S 'del(.source)' stream.json)
