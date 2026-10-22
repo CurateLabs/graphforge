@@ -112,6 +112,68 @@ test("a lineage document validates to its canonical form and digest", () => {
   assert.match(lineage.digest, /^sha256:[0-9a-f]{64}$/);
 });
 
+/** The corpus capabilities document with limits above 2^53, as JSON text. */
+function capabilitiesText(objectBytes, sessionBytes) {
+  const corpus = readJson(
+    "docs",
+    "reference",
+    "hub-publish",
+    "v1",
+    "conformance.json",
+  );
+  const base = corpus.cases
+    .flatMap(({ steps }) => steps)
+    .find(({ request }) => request?.url.endsWith("/.gf/publish"))?.expect.json;
+  const text = JSON.stringify(base);
+  assert.ok(text.includes('"max_object_bytes":67108864'));
+  return text
+    .replace('"max_object_bytes":67108864', `"max_object_bytes":${objectBytes}`)
+    .replace(
+      '"max_session_bytes":268435456',
+      `"max_session_bytes":${sessionBytes}`,
+    );
+}
+
+test("64-bit integers above 2^53 are exact in results and in object arguments", () => {
+  const text = capabilitiesText("9007199254740993", "9007199254740999");
+  const { limits } = protocol.validate_capabilities(text).document;
+  // Neither JSON.parse nor a double can hold this value; a bigint does.
+  assert.equal(JSON.parse(text).limits.max_object_bytes, 9007199254740992);
+  assert.equal(limits.max_object_bytes, 9007199254740993n);
+  assert.equal(limits.max_session_bytes, 9007199254740999n);
+  assert.equal(typeof limits.max_objects, "bigint");
+
+  // A bigint in an object argument reaches the validator with every digit.
+  const object = JSON.parse(text);
+  object.limits.max_object_bytes = 9007199254740993n;
+  object.limits.max_session_bytes = 9007199254740999n;
+  const viaObject = protocol.validate_capabilities(object).document;
+  assert.equal(viaObject.limits.max_object_bytes, 9007199254740993n);
+});
+
+test("an integer above 2^53 in an object argument must be a bigint, never rounded", () => {
+  const object = JSON.parse(capabilitiesText("67108864", "268435456"));
+  object.limits.max_object_bytes = 9007199254740993; // already rounded to ...992
+  const refused = attempt(() => protocol.validate_capabilities(object));
+  assert.ok(!refused.ok);
+  assert.equal(refused.error.code, "invalid_argument");
+  assert.match(refused.error.message, /BigInt/);
+
+  // Safe integers, fractions and a precise bigint are accepted.
+  object.limits.max_object_bytes = 9007199254740991;
+  object.limits.max_session_bytes = 9007199254740991;
+  assert.equal(
+    protocol.validate_capabilities(object).document.limits.max_object_bytes,
+    9007199254740991n,
+  );
+  for (const unsupported of [new Date(0), new Map(), Number.NaN, () => 1]) {
+    const bad = attempt(() =>
+      protocol.validate_capabilities({ ...object, extra: unsupported }),
+    );
+    assert.equal(bad.error.code, "invalid_argument");
+  }
+});
+
 test("failures are structured plain objects with the Rust code", () => {
   const malformed = attempt(() => protocol.validate_manifest("{"));
   assert.ok(!malformed.ok);

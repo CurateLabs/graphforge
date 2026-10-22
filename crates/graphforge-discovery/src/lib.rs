@@ -381,6 +381,7 @@ pub struct ObjectDescriptor {
     /// Content digest and object identity.
     pub digest: Sha256Digest,
     /// Exact object length in bytes.
+    #[cfg_attr(feature = "typescript", tsify(type = "bigint"))]
     pub length: u64,
     /// Lowercase Internet media type without parameters.
     pub media_type: String,

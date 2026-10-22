@@ -3,9 +3,10 @@
 //! Every export converts its JavaScript arguments to JSON text, calls the
 //! matching [`engine`] function, and converts the result back to a plain
 //! object. A document argument is a JSON string (validated byte for byte,
-//! including duplicate-member rejection) or a plain object (serialized with
-//! `JSON.stringify` first). A failure is thrown as a plain
-//! [`engine::ProtocolError`] object.
+//! including duplicate-member rejection) or a plain object, written to JSON
+//! exactly: an integer above 2^53 must be a `BigInt` (a number would already be
+//! rounded, so it is refused). Results are plain objects whose 64-bit integers
+//! are `bigint`. A failure is thrown as a plain [`engine::ProtocolError`] object.
 //!
 //! The TypeScript declarations come from the `Tsify` derives on the Rust wire
 //! types and on this crate's result types; nothing is described by hand beyond
@@ -18,23 +19,27 @@
 pub mod engine;
 
 use engine::{Outcome, ProtocolError};
-use js_sys::{JSON, Uint8Array};
+use js_sys::{Array, BigInt, Object, Reflect, Uint8Array};
 use serde::Serialize;
+use serde_wasm_bindgen::Serializer;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen(typescript_custom_section)]
 const JSON_INPUT: &str = r#"
-/** A JSON document as text (validated byte for byte) or as a plain object. */
+/** A JSON document as text (validated byte for byte) or as a plain object. In an object, an integer above 2^53 must be a `bigint`. */
 export type JsonInput<T> = string | T;
 "#;
 
+/// Every result is a plain object. 64-bit integers are `bigint` (exact; a
+/// JavaScript number cannot hold them), maps are objects, and `None` is `null`.
+fn to_js<T: Serialize>(value: &T) -> Result<JsValue, serde_wasm_bindgen::Error> {
+    value.serialize(&Serializer::json_compatible().serialize_large_number_types_as_bigints(true))
+}
+
 fn error_value(error: &ProtocolError) -> JsValue {
-    serde_json::to_string(error)
-        .ok()
-        .and_then(|text| JSON::parse(&text).ok())
-        .unwrap_or_else(|| JsValue::from_str(&error.message))
+    to_js(error).unwrap_or_else(|_| JsValue::from_str(&error.message))
 }
 
 fn panic_error() -> ProtocolError {
@@ -53,8 +58,7 @@ fn panic_error() -> ProtocolError {
 fn run<T: Serialize>(call: impl FnOnce() -> Outcome<T>) -> Result<JsValue, JsValue> {
     let outcome = catch_unwind(AssertUnwindSafe(call)).unwrap_or_else(|_| Err(panic_error()));
     let value = outcome.map_err(|error| error_value(&error))?;
-    let text = serde_json::to_string(&value).map_err(|_| error_value(&panic_error()))?;
-    JSON::parse(&text)
+    to_js(&value).map_err(|_| error_value(&panic_error()))
 }
 
 /// Like [`run`] for functions whose success carries no value.
@@ -64,17 +68,106 @@ fn run_unit(call: impl FnOnce() -> Outcome<()>) -> Result<(), JsValue> {
         .map_err(|error| error_value(&error))
 }
 
-/// JSON text of a document or argument: a string as is, anything else
-/// serialized with `JSON.stringify`.
+/// Largest integer a JavaScript number holds exactly (2^53 − 1).
+const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
+
+/// Deepest nesting an object argument may have (`serde_json` refuses more).
+const MAX_DEPTH: usize = 128;
+
+const UNSAFE_INTEGER: &str =
+    "an integer outside ±2^53 in an object argument must be a BigInt, or sent in a JSON string";
+
+fn plain_object(value: &JsValue) -> bool {
+    let prototype = Object::get_prototype_of(value);
+    prototype.is_null() || prototype == Object::get_prototype_of(&Object::new())
+}
+
+/// Write `value` as JSON, exactly: a `BigInt` keeps every digit, an integer a
+/// JavaScript number cannot hold exactly is refused rather than rounded, and
+/// anything that is not plain JSON data (functions, `Date`, `Map`, class
+/// instances, `NaN`) is refused rather than silently reshaped.
+fn write_json(value: &JsValue, out: &mut String, depth: usize) -> Outcome<()> {
+    let refuse = |message: &str| Err(ProtocolError::argument(message));
+    if depth > MAX_DEPTH {
+        return refuse("object argument is nested too deeply");
+    }
+    if value.is_null() {
+        out.push_str("null");
+    } else if let Some(flag) = value.as_bool() {
+        out.push_str(if flag { "true" } else { "false" });
+    } else if let Some(text) = value.as_string() {
+        out.push_str(&serde_json::to_string(&text).map_err(|_| ProtocolError::argument("string"))?);
+    } else if value.is_bigint() {
+        let digits = BigInt::from(value.clone())
+            .to_string(10)
+            .map_err(|_| ProtocolError::argument("bigint"))?;
+        out.push_str(&String::from(digits));
+    } else if let Some(number) = value.as_f64() {
+        if !number.is_finite() {
+            return refuse("object argument holds a number that is not finite");
+        }
+        if number.fract() == 0.0 {
+            if number.abs() > MAX_SAFE_INTEGER {
+                return refuse(UNSAFE_INTEGER);
+            }
+            // `-0` is `0` in JSON.
+            #[allow(clippy::cast_possible_truncation)]
+            out.push_str(&(number as i64).to_string());
+        } else if let Some(float) = serde_json::Number::from_f64(number) {
+            out.push_str(&float.to_string());
+        }
+    } else if let Some(array) = value.dyn_ref::<Array>() {
+        out.push('[');
+        for (index, item) in array.iter().enumerate() {
+            if index > 0 {
+                out.push(',');
+            }
+            // `undefined` inside an array is `null`, as in `JSON.stringify`.
+            if item.is_undefined() {
+                out.push_str("null");
+            } else {
+                write_json(&item, out, depth + 1)?;
+            }
+        }
+        out.push(']');
+    } else if value.is_object() && !value.is_function() && plain_object(value) {
+        out.push('{');
+        let mut first = true;
+        for key in Object::keys(value.unchecked_ref::<Object>()).iter() {
+            let member =
+                Reflect::get(value, &key).map_err(|_| ProtocolError::argument("member"))?;
+            // `undefined` members are omitted, as in `JSON.stringify`.
+            if member.is_undefined() {
+                continue;
+            }
+            if !first {
+                out.push(',');
+            }
+            first = false;
+            let key = key.as_string().unwrap_or_default();
+            out.push_str(&serde_json::to_string(&key).map_err(|_| ProtocolError::argument("key"))?);
+            out.push(':');
+            write_json(&member, out, depth + 1)?;
+        }
+        out.push('}');
+    } else {
+        return refuse("argument is not plain JSON data");
+    }
+    Ok(())
+}
+
+/// JSON text of a document or argument: a string as is, anything else written
+/// by [`write_json`].
 fn text(value: &JsValue) -> Outcome<Vec<u8>> {
     if let Some(text) = value.as_string() {
         return Ok(text.into_bytes());
     }
-    JSON::stringify(value)
-        .ok()
-        .and_then(|text| text.as_string())
-        .map(String::into_bytes)
-        .ok_or_else(|| ProtocolError::argument("argument is not a JSON value"))
+    if value.is_undefined() {
+        return Err(ProtocolError::argument("argument is not a JSON value"));
+    }
+    let mut out = String::new();
+    write_json(value, &mut out, 0)?;
+    Ok(out.into_bytes())
 }
 
 /// A string argument. Typed `&str` parameters would hand the JavaScript glue's

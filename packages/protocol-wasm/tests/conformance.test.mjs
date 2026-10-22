@@ -117,19 +117,40 @@ test("preview corpus matches native Rust for every case", () => {
 //
 // The hub-publish corpus drives a stateful reference Hub over HTTP, which does
 // not exist in the WebAssembly build. What does exist is every control document
-// the exchange carries. For each one that a step can show to be valid or
-// invalid on its own, the module must agree with the recorded response:
-//   - a document sent in a request that the Hub accepted must validate, and
-//     the commitment recomputed from the open and commit requests must equal
-//     the one the client declared;
-//   - a document the module rejects must have been refused by the Hub with the
-//     same code;
-//   - documents the Hub returned (capabilities, receipts, operation statuses,
-//     refs and their ETag revision) must validate.
+// the exchange carries. `crates/graphforge-protocol-wasm/tests/hub_documents.rs`
+// runs each of them (and a mutated copy of one of each kind) through the native
+// validators and records the verdict, `accept` or the error code, in
+// `hub-publish-documents.json`. The module must reproduce every verdict, so it
+// can neither accept what native Rust refuses nor refuse what it accepts.
 
-const OWNER_REPOSITORY = /^https:\/\/hub\.example\/([^/]+)\/([^/]+)\/\.gf\//;
-const SUCCESS = (status) => status >= 200 && status < 300;
-const hasVariable = (value) => JSON.stringify(value).includes("${");
+const documents = readJson(
+  "crates",
+  "graphforge-protocol-wasm",
+  "tests",
+  "hub-publish-documents.json",
+);
+
+const DOCUMENT_VALIDATORS = {
+  capabilities: protocol.validate_capabilities,
+  session_request: protocol.validate_session_request,
+  commit_request: protocol.validate_commit_request,
+  operation_status: protocol.validate_operation_status,
+  receipt: protocol.validate_receipt,
+  refs: protocol.validate_refs,
+};
+
+const at = (value, pointer) =>
+  pointer
+    .split("/")
+    .slice(1)
+    .reduce((node, key) => node[key], value);
+
+function mutated(document, { set = {}, remove = [] }) {
+  const copy = structuredClone(document);
+  Object.assign(copy, set);
+  for (const name of remove) delete copy[name];
+  return copy;
+}
 
 const baseCapabilities = (() => {
   for (const { steps } of hubPublish.cases) {
@@ -153,156 +174,128 @@ function capabilitiesFor(owner, repository) {
   };
 }
 
-const tally = { accepted: 0, refused: 0, returned: 0, commitments: 0 };
-
-/** The module's verdict on a request document, compared with the recorded response. */
-function checkRequestDocument(label, validate, document, expect) {
-  const outcome = attempt(validate);
-  if (SUCCESS(expect.status)) {
-    assert.ok(
-      outcome.ok,
-      `${label}: ${outcome.ok ? "" : JSON.stringify(outcome.error)}`,
+/** Run the export `entry.kind` names on the corpus document it points at. */
+function replay(entry) {
+  const { steps } = hubPublish.cases.find(({ name }) => name === entry.case);
+  const step = steps[entry.step];
+  const document = at(step, entry.pointer);
+  if (entry.kind === "commit_manifest") {
+    const [, owner, repository] =
+      /^https:\/\/hub\.example\/([^/]+)\/([^/]+)\//.exec(step.request.url);
+    const open = steps[entry.open_step].request.json;
+    return attempt(() =>
+      protocol.check_commit_manifest({
+        manifest: protocol.validate_manifest(document.manifest).document,
+        repository: { owner, repository },
+        capabilities: capabilitiesFor(owner, repository),
+        inventory: open.objects,
+        refs: document.refs,
+      }),
     );
-    tally.accepted += 1;
-  } else if (!outcome.ok) {
-    assert.equal(
-      outcome.error.code,
-      expect.error,
-      `${label}: ${JSON.stringify(outcome.error)}`,
-    );
-    tally.refused += 1;
   }
-  return outcome;
+  const input = entry.mutation ? mutated(document, entry.mutation) : document;
+  return attempt(() => DOCUMENT_VALIDATORS[entry.kind](input));
 }
 
-test("hub-publish v1 corpus documents match native Rust for every case", () => {
+test("hub-publish v1 corpus documents have the recorded native verdict, accepted or refused", () => {
   assert.equal(hubPublish.cases.length, 30);
+  assert.equal(documents.format, "graphforge-protocol-wasm-hub-documents/1");
+  const seen = { accept: 0, refused: 0, mutated: 0 };
+  const kinds = new Set();
+  for (const entry of documents.documents) {
+    const label = `${entry.case}#${entry.step} ${entry.kind}${
+      entry.mutation ? ` ${JSON.stringify(entry.mutation)}` : ""
+    }`;
+    const outcome = replay(entry);
+    if (entry.outcome === "accept") {
+      assert.ok(
+        outcome.ok,
+        `${label}: native accepts, module refused ${outcome.ok ? "" : JSON.stringify(outcome.error)}`,
+      );
+      seen.accept += 1;
+    } else {
+      assert.ok(
+        !outcome.ok,
+        `${label}: native refuses with ${entry.outcome}, module accepted`,
+      );
+      assert.equal(outcome.error.code, entry.outcome, label);
+      seen.refused += 1;
+    }
+    if (entry.mutation) seen.mutated += 1;
+    kinds.add(entry.kind);
+  }
+  // Every kind of document is replayed, and refusals are among them.
+  assert.equal(kinds.size, 7, [...kinds].join());
+  assert.ok(
+    seen.accept > 150 && seen.refused >= 10 && seen.mutated >= 10,
+    JSON.stringify(seen),
+  );
+  console.log("hub-publish documents:", JSON.stringify(seen));
+});
+
+test("hub-publish v1 request commitments and refs revisions equal the declared ones", () => {
+  let commitments = 0;
   for (const { name, steps } of hubPublish.cases) {
     const sessions = new Map(); // captured session variable -> open request document
     for (const [index, { request, expect }] of steps.entries()) {
       if (!request) continue;
-      const label = `${name}#${index}`;
-      const location = OWNER_REPOSITORY.exec(request.url);
-      const body = request.json;
       const target = request.url.replace(
         /^https:\/\/hub\.example\/[^/]+\/[^/]+/,
         "",
       );
-
+      const body = request.json;
       if (
-        request.method === "GET" &&
-        target === "/.gf/publish" &&
-        expect.json
-      ) {
-        protocol.validate_capabilities(expect.json);
-        tally.returned += 1;
-      } else if (
         request.method === "GET" &&
         target === "/.gf/refs" &&
         expect.body_text
       ) {
         const { revision } = protocol.validate_refs(expect.body_text);
-        assert.equal(
-          `"${revision}"`,
-          expect.headers.etag,
-          `${label}: ETag is the refs revision`,
-        );
-        tally.returned += 1;
-      } else if (
-        request.method === "GET" &&
-        target.startsWith("/.gf/publish/operations/") &&
-        expect.json
-      ) {
-        protocol.validate_operation_status(expect.json);
-        tally.returned += 1;
+        assert.equal(`"${revision}"`, expect.headers.etag, `${name}#${index}`);
       } else if (
         request.method === "POST" &&
         target === "/.gf/publish/sessions" &&
         body &&
-        !hasVariable(body)
+        !JSON.stringify(body).includes("${") &&
+        expect.status >= 200 &&
+        expect.status < 300
       ) {
-        const outcome = checkRequestDocument(
-          label,
-          () => protocol.validate_session_request(body),
-          body,
-          expect,
-        );
-        if (outcome.ok && SUCCESS(expect.status)) {
-          for (const variable of Object.keys(expect.capture ?? {})) {
-            if (expect.capture[variable] === "/session_id")
-              sessions.set(variable, body);
-          }
+        for (const [variable, pointer] of Object.entries(
+          expect.capture ?? {},
+        )) {
+          if (pointer === "/session_id") sessions.set(variable, body);
         }
       } else if (
         request.method === "POST" &&
         target.endsWith("/commit") &&
         body &&
-        !hasVariable(body)
+        !JSON.stringify(body).includes("${") &&
+        expect.status >= 200 &&
+        expect.status < 300
       ) {
-        const [, owner, repository] = location;
-        const identity = { owner, repository };
+        const [, owner, repository] =
+          /^https:\/\/hub\.example\/([^/]+)\/([^/]+)\//.exec(request.url);
         const variable = /\/sessions\/\$\{([^}]+)\}\/commit$/.exec(target)?.[1];
         const open = sessions.get(variable);
-        const outcome = checkRequestDocument(
-          label,
-          () => protocol.validate_commit_request(body),
-          body,
-          expect,
-        );
-        if (outcome.ok && open) {
-          const manifest = protocol.validate_manifest(body.manifest);
-          const check = attempt(() =>
-            protocol.check_commit_manifest({
-              manifest: manifest.document,
-              repository: identity,
-              capabilities: capabilitiesFor(owner, repository),
-              inventory: open.objects,
-              refs: body.refs,
-            }),
-          );
-          if (SUCCESS(expect.status)) {
-            assert.ok(
-              check.ok,
-              `${label}: ${check.ok ? "" : JSON.stringify(check.error)}`,
-            );
-            const commitment = protocol.request_commitment({
-              rewrite: body.rewrite ?? false,
-              prune: body.prune ?? false,
-              repository: identity,
-              intent_digest: open.intent_digest,
-              objects: open.objects,
-              manifest_validator: manifest.digest,
-              refs: body.refs,
-              expected_revision: body.expected_revision,
-            });
-            assert.equal(
-              commitment,
-              open.request_commitment,
-              `${label}: request commitment`,
-            );
-            tally.commitments += 1;
-          } else if (!check.ok) {
-            assert.equal(
-              check.error.code,
-              expect.error,
-              `${label}: ${JSON.stringify(check.error)}`,
-            );
-          }
-        }
-        if (SUCCESS(expect.status) && expect.json?.receipt) {
-          protocol.validate_receipt(expect.json.receipt);
-          tally.returned += 1;
-        }
+        if (!open) continue;
+        const commitment = protocol.request_commitment({
+          rewrite: body.rewrite ?? false,
+          prune: body.prune ?? false,
+          repository: { owner, repository },
+          intent_digest: open.intent_digest,
+          objects: open.objects,
+          manifest_validator: protocol.validate_manifest(body.manifest).digest,
+          refs: body.refs,
+          expected_revision: body.expected_revision,
+        });
+        assert.equal(commitment, open.request_commitment, `${name}#${index}`);
+        commitments += 1;
       }
     }
   }
-  console.log("hub-publish documents:", JSON.stringify(tally));
-  // The replay must exercise every kind of document, not pass vacuously.
-  assert.ok(tally.accepted > 60, JSON.stringify(tally));
-  assert.ok(tally.commitments > 20, JSON.stringify(tally));
-  assert.ok(tally.returned > 20, JSON.stringify(tally));
-  assert.ok(tally.refused > 0, JSON.stringify(tally));
+  assert.ok(commitments > 20, `${commitments} commitments`);
 });
+
+const SUCCESS = (status) => status >= 200 && status < 300;
 
 test("a published research lineage binds its manifest and resolves each Version package", () => {
   let bound = 0;

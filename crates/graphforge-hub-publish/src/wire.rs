@@ -178,6 +178,16 @@ where
     T::deserialize(deserializer).map(Some)
 }
 
+// A required member that may be `null`: serde would otherwise read an absent
+// `Option` member as `None`.
+fn deserialize_nullable<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)
+}
+
 /// Upload bounds a Hub advertises. Every bound is enforced from declared
 /// lengths before any byte is buffered.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -185,12 +195,16 @@ where
 #[serde(deny_unknown_fields)]
 pub struct PublishLimits {
     /// Largest declared length of one object.
+    #[cfg_attr(feature = "typescript", tsify(type = "bigint"))]
     pub max_object_bytes: u64,
     /// Largest number of objects in one session.
+    #[cfg_attr(feature = "typescript", tsify(type = "bigint"))]
     pub max_objects: u64,
     /// Largest sum of declared lengths in one session.
+    #[cfg_attr(feature = "typescript", tsify(type = "bigint"))]
     pub max_session_bytes: u64,
     /// Largest body of one upload `PUT`.
+    #[cfg_attr(feature = "typescript", tsify(type = "bigint"))]
     pub max_chunk_bytes: u64,
     /// Preferred positive chunk size, at most `max_chunk_bytes`.
     #[serde(
@@ -198,8 +212,10 @@ pub struct PublishLimits {
         skip_serializing_if = "Option::is_none",
         deserialize_with = "deserialize_present"
     )]
+    #[cfg_attr(feature = "typescript", tsify(type = "bigint", optional))]
     pub preferred_chunk_bytes: Option<u64>,
     /// Largest control-plane JSON request body.
+    #[cfg_attr(feature = "typescript", tsify(type = "bigint"))]
     pub max_document_bytes: u64,
 }
 
@@ -381,6 +397,7 @@ pub struct ObjectDeclaration {
     /// Canonical `sha256:<64 lowercase hex>` content digest.
     pub digest: String,
     /// Exact byte length.
+    #[cfg_attr(feature = "typescript", tsify(type = "bigint"))]
     pub length: u64,
     /// Media type, as the manifest lists it.
     pub media_type: String,
@@ -505,11 +522,13 @@ pub struct UploadTarget {
     /// Object digest.
     pub digest: String,
     /// Declared length.
+    #[cfg_attr(feature = "typescript", tsify(type = "bigint"))]
     pub length: u64,
     /// Capability URL for `HEAD` and `PUT`. Treat as a secret: never log it,
     /// and never send the publish token to it.
     pub upload_url: String,
     /// Bytes already received and retained.
+    #[cfg_attr(feature = "typescript", tsify(type = "bigint"))]
     pub received: u64,
     /// Per-object chunk preference, overriding the capabilities preference.
     #[serde(
@@ -517,6 +536,7 @@ pub struct UploadTarget {
         skip_serializing_if = "Option::is_none",
         deserialize_with = "deserialize_present"
     )]
+    #[cfg_attr(feature = "typescript", tsify(type = "bigint", optional))]
     pub chunk_bytes: Option<u64>,
 }
 
@@ -617,7 +637,9 @@ pub struct PublishReceipt {
     pub manifest_validator: String,
     /// Refs advanced to the manifest.
     pub refs: Vec<String>,
-    /// Revision the commit required (`null`: created the repository).
+    /// Revision the commit required (`null`: created the repository). The
+    /// member is required even when `null`.
+    #[serde(deserialize_with = "deserialize_nullable")]
     pub previous_revision: Option<String>,
     /// Repository revision after the commit: the canonical digest of `.gf/refs`.
     pub revision: String,
@@ -756,8 +778,10 @@ pub struct UploadStatus {
     /// Object digest.
     pub digest: String,
     /// Declared length.
+    #[cfg_attr(feature = "typescript", tsify(type = "bigint"))]
     pub length: u64,
     /// Bytes received and retained; equals `length` once verified.
+    #[cfg_attr(feature = "typescript", tsify(type = "bigint"))]
     pub received: u64,
 }
 
@@ -797,9 +821,11 @@ pub struct DeviceAuthorizationResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verification_uri_complete: Option<String>,
     /// Seconds until `device_code` expires.
+    #[cfg_attr(feature = "typescript", tsify(type = "bigint"))]
     pub expires_in: u64,
     /// Minimum seconds between token polls.
     #[serde(default = "default_interval")]
+    #[cfg_attr(feature = "typescript", tsify(type = "bigint"))]
     pub interval: u64,
 }
 
@@ -816,6 +842,7 @@ pub struct TokenResponse {
     /// Always `Bearer`.
     pub token_type: String,
     /// Seconds until the token expires.
+    #[cfg_attr(feature = "typescript", tsify(type = "bigint"))]
     pub expires_in: u64,
     /// Granted scope.
     pub scope: String,

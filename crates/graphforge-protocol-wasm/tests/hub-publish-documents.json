@@ -1,0 +1,1570 @@
+{
+  "corpus": "docs/reference/hub-publish/v1/conformance.json",
+  "documents": [
+    {
+      "case": "missing-native-package-inventory-refused",
+      "kind": "session_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 1
+    },
+    {
+      "case": "missing-native-package-inventory-refused",
+      "kind": "commit_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 5
+    },
+    {
+      "case": "missing-native-package-inventory-refused",
+      "kind": "commit_manifest",
+      "open_step": 1,
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 5
+    },
+    {
+      "case": "missing-native-package-inventory-refused",
+      "kind": "receipt",
+      "outcome": "accept",
+      "pointer": "/expect/json/receipt",
+      "step": 5
+    },
+    {
+      "case": "missing-native-package-inventory-refused",
+      "kind": "session_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 6
+    },
+    {
+      "case": "missing-native-package-inventory-refused",
+      "kind": "commit_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 9
+    },
+    {
+      "case": "missing-native-package-inventory-refused",
+      "kind": "commit_manifest",
+      "open_step": 6,
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 9
+    },
+    {
+      "case": "missing-native-package-inventory-refused",
+      "kind": "refs",
+      "outcome": "accept",
+      "pointer": "/expect/body_text",
+      "step": 10
+    },
+    {
+      "case": "retained-native-package-survives-prune",
+      "kind": "session_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 1
+    },
+    {
+      "case": "retained-native-package-survives-prune",
+      "kind": "commit_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 5
+    },
+    {
+      "case": "retained-native-package-survives-prune",
+      "kind": "commit_manifest",
+      "open_step": 1,
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 5
+    },
+    {
+      "case": "retained-native-package-survives-prune",
+      "kind": "receipt",
+      "outcome": "accept",
+      "pointer": "/expect/json/receipt",
+      "step": 5
+    },
+    {
+      "case": "retained-native-package-survives-prune",
+      "kind": "session_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 6
+    },
+    {
+      "case": "retained-native-package-survives-prune",
+      "kind": "commit_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 9
+    },
+    {
+      "case": "retained-native-package-survives-prune",
+      "kind": "commit_manifest",
+      "open_step": 6,
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 9
+    },
+    {
+      "case": "retained-native-package-survives-prune",
+      "kind": "receipt",
+      "outcome": "accept",
+      "pointer": "/expect/json/receipt",
+      "step": 9
+    },
+    {
+      "case": "retained-native-package-survives-prune",
+      "kind": "refs",
+      "outcome": "accept",
+      "pointer": "/expect/body_text",
+      "step": 10
+    },
+    {
+      "case": "explicit-rewrite-prune-grace",
+      "kind": "session_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 1
+    },
+    {
+      "case": "explicit-rewrite-prune-grace",
+      "kind": "commit_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 5
+    },
+    {
+      "case": "explicit-rewrite-prune-grace",
+      "kind": "commit_manifest",
+      "open_step": 1,
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 5
+    },
+    {
+      "case": "explicit-rewrite-prune-grace",
+      "kind": "receipt",
+      "outcome": "accept",
+      "pointer": "/expect/json/receipt",
+      "step": 5
+    },
+    {
+      "case": "explicit-rewrite-prune-grace",
+      "kind": "session_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 6
+    },
+    {
+      "case": "explicit-rewrite-prune-grace",
+      "kind": "commit_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 9
+    },
+    {
+      "case": "explicit-rewrite-prune-grace",
+      "kind": "commit_manifest",
+      "open_step": 6,
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 9
+    },
+    {
+      "case": "explicit-rewrite-prune-grace",
+      "kind": "receipt",
+      "outcome": "accept",
+      "pointer": "/expect/json/receipt",
+      "step": 9
+    },
+    {
+      "case": "explicit-rewrite-prune-grace",
+      "kind": "session_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 10
+    },
+    {
+      "case": "explicit-rewrite-prune-grace",
+      "kind": "commit_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 13
+    },
+    {
+      "case": "explicit-rewrite-prune-grace",
+      "kind": "commit_manifest",
+      "open_step": 10,
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 13
+    },
+    {
+      "case": "explicit-rewrite-prune-grace",
+      "kind": "receipt",
+      "outcome": "accept",
+      "pointer": "/expect/json/receipt",
+      "step": 13
+    },
+    {
+      "case": "explicit-rewrite-prune-grace",
+      "kind": "refs",
+      "outcome": "accept",
+      "pointer": "/expect/body_text",
+      "step": 14
+    },
+    {
+      "case": "rewrite-stale-lease-refused",
+      "kind": "session_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 1
+    },
+    {
+      "case": "rewrite-stale-lease-refused",
+      "kind": "commit_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 5
+    },
+    {
+      "case": "rewrite-stale-lease-refused",
+      "kind": "commit_manifest",
+      "open_step": 1,
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 5
+    },
+    {
+      "case": "rewrite-stale-lease-refused",
+      "kind": "receipt",
+      "outcome": "accept",
+      "pointer": "/expect/json/receipt",
+      "step": 5
+    },
+    {
+      "case": "rewrite-stale-lease-refused",
+      "kind": "session_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 6
+    },
+    {
+      "case": "rewrite-stale-lease-refused",
+      "kind": "commit_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 9
+    },
+    {
+      "case": "rewrite-stale-lease-refused",
+      "kind": "commit_manifest",
+      "open_step": 6,
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 9
+    },
+    {
+      "case": "rewrite-stale-lease-refused",
+      "kind": "receipt",
+      "outcome": "accept",
+      "pointer": "/expect/json/receipt",
+      "step": 9
+    },
+    {
+      "case": "rewrite-stale-lease-refused",
+      "kind": "session_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 10
+    },
+    {
+      "case": "rewrite-stale-lease-refused",
+      "kind": "commit_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 13
+    },
+    {
+      "case": "rewrite-stale-lease-refused",
+      "kind": "commit_manifest",
+      "open_step": 10,
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 13
+    },
+    {
+      "case": "rewrite-stale-lease-refused",
+      "kind": "refs",
+      "outcome": "accept",
+      "pointer": "/expect/body_text",
+      "step": 14
+    },
+    {
+      "case": "prune-branch-origin-refused",
+      "kind": "session_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 1
+    },
+    {
+      "case": "prune-branch-origin-refused",
+      "kind": "commit_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 5
+    },
+    {
+      "case": "prune-branch-origin-refused",
+      "kind": "commit_manifest",
+      "open_step": 1,
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 5
+    },
+    {
+      "case": "prune-branch-origin-refused",
+      "kind": "receipt",
+      "outcome": "accept",
+      "pointer": "/expect/json/receipt",
+      "step": 5
+    },
+    {
+      "case": "prune-branch-origin-refused",
+      "kind": "session_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 6
+    },
+    {
+      "case": "prune-branch-origin-refused",
+      "kind": "commit_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 9
+    },
+    {
+      "case": "prune-branch-origin-refused",
+      "kind": "commit_manifest",
+      "open_step": 6,
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 9
+    },
+    {
+      "case": "prune-branch-origin-refused",
+      "kind": "receipt",
+      "outcome": "accept",
+      "pointer": "/expect/json/receipt",
+      "step": 9
+    },
+    {
+      "case": "prune-branch-origin-refused",
+      "kind": "session_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 10
+    },
+    {
+      "case": "prune-branch-origin-refused",
+      "kind": "commit_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 13
+    },
+    {
+      "case": "prune-branch-origin-refused",
+      "kind": "commit_manifest",
+      "open_step": 10,
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 13
+    },
+    {
+      "case": "prune-branch-origin-refused",
+      "kind": "refs",
+      "outcome": "accept",
+      "pointer": "/expect/body_text",
+      "step": 14
+    },
+    {
+      "case": "prune-proposal-source-refused",
+      "kind": "session_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 1
+    },
+    {
+      "case": "prune-proposal-source-refused",
+      "kind": "commit_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 5
+    },
+    {
+      "case": "prune-proposal-source-refused",
+      "kind": "commit_manifest",
+      "open_step": 1,
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 5
+    },
+    {
+      "case": "prune-proposal-source-refused",
+      "kind": "receipt",
+      "outcome": "accept",
+      "pointer": "/expect/json/receipt",
+      "step": 5
+    },
+    {
+      "case": "prune-proposal-source-refused",
+      "kind": "session_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 6
+    },
+    {
+      "case": "prune-proposal-source-refused",
+      "kind": "commit_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 9
+    },
+    {
+      "case": "prune-proposal-source-refused",
+      "kind": "commit_manifest",
+      "open_step": 6,
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 9
+    },
+    {
+      "case": "prune-proposal-source-refused",
+      "kind": "receipt",
+      "outcome": "accept",
+      "pointer": "/expect/json/receipt",
+      "step": 9
+    },
+    {
+      "case": "prune-proposal-source-refused",
+      "kind": "session_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 10
+    },
+    {
+      "case": "prune-proposal-source-refused",
+      "kind": "commit_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 14
+    },
+    {
+      "case": "prune-proposal-source-refused",
+      "kind": "commit_manifest",
+      "open_step": 10,
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 14
+    },
+    {
+      "case": "prune-proposal-source-refused",
+      "kind": "refs",
+      "outcome": "accept",
+      "pointer": "/expect/body_text",
+      "step": 15
+    },
+    {
+      "case": "retained-version-package-strip-refused",
+      "kind": "session_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 1
+    },
+    {
+      "case": "retained-version-package-strip-refused",
+      "kind": "commit_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 5
+    },
+    {
+      "case": "retained-version-package-strip-refused",
+      "kind": "commit_manifest",
+      "open_step": 1,
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 5
+    },
+    {
+      "case": "retained-version-package-strip-refused",
+      "kind": "receipt",
+      "outcome": "accept",
+      "pointer": "/expect/json/receipt",
+      "step": 5
+    },
+    {
+      "case": "retained-version-package-strip-refused",
+      "kind": "session_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 6
+    },
+    {
+      "case": "retained-version-package-strip-refused",
+      "kind": "commit_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 9
+    },
+    {
+      "case": "retained-version-package-strip-refused",
+      "kind": "commit_manifest",
+      "open_step": 6,
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 9
+    },
+    {
+      "case": "retained-version-package-strip-refused",
+      "kind": "refs",
+      "outcome": "accept",
+      "pointer": "/expect/body_text",
+      "step": 10
+    },
+    {
+      "case": "structural-fast-forward",
+      "kind": "session_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 1
+    },
+    {
+      "case": "structural-fast-forward",
+      "kind": "commit_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 5
+    },
+    {
+      "case": "structural-fast-forward",
+      "kind": "commit_manifest",
+      "open_step": 1,
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 5
+    },
+    {
+      "case": "structural-fast-forward",
+      "kind": "receipt",
+      "outcome": "accept",
+      "pointer": "/expect/json/receipt",
+      "step": 5
+    },
+    {
+      "case": "structural-fast-forward",
+      "kind": "session_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 6
+    },
+    {
+      "case": "structural-fast-forward",
+      "kind": "commit_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 10
+    },
+    {
+      "case": "structural-fast-forward",
+      "kind": "commit_manifest",
+      "open_step": 6,
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 10
+    },
+    {
+      "case": "structural-fast-forward",
+      "kind": "receipt",
+      "outcome": "accept",
+      "pointer": "/expect/json/receipt",
+      "step": 10
+    },
+    {
+      "case": "structural-fast-forward",
+      "kind": "refs",
+      "outcome": "accept",
+      "pointer": "/expect/body_text",
+      "step": 11
+    },
+    {
+      "case": "structural-divergence-refused",
+      "kind": "session_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 1
+    },
+    {
+      "case": "structural-divergence-refused",
+      "kind": "commit_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 5
+    },
+    {
+      "case": "structural-divergence-refused",
+      "kind": "commit_manifest",
+      "open_step": 1,
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 5
+    },
+    {
+      "case": "structural-divergence-refused",
+      "kind": "receipt",
+      "outcome": "accept",
+      "pointer": "/expect/json/receipt",
+      "step": 5
+    },
+    {
+      "case": "structural-divergence-refused",
+      "kind": "session_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 6
+    },
+    {
+      "case": "structural-divergence-refused",
+      "kind": "commit_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 10
+    },
+    {
+      "case": "structural-divergence-refused",
+      "kind": "commit_manifest",
+      "open_step": 6,
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 10
+    },
+    {
+      "case": "structural-divergence-refused",
+      "kind": "refs",
+      "outcome": "accept",
+      "pointer": "/expect/body_text",
+      "step": 11
+    },
+    {
+      "case": "stale-lease-precedes-ancestry-refusal",
+      "kind": "session_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 1
+    },
+    {
+      "case": "stale-lease-precedes-ancestry-refusal",
+      "kind": "commit_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 5
+    },
+    {
+      "case": "stale-lease-precedes-ancestry-refusal",
+      "kind": "commit_manifest",
+      "open_step": 1,
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 5
+    },
+    {
+      "case": "stale-lease-precedes-ancestry-refusal",
+      "kind": "receipt",
+      "outcome": "accept",
+      "pointer": "/expect/json/receipt",
+      "step": 5
+    },
+    {
+      "case": "stale-lease-precedes-ancestry-refusal",
+      "kind": "session_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 6
+    },
+    {
+      "case": "stale-lease-precedes-ancestry-refusal",
+      "kind": "commit_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 10
+    },
+    {
+      "case": "stale-lease-precedes-ancestry-refusal",
+      "kind": "commit_manifest",
+      "open_step": 6,
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 10
+    },
+    {
+      "case": "stale-lease-precedes-ancestry-refusal",
+      "kind": "refs",
+      "outcome": "accept",
+      "pointer": "/expect/body_text",
+      "step": 11
+    },
+    {
+      "case": "capabilities-document",
+      "kind": "capabilities",
+      "outcome": "accept",
+      "pointer": "/expect/json",
+      "step": 0
+    },
+    {
+      "case": "negotiated-capabilities",
+      "kind": "capabilities",
+      "outcome": "accept",
+      "pointer": "/expect/json",
+      "step": 0
+    },
+    {
+      "case": "negotiated-capabilities",
+      "kind": "session_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 5
+    },
+    {
+      "case": "large-object-async-commit",
+      "kind": "session_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 1
+    },
+    {
+      "case": "large-object-async-commit",
+      "kind": "commit_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 3
+    },
+    {
+      "case": "large-object-async-commit",
+      "kind": "commit_manifest",
+      "open_step": 1,
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 3
+    },
+    {
+      "case": "large-object-async-commit",
+      "kind": "operation_status",
+      "outcome": "accept",
+      "pointer": "/expect/json",
+      "step": 5
+    },
+    {
+      "case": "large-object-async-commit",
+      "kind": "refs",
+      "outcome": "accept",
+      "pointer": "/expect/body_text",
+      "step": 6
+    },
+    {
+      "case": "create-and-read-back",
+      "kind": "session_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 1
+    },
+    {
+      "case": "create-and-read-back",
+      "kind": "commit_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 3
+    },
+    {
+      "case": "create-and-read-back",
+      "kind": "commit_manifest",
+      "open_step": 1,
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 3
+    },
+    {
+      "case": "create-and-read-back",
+      "kind": "receipt",
+      "outcome": "accept",
+      "pointer": "/expect/json/receipt",
+      "step": 3
+    },
+    {
+      "case": "create-and-read-back",
+      "kind": "refs",
+      "outcome": "accept",
+      "pointer": "/expect/body_text",
+      "step": 4
+    },
+    {
+      "case": "same-publication-twice-returns-original-receipt",
+      "kind": "session_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 1
+    },
+    {
+      "case": "same-publication-twice-returns-original-receipt",
+      "kind": "commit_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 3
+    },
+    {
+      "case": "same-publication-twice-returns-original-receipt",
+      "kind": "commit_manifest",
+      "open_step": 1,
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 3
+    },
+    {
+      "case": "same-publication-twice-returns-original-receipt",
+      "kind": "receipt",
+      "outcome": "accept",
+      "pointer": "/expect/json/receipt",
+      "step": 3
+    },
+    {
+      "case": "same-publication-twice-returns-original-receipt",
+      "kind": "session_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 4
+    },
+    {
+      "case": "same-publication-twice-returns-original-receipt",
+      "kind": "commit_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 5
+    },
+    {
+      "case": "same-publication-twice-returns-original-receipt",
+      "kind": "commit_manifest",
+      "open_step": 1,
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 5
+    },
+    {
+      "case": "same-publication-twice-returns-original-receipt",
+      "kind": "receipt",
+      "outcome": "accept",
+      "pointer": "/expect/json/receipt",
+      "step": 5
+    },
+    {
+      "case": "same-publication-twice-returns-original-receipt",
+      "kind": "refs",
+      "outcome": "accept",
+      "pointer": "/expect/body_text",
+      "step": 6
+    },
+    {
+      "case": "operation-status-returns-intent-and-original-receipt",
+      "kind": "session_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 2
+    },
+    {
+      "case": "operation-status-returns-intent-and-original-receipt",
+      "kind": "commit_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 4
+    },
+    {
+      "case": "operation-status-returns-intent-and-original-receipt",
+      "kind": "commit_manifest",
+      "open_step": 2,
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 4
+    },
+    {
+      "case": "operation-status-returns-intent-and-original-receipt",
+      "kind": "receipt",
+      "outcome": "accept",
+      "pointer": "/expect/json/receipt",
+      "step": 4
+    },
+    {
+      "case": "operation-status-returns-intent-and-original-receipt",
+      "kind": "operation_status",
+      "outcome": "accept",
+      "pointer": "/expect/json",
+      "step": 5
+    },
+    {
+      "case": "changed-content-same-operation-conflicts",
+      "kind": "session_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 1
+    },
+    {
+      "case": "changed-content-same-operation-conflicts",
+      "kind": "commit_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 3
+    },
+    {
+      "case": "changed-content-same-operation-conflicts",
+      "kind": "commit_manifest",
+      "open_step": 1,
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 3
+    },
+    {
+      "case": "changed-content-same-operation-conflicts",
+      "kind": "receipt",
+      "outcome": "accept",
+      "pointer": "/expect/json/receipt",
+      "step": 3
+    },
+    {
+      "case": "changed-content-same-operation-conflicts",
+      "kind": "session_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 4
+    },
+    {
+      "case": "changed-content-same-operation-conflicts",
+      "kind": "refs",
+      "outcome": "accept",
+      "pointer": "/expect/body_text",
+      "step": 5
+    },
+    {
+      "case": "commit-content-must-match-commitment",
+      "kind": "session_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 1
+    },
+    {
+      "case": "commit-content-must-match-commitment",
+      "kind": "commit_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 3
+    },
+    {
+      "case": "commit-content-must-match-commitment",
+      "kind": "commit_manifest",
+      "open_step": 1,
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 3
+    },
+    {
+      "case": "new-attempt-supersedes-open-session",
+      "kind": "session_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 1
+    },
+    {
+      "case": "new-attempt-supersedes-open-session",
+      "kind": "session_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 3
+    },
+    {
+      "case": "new-attempt-supersedes-open-session",
+      "kind": "commit_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 6
+    },
+    {
+      "case": "new-attempt-supersedes-open-session",
+      "kind": "commit_manifest",
+      "open_step": 1,
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 6
+    },
+    {
+      "case": "new-attempt-supersedes-open-session",
+      "kind": "commit_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 7
+    },
+    {
+      "case": "new-attempt-supersedes-open-session",
+      "kind": "commit_manifest",
+      "open_step": 3,
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 7
+    },
+    {
+      "case": "new-attempt-supersedes-open-session",
+      "kind": "receipt",
+      "outcome": "accept",
+      "pointer": "/expect/json/receipt",
+      "step": 7
+    },
+    {
+      "case": "new-attempt-supersedes-open-session",
+      "kind": "refs",
+      "outcome": "accept",
+      "pointer": "/expect/body_text",
+      "step": 8
+    },
+    {
+      "case": "interrupted-upload-resumes",
+      "kind": "session_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 1
+    },
+    {
+      "case": "interrupted-upload-resumes",
+      "kind": "session_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 5
+    },
+    {
+      "case": "interrupted-upload-resumes",
+      "kind": "commit_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 7
+    },
+    {
+      "case": "interrupted-upload-resumes",
+      "kind": "commit_manifest",
+      "open_step": 1,
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 7
+    },
+    {
+      "case": "interrupted-upload-resumes",
+      "kind": "receipt",
+      "outcome": "accept",
+      "pointer": "/expect/json/receipt",
+      "step": 7
+    },
+    {
+      "case": "interrupted-upload-resumes",
+      "kind": "refs",
+      "outcome": "accept",
+      "pointer": "/expect/body_text",
+      "step": 8
+    },
+    {
+      "case": "corrupt-upload-refused-before-ref-moves",
+      "kind": "session_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 1
+    },
+    {
+      "case": "corrupt-upload-refused-before-ref-moves",
+      "kind": "commit_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 3
+    },
+    {
+      "case": "corrupt-upload-refused-before-ref-moves",
+      "kind": "commit_manifest",
+      "open_step": 1,
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 3
+    },
+    {
+      "case": "corrupt-upload-refused-before-ref-moves",
+      "kind": "receipt",
+      "outcome": "accept",
+      "pointer": "/expect/json/receipt",
+      "step": 3
+    },
+    {
+      "case": "corrupt-upload-refused-before-ref-moves",
+      "kind": "session_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 4
+    },
+    {
+      "case": "corrupt-upload-refused-before-ref-moves",
+      "kind": "commit_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 7
+    },
+    {
+      "case": "corrupt-upload-refused-before-ref-moves",
+      "kind": "commit_manifest",
+      "open_step": 4,
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 7
+    },
+    {
+      "case": "corrupt-upload-refused-before-ref-moves",
+      "kind": "refs",
+      "outcome": "accept",
+      "pointer": "/expect/body_text",
+      "step": 8
+    },
+    {
+      "case": "object-corrupted-after-upload-refuses-commit",
+      "kind": "session_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 1
+    },
+    {
+      "case": "object-corrupted-after-upload-refuses-commit",
+      "kind": "commit_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 4
+    },
+    {
+      "case": "object-corrupted-after-upload-refuses-commit",
+      "kind": "commit_manifest",
+      "open_step": 1,
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 4
+    },
+    {
+      "case": "stale-expected-revision-conflicts",
+      "kind": "session_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 1
+    },
+    {
+      "case": "stale-expected-revision-conflicts",
+      "kind": "commit_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 3
+    },
+    {
+      "case": "stale-expected-revision-conflicts",
+      "kind": "commit_manifest",
+      "open_step": 1,
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 3
+    },
+    {
+      "case": "stale-expected-revision-conflicts",
+      "kind": "receipt",
+      "outcome": "accept",
+      "pointer": "/expect/json/receipt",
+      "step": 3
+    },
+    {
+      "case": "stale-expected-revision-conflicts",
+      "kind": "session_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 4
+    },
+    {
+      "case": "stale-expected-revision-conflicts",
+      "kind": "commit_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 6
+    },
+    {
+      "case": "stale-expected-revision-conflicts",
+      "kind": "commit_manifest",
+      "open_step": 4,
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 6
+    },
+    {
+      "case": "stale-expected-revision-conflicts",
+      "kind": "receipt",
+      "outcome": "accept",
+      "pointer": "/expect/json/receipt",
+      "step": 6
+    },
+    {
+      "case": "stale-expected-revision-conflicts",
+      "kind": "session_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 7
+    },
+    {
+      "case": "stale-expected-revision-conflicts",
+      "kind": "commit_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 9
+    },
+    {
+      "case": "stale-expected-revision-conflicts",
+      "kind": "commit_manifest",
+      "open_step": 7,
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 9
+    },
+    {
+      "case": "stale-expected-revision-conflicts",
+      "kind": "refs",
+      "outcome": "accept",
+      "pointer": "/expect/body_text",
+      "step": 10
+    },
+    {
+      "case": "fork-is-create-if-absent",
+      "kind": "session_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 2
+    },
+    {
+      "case": "fork-is-create-if-absent",
+      "kind": "commit_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 6
+    },
+    {
+      "case": "fork-is-create-if-absent",
+      "kind": "commit_manifest",
+      "open_step": 2,
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 6
+    },
+    {
+      "case": "fork-is-create-if-absent",
+      "kind": "receipt",
+      "outcome": "accept",
+      "pointer": "/expect/json/receipt",
+      "step": 6
+    },
+    {
+      "case": "fork-is-create-if-absent",
+      "kind": "session_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 7
+    },
+    {
+      "case": "fork-is-create-if-absent",
+      "kind": "commit_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 11
+    },
+    {
+      "case": "fork-is-create-if-absent",
+      "kind": "commit_manifest",
+      "open_step": 7,
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 11
+    },
+    {
+      "case": "fork-is-create-if-absent",
+      "kind": "receipt",
+      "outcome": "accept",
+      "pointer": "/expect/json/receipt",
+      "step": 11
+    },
+    {
+      "case": "fork-is-create-if-absent",
+      "kind": "refs",
+      "outcome": "accept",
+      "pointer": "/expect/body_text",
+      "step": 12
+    },
+    {
+      "case": "fork-is-create-if-absent",
+      "kind": "session_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 14
+    },
+    {
+      "case": "fork-is-create-if-absent",
+      "kind": "commit_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 16
+    },
+    {
+      "case": "fork-is-create-if-absent",
+      "kind": "commit_manifest",
+      "open_step": 14,
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 16
+    },
+    {
+      "case": "fork-is-create-if-absent",
+      "kind": "refs",
+      "outcome": "accept",
+      "pointer": "/expect/body_text",
+      "step": 17
+    },
+    {
+      "case": "unknown-required-capability-is-unsupported-future",
+      "kind": "session_request",
+      "outcome": "unsupported_future",
+      "pointer": "/request/json",
+      "step": 1
+    },
+    {
+      "case": "unknown-required-capability-is-unsupported-future",
+      "kind": "session_request",
+      "outcome": "unsupported_future",
+      "pointer": "/request/json",
+      "step": 2
+    },
+    {
+      "case": "unknown-required-capability-is-unsupported-future",
+      "kind": "session_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 3
+    },
+    {
+      "case": "credentials-are-scoped-and-short-lived",
+      "kind": "session_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 0
+    },
+    {
+      "case": "credentials-are-scoped-and-short-lived",
+      "kind": "session_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 1
+    },
+    {
+      "case": "credentials-are-scoped-and-short-lived",
+      "kind": "session_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 3
+    },
+    {
+      "case": "credentials-are-scoped-and-short-lived",
+      "kind": "session_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 6
+    },
+    {
+      "case": "credentials-are-scoped-and-short-lived",
+      "kind": "session_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 8
+    },
+    {
+      "case": "oversized-declared-length-refused-at-open",
+      "kind": "session_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 1
+    },
+    {
+      "case": "oversized-declared-length-refused-at-open",
+      "kind": "session_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 2
+    },
+    {
+      "case": "entitlement-denied",
+      "kind": "session_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 2
+    },
+    {
+      "case": "manifest-must-reference-admitted-objects",
+      "kind": "session_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 1
+    },
+    {
+      "case": "manifest-must-reference-admitted-objects",
+      "kind": "commit_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 3
+    },
+    {
+      "case": "manifest-must-reference-admitted-objects",
+      "kind": "commit_manifest",
+      "open_step": 1,
+      "outcome": "invalid_input",
+      "pointer": "/request/json",
+      "step": 3
+    },
+    {
+      "case": "device-authorization-flow",
+      "kind": "session_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 7
+    },
+    {
+      "case": "missing-native-package-inventory-refused",
+      "kind": "session_request",
+      "mutation": {
+        "set": {
+          "format": "graphforge-hub-publish/2"
+        }
+      },
+      "outcome": "unsupported_future",
+      "pointer": "/request/json",
+      "step": 1
+    },
+    {
+      "case": "missing-native-package-inventory-refused",
+      "kind": "session_request",
+      "mutation": {
+        "set": {
+          "unexpected_member": 1
+        }
+      },
+      "outcome": "invalid_input",
+      "pointer": "/request/json",
+      "step": 1
+    },
+    {
+      "case": "missing-native-package-inventory-refused",
+      "kind": "commit_request",
+      "mutation": {
+        "set": {
+          "unexpected_member": 1
+        }
+      },
+      "outcome": "invalid_input",
+      "pointer": "/request/json",
+      "step": 5
+    },
+    {
+      "case": "missing-native-package-inventory-refused",
+      "kind": "commit_request",
+      "mutation": {
+        "remove": [
+          "expected_revision"
+        ]
+      },
+      "outcome": "invalid_input",
+      "pointer": "/request/json",
+      "step": 5
+    },
+    {
+      "case": "capabilities-document",
+      "kind": "capabilities",
+      "mutation": {
+        "set": {
+          "format": "graphforge-hub-publish/2"
+        }
+      },
+      "outcome": "unsupported_future",
+      "pointer": "/expect/json",
+      "step": 0
+    },
+    {
+      "case": "capabilities-document",
+      "kind": "capabilities",
+      "mutation": {
+        "set": {
+          "unexpected_member": 1
+        }
+      },
+      "outcome": "invalid_input",
+      "pointer": "/expect/json",
+      "step": 0
+    },
+    {
+      "case": "large-object-async-commit",
+      "kind": "operation_status",
+      "mutation": {
+        "set": {
+          "format": "graphforge-hub-publish/2"
+        }
+      },
+      "outcome": "unsupported_future",
+      "pointer": "/expect/json",
+      "step": 5
+    },
+    {
+      "case": "missing-native-package-inventory-refused",
+      "kind": "receipt",
+      "mutation": {
+        "set": {
+          "format": "graphforge-hub-publish/2"
+        }
+      },
+      "outcome": "unsupported_future",
+      "pointer": "/expect/json/receipt",
+      "step": 5
+    },
+    {
+      "case": "missing-native-package-inventory-refused",
+      "kind": "receipt",
+      "mutation": {
+        "remove": [
+          "previous_revision"
+        ]
+      },
+      "outcome": "invalid_input",
+      "pointer": "/expect/json/receipt",
+      "step": 5
+    },
+    {
+      "case": "missing-native-package-inventory-refused",
+      "kind": "receipt",
+      "mutation": {
+        "set": {
+          "revision": "sha256:ABC"
+        }
+      },
+      "outcome": "invalid_input",
+      "pointer": "/expect/json/receipt",
+      "step": 5
+    }
+  ],
+  "format": "graphforge-protocol-wasm-hub-documents/1"
+}

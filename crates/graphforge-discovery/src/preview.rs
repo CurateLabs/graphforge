@@ -60,6 +60,7 @@ pub struct PreviewDescriptor {
     /// Exactly `image/png` or `image/svg+xml`.
     pub media_type: String,
     /// Encoded byte count.
+    #[cfg_attr(feature = "typescript", tsify(type = "bigint"))]
     pub length: u64,
     /// Pixel width.
     pub width: u32,

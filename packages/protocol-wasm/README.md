@@ -56,11 +56,18 @@ const commitment = protocol.request_commitment({
 ```
 
 A document argument is a JSON string, validated byte for byte (duplicate
-members and oversize input are refused as in native Rust), or a plain object,
-which is serialized with `JSON.stringify` first. Results are plain objects.
-`canonical_json` and `digest`/`revision` are exact; numbers above 2^53 in
-`document` follow JavaScript number rules, so compare canonical text, not
-parsed numbers, when a length can exceed that.
+members and oversize input are refused as in native Rust), or a plain object.
+Results are plain objects.
+
+**Integers.** Every 64-bit integer in a result (`length`, `max_object_bytes`,
+`node_count`, ...) is a `bigint`, because a JavaScript number cannot hold a
+`u64` above 2^53 exactly; the generated declarations say `bigint`. In an object
+argument a `bigint` is passed through with every digit, a safe integer or a
+fraction is accepted as a number, and an integer above 2^53 given as a number is
+**refused** with `invalid_argument` (it is already rounded, so accepting it would
+validate a different value). Send such a value as a `bigint` or inside a JSON
+string. Objects must be plain JSON data: functions, `Date`, `Map`, class
+instances and `NaN` are refused rather than reshaped.
 
 | Area           | Exports                                                                                                                                |
 | -------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
@@ -125,11 +132,14 @@ The tests replay the discovery v1 and hub-publish v1 corpora
 (`docs/reference/`) through the built module and compare each result with the
 outcome the corpus records from native Rust. The hub-publish corpus drives a
 stateful reference Hub over HTTP, which does not exist in WebAssembly, so the
-replay checks every control document the exchange carries: documents the Hub
-accepted must validate, the commitment recomputed from the open and commit
-requests must equal the declared one, documents the module rejects must have
-been refused with the same code, and returned capabilities, receipts, operation
-statuses, and refs (with their ETag revision) must validate.
+replay checks every control document the exchange carries against a verdict
+that native Rust recorded for it (`accept` or the error code, with one mutated
+copy of each kind) in `crates/graphforge-protocol-wasm/tests/hub-publish-documents.json`.
+The module must accept exactly what native Rust accepts and refuse the rest with
+the same code; the file is regenerated with
+`GRAPHFORGE_UPDATE_PROTOCOL_WASM_EXPECTED=1 cargo test -p graphforge-protocol-wasm`.
+The replay also recomputes each request commitment from the open and commit
+requests and checks refs revisions against their ETag.
 `cargo test -p graphforge-protocol-wasm` runs the same corpora and the openalex
 fixture natively through the same engine functions.
 

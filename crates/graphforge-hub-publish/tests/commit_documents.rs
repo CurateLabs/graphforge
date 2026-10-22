@@ -90,6 +90,13 @@ fn receipts_are_validated_like_every_other_publish_document() {
     });
     PublishReceipt::from_json(receipt.to_string().as_bytes()).unwrap();
 
+    // The member is required even when `null`; an explicit `null` is accepted.
+    let mut omitted = receipt.clone();
+    omitted.as_object_mut().unwrap().remove("previous_revision");
+    let error = PublishReceipt::from_json(omitted.to_string().as_bytes()).unwrap_err();
+    assert_eq!(error.code, HubPublishErrorCode::InvalidInput);
+    assert_eq!(error.detail(), "receipt is malformed");
+
     let mut bad_digest = receipt.clone();
     bad_digest["revision"] = json!("sha256:ABC");
     let mut future = receipt.clone();

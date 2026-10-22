@@ -96,12 +96,16 @@ pub struct SummaryTemporalCoverage {
 #[serde(deny_unknown_fields)]
 pub struct SummaryCorpusSize {
     /// Optional declared node count.
+    #[cfg_attr(feature = "typescript", tsify(type = "bigint", optional))]
     pub node_count: Option<u64>,
     /// Optional declared relationship count.
+    #[cfg_attr(feature = "typescript", tsify(type = "bigint", optional))]
     pub relationship_count: Option<u64>,
     /// Optional declared source count.
+    #[cfg_attr(feature = "typescript", tsify(type = "bigint", optional))]
     pub source_count: Option<u64>,
     /// Optional declared artifact count.
+    #[cfg_attr(feature = "typescript", tsify(type = "bigint", optional))]
     pub artifact_count: Option<u64>,
 }
 
@@ -193,17 +197,20 @@ pub struct SummaryFacts {
     pub ontology_mode: String,
     /// Histogram of package components by kind. Only kinds with at least one
     /// component appear, so each fact has exactly one representation.
+    #[cfg_attr(feature = "typescript", tsify(type = "Record<string, bigint>"))]
     pub components: BTreeMap<String, u64>,
     /// Whether the package carries a research component.
     pub research_present: bool,
     /// Whether the package carries an evidence component.
     pub evidence_present: bool,
     /// Total verified payload bytes of the package.
+    #[cfg_attr(feature = "typescript", tsify(type = "bigint"))]
     pub payload_bytes: u64,
     /// Verified payload bytes by component kind, with `package-control` for
     /// the entries outside every component. The values sum exactly to
     /// [`Self::payload_bytes`], and the key set is the kinds of
     /// [`Self::components`] plus `package-control` when control bytes exist.
+    #[cfg_attr(feature = "typescript", tsify(type = "Record<string, bigint>"))]
     pub bytes_by_kind: BTreeMap<String, u64>,
     /// Ontology composition, when the package carries one.
     pub ontology_composition: Option<SummaryOntologyComposition>,
