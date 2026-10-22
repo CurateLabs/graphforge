@@ -18,9 +18,10 @@
 pub mod engine;
 
 use engine::{Outcome, ProtocolError};
-use js_sys::JSON;
+use js_sys::{JSON, Uint8Array};
 use serde::Serialize;
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen(typescript_custom_section)]
@@ -74,6 +75,22 @@ fn text(value: &JsValue) -> Outcome<Vec<u8>> {
         .and_then(|text| text.as_string())
         .map(String::into_bytes)
         .ok_or_else(|| ProtocolError::argument("argument is not a JSON value"))
+}
+
+/// A string argument. Typed `&str` parameters would hand the JavaScript glue's
+/// unchecked conversion a wrong-typed value, so strings arrive as `JsValue`.
+fn string(value: &JsValue, name: &str) -> Outcome<String> {
+    value
+        .as_string()
+        .ok_or_else(|| ProtocolError::argument(&format!("{name} argument must be a string")))
+}
+
+/// A `Uint8Array` argument, copied into Rust memory.
+fn bytes_of(value: &JsValue) -> Outcome<Vec<u8>> {
+    value
+        .dyn_ref::<Uint8Array>()
+        .map(Uint8Array::to_vec)
+        .ok_or_else(|| ProtocolError::argument("bytes argument must be a Uint8Array"))
 }
 
 /// Optional argument: `undefined` and `null` are absent.
@@ -223,14 +240,14 @@ pub fn ontology_module_object(
 pub fn research_version_object(
     #[wasm_bindgen(unchecked_param_type = "JsonInput<DiscoveryManifest>")] manifest: &JsValue,
     #[wasm_bindgen(unchecked_param_type = "JsonInput<ResearchLineage>")] lineage: &JsValue,
-    version_uuid: &str,
+    #[wasm_bindgen(unchecked_param_type = "string")] version_uuid: &JsValue,
     #[wasm_bindgen(unchecked_param_type = "DiscoveryLimitsOverride")] limits: Option<JsValue>,
 ) -> Result<JsValue, JsValue> {
     run(|| {
         engine::research_version_object(
             &text(manifest)?,
             &text(lineage)?,
-            version_uuid,
+            &string(version_uuid, "version_uuid")?,
             resolve_limits(limits.as_ref())?,
         )
     })
@@ -242,7 +259,7 @@ pub fn rehome_repository(
     #[wasm_bindgen(unchecked_param_type = "JsonInput<RefSet>")] refs: &JsValue,
     #[wasm_bindgen(unchecked_param_type = "RehomeSnapshot[]")] snapshots: &JsValue,
     #[wasm_bindgen(unchecked_param_type = "RepositoryIdentity")] new_identity: &JsValue,
-    control_locations: &str,
+    #[wasm_bindgen(unchecked_param_type = "string")] control_locations: &JsValue,
     #[wasm_bindgen(unchecked_param_type = "DiscoveryLimitsOverride")] limits: Option<JsValue>,
 ) -> Result<JsValue, JsValue> {
     run(|| {
@@ -250,7 +267,7 @@ pub fn rehome_repository(
             &text(refs)?,
             &text(snapshots)?,
             &text(new_identity)?,
-            control_locations,
+            &string(control_locations, "control_locations")?,
             resolve_limits(limits.as_ref())?,
         )
     })
@@ -260,17 +277,20 @@ pub fn rehome_repository(
 
 /// Validate image bytes against the closed PNG/SVG profile.
 #[wasm_bindgen(unchecked_return_type = "ImageDimensions")]
-pub fn validate_image(media_type: &str, bytes: &[u8]) -> Result<JsValue, JsValue> {
-    run(|| engine::validate_image(media_type, bytes))
+pub fn validate_image(
+    #[wasm_bindgen(unchecked_param_type = "string")] media_type: &JsValue,
+    #[wasm_bindgen(unchecked_param_type = "Uint8Array")] bytes: &JsValue,
+) -> Result<JsValue, JsValue> {
+    run(|| engine::validate_image(&string(media_type, "media_type")?, &bytes_of(bytes)?))
 }
 
 /// Revalidate untrusted bytes against every field of their descriptor.
 #[wasm_bindgen]
 pub fn validate_preview(
     #[wasm_bindgen(unchecked_param_type = "PreviewDescriptor")] descriptor: &JsValue,
-    bytes: &[u8],
+    #[wasm_bindgen(unchecked_param_type = "Uint8Array")] bytes: &JsValue,
 ) -> Result<(), JsValue> {
-    run_unit(|| engine::validate_preview(&text(descriptor)?, bytes))
+    run_unit(|| engine::validate_preview(&text(descriptor)?, &bytes_of(bytes)?))
 }
 
 /// Validate a descriptor list without fetching image bytes.

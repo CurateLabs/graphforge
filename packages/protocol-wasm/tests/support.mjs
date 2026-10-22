@@ -9,7 +9,7 @@ export const root = join(here, "..", "..", "..");
 export const dist = join(here, "..", "dist");
 
 export const protocol = await import(join(dist, "graphforge_protocol_wasm.js"));
-protocol.initSync({ module: readFileSync(join(dist, "graphforge_protocol_wasm_bg.wasm")) });
+export const wasm = protocol.initSync({ module: readFileSync(join(dist, "graphforge_protocol_wasm_bg.wasm")) });
 
 export const readJson = (...segments) => JSON.parse(readFileSync(join(root, ...segments), "utf8"));
 export const readText = (...segments) => readFileSync(join(root, ...segments), "utf8");
