@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
+import { everyTrapThrows } from "./hostile.mjs";
 import { attempt, dist, protocol, readJson } from "./support.mjs";
 
 const discovery = readJson(
@@ -30,111 +31,6 @@ const verdict = (validate, input, limits) => {
     ? { ok: true, canonical: outcome.value.canonical_json }
     : { ok: false, code: outcome.error.code, path: outcome.error.path };
 };
-
-const throwing = () => {
-  throw new Error("hostile");
-};
-
-/** A proxy whose every trap throws. */
-const everyTrapThrows = () =>
-  new Proxy(
-    {},
-    new Proxy({}, { get: (_target, trap) => () => throwing(trap) }),
-  );
-
-function hostileValues() {
-  const revoked = Proxy.revocable({}, {});
-  revoked.revoke();
-  const circular = {};
-  circular.self = circular;
-  let deep = {};
-  for (let i = 0; i < 100_000; i += 1) deep = { a: deep };
-  const bytesProxy = new Proxy(new Uint8Array(4), everyTrapThrows());
-  return [
-    everyTrapThrows(),
-    new Proxy({}, { getPrototypeOf: throwing }),
-    new Proxy({}, { ownKeys: throwing }),
-    new Proxy({}, { get: throwing }),
-    new Proxy([], { get: throwing }),
-    new Proxy(() => 1, everyTrapThrows()),
-    revoked.proxy,
-    bytesProxy,
-    {
-      get member() {
-        return throwing();
-      },
-    },
-    { toJSON: throwing },
-    {
-      toJSON: () => ({
-        get a() {
-          return throwing();
-        },
-      }),
-    },
-    { [Symbol.toStringTag]: "Uint8Array", length: 4 },
-    circular,
-    deep,
-    { value: 1n, again: [2n, { n: -3n }] },
-    { n: Number.NaN },
-    { n: Number.POSITIVE_INFINITY },
-    { n: 2 ** 60 },
-    new Date(0),
-    new Map([["a", 1]]),
-    Symbol("s"),
-    () => 1,
-    undefined,
-    null,
-    "\ud800",
-    { "\udc00": 1 },
-  ];
-}
-
-test("hostile arguments throw structured errors and the module stays usable", () => {
-  const hostile = hostileValues();
-  const exported = Object.entries(protocol).filter(
-    ([name, value]) => typeof value === "function" && name !== "initSync",
-  );
-  assert.ok(exported.length >= 24, `${exported.length} exports`);
-  let calls = 0;
-  let refusedByGlue = 0;
-  for (let round = 0; calls < 2000; round += 1) {
-    for (const [name, call] of exported) {
-      const value = hostile[(round + calls) % hostile.length];
-      const outcome = attempt(() => call(value, value, value, value, value));
-      calls += 1;
-      if (outcome.ok) continue;
-      const { error } = outcome;
-      // Only structured errors: no trap, no TypeError, no thrown Error.
-      assert.equal(
-        Object.getPrototypeOf(error),
-        Object.prototype,
-        `${name}: ${String(error)}`,
-      );
-      assert.equal(typeof error.code, "string", name);
-      if (error.code === "invalid_argument") refusedByGlue += 1;
-    }
-  }
-  assert.ok(calls >= 2000);
-  assert.ok(
-    refusedByGlue > 1000,
-    `${refusedByGlue} refused before reaching Rust`,
-  );
-  // Every export still works after thousands of hostile calls.
-  assert.equal(
-    protocol.validate_manifest(manifestCase.json).canonical_json,
-    manifestCase.expected.canonical_json,
-  );
-  assert.equal(
-    protocol.validate_image(
-      "image/svg+xml",
-      new TextEncoder().encode(
-        '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16"><path d="M0 0L1 1"/></svg>',
-      ),
-    ).width,
-    16,
-  );
-});
 
 test("a throwing proxy yields invalid_argument, 2,000 times, then a valid call succeeds", () => {
   const proxy = everyTrapThrows();
