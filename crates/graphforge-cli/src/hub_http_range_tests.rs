@@ -226,7 +226,7 @@ fn changed_etag_is_concurrent_mutation() {
 fn assert_cli_error(error: crate::CliRuntimeError, code: &str, exit_code: i32) -> String {
     assert_eq!(crate::error_exit_code(&error), exit_code);
     let mut output = Vec::new();
-    crate::write_runtime_error(&error, true, &mut output).unwrap();
+    crate::write_runtime_error(&error, true, &mut output, &[]).unwrap();
     let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
     assert_eq!(value["error"]["code"], code);
     value["error"]["message"].as_str().unwrap().to_owned()
