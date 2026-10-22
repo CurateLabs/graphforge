@@ -19,5 +19,12 @@ png = "=0.18.1"
 roxmltree = "=0.21.1"
 quick-xml = "=0.42.0"
 
+# Emits TypeScript declarations from the wire types for the WebAssembly package.
+tsify = { version = "0.5", optional = true }
+wasm-bindgen = { version = "0.2", optional = true }
+
+[features]
+typescript = ["dep:tsify", "dep:wasm-bindgen"]
+
 [lints]
 workspace = true

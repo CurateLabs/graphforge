@@ -9,6 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 /// One exact stored manifest and the raw control objects it advertises.
 /// Native package/module bytes are deliberately absent from this API.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(tsify::Tsify))]
 #[serde(deny_unknown_fields)]
 pub struct RepositorySnapshot {
     /// Parsed original manifest; its canonical digest is a ref validator.
@@ -20,6 +21,7 @@ pub struct RepositorySnapshot {
 }
 /// Complete deterministic replacement set, suitable for one Hub transaction.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(tsify::Tsify))]
 #[serde(deny_unknown_fields)]
 pub struct RehomedRepository {
     /// Re-homed refs with freshly derived manifest validators.

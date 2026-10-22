@@ -1,0 +1,52 @@
+{
+  "name": "@curatelabs/graphforge-protocol-wasm",
+  "version": "0.6.0-rc.5",
+  "description": "GraphForge Hub discovery and publish validators as a WebAssembly ES module",
+  "license": "Apache-2.0",
+  "homepage": "https://docs.graphforge.sh/",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/CurateLabs/graphforge.git",
+    "directory": "packages/protocol-wasm"
+  },
+  "bugs": {
+    "url": "https://github.com/CurateLabs/graphforge/issues"
+  },
+  "keywords": [
+    "graphforge",
+    "hub",
+    "webassembly",
+    "wasm",
+    "cloudflare-workers"
+  ],
+  "type": "module",
+  "main": "./dist/graphforge_protocol_wasm.js",
+  "types": "./dist/graphforge_protocol_wasm.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/graphforge_protocol_wasm.d.ts",
+      "default": "./dist/graphforge_protocol_wasm.js"
+    },
+    "./wasm": "./dist/graphforge_protocol_wasm_bg.wasm"
+  },
+  "sideEffects": false,
+  "files": [
+    "dist/",
+    "README.md",
+    "LICENSE",
+    "NOTICE",
+    "THIRD_PARTY_NOTICES.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test": "node --expose-gc --test tests/*.test.mjs",
+    "format:check": "prettier --check package.json README.md scripts tests"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  }
+}

@@ -87,6 +87,7 @@ pub fn check_format(format: &str) -> Result<(), HubPublishError> {
 
 /// One named, major-versioned protocol capability.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(tsify::Tsify))]
 #[serde(deny_unknown_fields)]
 pub struct Capability {
     /// Capability name.
@@ -180,6 +181,7 @@ where
 /// Upload bounds a Hub advertises. Every bound is enforced from declared
 /// lengths before any byte is buffered.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(tsify::Tsify))]
 #[serde(deny_unknown_fields)]
 pub struct PublishLimits {
     /// Largest declared length of one object.
@@ -223,6 +225,7 @@ impl PublishLimits {
 
 /// Where and how a client obtains a publish token (RFC 8628 device flow).
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(tsify::Tsify))]
 #[serde(deny_unknown_fields)]
 pub struct PublishAuthorization {
     /// OAuth client identifier; absent means `graphforge-cli`.
@@ -242,6 +245,7 @@ pub struct PublishAuthorization {
 
 /// `GET {repository}/.gf/publish` capabilities document.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(tsify::Tsify))]
 #[serde(deny_unknown_fields)]
 pub struct PublishCapabilities {
     /// Must equal [`HUB_PUBLISH_FORMAT`].
@@ -371,6 +375,7 @@ impl PublishCapabilities {
 
 /// One object in a publish session inventory.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(tsify::Tsify))]
 #[serde(deny_unknown_fields)]
 pub struct ObjectDeclaration {
     /// Canonical `sha256:<64 lowercase hex>` content digest.
@@ -383,6 +388,7 @@ pub struct ObjectDeclaration {
 
 /// Opaque session identity issued by a Hub (URL-path safe).
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(tsify::Tsify))]
 #[serde(transparent)]
 pub struct PublishSessionId(String);
 
@@ -415,11 +421,13 @@ impl fmt::Display for PublishSessionId {
 
 /// `POST {repository}/.gf/publish/sessions` request body.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(tsify::Tsify))]
 #[serde(deny_unknown_fields)]
 pub struct OpenSessionRequest {
     /// Must equal [`HUB_PUBLISH_FORMAT`].
     pub format: String,
     /// Caller-stable identity of this publication; retries reuse it.
+    #[cfg_attr(feature = "typescript", tsify(type = "string"))]
     pub operation_uuid: Uuid,
     /// [`PublishIntent::request_commitment`] of the whole publication.
     pub request_commitment: String,
@@ -491,6 +499,7 @@ pub fn validate_inventory(objects: &[ObjectDeclaration]) -> Result<(), HubPublis
 
 /// One data-plane upload location in an open session.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(tsify::Tsify))]
 #[serde(deny_unknown_fields)]
 pub struct UploadTarget {
     /// Object digest.
@@ -513,6 +522,7 @@ pub struct UploadTarget {
 
 /// Session open and commit response.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(tsify::Tsify))]
 #[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SessionResponse {
     /// Uploads may proceed.
@@ -525,6 +535,7 @@ pub enum SessionResponse {
     /// Verification is running; poll this operation until a receipt is present.
     Pending {
         /// Bound operation identity; never an arbitrary poll URL.
+        #[cfg_attr(feature = "typescript", tsify(type = "string"))]
         operation_uuid: Uuid,
     },
     /// The publication already committed; this is its original receipt.
@@ -536,6 +547,7 @@ pub enum SessionResponse {
 
 /// `POST {repository}/.gf/publish/sessions/{session_id}/commit` request body.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(tsify::Tsify))]
 #[serde(deny_unknown_fields)]
 pub struct CommitRequest {
     /// Explicitly permit structural non-fast-forward publication, never identity changes.
@@ -545,6 +557,7 @@ pub struct CommitRequest {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub prune: bool,
     /// Discovery manifest (`graphforge-discovery/1`) the refs will select.
+    #[cfg_attr(feature = "typescript", tsify(type = "unknown"))]
     pub manifest: Value,
     /// Ref names to advance to the manifest, strictly ascending.
     pub refs: Vec<String>,
@@ -588,11 +601,13 @@ pub fn validate_ref_list(refs: &[String]) -> Result<(), HubPublishError> {
 
 /// Receipt of one committed publication.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(tsify::Tsify))]
 #[serde(deny_unknown_fields)]
 pub struct PublishReceipt {
     /// Must equal [`HUB_PUBLISH_FORMAT`].
     pub format: String,
     /// Operation identity.
+    #[cfg_attr(feature = "typescript", tsify(type = "string"))]
     pub operation_uuid: Uuid,
     /// Request commitment the Hub verified.
     pub request_commitment: String,
@@ -695,11 +710,13 @@ impl PublishIntent {
 /// `intent_digest` is an idempotency conflict, and a present `receipt` is the
 /// original result of the committed operation.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(tsify::Tsify))]
 #[serde(deny_unknown_fields)]
 pub struct OperationStatus {
     /// Must equal [`HUB_PUBLISH_FORMAT`].
     pub format: String,
     /// Operation identity.
+    #[cfg_attr(feature = "typescript", tsify(type = "string"))]
     pub operation_uuid: Uuid,
     /// Repository the operation publishes into.
     pub repository: RepositoryIdentity,
@@ -733,6 +750,7 @@ impl OperationStatus {
 
 /// `PUT` upload response body.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(tsify::Tsify))]
 #[serde(deny_unknown_fields)]
 pub struct UploadStatus {
     /// Object digest.
@@ -767,6 +785,7 @@ pub fn parse_content_range(value: &str) -> Option<(u64, u64, u64)> {
 
 /// RFC 8628 device authorization response.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(tsify::Tsify))]
 pub struct DeviceAuthorizationResponse {
     /// Code the client polls the token endpoint with. Never displayed or logged.
     pub device_code: String,
@@ -790,6 +809,7 @@ const fn default_interval() -> u64 {
 
 /// RFC 6749 successful token response.
 #[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(tsify::Tsify))]
 pub struct TokenResponse {
     /// Short-lived bearer token.
     pub access_token: String,
@@ -815,6 +835,7 @@ impl fmt::Debug for TokenResponse {
 
 /// RFC 6749 section 5.2 error body returned by the token endpoint.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(tsify::Tsify))]
 pub struct OAuthErrorBody {
     /// Error code, e.g. `authorization_pending`.
     pub error: String,
