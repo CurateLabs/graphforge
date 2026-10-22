@@ -1073,6 +1073,7 @@ fn primary_streaming_current_and_checkpoint_reopen_with_exact_query_results() {
         args.extend(["--format", "bundle", "--output", bundle.to_str().unwrap()]);
         let exported = json(&gf(&project, &args));
         assert_eq!(exported["contract"], "graphforge-portable-export/1");
+        eprintln!("children_max_rss after export: {}", children_max_rss());
         let target = root.path().join(format!("{name}-imported"));
         let operation = uuid::Uuid::new_v4().to_string();
         let imported = json(&gf(
@@ -1260,3 +1261,209 @@ fn an_import_onto_an_unsupported_filesystem_keeps_its_code_and_exit_class() {
     assert!(message.contains("GF_UNSUPPORTED_FILESYSTEM"), "{message}");
     assert_nothing_written(shm.path(), &destination);
 }
+
+/// Peak resident memory of the reaped `gf` children, from `getrusage`. nextest
+/// runs each test in its own process, so the high-water mark covers exactly the
+/// children this test reaped. `ru_maxrss` is in KiB on Linux. Two things would
+/// otherwise pollute it, and the test below avoids both: a child inherits the
+/// pages this process holds at the fork, so this process never holds the
+/// payload, and a reaped child's own reaped descendants fold in, so the
+/// bulk-build chain is never reaped here.
+#[cfg(target_os = "linux")]
+fn children_max_rss() -> u64 {
+    // SAFETY: `getrusage` only writes the zeroed `rusage` it is given.
+    let (status, usage) = unsafe {
+        let mut usage = std::mem::zeroed::<libc::rusage>();
+        (libc::getrusage(libc::RUSAGE_CHILDREN, &mut usage), usage)
+    };
+    assert_eq!(status, 0, "getrusage failed");
+    u64::try_from(usage.ru_maxrss).expect("non-negative") * 1024
+}
+
+/// `length` deterministic letters, the same generator the API and OCI peak
+/// tests use.
+#[cfg(target_os = "linux")]
+fn blob(length: usize, salt: u64) -> String {
+    let mut state = 0x9E37_79B9_7F4A_7C15_u64 ^ salt;
+    (0..length)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            char::from(b'a' + (state % 26) as u8)
+        })
+        .collect()
+}
+
+/// Write `NODES` `Doc` nodes whose pseudo-random `body` properties carry
+/// [`BLOB_BYTES`], one row group per node, so this process holds one node's
+/// bytes at a time and stays far below the bound below.
+#[cfg(target_os = "linux")]
+fn write_blob_nodes(path: &Path) {
+    use arrow::array::{FixedSizeBinaryArray, StringArray};
+    use arrow::record_batch::RecordBatch;
+    use graphforge_api::bulk_node_input_schema;
+    use parquet::arrow::ArrowWriter;
+    use parquet::file::properties::WriterProperties;
+    use std::fs::File;
+    use std::sync::Arc;
+
+    let schema = bulk_node_input_schema(vec![arrow::datatypes::Field::new(
+        "body",
+        arrow::datatypes::DataType::Utf8,
+        true,
+    )])
+    .unwrap();
+    let properties = WriterProperties::builder()
+        .set_max_row_group_row_count(Some(1))
+        .build();
+    let mut writer = ArrowWriter::try_new(
+        File::create(path).unwrap(),
+        schema.clone(),
+        Some(properties),
+    )
+    .unwrap();
+    for index in 0..NODES {
+        let id = uuid::Uuid::now_v7();
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(
+                    FixedSizeBinaryArray::try_from_iter(std::iter::once(id.as_bytes().as_slice()))
+                        .unwrap(),
+                ),
+                Arc::new(StringArray::from(vec!["Doc"])),
+                Arc::new(StringArray::from(vec![blob(
+                    BLOB_BYTES / NODES,
+                    index as u64,
+                )])),
+            ],
+        )
+        .unwrap();
+        writer.write(&batch).unwrap();
+    }
+    writer.close().unwrap();
+}
+
+/// Bulk-build the durable project through real `gf` processes, detached: the
+/// `import-session validate` child legitimately decodes the whole source, so
+/// it is reaped by the shell instead of this test and never enters
+/// [`children_max_rss`]. The sentinel appears after the commit child exits.
+#[cfg(target_os = "linux")]
+fn build_project_detached(root: &Path, project: &Path, source: &Path) {
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+
+    let gf = gf_bin();
+    let sentinel = root.join("build-done");
+    let begun = root.join("begin.json");
+    let script = format!(
+        "set -e\n\
+         session=\"$(\"{gf}\" --json --project \"{p}\" import-session begin \
+         --operation-uuid \"{op}\" > \"{begun}\"; \
+         grep -o '\"session_uuid\":\"[^\"]*\"' \"{begun}\" | head -1 | cut -d'\"' -f4)\"\n\
+         \"{gf}\" --json --project \"{p}\" import-session register-parquet \
+         --session-uuid \"$session\" --kind nodes --path \"{s}\"\n\
+         \"{gf}\" --json --project \"{p}\" import-session validate --session-uuid \"$session\"\n\
+         \"{gf}\" --json --project \"{p}\" import-session commit --session-uuid \"$session\"\n\
+         touch \"{sentinel}\"\n",
+        gf = gf.display(),
+        p = project.display(),
+        s = source.display(),
+        begun = begun.display(),
+        sentinel = sentinel.display(),
+        op = uuid::Uuid::now_v7(),
+    );
+    Command::new("sh")
+        .arg("-c")
+        .arg(&script)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("spawn detached bulk-build shell");
+    let deadline = Instant::now() + Duration::from_secs(300);
+    while !sentinel.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "the detached bulk build never finished; see its output above"
+        );
+        std::thread::sleep(Duration::from_millis(500));
+    }
+}
+
+/// The real `gf` processes hold a fixed resident set while they bulk-build,
+/// `export --current`, and `import` a project whose package is many times that
+/// resident set (#1769): the peak RSS of the reaped export and import children
+/// stays below a fixed bound far under the payload. No public API attaches one
+/// opaque artifact blob to a project, so the payload is graph data: `Doc`
+/// nodes whose pseudo-random `body` properties carry the bytes.
+#[cfg(target_os = "linux")]
+#[test]
+fn cli_export_and_import_peak_rss_stays_bounded_below_a_large_payload() {
+    let root = TempDir::new().expect("temp root");
+    let project = root.path().join("source");
+    fs::create_dir(&project).expect("source project directory");
+    let source = root.path().join("nodes.parquet");
+    write_blob_nodes(&source);
+    build_project_detached(root.path(), &project, &source);
+
+    let bundle = root.path().join("project.gfpb");
+    let exported = json(&gf(
+        &project,
+        &[
+            "--json",
+            "export",
+            "--current",
+            "--format",
+            "bundle",
+            "--profile",
+            "complete",
+            "--output",
+            bundle.to_str().unwrap(),
+        ],
+    ));
+    assert_eq!(exported["contract"], "graphforge-portable-export/1");
+
+    let destination = root.path().join("destination");
+    let imported = json(&gf(
+        &destination,
+        &[
+            "--json",
+            "import",
+            "--input",
+            bundle.to_str().unwrap(),
+            "--idempotency-key",
+            &uuid::Uuid::now_v7().to_string(),
+        ],
+    ));
+    assert_eq!(imported["package_digest"], exported["package_digest"]);
+
+    let rss = children_max_rss();
+    let bundle_bytes = fs::metadata(&bundle).unwrap().len();
+    println!("bundle_bytes={bundle_bytes} peak_child_rss_bytes={rss}");
+    assert!(rss > 0, "the children's peak memory was not recorded");
+    assert!(
+        rss < PEAK_RSS_BOUND_BYTES,
+        "the children's peak resident memory was {rss} bytes"
+    );
+    // The bound means something only while the payload dwarfs it.
+    assert!(
+        u64::try_from(2 * PEAK_RSS_BOUND_BYTES).unwrap() < bundle_bytes,
+        "the bundle held only {bundle_bytes} bytes"
+    );
+}
+
+/// The payload the `gf` children build and stream: graph bytes, not controls.
+#[cfg(target_os = "linux")]
+const BLOB_BYTES: usize = 1024 * 1024 * 1024;
+/// The nodes sharing [`BLOB_BYTES`]; each holds one [`BLOB_BYTES`]/[`NODES`]
+/// `body`.
+#[cfg(target_os = "linux")]
+const NODES: usize = 128;
+/// The memory any reaped `gf` child may hold, whatever the payload. The
+/// empty-project baseline of `gf` alone is tens of MiB, this lean test
+/// process's fork adds the same order, and the bound stays a fraction of the
+/// package [`BLOB_BYTES`] produces.
+#[cfg(target_os = "linux")]
+const PEAK_RSS_BOUND_BYTES: u64 = 256 * 1024 * 1024;
