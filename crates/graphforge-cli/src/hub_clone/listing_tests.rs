@@ -20,7 +20,7 @@ fn list(json: bool) -> (Vec<u8>, Vec<String>) {
     run_list_with(
         &transport,
         &ListArgs {
-            repository: "openalex/openalex".into(),
+            repository: "opendata/openalex".into(),
             hub: None,
         },
         json,
@@ -41,8 +41,8 @@ fn a_repository_without_lineage_lists_its_refs_and_reads_no_object() {
     assert_eq!(
         requested,
         [
-            "https://graphforge.sh/openalex/openalex/.gf/refs",
-            "https://graphforge.sh/openalex/openalex/.gf/manifest",
+            "https://graphforge.sh/opendata/openalex/.gf/refs",
+            "https://graphforge.sh/opendata/openalex/.gf/manifest",
         ],
         "discovery documents only"
     );
@@ -51,7 +51,7 @@ fn a_repository_without_lineage_lists_its_refs_and_reads_no_object() {
         listing,
         serde_json::json!({
             "contract": "graphforge-hub-listing/1",
-            "repository": "openalex/openalex",
+            "repository": "opendata/openalex",
             "default_ref": manifest.default_ref,
             "immutable_version": manifest.immutable_version.0,
             "package_digest": manifest.package.package_digest.0,
@@ -62,7 +62,7 @@ fn a_repository_without_lineage_lists_its_refs_and_reads_no_object() {
     let (text, _) = list(false);
     assert_eq!(
         String::from_utf8(text).unwrap(),
-        "openalex/openalex (default ref main)\nRefs: main\n\
+        "opendata/openalex (default ref main)\nRefs: main\n\
          No research lineage; clone downloads the Project package.\n"
     );
 }

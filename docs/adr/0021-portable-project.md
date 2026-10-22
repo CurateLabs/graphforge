@@ -221,6 +221,8 @@ $GF --json --project $W/g500-project export --current --output $W/g500-s20.gfpb
 # Fixtures, measured in place at these repository paths
 #   tests/fixtures/research-v6/package.gfpb
 #   tests/fixtures/hub/generated/v1/objects/openalex-openalex.gfpb
+#   (historical path as measured; #2214 later regenerated the fixture as
+#   objects/opendata-openalex.gfpb with different digests)
 
 # Every level in the table, on each of the four bundles (BUNDLE = path)
 for L in 1 3 9 19; do
@@ -271,7 +273,7 @@ these bundles is far smaller than the host's RAM.)
 | research-v6 fixture | `a5a3c102bdad3a27e1212e615a8609eefc09821bd04e3c4bd37854655e85668b` | `sha256:b06489087e61a3cae78a440dbcf360e399c26cb04401f8c5363a81536f442ea3` |
 | OpenAlex fixture | `52cbffc43ab2bd081aefa297970a4f060fb52b8a8ab601b77e2bca9ca6dda54d` | `sha256:492188fb9c3ac96b06b5373f571b47b6c6fc703c12800da1d02585001203fb35` |
 
-Raw per-run output is on issue #1770, not in the repository. The SF1 archive sha256 is `2e3dfb9e3695592161a62ce893b9619c2566775512b7c1995c5a627277c2fb29` (it matches the pin in `benchmarks/profiles/gdc/snb-interactive-scorecard-identity.json`).
+The OpenAlex fixture row records the bundle as measured, before #2214 regenerated the fixture under a new name and digests. Raw per-run output is on issue #1770, not in the repository. The SF1 archive sha256 is `2e3dfb9e3695592161a62ce893b9619c2566775512b7c1995c5a627277c2fb29` (it matches the pin in `benchmarks/profiles/gdc/snb-interactive-scorecard-identity.json`).
 
 **revisit_when:** the payload encodings change (a different Parquet or CSR
 codec or level, uncompressed payloads, or bundles that carry evidence), or a

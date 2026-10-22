@@ -234,7 +234,7 @@ fn assert_cli_error(error: crate::CliRuntimeError, code: &str, exit_code: i32) -
 
 fn fixture_bytes() -> Vec<u8> {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../tests/fixtures/hub/generated/v1/objects/openalex-openalex.gfpb");
+        .join("../../tests/fixtures/hub/generated/v1/objects/opendata-openalex.gfpb");
     std::fs::read(path).unwrap()
 }
 
@@ -593,7 +593,7 @@ fn initial_body_never_exposes_bytes_beyond_content_length() {
 #[test]
 fn resumed_hub_bundle_verifies_like_the_file() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../tests/fixtures/hub/generated/v1/objects/openalex-openalex.gfpb");
+        .join("../../tests/fixtures/hub/generated/v1/objects/opendata-openalex.gfpb");
     let bytes = std::fs::read(&path).unwrap();
     let transport = Fake {
         bytes,

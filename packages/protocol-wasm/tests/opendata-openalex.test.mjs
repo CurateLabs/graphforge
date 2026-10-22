@@ -26,13 +26,13 @@ const recorded = readJson(
   "crates",
   "graphforge-protocol-wasm",
   "tests",
-  "openalex-commitment.json",
+  "opendata-openalex-commitment.json",
 );
 
 test("the openalex manifest, refs and summary validate and bind", () => {
   const manifest = protocol.validate_manifest(manifestText);
   assert.equal(manifest.digest, fixture.manifest_digest);
-  assert.equal(manifest.document.repository.owner, "openalex");
+  assert.equal(manifest.document.repository.owner, "opendata");
 
   const refs = protocol.validate_refs(refsText);
   assert.equal(refs.document.refs[0].validator, manifest.digest);
@@ -74,8 +74,8 @@ test("re-homing the openalex fixture matches the recorded native revision", () =
   const rehomed = protocol.rehome_repository(
     refsText,
     [{ manifest: JSON.parse(manifestText), summary: summaryText }],
-    { owner: "openalex", repository: "renamed" },
-    "https://control.example/openalex/renamed/sha256/{hex}",
+    { owner: "opendata", repository: "renamed" },
+    "https://control.example/opendata/renamed/sha256/{hex}",
   );
   assert.equal(rehomed.revision, recorded.rehomed_revision);
   assert.equal(rehomed.refs.refs[0].validator, recorded.rehomed_manifest);
@@ -89,7 +89,7 @@ test("re-homing the openalex fixture matches the recorded native revision", () =
     protocol.rehome_repository(
       refsText,
       [],
-      { owner: "openalex", repository: "renamed" },
+      { owner: "opendata", repository: "renamed" },
       "https://control.example/{hex}",
     ),
   );

@@ -55,13 +55,13 @@ fn project_page_facts_come_from_the_checked_in_artifacts_alone() {
     // Select the summary object the way a consumer does: by manifest descriptor.
     let descriptor = manifest.summary_object().unwrap();
     let summary_bytes =
-        fs::read(generated().join("objects/openalex-openalex.summary.json")).unwrap();
+        fs::read(generated().join("objects/opendata-openalex.summary.json")).unwrap();
     assert_eq!(digest(&summary_bytes), descriptor.digest.0);
     assert_eq!(summary_bytes.len() as u64, descriptor.length);
     let summary = ProjectSummary::from_json(&summary_bytes, DiscoveryLimits::default()).unwrap();
     manifest.bind_summary(&summary).unwrap();
 
-    assert_eq!(summary.repository.owner, "openalex");
+    assert_eq!(summary.repository.owner, "opendata");
     assert_eq!(summary.repository.repository, "openalex");
     assert_eq!(summary.metadata.title.as_deref(), Some("OpenAlex"));
     assert_eq!(summary.metadata.license.as_deref(), Some("CC0-1.0"));
@@ -71,7 +71,7 @@ fn project_page_facts_come_from_the_checked_in_artifacts_alone() {
     assert_eq!(summary.metadata.source_types, ["bibliographic-database"]);
     assert_eq!(
         summary.metadata.ontologies,
-        ["https://openalex.org/ontology/works"]
+        ["https://graphforge.sh/ont_drqf2xw8w33cxaxj"]
     );
     let size = summary.metadata.corpus_size.as_ref().unwrap();
     assert_eq!(size.node_count, Some(1_000));
@@ -91,7 +91,7 @@ fn project_page_facts_come_from_the_checked_in_artifacts_alone() {
     let composition = summary.facts.ontology_composition.as_ref().unwrap();
     assert_eq!(composition.modules.len(), 1);
     let module = &composition.modules[0];
-    assert_eq!(module.id, "https://openalex.org/ontology/works");
+    assert_eq!(module.id, "https://graphforge.sh/ont_drqf2xw8w33cxaxj");
     assert_eq!(module.version, "2026.01");
 
     // The manifest inventory advertises the same exact module with its own
@@ -120,7 +120,7 @@ fn project_page_facts_come_from_the_checked_in_artifacts_alone() {
     let resolved = resolve_discovered_ontology_module(&DiscoveryOntologyModuleRequest {
         manifest_json: &manifest_bytes,
         refs_json: &refs_bytes,
-        expected_repository: &RepositoryIdentity::parse("openalex/openalex").unwrap(),
+        expected_repository: &RepositoryIdentity::parse("opendata/openalex").unwrap(),
         module: &identity,
         package: &module_package,
         discovery_limits: DiscoveryLimits::default(),
@@ -143,7 +143,7 @@ fn summary_and_descriptors_survive_a_different_object_location_base() {
     )
     .unwrap();
     assert_ne!(DEFAULT_LOCATION_BASE, "https://mirror.example.org/content/");
-    let relative = "objects/openalex-openalex.summary.json";
+    let relative = "objects/opendata-openalex.summary.json";
     assert_eq!(
         fs::read(regenerated.path().join(relative)).unwrap(),
         fs::read(generated().join(relative)).unwrap()

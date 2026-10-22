@@ -11,7 +11,7 @@ mod hostile;
 
 const HUB_BUNDLE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../../tests/fixtures/hub/generated/v1/objects/openalex-openalex.gfpb"
+    "/../../tests/fixtures/hub/generated/v1/objects/opendata-openalex.gfpb"
 );
 const EVIDENCE_PATH: &str = "data/components/evidence/scan-0001/scan.bin";
 const GIB: u64 = 1024 * 1024 * 1024;

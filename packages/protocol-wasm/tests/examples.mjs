@@ -180,8 +180,8 @@ export const EXPORTS = {
     args: [
       refs,
       [{ manifest: manifestObject, summary }],
-      { owner: "openalex", repository: "renamed" },
-      "https://control.example/openalex/renamed/sha256/{hex}",
+      { owner: "opendata", repository: "renamed" },
+      "https://control.example/opendata/renamed/sha256/{hex}",
       undefined,
     ],
     optional: [4],

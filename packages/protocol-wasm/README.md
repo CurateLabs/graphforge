@@ -46,7 +46,7 @@ const { document, canonical_json, digest } =
   protocol.validate_manifest(manifestText);
 protocol.bind_summary(manifestText, summaryText);
 const commitment = protocol.request_commitment({
-  repository: { owner: "openalex", repository: "openalex" },
+  repository: { owner: "opendata", repository: "openalex" },
   intent_digest,
   objects, // [{ digest, length, media_type }], ascending by digest
   manifest_validator: digest,
@@ -161,5 +161,5 @@ fixture natively through the same engine functions.
 The module needs no Node APIs. In a Worker, import the `.wasm` file as above
 and call `initSync` once at module scope; `wrangler dev` or `wrangler deploy`
 bundles it. Workers are not available in this repository's CI, so the Worker
-run of the openalex acceptance case (`tests/openalex.test.mjs`) is a manual
+run of the openalex acceptance case (`tests/opendata-openalex.test.mjs`) is a manual
 step recorded on issue #1766.

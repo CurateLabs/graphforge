@@ -15,8 +15,8 @@ const FIXTURE: &str = include_str!("../../../tests/fixtures/hub/generated/v1/fix
 const MANIFEST: &str = include_str!("../../../tests/fixtures/hub/generated/v1/manifest.json");
 const REFS: &str = include_str!("../../../tests/fixtures/hub/generated/v1/refs.json");
 const SUMMARY: &str =
-    include_str!("../../../tests/fixtures/hub/generated/v1/objects/openalex-openalex.summary.json");
-const RECORDED: &str = "tests/openalex-commitment.json";
+    include_str!("../../../tests/fixtures/hub/generated/v1/objects/opendata-openalex.summary.json");
+const RECORDED: &str = "tests/opendata-openalex-commitment.json";
 const UPDATE: &str = "GRAPHFORGE_UPDATE_PROTOCOL_WASM_EXPECTED";
 
 fn limits(case: &Value) -> DiscoveryLimits {
@@ -105,7 +105,7 @@ fn openalex_intent() -> (Value, PublishIntent) {
         })
         .collect();
     objects.sort();
-    let repository = json!({"owner": "openalex", "repository": "openalex"});
+    let repository = json!({"owner": "opendata", "repository": "openalex"});
     let intent_digest = fixture["package_digest"].as_str().unwrap();
     let manifest_validator = fixture["manifest_digest"].as_str().unwrap();
     let input = json!({
@@ -153,13 +153,13 @@ fn rehome_openalex() -> engine::Outcome<engine::RehomeResult> {
     engine::rehome_repository(
         REFS.as_bytes(),
         &serde_json::to_vec(&snapshots).unwrap(),
-        br#"{"owner":"openalex","repository":"renamed"}"#,
-        "https://control.example/openalex/renamed/sha256/{hex}",
+        br#"{"owner":"opendata","repository":"renamed"}"#,
+        "https://control.example/opendata/renamed/sha256/{hex}",
         DiscoveryLimits::default(),
     )
 }
 
-/// The native values `packages/protocol-wasm/tests/openalex.test.mjs` must
+/// The native values `packages/protocol-wasm/tests/opendata-openalex.test.mjs` must
 /// reproduce through WebAssembly. After the fixture changes, regenerate them
 /// with `GRAPHFORGE_UPDATE_PROTOCOL_WASM_EXPECTED=1 cargo test -p graphforge-protocol-wasm`.
 #[test]
