@@ -173,5 +173,8 @@ fn rehoming_the_openalex_fixture_matches_the_recorded_revision() {
     assert_eq!(rehomed.refs.repository.repository, "renamed");
     let recorded: Value = serde_json::from_str(COMMITMENT).unwrap();
     assert_eq!(recorded["rehomed_revision"], rehomed.revision);
-    assert_eq!(recorded["rehomed_manifest"], rehomed.refs.refs[0].validator.0);
+    assert_eq!(
+        recorded["rehomed_manifest"],
+        rehomed.refs.refs[0].validator.0
+    );
 }
