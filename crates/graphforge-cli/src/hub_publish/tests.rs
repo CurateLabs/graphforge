@@ -25,6 +25,7 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 mod ancestor_publication;
+mod composition_proof;
 mod core_version_warning;
 mod credit;
 mod hub_listing;

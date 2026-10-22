@@ -14,7 +14,9 @@ use uuid::Uuid;
 pub(crate) mod planning;
 mod transport;
 use planning::{inspect, package_class};
-pub use planning::{plan_complete_portable, plan_selected_portable};
+pub use planning::{
+    plan_complete_portable, plan_portable_ontology_composition, plan_selected_portable,
+};
 pub(crate) use transport::WrittenPackage;
 use transport::{bundle, expanded};
 
@@ -127,6 +129,54 @@ impl PartialEq for PortableExportReceipt {
 }
 
 impl Eq for PortableExportReceipt {}
+
+/// Inspect the exact composition control an ontology export would advertise.
+/// This uses the export planner without writing a package or graph payload.
+pub fn inspect_portable_ontology_composition(
+    generation: &crate::ResolvedProjectGeneration,
+    limits: PortableExportLimits,
+) -> Result<Option<crate::PortableOntologyComposition>, PortableError> {
+    read_ontology_composition(generation, limits)?
+        .map(|composition| plan_portable_ontology_composition(&composition, limits))
+        .transpose()
+}
+
+fn read_ontology_composition(
+    generation: &crate::ResolvedProjectGeneration,
+    limits: PortableExportLimits,
+) -> Result<Option<crate::WorkspaceOntologyComposition>, PortableError> {
+    let Some(descriptor) = generation
+        .participant_descriptors()
+        .map_err(storage)?
+        .into_iter()
+        .find(|descriptor| {
+            descriptor.capability_id == crate::WORKSPACE_CAPABILITY_ID
+                && descriptor.record_family_id == crate::WORKSPACE_ONTOLOGY_COMPOSITION_FAMILY
+        })
+    else {
+        return Ok(None);
+    };
+    if descriptor.byte_length
+        > (crate::workspace_participants::MAX_WORKSPACE_ONTOLOGY_COMPOSITION_BYTES as u64)
+            .min(limits.max_manifest_bytes)
+            .min(limits.max_entry_bytes)
+    {
+        return Err(limit(
+            "ontology composition authority exceeds configured limit",
+        ));
+    }
+    // Authenticate only the requested participant, including validated carry-forward links.
+    let snapshot = generation
+        .participant_snapshot(
+            crate::WORKSPACE_CAPABILITY_ID,
+            crate::WORKSPACE_ONTOLOGY_COMPOSITION_FAMILY,
+        )
+        .map_err(storage)?
+        .ok_or_else(|| err("GF_INVALID_STRUCTURE", "ontology composition is missing"))?;
+    crate::WorkspaceOntologyComposition::from_canonical_json(&snapshot.bytes)
+        .map(Some)
+        .map_err(storage)
+}
 
 #[derive(Default)]
 struct ExportAllocationObserver {

@@ -1794,6 +1794,32 @@ fn check_receipt(
     Ok(())
 }
 
+/// Refuse to advertise current ontology controls for a different frozen Version.
+fn check_ontology_composition(graph: &GraphForge, selection: &Selection) -> Result<(), GfError> {
+    let current = graph
+        .portable_ontology_composition(PortableLimits::default())
+        .map_err(|error| derivation(&error.to_string()))?;
+    let selected = graph
+        .research_version_portable_ontology_composition(
+            selection.version_uuid,
+            PortableLimits::default(),
+        )
+        .map_err(|error| derivation(&error.to_string()))?;
+    // The export control contains sorted exact module/bridge identities and the
+    // portable digest, including activation profiles; an inventory fingerprint
+    // alone would miss profile-only changes.
+    if current != selected {
+        return Err(validation(
+            "hub.publish.ontology_composition_mismatch",
+            &format!(
+                "workspace ontology composition differs from selected Version {}; check out that Version, or commit the ontology changes as a new Version and publish the current Branch head",
+                selection.version_uuid
+            ),
+        ));
+    }
+    Ok(())
+}
+
 /// Publish one research Version (or Branch head) of `graph`.
 #[allow(clippy::too_many_lines)]
 pub(crate) fn publish(
@@ -1822,6 +1848,7 @@ pub(crate) fn publish(
             )
         })?;
     let selection = select(graph, args)?;
+    check_ontology_composition(graph, &selection)?;
     let previews = select_previews(args, selection.version_uuid)?;
     let preview_metadata = previews
         .iter()
