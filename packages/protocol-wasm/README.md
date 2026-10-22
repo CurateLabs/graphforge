@@ -59,6 +59,25 @@ A document argument is a JSON string, validated byte for byte (duplicate
 members and oversize input are refused as in native Rust), or a plain object.
 Results are plain objects.
 
+Permanent item references use Core's shared grammar directly:
+
+```js
+protocol.parse_item_id("ONT_7K2M9X4Q8R3T5V1W");
+// { id: "ont_7k2m9x4q8r3t5v1w",
+//   uri: "https://graphforge.sh/ont_7k2m9x4q8r3t5v1w",
+//   kind: "ontology_module" }
+protocol.has_item_id_shape("abc_0000000000000000"); // true (reserved name)
+```
+
+`parse_item_id(reference)` accepts a bare ID or `https://graphforge.sh/<id>`,
+folding ASCII case only. It recognizes `ont` (`ontology_module`) and `brg`
+(`bridge_set`), rejects Crockford aliases `i`, `l`, `o`, `u`, unknown prefixes,
+foreign URIs, extra paths, query strings and fragments, and throws a structured
+`invalid_argument` error on failure. `has_item_id_shape(name)` returns a boolean:
+any three lowercase letters followed by `_` and 16 lowercase Crockford base32
+characters are reserved, including unknown prefixes. It does not normalize case
+or accept a URI. Both calls work without entropy; ID generation is not exported.
+
 **Boundary.** Rust never reads a JavaScript object. The package's `index.js`
 turns an object argument into JSON text with `JSON.stringify` and passes only
 strings and bytes to the WebAssembly exports, so an object and its JSON text
@@ -83,6 +102,7 @@ included, are own properties.
 
 | Area           | Exports                                                                                                                                |
 | -------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| Permanent IDs  | `parse_item_id`, `has_item_id_shape`                                                                                                   |
 | Discovery      | `validate_manifest`, `validate_refs`, `validate_summary`, `validate_lineage`, `validate_repository_moved`                              |
 | Binding        | `bind_summary`, `bind_lineage`, `bind_summary_lineage`, `bind_refs`, `ontology_module_object`, `research_version_object`               |
 | Re-homing      | `rehome_repository`                                                                                                                    |
@@ -99,7 +119,8 @@ with the code Rust returns: `malformed_response`, `unsupported_future`,
 `integrity_failure`, `limit_exceeded`, ... for discovery;
 `invalid_input`, `auth_denied`, ... for publish documents; `preview.limit`,
 `preview.unsafe_svg`, ... for previews. `invalid_argument` means the argument
-was not the JSON value or string the export needs.
+was not the JSON value or string the export needs, or was an invalid permanent
+item reference.
 
 TypeScript declarations (`dist/graphforge_protocol_wasm.d.ts`) are generated
 from the Rust wire types; nothing in them is written by hand.

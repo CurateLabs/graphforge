@@ -145,6 +145,12 @@ const manifestObject = JSON.parse(manifest);
  * positions that accept `undefined`/`null`.
  */
 export const EXPORTS = {
+  parse_item_id: { args: ["ont_7k2m9x4q8r3t5v1w"], optional: [] },
+  has_item_id_shape: {
+    args: ["abc_0000000000000000"],
+    optional: [],
+    predicate: true,
+  },
   validate_manifest: { args: [manifest, undefined], optional: [1] },
   validate_refs: { args: [refs, undefined], optional: [1] },
   validate_summary: { args: [summary, undefined], optional: [1] },

@@ -12,7 +12,7 @@ test("the table covers exactly the module's exports", () => {
     .filter((name) => name !== "default" && name !== "initSync")
     .sort();
   assert.deepEqual(Object.keys(EXPORTS).sort(), exported);
-  assert.equal(exported.length, 23);
+  assert.equal(exported.length, 25);
 });
 
 test("every export succeeds on its working arguments", () => {
@@ -25,11 +25,11 @@ test("every export succeeds on its working arguments", () => {
   }
 });
 
-test("damaging any one argument of any export yields a structured error, never a trap", () => {
+test("damaging an argument yields a structured error or false predicate, never a trap", () => {
   const hostile = hostileValues();
   let calls = 0;
   let glue = 0;
-  for (const [name, { args, optional }] of Object.entries(EXPORTS)) {
+  for (const [name, { args, optional, predicate }] of Object.entries(EXPORTS)) {
     for (let position = 0; position < args.length; position += 1) {
       for (const [index, value] of hostile.entries()) {
         const damaged = args.with(position, value);
@@ -37,6 +37,10 @@ test("damaging any one argument of any export yields a structured error, never a
         calls += 1;
         const label = `${name}[${position}] hostile #${index}`;
         if (outcome.ok) {
+          if (predicate) {
+            assert.equal(outcome.value, false, label);
+            continue;
+          }
           // Only an optional argument may take a harmless value (`undefined`,
           // `null`, or an object that stringifies to `{}`).
           assert.ok(optional.includes(position), `${label} was accepted`);

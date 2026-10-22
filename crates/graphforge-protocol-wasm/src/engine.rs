@@ -1,6 +1,6 @@
 //! Native-callable engine behind every WebAssembly export.
 //!
-//! Each function takes JSON bytes (a document or an argument object) and
+//! Each function takes JSON bytes (a document or an argument object), or text, and
 //! returns a serializable value or a [`ProtocolError`]. It only parses its
 //! arguments and calls the Rust-owned validators in `graphforge-discovery` and
 //! `graphforge-hub-publish`; it adds no protocol rule of its own. The
@@ -10,9 +10,9 @@
 use graphforge_discovery::preview::{self, PreviewDescriptor, PreviewError};
 use graphforge_discovery::{
     DiscoveryError, DiscoveryLimits, DiscoveryManifest, DiscoveryVersionDetails, ExactIdentity,
-    LineageVersion, ObjectDescriptor, ObjectLocationTemplate, OntologyModuleDescriptor,
-    ProjectSummary, RefSet, RehomedRepository, RepositoryIdentity, RepositoryMoved,
-    RepositorySnapshot, ResearchLineage, Sha256Digest,
+    ItemId, ItemKind, LineageVersion, ObjectDescriptor, ObjectLocationTemplate,
+    OntologyModuleDescriptor, ProjectSummary, RefSet, RehomedRepository, RepositoryIdentity,
+    RepositoryMoved, RepositorySnapshot, ResearchLineage, Sha256Digest,
 };
 use graphforge_hub_publish::{
     CommitRequest, HubPublishError, ObjectDeclaration, OpenSessionRequest, OperationStatus,
@@ -25,7 +25,7 @@ use tsify::Tsify;
 ///
 /// `code` is the snake-case discovery or publish code (`integrity_failure`,
 /// `invalid_input`, ...), the `preview.*` token of a preview refusal, or
-/// `invalid_argument` for an argument the adapter itself cannot read.
+/// `invalid_argument` for an unreadable argument or invalid permanent item reference.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Tsify)]
 pub struct ProtocolError {
     /// Stable machine-readable code.
@@ -89,6 +89,47 @@ impl From<PreviewError> for ProtocolError {
 
 /// Result of every engine function.
 pub type Outcome<T> = Result<T, ProtocolError>;
+
+/// Kind named by a validated permanent item ID.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Tsify)]
+#[serde(rename_all = "snake_case")]
+pub enum ItemIdKind {
+    /// Ontology module (`ont`).
+    OntologyModule,
+    /// Bridge set (`brg`).
+    BridgeSet,
+}
+
+/// A permanent item reference normalized by Core's shared grammar.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Tsify)]
+pub struct ParsedItemId {
+    /// Canonical lowercase bare ID.
+    pub id: String,
+    /// Canonical `https://graphforge.sh/<id>` URI.
+    pub uri: String,
+    /// Known item kind selected by the prefix.
+    pub kind: ItemIdKind,
+}
+
+/// Parse a bare ID or canonical URI, folding ASCII case only.
+pub fn parse_item_id(reference: &str) -> Outcome<ParsedItemId> {
+    let item = ItemId::parse_reference(reference)
+        .map_err(|error| ProtocolError::argument(&error.to_string()))?;
+    Ok(ParsedItemId {
+        id: item.as_str().into(),
+        uri: item.to_uri(),
+        kind: match item.kind() {
+            ItemKind::OntologyModule => ItemIdKind::OntologyModule,
+            ItemKind::BridgeSet => ItemIdKind::BridgeSet,
+        },
+    })
+}
+
+/// Reserve canonical lowercase ID-shaped names, including unknown prefixes.
+#[must_use]
+pub fn has_item_id_shape(name: &str) -> bool {
+    graphforge_discovery::has_item_id_shape(name)
+}
 
 /// Optional overrides of the default discovery resource bounds.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Tsify)]
