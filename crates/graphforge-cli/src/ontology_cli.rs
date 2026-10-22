@@ -93,7 +93,7 @@ pub(crate) enum ModuleCommand {
     Get(ModuleSelectorArgs),
     Inspect(ModuleSelectorArgs),
     Validate(DocumentArgs),
-    Create(ModuleCandidateArgs),
+    Create(ModuleCreateArgs),
     Import(ModuleCandidateArgs),
     Adopt(ModuleMutationArgs),
     PreviewUpdate(ModulePreviewUpdateArgs),
@@ -117,7 +117,7 @@ pub(crate) enum BridgeCommand {
     Get(BridgeSelectorArgs),
     Inspect(BridgeSelectorArgs),
     Validate(DocumentArgs),
-    Create(BridgeCandidateArgs),
+    Create(BridgeCreateArgs),
     Import(BridgeCandidateArgs),
     Adopt(BridgeMutationArgs),
     PreviewUpdate(BridgePreviewUpdateArgs),
@@ -218,6 +218,32 @@ impl From<ModeArg> for ActivationMode {
             ModeArg::Strict => Self::Strict,
         }
     }
+}
+
+#[derive(Args)]
+pub(crate) struct CreateIdentityArgs {
+    /// Explicit permanent ID (bare or URI), or an IRI in your own domain.
+    #[arg(long)]
+    id: Option<String>,
+    /// Save the completed document as JSON; the input is never rewritten.
+    #[arg(long)]
+    output: Option<PathBuf>,
+}
+
+#[derive(Args)]
+pub(crate) struct ModuleCreateArgs {
+    #[command(flatten)]
+    candidate: ModuleCandidateArgs,
+    #[command(flatten)]
+    identity: CreateIdentityArgs,
+}
+
+#[derive(Args)]
+pub(crate) struct BridgeCreateArgs {
+    #[command(flatten)]
+    candidate: BridgeCandidateArgs,
+    #[command(flatten)]
+    identity: CreateIdentityArgs,
 }
 
 #[derive(Args)]
@@ -491,8 +517,32 @@ fn run_module(
             )
         }
         ModuleCommand::Create(args) => {
-            let candidate = module_candidate_from_args(graph, &args, true)?;
-            emit(&candidate, json_output, output)
+            let mut document: OntologyDoc =
+                read_document(&args.candidate.document.input, args.candidate.format)?;
+            apply_explicit_id(
+                &mut document.ontology_id,
+                args.identity.id.as_deref(),
+                graphforge_discovery::ItemKind::OntologyModule,
+            )?;
+            let dependencies = args
+                .candidate
+                .dependencies
+                .iter()
+                .map(|value| parse_module_id(value))
+                .collect::<Result<Vec<_>, _>>()?;
+            let candidate = graph.create_ontology_module(
+                document,
+                dependencies,
+                args.candidate.mode.map(Into::into),
+            )?;
+            emit_created(
+                &candidate.document,
+                &candidate,
+                &args.identity,
+                &args.candidate.document.input,
+                json_output,
+                output,
+            )
         }
         ModuleCommand::Import(args) => {
             let candidate = module_candidate_from_args(graph, &args, false)?;
@@ -550,9 +600,9 @@ fn run_module(
             )
         }
         ModuleCommand::Migrate(args) => {
-            let preview: ModuleMigrationPreview = read_json(&args.preview)?;
             let candidate =
                 module_candidate_from_args(graph, &args.update.preview.candidate, true)?;
+            let preview: ModuleMigrationPreview = read_json(&args.preview)?;
             let (authority, token) = authority(&args.update.authority)?;
             let receipt = graph.migrate_ontology_module(
                 &ModuleMigrationRequest {
@@ -635,11 +685,24 @@ fn run_bridge(
                 output,
             )
         }
-        BridgeCommand::Create(args) => emit(
-            &bridge_candidate_from_args(graph, &args, true)?,
-            json_output,
-            output,
-        ),
+        BridgeCommand::Create(args) => {
+            let mut document: BridgeDocument =
+                read_document(&args.candidate.document.input, args.candidate.format)?;
+            apply_explicit_id(
+                &mut document.bridge_id,
+                args.identity.id.as_deref(),
+                graphforge_discovery::ItemKind::BridgeSet,
+            )?;
+            let candidate = graph.create_ontology_bridge(document)?;
+            emit_created(
+                &candidate.document,
+                &candidate,
+                &args.identity,
+                &args.candidate.document.input,
+                json_output,
+                output,
+            )
+        }
         BridgeCommand::Import(args) => emit(
             &bridge_candidate_from_args(graph, &args, false)?,
             json_output,
@@ -833,6 +896,110 @@ pub(crate) fn run_portable_staging_adopt(
         Some(&token),
     )?;
     emit(&receipt, json_output, output)
+}
+
+fn parse_document<T: for<'de> Deserialize<'de>>(
+    text: &str,
+    format: InputFormat,
+) -> Result<T, graphforge_api::GfError> {
+    match format {
+        InputFormat::Json => serde_json::from_str(text)
+            .map_err(|_| graphforge_api::GfError::Validation("ontology JSON is malformed".into())),
+        InputFormat::Yaml => serde_yaml::from_str(text)
+            .map_err(|_| graphforge_api::GfError::Validation("ontology YAML is malformed".into())),
+        InputFormat::Auto if text.trim_start().starts_with('{') => {
+            parse_document(text, InputFormat::Json)
+        }
+        InputFormat::Auto => parse_document(text, InputFormat::Yaml),
+    }
+}
+
+fn read_document<T: for<'de> Deserialize<'de>>(
+    path: &Path,
+    format: InputFormat,
+) -> Result<T, graphforge_api::GfError> {
+    parse_document(&read_bounded(path)?, format)
+}
+
+fn apply_explicit_id(
+    document_id: &mut String,
+    explicit: Option<&str>,
+    kind: graphforge_discovery::ItemKind,
+) -> Result<(), graphforge_api::GfError> {
+    let Some(explicit) = explicit else {
+        return Ok(());
+    };
+    if explicit.trim().is_empty() {
+        return Err(graphforge_api::GfError::Validation(
+            "--id must not be empty".into(),
+        ));
+    }
+    let explicit = if explicit.get(..4).is_some_and(|prefix| {
+        prefix.eq_ignore_ascii_case("ont_") || prefix.eq_ignore_ascii_case("brg_")
+    }) {
+        graphforge_discovery::ItemId::parse_kind(explicit, kind)
+            .map_err(|error| graphforge_api::GfError::Validation(error.to_string()))?
+            .to_uri()
+    } else if let Ok(id) = graphforge_discovery::ItemId::parse_kind(explicit, kind) {
+        id.to_uri()
+    } else {
+        explicit.to_owned()
+    };
+    if !document_id.is_empty() && *document_id != explicit {
+        return Err(graphforge_api::GfError::Validation(
+            "--id disagrees with the document ID".into(),
+        ));
+    }
+    *document_id = explicit;
+    Ok(())
+}
+
+fn emit_created(
+    document: &impl serde::Serialize,
+    candidate: &impl serde::Serialize,
+    args: &CreateIdentityArgs,
+    input: &Path,
+    json_output: bool,
+    output: &mut dyn Write,
+) -> Result<(), CliRuntimeError> {
+    if let Some(path) = &args.output {
+        // Refuse alias paths too: the authored input must never be rewritten.
+        let input = fs::canonicalize(input)
+            .map_err(|error| graphforge_api::GfError::Execution(error.to_string()))?;
+        if fs::canonicalize(path).is_ok_and(|path| path == input) {
+            return Err(graphforge_api::GfError::Validation(
+                "--output must differ from --input".into(),
+            )
+            .into());
+        }
+        let bytes = serde_json::to_vec_pretty(document)
+            .map_err(|error| graphforge_api::GfError::Execution(error.to_string()))?;
+        write_created_output(path, |file| file.write_all(&bytes))
+            .map_err(|error| graphforge_api::GfError::Execution(error.to_string()))?;
+    }
+    if json_output {
+        emit(candidate, true, output)
+    } else if args.output.is_none() {
+        emit(document, false, output)
+    } else {
+        Ok(())
+    }
+}
+
+/// Publish completed bytes without leaving a partial destination on failure.
+fn write_created_output(
+    path: &Path,
+    write: impl FnOnce(&mut fs::File) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let mut file = tempfile::NamedTempFile::new_in(parent)?;
+    write(file.as_file_mut())?;
+    file.flush()?;
+    file.persist_noclobber(path).map_err(|error| error.error)?;
+    Ok(())
 }
 
 fn module_candidate_from_args(
@@ -1058,6 +1225,41 @@ mod tests {
     use clap::Parser as _;
     use tempfile::tempdir;
     use uuid::Uuid;
+
+    #[test]
+    fn created_output_failure_cleans_up_and_allows_retry() {
+        let root = tempdir().unwrap();
+        let path = root.path().join("completed.json");
+        let error = write_created_output(&path, |file| {
+            file.write_all(b"{\"ontology_id\":")?;
+            Err(std::io::Error::new(
+                std::io::ErrorKind::WriteZero,
+                "injected failure after a partial write",
+            ))
+        })
+        .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::WriteZero);
+        assert!(
+            !path.exists(),
+            "a failed write must not publish partial JSON"
+        );
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
+
+        let document = b"{\"ontology_id\":\"https://example.org/ontology\"}";
+        write_created_output(&path, |file| file.write_all(document)).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), document);
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn created_output_preserves_existing_destination() {
+        let root = tempdir().unwrap();
+        let path = root.path().join("completed.json");
+        fs::write(&path, b"existing contents").unwrap();
+        assert!(write_created_output(&path, |file| file.write_all(b"new contents")).is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"existing contents");
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
+    }
 
     #[test]
     fn exact_selectors_require_complete_identity() {

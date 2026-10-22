@@ -14,6 +14,7 @@ pub mod composition;
 pub mod error;
 pub mod handle;
 pub mod inventory;
+mod item_identity;
 pub mod loader;
 pub mod migration;
 pub mod ontology;

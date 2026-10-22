@@ -324,3 +324,39 @@ fn legacy_single_ontology_projection() {
         canonical_digest: inv.list()[0].digest.clone(),
     };
 }
+
+#[test]
+fn authored_module_identity_reserves_the_graphforge_namespace() {
+    let mut inventory = OntologyInventory::default();
+    for id in [
+        "https://graphforge.sh/ont_7k2m9x4q8r3t5v1w",
+        "core",
+        "legacy:digest",
+        "https://example.org/onto",
+    ] {
+        let identity = inventory
+            .create_register(entity_doc(id, "1", &["Person"]), vec![], None, "create")
+            .unwrap();
+        assert_eq!(identity.ontology_id, id);
+    }
+    for id in [
+        "",
+        "https://graphforge.sh/ONT_7K2M9X4Q8R3T5V1W",
+        "https://graphforge.sh/brg_7k2m9x4q8r3t5v1w",
+        "https://graphforge.sh/owner/repo/works",
+        "https://graphforge.sh/ontology/ont_7k2m9x4q8r3t5v1w",
+        "https://graphforge.sh/ont_7k2m9x4q8r3t5v1w/",
+        "https://graphforge.sh/ont_7k2m9x4q8r3t5v1i",
+    ] {
+        let error = inventory
+            .validate_document(&entity_doc(id, "1", &["Person"]))
+            .unwrap_err();
+        assert_eq!(
+            error.diagnostics[0].code,
+            DiagnosticCode::InventoryMalformed,
+            "{id}"
+        );
+    }
+    assert!(inventory.list().is_empty());
+    assert_eq!(inventory.generation(), 0);
+}

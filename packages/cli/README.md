@@ -237,6 +237,25 @@ A repository that moved reports `moved_from` and `moved_to`, as `clone` does.
 `null` when absent. `gf publish` does not publish Proposals, so `proposals` is
 empty unless another publisher added them.
 
+`ontology module create --input authored.yaml [--id ID] [--output completed.json]`
+and `ontology bridge create` complete an authored document without changing the
+input. Core mints a permanent `https://graphforge.sh/ont_<16 characters>` module
+ID or `https://graphforge.sh/brg_<16 characters>` bridge ID when the corresponding
+field is absent. The random part contains 80 bits encoded as lowercase Crockford
+base32 (no `i`, `l`, `o`, or `u`). Save the completed document and use it for every
+later operation: creation preserves an existing ID, while adopt, update, and
+module migrate require one and never mint another.
+
+Without `--output`, the completed JSON document goes to stdout. With `--output`,
+it goes to a new file; existing files are never overwritten. With `--json`,
+stdout contains the candidate receipt, including its ID and completed document,
+so use `--output` as well to save the document. `--id` accepts a bare `ont_…` or
+`brg_…` token, its URI, or an IRI in a domain you control. Permanent ID input is
+case-insensitive and is written in canonical lowercase URI form. An explicit ID
+must agree with an ID already in the document. Authored GraphForge IDs must use
+the canonical URI and the correct kind; legacy IDs and other-domain IRIs remain
+unchanged.
+
 `ontology module fetch REF --output FILE [--digest HEX] [--hub URL]` retrieves
 one verified ontology module without cloning a Project:
 

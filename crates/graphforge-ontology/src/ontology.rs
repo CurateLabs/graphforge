@@ -20,7 +20,9 @@ use serde::{Deserialize, Serialize};
 /// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OntologyDoc {
-    /// Stable identifier for this ontology (e.g. `"core"`, `"acme-kg"`).
+    /// Stable identifier for this ontology. May be omitted only before create,
+    /// which fills a permanent `https://graphforge.sh/ont_…` URI.
+    #[serde(default)]
     pub ontology_id: String,
     /// Semver-style version string (e.g. `"2026.05"`).
     pub version: String,

@@ -1352,3 +1352,364 @@ fn observed_cli_parity_report() -> Value {
         }
     })
 }
+
+#[test]
+fn create_completes_module_documents_and_checks_explicit_ids() {
+    let project = initialized_project();
+    let input = write_module(
+        project.path(),
+        "authored.json",
+        &serde_json::json!({"version":"1","entity_types":[{"name":"Person"}]}),
+    );
+    let original = fs::read(&input).unwrap();
+    let saved = project.path().join("completed.json");
+    let created = gf(
+        project.path(),
+        &[
+            "--json",
+            "ontology",
+            "module",
+            "create",
+            "--input",
+            input.to_str().unwrap(),
+            "--output",
+            saved.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        created.status.success(),
+        "{}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+    let candidate = parse_json(&created.stdout);
+    let document = parse_json(&fs::read(&saved).unwrap());
+    let id = document["ontology_id"].as_str().unwrap();
+    assert_eq!(
+        graphforge_discovery::ItemId::parse_kind(
+            id,
+            graphforge_discovery::ItemKind::OntologyModule
+        )
+        .unwrap()
+        .to_uri(),
+        id
+    );
+    assert_eq!(candidate["id"]["ontology_id"], document["ontology_id"]);
+    assert_eq!(candidate["document"], document);
+    assert_eq!(fs::read(&input).unwrap(), original);
+    let again = gf(
+        project.path(),
+        &[
+            "ontology",
+            "module",
+            "create",
+            "--input",
+            saved.to_str().unwrap(),
+        ],
+    );
+    assert!(again.status.success());
+    assert_eq!(
+        parse_json(&again.stdout),
+        document,
+        "stdout is a completed document"
+    );
+    let adopted = adopt_module(
+        project.path(),
+        &saved,
+        "00000000-0000-0000-0000-000000009200",
+        None,
+    );
+    assert!(
+        adopted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&adopted.stderr)
+    );
+    let reopened = graphforge_api::GraphForge::new(Some(project.path().to_str().unwrap())).unwrap();
+    assert!(
+        reopened
+            .ontology_modules()
+            .unwrap()
+            .iter()
+            .any(|entry| entry.id.ontology_id == id)
+    );
+    for explicit in [
+        "ONT_7K2M9X4Q8R3T5V1W",
+        "https://graphforge.sh/ont_7k2m9x4q8r3t5v1w",
+        "https://example.org/ontology/people",
+    ] {
+        let result = gf(
+            project.path(),
+            &[
+                "--json",
+                "ontology",
+                "module",
+                "create",
+                "--input",
+                input.to_str().unwrap(),
+                "--id",
+                explicit,
+            ],
+        );
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let expected = if explicit.starts_with("ONT_") {
+            "https://graphforge.sh/ont_7k2m9x4q8r3t5v1w"
+        } else {
+            explicit
+        };
+        assert_eq!(
+            parse_json(&result.stdout)["document"]["ontology_id"],
+            expected
+        );
+    }
+    for extra in [
+        vec!["--id", "brg_7k2m9x4q8r3t5v1w"],
+        vec!["--id", "ont_invalid"],
+        vec!["--id", ""],
+        vec!["--output", input.to_str().unwrap()],
+    ] {
+        let mut args = vec![
+            "ontology",
+            "module",
+            "create",
+            "--input",
+            input.to_str().unwrap(),
+        ];
+        args.extend(extra);
+        assert!(!gf(project.path(), &args).status.success());
+    }
+    let conflict = gf(
+        project.path(),
+        &[
+            "ontology",
+            "module",
+            "create",
+            "--input",
+            saved.to_str().unwrap(),
+            "--id",
+            "ont_0000000000000000",
+        ],
+    );
+    assert!(!conflict.status.success());
+    assert!(String::from_utf8_lossy(&conflict.stderr).contains("disagrees"));
+    assert_eq!(fs::read(&input).unwrap(), original);
+}
+
+#[test]
+fn create_completes_bridge_documents_and_checks_explicit_ids() {
+    let project = initialized_project();
+    let oracle = parity_oracle();
+    let base = write_module(project.path(), "base.json", &oracle["modules"]["base"]);
+    let base_id = candidate_id(project.path(), &base);
+    assert!(
+        adopt_module(
+            project.path(),
+            &base,
+            "00000000-0000-0000-0000-000000009210",
+            None
+        )
+        .status
+        .success()
+    );
+    let dependent = write_module(
+        project.path(),
+        "dependent.json",
+        &oracle["modules"]["dependent"],
+    );
+    let dependent_id = candidate_id(project.path(), &dependent);
+    assert!(
+        adopt_module(
+            project.path(),
+            &dependent,
+            "00000000-0000-0000-0000-000000009211",
+            Some(&display_id(&base_id))
+        )
+        .status
+        .success()
+    );
+    let mut document = substitute(
+        &oracle["bridge"],
+        &std::collections::BTreeMap::from([("$base", base_id), ("$dependent", dependent_id)]),
+    );
+    document.as_object_mut().unwrap().remove("bridge_id");
+    let input = write_module(project.path(), "bridge-authored.json", &document);
+    let saved = project.path().join("bridge-completed.json");
+    let created = gf(
+        project.path(),
+        &[
+            "--json",
+            "ontology",
+            "bridge",
+            "create",
+            "--input",
+            input.to_str().unwrap(),
+            "--output",
+            saved.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        created.status.success(),
+        "{}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+    let candidate = parse_json(&created.stdout);
+    let completed = parse_json(&fs::read(&saved).unwrap());
+    assert_eq!(candidate["document"], completed);
+    let id = completed["bridge_id"].as_str().unwrap();
+    assert_eq!(
+        graphforge_discovery::ItemId::parse_kind(id, graphforge_discovery::ItemKind::BridgeSet)
+            .unwrap()
+            .to_uri(),
+        id
+    );
+    let again = gf(
+        project.path(),
+        &[
+            "ontology",
+            "bridge",
+            "create",
+            "--input",
+            saved.to_str().unwrap(),
+        ],
+    );
+    assert!(again.status.success());
+    assert_eq!(parse_json(&again.stdout), completed);
+    let adopted = adopt_bridge(
+        project.path(),
+        &saved,
+        "00000000-0000-0000-0000-000000009212",
+    );
+    assert!(
+        adopted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&adopted.stderr)
+    );
+    let reopened = graphforge_api::GraphForge::new(Some(project.path().to_str().unwrap())).unwrap();
+    assert!(
+        reopened
+            .ontology_bridges()
+            .unwrap()
+            .iter()
+            .any(|entry| entry.id.bridge_id == id)
+    );
+    drop(reopened);
+    for explicit in [
+        "BRG_7K2M9X4Q8R3T5V1W",
+        "https://graphforge.sh/brg_7k2m9x4q8r3t5v1w",
+        "https://example.org/bridges/people",
+    ] {
+        let result = gf(
+            project.path(),
+            &[
+                "--json",
+                "ontology",
+                "bridge",
+                "create",
+                "--input",
+                input.to_str().unwrap(),
+                "--id",
+                explicit,
+            ],
+        );
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let expected = if explicit.starts_with("BRG_") {
+            "https://graphforge.sh/brg_7k2m9x4q8r3t5v1w"
+        } else {
+            explicit
+        };
+        assert_eq!(
+            parse_json(&result.stdout)["document"]["bridge_id"],
+            expected
+        );
+    }
+    let conflict = gf(
+        project.path(),
+        &[
+            "ontology",
+            "bridge",
+            "create",
+            "--input",
+            saved.to_str().unwrap(),
+            "--id",
+            "brg_0000000000000000",
+        ],
+    );
+    assert!(!conflict.status.success());
+    assert!(String::from_utf8_lossy(&conflict.stderr).contains("disagrees"));
+    let wrong_kind = gf(
+        project.path(),
+        &[
+            "ontology",
+            "bridge",
+            "create",
+            "--input",
+            input.to_str().unwrap(),
+            "--id",
+            "ont_0000000000000000",
+        ],
+    );
+    assert!(!wrong_kind.status.success());
+    assert_eq!(parse_json(&fs::read(&input).unwrap()), document);
+}
+
+#[test]
+fn lifecycle_commands_refuse_idless_documents_with_create_hint() {
+    let project = initialized_project();
+    for kind in ["module", "bridge"] {
+        let value = if kind == "module" {
+            serde_json::json!({"version":"1"})
+        } else {
+            serde_json::json!({"authored_version":"1","source_modules":[],"target_modules":[],"assertions":[]})
+        };
+        let input = write_module(project.path(), &format!("{kind}-incomplete.json"), &value);
+        let preview = write_module(project.path(), "preview.json", &serde_json::json!({}));
+        let operations: &[&str] = if kind == "module" {
+            &["adopt", "update", "preview-migrate", "migrate"]
+        } else {
+            &["adopt", "update"]
+        };
+        for operation in operations {
+            let mut args = vec![
+                "--json",
+                "ontology",
+                kind,
+                operation,
+                "--input",
+                input.to_str().unwrap(),
+                "--operation-uuid",
+                "00000000-0000-0000-0000-000000009220",
+                "--expected-generation",
+                "00000000-0000-0000-0000-000000009221",
+            ];
+            if *operation != "adopt" {
+                args.extend([
+                    if kind == "module" {
+                        "--ontology-id"
+                    } else {
+                        "--bridge-id"
+                    },
+                    "core",
+                ]);
+            }
+            if *operation == "migrate" {
+                args.extend(["--preview", preview.to_str().unwrap()]);
+            }
+            let result = gf(project.path(), &args);
+            assert!(!result.status.success(), "{kind} {operation}");
+            assert_eq!(parse_json(&result.stderr)["error"]["code"], "GF_VALIDATION");
+            assert!(
+                String::from_utf8_lossy(&result.stderr)
+                    .contains(&format!("ontology {kind} create first")),
+                "{kind} {operation}: {}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+        }
+        assert_eq!(parse_json(&fs::read(&input).unwrap()), value);
+    }
+}

@@ -18,6 +18,18 @@ pub fn validate_bridge_document(
     modules: &[ModuleSymbolTable],
     limit: DiagnosticLimit,
 ) -> Result<(), CompositionError> {
+    crate::item_identity::validate_item_identity(
+        &doc.bridge_id,
+        graphforge_discovery::ItemKind::BridgeSet,
+    )
+    .map_err(|message| {
+        CompositionError::one(CompositionDiagnostic::with_subjects(
+            DiagnosticCode::InventoryMalformed,
+            message,
+            vec![doc.bridge_id.clone()],
+            limit,
+        ))
+    })?;
     require_nfc(&doc.bridge_id, "bridge_id", limit)?;
     require_nfc(&doc.authored_version, "authored_version", limit)?;
     if doc.assertions.is_empty() {

@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import tempfile
 import uuid
 
@@ -584,5 +585,21 @@ def test_packaged_clean_install() -> None:
     assert semantic_results()["packaged_clean_install"] == graphforge.__file__
 
 
+def test_native_create_mints_permanent_module_identity() -> None:
+    forge = g.GraphForge()
+    try:
+        candidate = forge.create_ontology_module(
+            {"version": "1", "entity_types": [{"name": "Person"}]}, []
+        )
+        item_id = candidate["id"]["ontology_id"]
+        assert re.fullmatch(r"https://graphforge\.sh/ont_[0-9a-hjkmnp-tv-z]{16}", item_id)
+        assert candidate["document"]["ontology_id"] == item_id
+        repeated = forge.create_ontology_module(candidate["document"], [])
+        assert repeated["id"] == candidate["id"]
+    finally:
+        forge.close()
+
+
 if __name__ == "__main__":
+    test_native_create_mints_permanent_module_identity()
     semantic_results()
