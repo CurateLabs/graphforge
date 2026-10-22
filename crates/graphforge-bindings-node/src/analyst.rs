@@ -6,11 +6,15 @@ use crate::BigInt;
 use crate::Buffer;
 use crate::ClassInstance;
 use crate::EmbeddingInput;
+use crate::Env;
+use crate::FromNapiValue;
 use crate::GfError;
 use crate::GraphForge;
 use crate::InvocationDescriptor;
+use crate::JsValue;
 use crate::NodeSelector;
 use crate::NodeSelectorInput;
+use crate::Object;
 use crate::PathsOptions;
 use crate::Result;
 use crate::SimilarOptions;
@@ -25,6 +29,54 @@ use crate::record_batch_to_ipc;
 use crate::to_napi_err;
 use crate::to_napi_invocation_err;
 use crate::validate_embedding_options;
+
+const RANK_OPTION_KEYS: &[&str] = &[
+    "via",
+    "directed",
+    "writeProperty",
+    "damping",
+    "iterations",
+    "clusteringNormalization",
+];
+
+const CLUSTER_OPTION_KEYS: &[&str] = &[
+    "via",
+    "directed",
+    "writeProperty",
+    "vectorProperty",
+    "synchronousIterations",
+    "initialLabelProperty",
+];
+
+/// Convert an optional JS options object, refusing any key outside `accepted`.
+///
+/// `#[napi(object)]` conversion silently drops unknown keys, so a misspelled
+/// control (`{ iteratons: 0 }`) would run with defaults. Reject it before
+/// conversion, naming the key and listing the accepted ones.
+// SAFETY: `options` is a live N-API Object belonging to the injected Env;
+// `from_napi_value` fallibly converts it and failures become JS errors.
+#[allow(unsafe_code)]
+fn checked_options<T: FromNapiValue>(
+    env: Env,
+    options: Option<Object<'_>>,
+    method: &str,
+    accepted: &[&str],
+) -> Result<Option<T>> {
+    let Some(object) = options else {
+        return Ok(None);
+    };
+    let keys = Object::keys(&object)
+        .map_err(|error| crate::NodeError::new(error.status.as_ref().to_owned(), error.reason))?;
+    if let Some(unknown) = keys.iter().find(|key| !accepted.contains(&key.as_str())) {
+        return Err(to_napi_err(&GfError::Validation(format!(
+            "unknown {method} option {unknown:?}; accepted options: {}",
+            accepted.join(", ")
+        ))));
+    }
+    unsafe { T::from_napi_value(env.raw(), object.raw()) }
+        .map(Some)
+        .map_err(|error| crate::NodeError::new(error.status.as_ref().to_owned(), error.reason))
+}
 
 #[napi(object)]
 /// Optional rank controls. Existing defaults apply when a field is omitted.
@@ -259,15 +311,17 @@ impl GraphForge {
     /// Rank nodes through the Rust registry. Returns an Arrow IPC `Buffer`.
     ///
     /// Optional controls go in one `options` object; existing defaults apply
-    /// when fields are omitted.
-    #[napi]
+    /// when fields are omitted. Unknown option keys are refused.
+    #[napi(ts_args_type = "label: string, by: string, options?: RankOptionsInput | null")]
     pub fn rank(
         &self,
+        env: Env,
         label: String,
         by: String,
-        options: Option<RankOptionsInput>,
+        options: Option<Object<'_>>,
     ) -> Result<Buffer> {
         let g = self.open_guard()?;
+        let options = checked_options::<RankOptionsInput>(env, options, "rank", RANK_OPTION_KEYS)?;
         let options = options.unwrap_or(RankOptionsInput {
             via: None,
             directed: None,
@@ -504,15 +558,18 @@ impl GraphForge {
     /// Detect communities/components. Returns an Arrow IPC `Buffer`.
     ///
     /// Optional controls go in one `options` object; existing defaults apply
-    /// when fields are omitted.
-    #[napi]
+    /// when fields are omitted. Unknown option keys are refused.
+    #[napi(ts_args_type = "label: string, by: string, options?: ClusterOptionsInput | null")]
     pub fn cluster(
         &self,
+        env: Env,
         label: String,
         by: String,
-        options: Option<ClusterOptionsInput>,
+        options: Option<Object<'_>>,
     ) -> Result<Buffer> {
         let g = self.open_guard()?;
+        let options =
+            checked_options::<ClusterOptionsInput>(env, options, "cluster", CLUSTER_OPTION_KEYS)?;
         let options = options.unwrap_or(ClusterOptionsInput {
             via: None,
             directed: None,

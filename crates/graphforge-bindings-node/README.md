@@ -133,7 +133,9 @@ object; existing defaults apply when fields are omitted. Rank accepts `via`,
 `directed`, `writeProperty`, `damping`, `iterations` (including zero), and
 `clusteringNormalization` (`"fagiolo"` or `"neighbor_edges"`). Cluster accepts
 `via`, `directed`, `writeProperty`, `vectorProperty`, `synchronousIterations`
-(including zero), and `initialLabelProperty`.
+(including zero), and `initialLabelProperty`. An unknown option key (for example a misspelled
+`iteratons`) is refused with a validation error that lists the accepted keys,
+rather than running with defaults.
 
 ```js
 forge.rank("Person", "pagerank", { directed: true, damping: 0.85, iterations: 20 });

@@ -231,3 +231,54 @@ test("errors after an omitted id was minted carry it for a safe retry", () => {
 
   forge.close();
 });
+
+test("rank and cluster refuse unknown option keys instead of using defaults", () => {
+  const forge = new GraphForge();
+  forge.execute(
+    "CREATE (a:Person {name:'A'}), (b:Person {name:'B'}), (a)-[:LINK]->(b)",
+  );
+
+  // A misspelled control must not silently run with defaults.
+  assert.throws(
+    () => forge.rank("Person", "pagerank", { iteratons: 0 }),
+    (error) =>
+      error.code === "ValidationError" &&
+      error.message.includes('"iteratons"') &&
+      error.message.includes("iterations") &&
+      error.message.includes("clusteringNormalization"),
+  );
+  assert.throws(
+    () =>
+      forge.cluster("Person", "label_propagation", {
+        synchronousIteratons: 0,
+      }),
+    (error) =>
+      error.code === "ValidationError" &&
+      error.message.includes('"synchronousIteratons"') &&
+      error.message.includes("synchronousIterations") &&
+      error.message.includes("initialLabelProperty"),
+  );
+
+  // One bad key among valid ones is still refused.
+  assert.throws(
+    () =>
+      forge.rank("Person", "pagerank", { damping: 0.5, iterations: 1, tol: 1 }),
+    (error) => error.message.includes('"tol"'),
+  );
+
+  // Valid keys are still applied; omitted, null and undefined options use defaults.
+  const applied = tableFromIPC(
+    forge.rank("Person", "pagerank", {
+      via: "LINK",
+      directed: true,
+      damping: 0.5,
+      iterations: 1,
+    }),
+  );
+  assert.deepEqual(scores(applied), { A: 0.375, B: 0.625 });
+  for (const options of [undefined, null, {}, { via: undefined }]) {
+    assert.equal(forge.rank("Person", "degree", options).byteLength > 0, true);
+  }
+
+  forge.close();
+});
