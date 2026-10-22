@@ -108,10 +108,13 @@ test("the documented Node quickstart path needs no IPC plumbing", () => {
       "RETURN paper.title AS title, count(*) AS citations " +
       "ORDER BY citations DESC, title",
   );
-  assert.deepEqual(table.toArray().map((row) => row.toJSON()), [
-    { title: "Methods", citations: 2n },
-    { title: "Replication", citations: 1n },
-  ]);
+  assert.deepEqual(
+    table.toArray().map((row) => row.toJSON()),
+    [
+      { title: "Methods", citations: 2n },
+      { title: "Replication", citations: 1n },
+    ],
+  );
 
   forge.close();
 });
@@ -193,7 +196,9 @@ test("bulk publication mints and exposes an optional operation id", () => {
       conflicted =
         error?.code === "GF_IDEMPOTENCY_CONFLICT" ||
         String(error?.message ?? error).includes("IDEMPOTENCY") ||
-        String(error?.message ?? error).toLowerCase().includes("conflict");
+        String(error?.message ?? error)
+          .toLowerCase()
+          .includes("conflict");
     }
     assert.equal(conflicted, true);
     assert.equal(projectDigest(project), before);
