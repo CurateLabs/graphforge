@@ -37,14 +37,18 @@ function checkComponentsCluster() {
   );
 
   const via = tableFromIPC(
-    forge.cluster("Person", "components", "KNOWS", true),
+    forge.cluster("Person", "components", { via: "KNOWS", directed: true }),
   );
   assert.deepEqual(
     [...via.getChild("community_id").toArray()],
     [0n, 0n, 1n, 2n, 3n],
   );
   const written = tableFromIPC(
-    forge.cluster("Person", "components", "KNOWS", false, "component"),
+    forge.cluster("Person", "components", {
+      via: "KNOWS",
+      directed: false,
+      writeProperty: "component",
+    }),
   );
   assert.deepEqual(
     [...written.getChild("community_id").toArray()],
@@ -61,15 +65,7 @@ function checkComponentsCluster() {
   );
   const expectClusterValidation = (target, by, vectorProperty, message) => {
     assert.throws(
-      () =>
-        target.cluster(
-          "Person",
-          by,
-          undefined,
-          undefined,
-          undefined,
-          vectorProperty,
-        ),
+      () => target.cluster("Person", by, { vectorProperty: vectorProperty }),
       (error) => {
         assert.equal(error.code, "ValidationError");
         assert.equal(error.message, message);
@@ -114,7 +110,10 @@ function checkStronglyConnectedCluster() {
       "(f)-[:OTHER]->(a)",
   );
   const table = tableFromIPC(
-    forge.cluster("Person", "strongly_connected", "KNOWS", true),
+    forge.cluster("Person", "strongly_connected", {
+      via: "KNOWS",
+      directed: true,
+    }),
   );
   assert.deepEqual(
     table.schema.fields.map((field) => field.name),
@@ -143,14 +142,17 @@ function checkStronglyConnectedCluster() {
     [...expected.getChild("node_uuid").toArray()],
   );
   const undirected = tableFromIPC(
-    forge.cluster("Person", "strongly_connected", "KNOWS", false),
+    forge.cluster("Person", "strongly_connected", {
+      via: "KNOWS",
+      directed: false,
+    }),
   );
   assert.deepEqual(
     [...undirected.getChild("community_id").toArray()],
     [0n, 0n, 0n, 0n, 0n, 0n, 1n],
   );
   const allEdges = tableFromIPC(
-    forge.cluster("Person", "strongly_connected", undefined, true),
+    forge.cluster("Person", "strongly_connected", { directed: true }),
   );
   assert.deepEqual(
     [...allEdges.getChild("community_id").toArray()],
@@ -169,25 +171,18 @@ function checkStronglyConnectedCluster() {
   for (const [run, message] of [
     [
       () =>
-        forge.cluster(
-          "Person",
-          "strongly_connected",
-          "KNOWS",
-          true,
-          "atomic_scc",
-        ),
+        forge.cluster("Person", "strongly_connected", {
+          via: "KNOWS",
+          directed: true,
+          writeProperty: "atomic_scc",
+        }),
       'write_property "atomic_scc" collides with existing Utf8 data',
     ],
     [
       () =>
-        forge.cluster(
-          "Person",
-          "strongly_connected",
-          undefined,
-          undefined,
-          undefined,
-          "features",
-        ),
+        forge.cluster("Person", "strongly_connected", {
+          vectorProperty: "features",
+        }),
       "cluster.strongly_connected does not accept vector_property",
     ],
   ]) {
@@ -204,7 +199,11 @@ function checkStronglyConnectedCluster() {
   );
   assert.deepEqual([...unchanged.getChild("value").toArray()], ["old"]);
   const written = tableFromIPC(
-    forge.cluster("Person", "strongly_connected", "KNOWS", true, "scc"),
+    forge.cluster("Person", "strongly_connected", {
+      via: "KNOWS",
+      directed: true,
+      writeProperty: "scc",
+    }),
   );
   assert.deepEqual(
     [...written.getChild("community_id").toArray()],
@@ -246,7 +245,7 @@ function checkBiconnectedCluster() {
       "(f)-[:KNOWS]->(f), (g)-[:OTHER]->(a)",
   );
   const table = tableFromIPC(
-    forge.cluster("Person", "biconnected", "KNOWS", true),
+    forge.cluster("Person", "biconnected", { via: "KNOWS", directed: true }),
   );
   assert.deepEqual(
     table.schema.fields.map((field) => field.name),
@@ -275,13 +274,15 @@ function checkBiconnectedCluster() {
     [...expected.getChild("node_uuid").toArray()],
   );
   const undirected = tableFromIPC(
-    forge.cluster("Person", "biconnected", "KNOWS", false),
+    forge.cluster("Person", "biconnected", { via: "KNOWS", directed: false }),
   );
   assert.deepEqual(
     [...undirected.getChild("community_id").toArray()],
     [0n, 0n, 0n, 1n, 1n, 2n, 3n],
   );
-  const via = tableFromIPC(forge.cluster("Person", "biconnected", "OTHER"));
+  const via = tableFromIPC(
+    forge.cluster("Person", "biconnected", { via: "OTHER" }),
+  );
   assert.deepEqual(
     [...via.getChild("community_id").toArray()],
     [0n, 1n, 2n, 3n, 4n, 5n, 0n],
@@ -297,19 +298,16 @@ function checkBiconnectedCluster() {
   for (const [run, message] of [
     [
       () =>
-        forge.cluster("Person", "biconnected", "KNOWS", true, "atomic_block"),
+        forge.cluster("Person", "biconnected", {
+          via: "KNOWS",
+          directed: true,
+          writeProperty: "atomic_block",
+        }),
       'write_property "atomic_block" collides with existing Utf8 data',
     ],
     [
       () =>
-        forge.cluster(
-          "Person",
-          "biconnected",
-          undefined,
-          undefined,
-          undefined,
-          "features",
-        ),
+        forge.cluster("Person", "biconnected", { vectorProperty: "features" }),
       "cluster.biconnected does not accept vector_property",
     ],
   ]) {
@@ -326,7 +324,11 @@ function checkBiconnectedCluster() {
   );
   assert.deepEqual([...unchanged.getChild("value").toArray()], ["old"]);
   const written = tableFromIPC(
-    forge.cluster("Person", "biconnected", "KNOWS", true, "block"),
+    forge.cluster("Person", "biconnected", {
+      via: "KNOWS",
+      directed: true,
+      writeProperty: "block",
+    }),
   );
   assert.deepEqual(
     [...written.getChild("community_id").toArray()],
@@ -373,7 +375,10 @@ function checkKCoreDecompositionCluster() {
       "(f)-[:OTHER]->(a)",
   );
   const table = tableFromIPC(
-    forge.cluster("Person", "k_core_decomposition", "KNOWS", true),
+    forge.cluster("Person", "k_core_decomposition", {
+      via: "KNOWS",
+      directed: true,
+    }),
   );
   assert.deepEqual(
     table.schema.fields.map((field) => field.name),
@@ -403,14 +408,17 @@ function checkKCoreDecompositionCluster() {
     [...identities.getChild("uuid").toArray()],
   );
   const undirected = tableFromIPC(
-    forge.cluster("Person", "k_core_decomposition", "KNOWS", false),
+    forge.cluster("Person", "k_core_decomposition", {
+      via: "KNOWS",
+      directed: false,
+    }),
   );
   assert.deepEqual(
     [...undirected.getChild("community_id").toArray()],
     expectedCores,
   );
   const via = tableFromIPC(
-    forge.cluster("Person", "k_core_decomposition", "OTHER"),
+    forge.cluster("Person", "k_core_decomposition", { via: "OTHER" }),
   );
   assert.deepEqual(
     [...via.getChild("community_id").toArray()],
@@ -426,22 +434,15 @@ function checkKCoreDecompositionCluster() {
   forge.execute("MATCH (n:Person {name:'a'}) SET n.atomic_core = 'old'");
   for (const run of [
     () =>
-      forge.cluster(
-        "Person",
-        "k_core_decomposition",
-        "KNOWS",
-        true,
-        "atomic_core",
-      ),
+      forge.cluster("Person", "k_core_decomposition", {
+        via: "KNOWS",
+        directed: true,
+        writeProperty: "atomic_core",
+      }),
     () =>
-      forge.cluster(
-        "Person",
-        "k_core_decomposition",
-        undefined,
-        undefined,
-        undefined,
-        "features",
-      ),
+      forge.cluster("Person", "k_core_decomposition", {
+        vectorProperty: "features",
+      }),
   ]) {
     assert.throws(run, (error) => error.code === "ValidationError");
   }
@@ -452,7 +453,11 @@ function checkKCoreDecompositionCluster() {
   );
   assert.deepEqual([...unchanged.getChild("value").toArray()], ["old"]);
   const written = tableFromIPC(
-    forge.cluster("Person", "k_core_decomposition", "KNOWS", true, "core"),
+    forge.cluster("Person", "k_core_decomposition", {
+      via: "KNOWS",
+      directed: true,
+      writeProperty: "core",
+    }),
   );
   assert.deepEqual(
     [...written.getChild("community_id").toArray()],

@@ -16,7 +16,7 @@ function checkPreferentialAttachment() {
       "(d)-[:KNOWS]->(c), (e)-[:OTHER]->(f)",
   );
   const table = tableFromIPC(
-    forge.rank("Person", "preferential_attachment", "KNOWS"),
+    forge.rank("Person", "preferential_attachment", { via: "KNOWS" }),
   );
   assert.deepEqual(
     table.schema.fields.map((field) => field.name),
@@ -31,7 +31,7 @@ function checkPreferentialAttachment() {
   assert.deepEqual([...table.getChild("name").toArray()], [..."ABCDEF"]);
   assert.deepEqual([...table.getChild("score").toArray()], [2, 3, 2, 3, 0, 0]);
   const repeated = tableFromIPC(
-    forge.rank("Person", "preferential_attachment", "KNOWS"),
+    forge.rank("Person", "preferential_attachment", { via: "KNOWS" }),
   );
   assert.deepEqual(
     [...repeated.getChild("name").toArray()],
@@ -44,7 +44,10 @@ function checkPreferentialAttachment() {
   assert.deepEqual(
     [
       ...tableFromIPC(
-        forge.rank("Person", "preferential_attachment", "KNOWS", false),
+        forge.rank("Person", "preferential_attachment", {
+          via: "KNOWS",
+          directed: false,
+        }),
       )
         .getChild("score")
         .toArray(),
@@ -61,7 +64,11 @@ function checkPreferentialAttachment() {
   );
   assert.equal(
     tableFromIPC(
-      forge.rank("Person", "preferential_attachment", "KNOWS", true, "pa"),
+      forge.rank("Person", "preferential_attachment", {
+        via: "KNOWS",
+        directed: true,
+        writeProperty: "pa",
+      }),
     ).numRows,
     6,
   );
@@ -90,7 +97,9 @@ function checkAdamicAdar() {
       "(c)-[:KNOWS]->(a), (c)-[:KNOWS]->(e), (d)-[:KNOWS]->(e), " +
       "(a)-[:OTHER]->(f), (b)-[:OTHER]->(f)",
   );
-  const table = tableFromIPC(forge.rank("Person", "adamic_adar", "KNOWS"));
+  const table = tableFromIPC(
+    forge.rank("Person", "adamic_adar", { via: "KNOWS" }),
+  );
   assert.deepEqual(
     table.schema.fields.map((field) => field.name),
     ["node_uuid", "score", "name"],
@@ -115,7 +124,9 @@ function checkAdamicAdar() {
   assert.ok(
     scores.every((score, index) => Math.abs(score - expected[index]) <= 1e-12),
   );
-  const repeated = tableFromIPC(forge.rank("Person", "adamic_adar", "KNOWS"));
+  const repeated = tableFromIPC(
+    forge.rank("Person", "adamic_adar", { via: "KNOWS" }),
+  );
   assert.deepEqual(
     [...repeated.getChild("name").toArray()],
     [...table.getChild("name").toArray()],
@@ -123,7 +134,9 @@ function checkAdamicAdar() {
   assert.deepEqual([...repeated.getChild("score").toArray()], scores);
   assert.notDeepEqual(
     [
-      ...tableFromIPC(forge.rank("Person", "adamic_adar", "KNOWS", false))
+      ...tableFromIPC(
+        forge.rank("Person", "adamic_adar", { via: "KNOWS", directed: false }),
+      )
         .getChild("score")
         .toArray(),
     ],
@@ -138,8 +151,13 @@ function checkAdamicAdar() {
     scores,
   );
   assert.equal(
-    tableFromIPC(forge.rank("Person", "adamic_adar", "KNOWS", true, "adamic"))
-      .numRows,
+    tableFromIPC(
+      forge.rank("Person", "adamic_adar", {
+        via: "KNOWS",
+        directed: true,
+        writeProperty: "adamic",
+      }),
+    ).numRows,
     6,
   );
   const persisted = tableFromIPC(
@@ -170,7 +188,9 @@ function checkCommonNeighbors() {
       "(c)-[:KNOWS]->(a), (c)-[:KNOWS]->(e), (d)-[:KNOWS]->(e), " +
       "(a)-[:OTHER]->(f), (b)-[:OTHER]->(f)",
   );
-  const table = tableFromIPC(forge.rank("Person", "common_neighbors", "KNOWS"));
+  const table = tableFromIPC(
+    forge.rank("Person", "common_neighbors", { via: "KNOWS" }),
+  );
   assert.deepEqual(
     table.schema.fields.map((field) => field.name),
     ["node_uuid", "score", "name"],
@@ -184,7 +204,7 @@ function checkCommonNeighbors() {
   assert.deepEqual([...table.getChild("name").toArray()], [..."ABCDEF"]);
   assert.deepEqual([...table.getChild("score").toArray()], [2, 2, 1, 1, 0, 0]);
   const repeated = tableFromIPC(
-    forge.rank("Person", "common_neighbors", "KNOWS"),
+    forge.rank("Person", "common_neighbors", { via: "KNOWS" }),
   );
   assert.deepEqual(
     [...repeated.getChild("name").toArray()],
@@ -196,7 +216,12 @@ function checkCommonNeighbors() {
   );
   assert.deepEqual(
     [
-      ...tableFromIPC(forge.rank("Person", "common_neighbors", "KNOWS", false))
+      ...tableFromIPC(
+        forge.rank("Person", "common_neighbors", {
+          via: "KNOWS",
+          directed: false,
+        }),
+      )
         .getChild("score")
         .toArray(),
     ],
@@ -220,7 +245,11 @@ function checkCommonNeighbors() {
   );
   assert.equal(
     tableFromIPC(
-      forge.rank("Person", "common_neighbors", "KNOWS", true, "common"),
+      forge.rank("Person", "common_neighbors", {
+        via: "KNOWS",
+        directed: true,
+        writeProperty: "common",
+      }),
     ).numRows,
     6,
   );
@@ -251,7 +280,7 @@ function checkResourceAllocation() {
       "(a)-[:OTHER]->(f), (b)-[:OTHER]->(f)",
   );
   const table = tableFromIPC(
-    forge.rank("Person", "resource_allocation", "KNOWS"),
+    forge.rank("Person", "resource_allocation", { via: "KNOWS" }),
   );
   assert.deepEqual(
     table.schema.fields.map((field) => field.name),
@@ -269,7 +298,7 @@ function checkResourceAllocation() {
     [1, 1, 0.5, 0.5, 0, 0],
   );
   const repeated = tableFromIPC(
-    forge.rank("Person", "resource_allocation", "KNOWS"),
+    forge.rank("Person", "resource_allocation", { via: "KNOWS" }),
   );
   assert.deepEqual(
     [...repeated.getChild("name").toArray()],
@@ -280,7 +309,12 @@ function checkResourceAllocation() {
     [...table.getChild("score").toArray()],
   );
   const undirected = [
-    ...tableFromIPC(forge.rank("Person", "resource_allocation", "KNOWS", false))
+    ...tableFromIPC(
+      forge.rank("Person", "resource_allocation", {
+        via: "KNOWS",
+        directed: false,
+      }),
+    )
       .getChild("score")
       .toArray(),
   ];
@@ -308,7 +342,11 @@ function checkResourceAllocation() {
   );
   assert.equal(
     tableFromIPC(
-      forge.rank("Person", "resource_allocation", "KNOWS", true, "resource"),
+      forge.rank("Person", "resource_allocation", {
+        via: "KNOWS",
+        directed: true,
+        writeProperty: "resource",
+      }),
     ).numRows,
     6,
   );
@@ -339,7 +377,9 @@ function checkTotalNeighbors() {
       "(c)-[:KNOWS]->(a), (c)-[:KNOWS]->(e), (d)-[:KNOWS]->(e), " +
       "(a)-[:OTHER]->(f), (b)-[:OTHER]->(f)",
   );
-  const table = tableFromIPC(forge.rank("Person", "total_neighbors", "KNOWS"));
+  const table = tableFromIPC(
+    forge.rank("Person", "total_neighbors", { via: "KNOWS" }),
+  );
   assert.deepEqual(
     table.schema.fields.map((field) => field.name),
     ["node_uuid", "score", "name"],
@@ -353,7 +393,7 @@ function checkTotalNeighbors() {
   assert.deepEqual([...table.getChild("name").toArray()], [..."ABCDEF"]);
   assert.deepEqual([...table.getChild("score").toArray()], [6, 6, 8, 9, 7, 7]);
   const repeated = tableFromIPC(
-    forge.rank("Person", "total_neighbors", "KNOWS"),
+    forge.rank("Person", "total_neighbors", { via: "KNOWS" }),
   );
   assert.deepEqual(
     [...repeated.getChild("name").toArray()],
@@ -365,7 +405,12 @@ function checkTotalNeighbors() {
   );
   assert.deepEqual(
     [
-      ...tableFromIPC(forge.rank("Person", "total_neighbors", "KNOWS", false))
+      ...tableFromIPC(
+        forge.rank("Person", "total_neighbors", {
+          via: "KNOWS",
+          directed: false,
+        }),
+      )
         .getChild("score")
         .toArray(),
     ],
@@ -389,7 +434,11 @@ function checkTotalNeighbors() {
   );
   assert.equal(
     tableFromIPC(
-      forge.rank("Person", "total_neighbors", "KNOWS", true, "total"),
+      forge.rank("Person", "total_neighbors", {
+        via: "KNOWS",
+        directed: true,
+        writeProperty: "total",
+      }),
     ).numRows,
     6,
   );

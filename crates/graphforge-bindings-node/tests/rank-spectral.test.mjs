@@ -13,7 +13,9 @@ function checkEigenvector() {
       "(a)-[:KNOWS]->(b), (a)-[:KNOWS]->(b), (b)-[:KNOWS]->(b), " +
       "(a)-[:OTHER]->(c)",
   );
-  const table = tableFromIPC(forge.rank("Person", "eigenvector", "KNOWS"));
+  const table = tableFromIPC(
+    forge.rank("Person", "eigenvector", { via: "KNOWS" }),
+  );
   assert.deepEqual(
     table.schema.fields.map((field) => field.name),
     ["node_uuid", "score", "name"],
@@ -36,12 +38,14 @@ function checkEigenvector() {
     scores.every((score, index) => Math.abs(score - expected[index]) <= 1e-15),
   );
   assert.deepEqual(scores, [
-    ...tableFromIPC(forge.rank("Person", "eigenvector", "KNOWS"))
+    ...tableFromIPC(forge.rank("Person", "eigenvector", { via: "KNOWS" }))
       .getChild("score")
       .toArray(),
   ]);
   const undirected = [
-    ...tableFromIPC(forge.rank("Person", "eigenvector", "KNOWS", false))
+    ...tableFromIPC(
+      forge.rank("Person", "eigenvector", { via: "KNOWS", directed: false }),
+    )
       .getChild("score")
       .toArray(),
   ];
@@ -55,7 +59,10 @@ function checkEigenvector() {
   );
   assert.equal(
     tableFromIPC(
-      forge.rank("Person", "eigenvector", undefined, true, "eigen_score"),
+      forge.rank("Person", "eigenvector", {
+        directed: true,
+        writeProperty: "eigen_score",
+      }),
     ).numRows,
     4,
   );
@@ -81,7 +88,9 @@ function checkArticleRank() {
       "(a)-[:KNOWS]->(b), (a)-[:OTHER]->(c), " +
       "(a)-[:OTHER]->(c), (c)-[:OTHER]->(c)",
   );
-  const table = tableFromIPC(forge.rank("Person", "article_rank", "KNOWS"));
+  const table = tableFromIPC(
+    forge.rank("Person", "article_rank", { via: "KNOWS" }),
+  );
   assert.deepEqual(
     table.schema.fields.map((field) => field.name),
     ["node_uuid", "score", "name"],
@@ -104,12 +113,14 @@ function checkArticleRank() {
     ),
   );
   assert.deepEqual(scores, [
-    ...tableFromIPC(forge.rank("Person", "article_rank", "KNOWS"))
+    ...tableFromIPC(forge.rank("Person", "article_rank", { via: "KNOWS" }))
       .getChild("score")
       .toArray(),
   ]);
   assert.notDeepEqual(scores, [
-    ...tableFromIPC(forge.rank("Person", "article_rank", "KNOWS", false))
+    ...tableFromIPC(
+      forge.rank("Person", "article_rank", { via: "KNOWS", directed: false }),
+    )
       .getChild("score")
       .toArray(),
   ]);
@@ -120,7 +131,10 @@ function checkArticleRank() {
   );
   assert.equal(
     tableFromIPC(
-      forge.rank("Person", "article_rank", undefined, true, "article_score"),
+      forge.rank("Person", "article_rank", {
+        directed: true,
+        writeProperty: "article_score",
+      }),
     ).numRows,
     4,
   );
@@ -146,7 +160,9 @@ function checkHitsHub() {
       "(a)-[:KNOWS]->(b), (b)-[:KNOWS]->(c), " +
       "(a)-[:OTHER]->(c), (a)-[:OTHER]->(c), (c)-[:OTHER]->(c)",
   );
-  const table = tableFromIPC(forge.rank("Person", "hits_hub", "KNOWS"));
+  const table = tableFromIPC(
+    forge.rank("Person", "hits_hub", { via: "KNOWS" }),
+  );
   assert.deepEqual(
     table.schema.fields.map((field) => field.name),
     ["node_uuid", "score", "name"],
@@ -164,12 +180,14 @@ function checkHitsHub() {
     scores.every((score, index) => Math.abs(score - expected[index]) <= 1e-15),
   );
   assert.deepEqual(scores, [
-    ...tableFromIPC(forge.rank("Person", "hits_hub", "KNOWS"))
+    ...tableFromIPC(forge.rank("Person", "hits_hub", { via: "KNOWS" }))
       .getChild("score")
       .toArray(),
   ]);
   const undirected = [
-    ...tableFromIPC(forge.rank("Person", "hits_hub", "KNOWS", false))
+    ...tableFromIPC(
+      forge.rank("Person", "hits_hub", { via: "KNOWS", directed: false }),
+    )
       .getChild("score")
       .toArray(),
   ];
@@ -182,8 +200,12 @@ function checkHitsHub() {
     tableFromIPC(forge.rank("Person", "hits_hub")).getChild("score").get(2) > 0,
   );
   assert.equal(
-    tableFromIPC(forge.rank("Person", "hits_hub", undefined, true, "hub_score"))
-      .numRows,
+    tableFromIPC(
+      forge.rank("Person", "hits_hub", {
+        directed: true,
+        writeProperty: "hub_score",
+      }),
+    ).numRows,
     4,
   );
   assert.equal(
@@ -208,7 +230,9 @@ function checkHitsAuthority() {
       "(a)-[:KNOWS]->(b), (b)-[:KNOWS]->(c), " +
       "(a)-[:OTHER]->(c), (a)-[:OTHER]->(c), (c)-[:OTHER]->(c)",
   );
-  const table = tableFromIPC(forge.rank("Person", "hits_authority", "KNOWS"));
+  const table = tableFromIPC(
+    forge.rank("Person", "hits_authority", { via: "KNOWS" }),
+  );
   assert.deepEqual(
     table.schema.fields.map((field) => field.name),
     ["node_uuid", "score", "name"],
@@ -229,12 +253,14 @@ function checkHitsAuthority() {
     scores.every((score, index) => Math.abs(score - expected[index]) <= 1e-15),
   );
   assert.deepEqual(scores, [
-    ...tableFromIPC(forge.rank("Person", "hits_authority", "KNOWS"))
+    ...tableFromIPC(forge.rank("Person", "hits_authority", { via: "KNOWS" }))
       .getChild("score")
       .toArray(),
   ]);
   const undirected = [
-    ...tableFromIPC(forge.rank("Person", "hits_authority", "KNOWS", false))
+    ...tableFromIPC(
+      forge.rank("Person", "hits_authority", { via: "KNOWS", directed: false }),
+    )
       .getChild("score")
       .toArray(),
   ];
@@ -259,13 +285,10 @@ function checkHitsAuthority() {
   );
   assert.equal(
     tableFromIPC(
-      forge.rank(
-        "Person",
-        "hits_authority",
-        undefined,
-        true,
-        "authority_score",
-      ),
+      forge.rank("Person", "hits_authority", {
+        directed: true,
+        writeProperty: "authority_score",
+      }),
     ).numRows,
     4,
   );

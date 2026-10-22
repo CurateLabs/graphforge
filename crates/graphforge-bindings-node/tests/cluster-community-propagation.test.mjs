@@ -16,7 +16,9 @@ function checkLouvainCluster() {
       "(e)-[:KNOWS]->(f), (f)-[:KNOWS]->(d), (f)-[:KNOWS]->(f), " +
       "(a)-[:OTHER]->(g)",
   );
-  const table = tableFromIPC(forge.cluster("Person", "louvain", "KNOWS", true));
+  const table = tableFromIPC(
+    forge.cluster("Person", "louvain", { via: "KNOWS", directed: true }),
+  );
   assert.deepEqual(
     table.schema.fields.map((field) => field.name),
     ["node_uuid", "community_id", "name"],
@@ -30,7 +32,7 @@ function checkLouvainCluster() {
     [0n, 0n, 0n, 1n, 1n, 1n, 2n],
   );
   const undirected = tableFromIPC(
-    forge.cluster("Person", "louvain", "KNOWS", false),
+    forge.cluster("Person", "louvain", { via: "KNOWS", directed: false }),
   );
   assert.deepEqual(
     [...undirected.getChild("community_id").toArray()],
@@ -50,7 +52,11 @@ function checkLouvainCluster() {
     0,
   );
   const written = tableFromIPC(
-    forge.cluster("Person", "louvain", "KNOWS", true, "group_id"),
+    forge.cluster("Person", "louvain", {
+      via: "KNOWS",
+      directed: true,
+      writeProperty: "group_id",
+    }),
   );
   assert.deepEqual(
     [...written.getChild("community_id").toArray()],
@@ -82,7 +88,9 @@ function checkLeidenCluster() {
       "(c)-[:KNOWS]->(g), (d)-[:KNOWS]->(g), (e)-[:KNOWS]->(g), " +
       "(f)-[:KNOWS]->(g), (a)-[:KNOWS]->(a), (a)-[:OTHER]->(h)",
   );
-  const table = tableFromIPC(forge.cluster("Person", "leiden", "KNOWS", true));
+  const table = tableFromIPC(
+    forge.cluster("Person", "leiden", { via: "KNOWS", directed: true }),
+  );
   assert.deepEqual(
     table.schema.fields.map((field) => field.name),
     ["node_uuid", "community_id", "name"],
@@ -94,7 +102,7 @@ function checkLeidenCluster() {
   const expected = [0n, 1n, 1n, 0n, 0n, 1n, 0n, 2n];
   assert.deepEqual([...table.getChild("community_id").toArray()], expected);
   const undirected = tableFromIPC(
-    forge.cluster("Person", "leiden", "KNOWS", false),
+    forge.cluster("Person", "leiden", { via: "KNOWS", directed: false }),
   );
   assert.deepEqual(
     [...undirected.getChild("community_id").toArray()],
@@ -109,7 +117,11 @@ function checkLeidenCluster() {
     0,
   );
   const written = tableFromIPC(
-    forge.cluster("Person", "leiden", "KNOWS", true, "group_id"),
+    forge.cluster("Person", "leiden", {
+      via: "KNOWS",
+      directed: true,
+      writeProperty: "group_id",
+    }),
   );
   assert.deepEqual([...written.getChild("community_id").toArray()], expected);
   const persisted = tableFromIPC(
@@ -133,7 +145,10 @@ function checkLabelPropagationCluster() {
       "(f)-[:KNOWS]->(d), (f)-[:KNOWS]->(f), (c)-[:OTHER]->(d)",
   );
   const table = tableFromIPC(
-    forge.cluster("Person", "label_propagation", "KNOWS", true),
+    forge.cluster("Person", "label_propagation", {
+      via: "KNOWS",
+      directed: true,
+    }),
   );
   assert.deepEqual(
     table.schema.fields.map((field) => field.name),
@@ -149,7 +164,10 @@ function checkLabelPropagationCluster() {
   const expected = [0n, 0n, 0n, 1n, 1n, 1n, 2n];
   assert.deepEqual([...table.getChild("community_id").toArray()], expected);
   const undirected = tableFromIPC(
-    forge.cluster("Person", "label_propagation", "KNOWS", false),
+    forge.cluster("Person", "label_propagation", {
+      via: "KNOWS",
+      directed: false,
+    }),
   );
   assert.deepEqual(
     [...undirected.getChild("community_id").toArray()],
@@ -164,7 +182,11 @@ function checkLabelPropagationCluster() {
     0,
   );
   const written = tableFromIPC(
-    forge.cluster("Person", "label_propagation", "KNOWS", true, "group_id"),
+    forge.cluster("Person", "label_propagation", {
+      via: "KNOWS",
+      directed: true,
+      writeProperty: "group_id",
+    }),
   );
   assert.deepEqual([...written.getChild("community_id").toArray()], expected);
   const persisted = tableFromIPC(
@@ -189,7 +211,10 @@ function checkSpeakerListenerCluster() {
       "(f)-[:KNOWS]->(d), (f)-[:KNOWS]->(f), (c)-[:OTHER]->(d)",
   );
   const table = tableFromIPC(
-    forge.cluster("Person", "speaker_listener", "KNOWS", true),
+    forge.cluster("Person", "speaker_listener", {
+      via: "KNOWS",
+      directed: true,
+    }),
   );
   assert.deepEqual(
     table.schema.fields.map((field) => field.name),
@@ -205,7 +230,10 @@ function checkSpeakerListenerCluster() {
   const expected = [0n, 0n, 0n, 1n, 1n, 1n, 2n];
   assert.deepEqual([...table.getChild("community_id").toArray()], expected);
   const undirected = tableFromIPC(
-    forge.cluster("Person", "speaker_listener", "KNOWS", false),
+    forge.cluster("Person", "speaker_listener", {
+      via: "KNOWS",
+      directed: false,
+    }),
   );
   assert.deepEqual(
     [...undirected.getChild("community_id").toArray()],
@@ -220,7 +248,11 @@ function checkSpeakerListenerCluster() {
     0,
   );
   const written = tableFromIPC(
-    forge.cluster("Person", "speaker_listener", "KNOWS", true, "slpa_group"),
+    forge.cluster("Person", "speaker_listener", {
+      via: "KNOWS",
+      directed: true,
+      writeProperty: "slpa_group",
+    }),
   );
   assert.deepEqual([...written.getChild("community_id").toArray()], expected);
   const persisted = tableFromIPC(
@@ -244,7 +276,7 @@ function checkGirvanNewmanCluster() {
       "(e)-[:KNOWS]->(f), (f)-[:KNOWS]->(d)",
   );
   const table = tableFromIPC(
-    forge.cluster("Person", "girvan_newman", "KNOWS", true),
+    forge.cluster("Person", "girvan_newman", { via: "KNOWS", directed: true }),
   );
   assert.deepEqual(
     table.schema.fields.map((field) => field.name),

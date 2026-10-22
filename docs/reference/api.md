@@ -192,18 +192,25 @@ is a `TypeError`.
 alice = forge.add_node("Person", name="Alice", age=30)
 ```
 
-#### `publish_bulk_nodes(operation_uuid, data)` → `pyarrow.Table`
+#### `publish_bulk_nodes(data, operation_uuid=None)` → `pyarrow.Table`
 
 Publish one atomic Arrow bulk node batch through the Rust-owned contract. `data`
 must be a canonical Arrow Table (or Arrow-compatible container) with
 `node_uuid` / `label` topology columns and bulk metadata. Returns the canonical
 bulk receipt table (`entity_uuid`, `row_ordinal`, generation identity, …).
 
+When `operation_uuid` is omitted, Rust mints a UUIDv7 identity and returns it in
+the receipt's `operation_uuid` column. Pass that identity back explicitly to
+retry the same batch idempotently; reusing it with changed input still fails
+with `GF_IDEMPOTENCY_CONFLICT`. An exception raised after the identity was minted
+carries it as `error.operation_uuid` (Node: `error.operationUuid`); on any error,
+retry with that identity.
+
 ```python
-receipt = forge.publish_bulk_nodes(operation_uuid, node_table)
+receipt = forge.publish_bulk_nodes(node_table, operation_uuid)
 ```
 
-#### Python: `add_nodes(label, data, *, operation_uuid)` → `pyarrow.Table`
+#### Python: `add_nodes(label, data, *, operation_uuid=None)` → `pyarrow.Table`
 
 Convenience projection onto `publish_bulk_nodes`. `data` may be an Arrow Table,
 a pandas or Polars DataFrame, or a `list[dict]`. Missing `label` / `node_uuid`
@@ -213,7 +220,6 @@ columns are injected before Rust publication. Returns the same receipt table.
 receipt = forge.add_nodes(
     "Person",
     [{"name": "Alice", "age": 30}, {"name": "Bob", "age": 25}],
-    operation_uuid=operation_uuid,
 )
 ```
 
@@ -226,16 +232,17 @@ Add a single directed relationship. Returns an `EdgeHandle` exposing stable
 forge.add_edge(alice, "KNOWS", bob, since=2020)
 ```
 
-#### `publish_bulk_edges(operation_uuid, data)` → `pyarrow.Table`
+#### `publish_bulk_edges(data, operation_uuid=None)` → `pyarrow.Table`
 
 Publish one atomic Arrow bulk edge batch. Endpoint UUIDs must already exist.
-Returns the canonical bulk receipt table.
+Returns the canonical bulk receipt table. Omitted `operation_uuid` behaves as
+for `publish_bulk_nodes`.
 
 ```python
-receipt = forge.publish_bulk_edges(operation_uuid, edge_table)
+receipt = forge.publish_bulk_edges(edge_table, operation_uuid)
 ```
 
-#### Python: `add_edges(rel_type, data, *, operation_uuid, src="src_id", dst="dst_id")` → `pyarrow.Table`
+#### Python: `add_edges(rel_type, data, *, operation_uuid=None, src="src_id", dst="dst_id")` → `pyarrow.Table`
 
 Convenience projection onto `publish_bulk_edges`. `src` / `dst` name endpoint
 columns (default `src_id` / `dst_id`) and are renamed to `source_uuid` /

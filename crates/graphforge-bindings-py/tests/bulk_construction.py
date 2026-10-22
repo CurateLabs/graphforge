@@ -86,7 +86,7 @@ def check_bulk_construction(project: Path) -> None:
     forge = g.GraphForge(str(project))
 
     # Empty batch returns a zero-row receipt without mutating the project.
-    empty = forge.publish_bulk_nodes(NODE_OPERATION, canonical_node_table([]))
+    empty = forge.publish_bulk_nodes(canonical_node_table([]), NODE_OPERATION)
     assert empty.num_rows == 0, empty
     assert forge.execute("MATCH (n) RETURN count(n) AS c").column("c").to_pylist() == [0]
 
@@ -109,7 +109,7 @@ def check_bulk_construction(project: Path) -> None:
         ],
         schema=BULK_MIXED_NODE_SCHEMA,
     )
-    table_receipt = forge.publish_bulk_nodes(NODE_OPERATION, mixed)
+    table_receipt = forge.publish_bulk_nodes(mixed, NODE_OPERATION)
     assert table_receipt.num_rows == 2, table_receipt
     table_ids = table_receipt.column("entity_uuid").to_pylist()
 
@@ -122,7 +122,7 @@ def check_bulk_construction(project: Path) -> None:
 
     # Exact retry is idempotent; conflicting reuse fails without mutation.
     before = project_digest(project)
-    retry = forge.publish_bulk_nodes(NODE_OPERATION, mixed)
+    retry = forge.publish_bulk_nodes(mixed, NODE_OPERATION)
     assert retry.column("entity_uuid").to_pylist() == table_ids
     assert project_digest(project) == before
 
@@ -139,7 +139,7 @@ def check_bulk_construction(project: Path) -> None:
     assert project_digest(project) == before
 
     try:
-        forge.publish_bulk_nodes(NODE_OPERATION, canonical_node_table(["Carol"]))
+        forge.publish_bulk_nodes(canonical_node_table(["Carol"]), NODE_OPERATION)
     except g.GraphForgeError as exc:
         assert exc.code == "GF_IDEMPOTENCY_CONFLICT", exc.code
     else:
@@ -160,7 +160,7 @@ def check_bulk_construction(project: Path) -> None:
         schema=BULK_EDGE_SCHEMA,
     )
     try:
-        forge.publish_bulk_edges(MISSING_OPERATION, bad_edge)
+        forge.publish_bulk_edges(bad_edge, MISSING_OPERATION)
     except g.GraphForgeError as exc:
         assert exc.code == "GF_VALIDATION", exc.code
         assert "missing_endpoint" in str(exc) or "GF_BULK_VALIDATION" in str(exc)

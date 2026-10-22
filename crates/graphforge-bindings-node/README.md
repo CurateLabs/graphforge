@@ -18,9 +18,13 @@ npm install @curatelabs/graphforge
 pnpm add @curatelabs/graphforge
 ```
 
-Decode Arrow IPC results with [`apache-arrow`](https://www.npmjs.com/package/apache-arrow)
-(`npm install apache-arrow` / `pnpm add apache-arrow`) when you want table helpers
-in JavaScript.
+`query()` from the package returns an
+[`apache-arrow`](https://www.npmjs.com/package/apache-arrow) `Table` directly,
+so reading a useful result needs no Arrow IPC decoding. `apache-arrow` is an
+optional peer dependency used only by `query()` and your own table helpers;
+install it next to the binding (`npm install @curatelabs/graphforge apache-arrow`
+/ `pnpm add @curatelabs/graphforge apache-arrow`). The native engine and CLI do
+not need it.
 
 Node.js 20 or newer is required. Prebuilt packages are published for:
 
@@ -31,22 +35,25 @@ Node.js 20 or newer is required. Prebuilt packages are published for:
 ## Quick start
 
 ```js
-import { tableFromIPC } from "apache-arrow";
 import { GraphForge } from "@curatelabs/graphforge";
+import { query } from "@curatelabs/graphforge/lib/query.mjs";
 
 const forge = new GraphForge();
 forge.execute("CREATE (:Person {name: 'Alice', age: 30})");
 
-const result = forge.execute(
+const table = query(
+  forge,
   "MATCH (p:Person) RETURN p.name AS name, p.age AS age",
 );
-const table = tableFromIPC(result);
 
 console.log(table.toArray());
 ```
 
-GraphForge returns Arrow IPC buffers from query and analyst-verb result
-surfaces. Decode them with `apache-arrow` as shown above.
+`query(forge, cypher, params)` runs the statement and decodes the Arrow IPC
+result into an apache-arrow `Table`. `forge.execute()` keeps returning the raw
+Arrow IPC buffer for code that depends on that form; decode it with
+`tableFromIPC` from `apache-arrow` as before. Writes (`CREATE`/`SET`/`DELETE`/…)
+execute and return a summary.
 
 ## External decision results
 
@@ -121,17 +128,26 @@ included `LICENSE` and `NOTICE` files for terms and attribution.
 
 ## Algorithm definitions
 
-Optional positional controls are appended after existing arguments, preserving
-existing calls. Rank accepts `damping`, `iterations` (including zero), and
+`rank` and `cluster` take their optional controls in one trailing options
+object; existing defaults apply when fields are omitted. Rank accepts `via`,
+`directed`, `writeProperty`, `damping`, `iterations` (including zero), and
 `clusteringNormalization` (`"fagiolo"` or `"neighbor_edges"`). Cluster accepts
-`synchronousIterations` (including zero) and `initialLabelProperty`.
+`via`, `directed`, `writeProperty`, `vectorProperty`, `synchronousIterations`
+(including zero), and `initialLabelProperty`. An unknown option key (for example a misspelled
+`iteratons`) is refused with a validation error that lists the accepted keys,
+rather than running with defaults.
 
 ```js
-forge.rank("Person", "pagerank", undefined, true, undefined, 0.85, 20);
-forge.cluster("Person", "label_propagation", undefined, false,
-  undefined, undefined, 10, "external_id");
-forge.rank("Person", "clustering_coefficient", undefined, true,
-  undefined, undefined, undefined, "neighbor_edges");
+forge.rank("Person", "pagerank", { directed: true, damping: 0.85, iterations: 20 });
+forge.cluster("Person", "label_propagation", {
+  directed: false,
+  synchronousIterations: 10,
+  initialLabelProperty: "external_id",
+});
+forge.rank("Person", "clustering_coefficient", {
+  directed: true,
+  clusteringNormalization: "neighbor_edges",
+});
 ```
 
 `initialLabelProperty` requires synchronous rounds and an Int64 property on
