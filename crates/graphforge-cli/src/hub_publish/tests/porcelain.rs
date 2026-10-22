@@ -413,6 +413,34 @@ fn pull_is_a_no_op_when_the_remote_head_is_an_ancestor() {
 }
 
 #[test]
+fn served_tags_are_installed_with_the_fetch_even_when_the_update_is_refused() {
+    let hub = LoopbackHub::start();
+    let root = tempfile::tempdir().unwrap();
+    let alice = seeded(root.path(), "alice");
+    ok(&hub, &alice, &["branch", "main", "--author", ALICE]);
+    ok(&hub, &alice, &["push", REPOSITORY]);
+    let bob = root.path().join("bob");
+    ok(
+        &hub,
+        &bob,
+        &["clone", REPOSITORY, bob.to_str().unwrap(), "--ref", "main"],
+    );
+    // Alice tags a new commit and pushes; Bob changes the same field.
+    let theirs = commit(&hub, &alice, ALICE, "alice", 1)["version_uuid"].clone();
+    ok(&hub, &alice, &["tag", "a1"]);
+    ok(&hub, &alice, &["push"]);
+    commit(&hub, &bob, BOB, "bob", 2);
+    assert!(ok(&hub, &bob, &["tag"]).as_array().unwrap().is_empty());
+
+    // The update is refused between the durable fetch and the incorporation; the
+    // tag came with the fetch, in the same publication as the admitted Version.
+    gf(&hub, &bob, &["pull", "--author", BOB]).unwrap_err();
+    let tags = ok(&hub, &bob, &["tag"]);
+    assert_eq!(tags[0]["name"], "a1");
+    assert_eq!(tags[0]["version_uuid"], theirs);
+}
+
+#[test]
 fn pull_refuses_a_served_tag_that_conflicts_with_a_local_tag() {
     let hub = LoopbackHub::start();
     let root = tempfile::tempdir().unwrap();
@@ -576,6 +604,26 @@ fn every_local_verb_replays_only_the_complete_original_request() {
         &["switch", "main", "--operation-uuid", &o],
     ));
     assert_eq!(ok(&hub, &alice, &["status"])["label"], "feature");
+    // Selecting the Branch that is already current still records the identity, so
+    // the identity cannot later be reused for another selection.
+    let o = operation();
+    ok(&hub, &alice, &["switch", "feature", "--operation-uuid", &o]);
+    let recorded = GraphForge::new(alice.to_str())
+        .unwrap()
+        .research_version_retention()
+        .unwrap()
+        .receipts
+        .contains_key(&Uuid::parse_str(&o).unwrap());
+    assert!(
+        recorded,
+        "a no-op selection under an identity leaves its receipt"
+    );
+    assert_conflict(gf(
+        &hub,
+        &alice,
+        &["switch", "main", "--operation-uuid", &o],
+    ));
+    assert_eq!(ok(&hub, &alice, &["status"])["label"], "feature");
 }
 
 #[test]
@@ -644,9 +692,23 @@ fn push_replays_a_completed_publication_and_refuses_another_request() {
             .count()
     };
     let before = writes();
+    let receipts = |project: &Path| {
+        GraphForge::new(project.to_str())
+            .unwrap()
+            .research_version_retention()
+            .unwrap()
+            .receipts
+            .len()
+    };
+    let recorded = receipts(&alice);
     let again = ok(&hub, &alice, &["push", "--operation-uuid", &o]);
     assert_eq!(again, first);
     assert_eq!(writes(), before, "a replay uploads and commits nothing");
+    // Replays are free: the permanent receipt ledger does not grow with them.
+    for _ in 0..5 {
+        assert_eq!(ok(&hub, &alice, &["push", "--operation-uuid", &o]), first);
+    }
+    assert_eq!(receipts(&alice), recorded);
     // The same identity for another ref or another flag is refused.
     ok(
         &hub,
@@ -671,6 +733,86 @@ fn push_replays_a_completed_publication_and_refuses_another_request() {
         &["push", "--ref", "main", "--rewrite", "--operation-uuid", &o],
     ));
     assert_eq!(writes(), before);
+}
+
+#[test]
+fn publication_records_only_what_the_receipt_confirmed() {
+    let hub = LoopbackHub::start();
+    let root = tempfile::tempdir().unwrap();
+    let alice = seeded(root.path(), "alice");
+    ok(&hub, &alice, &["branch", "main", "--author", ALICE]);
+    let receipt: graphforge_hub_publish::PublishReceipt =
+        serde_json::from_value(ok(&hub, &alice, &["push", REPOSITORY])).unwrap();
+    let published = ok(&hub, &alice, &["status"])["head_version_uuid"].clone();
+    // An unpublished descendant: the Branch head moves past what the Hub holds.
+    let unpublished = commit(&hub, &alice, ALICE, "not pushed", 9)["version_uuid"].clone();
+    let (manifest, lineage) = served_lineage(&hub, "curate/claims");
+    let mut graph = GraphForge::new(alice.to_str()).unwrap();
+    let branch = *graph
+        .research_version_retention()
+        .unwrap()
+        .branches
+        .keys()
+        .next()
+        .unwrap();
+    let mut record = |receipt: graphforge_hub_publish::PublishReceipt,
+                      manifest: DiscoveryManifest,
+                      lineage: ResearchLineage| {
+        let request = graphforge_api::RecordResearchPublicationRequest {
+            operation_uuid: Uuid::now_v7(),
+            expected_generation_uuid: generation(&graph),
+            branch_uuid: branch,
+            repository_url: REPOSITORY.into(),
+            receipt,
+            manifest,
+            lineage,
+        };
+        graph.record_research_publication(&request, &CancellationToken::new())
+    };
+
+    // What the receipt confirms is the published head, not the Branch head, and it
+    // is already recorded: recording again writes nothing.
+    assert!(
+        record(receipt.clone(), manifest.clone(), lineage.clone())
+            .unwrap()
+            .is_none()
+    );
+    drop(record);
+    drop(graph);
+    let upstream = ok(&hub, &alice, &["status"]);
+    assert_eq!(upstream["upstream"]["head_version_uuid"], published);
+    assert_ne!(upstream["upstream"]["head_version_uuid"], unpublished);
+
+    let mut graph = GraphForge::new(alice.to_str()).unwrap();
+    let mut record = |receipt: graphforge_hub_publish::PublishReceipt,
+                      manifest: DiscoveryManifest,
+                      lineage: ResearchLineage| {
+        let request = graphforge_api::RecordResearchPublicationRequest {
+            operation_uuid: Uuid::now_v7(),
+            expected_generation_uuid: generation(&graph),
+            branch_uuid: branch,
+            repository_url: REPOSITORY.into(),
+            receipt,
+            manifest,
+            lineage,
+        };
+        graph.record_research_publication(&request, &CancellationToken::new())
+    };
+    // A lineage that claims the unpublished head is not the one the receipt commits to.
+    let mut forged = lineage.clone();
+    forged.branches[0].head_version_uuid = unpublished.as_str().unwrap().to_owned();
+    record(receipt.clone(), manifest.clone(), forged).unwrap_err();
+    // Nor is a receipt for other documents, another repository, or other refs.
+    let mut other_documents = receipt.clone();
+    other_documents.manifest_validator = format!("sha256:{}", "0".repeat(64));
+    record(other_documents, manifest.clone(), lineage.clone()).unwrap_err();
+    let mut elsewhere = receipt.clone();
+    elsewhere.repository =
+        graphforge_discovery::RepositoryIdentity::parse("curate/elsewhere").unwrap();
+    record(elsewhere, manifest.clone(), lineage.clone()).unwrap_err();
+    let mut other_refs = receipt;
+    other_refs.refs = vec!["feature".into()];
+    record(other_refs, manifest, lineage).unwrap_err();
 }
 
 #[test]

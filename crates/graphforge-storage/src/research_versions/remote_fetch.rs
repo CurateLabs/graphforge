@@ -22,6 +22,11 @@ pub struct ResearchRemoteFetchBinding {
     pub package_sha256: [u8; 32],
     /// Verified downloaded transport object identity from the bound discovery inventory.
     pub object_sha256: [u8; 32],
+    /// Tags the verified lineage serves on Versions this fetch admits. They are
+    /// installed by the same publication as the admission, so a fetch never leaves
+    /// them half applied (ADR 0061).
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub tags: std::collections::BTreeMap<String, Uuid>,
 }
 
 /// Native fetch request witness, reconstructed from an admitted immutable archive.
@@ -228,6 +233,9 @@ pub(super) fn apply(
         .interchange
         .entry(reference.head_version_uuid)
         .or_insert_with(|| *fetch.archive.clone());
+    for (name, target) in &fetch.binding.tags {
+        super::local_state::install_served_tag(registry, name, *target)?;
+    }
     registry
         .remote_branches
         .insert(reference.key()?, reference.clone());
@@ -290,6 +298,18 @@ pub(super) fn preserve(
                 != Some(&fetch.binding.reference)
             || after.remote_branches.keys().any(|key| {
                 !before.remote_branches.contains_key(key) && Some(key) != refreshed.as_ref()
+            })
+            || fetch
+                .binding
+                .tags
+                .iter()
+                .any(|(name, target)| after.tags.get(name) != Some(target))
+            || after.tags.iter().any(|(name, target)| {
+                before
+                    .tags
+                    .get(name)
+                    .or_else(|| fetch.binding.tags.get(name))
+                    != Some(target)
             })
         {
             return Err(invalid(

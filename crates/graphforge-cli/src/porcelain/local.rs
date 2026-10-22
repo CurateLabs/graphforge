@@ -495,9 +495,13 @@ fn switch(
     let registry = graph.research_version_retention()?;
     let target = resolve_branch(&registry, Some(&args.reference))?;
     let operation = operation_uuid(args.operation_uuid.as_deref())?;
-    // A rerun of the identity goes through the native operation, which replays it
-    // or refuses a different request; otherwise selecting the current Branch is a no-op.
-    if registry.current_branch != Some(target) || replayed(&registry, operation).is_some() {
+    // Without an identity, selecting the current Branch is a no-op.
+    // A supplied operation identity always goes through the receipted operation, a
+    // no-op selection included, so the identity is bound to this request.
+    if args.operation_uuid.is_some()
+        || registry.current_branch != Some(target)
+        || replayed(&registry, operation).is_some()
+    {
         let request = SelectResearchBranchRequest {
             operation_uuid: operation,
             expected_generation_uuid: current_generation(graph)?,

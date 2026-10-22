@@ -395,8 +395,8 @@ pub(crate) fn pull(
         label: None,
         description: Some(format!("Merge {label} of {repository}")),
     };
+    // The served tags were installed with the fetch, in one publication with its admission.
     let receipt = graph.update_research_branch(&update, &cancel)?;
-    install_tags(graph, &remote)?;
     let mut value = receipt_json(&receipt, false);
     value["parents"] = json!([local_head, remote_head]);
     value["incorporated"] = json!(adoptable);

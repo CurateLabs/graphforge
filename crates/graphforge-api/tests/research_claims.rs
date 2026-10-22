@@ -1109,3 +1109,23 @@ fn bring_selected_claim_keeps_classification_without_importing_source_authority(
         1
     );
 }
+
+#[test]
+fn canonical_decisions_are_part_of_the_publication_content() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("project");
+    let mut g = GraphForge::new(root.to_str()).unwrap();
+    g.execute("CREATE (:ClaimSubject {name:'shared evidence'})")
+        .unwrap();
+    let before = g.publication_content_identity().unwrap();
+    let manifest = g.committed_generation_identity().unwrap().manifest_sha256;
+    // A decision moves no Branch head and no tag, yet it is published research.
+    let promote = request(&g, ResearchContext::Project, ResearchDecisionKind::Promote);
+    g.record_research_decisions(&promote, &CancellationToken::new())
+        .unwrap();
+    assert_ne!(
+        g.committed_generation_identity().unwrap().manifest_sha256,
+        manifest
+    );
+    assert_ne!(g.publication_content_identity().unwrap(), before);
+}

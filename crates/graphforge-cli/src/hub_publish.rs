@@ -168,7 +168,7 @@ fn select_credential(
 }
 
 /// Published result written to stdout.
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, PartialEq)]
 pub(crate) struct PublishOutcome {
     /// Original Hub receipt.
     pub receipt: PublishReceipt,
@@ -179,14 +179,31 @@ pub(crate) struct PublishOutcome {
     pub published: Option<PublishedHead>,
 }
 
-/// A Branch head published under its ref.
-#[derive(Debug, Eq, PartialEq)]
+/// A Branch published under its ref.
+#[derive(Debug, PartialEq)]
 pub(crate) struct PublishedHead {
     pub branch_uuid: Uuid,
-    pub version_uuid: Uuid,
-    pub ref_name: String,
     /// Canonical HTTPS repository URL, the key of the local remote Branch citation.
     pub repository_url: String,
+    /// The documents the Hub's receipt commits to; absent when they are no longer
+    /// available (the repository moved on since a replayed publication).
+    pub documents: Option<(DiscoveryManifest, ResearchLineage)>,
+}
+
+impl PublishedHead {
+    /// Attach the documents when they are the ones `receipt` commits to.
+    fn confirmed_by(
+        mut self,
+        receipt: &PublishReceipt,
+        manifest: &DiscoveryManifest,
+        lineage: &ResearchLineage,
+    ) -> Self {
+        self.documents = manifest
+            .canonical_digest()
+            .is_ok_and(|digest| digest.0 == receipt.manifest_validator)
+            .then(|| (manifest.clone(), lineage.clone()));
+        self
+    }
 }
 
 /// Dispatch the Hub commands, `gf clone` and `gf publish`.
@@ -348,10 +365,16 @@ pub(crate) fn publish_with_credentials(
 }
 
 /// A Branch whose publication the Hub confirmed tracks that repository and ref:
-/// the remote citation clone and fetch maintain records the confirmed head. A
-/// refused or failed publication never reaches this.
+/// the remote citation clone and fetch maintain records the published head. A
+/// refused or failed publication never reaches this, and a citation the Project
+/// already holds is left alone, so repeating a completed publication writes nothing.
 fn record_upstream(graph: &mut GraphForge, outcome: &PublishOutcome) -> Result<(), GfError> {
-    let Some(head) = &outcome.published else {
+    let Some(PublishedHead {
+        branch_uuid,
+        repository_url,
+        documents: Some((manifest, lineage)),
+    }) = &outcome.published
+    else {
         return Ok(());
     };
     graph
@@ -359,10 +382,11 @@ fn record_upstream(graph: &mut GraphForge, outcome: &PublishOutcome) -> Result<(
             &graphforge_api::RecordResearchPublicationRequest {
                 operation_uuid: Uuid::now_v7(),
                 expected_generation_uuid: graph.committed_generation_identity()?.generation_uuid,
-                branch_uuid: head.branch_uuid,
-                published_version_uuid: head.version_uuid,
-                repository_url: head.repository_url.clone(),
+                branch_uuid: *branch_uuid,
+                repository_url: repository_url.clone(),
                 receipt: outcome.receipt.clone(),
+                manifest: manifest.clone(),
+                lineage: lineage.clone(),
             },
             &CancellationToken::new(),
         )
@@ -1961,20 +1985,18 @@ pub(crate) fn publish(
         capabilities,
         ..
     } = resolution;
-    let confirmed =
-        selection
-            .branch_uuid
-            .zip(selection.git_ref.clone())
-            .map(|(branch_uuid, ref_name)| PublishedHead {
-                branch_uuid,
-                version_uuid: selection.version_uuid,
-                ref_name,
-                repository_url: format!(
-                    "{}/{}",
-                    base.origin().ascii_serialization(),
-                    identity.canonical_name()
-                ),
-            });
+    let confirmed = selection
+        .branch_uuid
+        .map(|branch_uuid| PublishedHead {
+            branch_uuid,
+            repository_url: format!(
+                "{}/{}",
+                base.origin().ascii_serialization(),
+                identity.canonical_name()
+            ),
+            documents: None,
+        })
+        .filter(|_| selection.git_ref.is_some());
 
     let operation_uuid = operation_uuid.unwrap_or_else(|| {
         graphforge_api::hub_publish_operation(
@@ -2056,6 +2078,14 @@ pub(crate) fn publish(
                         environment.notices,
                     )?;
                 }
+                // The documents the receipt committed to, while the repository still
+                // serves them; a repository that moved on records nothing here.
+                let confirmed = match (confirmed, read_current()?) {
+                    (Some(head), Some(current)) => {
+                        Some(head.confirmed_by(&receipt, &current.manifest, &current.lineage))
+                    }
+                    (head, _) => head,
+                };
                 return Ok(PublishOutcome {
                     receipt,
                     replayed: true,
@@ -2227,6 +2257,8 @@ pub(crate) fn publish(
     let (session_id, uploads) = match opened {
         SessionResponse::Complete { receipt } => {
             check_receipt(&receipt, &identity, operation_uuid)?;
+            let confirmed =
+                confirmed.map(|head| head.confirmed_by(&receipt, &snapshot.manifest, &lineage));
             return Ok(PublishOutcome {
                 receipt,
                 replayed: true,
@@ -2331,6 +2363,7 @@ pub(crate) fn publish(
             "the receipt does not bind the committed publication",
         ));
     }
+    let confirmed = confirmed.map(|head| head.confirmed_by(&receipt, &snapshot.manifest, &lineage));
     Ok(PublishOutcome {
         receipt,
         replayed: false,

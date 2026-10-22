@@ -1312,12 +1312,16 @@
           "symbol": "current_branch_and_tags_persist_through_the_native_operations"
         },
         {
-          "path": "crates/graphforge-api/tests/branches.rs",
-          "symbol": "a_published_head_is_recorded_only_against_native_branch_authority"
+          "path": "crates/graphforge-cli/src/hub_publish/tests/porcelain.rs",
+          "symbol": "publication_records_only_what_the_receipt_confirmed"
         },
         {
           "path": "crates/graphforge-api/tests/branches.rs",
-          "symbol": "publication_content_identity_ignores_only_the_tracking_a_publication_writes"
+          "symbol": "publication_content_identity_tracks_what_is_published"
+        },
+        {
+          "path": "crates/graphforge-api/tests/research_claims.rs",
+          "symbol": "canonical_decisions_are_part_of_the_publication_content"
         }
       ]
     },

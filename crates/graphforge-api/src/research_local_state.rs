@@ -33,9 +33,11 @@ pub struct SetResearchTagRequest {
 /// Branch now tracks, and the head the Hub's receipt says it serves.
 ///
 /// This is bookkeeping about a remote, not shared history and not authentication
-/// of the Hub: the receipt is the Hub's own statement, checked here only against
-/// the Branch it claims to publish.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// of the Hub. The head is not a caller field: it is read from the published
+/// documents, which the Hub's receipt commits to (its `manifest_validator` is the
+/// digest of `manifest`, which commits to `lineage`), so only what the receipt
+/// confirmed can be recorded.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RecordResearchPublicationRequest {
     /// Stable operation identity for exact replay.
@@ -44,13 +46,14 @@ pub struct RecordResearchPublicationRequest {
     pub expected_generation_uuid: Uuid,
     /// Local Branch that was published; the ref is its label.
     pub branch_uuid: Uuid,
-    /// The Version the publication named as the ref's head: the Branch head at
-    /// that time, which is the Branch head now or one of its ancestors.
-    pub published_version_uuid: Uuid,
     /// Canonical HTTPS repository URL the receipt was issued for.
     pub repository_url: String,
     /// The Hub's receipt for the publication.
     pub receipt: PublishReceipt,
+    /// The discovery manifest the receipt's `manifest_validator` is the digest of.
+    pub manifest: graphforge_discovery::DiscoveryManifest,
+    /// The research lineage that manifest commits to.
+    pub lineage: graphforge_discovery::ResearchLineage,
 }
 
 /// Select the Branch the porcelain verbs act on.
@@ -157,56 +160,106 @@ impl GraphForge {
     }
 
     /// Record a publication the Hub's receipt confirmed as the remote citation of
-    /// its Branch, the record clone and fetch maintain. The receipt must be for the
-    /// named repository and carry the Branch's ref, and the published Version must
-    /// be the Branch head or an ancestor of it. The citation is built from native
-    /// authority; only the repository and the receipt come from the caller.
+    /// its Branch, the record clone and fetch maintain. Returns `None` when the
+    /// Project already holds exactly that citation, so repeating a completed
+    /// publication writes nothing.
+    ///
+    /// The receipt must be for the named repository and carry the Branch's ref;
+    /// the manifest and lineage must be the ones it commits to; the recorded head
+    /// is the Branch's published head in that lineage, and it must be the Branch
+    /// head or an ancestor of it with the identity the lineage names.
     pub fn record_research_publication(
         &mut self,
         request: &RecordResearchPublicationRequest,
         cancellation: &CancellationToken,
-    ) -> Result<ResearchOperationReceipt, GfError> {
+    ) -> Result<Option<ResearchOperationReceipt>, GfError> {
         let invalid = |message: &str| GfError::Validation(message.into());
         let registry = self.research_version_retention()?;
         let branch = registry
             .branches
             .get(&request.branch_uuid)
             .ok_or_else(|| invalid("the published Branch does not exist"))?;
-        let identity = registry
-            .identities
-            .get(&request.published_version_uuid)
-            .ok_or_else(|| invalid("the published head is not a known Version"))?;
-        graphforge_hub_publish::check_format(&request.receipt.format)
+        let receipt = &request.receipt;
+        graphforge_hub_publish::check_format(&receipt.format)
             .map_err(|_| invalid("the receipt is not a Hub publish receipt"))?;
         let url = url::Url::parse(&request.repository_url)
             .map_err(|_| invalid("the repository URL is invalid"))?;
-        if url.path() != format!("/{}", request.receipt.repository.canonical_name()) {
+        if url.path() != format!("/{}", receipt.repository.canonical_name()) {
             return Err(invalid("the receipt is for another repository"));
         }
-        if !request.receipt.refs.contains(&branch.label) {
+        if !receipt.refs.contains(&branch.label) {
             return Err(invalid("the receipt does not name the Branch's ref"));
+        }
+        let manifest_digest = request
+            .manifest
+            .canonical_digest()
+            .map_err(|_| invalid("the manifest cannot be encoded"))?;
+        let lineage_digest = request
+            .lineage
+            .canonical_digest()
+            .map_err(|_| invalid("the lineage cannot be encoded"))?;
+        if manifest_digest.0 != receipt.manifest_validator
+            || request.manifest.repository != receipt.repository
+            || request.lineage.repository != receipt.repository
+            || request
+                .manifest
+                .lineage
+                .as_ref()
+                .is_none_or(|reference| reference.lineage_digest != lineage_digest)
+            || request.lineage.project_uuid != branch.project_uuid.to_string()
+        {
+            return Err(invalid("the receipt does not commit to these documents"));
+        }
+        let published = request
+            .lineage
+            .branches
+            .iter()
+            .find(|candidate| {
+                candidate.ref_name == branch.label
+                    && candidate.branch_uuid == request.branch_uuid.to_string()
+            })
+            .ok_or_else(|| invalid("the published lineage has no such Branch ref"))?;
+        let head = Uuid::parse_str(&published.head_version_uuid)
+            .map_err(|_| invalid("the published head is not a Version UUID"))?;
+        let identity = registry
+            .identities
+            .get(&head)
+            .ok_or_else(|| invalid("the published head is not a known Version"))?;
+        let advertised = request
+            .lineage
+            .version(&published.head_version_uuid)
+            .ok_or_else(|| invalid("the published lineage omits its head"))?;
+        if crate::discovery_research_lineage::identity_digest(identity)
+            .map_err(|_| invalid("the published head identity is malformed"))?
+            != advertised.identity_digest
+        {
+            return Err(invalid("the published head differs from the local Version"));
+        }
+        let reference = ResearchRemoteBranch {
+            repository_url: request.repository_url.clone(),
+            project_uuid: branch.project_uuid,
+            ref_name: branch.label.clone(),
+            branch_uuid: request.branch_uuid,
+            head_version_uuid: head,
+            identity_sha256: *identity,
+        };
+        if registry.remote_branches.get(&reference.key()?) == Some(&reference) {
+            return Ok(None);
         }
         self.publish_research_operation(
             &ResearchOperation {
                 operation_uuid: request.operation_uuid,
                 expected_generation_uuid: request.expected_generation_uuid,
-                mutation: ResearchMutation::RecordPublishedBranch {
-                    reference: ResearchRemoteBranch {
-                        repository_url: request.repository_url.clone(),
-                        project_uuid: branch.project_uuid,
-                        ref_name: branch.label.clone(),
-                        branch_uuid: request.branch_uuid,
-                        head_version_uuid: request.published_version_uuid,
-                        identity_sha256: *identity,
-                    },
-                },
+                mutation: ResearchMutation::RecordPublishedBranch { reference },
             },
             cancellation,
         )
+        .map(Some)
     }
 
     /// Digest of what a publication of this Project is made of: every participant
-    /// except the research registry, and the registry without the tracking state a
+    /// except the research registry (the other research participants, canonical
+    /// decisions included, are part of it), and the registry without the tracking state a
     /// publication itself writes (remote citations and operation receipts).
     ///
     /// A publication's intent binds this, so recording a confirmed publication does
@@ -223,6 +276,8 @@ impl GraphForge {
         for participant in generation.participant_descriptors()? {
             if participant.capability_id
                 == graphforge_storage::research_versions::RESEARCH_CAPABILITY
+                && participant.record_family_id
+                    == graphforge_storage::research_versions::RESEARCH_REGISTRY
             {
                 continue;
             }
