@@ -15,7 +15,9 @@ test("degree and components write back atomically and persist", () => {
         "(c:Person {name:'Carol'}), (a)-[:KNOWS]->(b)",
     );
 
-    const degree = tableFromIPC(forge.rank("Person", "degree", "KNOWS", false));
+    const degree = tableFromIPC(
+      forge.rank("Person", "degree", { via: "KNOWS", directed: false }),
+    );
     assert.deepEqual([...degree.getChild("score").toArray()], [0.5, 0.5, 0]);
     assert.equal(
       tableFromIPC(
@@ -26,7 +28,11 @@ test("degree and components write back atomically and persist", () => {
       0,
     );
     const writtenDegree = tableFromIPC(
-      forge.rank("Person", "degree", "KNOWS", false, "degree_score"),
+      forge.rank("Person", "degree", {
+        via: "KNOWS",
+        directed: false,
+        writeProperty: "degree_score",
+      }),
     );
     assert.deepEqual(
       [...writtenDegree.getChild("score").toArray()],
@@ -34,7 +40,7 @@ test("degree and components write back atomically and persist", () => {
     );
 
     const components = tableFromIPC(
-      forge.cluster("Person", "components", "KNOWS", false),
+      forge.cluster("Person", "components", { via: "KNOWS", directed: false }),
     );
     assert.equal(
       tableFromIPC(
@@ -49,13 +55,11 @@ test("degree and components write back atomically and persist", () => {
     );
     assert.throws(
       () =>
-        forge.cluster(
-          "Person",
-          "components",
-          "KNOWS",
-          false,
-          "atomic_component",
-        ),
+        forge.cluster("Person", "components", {
+          via: "KNOWS",
+          directed: false,
+          writeProperty: "atomic_component",
+        }),
       (error) =>
         error.code === "ValidationError" &&
         error.message.includes("collides with existing Utf8 data"),
@@ -74,23 +78,30 @@ test("degree and components write back atomically and persist", () => {
       ["old"],
     );
     assert.throws(
-      () => forge.cluster("Person", "components", "KNOWS", false, ""),
+      () =>
+        forge.cluster("Person", "components", {
+          via: "KNOWS",
+          directed: false,
+          writeProperty: "",
+        }),
       (error) => error.code === "ValidationError",
     );
     assert.equal(
       tableFromIPC(
-        forge.cluster(
-          "Missing",
-          "components",
-          "KNOWS",
-          false,
-          "empty_component",
-        ),
+        forge.cluster("Missing", "components", {
+          via: "KNOWS",
+          directed: false,
+          writeProperty: "empty_component",
+        }),
       ).numRows,
       0,
     );
     const writtenComponents = tableFromIPC(
-      forge.cluster("Person", "components", "KNOWS", false, "component"),
+      forge.cluster("Person", "components", {
+        via: "KNOWS",
+        directed: false,
+        writeProperty: "component",
+      }),
     );
     assert.deepEqual(
       [...writtenComponents.getChild("community_id").toArray()],

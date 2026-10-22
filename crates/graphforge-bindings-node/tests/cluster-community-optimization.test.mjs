@@ -15,7 +15,10 @@ function checkModularityOptimizationCluster() {
       "(e)-[:KNOWS]->(f), (f)-[:KNOWS]->(d)",
   );
   const table = tableFromIPC(
-    forge.cluster("Person", "modularity_optimization", "KNOWS", true),
+    forge.cluster("Person", "modularity_optimization", {
+      via: "KNOWS",
+      directed: true,
+    }),
   );
   assert.deepEqual(
     table.schema.fields.map((field) => field.name),
@@ -44,7 +47,7 @@ function checkFastGreedyCluster() {
       "(e)-[:KNOWS]->(f), (f)-[:KNOWS]->(d)",
   );
   const table = tableFromIPC(
-    forge.cluster("Person", "fastgreedy", "KNOWS", true),
+    forge.cluster("Person", "fastgreedy", { via: "KNOWS", directed: true }),
   );
   assert.deepEqual(
     table.schema.fields.map((field) => field.name),
@@ -67,7 +70,9 @@ function checkInfoMapCluster() {
       "(d:Person {name:'D'}), (e:Person {name:'E'}), (a)-[:KNOWS]->(b), " +
       "(b)-[:KNOWS]->(a), (c)-[:KNOWS]->(d), (d)-[:KNOWS]->(c)",
   );
-  const table = tableFromIPC(forge.cluster("Person", "infomap", "KNOWS", true));
+  const table = tableFromIPC(
+    forge.cluster("Person", "infomap", { via: "KNOWS", directed: true }),
+  );
   assert.deepEqual(
     table.schema.fields.map((field) => field.name),
     ["node_uuid", "community_id", "name"],
@@ -92,7 +97,10 @@ function checkLeadingEigenvectorCluster() {
       "(e)-[:KNOWS]->(f), (f)-[:KNOWS]->(d)",
   );
   const table = tableFromIPC(
-    forge.cluster("Person", "leading_eigenvector", "KNOWS", true),
+    forge.cluster("Person", "leading_eigenvector", {
+      via: "KNOWS",
+      directed: true,
+    }),
   );
   assert.deepEqual(
     table.schema.fields.map((field) => field.name),
@@ -121,7 +129,7 @@ function checkWalktrapCluster() {
       "(e)-[:KNOWS]->(f), (f)-[:KNOWS]->(d)",
   );
   const table = tableFromIPC(
-    forge.cluster("Person", "walktrap", "KNOWS", true),
+    forge.cluster("Person", "walktrap", { via: "KNOWS", directed: true }),
   );
   assert.deepEqual(
     table.schema.fields.map((field) => field.name),
@@ -147,7 +155,7 @@ function checkSpinglassCluster() {
       "(e)-[:KNOWS]->(f), (f)-[:KNOWS]->(d)",
   );
   const table = tableFromIPC(
-    forge.cluster("Person", "spinglass", "KNOWS", true),
+    forge.cluster("Person", "spinglass", { via: "KNOWS", directed: true }),
   );
   assert.deepEqual(
     table.schema.fields.map((field) => field.name),

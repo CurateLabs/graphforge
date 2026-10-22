@@ -4,7 +4,9 @@ use crate::Buffer;
 use crate::CompositeTransactionInput;
 use crate::Env;
 use crate::GraphForge;
+use crate::NodeError;
 use crate::Object;
+use crate::OperationId;
 use crate::Result;
 use crate::Unknown;
 use crate::bulk_edge_publication_error;
@@ -78,6 +80,38 @@ impl EdgeHandle {
     }
 }
 
+/// Resolve the caller-supplied operation identity, minting a Rust-owned
+/// UUIDv7 when omitted. Explicit identities keep their canonical validation so
+/// replay and conflict behavior is unchanged.
+fn resolve_operation_id(operation_uuid: Option<String>) -> Result<OperationId> {
+    match operation_uuid {
+        Some(value) => canonical_operation_id(&value),
+        None => Ok(OperationId(graphforge_api::new_v7())),
+    }
+}
+
+/// Throw `error` as a JS error that also carries `operationUuid`, so a caller
+/// that omitted the id can retry the same publication with
+/// `error.operationUuid` instead of minting a second identity (and a duplicate
+/// load) if the commit succeeded before the failure. napi cannot attach extra
+/// properties to a returned `napi::Error`, so build and throw the JS error and
+/// return the pending-exception sentinel, as `type_error` does.
+fn with_operation_id(env: Env, operation_uuid: OperationId, error: NodeError) -> NodeError {
+    let thrown = (|| -> napi::Result<()> {
+        let mut js_error = env.create_error(napi::Error::new(
+            napi::Status::GenericFailure,
+            error.reason.clone(),
+        ))?;
+        js_error.set("code", error.status.as_str())?;
+        js_error.set("operationUuid", operation_uuid.0.hyphenated().to_string())?;
+        env.throw(js_error)
+    })();
+    match thrown {
+        Ok(()) => NodeError::new("PendingException".to_owned(), error.reason),
+        Err(_) => error,
+    }
+}
+
 #[napi]
 impl GraphForge {
     /// Add a node through the Rust facade and return its graph-owned UUID handle.
@@ -118,31 +152,57 @@ impl GraphForge {
     }
 
     /// Publish one atomic bulk node batch (Arrow IPC) through the Rust contract.
+    ///
+    /// When `operationUuid` is omitted, Rust mints a UUIDv7 identity and
+    /// returns it in the receipt's `operation_uuid` column for explicit
+    /// idempotent retries. Any error thrown after the identity exists carries
+    /// it as `error.operationUuid`.
     #[napi]
-    pub fn publish_bulk_nodes(&self, operation_uuid: String, data: Buffer) -> Result<Buffer> {
-        let operation_uuid = canonical_operation_id(&operation_uuid)?;
-        let batch = ipc_to_record_batch(&data)?;
-        let graph = self.open_guard()?;
-        let receipt = graph
-            .publish_bulk_nodes(operation_uuid, &[batch])
-            .map_err(bulk_node_publication_error)?;
-        record_batch_to_ipc(&receipt)
-            .map(Buffer::from)
-            .map_err(|error| to_napi_err(&error))
+    pub fn publish_bulk_nodes(
+        &self,
+        env: Env,
+        data: Buffer,
+        operation_uuid: Option<String>,
+    ) -> Result<Buffer> {
+        let operation_uuid = resolve_operation_id(operation_uuid)?;
+        (|| {
+            let batch = ipc_to_record_batch(&data)?;
+            let graph = self.open_guard()?;
+            let receipt = graph
+                .publish_bulk_nodes(operation_uuid, &[batch])
+                .map_err(bulk_node_publication_error)?;
+            record_batch_to_ipc(&receipt)
+                .map(Buffer::from)
+                .map_err(|error| to_napi_err(&error))
+        })()
+        .map_err(|error| with_operation_id(env, operation_uuid, error))
     }
 
     /// Publish one atomic bulk edge batch (Arrow IPC) through the Rust contract.
+    ///
+    /// When `operationUuid` is omitted, Rust mints a UUIDv7 identity and
+    /// returns it in the receipt's `operation_uuid` column for explicit
+    /// idempotent retries. Any error thrown after the identity exists carries
+    /// it as `error.operationUuid`.
     #[napi]
-    pub fn publish_bulk_edges(&self, operation_uuid: String, data: Buffer) -> Result<Buffer> {
-        let operation_uuid = canonical_operation_id(&operation_uuid)?;
-        let batch = ipc_to_record_batch(&data)?;
-        let graph = self.open_guard()?;
-        let receipt = graph
-            .publish_bulk_edges(operation_uuid, &[batch])
-            .map_err(bulk_edge_publication_error)?;
-        record_batch_to_ipc(&receipt)
-            .map(Buffer::from)
-            .map_err(|error| to_napi_err(&error))
+    pub fn publish_bulk_edges(
+        &self,
+        env: Env,
+        data: Buffer,
+        operation_uuid: Option<String>,
+    ) -> Result<Buffer> {
+        let operation_uuid = resolve_operation_id(operation_uuid)?;
+        (|| {
+            let batch = ipc_to_record_batch(&data)?;
+            let graph = self.open_guard()?;
+            let receipt = graph
+                .publish_bulk_edges(operation_uuid, &[batch])
+                .map_err(bulk_edge_publication_error)?;
+            record_batch_to_ipc(&receipt)
+                .map(Buffer::from)
+                .map_err(|error| to_napi_err(&error))
+        })()
+        .map_err(|error| with_operation_id(env, operation_uuid, error))
     }
 
     /// Publish one composite graph + knowledge transaction through Rust.

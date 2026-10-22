@@ -249,7 +249,7 @@ test("the native Node facade preserves deterministic IPC through persistence and
     );
     forge.index("Person", { properties: ["name"] });
 
-    const rank = tableFromIPC(forge.rank("Person", "degree", "KNOWS"));
+    const rank = tableFromIPC(forge.rank("Person", "degree", { via: "KNOWS" }));
     assert.deepEqual(
       rank.schema.fields.map(({ name }) => name),
       ["node_uuid", "score", "name"],
@@ -276,7 +276,9 @@ test("the native Node facade preserves deterministic IPC through persistence and
 
     const reopened = new GraphForge(project);
     assert.deepEqual(
-      tableFromIPC(reopened.rank("Person", "degree", "KNOWS")).toArray(),
+      tableFromIPC(
+        reopened.rank("Person", "degree", { via: "KNOWS" }),
+      ).toArray(),
       rank.toArray(),
     );
     assert.deepEqual(

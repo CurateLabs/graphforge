@@ -115,32 +115,32 @@ test("publishBulkNodes/Edges accept canonical IPC and reopen identically", () =>
     let forge = new GraphForge(project);
 
     const emptyReceipt = tableFromIPC(
-      forge.publishBulkNodes(EMPTY_OPERATION, tableToIpc(nodeTable([]))),
+      forge.publishBulkNodes(tableToIpc(nodeTable([])), EMPTY_OPERATION),
     );
     assert.equal(emptyReceipt.numRows, 0);
 
     const singleReceipt = tableFromIPC(
-      forge.publishBulkNodes(SINGLE_OPERATION, tableToIpc(nodeTable(["Solo"]))),
+      forge.publishBulkNodes(tableToIpc(nodeTable(["Solo"])), SINGLE_OPERATION),
     );
     assert.equal(singleReceipt.numRows, 1);
 
     const published = nodeTable(["Alice", "Bob"], [BigInt(10), BigInt(20)]);
     const nodeReceipt = tableFromIPC(
-      forge.publishBulkNodes(NODE_OPERATION, tableToIpc(published)),
+      forge.publishBulkNodes(tableToIpc(published), NODE_OPERATION),
     );
     assert.equal(nodeReceipt.numRows, 2);
     const nodeIds = [...nodeReceipt.getChild("entity_uuid")];
 
     const before = projectDigest(project);
     const retry = tableFromIPC(
-      forge.publishBulkNodes(NODE_OPERATION, tableToIpc(published)),
+      forge.publishBulkNodes(tableToIpc(published), NODE_OPERATION),
     );
     assert.deepEqual([...retry.getChild("entity_uuid")], nodeIds);
     assert.equal(projectDigest(project), before);
 
     let conflicted = false;
     try {
-      forge.publishBulkNodes(NODE_OPERATION, tableToIpc(nodeTable(["Carol"])));
+      forge.publishBulkNodes(tableToIpc(nodeTable(["Carol"])), NODE_OPERATION);
     } catch (error) {
       conflicted =
         error?.code === "GF_IDEMPOTENCY_CONFLICT" ||
@@ -162,7 +162,7 @@ test("publishBulkNodes/Edges accept canonical IPC and reopen identically", () =>
         target_uuid: vectorFromArray([missing], new FixedSizeBinary(16)),
         since: vectorFromArray([BigInt(2020)], new Int64()),
       });
-      forge.publishBulkEdges(MISSING_OPERATION, tableToIpc(badEdge));
+      forge.publishBulkEdges(tableToIpc(badEdge), MISSING_OPERATION);
     } catch (error) {
       missingEndpoint =
         error?.code === "GF_VALIDATION" ||
@@ -180,7 +180,7 @@ test("publishBulkNodes/Edges accept canonical IPC and reopen identically", () =>
       since: vectorFromArray([BigInt(2020)], new Int64()),
     });
     const edgeReceipt = tableFromIPC(
-      forge.publishBulkEdges(EDGE_OPERATION, tableToIpc(edgeTable)),
+      forge.publishBulkEdges(tableToIpc(edgeTable), EDGE_OPERATION),
     );
     assert.equal(edgeReceipt.numRows, 1);
     assert.deepEqual([...edgeReceipt.getChild("rel_type")], ["KNOWS"]);
@@ -204,7 +204,7 @@ test("publishBulkNodes/Edges accept canonical IPC and reopen identically", () =>
     );
     let malformed = false;
     try {
-      forge.publishBulkNodes(EDGE_OPERATION, Buffer.from("not-ipc"));
+      forge.publishBulkNodes(Buffer.from("not-ipc"), EDGE_OPERATION);
     } catch {
       malformed = true;
     }
