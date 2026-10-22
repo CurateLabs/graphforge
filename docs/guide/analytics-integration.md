@@ -111,7 +111,7 @@ table = forge.rank("Person", by="betweenness", via="KNOWS", directed=True)
 table = forge.rank("Person", by="degree")
 ```
 
-**Available algorithms for `by`:**
+**Selected rank algorithms for `by`** (the [API reference](../reference/api.md#analyst-verbs) lists the full catalog):
 
 | Value                    | Description                                                              |
 | ------------------------ | ------------------------------------------------------------------------ |
@@ -160,7 +160,7 @@ table = forge.cluster("Person", by="louvain", via="KNOWS")
 table = forge.cluster("Person", by="components")
 ```
 
-**Available algorithms for `by`:**
+**Selected cluster algorithms for `by`** (the [API reference](../reference/api.md#analyst-verbs) lists the full catalog):
 
 | Value        | Description                               |
 | ------------ | ----------------------------------------- |

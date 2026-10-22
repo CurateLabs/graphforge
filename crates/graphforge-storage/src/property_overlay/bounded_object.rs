@@ -303,6 +303,7 @@ fn decode_part(bytes: Bytes, layout: EnvelopeLayout, index: u64) -> Result<Bytes
     // payload check, so refuse the actual pages before a reader exists.
     admit_pages(&bytes).map_err(|error| match error {
         PageAdmissionError::Unfunded => super::parquet_budget::unfunded_encoding(),
+        PageAdmissionError::Io => GfError::Storage("Parquet part read failed".into()),
         PageAdmissionError::Malformed(message) => invalid(message),
     })?;
     let builder = ParquetRecordBatchReaderBuilder::try_new(bytes).map_err(parquet_error)?;

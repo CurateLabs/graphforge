@@ -19,7 +19,7 @@ use crate::project_portable::{
     check_cancel, finish_bundle,
     materialization::{CopySink, EntrySink},
     plausibility::ParquetSignals,
-    preflight, read_bounded_file, read_bundle, scan_entries,
+    preflight, read_bounded_file, read_bundle, read_failure, scan_entries,
 };
 use crate::project_portable_import::NativeResearchValidator;
 use crate::research_versions::{
@@ -266,12 +266,20 @@ impl<'a, 'v> Driver<'a, 'v> {
     }
 
     fn read_registry(&mut self, mut file: File) -> Result<(), PortableError> {
-        file.seek(SeekFrom::Start(0)).map_err(|_| {
-            PortableError::new(PortableErrorCode::Io, "cannot read research registry")
+        file.seek(SeekFrom::Start(0)).map_err(|error| {
+            read_failure(
+                &error,
+                PortableError::new(PortableErrorCode::Io, "cannot read research registry"),
+                PortableError::new(PortableErrorCode::Io, "cannot read research registry"),
+            )
         })?;
         let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes).map_err(|_| {
-            PortableError::new(PortableErrorCode::Io, "cannot read research registry")
+        file.read_to_end(&mut bytes).map_err(|error| {
+            read_failure(
+                &error,
+                PortableError::new(PortableErrorCode::Io, "cannot read research registry"),
+                PortableError::new(PortableErrorCode::Io, "cannot read research registry"),
+            )
         })?;
         self.registry = Some(portable::portable_registry(&bytes).map_err(|_| invalid())?);
         Ok(())
