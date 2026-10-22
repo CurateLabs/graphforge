@@ -608,6 +608,33 @@ pub struct PublishReceipt {
     pub revision: String,
 }
 
+impl PublishReceipt {
+    /// Parse and validate an untrusted receipt.
+    pub fn from_json(bytes: &[u8]) -> Result<Self, HubPublishError> {
+        let value = parse_unique_json(bytes)?;
+        check_header(&value)?;
+        let receipt: Self =
+            serde_json::from_value(value).map_err(|_| invalid("receipt is malformed"))?;
+        receipt.validate()?;
+        Ok(receipt)
+    }
+
+    /// Validate every member.
+    pub fn validate(&self) -> Result<(), HubPublishError> {
+        check_format(&self.format)?;
+        validate_digest(&self.request_commitment)?;
+        validate_digest(&self.manifest_validator)?;
+        validate_digest(&self.revision)?;
+        if let Some(previous) = &self.previous_revision {
+            validate_digest(previous)?;
+        }
+        self.repository
+            .validate()
+            .map_err(|_| invalid("repository identity is invalid"))?;
+        validate_ref_list(&self.refs)
+    }
+}
+
 /// Everything a request commitment binds.
 ///
 /// A client computes the commitment before opening a session; the Hub
