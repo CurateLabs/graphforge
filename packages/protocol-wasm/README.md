@@ -59,15 +59,27 @@ A document argument is a JSON string, validated byte for byte (duplicate
 members and oversize input are refused as in native Rust), or a plain object.
 Results are plain objects.
 
+**Boundary.** Rust never reads a JavaScript object. The package's `index.js`
+turns an object argument into JSON text with `JSON.stringify` and passes only
+strings and bytes to the WebAssembly exports, so an object and its JSON text
+always get the same verdict, and a throwing proxy, getter or `toJSON` yields a
+structured `invalid_argument` error without touching the module. A string must be
+well-formed UTF-16 (a lone surrogate is refused rather than read as U+FFFD; in
+an object it is escaped by `JSON.stringify` and refused by the validator like
+the same text). Objects follow `JSON.stringify` (`Date` becomes its string,
+`undefined` members are omitted, `-0` is `0`), except that a `bigint` is written
+exactly and an integer above 2^53 given as a number (already rounded) or a
+non-finite number is refused.
+
 **Integers.** Every 64-bit integer in a result (`length`, `max_object_bytes`,
-`node_count`, ...) is a `bigint`, because a JavaScript number cannot hold a
-`u64` above 2^53 exactly; the generated declarations say `bigint`. In an object
-argument a `bigint` is passed through with every digit, a safe integer or a
-fraction is accepted as a number, and an integer above 2^53 given as a number is
-**refused** with `invalid_argument` (it is already rounded, so accepting it would
-validate a different value). Send such a value as a `bigint` or inside a JSON
-string. Objects must be plain JSON data: functions, `Date`, `Map`, class
-instances and `NaN` are refused rather than reshaped.
+`node_count`, and every integer inside a free-form `extensions` value) is a
+`bigint`, because a JavaScript number cannot hold a `u64` above 2^53 exactly;
+the generated declarations say `bigint`. In an object argument pass a `bigint`
+(or a safe integer) or send the value inside a JSON string.
+
+**Results** are built from Rust data only: `null` fields are `null`, and a JSON
+object (including `extensions`) is a plain object whose keys, `__proto__`
+included, are own properties.
 
 | Area           | Exports                                                                                                                                |
 | -------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
@@ -112,8 +124,9 @@ numbers for your machine (`# {"wasm_bytes": ...}` diagnostic).
 
 A WebAssembly build aborts on a Rust panic, so a panic cannot be turned into a
 thrown error there. The adapter calls only validators that return errors for
-untrusted input, and `tests/openalex.test.mjs` feeds every document export
-hostile values to confirm none traps.
+untrusted input, and `tests/boundary.test.mjs` feeds every export hostile values (throwing
+proxies, getters, cycles, 100,000-deep objects) and confirms each fails with a
+structured error and none traps.
 
 ## Build and test
 

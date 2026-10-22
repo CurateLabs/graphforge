@@ -20,17 +20,18 @@
     "cloudflare-workers"
   ],
   "type": "module",
-  "main": "./dist/graphforge_protocol_wasm.js",
+  "main": "./index.js",
   "types": "./dist/graphforge_protocol_wasm.d.ts",
   "exports": {
     ".": {
       "types": "./dist/graphforge_protocol_wasm.d.ts",
-      "default": "./dist/graphforge_protocol_wasm.js"
+      "default": "./index.js"
     },
     "./wasm": "./dist/graphforge_protocol_wasm_bg.wasm"
   },
   "sideEffects": false,
   "files": [
+    "index.js",
     "dist/",
     "README.md",
     "LICENSE",
@@ -43,7 +44,7 @@
   "scripts": {
     "build": "node scripts/build.mjs",
     "test": "node --expose-gc --test tests/*.test.mjs",
-    "format:check": "prettier --check package.json README.md scripts tests"
+    "format:check": "prettier --check package.json README.md index.js scripts tests"
   },
   "publishConfig": {
     "access": "public",

@@ -8,7 +8,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 export const root = join(here, "..", "..", "..");
 export const dist = join(here, "..", "dist");
 
-export const protocol = await import(join(dist, "graphforge_protocol_wasm.js"));
+export const protocol = await import("../index.js");
 export const wasm = protocol.initSync({
   module: readFileSync(join(dist, "graphforge_protocol_wasm_bg.wasm")),
 });

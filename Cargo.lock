@@ -2860,7 +2860,6 @@ version = "0.6.0-rc.5"
 dependencies = [
  "graphforge-discovery",
  "graphforge-hub-publish",
- "js-sys",
  "serde",
  "serde-wasm-bindgen",
  "serde_json",

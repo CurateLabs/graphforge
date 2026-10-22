@@ -96,16 +96,16 @@ pub struct SummaryTemporalCoverage {
 #[serde(deny_unknown_fields)]
 pub struct SummaryCorpusSize {
     /// Optional declared node count.
-    #[cfg_attr(feature = "typescript", tsify(type = "bigint", optional))]
+    #[cfg_attr(feature = "typescript", tsify(type = "bigint | null"))]
     pub node_count: Option<u64>,
     /// Optional declared relationship count.
-    #[cfg_attr(feature = "typescript", tsify(type = "bigint", optional))]
+    #[cfg_attr(feature = "typescript", tsify(type = "bigint | null"))]
     pub relationship_count: Option<u64>,
     /// Optional declared source count.
-    #[cfg_attr(feature = "typescript", tsify(type = "bigint", optional))]
+    #[cfg_attr(feature = "typescript", tsify(type = "bigint | null"))]
     pub source_count: Option<u64>,
     /// Optional declared artifact count.
-    #[cfg_attr(feature = "typescript", tsify(type = "bigint", optional))]
+    #[cfg_attr(feature = "typescript", tsify(type = "bigint | null"))]
     pub artifact_count: Option<u64>,
 }
 
