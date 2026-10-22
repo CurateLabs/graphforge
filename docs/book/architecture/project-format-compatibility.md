@@ -285,11 +285,12 @@ Manifests still reject unknown fields, so an older Core refuses a newer
 manifest that adds one.
 
 Opening a project passes the stamp, with the portable import and clone
-declarations, through one check point (`graphforge_core::core_version`). A
-different version yields the warning `GF_CORE_VERSION_MISMATCH`; an absent stamp
+declarations, through one check point (`graphforge_core::core_version`), which
+#1936 added. A different version yields the warning `GF_CORE_VERSION_MISMATCH`,
+which names both versions and how to get a matching runtime; an absent stamp
 and a matching one yield none. The check never refuses: unreadable data fails
 through the format checks above. A future refusal or fix-up policy plugs in at
-that check point (#1936).
+the same check point.
 
 ## Future compatibility
 
