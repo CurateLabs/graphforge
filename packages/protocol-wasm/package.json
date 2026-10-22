@@ -49,5 +49,8 @@
   "publishConfig": {
     "access": "public",
     "registry": "https://registry.npmjs.org/"
+  },
+  "devDependencies": {
+    "miniflare": "3.20250718.3"
   }
 }
