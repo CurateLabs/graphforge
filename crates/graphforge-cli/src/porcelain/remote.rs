@@ -1,9 +1,10 @@
 //! The porcelain verbs that talk to a Hub: `push`, `pull` and `log --remote`.
 use super::local::{upstream_of, write_log};
-use super::render::LogEntry;
+use super::render::{LogEntry, history_order};
 use super::{
     BranchSelect, HubFlags, LogArgs, PullArgs, PushArgs, bound_uuid, created_at, derived_uuid,
-    emit, idempotency_conflict, intent_digest, operation_uuid, receipt_json, resolve_branch, short,
+    emit, idempotency_conflict, intent_digest, receipt_json, report_operation, resolve_branch,
+    short,
 };
 use crate::hub_clone::remote_read::{RemoteHead, RemoteRepository, RemoteRequest, read_remote};
 use crate::hub_http::Transport;
@@ -270,7 +271,7 @@ pub(crate) fn pull(
     )?;
     let label = registry.branches[&branch].label.clone();
     let repository = repository_of(&registry, branch, args.repository.as_deref(), &args.hub)?;
-    let operation = operation_uuid(args.operation_uuid.as_deref())?;
+    let operation = report_operation(args.operation_uuid.as_deref(), json_output, output)?;
     let (author, committer) = crate::identity::resolve_from_process(&args.identity)?;
     // The merge Version's identity is bound to the complete request, so an earlier
     // run of this identity is replayed from the local ledger, with no network, only
@@ -478,20 +479,21 @@ fn log_remote(
                 GfError::Validation(format!("the repository publishes no ref '{label}'"))
             })?,
     };
-    let mut entries = Vec::new();
-    let mut seen = BTreeSet::new();
-    let mut pending = vec![start];
-    while let Some(version) = pending.pop() {
-        if args.max_count.is_some_and(|limit| entries.len() >= limit) {
-            break;
-        }
-        if !seen.insert(version.clone()) {
-            continue;
-        }
-        let Some(record) = lineage.version(&version) else {
-            break;
-        };
-        entries.push(LogEntry {
+    let order = history_order(
+        start,
+        args.all,
+        |version| {
+            lineage
+                .version(version)
+                .map(|record| record.parents.clone())
+        },
+        |_| None,
+    );
+    let entries: Vec<LogEntry> = order
+        .iter()
+        .filter_map(|version| lineage.version(version))
+        .take(args.max_count.unwrap_or(usize::MAX))
+        .map(|record| LogEntry {
             version_uuid: record.version_uuid.clone(),
             parents: record.parents.clone(),
             author: record
@@ -512,13 +514,7 @@ fn log_remote(
                 .map(|tag| tag.name.clone())
                 .collect(),
             kind: record.kind.clone(),
-        });
-        let next: Vec<String> = if args.all {
-            record.parents.clone()
-        } else {
-            record.parents.iter().take(1).cloned().collect()
-        };
-        pending.extend(next.into_iter().rev());
-    }
+        })
+        .collect();
     write_log(&entries, json_output, output)
 }

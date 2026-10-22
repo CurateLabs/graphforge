@@ -2313,7 +2313,6 @@ fn clone_into_staging(
             // Research staging is admitted read-only before any constructor or
             // generic error cleanup. Foreign or unreadable projects are preserved.
             if let Some(context) = &research_context
-                && let Some(branch) = &context.selected_branch
                 && existing_project
             {
                 if read_import_operation(staging)?.as_deref()
@@ -2326,26 +2325,45 @@ fn clone_into_staging(
                 }
                 let lineage = ResearchLineage::from_json(&context.lineage_bytes, limits)
                     .map_err(|e| protocol_error(&e))?;
-                let receipt = GraphForge::continue_imported_research_branch(
-                    &staging.project,
-                    branch,
-                    &lineage,
-                    &format!(
-                        "{}/{}",
-                        base.origin().ascii_serialization(),
-                        identity.canonical_name()
-                    ),
-                    operation_id.0,
-                )?;
-                if let Some(receipt) = receipt {
+                if context.selected_branch.is_none()
+                    && let Some(generation_uuid) = GraphForge::continue_imported_research_tags(
+                        &staging.project,
+                        &lineage,
+                        uuid::Uuid::parse_str(&context.version_uuid).map_err(storage)?,
+                        operation_id.0,
+                    )?
+                {
                     return Ok((
                         CloneImported {
                             package_digest: context.package_digest.clone(),
-                            generation_uuid: receipt.generation_uuid,
+                            generation_uuid,
                         },
                         None,
                         None,
                     ));
+                }
+                if let Some(branch) = &context.selected_branch {
+                    let receipt = GraphForge::continue_imported_research_branch(
+                        &staging.project,
+                        branch,
+                        &lineage,
+                        &format!(
+                            "{}/{}",
+                            base.origin().ascii_serialization(),
+                            identity.canonical_name()
+                        ),
+                        operation_id.0,
+                    )?;
+                    if let Some(receipt) = receipt {
+                        return Ok((
+                            CloneImported {
+                                package_digest: context.package_digest.clone(),
+                                generation_uuid: receipt.generation_uuid,
+                            },
+                            None,
+                            None,
+                        ));
+                    }
                 }
             }
             bind_import_target(staging, &operation_id)?;
@@ -2423,6 +2441,20 @@ fn clone_into_staging(
         })?;
         imported.generation_uuid = receipt.generation_uuid;
         clone_failpoint("clone.after_branch_continuation");
+    }
+    if let Some(context) = &research_context
+        && context.selected_branch.is_none()
+    {
+        let lineage = ResearchLineage::from_json(&context.lineage_bytes, limits)
+            .map_err(|error| protocol_error(&error))?;
+        imported.generation_uuid = GraphForge::continue_imported_research_tags(
+            &staging.project,
+            &lineage,
+            uuid::Uuid::parse_str(&context.version_uuid).map_err(storage)?,
+            operation_id.0,
+        )?
+        .ok_or_else(|| validation("hub.destination_conflict", "Version import is unfinished"))?;
+        clone_failpoint("clone.after_version_tags");
     }
     profile.handoff(
         ComponentKind::PortableImport,

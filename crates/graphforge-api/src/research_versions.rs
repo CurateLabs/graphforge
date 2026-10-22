@@ -1,4 +1,5 @@
 //! Immutable research Versions, owner-derived capture and exact historical views.
+mod imported_tags;
 mod view;
 pub use view::ResearchVersionView;
 pub(crate) use view::materialize as materialize_version;

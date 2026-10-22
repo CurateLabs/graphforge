@@ -1,8 +1,8 @@
 //! The porcelain verbs that read or write only the local Project.
-use super::render::{LogEntry, log_line};
+use super::render::{LogEntry, history_order, log_line};
 use super::{
     BranchArgs, CommitArgs, LogArgs, StatusArgs, SwitchArgs, TagArgs, bound_uuid, created_at, emit,
-    hex, idempotency_conflict, intent_digest, operation_uuid, receipt_json, resolve_branch,
+    hex, idempotency_conflict, intent_digest, receipt_json, report_operation, resolve_branch,
     resolve_version, short,
 };
 use graphforge_api::{
@@ -154,10 +154,11 @@ fn log(
     output: &mut dyn Write,
 ) -> Result<(), GfError> {
     let registry = graph.research_version_retention()?;
-    let branch = resolve_branch(&registry, args.select.branch.as_deref())?;
-    let start = match &args.version {
-        Some(text) => resolve_version(&registry, text)?,
-        None => head_of(&registry, branch)?,
+    let start = if let Some(text) = &args.version {
+        resolve_version(&registry, text)?
+    } else {
+        let branch = resolve_branch(&registry, args.select.branch.as_deref())?;
+        head_of(&registry, branch)?
     };
     let entries = walk(&registry, start, args.all, args.max_count);
     write_log(&entries, json_output, output)
@@ -181,56 +182,57 @@ pub(super) fn write_log(
     }
 }
 
-/// Walk history from `start`: first parent only, or every parent.
+/// Walk history from `start`, newest first with every child before its
+/// parents: first parent only, or every parent.
 fn walk(
     registry: &ResearchRegistry,
     start: Uuid,
     all: bool,
     limit: Option<usize>,
 ) -> Vec<LogEntry> {
-    let mut entries = Vec::new();
-    let mut seen = BTreeSet::new();
-    let mut pending = vec![start];
-    while let Some(version) = pending.pop() {
-        if limit.is_some_and(|limit| entries.len() >= limit) {
-            break;
-        }
-        if !seen.insert(version) {
-            continue;
-        }
-        let record = registry.versions.get(&version);
-        let parents = record.map_or_else(
-            || registry.ancestry.get(&version).cloned().unwrap_or_default(),
+    let parents_of = |version: &Uuid| {
+        registry.versions.get(version).map_or_else(
+            || registry.ancestry.get(version).cloned().unwrap_or_default(),
             |record| record.parents.clone(),
-        );
-        entries.push(LogEntry {
-            version_uuid: version.to_string(),
-            parents: parents.iter().map(Uuid::to_string).collect(),
-            author: record.and_then(|record| serde_json::to_value(&record.author).ok()),
-            committer: record.and_then(|record| serde_json::to_value(&record.committer).ok()),
-            created_at: record.map(|record| record.created_at),
-            label: record.and_then(|record| record.label.clone()),
-            description: record.and_then(|record| record.description.clone()),
-            tags: tags_of(registry, version),
-            kind: record
-                .map_or("released", |record| {
-                    if record.content.source_version.is_some() {
-                        "projection"
-                    } else {
-                        "complete"
-                    }
-                })
-                .to_owned(),
-        });
-        let next: Vec<Uuid> = if all {
-            parents
-        } else {
-            parents.into_iter().take(1).collect()
-        };
-        // The first parent is visited first.
-        pending.extend(next.into_iter().rev());
-    }
-    entries
+        )
+    };
+    let order = history_order(
+        start,
+        all,
+        |version| Some(parents_of(version)),
+        |version| {
+            registry
+                .versions
+                .get(version)
+                .map(|record| record.created_at)
+        },
+    );
+    order
+        .into_iter()
+        .take(limit.unwrap_or(usize::MAX))
+        .map(|version| {
+            let record = registry.versions.get(&version);
+            LogEntry {
+                version_uuid: version.to_string(),
+                parents: parents_of(&version).iter().map(Uuid::to_string).collect(),
+                author: record.and_then(|record| serde_json::to_value(&record.author).ok()),
+                committer: record.and_then(|record| serde_json::to_value(&record.committer).ok()),
+                created_at: record.map(|record| record.created_at),
+                label: record.and_then(|record| record.label.clone()),
+                description: record.and_then(|record| record.description.clone()),
+                tags: tags_of(registry, version),
+                kind: record
+                    .map_or("released", |record| {
+                        if record.content.source_version.is_some() {
+                            "projection"
+                        } else {
+                            "complete"
+                        }
+                    })
+                    .to_owned(),
+            }
+        })
+        .collect()
 }
 
 /// A durable receipt for `operation`, when it was already published by `branch`.
@@ -317,7 +319,7 @@ fn commit(
 ) -> Result<(), GfError> {
     let registry = graph.research_version_retention()?;
     let branch = resolve_branch(&registry, args.select.branch.as_deref())?;
-    let operation = operation_uuid(args.operation_uuid.as_deref())?;
+    let operation = report_operation(args.operation_uuid.as_deref(), json_output, output)?;
     let signatures = crate::identity::resolve_from_process(&args.identity)?;
     let query = read_query(args)?;
     let request = commit_request(
@@ -421,7 +423,7 @@ fn branch(
     let Some(name) = &args.name else {
         return list_branches(&registry, args, json_output, output);
     };
-    let operation = operation_uuid(args.operation_uuid.as_deref())?;
+    let operation = report_operation(args.operation_uuid.as_deref(), json_output, output)?;
     let signatures = crate::identity::resolve_from_process(&args.identity)?;
     // The request as it was typed: a Branch asked for from the head, or from a
     // named Version, from a named Branch's head, or as the Project's first.
@@ -494,7 +496,7 @@ fn switch(
 ) -> Result<(), GfError> {
     let registry = graph.research_version_retention()?;
     let target = resolve_branch(&registry, Some(&args.reference))?;
-    let operation = operation_uuid(args.operation_uuid.as_deref())?;
+    let operation = report_operation(args.operation_uuid.as_deref(), json_output, output)?;
     // Without an identity, selecting the current Branch is a no-op.
     // A supplied operation identity always goes through the receipted operation, a
     // no-op selection included, so the identity is bound to this request.
@@ -512,7 +514,7 @@ fn switch(
     emit(
         output,
         json_output,
-        &json!({"branch_uuid": target, "label": args.reference}),
+        &json!({"operation_uuid": operation, "branch_uuid": target, "label": args.reference}),
         &format!("Switched to branch '{}'", args.reference),
     )
 }
@@ -524,7 +526,6 @@ fn tag(
     output: &mut dyn Write,
 ) -> Result<(), GfError> {
     let registry = graph.research_version_retention()?;
-    let operation = operation_uuid(args.operation_uuid.as_deref())?;
     let (name, version, text) = if let Some(name) = &args.delete {
         (name.clone(), None, format!("Deleted tag {name}"))
     } else if let Some(name) = &args.name {
@@ -554,6 +555,7 @@ fn tag(
             .join("\n");
         return emit(output, json_output, &Value::Array(list), &text);
     };
+    let operation = report_operation(args.operation_uuid.as_deref(), json_output, output)?;
     // The native operation replays a rerun of the identity and refuses a different request.
     let was_replayed = replayed(&registry, operation).is_some();
     let request = SetResearchTagRequest {

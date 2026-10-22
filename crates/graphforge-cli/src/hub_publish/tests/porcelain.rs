@@ -229,6 +229,9 @@ fn porcelain_walkthrough_clones_commits_tags_pushes_pulls_and_logs() {
             .unwrap_or_else(|| panic!("no '{message}' in {log}"))
     };
     assert_eq!(entries[0]["version_uuid"], merged["version_uuid"]);
+    let limited = ok(&hub, &bob, &["log", "--all", "-n", "2"]);
+    assert_eq!(limited[0]["version_uuid"], merged["version_uuid"]);
+    assert_eq!(limited[1]["version_uuid"], alices["version_uuid"]);
     assert_eq!(by_message("first")["author"]["name"], "Bob");
     assert_eq!(by_message("first")["committer"]["name"], "Bob");
     assert_eq!(by_message("alice's change")["author"]["name"], "Alice");
@@ -267,6 +270,29 @@ fn porcelain_walkthrough_clones_commits_tags_pushes_pulls_and_logs() {
     for version in &walked {
         assert!(lineage.version(version).is_some());
     }
+    let mut pending = vec![head];
+    let mut reachable = BTreeSet::new();
+    while let Some(version) = pending.pop() {
+        if let Some(record) = lineage.version(version)
+            && reachable.insert(version)
+        {
+            pending.extend(record.parents.iter().map(String::as_str));
+        }
+    }
+    assert_eq!(
+        walked.iter().copied().collect::<BTreeSet<_>>(),
+        reachable,
+        "a boundary anchor must not hide the other merge parent's history"
+    );
+    for (child, version) in walked.iter().enumerate() {
+        for parent in &lineage.version(version).unwrap().parents {
+            if let Some(position) = walked.iter().position(|id| *id == parent) {
+                assert!(child < position, "child {version} follows parent {parent}");
+            }
+        }
+    }
+    let limited = ok(&hub, &bob, &["log", "--remote", "--all", "-n", "3"]);
+    assert_eq!(limited[2]["version_uuid"], second["version_uuid"]);
 
     // A tag names its Version for log, and a third clone materializes it.
     let tagged = ok(&hub, &bob, &["log", "v1", "-n", "1"]);
@@ -279,6 +305,11 @@ fn porcelain_walkthrough_clones_commits_tags_pushes_pulls_and_logs() {
         &["clone", REPOSITORY, third.to_str().unwrap(), "--tag", "v1"],
     );
     let cloned = GraphForge::new(third.to_str()).unwrap();
+    assert_eq!(ok(&hub, &third, &["tag"])[0]["name"], "v1");
+    assert_eq!(
+        ok(&hub, &third, &["log", "v1", "-n", "1"])[0]["version_uuid"],
+        second["version_uuid"]
+    );
     assert_eq!(
         sum(cloned
             .execute("MATCH (n:Item) RETURN sum(n.score)")
@@ -993,4 +1024,143 @@ fn porcelain_walkthrough_uses_no_handwritten_json() {
         0,
         "the walkthrough must not hand a request file to any verb"
     );
+}
+
+#[test]
+fn human_push_and_pull_report_their_retry_identity_on_success_and_refusal() {
+    let hub = LoopbackHub::start();
+    let root = tempfile::tempdir().unwrap();
+    let alice = seeded(root.path(), "alice");
+    ok(&hub, &alice, &["branch", "main", "--author", ALICE]);
+    let human = |project: &Path, arguments: &[&str]| {
+        let mut argv = vec!["gf"];
+        argv.extend_from_slice(arguments);
+        let command = Cli::try_parse_from(argv).unwrap().command.unwrap();
+        let mut graph = GraphForge::new(project.to_str()).unwrap();
+        let mut output = Vec::new();
+        let result = run_remote_with(
+            &hub.transport(),
+            &|_| Ok(Some(token(&hub, "curate/claims"))),
+            &mut graph,
+            command,
+            false,
+            &mut output,
+        );
+        let text = String::from_utf8(output).unwrap();
+        let operation = Uuid::parse_str(
+            text.lines()
+                .next()
+                .unwrap()
+                .strip_prefix("Operation UUID: ")
+                .expect(&text),
+        )
+        .unwrap();
+        (result, operation, text)
+    };
+    let (result, pushed, text) = human(&alice, &["push", REPOSITORY]);
+    result.unwrap();
+    assert!(text.contains("Published"), "{text}");
+    assert_eq!(
+        ok(&hub, &alice, &["push"])["operation_uuid"],
+        pushed.to_string()
+    );
+    let bob = root.path().join("bob");
+    ok(
+        &hub,
+        &bob,
+        &["clone", REPOSITORY, bob.to_str().unwrap(), "--ref", "main"],
+    );
+    commit(&hub, &alice, ALICE, "alice", 1);
+    ok(&hub, &alice, &["push"]);
+    let (result, pulled, text) = human(&bob, &["pull", "--author", BOB]);
+    result.unwrap();
+    assert!(text.contains("Merged"), "{text}");
+    assert_eq!(
+        ok(
+            &hub,
+            &bob,
+            &[
+                "pull",
+                "--author",
+                BOB,
+                "--operation-uuid",
+                &pulled.to_string()
+            ]
+        )["replayed"],
+        true
+    );
+
+    // Both sides advance the same field. The pull refuses after its durable fetch,
+    // and the printed identity lets a human retry that fetch rather than minting one.
+    commit(&hub, &alice, ALICE, "alice again", 2);
+    ok(&hub, &alice, &["push"]);
+    commit(&hub, &bob, BOB, "bob", 3);
+    let (result, operation, _) = human(&bob, &["pull", "--author", BOB]);
+    assert!(result.unwrap_err().to_string().contains("property:score"));
+    let state = GraphForge::new(bob.to_str())
+        .unwrap()
+        .research_version_retention()
+        .unwrap();
+    assert!(
+        state
+            .receipts
+            .contains_key(&crate::porcelain::derived_uuid(operation, "fetch"))
+    );
+    let (result, repeated, _) = human(
+        &bob,
+        &[
+            "pull",
+            "--author",
+            BOB,
+            "--operation-uuid",
+            &operation.to_string(),
+        ],
+    );
+    assert!(result.unwrap_err().to_string().contains("property:score"));
+    assert_eq!(repeated, operation);
+    let (result, _, _) = human(&bob, &["push"]);
+    assert_eq!(
+        error_code(&result.unwrap_err()),
+        "hub.publish.non_fast_forward"
+    );
+}
+
+#[test]
+fn remote_log_visits_the_other_merge_parent_after_a_project_boundary() {
+    let hub = LoopbackHub::start();
+    let root = tempfile::tempdir().unwrap();
+    let alice = seeded(root.path(), "alice");
+    ok(&hub, &alice, &["branch", "main", "--author", ALICE]);
+    ok(&hub, &alice, &["push", REPOSITORY]);
+    let base = ok(&hub, &alice, &["status"])["head_version_uuid"].clone();
+    let bob = root.path().join("bob");
+    ok(
+        &hub,
+        &bob,
+        &["clone", REPOSITORY, bob.to_str().unwrap(), "--ref", "main"],
+    );
+    let changed = commit(&hub, &alice, ALICE, "alice", 1)["version_uuid"].clone();
+    ok(&hub, &alice, &["push"]);
+    let merged = ok(&hub, &bob, &["pull", "--author", BOB])["version_uuid"].clone();
+    ok(&hub, &bob, &["push"]);
+    let (_, lineage) = served_lineage(&hub, "curate/claims");
+    let parent = &lineage.version(base.as_str().unwrap()).unwrap().parents[0];
+    assert!(lineage.version(parent).is_none());
+    assert!(
+        lineage
+            .boundary_anchors
+            .iter()
+            .any(|anchor| &anchor.version_uuid == parent)
+    );
+    let log = ok(&hub, &bob, &["log", "--remote", "--all"]);
+    assert!(
+        log.as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["version_uuid"] == changed),
+        "the first parent's boundary must not hide the second parent: {log}"
+    );
+    let limited = ok(&hub, &bob, &["log", "--remote", "--all", "-n", "2"]);
+    assert_eq!(limited[0]["version_uuid"], merged);
+    assert_eq!(limited[1]["version_uuid"], changed);
 }

@@ -270,6 +270,22 @@ pub(crate) fn operation_uuid(given: Option<&str>) -> Result<Uuid, GfError> {
     Ok(uuid)
 }
 
+/// Print the retry identity before a mutation can fail, including a refusal after
+/// a durable fetch. JSON success results carry the identity in their receipt.
+pub(crate) fn report_operation(
+    given: Option<&str>,
+    json_output: bool,
+    output: &mut dyn Write,
+) -> Result<Uuid, GfError> {
+    let operation = operation_uuid(given)?;
+    if !json_output {
+        writeln!(output, "Operation UUID: {operation}")
+            .and_then(|()| output.flush())
+            .map_err(|error| GfError::Execution(error.to_string()))?;
+    }
+    Ok(operation)
+}
+
 /// UTC microseconds carried by a UUIDv7, so a rerun records the same time.
 pub(crate) fn created_at(operation: Uuid) -> i64 {
     operation.get_timestamp().map_or(0, |timestamp| {

@@ -396,7 +396,15 @@ pub(crate) fn publish_and_report(
     json: bool,
     output: &mut dyn Write,
 ) -> Result<(), GfError> {
-    let outcome = publish(transport, graph, args, environment)?;
+    let outcome =
+        publish_with_operation_report(transport, graph, args, environment, |operation| {
+            if !json {
+                writeln!(output, "Operation UUID: {operation}")
+                    .and_then(|()| output.flush())
+                    .map_err(|error| GfError::Storage(error.to_string()))?;
+            }
+            Ok(())
+        })?;
     record_upstream(graph, transport, args, &outcome)?;
     write_outcome(&outcome, json, output)
 }
@@ -2013,12 +2021,23 @@ fn check_receipt(
 }
 
 /// Publish one research Version (or Branch head) of `graph`.
-#[allow(clippy::too_many_lines)]
+#[cfg(test)]
 pub(crate) fn publish(
     transport: &dyn Transport,
     graph: &GraphForge,
     args: &PublishArgs,
     environment: &mut PublishEnvironment<'_>,
+) -> Result<PublishOutcome, GfError> {
+    publish_with_operation_report(transport, graph, args, environment, |_| Ok(()))
+}
+
+#[allow(clippy::too_many_lines)]
+fn publish_with_operation_report(
+    transport: &dyn Transport,
+    graph: &GraphForge,
+    args: &PublishArgs,
+    environment: &mut PublishEnvironment<'_>,
+    mut report: impl FnMut(Uuid) -> Result<(), GfError>,
 ) -> Result<PublishOutcome, GfError> {
     let (identity, base) = parse_input(&args.repository)?;
     let fork = args.fork_of.as_deref().map(parse_input).transpose()?;
@@ -2094,6 +2113,7 @@ pub(crate) fn publish(
             &operation_content,
         )
     });
+    report(operation_uuid)?;
     let base_intent = intent_digest(&identity, &selection, fork.as_ref().map(|(id, _)| id));
     let intent_digest = if previews.is_empty() {
         base_intent
