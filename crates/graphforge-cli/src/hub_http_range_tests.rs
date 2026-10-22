@@ -45,6 +45,8 @@ struct Fake {
     weak_etag: bool,
     weak_resume_etag: bool,
     resume_range_end: Option<u64>,
+    resume_body_limit: Option<usize>,
+    resume_body_error: bool,
     omit_resume_content_length: bool,
     initial_length_override: Option<u64>,
 }
@@ -93,6 +95,24 @@ impl Transport for Fake {
                 .filter(|end| *end >= offset)
                 .unwrap_or_else(|| self.bytes.len().saturating_sub(1) as u64);
             let bytes = self.bytes[offset as usize..].to_vec();
+            let range_length = range_end - offset + 1;
+            let resume_body_limit = (calls.len() == 2)
+                .then_some(self.resume_body_limit)
+                .flatten();
+            let body: Box<dyn Read + Send> = match resume_body_limit {
+                Some(limit) if self.resume_body_error => Box::new(Disconnect {
+                    remaining: limit,
+                    bytes,
+                }),
+                Some(limit) => Box::new(std::io::Cursor::new(
+                    bytes[..limit.min(bytes.len())].to_vec(),
+                )),
+                None if self.repeat_disconnect => Box::new(Disconnect {
+                    remaining: 0,
+                    bytes,
+                }),
+                None => Box::new(std::io::Cursor::new(bytes)),
+            };
             Ok(HttpResponse {
                 status: 206,
                 location: None,
@@ -102,16 +122,9 @@ impl Transport for Fake {
                     format!("bytes {offset}-{range_end}/{}", self.bytes.len())
                 }),
                 etag: Some(etag.into()),
-                content_length: (!self.omit_resume_content_length).then_some(bytes.len() as u64),
+                content_length: (!self.omit_resume_content_length).then_some(range_length),
                 retry_after: None,
-                body: if self.repeat_disconnect {
-                    Box::new(Disconnect {
-                        remaining: 0,
-                        bytes,
-                    })
-                } else {
-                    Box::new(std::io::Cursor::new(bytes))
-                },
+                body,
             })
         } else {
             Ok(HttpResponse {
@@ -157,6 +170,8 @@ fn resume_carries_range_and_if_range_and_rejects_changed_etag() {
         initial_clean_eof: false,
         weak_etag: false,
         weak_resume_etag: false,
+        resume_body_limit: None,
+        resume_body_error: false,
         resume_range_end: None,
         omit_resume_content_length: false,
         initial_length_override: None,
@@ -189,6 +204,8 @@ fn changed_etag_is_concurrent_mutation() {
         initial_clean_eof: false,
         weak_etag: false,
         weak_resume_etag: false,
+        resume_body_limit: None,
+        resume_body_error: false,
         resume_range_end: None,
         omit_resume_content_length: false,
         initial_length_override: None,
@@ -238,6 +255,8 @@ fn url_verification_maps_changed_objects_to_conflict_exit_one() {
             initial_clean_eof: false,
             weak_etag: false,
             weak_resume_etag: false,
+            resume_body_limit: None,
+            resume_body_error: false,
             resume_range_end: None,
             omit_resume_content_length: false,
             initial_length_override: None,
@@ -265,6 +284,8 @@ fn url_verification_maps_ninth_disconnect_to_io_exit_three() {
         initial_clean_eof: false,
         weak_etag: false,
         weak_resume_etag: false,
+        resume_body_limit: None,
+        resume_body_error: false,
         resume_range_end: None,
         omit_resume_content_length: false,
         initial_length_override: None,
@@ -311,6 +332,8 @@ fn url_without_content_length_fails_before_reading() {
         initial_clean_eof: true,
         weak_etag: false,
         weak_resume_etag: false,
+        resume_body_limit: None,
+        resume_body_error: false,
         resume_range_end: None,
         omit_resume_content_length: false,
         initial_length_override: None,
@@ -339,6 +362,8 @@ fn interrupted_body_read_retries_without_ranging() {
         initial_clean_eof: false,
         weak_etag: false,
         weak_resume_etag: false,
+        resume_body_limit: None,
+        resume_body_error: false,
         resume_range_end: None,
         omit_resume_content_length: false,
         initial_length_override: None,
@@ -369,6 +394,8 @@ fn weak_etag_cannot_authorize_a_resume() {
         initial_clean_eof: false,
         weak_etag: true,
         weak_resume_etag: false,
+        resume_body_limit: None,
+        resume_body_error: false,
         resume_range_end: None,
         omit_resume_content_length: false,
         initial_length_override: None,
@@ -407,6 +434,8 @@ fn weak_etag_on_resumed_response_is_a_conflict() {
         initial_clean_eof: false,
         weak_etag: false,
         weak_resume_etag: true,
+        resume_body_limit: None,
+        resume_body_error: false,
         resume_range_end: None,
         omit_resume_content_length: false,
         initial_length_override: None,
@@ -436,6 +465,8 @@ fn short_declared_range_is_bounded_and_resumed_from_its_end() {
         initial_clean_eof: false,
         weak_etag: false,
         weak_resume_etag: false,
+        resume_body_limit: None,
+        resume_body_error: false,
         resume_range_end: Some(6),
         omit_resume_content_length: true,
         initial_length_override: None,
@@ -459,6 +490,47 @@ fn short_declared_range_is_bounded_and_resumed_from_its_end() {
 }
 
 #[test]
+fn premature_full_range_resumes_after_bytes_read_without_duplication() {
+    let data = b"0123456789".to_vec();
+    for resume_body_error in [false, true] {
+        let transport = Fake {
+            bytes: data.clone(),
+            calls: Mutex::new(Vec::new()),
+            changed: false,
+            status_on_resume: 206,
+            mismatch_range: false,
+            repeat_disconnect: false,
+            initial_content_length: true,
+            interrupt_once: false,
+            initial_clean_eof: false,
+            weak_etag: false,
+            weak_resume_etag: false,
+            resume_body_limit: Some(2),
+            resume_body_error,
+            resume_range_end: None,
+            omit_resume_content_length: false,
+            initial_length_override: None,
+        };
+        let mut reader = RangedObjectReader::open(
+            &transport,
+            Url::parse("https://example.com/object").unwrap(),
+        )
+        .unwrap();
+        let mut actual = Vec::new();
+        reader.read_to_end(&mut actual).unwrap();
+        assert_eq!(actual, data);
+        assert_eq!(
+            *transport.calls.lock().unwrap(),
+            vec![
+                (None, None),
+                (Some(5), Some("\"stable\"".into())),
+                (Some(7), Some("\"stable\"".into()))
+            ]
+        );
+    }
+}
+
+#[test]
 fn range_end_must_be_less_than_total() {
     let transport = Fake {
         bytes: b"0123456789".to_vec(),
@@ -472,6 +544,8 @@ fn range_end_must_be_less_than_total() {
         initial_clean_eof: false,
         weak_etag: false,
         weak_resume_etag: false,
+        resume_body_limit: None,
+        resume_body_error: false,
         resume_range_end: Some(10),
         omit_resume_content_length: true,
         initial_length_override: None,
@@ -500,6 +574,8 @@ fn initial_body_never_exposes_bytes_beyond_content_length() {
         initial_clean_eof: true,
         weak_etag: false,
         weak_resume_etag: false,
+        resume_body_limit: None,
+        resume_body_error: false,
         resume_range_end: None,
         omit_resume_content_length: false,
         initial_length_override: Some(5),
@@ -531,6 +607,8 @@ fn resumed_hub_bundle_verifies_like_the_file() {
         initial_clean_eof: false,
         weak_etag: false,
         weak_resume_etag: false,
+        resume_body_limit: None,
+        resume_body_error: false,
         resume_range_end: None,
         omit_resume_content_length: false,
         initial_length_override: None,
@@ -588,6 +666,8 @@ fn resume_rejects_200_and_mismatched_content_range() {
             initial_clean_eof: false,
             weak_etag: false,
             weak_resume_etag: false,
+            resume_body_limit: None,
+            resume_body_error: false,
             resume_range_end: None,
             omit_resume_content_length: false,
             initial_length_override: None,
@@ -622,6 +702,8 @@ fn ninth_disconnect_fails_as_io() {
         initial_clean_eof: false,
         weak_etag: false,
         weak_resume_etag: false,
+        resume_body_limit: None,
+        resume_body_error: false,
         resume_range_end: None,
         omit_resume_content_length: false,
         initial_length_override: None,
@@ -655,6 +737,8 @@ fn ranged_url_validation_refuses_unsafe_urls_before_transport() {
         initial_clean_eof: true,
         weak_etag: false,
         weak_resume_etag: false,
+        resume_body_limit: None,
+        resume_body_error: false,
         resume_range_end: None,
         omit_resume_content_length: false,
         initial_length_override: None,

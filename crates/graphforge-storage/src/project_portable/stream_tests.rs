@@ -2,6 +2,30 @@
 use super::*;
 use std::io::Cursor;
 
+struct FailsAt {
+    bytes: Cursor<Vec<u8>>,
+    offset: u64,
+    kind: Option<std::io::ErrorKind>,
+}
+
+impl Read for FailsAt {
+    fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
+        if output.is_empty() {
+            return Ok(0);
+        }
+        let position = self.bytes.position();
+        if position >= self.offset {
+            return match self.kind {
+                Some(kind) => Err(std::io::Error::new(kind, "injected read failure")),
+                None => Ok(0),
+            };
+        }
+        let before_failure = usize::try_from(self.offset - position).unwrap_or(usize::MAX);
+        let readable = output.len().min(before_failure);
+        self.bytes.read(&mut output[..readable])
+    }
+}
+
 fn file_of(bytes: &[u8]) -> tempfile::NamedTempFile {
     let file = tempfile::NamedTempFile::new().unwrap();
     fs::write(file.path(), bytes).unwrap();
@@ -85,6 +109,35 @@ fn entries(bytes: &[u8]) -> Vec<(usize, usize)> {
 #[test]
 fn truncated_bundles_fail_alike_from_a_file_and_a_stream() {
     assert_truncations_alike(&ontology_only_bundle());
+}
+
+#[test]
+fn tar_header_and_payload_read_errors_keep_their_source_classification() {
+    let bytes = ontology_only_bundle();
+    let first = entries(&bytes)[0];
+    let positions = [
+        ("header", first.0 as u64, "truncated bundle"),
+        ("payload", (first.0 + 512 + 3) as u64, "truncated payload"),
+    ];
+    for (name, offset, _) in positions {
+        let mut reader = FailsAt {
+            bytes: Cursor::new(bytes.clone()),
+            offset,
+            kind: Some(std::io::ErrorKind::Other),
+        };
+        let error =
+            verify_portable_stream(&mut reader, None, PortableLimits::default(), None).unwrap_err();
+        assert_eq!(error.code, PortableErrorCode::Io, "{name}");
+
+        let mut reader = FailsAt {
+            bytes: Cursor::new(bytes.clone()),
+            offset,
+            kind: None,
+        };
+        let error =
+            verify_portable_stream(&mut reader, None, PortableLimits::default(), None).unwrap_err();
+        assert_eq!(error.code, PortableErrorCode::InvalidStructure, "{name}");
+    }
 }
 
 /// Cut `bytes` mid-header, mid-payload, mid-padding, after the first end block
