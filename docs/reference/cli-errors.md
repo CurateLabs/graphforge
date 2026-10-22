@@ -15,10 +15,17 @@ Branch in this order:
    (`hub.network`, `inventory.not_found`, …). Present exactly when the failure
    carries a stable dotted contract code. This is the field agents key on for
    Hub, clone, and publish behavior.
-2. `error.code` — the coarse, always-present `GF_*` outer code
+2. `error.diagnostics[].code` — multi-ontology failures only: read the
+   per-diagnostic codes before falling back to the outer code, because they
+   can reclass the failure. A concurrent portable change, for example, is the
+   outer `GF_IDEMPOTENCY_CONFLICT` with the diagnostic
+   `inventory.generation_conflict` — a retry after refreshing, not the
+   operation-identity decision the outer code alone suggests. The complete
+   vocabulary is tabulated under [Diagnostic codes](#diagnostic-codes-errordiagnosticscode) below.
+3. `error.code` — the coarse, always-present `GF_*` outer code
    (`GF_VALIDATION`, `GF_IO`, …). Use it when `semantic_code` is absent and to
    derive the exit class.
-3. Exit code — a coarse fallback documented below.
+4. Exit code — a coarse fallback documented below.
 
 Never branch on `error.message`: it is diagnostic text, not a contract.
 
@@ -60,13 +67,9 @@ Multi-ontology facade failures use a diagnostics list instead of `details`:
 "candidates":["…"],"remediation":"…","limit":64}]}}
 ```
 
-Each `diagnostics[].code` is a stable dotted code from the same vocabulary as
-`semantic_code`, and `remediation` is Rust-owned guidance. The diagnostic
-codes are `dependency.in_use`, `interchange.integrity`, `interchange.io`,
-`interchange.selection`, `interchange.unsupported_format`,
-`interchange.unsupported_future`, `inventory.generation_conflict`,
-`lifecycle.cancelled`, `resource.bytes`, `storage.insufficient_space`, and
-`storage.unsupported_filesystem`.
+Each `diagnostics[].code` is a stable dotted code, and `remediation` is
+Rust-owned guidance mirroring the next action. The complete diagnostic
+vocabulary is tabulated under [Diagnostic codes](#diagnostic-codes-errordiagnosticscode).
 
 Without `--json`, failures print `CODE: message` plain text. Agents must pass
 `--json`.
@@ -77,7 +80,7 @@ Without `--json`, failures print `CODE: message` plain text. Agents must pass
 | --- | --- |
 | `0` | Success. |
 | `1` | Failure not otherwise classified (includes `GF_IDEMPOTENCY_CONFLICT` and `GF_WRITER_BUSY`). |
-| `2` | Fix the input: argument refusals and every `GF_VALIDATION`, including all `hub.publish.*` codes except `internal`. |
+| `2` | Fix the input: argument refusals and every `GF_VALIDATION`, including all `hub.publish.*` codes except `internal` (exit 3) and `idempotency_conflict` (surfaced as `GF_IDEMPOTENCY_CONFLICT`, exit 1). |
 | `3` | Transport or storage: `GF_IO` (including `hub.network`), `GF_UNSUPPORTED_FILESYSTEM`, `hub.publish.internal`, and the transient Hub statuses (`hub.rate_limited`, `hub.unavailable`). |
 | `4` | `gf sync --check` found drift. Control-flow result, not an error; the JSON body is on standard output. |
 
@@ -105,7 +108,6 @@ escalate to a human when the obvious fix does not clear the failure.
 | `hub.network` | retry | Transport failed after the CLI's in-process retries | Rerun; check connectivity and the Hub's status | 3 |
 | `hub.rate_limited` | retry | Hub returned 429 and asked to slow down (its `Retry-After` is honored in process) | Rerun after a wait | 3 |
 | `hub.unavailable` | retry | Hub returned 408/502/503/504 | Rerun later; if it persists, check the Hub | 3 |
-| `hub.unexpected_status` | retry | HTTP status without a Hub error body (for example a proxy) | Rerun; if it persists, ask the Hub operator | 2 |
 | `hub.concurrent_clone` | retry | Another clone into this destination is already running | Wait for it, then rerun | 2 |
 | `hub.interrupted` | retry | This run was cancelled by a signal | Rerun if the work is still wanted | 2 |
 | `hub.package.cancelled` | retry | Package import was cancelled | Rerun | 2 |
@@ -118,6 +120,7 @@ escalate to a human when the obvious fix does not clear the failure.
 
 | Code | Class | Meaning | Next action | Exit |
 | --- | --- | --- | --- | --- |
+| `hub.publish.auth_denied` | fix input | Publish credential missing, expired, or not scoped to this repository | With no token: set `GRAPHFORGE_HUB_PUBLISH_TOKEN` (see [Credentials](#credentials)). With a token still denied: a human must mint a `publish:owner/repository`-scoped token | 2 |
 | `hub.invalid_identity` | fix input | Repository argument is not `owner/repository` or a valid HTTPS URL | Fix the repository (or `--hub`) argument | 2 |
 | `hub.unsafe_location` | fix input | URL must be credential-free HTTPS on a public host | Pass the documented Hub URL form | 2 |
 | `hub.auth_denied` | fix input | Credential missing, unreadable, empty, or not valid for this origin (clone `--token-env`; publish saved-session origin) | Set or correct the credential environment variable (see [Credentials](#credentials)); if a provided token is still denied, a human must mint a scoped token | 2 |
@@ -153,8 +156,8 @@ escalate to a human when the obvious fix does not clear the failure.
 | `hub.publish.unsupported_future` | fix input | The publish protocol needs a capability this client lacks | Upgrade the GraphForge CLI | 2 |
 | `interchange.unsupported_future` | fix input | Input uses a newer interchange major | Upgrade the GraphForge CLI | 1 |
 | `interchange.unsupported_format` | fix input | Input format is not recognized | Check the input file type | 1 |
-| `interchange.integrity` | fix input | Interchange digests, duplicates, or structure failed verification | Re-export or re-download the input | 1 |
-| `interchange.selection` | fix input | The requested selection is incompatible with the input | Adjust the selection | 1 |
+| `interchange.integrity` | fix input | Interchange digests, duplicates, or structure failed verification | Re-export or re-download the input | 2 |
+| `interchange.selection` | fix input | The requested selection is incompatible with the input | Adjust the selection | 2 |
 | `interchange.io` | fix input | Local I/O or path validation failed | Check the path and permissions | 1 |
 | `inventory.not_found` | fix input | A named object is absent | Check the name/UUID argument | 1 |
 | `dependency.in_use` | fix input | The module has bounded dependants | Remove or rebind the dependants first | 1 |
@@ -165,12 +168,49 @@ escalate to a human when the obvious fix does not clear the failure.
 
 | Code | Class | Meaning | Next action | Exit |
 | --- | --- | --- | --- | --- |
-| `hub.publish.auth_denied` | fix input | Publish credential missing, expired, or not scoped to this repository | With no token: set `GRAPHFORGE_HUB_PUBLISH_TOKEN` (see [Credentials](#credentials)). With a token still denied: a human must mint a `publish:owner/repository`-scoped token | 2 |
+| `hub.unexpected_status` | ask a human | HTTP status without a Hub error body (for example a proxy): a protocol or Hub failure, never a transient one | Check for an outdated client or a proxy rewriting responses; ask the Hub operator | 2 |
 | `hub.publish.entitlement_denied` | ask a human | Quota or entitlement refused publication | Ask the account/Hub owner | 2 |
 | `hub.access_denied` | ask a human | The repository is private or the credential lacks access | Ask the repository owner for access or a scoped token | 2 |
 | `hub.malformed_response` | ask a human | The Hub response violated its contract | Possibly an outdated client: upgrade first; otherwise ask the Hub operator | 2 |
 | `hub.publish.internal` | ask a human | Hub internal failure (500) | Report to the Hub operator | 3 |
 | `hub.publish.idempotency_conflict` | ask a human | The same operation identity was reused with different content (`GF_IDEMPOTENCY_CONFLICT` is the outer `error.code`; no `semantic_code` is emitted) | A human decides: replay (same identity) or intentional new operation (new UUID) | 1 |
+
+### Diagnostic codes (`error.diagnostics[].code`)
+
+Multi-ontology failures carry per-diagnostic codes. Read them before the outer
+code: the exit is a property of the envelope (`error.code` per the exit-code
+table — usually `GF_ONTOLOGY_DIAGNOSTIC`, exit 1), while the diagnostic names
+the actionable cause. Each diagnostic also carries a Rust-owned `remediation`
+string mirroring the next action below. Spellings are the stable
+`DiagnosticCode::as_str` tokens plus the portable staging codes.
+
+| Code | Class | Meaning | Next action |
+| --- | --- | --- | --- |
+| `inventory.generation_conflict` | retry | A concurrent portable change moved the authority under this operation (the outer code may be `GF_IDEMPOTENCY_CONFLICT`) | Refresh the authority state and rerun; not an identity decision |
+| `lifecycle.cancelled` | retry | The operation was cancelled at a deterministic checkpoint | Rerun if the work is still wanted |
+| `bridge.contradiction` | fix input | Bridge assertions contradict each other | Remove the contradictory bridge assertions |
+| `bridge.endpoint_missing` | fix input | A bridge endpoint module is absent from the inventory | Adopt every exact bridge endpoint module first |
+| `bridge.provenance_missing` | fix input | The authoritative mapping lacks required provenance | Add bounded authored provenance |
+| `collision.metadata` | fix input | An identifier is not NFC-normalized or its digest is malformed | Normalize the identifier and repair its metadata |
+| `collision.qualified_duplicate` | fix input | The same qualified identity is declared twice with conflicting content | Remove the conflicting qualified symbol |
+| `dependency.cycle` | fix input | The module dependency graph contains a cycle | Remove the dependency cycle |
+| `dependency.in_use` | fix input | A module or bridge cannot be removed while dependants reference it | Remove dependent module, bridge, and activation references first |
+| `dependency.missing` | fix input | A required dependency identity is not present | Adopt every exact dependency first |
+| `interchange.integrity` | fix input | A declared digest disagrees with the canonical document | Repair or regenerate the authenticated content |
+| `interchange.io` | fix input | Portable staging I/O or path validation failed | Verify the staging authority and path, then retry |
+| `interchange.selection` | fix input | The request is incompatible with the candidate | Select a compatible portable ontology candidate |
+| `interchange.unsupported_format` | fix input | The package format is not a supported portable project | Export with a supported producer |
+| `interchange.unsupported_future` | fix input | The package needs a newer format or capability | Upgrade GraphForge |
+| `inventory.duplicate` | fix input | A module identity is duplicated with conflicting content | Select or author one unique exact identity |
+| `inventory.malformed` | fix input | The module document failed independent validation | Repair and validate the authored document |
+| `inventory.not_found` | fix input | The requested module is absent from the inventory | Select an existing exact inventory identity |
+| `lifecycle.invalid_transition` | fix input | The lifecycle transition is not allowed from the current status | Perform the required prior lifecycle step |
+| `resolution.ambiguous` | fix input | An unqualified name has more than one candidate | Supply an exact qualified selector |
+| `resolution.kind_mismatch` | fix input | The requested kind does not match the candidate | Request the symbol under its actual kind |
+| `resolution.not_found` | fix input | No candidate exists for the requested symbol | Check the requested symbol's name |
+| `resource.bridges`, `resource.bytes`, `resource.diagnostics`, `resource.modules`, `resource.symbols` | fix input | A caller limit was exceeded | Reduce the request below the registered limit |
+| `storage.insufficient_space` | fix input | The target filesystem lacks space | Free space beside the target or import onto a larger volume |
+| `storage.unsupported_filesystem` | fix input | The filesystem cannot provide the required semantics | Import onto a local `ext4`/`xfs`/`btrfs` volume (see `docs/development/agent-environment.md`) |
 
 ## Outer codes without a `semantic_code`
 

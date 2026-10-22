@@ -145,7 +145,7 @@ fn missing_publish_token_fails_fix_input_before_any_request() {
 }
 
 #[test]
-fn publish_env_token_reaches_the_request_and_is_never_logged() {
+fn publish_env_token_passes_the_early_credential_check_and_is_never_logged() {
     let _guard = ENV_SERIAL
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -153,11 +153,16 @@ fn publish_env_token_reaches_the_request_and_is_never_logged() {
     unsafe {
         std::env::set_var(PUBLISH_TOKEN_ENV, SECRET);
     }
-    // In the captured runner a set token is the only way past the credential
-    // gate: without the environment read this run fails `auth_denied`
-    // (exit 2) before any request. With it, the run uses the token on the
-    // discovery request and only the reserved Hub name's transport failure
-    // remains — the documented retry class, where rerunning may succeed.
+    // The environment token's proven role here is the early credential gate:
+    // without the environment read this captured run fails `auth_denied`
+    // (exit 2) before any request; with it, the run proceeds and only the
+    // reserved Hub name's transport failure remains — the documented retry
+    // class, where rerunning may succeed. The request that fails is the
+    // anonymous discovery read, which runs before credential selection, so
+    // this test does not observe the Authorization header; bearer delivery
+    // to the control plane is covered by
+    // `publish_token_never_leaves_the_control_plane` in
+    // `crates/graphforge-cli/src/hub_publish/tests.rs`.
     let run = graphforge_cli::execute([
         "gf",
         "--json",
