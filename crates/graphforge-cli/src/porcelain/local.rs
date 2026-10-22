@@ -2,7 +2,7 @@
 use super::render::{LogEntry, log_line};
 use super::{
     BranchArgs, CommitArgs, LogArgs, StatusArgs, SwitchArgs, TagArgs, bound_uuid, created_at, emit,
-    idempotency_conflict, intent_digest, operation_uuid, receipt_json, resolve_branch,
+    hex, idempotency_conflict, intent_digest, operation_uuid, receipt_json, resolve_branch,
     resolve_version, short,
 };
 use graphforge_api::{
@@ -271,10 +271,7 @@ pub(super) fn commit_intent(
     query: &str,
 ) -> [u8; 32] {
     use sha2::Digest as _;
-    let query_sha256: String = sha2::Sha256::digest(query.as_bytes())
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect();
+    let query_sha256 = hex(&sha2::Sha256::digest(query.as_bytes()));
     intent_digest(
         "commit",
         &json!({
@@ -365,6 +362,55 @@ fn commit(
     )
 }
 
+fn list_branches(
+    registry: &ResearchRegistry,
+    args: &BranchArgs,
+    json_output: bool,
+    output: &mut dyn Write,
+) -> Result<(), GfError> {
+    let current = resolve_branch(registry, args.select.branch.as_deref()).ok();
+    let mut rows: Vec<(&String, Uuid)> = registry
+        .branches
+        .iter()
+        .map(|(uuid, record)| (&record.label, *uuid))
+        .collect();
+    rows.sort();
+    let list: Vec<Value> = rows
+        .iter()
+        .map(|(label, uuid)| {
+            let mut row = json!({
+                "branch_uuid": uuid,
+                "label": label,
+                "head_version_uuid": registry.heads.get(uuid),
+                "current": Some(*uuid) == current,
+            });
+            if let Some(remote) = upstream_of(registry, *uuid) {
+                row["upstream"] = json!({
+                    "repository_url": remote.repository_url,
+                    "ref": remote.ref_name,
+                });
+            }
+            row
+        })
+        .collect();
+    let text = rows
+        .iter()
+        .map(|(label, uuid)| {
+            let mark = if Some(*uuid) == current { '*' } else { ' ' };
+            let head = registry.heads.get(uuid).map_or_else(String::new, short);
+            match upstream_of(registry, *uuid) {
+                Some(remote) => format!(
+                    "{mark} {label} {head} -> {} {}",
+                    remote.repository_url, remote.ref_name
+                ),
+                None => format!("{mark} {label} {head}"),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    emit(output, json_output, &Value::Array(list), &text)
+}
+
 fn branch(
     graph: &mut GraphForge,
     args: &BranchArgs,
@@ -373,47 +419,7 @@ fn branch(
 ) -> Result<(), GfError> {
     let registry = graph.research_version_retention()?;
     let Some(name) = &args.name else {
-        let current = resolve_branch(&registry, args.select.branch.as_deref()).ok();
-        let mut rows: Vec<(&String, Uuid)> = registry
-            .branches
-            .iter()
-            .map(|(uuid, record)| (&record.label, *uuid))
-            .collect();
-        rows.sort();
-        let list: Vec<Value> = rows
-            .iter()
-            .map(|(label, uuid)| {
-                let mut row = json!({
-                    "branch_uuid": uuid,
-                    "label": label,
-                    "head_version_uuid": registry.heads.get(uuid),
-                    "current": Some(*uuid) == current,
-                });
-                if let Some(remote) = upstream_of(&registry, *uuid) {
-                    row["upstream"] = json!({
-                        "repository_url": remote.repository_url,
-                        "ref": remote.ref_name,
-                    });
-                }
-                row
-            })
-            .collect();
-        let text = rows
-            .iter()
-            .map(|(label, uuid)| {
-                let mark = if Some(*uuid) == current { '*' } else { ' ' };
-                let head = registry.heads.get(uuid).map_or_else(String::new, short);
-                match upstream_of(&registry, *uuid) {
-                    Some(remote) => format!(
-                        "{mark} {label} {head} -> {} {}",
-                        remote.repository_url, remote.ref_name
-                    ),
-                    None => format!("{mark} {label} {head}"),
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        return emit(output, json_output, &Value::Array(list), &text);
+        return list_branches(&registry, args, json_output, output);
     };
     let operation = operation_uuid(args.operation_uuid.as_deref())?;
     let signatures = crate::identity::resolve_from_process(&args.identity)?;

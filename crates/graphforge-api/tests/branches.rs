@@ -1901,3 +1901,71 @@ fn a_published_head_is_recorded_only_against_native_branch_authority() {
         1
     );
 }
+
+#[test]
+fn publication_content_identity_ignores_only_the_tracking_a_publication_writes() {
+    let root = tempfile::tempdir().unwrap();
+    let mut graph = GraphForge::new(root.path().join("project").to_str()).unwrap();
+    graph.execute("CREATE (:Item {score:0})").unwrap();
+    let main = create(&mut graph, "main");
+    let before = graph.publication_content_identity().unwrap();
+    let manifest = graph
+        .committed_generation_identity()
+        .unwrap()
+        .manifest_sha256;
+
+    // Recording a confirmed publication changes CURRENT but not what is published.
+    let receipt = graphforge_hub_publish::PublishReceipt {
+        format: graphforge_hub_publish::HUB_PUBLISH_FORMAT.into(),
+        operation_uuid: Uuid::now_v7(),
+        request_commitment: format!("sha256:{}", "1".repeat(64)),
+        repository: graphforge_discovery::RepositoryIdentity::parse("curate/claims").unwrap(),
+        manifest_validator: format!("sha256:{}", "2".repeat(64)),
+        refs: vec!["main".into()],
+        previous_revision: None,
+        revision: format!("sha256:{}", "3".repeat(64)),
+    };
+    graph
+        .record_research_publication(
+            &RecordResearchPublicationRequest {
+                operation_uuid: Uuid::now_v7(),
+                expected_generation_uuid: current(&graph),
+                branch_uuid: main.branch_uuid,
+                published_version_uuid: main.version_uuid,
+                repository_url: "https://hub.test/curate/claims".into(),
+                receipt,
+            },
+            &CancellationToken::new(),
+        )
+        .unwrap();
+    assert_ne!(
+        graph
+            .committed_generation_identity()
+            .unwrap()
+            .manifest_sha256,
+        manifest
+    );
+    assert_eq!(graph.publication_content_identity().unwrap(), before);
+
+    // A tag, a Version and Project data are all part of what is published.
+    let tag = SetResearchTagRequest {
+        operation_uuid: Uuid::now_v7(),
+        expected_generation_uuid: current(&graph),
+        name: "v1".into(),
+        version_uuid: Some(main.version_uuid),
+    };
+    graph
+        .set_research_tag(&tag, &CancellationToken::new())
+        .unwrap();
+    let tagged = graph.publication_content_identity().unwrap();
+    assert_ne!(tagged, before);
+    edit(
+        &mut graph,
+        main.branch_uuid,
+        "MATCH (n:Item) SET n.score = 1",
+    );
+    let committed = graph.publication_content_identity().unwrap();
+    assert_ne!(committed, tagged);
+    graph.execute("CREATE (:Item {score:5})").unwrap();
+    assert_ne!(graph.publication_content_identity().unwrap(), committed);
+}

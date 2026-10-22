@@ -292,11 +292,19 @@ pub(crate) fn intent_digest(kind: &str, fields: &Value) -> [u8; 32] {
     digest.finalize().into()
 }
 
+/// Lower-case hexadecimal of `bytes`.
+pub(crate) fn hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    bytes.iter().fold(String::new(), |mut text, byte| {
+        let _ = write!(text, "{byte:02x}");
+        text
+    })
+}
+
 /// An identity bound to the operation, its role and the complete intent: a Version
 /// or Branch that carries it can only have come from that exact request.
 pub(crate) fn bound_uuid(operation: Uuid, role: &str, intent: &[u8; 32]) -> Uuid {
-    let hex: String = intent.iter().map(|byte| format!("{byte:02x}")).collect();
-    derived_uuid(operation, &format!("{role}/{hex}"))
+    derived_uuid(operation, &format!("{role}/{}", hex(intent)))
 }
 
 /// The idempotency conflict a native operation reports when its identity was

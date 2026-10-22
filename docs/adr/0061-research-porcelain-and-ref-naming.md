@@ -445,17 +445,28 @@ of decision.
   already is the Branch label); the other three requests gain `label` and
   `description`.
 - **Operation identity.** A caller-supplied `--operation-uuid` must be a UUIDv7.
-  The Version, Branch and actor identities and the creation time are derived from
-  it, so a rerun builds the same request. The verbs find an earlier result in the
-  durable receipt ledger instead of rebuilding a request whose
-  `expected_generation_uuid` has moved.
+  The creation time derives from it. A rerun is a replay only when its complete
+  request matches the original, otherwise it is refused as
+  `GF_IDEMPOTENCY_CONFLICT`. `commit`, `branch` and `pull` bind a digest of the
+  whole request (kind, Branch, message, query digest, credit, `--from`,
+  repository) into the identity of the Version they create, so a receipt whose
+  Version carries a different identity belongs to another request. `tag` and
+  `switch` carry that digest in the native receipt (`intent_sha256`), like the
+  other Branch operations, and the native API replays or refuses before it looks at
+  CURRENT. A replay is answered from the local receipt ledger, with no network.
+  A request that names its target relatively (`gf tag v1` at the head) is the
+  request as resolved; pass the Version to replay it after the head moved.
 - **First Branch.** `gf branch <name>` in a Project with no Branch creates it from
   the Project's current research.
 - **Upstream record.** A publication the Hub confirmed (`gf push`, `gf publish
   --ref`) records the published head as the Branch's remote citation, the record
   clone and fetch maintain (`ResearchMutation::RecordPublishedBranch`, built by
-  `record_research_publication` from native Branch authority; the generic
-  operation entry refuses it). A Branch's first confirmed publication therefore
+  `record_research_publication` from native Branch authority and the typed Hub
+  receipt, which must be for the repository and carry the Branch's ref; the
+  generic operation entry refuses it). It is local tracking state, not shared
+  history. A publication's intent binds `publication_content_identity`, which
+  leaves out the remote citations and receipts a publication itself writes, so
+  rerunning a completed `gf push --operation-uuid` replays it. A Branch's first confirmed publication therefore
   makes it track that repository and ref, and `ahead N` is `0` right after a push.
   A failed or refused publication leaves the record unchanged, and a Version
   publication records nothing.
