@@ -205,5 +205,5 @@ Cloudflare's own workerd runtime through Miniflare, with the package's
 specifiers mapped to its files as the `exports` map does, and checks that it
 validates the openalex fixture and computes the request commitment and re-homed
 revision the native Rust tests pin. It needs no account and no network, runs on
-Linux, macOS and Windows (workerd ships for all three) and on Node 18 or newer
+Linux, macOS and Windows (workerd ships for all three) and on Node 20 or newer
 (Miniflare 3). A deployed Worker on Cloudflare's network remains a manual check.
