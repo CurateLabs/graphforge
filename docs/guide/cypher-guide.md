@@ -220,13 +220,10 @@ MATCH (p:Person) WHERE p.city IN ['NYC', 'Boston', 'London'] RETURN p
 MATCH (p:Person) WHERE (p)-[:KNOWS]->(:Person {name: 'Alice'}) RETURN p
 MATCH (p:Person) WHERE NOT (p)-[:KNOWS]->() RETURN p
 
--- EXISTS subquery
+-- EXISTS subquery (pattern form)
 MATCH (p:Person)
-WHERE EXISTS { MATCH (p)-[:KNOWS]->(:Person) }
+WHERE EXISTS { (p)-[:KNOWS]->(:Person) }
 RETURN p.name
-
--- Property existence (short form)
-MATCH (p:Person) WHERE exists(p.email) RETURN p
 ```
 
 ### RETURN
@@ -250,7 +247,7 @@ MATCH (p:Person) RETURN DISTINCT p.city
 MATCH (p:Person) RETURN p.city AS city, count(*) AS total
 
 -- All properties (map)
-MATCH (p:Person) RETURN p {.*}
+MATCH (p:Person) RETURN properties(p) AS props
 
 -- Arithmetic in return
 MATCH (p:Person) RETURN p.name, p.salary * 1.1 AS after_raise
@@ -456,10 +453,11 @@ RETURN name, age
 
 -- Aggregate then match
 MATCH (p:Person)
-WITH p.city AS city, count(*) AS pop
+WITH p.city AS town, count(*) AS pop
 WHERE pop > 100
-MATCH (p2:Person {city: city})
-RETURN p2.name, city, pop
+MATCH (p2:Person)
+WHERE p2.city = town
+RETURN p2.name, town, pop
 ORDER BY pop DESC
 
 -- WITH DISTINCT
@@ -517,10 +515,6 @@ MATCH (p2:Person) RETURN p2.name AS name
 -- Bind path to variable
 MATCH p = (a:Person)-[:KNOWS*]->(b:Person)
 RETURN length(p) AS hops, nodes(p) AS path_nodes
-
--- Shortest path
-MATCH p = shortestPath((a:Person {name: 'Alice'})-[:KNOWS*]->(b:Person {name: 'Bob'}))
-RETURN p
 ```
 
 ---
@@ -628,8 +622,6 @@ END
 | `rtrim(s)`                 | `rtrim('hi ')`             | `'hi'`          |
 | `replace(s, f, r)`         | `replace('aaa', 'a', 'b')` | `'bbb'`         |
 | `substring(s, start, len)` | `substring('hello', 1, 3)` | `'ell'`         |
-| `left(s, n)`               | `left('hello', 2)`         | `'he'`          |
-| `right(s, n)`              | `right('hello', 2)`        | `'lo'`          |
 | `split(s, delim)`          | `split('a,b,c', ',')`      | `['a','b','c']` |
 | `reverse(s)`               | `reverse('hello')`         | `'olleh'`       |
 | `size(s)`                  | `size('hello')`            | `5`             |
@@ -637,23 +629,18 @@ END
 
 ### Math Functions
 
-| Function                                      | Description      |
-| --------------------------------------------- | ---------------- |
-| `abs(n)`                                      | Absolute value   |
-| `ceil(n)`                                     | Round up         |
-| `floor(n)`                                    | Round down       |
-| `round(n)`                                    | Round to nearest |
-| `sqrt(n)`                                     | Square root      |
-| `pow(base, exp)`                              | Power            |
-| `exp(n)`                                      | e^n              |
-| `log(n)`                                      | Natural log      |
-| `log10(n)`                                    | Base-10 log      |
-| `sin(n)`, `cos(n)`, `tan(n)`                  | Trig (radians)   |
-| `asin(n)`, `acos(n)`, `atan(n)`, `atan2(y,x)` | Inverse trig     |
-| `pi()`                                        | π (3.14159…)     |
-| `e()`                                         | e (2.71828…)     |
-| `rand()`                                      | Random 0.0–1.0   |
-| `sign(n)`                                     | -1, 0, or 1      |
+| Function           | Description                      |
+| ------------------ | -------------------------------- |
+| `abs(n)`           | Absolute value                   |
+| `ceil(n)`          | Round up                         |
+| `floor(n)`         | Round down                       |
+| `round(n)`         | Round to nearest                 |
+| `sqrt(n)`          | Square root                      |
+| `power(base, exp)` | Power                            |
+| `exp(n)`           | e^n                              |
+| `log(base, n)`     | Logarithm of n to the given base |
+| `rand()`           | Random 0.0–1.0                   |
+| `sign(n)`          | -1, 0, or 1                      |
 
 ### List Functions
 
@@ -666,7 +653,6 @@ END
 | `range(start, end)`       | `range(1,5)`       | `[1,2,3,4,5]`    |
 | `range(start, end, step)` | `range(0,10,2)`    | `[0,2,4,6,8,10]` |
 | `reverse(list)`           | `reverse([1,2,3])` | `[3,2,1]`        |
-| `sort(list)`              | `sort([3,1,2])`    | `[1,2,3]`        |
 | `keys(map)`               | `keys({a:1,b:2})`  | `['a','b']`      |
 
 ### List Comprehension and Predicates
@@ -692,9 +678,6 @@ RETURN none(x IN [1,2,3] WHERE x > 5)       -- true
 
 -- single() — exactly one element satisfies predicate
 RETURN single(x IN [1,2,3] WHERE x = 2)     -- true
-
--- reduce() — fold list to single value
-RETURN reduce(acc = 0, x IN [1,2,3,4,5] | acc + x)  -- 15
 ```
 
 ### Aggregation Functions
@@ -717,9 +700,6 @@ MATCH (p:Person) RETURN collect(p.name) AS names
 
 -- Collect distinct
 MATCH (p:Person) RETURN collect(DISTINCT p.city) AS cities
-
--- Standard deviation
-MATCH (p:Person) RETURN stDev(p.age), stDevP(p.age)
 
 -- Percentile
 MATCH (p:Person) RETURN percentileDisc(p.age, 0.5) AS median
@@ -752,16 +732,16 @@ RETURN nodes(p), relationships(p), length(p)
 MATCH (a)-[r]->(b)
 RETURN startNode(r), endNode(r)
 
--- Degree
-MATCH (n:Person)
-RETURN size((n)-[:KNOWS]->()) AS out_degree
+-- Degree (count outgoing relationships)
+MATCH (n:Person {name: 'Alice'})-[:KNOWS]->(other)
+RETURN count(other) AS out_degree
 ```
 
 ### Predicate Functions
 
 ```cypher
--- exists() — property exists
-MATCH (p:Person) WHERE exists(p.email) RETURN p
+-- Property exists (use IS NOT NULL)
+MATCH (p:Person) WHERE p.email IS NOT NULL RETURN p
 
 -- Empty lists and strings; unknown is separate from empty
 RETURN size([]) = 0    -- true
@@ -807,7 +787,7 @@ RETURN datetime('2024-01-15T14:30:00[Europe/London]')  -- IANA timezone
 RETURN datetime('2024-01-15T14:30:00+01:00')           -- offset
 RETURN datetime()                                       -- current datetime
 
-RETURN localDatetime('2024-01-15T14:30:00')
+RETURN localdatetime('2024-01-15T14:30:00')
 RETURN duration('P1Y2M3DT4H5M6.789S')
 RETURN duration({years: 1, months: 2, days: 3})
 ```
@@ -818,7 +798,6 @@ RETURN duration({years: 1, months: 2, days: 3})
 RETURN date('2024-01-15').year         -- 2024
 RETURN date('2024-01-15').month        -- 1
 RETURN date('2024-01-15').day          -- 15
-RETURN date('2024-01-15').weekday      -- 1 (Monday)
 RETURN date('2024-01-15').week         -- 3 (ISO week)
 RETURN date('2024-01-15').ordinalDay   -- 15
 
@@ -843,7 +822,7 @@ RETURN duration('P1Y') + duration('P6M')       -- P1Y6M
 -- Between
 RETURN duration.between(date('2020-01-01'), date('2024-01-01'))
 RETURN duration.inMonths(date('2020-01-01'), date('2024-01-01'))
-RETURN duration.inDays(datetime('2020-01-01T00:00'), datetime('2020-01-15T12:00'))
+RETURN duration.inDays(datetime('2020-01-01T00:00Z'), datetime('2020-01-15T12:00Z'))
 RETURN duration.inSeconds(time('08:00'), time('16:30'))
 ```
 
@@ -944,12 +923,12 @@ RETURN p.name,
 ```cypher
 -- Nodes that have at least one outgoing relationship
 MATCH (p:Person)
-WHERE EXISTS { MATCH (p)-[:KNOWS]->() }
+WHERE EXISTS { (p)-[:KNOWS]->() }
 RETURN p.name
 
 -- Nodes that have no relationships
 MATCH (p:Person)
-WHERE NOT EXISTS { MATCH (p)-[]-() }
+WHERE NOT (p)-[]-()
 RETURN p.name AS isolated
 ```
 
