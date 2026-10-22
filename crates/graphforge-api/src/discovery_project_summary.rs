@@ -92,6 +92,7 @@ pub fn summarize_verified_portable(
         evidence_present: components.contains_key("evidence"),
         components,
         payload_bytes: report.payload_bytes,
+        bytes_by_kind: report.bytes_by_kind.clone(),
         ontology_composition: report.ontology_composition.as_ref().map(composition_facts),
     };
     let summary = ProjectSummary {

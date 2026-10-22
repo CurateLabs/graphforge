@@ -215,12 +215,15 @@ pub(crate) fn run_hub_command(
     project_dir: Option<PathBuf>,
     json: bool,
     output: &mut dyn Write,
+    diagnostics: &mut crate::Diagnostics<'_>,
 ) -> Result<i32, crate::CliRuntimeError> {
     match command {
         crate::Command::Clone(args) => {
-            Ok(crate::hub_clone::run_clone(args, json, output).map(|()| 0)?)
+            Ok(crate::hub_clone::run_clone(args, json, output, diagnostics).map(|()| 0)?)
         }
-        crate::Command::Publish(args) => run(&args, project, project_dir, json, output),
+        crate::Command::Publish(args) => {
+            run(&args, project, project_dir, json, output, diagnostics)
+        }
         crate::Command::Hub(args) => {
             Ok(crate::hub_clone::run_hub(&args, json, output).map(|()| 0)?)
         }
@@ -239,8 +242,9 @@ fn run(
     project_dir: Option<PathBuf>,
     json: bool,
     output: &mut dyn Write,
+    diagnostics: &mut crate::Diagnostics<'_>,
 ) -> Result<i32, crate::CliRuntimeError> {
-    run_command(args, project, project_dir, json, output)
+    run_command(args, project, project_dir, json, output, diagnostics)
         .map(|()| 0)
         .map_err(Into::into)
 }
@@ -251,8 +255,9 @@ fn run_command(
     project_dir: Option<PathBuf>,
     json: bool,
     output: &mut dyn Write,
+    diagnostics: &mut crate::Diagnostics<'_>,
 ) -> Result<(), GfError> {
-    run_command_with_token_env(args, None, project, project_dir, json, output)
+    run_command_with_token_env(args, None, project, project_dir, json, output, diagnostics)
 }
 
 /// `gf publish` and `gf push`: `token_env` names the variable holding the publish
@@ -264,6 +269,7 @@ pub(crate) fn run_command_with_token_env(
     project_dir: Option<PathBuf>,
     json: bool,
     output: &mut dyn Write,
+    diagnostics: &mut crate::Diagnostics<'_>,
 ) -> Result<(), GfError> {
     // Locations and arguments are validated before any credential or network use.
     let (_, base) = parse_input(&args.repository)?;
@@ -281,16 +287,18 @@ pub(crate) fn run_command_with_token_env(
     let path = path
         .to_str()
         .ok_or_else(|| GfError::Validation("--project must be valid UTF-8".into()))?;
-    let mut graph = GraphForge::new(Some(path))?;
-    publish_with_credentials(
-        &crate::hub_http::HubTransport::new(),
-        &mut graph,
-        args,
-        explicit,
-        bypass.as_ref(),
-        json,
-        output,
-    )
+    let transport = crate::hub_http::HubTransport::new();
+    publish_with_credentials(&transport, args, explicit, bypass.as_ref(), |environment| {
+        open_and_publish(
+            &transport,
+            path,
+            args,
+            environment,
+            json,
+            output,
+            diagnostics,
+        )
+    })
 }
 
 /// The publish token the process supplies: the variable `token_env` names, else
@@ -318,12 +326,10 @@ pub(crate) fn publish_token(token_env: Option<&str>) -> Result<Option<PublishTok
 /// the repository, obtain a credential, publish and report.
 pub(crate) fn publish_with_credentials(
     transport: &dyn Transport,
-    graph: &mut GraphForge,
     args: &PublishArgs,
     explicit: Option<PublishToken>,
     bypass: Option<&crate::hub_http::DiscoveryCredentials>,
-    json: bool,
-    output: &mut dyn Write,
+    publish_with: impl FnOnce(&mut PublishEnvironment<'_>) -> Result<(), GfError>,
 ) -> Result<(), GfError> {
     use std::io::IsTerminal as _;
     let streaming = DEVICE_FLOW_ALLOWED.load(Ordering::Relaxed);
@@ -361,7 +367,36 @@ pub(crate) fn publish_with_credentials(
         notices: &mut notices,
         resolution: Some(resolution),
     };
-    let outcome = publish(transport, graph, args, &mut environment)?;
+    publish_with(&mut environment)
+}
+
+/// Open the Project and publish it. A Core version warning from the open is
+/// raised before anything is published, so it is reported whether or not the
+/// publication then succeeds.
+fn open_and_publish(
+    transport: &dyn Transport,
+    path: &str,
+    args: &PublishArgs,
+    environment: &mut PublishEnvironment<'_>,
+    json: bool,
+    output: &mut dyn Write,
+    diagnostics: &mut crate::Diagnostics<'_>,
+) -> Result<(), GfError> {
+    let mut graph = GraphForge::new(Some(path))?;
+    diagnostics.warn(&graph.open_warnings());
+    publish_and_report(transport, &mut graph, args, environment, json, output)
+}
+
+/// Publish an open Project, record what the Hub confirmed, and report it.
+pub(crate) fn publish_and_report(
+    transport: &dyn Transport,
+    graph: &mut GraphForge,
+    args: &PublishArgs,
+    environment: &mut PublishEnvironment<'_>,
+    json: bool,
+    output: &mut dyn Write,
+) -> Result<(), GfError> {
+    let outcome = publish(transport, graph, args, environment)?;
     record_upstream(graph, transport, args, &outcome)?;
     write_outcome(&outcome, json, output)
 }

@@ -18,6 +18,7 @@
 pub mod preview;
 
 mod credit;
+mod item_id;
 mod lineage;
 mod rehome;
 mod repository;
@@ -27,6 +28,10 @@ pub use rehome::{RehomedRepository, RepositorySnapshot, rehome_repository};
 pub use repository::{ObjectLocationTemplate, RepositoryMoved};
 
 pub use credit::{CreditSignature, ROLE_AUTHOR, ROLE_COMMITTER, SummaryPerson};
+pub use item_id::{
+    ITEM_ID_LEN, ITEM_ID_RANDOM_BYTES, ITEM_ID_RANDOM_CHARS, ITEM_ID_URI_BASE, ItemId, ItemIdError,
+    ItemKind, has_item_id_shape,
+};
 pub use lineage::{
     LineageBoundaryAnchor, LineageBranch, LineageForkOrigin, LineageProposal, LineageTag,
     LineageVersion, RESEARCH_LINEAGE_CAPABILITY, RESEARCH_LINEAGE_FORMAT,

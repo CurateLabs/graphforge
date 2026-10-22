@@ -30,12 +30,14 @@ pub(crate) fn run_remote(
     project_dir: Option<PathBuf>,
     json_output: bool,
     output: &mut dyn Write,
+    diagnostics: &mut crate::Diagnostics<'_>,
 ) -> Result<(), GfError> {
     let path = crate::resolve_project_path(project, project_dir)?;
     let path = path
         .to_str()
         .ok_or_else(|| GfError::Validation("--project must be valid UTF-8".into()))?;
     let mut graph = GraphForge::new(Some(path))?;
+    diagnostics.warn(&graph.open_warnings());
     run_remote_with(
         &crate::hub_http::HubTransport::new(),
         &|hub: &HubFlags| crate::hub_publish::publish_token(hub.token_env.as_deref()),
@@ -150,12 +152,19 @@ pub(crate) fn push(
     )?;
     crate::hub_publish::publish_with_credentials(
         transport,
-        graph,
         &publish,
         token,
         bypass.as_ref(),
-        json_output,
-        output,
+        |environment| {
+            crate::hub_publish::publish_and_report(
+                transport,
+                graph,
+                &publish,
+                environment,
+                json_output,
+                output,
+            )
+        },
     )
 }
 

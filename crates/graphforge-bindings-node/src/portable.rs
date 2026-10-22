@@ -586,12 +586,34 @@ pub struct PortableResearchEntryOutput {
     pub sha256: String,
 }
 
+/// Data written by another Core version: stable `code`, both versions, and
+/// how to get a matching runtime.
+#[napi(object)]
+pub struct CoreVersionWarningOutput {
+    pub code: String,
+    pub producing_core_version: String,
+    pub running_core_version: String,
+    pub message: String,
+}
+
+impl From<graphforge_api::CoreVersionWarning> for CoreVersionWarningOutput {
+    fn from(warning: graphforge_api::CoreVersionWarning) -> Self {
+        Self {
+            code: warning.code,
+            producing_core_version: warning.producing_core_version,
+            running_core_version: warning.running_core_version,
+            message: warning.message,
+        }
+    }
+}
+
 #[napi(object)]
 pub struct PortableImportOutput {
     pub package_digest: String,
     pub transport_digest: Option<String>,
     pub generation_uuid: String,
     pub idempotent_replay: bool,
+    pub warnings: Vec<CoreVersionWarningOutput>,
 }
 
 #[napi(object)]
@@ -746,6 +768,7 @@ impl Task for ImportPortableTask {
                 transport_digest: result.transport_digest,
                 generation_uuid: result.generation_uuid.to_string(),
                 idempotent_replay: result.idempotent_replay,
+                warnings: result.warnings.into_iter().map(Into::into).collect(),
             })
             .map_err(|error| to_portable_deferred_err(env, error))
     }

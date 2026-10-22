@@ -344,6 +344,10 @@ struct CloneResult {
     moved_from: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     moved_to: Option<String>,
+    /// Raised before any graph object was downloaded: the Version was
+    /// produced by a different Core version. The clone still completed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    warnings: Vec<graphforge_api::CoreVersionWarning>,
 }
 
 struct CloneImported {
@@ -359,6 +363,7 @@ struct ResearchCloneContext {
     version_kind: String,
     identity_digest: String,
     package_digest: String,
+    producing_core_version: String,
 }
 
 fn select_bundle(
@@ -522,6 +527,12 @@ fn prepare_research_clone(
     let (version, object) = manifest
         .research_version_object(&lineage, &selected_uuid)
         .map_err(|error| protocol_error(&error))?;
+    let advertised_package = version.package.as_ref().ok_or_else(|| {
+        validation(
+            "hub.missing_object",
+            "research Version package is not advertised",
+        )
+    })?;
     Ok(Some((
         object.clone(),
         ResearchCloneContext {
@@ -539,16 +550,8 @@ fn prepare_research_clone(
             version_uuid: selected_uuid,
             version_kind: version.kind.clone(),
             identity_digest: version.identity_digest.0.clone(),
-            package_digest: version
-                .package
-                .as_ref()
-                .map(|package| package.package_digest.0.clone())
-                .ok_or_else(|| {
-                    validation(
-                        "hub.missing_object",
-                        "research Version package is not advertised",
-                    )
-                })?,
+            package_digest: advertised_package.package_digest.0.clone(),
+            producing_core_version: advertised_package.producing_core_version.clone(),
         },
     )))
 }
@@ -1177,6 +1180,7 @@ pub(crate) fn run_clone(
     args: CloneArgs,
     json: bool,
     output: &mut dyn Write,
+    diagnostics: &mut crate::Diagnostics<'_>,
 ) -> Result<(), graphforge_api::GfError> {
     let transport = crate::auth::CloneTransport::new(
         &args.repository,
@@ -1190,6 +1194,7 @@ pub(crate) fn run_clone(
         install_interrupt_handler();
     }
     let mut stderr = std::io::stderr();
+    let mut warn = |warnings: &[graphforge_api::CoreVersionWarning]| diagnostics.warn(warnings);
     let mut env = CloneEnv {
         retry: RETRY_POLICY,
         credential_lookup: |name| std::env::var(name),
@@ -1200,6 +1205,7 @@ pub(crate) fn run_clone(
         },
         available_space,
         progress: CloneProgress::new(attached.then_some(&mut stderr as &mut dyn Write)),
+        warn: Some(&mut warn),
     };
     let result = run_clone_profiled_with_delays(
         &transport,
@@ -1250,6 +1256,9 @@ fn available_space(path: &Path) -> std::io::Result<u64> {
     fs4::available_space(path)
 }
 
+/// Receives Core version warnings as the clone raises them.
+type WarningSink<'a> = &'a mut dyn FnMut(&[graphforge_api::CoreVersionWarning]);
+
 /// Process-level effects of one clone: retry bound, cancellation, the free
 /// space probe, and progress output. Tests inject each of them.
 struct CloneEnv<'a> {
@@ -1258,6 +1267,8 @@ struct CloneEnv<'a> {
     cancelled: &'a AtomicBool,
     available_space: fn(&Path) -> std::io::Result<u64>,
     progress: CloneProgress<'a>,
+    /// Receives the Core version warning before the first graph object is requested.
+    warn: Option<WarningSink<'a>>,
 }
 
 #[cfg(test)]
@@ -1269,6 +1280,7 @@ impl CloneEnv<'_> {
             cancelled: &NEVER_CANCELLED,
             available_space,
             progress: CloneProgress::new(None),
+            warn: None,
         }
     }
 }
@@ -2126,6 +2138,21 @@ fn clone_into_staging(
     if object.length > MAX_OBJECT_BYTES {
         return Err(limit_error("object exceeds the clone byte bound"));
     }
+    // Discovery declares the producing Core version, so a mismatch is reported
+    // here, before the first graph object is requested. Verification later
+    // requires the package to declare the same version.
+    let producing_core_version = research_context.as_ref().map_or(
+        manifest.package.producing_core_version.as_str(),
+        |context| context.producing_core_version.as_str(),
+    );
+    let warnings: Vec<_> = graphforge_api::check_core_version(Some(producing_core_version))
+        .into_iter()
+        .collect();
+    if !warnings.is_empty()
+        && let Some(warn) = env.warn.as_mut()
+    {
+        warn(&warnings);
+    }
     remove_stale_scratch(staging)?;
     // Verification later confirms the manifest's immutable version, so the
     // operation planned here is the one the import runs.
@@ -2467,6 +2494,7 @@ fn clone_into_staging(
             .map(|context| context.identity_digest.clone()),
         moved_from: moved.map(|m| m.moved_from.canonical_name()),
         moved_to: moved.map(|m| m.moved_to.canonical_name()),
+        warnings,
     };
     let record = InstallRecord {
         generation_uuid: result.generation_uuid.clone(),
@@ -2590,6 +2618,8 @@ fn portable_error(error: DiscoveryPortableError) -> graphforge_api::GfError {
         ),
     }
 }
+#[cfg(test)]
+mod core_version_tests;
 #[cfg(test)]
 mod download_digest_tests;
 #[cfg(test)]

@@ -54,6 +54,28 @@
     "facts": {
       "additionalProperties": false,
       "properties": {
+        "bytes_by_kind": {
+          "additionalProperties": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "propertyNames": {
+            "enum": [
+              "ontology",
+              "schema",
+              "migration",
+              "settings",
+              "graph-data",
+              "derived-artifact",
+              "evidence",
+              "provenance",
+              "compatibility",
+              "research",
+              "package-control"
+            ]
+          },
+          "type": "object"
+        },
         "components": {
           "additionalProperties": {
             "minimum": 1,
@@ -159,6 +181,7 @@
         "research_present",
         "evidence_present",
         "payload_bytes",
+        "bytes_by_kind",
         "ontology_composition"
       ],
       "type": "object"

@@ -815,6 +815,34 @@ fn stdin_input_requires_full_mode() {
     );
 }
 
+/// `--url` is a stream too: a non-full mode is refused before any request.
+#[test]
+fn url_input_requires_full_mode() {
+    let run = gf(
+        &[
+            "portable",
+            "verify",
+            "--url",
+            "https://example.invalid/object",
+            "--mode",
+            "inspect",
+            "--json",
+        ],
+        b"",
+    );
+    assert_eq!(run.code, Some(2));
+    assert!(run.stdout.is_empty());
+    let error = one_document(run.stderr.as_bytes());
+    assert_eq!(error["error"]["code"], "GF_VALIDATION");
+    assert!(
+        error["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("--mode full"),
+        "{error}"
+    );
+}
+
 /// A refused argument list is the one JSON error document the embedded
 /// `execute` gives, with the argument-error exit code, on the real binary.
 #[test]

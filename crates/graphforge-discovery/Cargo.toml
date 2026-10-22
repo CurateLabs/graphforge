@@ -19,5 +19,14 @@ png = "=0.18.1"
 roxmltree = "=0.21.1"
 quick-xml = "=0.42.0"
 
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# CSPRNG for permanent item IDs; wasm builds parse and validate only.
+getrandom = { version = "0.3", optional = true }
+
+[features]
+default = ["generate"]
+# Create permanent item IDs from the operating system's CSPRNG (non-wasm targets).
+generate = ["dep:getrandom"]
+
 [lints]
 workspace = true

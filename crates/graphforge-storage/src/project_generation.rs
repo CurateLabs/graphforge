@@ -327,6 +327,13 @@ impl ResolvedProjectGeneration {
         self.generation_uuid
     }
 
+    /// Exact Core version recorded by the commit that wrote this generation, or
+    /// `None` for a generation written before the stamp existed.
+    #[must_use]
+    pub fn producing_core_version(&self) -> Option<&str> {
+        self.manifest.producing_core_version.as_deref()
+    }
+
     /// Immutable selected generation root.
     #[must_use]
     pub fn generation_root(&self) -> &Path {
@@ -878,6 +885,11 @@ struct GenerationManifest {
     transaction_uuid: String,
     capabilities: Vec<CapabilityDescriptor>,
     participants: Vec<ParticipantDescriptor>,
+    /// Exact Core version that wrote this generation: the last writer, since
+    /// every commit stamps its own. Absent on generations written before the
+    /// stamp existed; the manifest version is unchanged and those still open.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    producing_core_version: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1441,6 +1453,7 @@ fn initialize_empty_generation(
             },
         ],
         participants: participant_descriptors,
+        producing_core_version: Some(graphforge_core::manifest::GRAPHFORGE_VERSION.to_owned()),
     };
     let mut manifest_bytes = serde_json::to_vec(&manifest)
         .map_err(|error| GfError::Storage(format!("failed to encode generation: {error}")))?;
@@ -2162,6 +2175,7 @@ mod tests {
         fs::create_dir_all(generation_root.join(PARTICIPANTS_DIR)).unwrap();
         fs::write(generation_root.join(LEASE_FILE), []).unwrap();
         let manifest = GenerationManifest {
+            producing_core_version: None,
             format: "graphforge-generation".into(),
             format_version: GENERATION_MANIFEST_VERSION,
             generation_uuid: generation_uuid.hyphenated().to_string(),
@@ -2234,6 +2248,41 @@ mod tests {
             generation.generation_uuid(),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn producing_core_version_is_an_optional_stamp_on_the_unchanged_manifest_version() {
+        let root = tempfile::tempdir().unwrap();
+        let generation = open_or_initialize_project(root.path()).unwrap();
+        assert_eq!(
+            generation.producing_core_version(),
+            Some(graphforge_core::manifest::GRAPHFORGE_VERSION)
+        );
+        let bytes = fs::read(generation.generation_root().join(MANIFEST_FILE)).unwrap();
+        let written: GenerationManifest = parse_generation_manifest(&bytes, "manifest").unwrap();
+        assert_eq!(written.format_version, GENERATION_MANIFEST_VERSION);
+        assert_eq!(GENERATION_MANIFEST_VERSION, 2);
+
+        // A generation written before the stamp existed has no field, keeps
+        // the same manifest version and stays canonical and valid.
+        let mut unstamped = written.clone();
+        unstamped.producing_core_version = None;
+        let unstamped_bytes = canonical_line(&unstamped);
+        assert!(!String::from_utf8_lossy(&unstamped_bytes).contains("producing_core_version"));
+        let parsed = parse_generation_manifest(&unstamped_bytes, "manifest").unwrap();
+        validate_manifest(&parsed, generation.generation_uuid()).unwrap();
+        assert_eq!(parsed.producing_core_version, None);
+
+        // Another Core's stamp round-trips through the same serializer.
+        let mut foreign = written;
+        foreign.producing_core_version = Some("0.0.1".into());
+        let parsed = parse_generation_manifest(&canonical_line(&foreign), "manifest").unwrap();
+        assert_eq!(parsed.producing_core_version.as_deref(), Some("0.0.1"));
+
+        // Unknown fields are still refused: a newer manifest fails on an older Core.
+        let mut future: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        future["added_by_a_future_core"] = serde_json::json!(true);
+        assert!(parse_generation_manifest(&canonical_line(&future), "manifest").is_err());
     }
 
     #[test]
@@ -2387,6 +2436,7 @@ mod tests {
             content_xxh64: crate::corruption_checksum::checksum(&participant.bytes),
         };
         let manifest = GenerationManifest {
+            producing_core_version: None,
             format: "graphforge-generation".into(),
             format_version: GENERATION_MANIFEST_VERSION,
             generation_uuid: generation_uuid.hyphenated().to_string(),
@@ -3149,6 +3199,7 @@ mod tests {
             .join("generations")
             .join(generation.hyphenated().to_string());
         let manifest = GenerationManifest {
+            producing_core_version: None,
             format: "graphforge-generation".into(),
             format_version: GENERATION_MANIFEST_VERSION,
             generation_uuid: generation.hyphenated().to_string(),
@@ -3189,6 +3240,7 @@ mod tests {
             .join("generations")
             .join(generation.hyphenated().to_string());
         let manifest = GenerationManifest {
+            producing_core_version: None,
             format: "graphforge-generation".into(),
             format_version: GENERATION_MANIFEST_VERSION,
             generation_uuid: generation.hyphenated().to_string(),
@@ -3282,6 +3334,7 @@ mod tests {
         assert!(validate_machine_id("graph_data-1").is_ok());
 
         let base = GenerationManifest {
+            producing_core_version: None,
             format: "graphforge-generation".into(),
             format_version: GENERATION_MANIFEST_VERSION,
             generation_uuid: expected.hyphenated().to_string(),

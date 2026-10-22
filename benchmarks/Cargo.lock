@@ -1942,6 +1942,7 @@ dependencies = [
 name = "graphforge-discovery"
 version = "0.6.0-rc.5"
 dependencies = [
+ "getrandom 0.3.4",
  "png",
  "quick-xml",
  "roxmltree",

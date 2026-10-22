@@ -32,14 +32,22 @@ fn gf(hub: &LoopbackHub, project: &Path, arguments: &[&str]) -> Result<Value, Gf
         }
         Command::Publish(args) => {
             let mut graph = GraphForge::new(Some(project_text))?;
+            let transport = hub.transport();
             crate::hub_publish::publish_with_credentials(
-                &hub.transport(),
-                &mut graph,
+                &transport,
                 &args,
                 Some(token(hub, "curate/claims")),
                 None,
-                true,
-                &mut output,
+                |environment| {
+                    crate::hub_publish::publish_and_report(
+                        &transport,
+                        &mut graph,
+                        &args,
+                        environment,
+                        true,
+                        &mut output,
+                    )
+                },
             )?;
         }
         command @ (Command::Push(_) | Command::Pull(_)) => {

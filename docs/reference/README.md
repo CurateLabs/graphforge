@@ -10,6 +10,7 @@ technical limit. For a guided first exercise, start with
 | What you need                                    | Page                                                    |
 | ------------------------------------------------ | ------------------------------------------------------- |
 | Method arguments and return values               | [API reference](api.md)                                 |
+| The CLI JSON error contract for agents           | [CLI errors](cli-errors.md)                             |
 | Supported query language and its limits          | [openCypher compatibility](opencypher-compatibility.md) |
 | Query examples with explanations                 | [Cypher guide](../guide/cypher-guide.md)                |
 | Names of columns returned by a query             | [Column naming](column-naming-behavior.md)              |

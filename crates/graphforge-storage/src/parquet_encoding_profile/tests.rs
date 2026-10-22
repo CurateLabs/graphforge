@@ -253,3 +253,57 @@ fn objects_that_are_not_readable_parquet_are_not_admitted() {
         );
     }
 }
+
+struct FailsAtChunk {
+    bytes: Bytes,
+    offset: u64,
+    kind: std::io::ErrorKind,
+}
+
+impl Length for FailsAtChunk {
+    fn len(&self) -> u64 {
+        self.bytes.len() as u64
+    }
+}
+
+impl ChunkReader for FailsAtChunk {
+    type T = std::io::Cursor<Bytes>;
+
+    fn get_read(&self, start: u64) -> ParquetResult<Self::T> {
+        let length = usize::try_from(self.len() - start).unwrap();
+        self.get_bytes(start, length).map(std::io::Cursor::new)
+    }
+
+    fn get_bytes(&self, start: u64, length: usize) -> ParquetResult<Bytes> {
+        if start == self.offset {
+            return Err(std::io::Error::new(self.kind, "injected parquet read failure").into());
+        }
+        Ok(self.bytes.slice(start as usize..start as usize + length))
+    }
+}
+
+#[test]
+fn parquet_page_walk_classifies_external_io_and_preserves_eof_verdict() {
+    let bytes = string_file(Encoding::PLAIN, WriterVersion::PARQUET_1_0, 64);
+    let metadata = metadata(&bytes);
+    let column = metadata.row_group(0).column(0);
+    let offset = column
+        .dictionary_page_offset()
+        .unwrap_or_else(|| column.data_page_offset()) as u64;
+    let other = FailsAtChunk {
+        bytes: Bytes::from(bytes.clone()),
+        offset,
+        kind: std::io::ErrorKind::Other,
+    };
+    assert_eq!(admit_pages(&other), Err(PageAdmissionError::Io));
+
+    let eof = FailsAtChunk {
+        bytes: Bytes::from(bytes),
+        offset,
+        kind: std::io::ErrorKind::UnexpectedEof,
+    };
+    assert_eq!(
+        admit_pages(&eof),
+        Err(PageAdmissionError::Malformed("page header is unreadable"))
+    );
+}

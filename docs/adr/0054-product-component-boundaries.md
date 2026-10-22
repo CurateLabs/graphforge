@@ -158,15 +158,25 @@ is always a supported pair.
 
 ### 9. No backward compatibility before v1
 
-Before GraphForge v1, data runs only on the Core version that wrote it. Core
-refuses data from another version with a stable error rather than guessing.
+Before GraphForge v1, data is only guaranteed to run on the Core version that
+wrote it. Core detects data from another version and warns; it does not refuse
+on a mismatch alone. Data that is actually unreadable still fails through the
+existing format checks (`GF_UNSUPPORTED_PROJECT_FORMAT`) before any mutation.
 
-- Every published Version declares the exact Core version that produced it.
-- The Hub shows that version, and clients name it when they refuse.
+- Every published Version declares the exact Core version that produced it. A
+  durable project records the Core version of the last commit that wrote it, in
+  its generation manifest.
+- Opening a durable project, importing a package and cloning a Version each
+  compare that version with the running Core at one check point, by exact match
+  of the canonical version string. A mismatch yields the warning
+  `GF_CORE_VERSION_MISMATCH`, which names both versions and how to get a matching
+  runtime. `gf clone` warns before it downloads any graph object.
+- The Hub shows that version, and clients name it when they warn.
 - Analysts open a package with the matching Core version, for example through
   the editor's engine-version setting or a matching Python environment.
 - A data fix-up feature that upgrades older data is planned but not yet
-  available. Until it exists, no component may claim to read older data.
+  available. Until it exists, no component may claim to read older data, and a
+  warning is not a promise that the data reads correctly.
 
 ### 10. Editor and Hub meet only through Core and a link
 
