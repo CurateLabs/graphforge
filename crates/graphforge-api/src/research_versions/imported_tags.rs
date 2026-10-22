@@ -79,17 +79,35 @@ impl GraphForge {
         if graph.committed_generation_identity()?.generation_uuid != expected {
             return Err(conflict());
         }
-        for (name, target, id) in tags {
-            let request = SetResearchTagRequest {
-                operation_uuid: id,
-                expected_generation_uuid: graph.committed_generation_identity()?.generation_uuid,
-                name,
-                version_uuid: Some(target),
-            };
-            graph.set_research_tag(&request, &CancellationToken::new())?;
-        }
-        Ok(Some(graph.committed_generation_identity()?.generation_uuid))
+        let pending = tags
+            .into_iter()
+            .filter(|(_, _, id)| !registry.receipts.contains_key(id));
+        publish_tags(&mut graph, pending, expected).map(Some)
     }
+}
+
+/// Advance only from the admitted import through this continuation's receipts.
+/// Reading CURRENT to refresh a precondition would admit an independent writer.
+fn publish_tags(
+    graph: &mut GraphForge,
+    tags: impl IntoIterator<Item = (String, Uuid, Uuid)>,
+    mut expected: Uuid,
+) -> Result<Uuid, GfError> {
+    for (name, target, id) in tags {
+        let request = SetResearchTagRequest {
+            operation_uuid: id,
+            expected_generation_uuid: expected,
+            name,
+            version_uuid: Some(target),
+        };
+        expected = graph
+            .set_research_tag(&request, &CancellationToken::new())?
+            .generation_uuid;
+    }
+    if graph.committed_generation_identity()?.generation_uuid != expected {
+        return Err(conflict());
+    }
+    Ok(expected)
 }
 
 fn tag_operation(import: Uuid, name: &str, target: Uuid) -> Uuid {
@@ -103,4 +121,99 @@ fn tag_operation(import: Uuid, name: &str, target: Uuid) -> Uuid {
 
 fn conflict() -> GfError {
     GfError::Validation("hub.destination_conflict: staging is not the selected Version import or its tag publications".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::PrepareResearchVersionRequest;
+    use std::collections::BTreeSet;
+
+    #[test]
+    fn tag_continuation_refuses_a_writer_after_admission_and_preserves_its_state() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("project");
+        let mut graph = GraphForge::new(path.to_str()).unwrap();
+        graph.execute("CREATE (:Item {score: 1})").unwrap();
+        let version = Uuid::now_v7();
+        let operation = graph
+            .prepare_research_version(PrepareResearchVersionRequest {
+                operation_uuid: Uuid::now_v7(),
+                version_uuid: version,
+                context_uuid: Uuid::now_v7(),
+                label: None,
+                description: None,
+                author: None,
+                committer: None,
+                created_at: 1,
+                required_versions: BTreeSet::new(),
+            })
+            .unwrap();
+        graph
+            .commit_research_version_operation(operation, &CancellationToken::new())
+            .unwrap();
+        let admitted = graph
+            .committed_generation_identity()
+            .unwrap()
+            .generation_uuid;
+        let first = publish_tags(
+            &mut graph,
+            [("first".into(), version, Uuid::now_v7())],
+            admitted,
+        )
+        .unwrap();
+
+        // An independent handle publishes after our admitted tag receipt. No
+        // lifetime writer lock protects the continuation between publications.
+        let writer = GraphForge::new(path.to_str()).unwrap();
+        writer.execute("CREATE (:Independent)").unwrap();
+        let advanced = writer
+            .committed_generation_identity()
+            .unwrap()
+            .generation_uuid;
+        assert_ne!(advanced, first);
+        drop(writer);
+
+        let refused = publish_tags(
+            &mut graph,
+            [("second".into(), version, Uuid::now_v7())],
+            first,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            refused,
+            GfError::Project {
+                code: graphforge_core::ProjectErrorCode::WriteConflict,
+                ..
+            }
+        ));
+        // A completed/replayed continuation with no pending tags must also
+        // refuse an independent advance instead of returning it as our receipt.
+        assert!(matches!(
+            publish_tags(&mut graph, [], first),
+            Err(GfError::Validation(message)) if message.starts_with("hub.destination_conflict:")
+        ));
+
+        let reopened = GraphForge::new(path.to_str()).unwrap();
+        assert_eq!(
+            reopened
+                .committed_generation_identity()
+                .unwrap()
+                .generation_uuid,
+            advanced
+        );
+        let registry = reopened.research_version_retention().unwrap();
+        assert_eq!(registry.tags.get("first"), Some(&version));
+        assert!(!registry.tags.contains_key("second"));
+        let result = reopened
+            .execute("MATCH (:Independent) RETURN count(*) AS count")
+            .unwrap();
+        let count = result.batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<arrow::array::Int64Array>()
+            .unwrap()
+            .value(0);
+        assert_eq!(count, 1);
+    }
 }
