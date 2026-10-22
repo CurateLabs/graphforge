@@ -488,6 +488,14 @@ impl GraphForge {
         Ok(g.path().map(|p| p.display().to_string()))
     }
 
+    /// Warnings raised when this project opened: one when it was written by a
+    /// different Core version. Empty otherwise.
+    #[napi(getter)]
+    pub fn open_warnings(&self) -> Result<Vec<portable::CoreVersionWarningOutput>> {
+        let g = self.open_guard()?;
+        Ok(g.open_warnings().into_iter().map(Into::into).collect())
+    }
+
     /// The effective ontology mode: `"exploratory"` | `"advisory"` | `"strict"`.
     #[napi(getter)]
     pub fn ontology_mode(&self) -> Result<String> {

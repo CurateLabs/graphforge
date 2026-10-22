@@ -58,6 +58,7 @@ fn encode_arrow(
 pub(crate) fn run(
     _graph: &GraphForge,
     command: DecisionCommand,
+    json: bool,
     output: &mut dyn Write,
 ) -> Result<(), GfError> {
     match command {
@@ -66,10 +67,21 @@ pub(crate) fn run(
             let result = batch.validate()?;
             let mut ipc = Vec::new();
             encode_arrow(&result, &mut ipc)?;
-            std::fs::write(args.output, ipc)
+            std::fs::write(&args.output, ipc)
                 .map_err(|_| GfError::Validation("cannot write decision Arrow result".into()))?;
-            writeln!(output, "validated {} decision rows", result.num_rows())
-                .map_err(|_| GfError::Validation("cannot write CLI output".into()))?;
+            let written = if json {
+                writeln!(
+                    output,
+                    "{}",
+                    serde_json::json!({
+                        "validated_rows": result.num_rows(),
+                        "output": args.output.display().to_string(),
+                    })
+                )
+            } else {
+                writeln!(output, "validated {} decision rows", result.num_rows())
+            };
+            written.map_err(|_| GfError::Validation("cannot write CLI output".into()))?;
         }
     }
     Ok(())

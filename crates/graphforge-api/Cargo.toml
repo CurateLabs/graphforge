@@ -211,6 +211,11 @@ required-features = ["portable"]
 name = "oci_layer_streaming_peak"
 required-features = ["portable"]
 
+# Measures real portable export/import peak heap through the Rust facade.
+[[test]]
+name = "portable_round_trip_memory"
+required-features = ["portable"]
+
 [[test]]
 name = "mutated_project_open"
 required-features = ["knowledge"]
@@ -268,6 +273,10 @@ name = "source_registration_reuse"
 required-features = ["knowledge", "portable"]
 
 # Measures real portable export/import through the Rust facade.
+[[test]]
+name = "core_version_warning"
+required-features = ["portable"]
+
 [[test]]
 name = "portable_payload_identity"
 required-features = ["portable"]

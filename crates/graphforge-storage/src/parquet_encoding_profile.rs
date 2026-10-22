@@ -54,8 +54,39 @@ const MAX_HEADER_BYTES: usize = 64 * 1024;
 pub(crate) enum PageAdmissionError {
     /// A page uses an encoding outside the funded profile.
     Unfunded,
+    /// Reading an authenticated Parquet object failed.
+    Io,
     /// The object is not a Parquet file the decoders could read either.
     Malformed(&'static str),
+}
+
+fn parquet_read_failure(
+    error: &parquet::errors::ParquetError,
+    detail: &'static str,
+) -> PageAdmissionError {
+    use parquet::errors::ParquetError;
+
+    if let ParquetError::External(cause) = error
+        && let Some(error) = cause.downcast_ref::<std::io::Error>()
+    {
+        let failure = crate::project_portable::read_failure(
+            error,
+            graphforge_core::portable::PortableError::new(
+                graphforge_core::portable::PortableErrorCode::InvalidStructure,
+                detail,
+            ),
+            graphforge_core::portable::PortableError::new(
+                graphforge_core::portable::PortableErrorCode::Io,
+                "Parquet read failed",
+            ),
+        );
+        return if failure.code == graphforge_core::portable::PortableErrorCode::Io {
+            PageAdmissionError::Io
+        } else {
+            PageAdmissionError::Malformed(detail)
+        };
+    }
+    PageAdmissionError::Malformed(detail)
 }
 
 /// Convert a footer-declared encoding to its page-header form.
@@ -146,10 +177,10 @@ pub(crate) fn admit_pages<R: ChunkReader>(source: &R) -> Result<ParquetShape, Pa
         return Err(malformed("object is too short to be Parquet"));
     }
     let read = |start: u64, bytes: u64| {
-        usize::try_from(bytes)
-            .ok()
-            .and_then(|bytes| source.get_bytes(start, bytes).ok())
-            .ok_or(malformed("object is unreadable"))
+        let bytes = usize::try_from(bytes).map_err(|_| malformed("object is unreadable"))?;
+        source
+            .get_bytes(start, bytes)
+            .map_err(|error| parquet_read_failure(&error, "object is unreadable"))
     };
     let tail = read(length - 8, 8)?;
     if &tail[4..] != b"PAR1" {
@@ -160,7 +191,7 @@ pub(crate) fn admit_pages<R: ChunkReader>(source: &R) -> Result<ParquetShape, Pa
         return Err(malformed("Parquet footer exceeds its bound"));
     }
     let metadata = ParquetMetaDataReader::decode_metadata(&read(length - 8 - footer, footer)?)
-        .map_err(|_| malformed("Parquet footer is undecodable"))?;
+        .map_err(|error| parquet_read_failure(&error, "Parquet footer is undecodable"))?;
     admit_pages_with_metadata(&metadata, source, length - 8 - footer)?;
     Ok(ParquetShape {
         rows: u64::try_from(metadata.file_metadata().num_rows())
@@ -233,7 +264,7 @@ fn read_header<R: ChunkReader>(
         let window = window.min(available);
         let bytes = source
             .get_bytes(position, window)
-            .map_err(|_| malformed("page header is unreadable"))?;
+            .map_err(|error| parquet_read_failure(&error, "page header is unreadable"))?;
         let mut cursor = Cursor::new(bytes.as_ref());
         let mut protocol = thrift::protocol::TCompactInputProtocol::new(&mut cursor);
         if let Ok(header) = PageHeader::read_from_in_protocol(&mut protocol) {

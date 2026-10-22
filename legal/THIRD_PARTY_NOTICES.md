@@ -17,8 +17,8 @@ python3 scripts/generate_third_party_notices.py
 
 ## License overview
 
-- Apache License 2.0 (388)
-- MIT License (91)
+- Apache License 2.0 (393)
+- MIT License (92)
 - Unicode License v3 (21)
 - BSD 3-Clause "New" or "Revised" License (13)
 - ISC License (4)
@@ -6219,6 +6219,7 @@ Used by:
 - wasm-bindgen-macro 0.2.122
 - wasm-bindgen-macro-support 0.2.122
 - wasm-bindgen-shared 0.2.122
+- web-sys 0.3.99
 - wit-bindgen 0.51.0
 - wit-bindgen 0.57.1
 
@@ -8306,6 +8307,7 @@ Used by:
 - erased-serde 0.4.10
 - fdeflate 0.3.7
 - flatbuffers 25.12.19
+- gloo-utils 0.2.0
 - half 2.7.1
 - htmlescape 0.3.1
 - ident_case 1.0.1
@@ -8346,6 +8348,7 @@ Used by:
 - serde 1.0.229
 - serde_core 1.0.229
 - serde_derive 1.0.229
+- serde_derive_internals 0.29.1
 - serde_json 1.0.154
 - serde_repr 0.1.21
 - serde_yaml_ng 0.9.36
@@ -8361,6 +8364,8 @@ Used by:
 - thrift 0.17.0
 - time 0.3.54
 - time-core 0.1.9
+- tsify 0.5.8
+- tsify-macros 0.5.8
 - typeid 1.0.3
 - typetag 0.2.23
 - typetag-impl 0.2.23
@@ -10150,6 +10155,37 @@ Used by:
 MIT License
 
 Copyright (c) 2019 Arne Beer
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+--------------------------------------------------------------------------------
+
+## MIT License
+
+Used by:
+- serde-wasm-bindgen 0.6.5
+
+```
+MIT License
+
+Copyright (c) 2019 Cloudflare, Inc.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

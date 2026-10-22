@@ -30,6 +30,10 @@ on:
       - scripts/ci/prepare-napi-packages.py
       - scripts/ci/validate-napi-artifacts.py
       - scripts/ci/multi-ontology-packaged-smoke.mjs
+      - scripts/ci/protocol-wasm-packaged-smoke.mjs
+      - scripts/ci/install-wasm-bindgen.sh
+      - packages/protocol-wasm/**
+      - crates/graphforge-protocol-wasm/**
 
 permissions:
   contents: read
@@ -365,6 +369,26 @@ jobs:
       - name: Install workspace dependencies
         run: pnpm install --frozen-lockfile
 
+      # The WebAssembly protocol package is built from the crate here, with the
+      # wasm-bindgen CLI the lockfile pins.
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
+        with:
+          toolchain: "1.96.0"
+          targets: wasm32-unknown-unknown
+      - name: Resolve the locked wasm-bindgen version
+        id: wasm_bindgen
+        run: echo "version=$(scripts/ci/install-wasm-bindgen.sh --print-version)" >> "$GITHUB_OUTPUT"
+      - name: Cache the wasm-bindgen CLI
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.wasm-bindgen
+          key: wasm-bindgen-cli-${{ runner.os }}-${{ steps.wasm_bindgen.outputs.version }}
+      - name: Build the WebAssembly protocol package
+        run: |
+          scripts/ci/install-wasm-bindgen.sh "$HOME/.wasm-bindgen"
+          export PATH="$HOME/.wasm-bindgen/bin:$PATH"
+          pnpm --filter @curatelabs/graphforge-protocol-wasm build
+
       - name: Assemble and pack every npm package
         shell: bash
         run: |
@@ -387,9 +411,11 @@ jobs:
           npm pack . --ignore-scripts --pack-destination "$out"
           pnpm --dir "$GITHUB_WORKSPACE/packages/cli" pack --pack-destination "$out"
           pnpm --dir "$GITHUB_WORKSPACE/packages/agent-skills" pack --pack-destination "$out"
-          # Five native packages, the main package, the CLI, and agent-skills.
+          pnpm --dir "$GITHUB_WORKSPACE/packages/protocol-wasm" pack --pack-destination "$out"
+          # Five native packages, the main package, the CLI, agent-skills, and
+          # the WebAssembly protocol validators.
           python3 "$GITHUB_WORKSPACE/scripts/publish_npm.py" --list "$out"
-          test "$(find "$out" -name '*.tgz' | wc -l)" -eq 8
+          test "$(find "$out" -name '*.tgz' | wc -l)" -eq 9
           # The main tarball must carry the loaders (named exactly, so a
           # prerelease version such as 0.6.0-rc.1 resolves).
           # Naming the members makes tar fail if either is absent.
@@ -407,8 +433,10 @@ jobs:
           npm install \
             "$out/curatelabs-graphforge-$NPM_PACKAGE_VERSION.tgz" \
             "$out/curatelabs-graphforge-cli-$NPM_PACKAGE_VERSION.tgz" \
-            "$out/curatelabs-graphforge-linux-x64-gnu-$NPM_PACKAGE_VERSION.tgz"
+            "$out/curatelabs-graphforge-linux-x64-gnu-$NPM_PACKAGE_VERSION.tgz" \
+            "$out/curatelabs-graphforge-protocol-wasm-$NPM_PACKAGE_VERSION.tgz"
           node "$GITHUB_WORKSPACE/scripts/ci/multi-ontology-packaged-smoke.mjs"
+          node "$GITHUB_WORKSPACE/scripts/ci/protocol-wasm-packaged-smoke.mjs" "$GITHUB_WORKSPACE"
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -563,7 +591,8 @@ jobs:
             if curl -fsS "https://pypi.org/pypi/graphforge/$python_version/json" >/dev/null &&
               npm view "@curatelabs/graphforge@$RELEASE_VERSION" version >/dev/null 2>&1 &&
               npm view "@curatelabs/graphforge-linux-x64-gnu@$RELEASE_VERSION" version >/dev/null 2>&1 &&
-              npm view "@curatelabs/graphforge-cli@$RELEASE_VERSION" version >/dev/null 2>&1; then
+              npm view "@curatelabs/graphforge-cli@$RELEASE_VERSION" version >/dev/null 2>&1 &&
+              npm view "@curatelabs/graphforge-protocol-wasm@$RELEASE_VERSION" version >/dev/null 2>&1; then
               exit 0
             fi
             echo "attempt $attempt: not served yet"
@@ -589,5 +618,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/published-smoke"
           cd "$RUNNER_TEMP/published-smoke"
           npm init --yes
-          npm install "@curatelabs/graphforge@$RELEASE_VERSION" "@curatelabs/graphforge-cli@$RELEASE_VERSION"
+          npm install "@curatelabs/graphforge@$RELEASE_VERSION" "@curatelabs/graphforge-cli@$RELEASE_VERSION" \
+            "@curatelabs/graphforge-protocol-wasm@$RELEASE_VERSION"
           node "$GITHUB_WORKSPACE/scripts/ci/multi-ontology-packaged-smoke.mjs"
+          node "$GITHUB_WORKSPACE/scripts/ci/protocol-wasm-packaged-smoke.mjs" "$GITHUB_WORKSPACE"

@@ -42,6 +42,9 @@ pub struct PortableImportResult {
     pub generation_uuid: Uuid,
     /// Whether the operation replayed an identical publication.
     pub idempotent_replay: bool,
+    /// Warnings raised before the import mutated the target: the package was
+    /// produced by a different Core version. The import still completed.
+    pub warnings: Vec<graphforge_core::core_version::CoreVersionWarning>,
     /// Exact private-materialization identity allocation for lifecycle qualification.
     #[doc(hidden)]
     pub materialized_identity_allocated_bytes: std::collections::BTreeMap<String, u64>,
@@ -581,6 +584,7 @@ impl GraphForge {
             transport_digest: receipt.transport_digest,
             generation_uuid: receipt.publication.generation_uuid,
             idempotent_replay: receipt.publication.idempotent_replay,
+            warnings: receipt.core_version_warning.into_iter().collect(),
             materialized_identity_allocated_bytes: receipt.materialized_identity_allocated_bytes,
             published_identity_allocated_bytes: receipt.published_identity_allocated_bytes,
             materialized_cleanup_removed_identity_allocated_bytes: receipt
@@ -2119,6 +2123,7 @@ mod repack_boundary_tests {
     fn import_allocation_qualification_deduplicates_and_requires_durable_cleanup() {
         use std::collections::BTreeMap;
         let mut result = PortableImportResult {
+            warnings: Vec::new(),
             package_digest: "package".into(),
             transport_digest: None,
             generation_uuid: Uuid::nil(),
@@ -2161,6 +2166,7 @@ mod repack_boundary_tests {
     fn import_allocation_qualification_rejects_live_alias_disagreement_and_underreported_peak() {
         use std::collections::BTreeMap;
         let mut result = PortableImportResult {
+            warnings: Vec::new(),
             package_digest: "package".into(),
             transport_digest: None,
             generation_uuid: Uuid::nil(),
@@ -2208,6 +2214,7 @@ mod repack_boundary_tests {
         assert_eq!(ordered.peak_allocated_bytes(), 16);
 
         let result = PortableImportResult {
+            warnings: Vec::new(),
             package_digest: "package".into(),
             transport_digest: None,
             generation_uuid: Uuid::nil(),

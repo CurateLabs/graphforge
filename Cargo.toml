@@ -13,6 +13,7 @@ members = [
   "crates/graphforge-storage",
   "crates/graphforge-discovery",
   "crates/graphforge-hub-publish",
+  "crates/graphforge-protocol-wasm",
   "crates/graphforge-filesystem",
   "crates/graphforge-io",
   "crates/graphforge-provenance",
@@ -172,3 +173,13 @@ debug = "line-tables-only"
 # about 25 MB/s, which made streaming a multi-GiB entry take minutes in a test.
 [profile.dev.package.sha2]
 opt-level = 3
+
+# The WebAssembly protocol module ships to Workers and browsers, where bytes on
+# the wire matter more than peak speed. Only that crate builds with this profile.
+[profile.wasm-release]
+inherits = "release"
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

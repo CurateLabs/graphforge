@@ -47,6 +47,8 @@ importers:
         specifier: workspace:*
         version: link:../../crates/graphforge-bindings-node
 
+  packages/protocol-wasm: {}
+
   tests/features/node:
     dependencies:
       '@curatelabs/graphforge':

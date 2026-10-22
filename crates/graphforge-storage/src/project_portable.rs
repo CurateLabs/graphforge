@@ -398,7 +398,13 @@ fn read_bounded_file(path: &Path, limit: u64, entry: &str) -> Result<Vec<u8>, Po
     std::io::Read::by_ref(&mut file)
         .take(limit.saturating_add(1))
         .read_to_end(&mut bytes)
-        .map_err(|_| PortableError::at(PortableErrorCode::Io, entry, "cannot read control"))?;
+        .map_err(|error| {
+            read_failure(
+                &error,
+                PortableError::at(PortableErrorCode::Io, entry, "cannot read control"),
+                PortableError::at(PortableErrorCode::Io, entry, "cannot read control"),
+            )
+        })?;
     if bytes.len() as u64 > limit {
         return Err(PortableError::at(
             PortableErrorCode::LimitExceeded,
@@ -471,8 +477,12 @@ fn preflight_bundle(
         // This is not a decoder or compatibility path.
         if first_header {
             first_header = false;
-            input.read_exact(&mut header[..16]).map_err(|_| {
-                PortableError::new(PortableErrorCode::InvalidStructure, "truncated bundle")
+            input.read_exact(&mut header[..16]).map_err(|error| {
+                read_failure(
+                    &error,
+                    PortableError::new(PortableErrorCode::InvalidStructure, "truncated bundle"),
+                    PortableError::new(PortableErrorCode::Io, "bundle read failed"),
+                )
             })?;
             if header[..16] == RETIRED_PROJECT_SIGNATURE[..] {
                 return Err(PortableError::new(
@@ -480,12 +490,20 @@ fn preflight_bundle(
                     "unsupported project format",
                 ));
             }
-            input.read_exact(&mut header[16..]).map_err(|_| {
-                PortableError::new(PortableErrorCode::InvalidStructure, "truncated bundle")
+            input.read_exact(&mut header[16..]).map_err(|error| {
+                read_failure(
+                    &error,
+                    PortableError::new(PortableErrorCode::InvalidStructure, "truncated bundle"),
+                    PortableError::new(PortableErrorCode::Io, "bundle read failed"),
+                )
             })?;
         } else {
-            input.read_exact(&mut header).map_err(|_| {
-                PortableError::new(PortableErrorCode::InvalidStructure, "truncated bundle")
+            input.read_exact(&mut header).map_err(|error| {
+                read_failure(
+                    &error,
+                    PortableError::new(PortableErrorCode::InvalidStructure, "truncated bundle"),
+                    PortableError::new(PortableErrorCode::Io, "bundle read failed"),
+                )
             })?;
         }
         if header.iter().all(|byte| *byte == 0) {
@@ -569,8 +587,12 @@ fn preflight_bundle(
             let skip = i64::try_from(size.saturating_add(padding)).map_err(|_| {
                 PortableError::new(PortableErrorCode::LimitExceeded, "bundle entry size")
             })?;
-            input.seek(SeekFrom::Current(skip)).map_err(|_| {
-                PortableError::new(PortableErrorCode::InvalidStructure, "truncated bundle")
+            input.seek(SeekFrom::Current(skip)).map_err(|error| {
+                read_failure(
+                    &error,
+                    PortableError::new(PortableErrorCode::InvalidStructure, "truncated bundle"),
+                    PortableError::new(PortableErrorCode::Io, "bundle read failed"),
+                )
             })?;
         }
     }
@@ -611,8 +633,12 @@ fn skip_padding(input: &mut impl Read, length: u64) -> Result<(), PortableError>
     let mut bytes = [0u8; 512];
     input
         .read_exact(&mut bytes[..padding as usize])
-        .map_err(|_| {
-            PortableError::new(PortableErrorCode::InvalidStructure, "truncated padding")
+        .map_err(|error| {
+            read_failure(
+                &error,
+                PortableError::new(PortableErrorCode::InvalidStructure, "truncated padding"),
+                PortableError::new(PortableErrorCode::Io, "bundle read failed"),
+            )
         })?;
     Ok(())
 }
@@ -631,8 +657,12 @@ fn read_unhashed_payload(
         PortableError::new(PortableErrorCode::LimitExceeded, "PAX path exceeds limit")
     })?;
     let mut bytes = vec![0; length];
-    input.read_exact(&mut bytes).map_err(|_| {
-        PortableError::new(PortableErrorCode::InvalidStructure, "truncated PAX payload")
+    input.read_exact(&mut bytes).map_err(|error| {
+        read_failure(
+            &error,
+            PortableError::new(PortableErrorCode::InvalidStructure, "truncated PAX payload"),
+            PortableError::new(PortableErrorCode::Io, "bundle read failed"),
+        )
     })?;
     skip_padding(input, length as u64)?;
     Ok(bytes)
@@ -965,7 +995,13 @@ fn read_bundle<R: Read + ?Sized>(
             let count = loop {
                 match reader.read(&mut extra) {
                     Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
-                    Err(_) => return Err(PortableError::new(PortableErrorCode::Io, "bundle read")),
+                    Err(error) => {
+                        return Err(read_failure(
+                            &error,
+                            PortableError::new(PortableErrorCode::Io, "bundle read"),
+                            PortableError::new(PortableErrorCode::Io, "bundle read"),
+                        ));
+                    }
                     Ok(count) => break count,
                 }
             };
@@ -1594,7 +1630,13 @@ fn hash_file(
         check_cancel(cancelled)?;
         let n = f
             .read(&mut b[..usize::try_from(left.min(buffer as u64)).unwrap()])
-            .map_err(|_| PortableError::at(PortableErrorCode::Io, entry, "cannot read entry"))?;
+            .map_err(|error| {
+                read_failure(
+                    &error,
+                    PortableError::at(PortableErrorCode::Io, entry, "cannot read entry"),
+                    PortableError::at(PortableErrorCode::Io, entry, "cannot read entry"),
+                )
+            })?;
         if n == 0 {
             return Err(PortableError::at(
                 PortableErrorCode::ConcurrentMutation,
@@ -1824,14 +1866,31 @@ fn validate_path_set(paths: &[String]) -> Result<(), PortableError> {
     let mut set = PathSet::default();
     paths.iter().try_for_each(|path| set.admit(path))
 }
+pub(crate) fn read_failure(
+    error: &std::io::Error,
+    unexpected_eof: PortableError,
+    other_error: PortableError,
+) -> PortableError {
+    if error.kind() == std::io::ErrorKind::UnexpectedEof {
+        unexpected_eof
+    } else {
+        other_error
+    }
+}
+
 fn read_exact_hash(
     r: &mut (impl Read + ?Sized),
     b: &mut [u8],
     h: &mut StreamHash,
     detail: &'static str,
 ) -> Result<(), PortableError> {
-    r.read_exact(b)
-        .map_err(|_| PortableError::new(PortableErrorCode::InvalidStructure, detail))?;
+    r.read_exact(b).map_err(|error| {
+        read_failure(
+            &error,
+            PortableError::new(PortableErrorCode::InvalidStructure, detail),
+            PortableError::new(PortableErrorCode::Io, "bundle read failed"),
+        )
+    })?;
     h.update(b);
     Ok(())
 }
@@ -2160,6 +2219,8 @@ impl<'de> Visitor<'de> for UniqueVisitor {
 
 #[cfg(test)]
 mod plausibility_tests;
+#[cfg(test)]
+pub(crate) mod research_tests;
 #[cfg(test)]
 pub(crate) mod stream_tests;
 #[cfg(test)]

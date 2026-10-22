@@ -2,8 +2,8 @@
 
 One workflow, `.github/workflows/publish.yaml`, builds, publishes, and checks a
 release. GraphForge ships one version across 21 crates (crates.io), the
-`graphforge` wheels and sdist (PyPI), and 8 npm packages (five native addons,
-`@curatelabs/graphforge`, `-cli`, `-agent-skills`).
+`graphforge` wheels and sdist (PyPI), and 9 npm packages (five native addons,
+`@curatelabs/graphforge`, `-cli`, `-agent-skills`, `-protocol-wasm`).
 
 ## What the workflow does
 
@@ -13,7 +13,7 @@ release. GraphForge ships one version across 21 crates (crates.io), the
 | Manual run (`workflow_dispatch`) or a pull request touching the release path | Dry run: builds, packs, and smoke-tests everything. Nothing is uploaded.                                                                                                          |
 
 Build jobs: 3 wheels (Linux x86_64 manylinux 2_17, macOS arm64, Windows
-amd64), the sdist, 5 Node addons, the 8 npm tarballs, and a dry-run package of
+amd64), the sdist, 5 Node addons, the 9 npm tarballs, and a dry-run package of
 every crate. Cargo extracts and builds every `.crate` before any upload, using
 its temporary package registry for dependencies in the same publish set.
 The publish job needs all of them and runs crates.io, then PyPI,
@@ -26,7 +26,7 @@ already published. A tag run fails before any upload if the tag is not
 Registry and repository settings are outside this repository; the workflow
 requires them but nothing here proves they are set.
 
-- crates.io, PyPI, and each of the eight npm packages name this repository,
+- crates.io, PyPI, and each of the nine npm packages name this repository,
   workflow file `publish.yaml`, and environment `release` in their trusted
   publishing settings. Renaming the file or the environment breaks publishing
   until those settings change.
@@ -43,6 +43,19 @@ requires them but nothing here proves they are set.
   `graphforge-portable-oci`, and `graphforge-value`. `graphforge-hub-publish` was
   added later and is also new to crates.io. New crates are rate limited to one per ten minutes;
   the script sleeps until the time crates.io names (at most two hours in total).
+
+## The WebAssembly protocol package
+
+`@curatelabs/graphforge-protocol-wasm` (`packages/protocol-wasm`) is built in the
+`npm-packages` job from `crates/graphforge-protocol-wasm` with the `wasm-bindgen`
+CLI whose version `scripts/ci/install-wasm-bindgen.sh` reads from `Cargo.lock`,
+so a `wasm-bindgen` bump in `Cargo.lock` needs no workflow edit. The crate is not
+published to crates.io. The package version moves with the release through
+`set_release_version.py`. It is published last, after the CLI and agent-skills, and is
+verified by `scripts/ci/protocol-wasm-packaged-smoke.mjs` against the packed
+tarball and again against the registry. Its first publication needs the
+package's trusted publisher registered like the other eight, before the first
+release candidate is uploaded (#1095 owns that registry operation).
 
 ## Development version
 
@@ -114,7 +127,9 @@ serve the version, installs `graphforge` from PyPI and the npm packages
 `@curatelabs/graphforge` and `@curatelabs/graphforge-cli` from npm, and runs
 smoke tests. It also runs `cargo install graphforge-cli --version <version>
 --locked` outside the workspace and checks the installed `gf --version`.
-It does not install the agent-skills package. Confirm by hand that all 21
+It also installs `@curatelabs/graphforge-protocol-wasm` and validates the
+openalex fixture's manifest with it. It does not install the agent-skills
+package. Confirm by hand that all 21
 crates.io pages render their README, docs.rs builds `graphforge-api` and
 `graphforge-cli` at that version, and the GitHub Release exists. Record these
 publication results on the release issue (#1095).

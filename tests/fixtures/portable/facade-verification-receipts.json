@@ -1,9 +1,11 @@
 {
   "full": {
+    "research_interchange": false,
+    "research_entries": [],
     "contract": "graphforge-portable-verify/1",
     "representation": "bundle",
     "source": "file",
-    "package_digest": "sha256:65ba7583180f6e4556461168d38258efd1e5ed4ebb87f1bb69b578979e077e88",
+    "package_digest": "sha256:a31909431e6cea2945731f3a089b0cba937b62e744e232396367234fd55a5cb1",
     "package_class": "complete",
     "producing_core_version": "0.6.0-rc.5",
     "component_count": 7,
@@ -31,7 +33,7 @@
     "integrity": "verified",
     "compatibility": "supported",
     "authenticity": "unsigned",
-    "transport_digest": "sha256:060911b0899726a985fdde8f144637010289b2cfa9fc5980fd5ca3d24d41d30b",
+    "transport_digest": "sha256:d390aadce444be3b15477417625bf0b6414b4c46203169fa7ffb0b1694d6be3b",
     "ontology_composition": {
       "contract": "graphforge-ontology-composition/1",
       "activation_profile": {
@@ -69,15 +71,15 @@
         "sha256": "7d0c5018d4bd4abca09e268900412020317100af4ecdc11f81ad29b0296d6a94",
         "required_dependencies": []
       }
-    ],
-    "research_interchange": false,
-    "research_entries": []
+    ]
   },
   "structure_only": {
+    "research_interchange": false,
+    "research_entries": [],
     "contract": "graphforge-portable-verify/1",
     "representation": "bundle",
     "source": "file",
-    "package_digest": "sha256:65ba7583180f6e4556461168d38258efd1e5ed4ebb87f1bb69b578979e077e88",
+    "package_digest": "sha256:a31909431e6cea2945731f3a089b0cba937b62e744e232396367234fd55a5cb1",
     "package_class": "complete",
     "producing_core_version": "0.6.0-rc.5",
     "component_count": 7,
@@ -98,7 +100,7 @@
     "integrity": "not_checked",
     "compatibility": "supported",
     "authenticity": "unsigned",
-    "transport_digest": "sha256:060911b0899726a985fdde8f144637010289b2cfa9fc5980fd5ca3d24d41d30b",
+    "transport_digest": "sha256:d390aadce444be3b15477417625bf0b6414b4c46203169fa7ffb0b1694d6be3b",
     "ontology_composition": {
       "contract": "graphforge-ontology-composition/1",
       "activation_profile": {
@@ -136,8 +138,6 @@
         "sha256": "7d0c5018d4bd4abca09e268900412020317100af4ecdc11f81ad29b0296d6a94",
         "required_dependencies": []
       }
-    ],
-    "research_interchange": false,
-    "research_entries": []
+    ]
   }
 }

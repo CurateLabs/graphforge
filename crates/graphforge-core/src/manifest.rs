@@ -17,8 +17,9 @@ use crate::{GfError, OntologyMode};
 /// Exact GraphForge Core version of this build.
 ///
 /// The single source for every record that names the Core version that produced
-/// it: the Project manifest's `graphforge_version` and the producing version
-/// declared by portable packages, discovery manifests and Project summaries.
+/// it: the Project manifest's `graphforge_version`, the producing version
+/// declared by portable packages, discovery manifests and Project summaries,
+/// and the last writer's version stamped into every generation manifest.
 pub const GRAPHFORGE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// File name of the manifest within a project directory.
@@ -108,6 +109,10 @@ pub struct ProjectManifest {
     /// IR schema version the project was created with.
     pub ir_version: String,
     /// GraphForge version the project was created with.
+    ///
+    /// Informational: durable projects do not load this file. The Core version
+    /// that last wrote a project is the `producing_core_version` stamp in its
+    /// generation manifest, which is what open compares with the running Core.
     pub graphforge_version: String,
     /// Capability flags; absent block defaults to the baseline.
     #[serde(default)]
