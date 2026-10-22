@@ -44,6 +44,13 @@ Core runtime and argument errors:
   `ontology`, `not_implemented`, or the lowering/algorithm fault domain.
 - `error.details.semantic_code` — optional; the stable dotted code this page
   tabulates.
+- `warnings` — optional, a sibling of `error`, present only when the command
+  raised diagnostics before it failed. Today these are Core version warnings
+  (`{"code":"GF_CORE_VERSION_MISMATCH","producing_core_version":…,"running_core_version":…,"message":…}`):
+  the project or package was written by another Core version. A warning never
+  changes the error class; it names the runtime that matches the data. The
+  same `warnings` array is added to a successful command's single stdout
+  document.
 
 Multi-ontology facade failures use a diagnostics list instead of `details`:
 
@@ -158,7 +165,7 @@ escalate to a human when the obvious fix does not clear the failure.
 
 | Code | Class | Meaning | Next action | Exit |
 | --- | --- | --- | --- | --- |
-| `hub.publish.auth_denied` | ask a human | Publish credential missing, expired, or not scoped to this repository | With no token: set `GRAPHFORGE_HUB_PUBLISH_TOKEN` (see [Credentials](#credentials)). With a token still denied: a human must mint a `publish:owner/repository`-scoped token | 2 |
+| `hub.publish.auth_denied` | fix input | Publish credential missing, expired, or not scoped to this repository | With no token: set `GRAPHFORGE_HUB_PUBLISH_TOKEN` (see [Credentials](#credentials)). With a token still denied: a human must mint a `publish:owner/repository`-scoped token | 2 |
 | `hub.publish.entitlement_denied` | ask a human | Quota or entitlement refused publication | Ask the account/Hub owner | 2 |
 | `hub.access_denied` | ask a human | The repository is private or the credential lacks access | Ask the repository owner for access or a scoped token | 2 |
 | `hub.malformed_response` | ask a human | The Hub response violated its contract | Possibly an outdated client: upgrade first; otherwise ask the Hub operator | 2 |
