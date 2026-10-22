@@ -16,7 +16,8 @@ const MANIFEST: &str = include_str!("../../../tests/fixtures/hub/generated/v1/ma
 const REFS: &str = include_str!("../../../tests/fixtures/hub/generated/v1/refs.json");
 const SUMMARY: &str =
     include_str!("../../../tests/fixtures/hub/generated/v1/objects/openalex-openalex.summary.json");
-const COMMITMENT: &str = include_str!("openalex-commitment.json");
+const RECORDED: &str = "tests/openalex-commitment.json";
+const UPDATE: &str = "GRAPHFORGE_UPDATE_PROTOCOL_WASM_EXPECTED";
 
 fn limits(case: &Value) -> DiscoveryLimits {
     let bytes = case.get("limits").map(|l| serde_json::to_vec(l).unwrap());
@@ -129,7 +130,7 @@ fn openalex_intent() -> (Value, PublishIntent) {
 }
 
 #[test]
-fn openalex_fixture_validates_and_commits_to_the_native_commitment() {
+fn openalex_fixture_validates_and_binds() {
     let fixture: Value = serde_json::from_str(FIXTURE).unwrap();
     let limits = DiscoveryLimits::default();
 
@@ -141,15 +142,6 @@ fn openalex_fixture_validates_and_commits_to_the_native_commitment() {
     assert_eq!(refs.document.refs[0].validator.0, manifest.digest);
     engine::bind_summary(MANIFEST.as_bytes(), SUMMARY.as_bytes(), limits).unwrap();
     engine::bind_refs(REFS.as_bytes(), MANIFEST.as_bytes(), limits).unwrap();
-
-    let (input, intent) = openalex_intent();
-    let native = intent.request_commitment();
-    assert_eq!(
-        engine::request_commitment(&serde_json::to_vec(&input).unwrap()).unwrap(),
-        native
-    );
-    let recorded: Value = serde_json::from_str(COMMITMENT).unwrap();
-    assert_eq!(recorded["request_commitment"], native);
 }
 
 /// Re-home the openalex fixture's single ref closure to another identity.
@@ -167,14 +159,32 @@ fn rehome_openalex() -> engine::Outcome<engine::RehomeResult> {
     )
 }
 
+/// The native values `packages/protocol-wasm/tests/openalex.test.mjs` must
+/// reproduce through WebAssembly. After the fixture changes, regenerate them
+/// with `GRAPHFORGE_UPDATE_PROTOCOL_WASM_EXPECTED=1 cargo test -p graphforge-protocol-wasm`.
 #[test]
-fn rehoming_the_openalex_fixture_matches_the_recorded_revision() {
+fn openalex_native_values_match_the_recorded_expectation() {
+    let (input, intent) = openalex_intent();
+    let commitment = intent.request_commitment();
+    assert_eq!(
+        engine::request_commitment(&serde_json::to_vec(&input).unwrap()).unwrap(),
+        commitment,
+        "the engine commits to what gf publish commits to"
+    );
     let rehomed = rehome_openalex().unwrap();
     assert_eq!(rehomed.refs.repository.repository, "renamed");
-    let recorded: Value = serde_json::from_str(COMMITMENT).unwrap();
-    assert_eq!(recorded["rehomed_revision"], rehomed.revision);
+    let native = json!({
+        "request_commitment": commitment,
+        "rehomed_revision": rehomed.revision,
+        "rehomed_manifest": rehomed.refs.refs[0].validator.0,
+    });
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(RECORDED);
+    if std::env::var_os(UPDATE).is_some() {
+        std::fs::write(&path, serde_json::to_string_pretty(&native).unwrap() + "\n").unwrap();
+    }
+    let recorded: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
     assert_eq!(
-        recorded["rehomed_manifest"],
-        rehomed.refs.refs[0].validator.0
+        recorded, native,
+        "run with {UPDATE}=1 to regenerate {RECORDED}"
     );
 }
