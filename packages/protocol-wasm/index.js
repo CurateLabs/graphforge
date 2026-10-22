@@ -9,7 +9,11 @@ export { default, initSync } from "./dist/graphforge_protocol_wasm.js";
 
 const refuse = (message) => ({ code: "invalid_argument", message });
 
-let counter = 0;
+/** An unpredictable marker for one conversion; never derived from the input. */
+function marker() {
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  return `gf-bigint-${Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("")}:`;
+}
 
 /**
  * JSON text of an argument. A string is used as is (it must be well-formed
@@ -17,6 +21,12 @@ let counter = 0;
  * Anything else goes through `JSON.stringify`, with two differences: a `bigint`
  * is written exactly, and an integer above 2^53 (already rounded) or a
  * non-finite number is refused instead of being rounded or turned into `null`.
+ *
+ * A `bigint` is stringified as a marked string and the marks are then replaced
+ * by its digits. The replacement happens only when the number of marks in the
+ * text equals the number of bigints converted, so a caller string that contains
+ * the mark can never be rewritten; on such a collision the conversion retries
+ * with a fresh mark.
  */
 function toJson(value, name) {
   if (typeof value === "string") {
@@ -28,27 +38,38 @@ function toJson(value, name) {
   const refusal = refuse(
     `${name} holds an integer above 2^53 or a number that is not finite; send a bigint, or a JSON string`,
   );
-  const nonce = `gf-bigint-${(counter += 1)}-${Math.random().toString(36).slice(2)}:`;
-  let text;
-  try {
-    text = JSON.stringify(value, (_key, member) => {
-      if (typeof member === "bigint") return `${nonce}${member}`;
-      if (
-        typeof member === "number" &&
-        (!Number.isFinite(member) || (Number.isInteger(member) && !Number.isSafeInteger(member)))
-      ) {
-        throw refusal;
-      }
-      return member;
-    });
-  } catch (error) {
-    // Anything else was thrown by the caller's own getters, `toJSON` or proxy.
-    throw error === refusal ? refusal : refuse(`${name} could not be converted to JSON`);
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const mark = marker();
+    let bigints = 0;
+    let text;
+    try {
+      text = JSON.stringify(value, (_key, member) => {
+        if (typeof member === "bigint") {
+          bigints += 1;
+          return `${mark}${member}`;
+        }
+        if (
+          typeof member === "number" &&
+          (!Number.isFinite(member) || (Number.isInteger(member) && !Number.isSafeInteger(member)))
+        ) {
+          throw refusal;
+        }
+        return member;
+      });
+    } catch (error) {
+      // Anything else was thrown by the caller's own getters, `toJSON` or proxy.
+      throw error === refusal ? refusal : refuse(`${name} could not be converted to JSON`);
+    }
+    if (typeof text !== "string") {
+      throw refuse(`${name} is not a JSON value`);
+    }
+    if (bigints === 0) return text;
+    // Each bigint left exactly one mark; any other mark came from the caller.
+    if (text.split(mark).length - 1 === bigints) {
+      return text.replace(new RegExp(`"${mark}(-?\\d+)"`, "g"), "$1");
+    }
   }
-  if (typeof text !== "string") {
-    throw refuse(`${name} is not a JSON value`);
-  }
-  return text.replace(new RegExp(`"${nonce}(-?\\d+)"`, "g"), "$1");
+  throw refuse(`${name} could not be converted to JSON`);
 }
 
 function toBytes(value, name) {

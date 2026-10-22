@@ -269,3 +269,39 @@ test("null fields are null, and the declarations say so", () => {
   // Optional-by-omission fields stay optional, not nullable.
   assert.match(declarations, /^\s+preferred_chunk_bytes\?: bigint;/m);
 });
+
+test("a caller string carrying the bigint mark is never rewritten", () => {
+  const zeros = `gf-bigint-${"00".repeat(16)}:`;
+  const real = crypto.getRandomValues.bind(crypto);
+  let calls = 0;
+  // The first mark is predictable (all zero bytes); later marks are random.
+  crypto.getRandomValues = (bytes) =>
+    calls++ === 0 ? bytes.fill(0) : real(bytes);
+  try {
+    // No bigint: the colliding string stays a string, as in the text form.
+    const colliding = JSON.parse(manifestCase.json);
+    colliding.objects[0].length = `${zeros}1`;
+    assert.deepEqual(
+      verdict(protocol.validate_manifest, colliding),
+      verdict(protocol.validate_manifest, JSON.stringify(colliding)),
+    );
+    assert.equal(verdict(protocol.validate_manifest, colliding).ok, false);
+
+    // A bigint beside a colliding string: the first mark collides, so the
+    // conversion retries with a fresh mark and writes only the bigint exactly.
+    calls = 0;
+    const mixed = JSON.parse(manifestCase.json);
+    mixed.extensions = { "x-mark": `${zeros}7`, "x-count": 5n };
+    const text = JSON.stringify({
+      ...mixed,
+      extensions: { "x-mark": `${zeros}7`, "x-count": 5 },
+    });
+    assert.deepEqual(
+      verdict(protocol.validate_manifest, mixed),
+      verdict(protocol.validate_manifest, text),
+    );
+    assert.ok(calls >= 2, "the colliding first mark was retried");
+  } finally {
+    crypto.getRandomValues = real;
+  }
+});
