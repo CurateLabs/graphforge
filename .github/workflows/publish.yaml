@@ -149,7 +149,7 @@ jobs:
             uv run --isolated --no-project --with "${wheels[0]}" python "$test_file"
           done
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: wheel-${{ matrix.target }}
           path: dist/*.whl
@@ -165,7 +165,7 @@ jobs:
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
       - name: Build the sdist
         run: uvx --from 'maturin>=1.7,<2.0' maturin sdist --manifest-path crates/graphforge-bindings-py/Cargo.toml --out dist
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: sdist
           path: dist/*.tar.gz
@@ -326,13 +326,13 @@ jobs:
           python3 "$GITHUB_WORKSPACE/scripts/ci/validate-napi-artifacts.py" \
             --npm-dir npm --manifest package.json --target "$NODE_TARGET"
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: addon-${{ matrix.target }}
           path: crates/graphforge-bindings-node/*.node
           if-no-files-found: error
           retention-days: 7
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: matrix.publishes_loaders == 'true'
         with:
           name: node-loaders
@@ -438,7 +438,7 @@ jobs:
           node "$GITHUB_WORKSPACE/scripts/ci/multi-ontology-packaged-smoke.mjs"
           node "$GITHUB_WORKSPACE/scripts/ci/protocol-wasm-packaged-smoke.mjs" "$GITHUB_WORKSPACE"
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: npm-packages
           path: dist-npm/*.tgz
