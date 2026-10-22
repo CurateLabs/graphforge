@@ -141,6 +141,7 @@ escalate to a human when the obvious fix does not clear the failure.
 | `hub.integrity_failure` | fix input | Stored or transported bytes disagree with digests | Rerun to re-download; if it repeats, ask the Hub operator | 2 |
 | `hub.publish.invalid_input` | fix input | The publish request failed structural validation (400, 404 unknown resource, 413 over a limit, 416 upload offset) | Fix the selection, image set, or sizes per the message | 2 |
 | `hub.publish.non_fast_forward` | fix input | The remote head is not an ancestor of the proposed head | Pull/clone the remote head first, or take the explicit `--rewrite` lease deliberately | 2 |
+| `hub.publish.integrity_failure` | fix input | Stored or uploaded bytes disagree with the declared digests | Rerun to rebuild and re-upload; if it repeats, ask the Hub operator | 2 |
 | `hub.unsupported_future` | fix input | Discovery needs a protocol capability this client lacks | Upgrade the GraphForge CLI | 2 |
 | `hub.publish.unsupported_future` | fix input | The publish protocol needs a capability this client lacks | Upgrade the GraphForge CLI | 2 |
 | `interchange.unsupported_future` | fix input | Input uses a newer interchange major | Upgrade the GraphForge CLI | 1 |
@@ -203,8 +204,10 @@ These failures set `error.code` and `details.kind` only. The class follows the
    terminals.
 
 With no credential available, `gf publish` fails `hub.publish.auth_denied`
-(exit 2) before any network request and names the environment variable in the
-message.
+(exit 2) and names the environment variable in the message. A captured
+invocation (the Python and Node CLI shims) refuses before any request; an
+interactive `gf` process attempts the anonymous discovery read first and may
+report a transport code instead when the Hub is unreachable.
 
 The token value is never accepted as a command-line argument, never logged,
 never serialized into the Project or receipts, and is sent only as the
