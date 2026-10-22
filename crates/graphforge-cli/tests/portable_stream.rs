@@ -29,7 +29,7 @@ const BAGIT: &[u8] = b"BagIt-Version: 1.0\nTag-File-Character-Encoding: UTF-8\n"
 const BAG_INFO: &[u8] = b"Bag-Software-Agent: GraphForge portable\nBagging-Date: 1970-01-01\n";
 const HUB_BUNDLE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../../tests/fixtures/hub/generated/v1/objects/openalex-openalex.gfpb"
+    "/../../tests/fixtures/hub/generated/v1/objects/opendata-openalex.gfpb"
 );
 /// The evidence artifact: 5 GiB of zero bytes.
 const EVIDENCE_LENGTH: u64 = 5 * GIB;

@@ -564,9 +564,9 @@ fn portable_facade_and_same_binary_preserve_complete_receipts() {
 fn shared_verification_golden_matches_real_facade_and_cli() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     // Verifier inputs must be ordinary owned files, never links into the tree.
-    let fixture = root.join("tests/fixtures/hub/generated/v1/objects/openalex-openalex.gfpb");
+    let fixture = root.join("tests/fixtures/hub/generated/v1/objects/opendata-openalex.gfpb");
     let materialized = tempfile::tempdir().unwrap();
-    let package = materialized.path().join("openalex-openalex.gfpb");
+    let package = materialized.path().join("opendata-openalex.gfpb");
     fs::copy(&fixture, &package).unwrap();
     assert_eq!(fs::read(&package).unwrap(), fs::read(&fixture).unwrap());
     let expected: Value = serde_json::from_slice(

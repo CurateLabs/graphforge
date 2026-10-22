@@ -31,8 +31,8 @@ pub const GENERATOR_CONTRACT: &str = "graphforge-hub-fixture-generator/1";
 /// Object location base used by the checked-in fixture. Locations are transport,
 /// never identity, so a different base changes the manifest locations and their bindings.
 pub const DEFAULT_LOCATION_BASE: &str = "https://data.graphforge.sh/objects/sha256/";
-const OBJECT_PATH: &str = "objects/openalex-openalex.gfpb";
-const SUMMARY_PATH: &str = "objects/openalex-openalex.summary.json";
+const OBJECT_PATH: &str = "objects/opendata-openalex.gfpb";
+const SUMMARY_PATH: &str = "objects/opendata-openalex.summary.json";
 const MODULE_OBJECT_PREFIX: &str = "objects/ontology-module-";
 const MODULE_OBJECT_SUFFIX: &str = ".gfpb";
 const FIXED_FILES: [&str; 5] = [
@@ -43,7 +43,9 @@ const FIXED_FILES: [&str; 5] = [
     SUMMARY_PATH,
 ];
 
-const MODULE_ID: &str = "https://openalex.org/ontology/works";
+/// GraphForge-owned permanent module ID in the `ont_` form (#2215). The fixture is a
+/// maintainer-curated mirror, so the ID is never minted in the data source's domain.
+const MODULE_ID: &str = "https://graphforge.sh/ont_drqf2xw8w33cxaxj";
 const MODULE_VERSION: &str = "2026.01";
 const SOURCE_METADATA_OPERATION: u128 = 0x91f2_1a60_d89e_54e1_a000_0000_0000_0001;
 const SOURCE_ADOPTION_OPERATION: u128 = 0x91f2_1a60_d89e_54e1_a000_0000_0000_0002;
@@ -291,7 +293,7 @@ fn module_object_path(content_digest: &str) -> Result<String, String> {
 
 fn repository_identity() -> RepositoryIdentity {
     RepositoryIdentity {
-        owner: "openalex".into(),
+        owner: "opendata".into(),
         repository: "openalex".into(),
     }
 }
@@ -900,7 +902,7 @@ mod tests {
         )
         .unwrap();
         refs.validate_manifest(&manifest).unwrap();
-        let object = fs::read(generated.join("objects/openalex-openalex.gfpb")).unwrap();
+        let object = fs::read(generated.join(OBJECT_PATH)).unwrap();
         let selected = manifest.package_object().unwrap();
         assert_eq!(selected.digest.0, digest_bytes(&object));
         assert_eq!(selected.length, object.len() as u64);
@@ -1013,7 +1015,7 @@ mod tests {
             );
         }
         let package = copy_artifacts(&pristine);
-        let path = package.path().join("objects/openalex-openalex.gfpb");
+        let path = package.path().join(OBJECT_PATH);
         let mut bytes = fs::read(&path).unwrap();
         bytes[1024] ^= 1;
         fs::write(path, bytes).unwrap();

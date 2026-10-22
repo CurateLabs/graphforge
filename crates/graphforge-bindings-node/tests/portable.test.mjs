@@ -165,7 +165,7 @@ test("shared immutable package has the complete Rust facade verification receipt
   const root = fileURLToPath(new URL("../../..", import.meta.url));
   const input = join(
     root,
-    "tests/fixtures/hub/generated/v1/objects/openalex-openalex.gfpb",
+    "tests/fixtures/hub/generated/v1/objects/opendata-openalex.gfpb",
   );
   const expected = JSON.parse(
     readFileSync(

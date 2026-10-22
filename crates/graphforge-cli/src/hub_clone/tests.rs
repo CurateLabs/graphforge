@@ -153,8 +153,8 @@ pub(super) fn object(bytes: &[u8]) -> ObjectDescriptor {
 }
 #[test]
 fn identity_forms_are_equivalent() {
-    let (short, _) = parse_input("openalex/openalex").unwrap();
-    let (url, _) = parse_input("https://graphforge.sh/openalex/openalex").unwrap();
+    let (short, _) = parse_input("opendata/openalex").unwrap();
+    let (url, _) = parse_input("https://graphforge.sh/opendata/openalex").unwrap();
     assert_eq!(short, url);
 }
 #[test]
@@ -396,7 +396,7 @@ fn dangling_destination_symlink_is_a_conflict() {
             hub: None,
             token_env: None,
             protection_bypass_env: None,
-            repository: "openalex/openalex".into(),
+            repository: "opendata/openalex".into(),
             destination: Some(destination),
             telemetry_endpoint: None,
             git_ref: None,
@@ -412,10 +412,10 @@ fn dangling_destination_symlink_is_a_conflict() {
 
 #[test]
 fn endpoint_does_not_duplicate_repository_path() {
-    let base = Url::parse("https://graphforge.sh/openalex/openalex").unwrap();
+    let base = Url::parse("https://graphforge.sh/opendata/openalex").unwrap();
     assert_eq!(
         endpoint(&base, "refs").as_str(),
-        "https://graphforge.sh/openalex/openalex/.gf/refs"
+        "https://graphforge.sh/opendata/openalex/.gf/refs"
     );
 }
 
@@ -454,7 +454,7 @@ fn staging_directory_symlink_is_rejected() {
 
 #[test]
 fn research_ref_without_lineage_stops_before_project_download() {
-    let repository = serde_json::json!({"owner":"openalex","repository":"openalex"});
+    let repository = serde_json::json!({"owner":"opendata","repository":"openalex"});
     let immutable = format!("sha256:{}", "a".repeat(64));
     let refs = serde_json::to_vec(&serde_json::json!({
         "format":"graphforge-discovery/1","version":{"major":1,"minor":0},
@@ -492,7 +492,7 @@ fn research_ref_without_lineage_stops_before_project_download() {
             hub: None,
             token_env: None,
             protection_bypass_env: None,
-            repository: "openalex/openalex".into(),
+            repository: "opendata/openalex".into(),
             destination: Some(root.path().join("project")),
             telemetry_endpoint: None,
             git_ref: Some("main".into()),
@@ -512,7 +512,7 @@ fn research_ref_without_lineage_stops_before_project_download() {
 
 #[test]
 fn unsupported_future_manifest_stops_before_object_access() {
-    let repository = serde_json::json!({"owner":"openalex","repository":"openalex"});
+    let repository = serde_json::json!({"owner":"opendata","repository":"openalex"});
     let immutable = format!("sha256:{}", "a".repeat(64));
     let refs = serde_json::to_vec(&serde_json::json!({
         "format":"graphforge-discovery/1","version":{"major":1,"minor":0},
@@ -550,7 +550,7 @@ fn unsupported_future_manifest_stops_before_object_access() {
             hub: None,
             token_env: None,
             protection_bypass_env: None,
-            repository: "openalex/openalex".into(),
+            repository: "opendata/openalex".into(),
             destination: Some(root.path().join("project")),
             telemetry_endpoint: None,
             git_ref: None,
@@ -573,7 +573,7 @@ fn unsupported_future_manifest_stops_before_object_access() {
 
 #[test]
 fn retired_capability_name_stops_before_object_access() {
-    let repository = serde_json::json!({"owner":"openalex","repository":"openalex"});
+    let repository = serde_json::json!({"owner":"opendata","repository":"openalex"});
     let immutable = format!("sha256:{}", "a".repeat(64));
     let refs = serde_json::to_vec(&serde_json::json!({
         "format":"graphforge-discovery/1","version":{"major":1,"minor":0},
@@ -611,7 +611,7 @@ fn retired_capability_name_stops_before_object_access() {
             hub: None,
             token_env: None,
             protection_bypass_env: None,
-            repository: "openalex/openalex".into(),
+            repository: "opendata/openalex".into(),
             destination: Some(root.path().join("project")),
             telemetry_endpoint: None,
             git_ref: None,
@@ -649,7 +649,7 @@ pub(super) fn clone_documents(
     extra: &[serde_json::Value],
 ) -> (Vec<u8>, Vec<u8>) {
     let object_digest = hash_reader(&mut std::io::Cursor::new(bundle)).unwrap();
-    let repository = serde_json::json!({"owner":"openalex","repository":"openalex"});
+    let repository = serde_json::json!({"owner":"opendata","repository":"openalex"});
     let immutable = format!("sha256:{}", "a".repeat(64));
     let validator = format!("sha256:{}", "d".repeat(64));
     let refs = serde_json::to_vec(&serde_json::json!({
@@ -747,7 +747,7 @@ fn clone_succeeds_against_the_checked_in_hub_fixture() {
     }
     let refs = fixture!("refs.json");
     let manifest_bytes = fixture!("manifest.json");
-    let project = fixture!("objects/openalex-openalex.gfpb");
+    let project = fixture!("objects/opendata-openalex.gfpb");
     let manifest = graphforge_discovery::DiscoveryManifest::from_json(
         manifest_bytes,
         graphforge_discovery::DiscoveryLimits::default(),
@@ -775,7 +775,7 @@ fn clone_succeeds_against_the_checked_in_hub_fixture() {
             hub: None,
             token_env: None,
             protection_bypass_env: None,
-            repository: "openalex/openalex".into(),
+            repository: "opendata/openalex".into(),
             destination: Some(destination.clone()),
             telemetry_endpoint: None,
             git_ref: None,
@@ -848,7 +848,7 @@ fn interrupted_clone_retains_resumed_and_transferred_bytes_once() {
             hub: None,
             token_env: None,
             protection_bypass_env: None,
-            repository: "openalex/openalex".into(),
+            repository: "opendata/openalex".into(),
             destination: Some(destination),
             telemetry_endpoint: None,
             git_ref: None,
@@ -1025,15 +1025,15 @@ fn both_identity_forms_import_and_reopen_the_same_real_project() {
     let mut fail_open_elapsed = Vec::new();
     let mut delayed_jobs = Vec::new();
     for (index, input) in [
-        "openalex/openalex",
-        "https://graphforge.sh/openalex/openalex",
-        "openalex/openalex",
-        "openalex/openalex",
-        "openalex/openalex",
-        "openalex/openalex",
-        "openalex/openalex",
-        "openalex/openalex",
-        "openalex/openalex",
+        "opendata/openalex",
+        "https://graphforge.sh/opendata/openalex",
+        "opendata/openalex",
+        "opendata/openalex",
+        "opendata/openalex",
+        "opendata/openalex",
+        "opendata/openalex",
+        "opendata/openalex",
+        "opendata/openalex",
     ]
     .into_iter()
     .enumerate()
@@ -1257,7 +1257,7 @@ fn measure_clone_wall_time() {
                 hub: None,
                 token_env: None,
                 protection_bypass_env: None,
-                repository: "openalex/openalex".into(),
+                repository: "opendata/openalex".into(),
                 destination: Some(destination),
                 telemetry_endpoint: None,
                 git_ref: None,

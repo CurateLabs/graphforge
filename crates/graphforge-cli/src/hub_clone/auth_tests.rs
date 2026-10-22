@@ -329,7 +329,7 @@ fn transient_discovery_retry_reauthenticates_only_the_initial_request() {
 
 fn clone_args(destination: &Path) -> CloneArgs {
     CloneArgs {
-        repository: "openalex/openalex".into(),
+        repository: "opendata/openalex".into(),
         hub: Some("https://hub.example".into()),
         token_env: Some("HUB_TOKEN".into()),
         protection_bypass_env: Some("PREVIEW_SECRET".into()),
@@ -392,7 +392,7 @@ fn clone_authenticates_discovery_but_never_same_or_cross_origin_objects() {
     let refs = include_bytes!("../../../../tests/fixtures/hub/generated/v1/refs.json");
     let manifest = include_bytes!("../../../../tests/fixtures/hub/generated/v1/manifest.json");
     let project = include_bytes!(
-        "../../../../tests/fixtures/hub/generated/v1/objects/openalex-openalex.gfpb"
+        "../../../../tests/fixtures/hub/generated/v1/objects/opendata-openalex.gfpb"
     );
     for origin in ["hub.example", "objects.example"] {
         let mut manifest =
@@ -415,8 +415,8 @@ fn clone_authenticates_discovery_but_never_same_or_cross_origin_objects() {
         clone(&transport, clone_args(&destination), &mut output).unwrap();
         let requests = server.join().unwrap();
         assert_eq!(requests.len(), 3);
-        assert!(requests[0].starts_with("GET /openalex/openalex/.gf/refs "));
-        assert!(requests[1].starts_with("GET /openalex/openalex/.gf/manifest "));
+        assert!(requests[0].starts_with("GET /opendata/openalex/.gf/refs "));
+        assert!(requests[1].starts_with("GET /opendata/openalex/.gf/manifest "));
         assert!(requests[2].starts_with("GET /project.gfpb "));
         assert_headers(&requests[0], true, true);
         assert_headers(&requests[1], true, true);
@@ -487,7 +487,7 @@ fn clone_cli_parses_explicit_hub_and_credential_source_names() {
     let cli = crate::Cli::try_parse_from([
         "gf",
         "clone",
-        "openalex/openalex",
+        "opendata/openalex",
         "--hub",
         "https://hub.example",
         "--token-env",

@@ -18,7 +18,7 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 fn demo() -> RepositoryIdentity {
-    RepositoryIdentity::parse("openalex/demo").unwrap()
+    RepositoryIdentity::parse("opendata/demo").unwrap()
 }
 
 fn error_code(response: &HubResponse) -> HubPublishErrorCode {
@@ -338,7 +338,7 @@ fn operation_status_reports_intent_and_original_receipt_without_a_session() {
         ),
     ));
     assert_eq!(error_code(&anonymous), HubPublishErrorCode::AuthDenied);
-    let other = Client::new(&hub, RepositoryIdentity::parse("openalex/other").unwrap());
+    let other = Client::new(&hub, RepositoryIdentity::parse("opendata/other").unwrap());
     assert_eq!(other.operation(plan.operation).status, 404);
 }
 
@@ -593,14 +593,14 @@ fn expired_or_misscoped_tokens_are_auth_denied() {
     let mut client = Client::new(&hub, demo());
     let plan = Plan::new("package v1", 'b', None);
 
-    client.token = PublishToken::new(hub.issue_token("publish:openalex/other", 900));
+    client.token = PublishToken::new(hub.issue_token("publish:opendata/other", 900));
     let response = client.open(&plan);
     assert_eq!(
         (response.status, error_code(&response)),
         (403, HubPublishErrorCode::AuthDenied)
     );
 
-    client.token = PublishToken::new(hub.issue_token("publish:openalex/demo", 30));
+    client.token = PublishToken::new(hub.issue_token("publish:opendata/demo", 30));
     hub.advance_clock(30);
     let response = client.open(&plan);
     assert_eq!(

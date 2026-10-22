@@ -106,7 +106,7 @@ def check_shared_verification_receipts() -> None:
     import graphforge as gf
 
     root = Path(__file__).resolve().parents[3]
-    package = root / "tests/fixtures/hub/generated/v1/objects/openalex-openalex.gfpb"
+    package = root / "tests/fixtures/hub/generated/v1/objects/opendata-openalex.gfpb"
     expected = json.loads(
         (root / "tests/fixtures/portable/facade-verification-receipts.json").read_text()
     )

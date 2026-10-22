@@ -1740,7 +1740,7 @@ mod tests {
         DiscoveryManifest {
             format: DISCOVERY_FORMAT.to_owned(),
             version: ProtocolVersion::CURRENT,
-            repository: RepositoryIdentity::parse("openalex/openalex").unwrap(),
+            repository: RepositoryIdentity::parse("opendata/openalex").unwrap(),
             default_ref: "main".to_owned(),
             resolved_ref: "main".to_owned(),
             immutable_version: digest('a'),
@@ -1776,11 +1776,11 @@ mod tests {
 
     #[test]
     fn identity_is_canonical_and_provider_independent() {
-        let identity = RepositoryIdentity::parse("openalex/openalex").unwrap();
-        assert_eq!(identity.canonical_name(), "openalex/openalex");
+        let identity = RepositoryIdentity::parse("opendata/openalex").unwrap();
+        assert_eq!(identity.canonical_name(), "opendata/openalex");
         for invalid in [
-            "https://graphforge.sh/openalex/openalex",
-            "OpenAlex/openalex",
+            "https://graphforge.sh/opendata/openalex",
+            "OpenData/openalex",
             "a/../b",
             "a/",
         ] {
@@ -1928,7 +1928,7 @@ mod tests {
         let refs = RefSet {
             format: DISCOVERY_FORMAT.to_owned(),
             version: ProtocolVersion::CURRENT,
-            repository: RepositoryIdentity::parse("openalex/openalex").unwrap(),
+            repository: RepositoryIdentity::parse("opendata/openalex").unwrap(),
             default_ref: "main".to_owned(),
             refs: vec![RepositoryRef {
                 name: "main".to_owned(),

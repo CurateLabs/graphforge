@@ -345,7 +345,7 @@ mod tests {
             DiscoveryManifest::from_json(FIXTURE_MANIFEST, DiscoveryLimits::default()).unwrap();
         let module = &manifest.ontology.as_ref().unwrap().modules[0];
         ModuleFetchArgs {
-            repository: "openalex/openalex".into(),
+            repository: "opendata/openalex".into(),
             ontology_id: module.id.clone(),
             version: module.version.clone(),
             digest: module.content_digest.0.clone(),
@@ -461,7 +461,7 @@ mod tests {
         let args = fixture_module_args(&root.path().join("module.json"));
         let receipt = fetch_module(&transport, &args).unwrap();
         assert_eq!(receipt["repository"], "research/renamed");
-        assert_eq!(receipt["moved_from"], "openalex/openalex");
+        assert_eq!(receipt["moved_from"], "opendata/openalex");
         assert_eq!(receipt["moved_to"], "research/renamed");
         assert!(args.output.is_file());
         assert_eq!(transport.inner.remaining(), 0);
@@ -485,7 +485,7 @@ mod tests {
     fn module_fetch_rejects_foreign_move_before_target_request_or_output() {
         let body = serde_json::to_vec(&graphforge_discovery::RepositoryMoved {
             format: "graphforge-repository-moved/1".into(),
-            moved_from: graphforge_discovery::RepositoryIdentity::parse("openalex/openalex")
+            moved_from: graphforge_discovery::RepositoryIdentity::parse("opendata/openalex")
                 .unwrap(),
             moved_to: graphforge_discovery::RepositoryIdentity::parse("research/renamed").unwrap(),
         })
@@ -502,7 +502,7 @@ mod tests {
             assert_module_fetch_fails("hub.integrity_failure", &transport, &args, root.path(), &[]);
         assert_eq!(
             requests,
-            ["https://graphforge.sh/openalex/openalex/.gf/refs"]
+            ["https://graphforge.sh/opendata/openalex/.gf/refs"]
         );
         assert_eq!(transport.inner.remaining(), 0);
     }
@@ -529,8 +529,8 @@ mod tests {
         assert_eq!(
             transport.requested.lock().unwrap().clone(),
             [
-                "https://graphforge.sh/openalex/openalex/.gf/refs".to_owned(),
-                "https://graphforge.sh/openalex/openalex/.gf/manifest".to_owned(),
+                "https://graphforge.sh/opendata/openalex/.gf/refs".to_owned(),
+                "https://graphforge.sh/opendata/openalex/.gf/manifest".to_owned(),
                 module_object.locations[0].clone(),
             ],
             "refs, manifest, and the module object; never the Project package or summary"
@@ -543,7 +543,7 @@ mod tests {
         let expected = resolve_discovered_ontology_module(&DiscoveryOntologyModuleRequest {
             manifest_json: FIXTURE_MANIFEST,
             refs_json: FIXTURE_REFS,
-            expected_repository: &RepositoryIdentity::parse("openalex/openalex").unwrap(),
+            expected_repository: &RepositoryIdentity::parse("opendata/openalex").unwrap(),
             module: &identity,
             package: &package_path,
             discovery_limits: DiscoveryLimits::default(),
@@ -560,7 +560,7 @@ mod tests {
             receipt,
             serde_json::json!({
                 "contract": "graphforge-hub-module-fetch/1",
-                "repository": "openalex/openalex",
+                "repository": "opendata/openalex",
                 "module": {
                     "ontology_id": descriptor.id,
                     "authored_version": descriptor.version,
@@ -592,8 +592,8 @@ mod tests {
         assert_eq!(
             requested[..2],
             [
-                "https://hub.example/prefix/openalex/openalex/.gf/refs",
-                "https://hub.example/prefix/openalex/openalex/.gf/manifest",
+                "https://hub.example/prefix/opendata/openalex/.gf/refs",
+                "https://hub.example/prefix/opendata/openalex/.gf/manifest",
             ]
         );
     }
@@ -632,7 +632,7 @@ mod tests {
             ),
             (
                 Box::new(|args| {
-                    args.repository = "https://hub.example/openalex/openalex".into();
+                    args.repository = "https://hub.example/opendata/openalex".into();
                     args.hub = Some("https://other.example".into());
                 }),
                 "hub.invalid_identity",
@@ -683,7 +683,7 @@ mod tests {
         for change in [
             Box::new(|args: &mut ModuleFetchArgs| args.version = "9999.01".into())
                 as Box<dyn Fn(&mut ModuleFetchArgs)>,
-            Box::new(|args| args.ontology_id = "https://openalex.org/ontology/other".into()),
+            Box::new(|args| args.ontology_id = "https://graphforge.sh/ont_kdeke08bwg6cheea".into()),
             Box::new(|args| args.digest = "0".repeat(64)),
         ] {
             let mut args = fixture_module_args(&root.path().join("works.json"));

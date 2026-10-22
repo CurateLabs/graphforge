@@ -1111,13 +1111,13 @@ mod tests {
             "ontology",
             "module",
             "fetch",
-            "openalex/openalex",
+            "opendata/openalex",
             "--ontology-id",
-            "https://openalex.org/ontology/works",
+            "https://graphforge.sh/ont_drqf2xw8w33cxaxj",
             "--version",
             "2026.01",
             "--digest",
-            "f1f475dfcf01bdfe7a578afb0203bac26831dc0b48f4cd009bdc418b506981b4",
+            "64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11",
             "--output",
             output,
         ];
@@ -1141,8 +1141,11 @@ mod tests {
         else {
             panic!("expected `ontology module fetch`");
         };
-        assert_eq!(args.repository, "openalex/openalex");
-        assert_eq!(args.ontology_id, "https://openalex.org/ontology/works");
+        assert_eq!(args.repository, "opendata/openalex");
+        assert_eq!(
+            args.ontology_id,
+            "https://graphforge.sh/ont_drqf2xw8w33cxaxj"
+        );
         assert_eq!(args.version, "2026.01");
         assert_eq!(args.digest.len(), 64);
         assert_eq!(args.output, PathBuf::from("works.json"));
