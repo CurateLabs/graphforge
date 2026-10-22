@@ -1073,7 +1073,6 @@ fn primary_streaming_current_and_checkpoint_reopen_with_exact_query_results() {
         args.extend(["--format", "bundle", "--output", bundle.to_str().unwrap()]);
         let exported = json(&gf(&project, &args));
         assert_eq!(exported["contract"], "graphforge-portable-export/1");
-        eprintln!("children_max_rss after export: {}", children_max_rss());
         let target = root.path().join(format!("{name}-imported"));
         let operation = uuid::Uuid::new_v4().to_string();
         let imported = json(&gf(
@@ -1351,14 +1350,16 @@ fn write_blob_nodes(path: &Path) {
 /// [`children_max_rss`]. The sentinel appears after the commit child exits.
 #[cfg(target_os = "linux")]
 fn build_project_detached(root: &Path, project: &Path, source: &Path) {
+    use std::os::unix::process::CommandExt;
     use std::process::Stdio;
     use std::time::{Duration, Instant};
 
     let gf = gf_bin();
     let sentinel = root.join("build-done");
+    let failed = root.join("build-failed");
     let begun = root.join("begin.json");
     let script = format!(
-        "set -e\n\
+        "if ( set -e\n\
          session=\"$(\"{gf}\" --json --project \"{p}\" import-session begin \
          --operation-uuid \"{op}\" > \"{begun}\"; \
          grep -o '\"session_uuid\":\"[^\"]*\"' \"{begun}\" | head -1 | cut -d'\"' -f4)\"\n\
@@ -1366,28 +1367,39 @@ fn build_project_detached(root: &Path, project: &Path, source: &Path) {
          --session-uuid \"$session\" --kind nodes --path \"{s}\"\n\
          \"{gf}\" --json --project \"{p}\" import-session validate --session-uuid \"$session\"\n\
          \"{gf}\" --json --project \"{p}\" import-session commit --session-uuid \"$session\"\n\
-         touch \"{sentinel}\"\n",
+         ); then touch \"{sentinel}\"; else touch \"{failed}\"; fi\n",
         gf = gf.display(),
         p = project.display(),
         s = source.display(),
         begun = begun.display(),
         sentinel = sentinel.display(),
+        failed = failed.display(),
         op = uuid::Uuid::now_v7(),
     );
-    Command::new("sh")
+    // The shell is never reaped here, so the build's memory never folds into
+    // this process's children's peak. It leads its own process group, so a
+    // timeout can stop the whole build.
+    let shell = Command::new("sh")
         .arg("-c")
         .arg(&script)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())
+        .process_group(0)
         .spawn()
         .expect("spawn detached bulk-build shell");
     let deadline = Instant::now() + Duration::from_secs(300);
     while !sentinel.exists() {
         assert!(
-            Instant::now() < deadline,
-            "the detached bulk build never finished; see its output above"
+            !failed.exists(),
+            "the detached bulk build failed; see its output above"
         );
+        if Instant::now() >= deadline {
+            let _ = Command::new("kill")
+                .args(["-KILL", &format!("-{}", shell.id())])
+                .status();
+            panic!("the detached bulk build never finished; it was stopped");
+        }
         std::thread::sleep(Duration::from_millis(500));
     }
 }
