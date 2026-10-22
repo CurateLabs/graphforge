@@ -549,6 +549,10 @@ export default defineConfig({
                   label: '0060 — Carry prepaid memory authority across reader handoffs',
                   slug: 'adr/0060-query-memory-handoffs',
                 },
+                {
+                  label: '0062 — Projects are named like repositories; ontologies and bridge sets have permanent IDs like gists',
+                  slug: 'adr/0062-project-and-ontology-identity',
+                },
                 // END generated ADR records
               ],
             },
