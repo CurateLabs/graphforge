@@ -135,7 +135,7 @@ pub(crate) fn run_research(
     output: &mut dyn Write,
 ) -> Result<(), crate::CliRuntimeError> {
     match command {
-        ResearchCommand::Decision { command } => decisions::run(graph, command, output)?,
+        ResearchCommand::Decision { command } => decisions::run(graph, command, json, output)?,
         ResearchCommand::Interchange { command } => interchange::run(graph, command, output)?,
         ResearchCommand::Proposal { command } => proposals::run(graph, command, json, output)?,
         ResearchCommand::Upstream { command } => upstream::run(graph, command, json, output)?,

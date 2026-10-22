@@ -469,6 +469,17 @@ impl GraphForge {
         )
     }
 
+    /// Warnings raised when this project opened, as a list of dicts with
+    /// `code`, `producing_core_version`, `running_core_version` and `message`.
+    /// Empty unless the project was written by a different Core version.
+    #[getter]
+    fn open_warnings(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let native = self.ensure_open()?;
+        let warnings = serde_json::to_value(native.open_warnings())
+            .map_err(|error| to_pyerr(py, &GfError::Execution(error.to_string())))?;
+        json_value_to_python(py, &warnings)
+    }
+
     /// The effective ontology mode: `"exploratory"` | `"advisory"` | `"strict"`.
     #[getter]
     fn ontology_mode(&self) -> String {

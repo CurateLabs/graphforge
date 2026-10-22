@@ -15,13 +15,13 @@ const HUB_BODY: &str = "untrusted hub body";
 
 /// A loopback server answering each request with the next scripted response
 /// (status, extra header lines, body) and recording the request paths.
-struct StatusServer {
-    address: SocketAddr,
+pub(super) struct StatusServer {
+    pub(super) address: SocketAddr,
     paths: Arc<Mutex<Vec<String>>>,
 }
 
 impl StatusServer {
-    fn start(script: Vec<(u16, String, Vec<u8>)>) -> Self {
+    pub(super) fn start(script: Vec<(u16, String, Vec<u8>)>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let paths = Arc::new(Mutex::new(Vec::new()));
@@ -61,20 +61,20 @@ impl StatusServer {
         Self { address, paths }
     }
 
-    fn paths(&self) -> Vec<String> {
+    pub(super) fn paths(&self) -> Vec<String> {
         self.paths.lock().unwrap().clone()
     }
 }
 
 /// The production read transport and URL validation; only the connection is
 /// re-targeted from `https://hub.test` to the loopback server.
-struct Routed {
+pub(super) struct Routed {
     inner: HttpTransport,
     address: SocketAddr,
 }
 
 impl Routed {
-    fn new(address: SocketAddr) -> Self {
+    pub(super) fn new(address: SocketAddr) -> Self {
         let bound = Duration::from_secs(5);
         Self {
             inner: HttpTransport {
@@ -111,7 +111,7 @@ impl Transport for Routed {
 /// Render `error` as the CLI does: the JSON error and the process exit code.
 fn rendered(error: graphforge_api::GfError) -> (serde_json::Value, i32) {
     let mut stderr = Vec::new();
-    crate::write_error(&error, true, &mut stderr).unwrap();
+    crate::write_error(&error, true, &mut stderr, &[]).unwrap();
     let exit = crate::error_exit_code(&crate::CliRuntimeError::Core(error));
     (serde_json::from_slice(&stderr).unwrap(), exit)
 }
