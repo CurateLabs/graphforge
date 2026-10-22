@@ -131,7 +131,7 @@ Measured on the release build (`opt-level = "z"`, LTO), Node 22:
 
 | Measure                                     | Value                                                         |
 | ------------------------------------------- | ------------------------------------------------------------- |
-| Delivered `.wasm` size                      | about 352 KB gzip, about 281 KB brotli (1.07 MB uncompressed) |
+| Delivered `.wasm` size                      | about 354 KB gzip, about 282 KB brotli (1.07 MB uncompressed) |
 | Linear memory after instantiation           | about 1.3 MiB                                                 |
 | `validate_manifest`, openalex (2.2 KB)      | about 0.3 ms                                                  |
 | `validate_lineage`, largest corpus (4.5 KB) | about 0.5 ms                                                  |
