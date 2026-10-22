@@ -128,14 +128,14 @@ pub(crate) fn validate_version(
         version,
         target.path(),
     )
-    .map_err(classify_native_failure)?;
-    validator(&generation, version, registry).map_err(classify_native_failure)?;
+    .map_err(|error| classify_native_failure(&error))?;
+    validator(&generation, version, registry).map_err(|error| classify_native_failure(&error))?;
     check_cancel(cancelled)
 }
 
 /// A native-owner failure over the package's content is the archive's
 /// incompatibility; a storage failure keeps the storage class (`Io`).
-fn classify_native_failure(error: graphforge_core::GfError) -> PortableError {
+fn classify_native_failure(error: &graphforge_core::GfError) -> PortableError {
     match error {
         graphforge_core::GfError::Storage(_) => PortableError::new(
             PortableErrorCode::Io,

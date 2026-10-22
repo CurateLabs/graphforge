@@ -2220,9 +2220,9 @@ impl<'de> Visitor<'de> for UniqueVisitor {
 #[cfg(test)]
 mod plausibility_tests;
 #[cfg(test)]
-pub(crate) mod stream_tests;
-#[cfg(test)]
 mod research_tests;
+#[cfg(test)]
+pub(crate) mod stream_tests;
 #[cfg(test)]
 mod tar_fixtures;
 #[cfg(test)]

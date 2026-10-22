@@ -3,8 +3,9 @@
 //! reader failure stays `Incompatible`.
 use super::*;
 use crate::research_versions::{
-    ResearchInterchangeManifest, ResearchInterchangeSelection, ResearchParticipantCommitment,
-    ResearchParticipantKey, ResearchVersionContent, ResearchVersionRecord, RESEARCH_VERSION,
+    RESEARCH_VERSION, ResearchInterchangeManifest, ResearchInterchangeSelection,
+    ResearchParticipantCommitment, ResearchParticipantKey, ResearchVersionContent,
+    ResearchVersionRecord,
 };
 use sha2::Digest;
 use std::collections::BTreeSet;
@@ -115,7 +116,10 @@ fn package() -> Package {
         crate::project_portable_export::planning::portable_participant_id("research", "registry");
     let digest = hex(&selected.content.participants[0].content_sha256);
     Package {
-        registry_path: format!("{}{registry_id}/participant.json", super::research::NAMESPACE),
+        registry_path: format!(
+            "{}{registry_id}/participant.json",
+            super::research::NAMESPACE
+        ),
         registry_bytes: registry.participant().unwrap().bytes,
         object_path: super::research::object_path(&selected.version_uuid, &digest, false),
         object_bytes: participant.bytes,

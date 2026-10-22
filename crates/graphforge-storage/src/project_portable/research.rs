@@ -199,31 +199,32 @@ fn check_version(
     // A reader's I/O failure is a storage fault, not the package's; the closure
     // records it and a failed admission returns it instead of `invalid()`.
     let mut io_failure: Option<PortableError> = None;
-    let mut read_control = |digest: &str, bound: u64| -> Result<Vec<u8>, graphforge_core::GfError> {
-        super::check_cancel(cancelled).map_err(|_| {
-            graphforge_core::GfError::Validation("research verification cancelled".into())
-        })?;
-        if provided
-            .get(&(*id, digest.to_owned()))
-            .is_none_or(|held| held.length > bound.min(limits.max_entry_bytes))
-        {
-            return Err(graphforge_core::GfError::Validation(
-                "research object is missing or oversized".into(),
-            ));
-        }
-        read(
-            &object_path(id, digest, false),
-            bound.min(limits.max_entry_bytes),
-        )
-        .map_err(|error| {
-            if error.code == PortableErrorCode::Io {
-                io_failure = Some(error);
+    let mut read_control =
+        |digest: &str, bound: u64| -> Result<Vec<u8>, graphforge_core::GfError> {
+            super::check_cancel(cancelled).map_err(|_| {
+                graphforge_core::GfError::Validation("research verification cancelled".into())
+            })?;
+            if provided
+                .get(&(*id, digest.to_owned()))
+                .is_none_or(|held| held.length > bound.min(limits.max_entry_bytes))
+            {
+                return Err(graphforge_core::GfError::Validation(
+                    "research object is missing or oversized".into(),
+                ));
             }
-            graphforge_core::GfError::Validation("research object unavailable".into())
-        })
-    };
-    let core = portable::core_objects_admitted(version, length_of, &mut read_control)
-        .map_err(|_| {
+            read(
+                &object_path(id, digest, false),
+                bound.min(limits.max_entry_bytes),
+            )
+            .map_err(|error| {
+                if error.code == PortableErrorCode::Io {
+                    io_failure = Some(error);
+                }
+                graphforge_core::GfError::Validation("research object unavailable".into())
+            })
+        };
+    let core =
+        portable::core_objects_admitted(version, length_of, &mut read_control).map_err(|_| {
             super::check_cancel(cancelled)
                 .err()
                 .or_else(|| io_failure.take())

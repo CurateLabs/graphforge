@@ -152,11 +152,7 @@ fn the_bundle_preflights_bounded_reads_classify_io_and_truncation() {
             Some(std::io::ErrorKind::Other),
             PortableErrorCode::Io,
         ),
-        (
-            "end of input",
-            None,
-            PortableErrorCode::InvalidStructure,
-        ),
+        ("end of input", None, PortableErrorCode::InvalidStructure),
     ] {
         let payload = vec![7u8; 1024];
         let mut reader = FailsAt {
@@ -164,8 +160,8 @@ fn the_bundle_preflights_bounded_reads_classify_io_and_truncation() {
             offset: 8,
             kind,
         };
-        let error = read_unhashed_payload(&mut reader, payload.len() as u64, usize::MAX)
-            .unwrap_err();
+        let error =
+            read_unhashed_payload(&mut reader, payload.len() as u64, usize::MAX).unwrap_err();
         assert_eq!(error.code, expected, "{name}");
         // Padding of a 600-byte entry: 424 bytes, so the fault lands mid-padding.
         let mut reader = FailsAt {
