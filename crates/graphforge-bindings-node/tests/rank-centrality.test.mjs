@@ -33,10 +33,14 @@ function checkDegreeRank() {
   );
   assert.deepEqual([...table.getChild("score").toArray()], [1.5, 0, 0]);
 
-  const via = tableFromIPC(forge.rank("Person", "degree", "KNOWS"));
+  const via = tableFromIPC(forge.rank("Person", "degree", { via: "KNOWS" }));
   assert.deepEqual([...via.getChild("score").toArray()], [1, 0, 0]);
   const undirected = tableFromIPC(
-    forge.rank("Person", "degree", "KNOWS", false, "degree_score"),
+    forge.rank("Person", "degree", {
+      via: "KNOWS",
+      directed: false,
+      writeProperty: "degree_score",
+    }),
   );
   assert.deepEqual([...undirected.getChild("score").toArray()], [1, 1, 0]);
   const written = tableFromIPC(
@@ -62,7 +66,9 @@ function checkPageRank() {
       "(c:Person {name:'Carol'}), (a)-[:KNOWS]->(b), " +
       "(a)-[:KNOWS]->(b), (a)-[:KNOWS]->(a), (a)-[:OTHER]->(c)",
   );
-  const table = tableFromIPC(forge.rank("Person", "pagerank", "KNOWS"));
+  const table = tableFromIPC(
+    forge.rank("Person", "pagerank", { via: "KNOWS" }),
+  );
   assert.deepEqual(
     table.schema.fields.map((field) => field.name),
     ["node_uuid", "score", "name"],
@@ -72,19 +78,23 @@ function checkPageRank() {
   assert.equal(table.schema.metadata.get("graphforge.algorithm"), "pagerank");
   const scores = [...table.getChild("score").toArray()];
   assert.deepEqual(scores, [
-    ...tableFromIPC(forge.rank("Person", "pagerank", "KNOWS"))
+    ...tableFromIPC(forge.rank("Person", "pagerank", { via: "KNOWS" }))
       .getChild("score")
       .toArray(),
   ]);
   assert.ok(Math.abs(scores.reduce((sum, score) => sum + score, 0) - 1) < 1e-9);
   assert.notDeepEqual(scores, [
-    ...tableFromIPC(forge.rank("Person", "pagerank", undefined, false))
+    ...tableFromIPC(forge.rank("Person", "pagerank", { directed: false }))
       .getChild("score")
       .toArray(),
   ]);
   assert.equal(
-    tableFromIPC(forge.rank("Person", "pagerank", undefined, true, "page_rank"))
-      .numRows,
+    tableFromIPC(
+      forge.rank("Person", "pagerank", {
+        directed: true,
+        writeProperty: "page_rank",
+      }),
+    ).numRows,
     3,
   );
   assert.equal(
@@ -110,7 +120,9 @@ function checkBetweenness() {
       "(a)-[:KNOWS]->(d), (d)-[:KNOWS]->(c), (b)-[:KNOWS]->(b), " +
       "(a)-[:OTHER]->(c)",
   );
-  const table = tableFromIPC(forge.rank("Person", "betweenness", "KNOWS"));
+  const table = tableFromIPC(
+    forge.rank("Person", "betweenness", { via: "KNOWS" }),
+  );
   assert.deepEqual(
     table.schema.fields.map((field) => field.name),
     ["node_uuid", "score", "name"],
@@ -128,12 +140,12 @@ function checkBetweenness() {
   const scores = [...table.getChild("score").toArray()];
   assert.deepEqual(scores, [0, 1 / 9, 0, 1 / 18]);
   assert.deepEqual(scores, [
-    ...tableFromIPC(forge.rank("Person", "betweenness", "KNOWS"))
+    ...tableFromIPC(forge.rank("Person", "betweenness", { via: "KNOWS" }))
       .getChild("score")
       .toArray(),
   ]);
   assert.notDeepEqual(scores, [
-    ...tableFromIPC(forge.rank("Person", "betweenness", undefined, false))
+    ...tableFromIPC(forge.rank("Person", "betweenness", { directed: false }))
       .getChild("score")
       .toArray(),
   ]);
@@ -144,7 +156,10 @@ function checkBetweenness() {
   ]);
   assert.equal(
     tableFromIPC(
-      forge.rank("Person", "betweenness", undefined, true, "between"),
+      forge.rank("Person", "betweenness", {
+        directed: true,
+        writeProperty: "between",
+      }),
     ).numRows,
     4,
   );
@@ -170,7 +185,9 @@ function checkCloseness() {
       "(a)-[:KNOWS]->(b), (a)-[:KNOWS]->(b), (b)-[:KNOWS]->(c), " +
       "(b)-[:KNOWS]->(b), (a)-[:OTHER]->(c)",
   );
-  const table = tableFromIPC(forge.rank("Person", "closeness", "KNOWS"));
+  const table = tableFromIPC(
+    forge.rank("Person", "closeness", { via: "KNOWS" }),
+  );
   assert.deepEqual(
     table.schema.fields.map((field) => field.name),
     ["node_uuid", "score", "name"],
@@ -185,13 +202,15 @@ function checkCloseness() {
   const scores = [...table.getChild("score").toArray()];
   assert.deepEqual(scores, [4 / 9, 1 / 3, 0, 0]);
   assert.deepEqual(scores, [
-    ...tableFromIPC(forge.rank("Person", "closeness", "KNOWS"))
+    ...tableFromIPC(forge.rank("Person", "closeness", { via: "KNOWS" }))
       .getChild("score")
       .toArray(),
   ]);
   assert.deepEqual(
     [
-      ...tableFromIPC(forge.rank("Person", "closeness", "KNOWS", false))
+      ...tableFromIPC(
+        forge.rank("Person", "closeness", { via: "KNOWS", directed: false }),
+      )
         .getChild("score")
         .toArray(),
     ],
@@ -204,7 +223,10 @@ function checkCloseness() {
   ]);
   assert.equal(
     tableFromIPC(
-      forge.rank("Person", "closeness", undefined, true, "close_score"),
+      forge.rank("Person", "closeness", {
+        directed: true,
+        writeProperty: "close_score",
+      }),
     ).numRows,
     4,
   );
@@ -231,7 +253,7 @@ function checkHarmonicCloseness() {
       "(b)-[:KNOWS]->(b), (a)-[:OTHER]->(c)",
   );
   const table = tableFromIPC(
-    forge.rank("Person", "harmonic_closeness", "KNOWS"),
+    forge.rank("Person", "harmonic_closeness", { via: "KNOWS" }),
   );
   assert.deepEqual(
     table.schema.fields.map((field) => field.name),
@@ -250,14 +272,19 @@ function checkHarmonicCloseness() {
   const scores = [...table.getChild("score").toArray()];
   assert.deepEqual(scores, [0.5, 1 / 3, 0, 0]);
   assert.deepEqual(scores, [
-    ...tableFromIPC(forge.rank("Person", "harmonic_closeness", "KNOWS"))
+    ...tableFromIPC(
+      forge.rank("Person", "harmonic_closeness", { via: "KNOWS" }),
+    )
       .getChild("score")
       .toArray(),
   ]);
   assert.deepEqual(
     [
       ...tableFromIPC(
-        forge.rank("Person", "harmonic_closeness", "KNOWS", false),
+        forge.rank("Person", "harmonic_closeness", {
+          via: "KNOWS",
+          directed: false,
+        }),
       )
         .getChild("score")
         .toArray(),
@@ -271,7 +298,10 @@ function checkHarmonicCloseness() {
   ]);
   assert.equal(
     tableFromIPC(
-      forge.rank("Person", "harmonic_closeness", undefined, true, "harmonic"),
+      forge.rank("Person", "harmonic_closeness", {
+        directed: true,
+        writeProperty: "harmonic",
+      }),
     ).numRows,
     4,
   );

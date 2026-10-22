@@ -42,8 +42,8 @@ const nodeTable = tableFromArrays({
   risk_score: [0.4, 0.55],
 });
 source.publishBulkNodes(
-  "018f0f4e-7b8c-7000-8000-000000029911",
   Buffer.from(tableToIPC(nodeTable)),
+  "018f0f4e-7b8c-7000-8000-000000029911",
 );
 source.loadOntology(resolve(args.ontology));
 assert.equal(source.ontologyMode, "advisory");
@@ -77,8 +77,8 @@ try {
     approval_record_uuid: ["018f0f4e-7b8c-7000-8000-00000000a001"],
   });
   target.publishBulkNodes(
-    "018f0f4e-7b8c-7000-8000-000000029913",
     Buffer.from(tableToIPC(bad)),
+    "018f0f4e-7b8c-7000-8000-000000029913",
   );
   throw new Error("strict unmapped label must fail");
 } catch (error) {

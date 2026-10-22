@@ -58,6 +58,14 @@
     "access": "public",
     "registry": "https://registry.npmjs.org/"
   },
+  "peerDependencies": {
+    "apache-arrow": "^21.2.0"
+  },
+  "peerDependenciesMeta": {
+    "apache-arrow": {
+      "optional": true
+    }
+  },
   "devDependencies": {
     "@napi-rs/cli": "^3.10.8",
     "apache-arrow": "^21.2.0",

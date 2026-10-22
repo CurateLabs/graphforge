@@ -6,11 +6,15 @@ use crate::BigInt;
 use crate::Buffer;
 use crate::ClassInstance;
 use crate::EmbeddingInput;
+use crate::Env;
+use crate::FromNapiValue;
 use crate::GfError;
 use crate::GraphForge;
 use crate::InvocationDescriptor;
+use crate::JsValue;
 use crate::NodeSelector;
 use crate::NodeSelectorInput;
+use crate::Object;
 use crate::PathsOptions;
 use crate::Result;
 use crate::SimilarOptions;
@@ -25,6 +29,88 @@ use crate::record_batch_to_ipc;
 use crate::to_napi_err;
 use crate::to_napi_invocation_err;
 use crate::validate_embedding_options;
+
+const RANK_OPTION_KEYS: &[&str] = &[
+    "via",
+    "directed",
+    "writeProperty",
+    "damping",
+    "iterations",
+    "clusteringNormalization",
+];
+
+const CLUSTER_OPTION_KEYS: &[&str] = &[
+    "via",
+    "directed",
+    "writeProperty",
+    "vectorProperty",
+    "synchronousIterations",
+    "initialLabelProperty",
+];
+
+/// Convert an optional JS options object, refusing any key outside `accepted`.
+///
+/// `#[napi(object)]` conversion silently drops unknown keys, so a misspelled
+/// control (`{ iteratons: 0 }`) would run with defaults. Reject it before
+/// conversion, naming the key and listing the accepted ones.
+// SAFETY: `options` is a live N-API Object belonging to the injected Env;
+// `from_napi_value` fallibly converts it and failures become JS errors.
+#[allow(unsafe_code)]
+fn checked_options<T: FromNapiValue>(
+    env: Env,
+    options: Option<Object<'_>>,
+    method: &str,
+    accepted: &[&str],
+) -> Result<Option<T>> {
+    let Some(object) = options else {
+        return Ok(None);
+    };
+    let keys = Object::keys(&object)
+        .map_err(|error| crate::NodeError::new(error.status.as_ref().to_owned(), error.reason))?;
+    if let Some(unknown) = keys.iter().find(|key| !accepted.contains(&key.as_str())) {
+        return Err(to_napi_err(&GfError::Validation(format!(
+            "unknown {method} option {unknown:?}; accepted options: {}",
+            accepted.join(", ")
+        ))));
+    }
+    unsafe { T::from_napi_value(env.raw(), object.raw()) }
+        .map(Some)
+        .map_err(|error| crate::NodeError::new(error.status.as_ref().to_owned(), error.reason))
+}
+
+#[napi(object)]
+/// Optional rank controls. Existing defaults apply when a field is omitted.
+pub struct RankOptionsInput {
+    /// Relationship types constraining the traversal (`null` follows all).
+    pub via: Option<String>,
+    /// Treat relationships as directed (rank default `true`).
+    pub directed: Option<bool>,
+    /// Write scores back to this node property instead of returning only.
+    pub write_property: Option<String>,
+    /// PageRank damping factor.
+    pub damping: Option<f64>,
+    /// Fixed PageRank iteration count (including zero).
+    pub iterations: Option<f64>,
+    /// Clustering normalization: `fagiolo` or `neighbor_edges`.
+    pub clustering_normalization: Option<String>,
+}
+
+#[napi(object)]
+/// Optional cluster controls. Existing defaults apply when a field is omitted.
+pub struct ClusterOptionsInput {
+    /// Relationship types constraining the traversal (`null` follows all).
+    pub via: Option<String>,
+    /// Treat relationships as directed (cluster default `false`).
+    pub directed: Option<bool>,
+    /// Write labels back to this node property instead of returning only.
+    pub write_property: Option<String>,
+    /// Edge-vector property for vector-based clustering.
+    pub vector_property: Option<String>,
+    /// Fixed synchronous label-propagation rounds (including zero).
+    pub synchronous_iterations: Option<f64>,
+    /// Int64 property supplying initial labels for synchronous rounds.
+    pub initial_label_property: Option<String>,
+}
 
 #[napi(object)]
 /// Structured Graph Scale Index grade for one opened workspace.
@@ -222,34 +308,41 @@ pub(super) fn synchronous_label_propagation_options(
 
 #[napi]
 impl GraphForge {
-    #[allow(clippy::too_many_arguments)] // Append controls without shifting existing arguments.
     /// Rank nodes through the Rust registry. Returns an Arrow IPC `Buffer`.
-    #[napi]
+    ///
+    /// Optional controls go in one `options` object; existing defaults apply
+    /// when fields are omitted. Unknown option keys are refused.
+    #[napi(ts_args_type = "label: string, by: string, options?: RankOptionsInput | null")]
     pub fn rank(
         &self,
+        env: Env,
         label: String,
         by: String,
-        via: Option<String>,
-        directed: Option<bool>,
-        write_property: Option<String>,
-        damping: Option<f64>,
-        iterations: Option<f64>,
-        clustering_normalization: Option<String>,
+        options: Option<Object<'_>>,
     ) -> Result<Buffer> {
         let g = self.open_guard()?;
-        let options = graphforge_api::RankOptions {
+        let options = checked_options::<RankOptionsInput>(env, options, "rank", RANK_OPTION_KEYS)?;
+        let options = options.unwrap_or(RankOptionsInput {
+            via: None,
+            directed: None,
+            write_property: None,
+            damping: None,
+            iterations: None,
+            clustering_normalization: None,
+        });
+        let rank_options = graphforge_api::RankOptions {
             by: by.parse().map_err(|error| to_napi_err(&error))?,
-            via,
-            directed: directed.unwrap_or(true),
-            write_property,
+            via: options.via,
+            directed: options.directed.unwrap_or(true),
+            write_property: options.write_property,
 
-            pagerank: pagerank_options(damping, iterations)?,
+            pagerank: pagerank_options(options.damping, options.iterations)?,
             clustering_normalization: parse_clustering_normalization(
-                clustering_normalization.as_deref(),
+                options.clustering_normalization.as_deref(),
             )?,
         };
         let batch = g
-            .rank(&label, options)
+            .rank(&label, rank_options)
             .map_err(|error| to_napi_err(&error))?;
         Ok(Buffer::from(
             record_batch_to_ipc(&batch).map_err(|error| to_napi_err(&error))?,
@@ -462,35 +555,43 @@ impl GraphForge {
             .map_err(|error| to_napi_err(&error))
     }
 
-    #[allow(clippy::too_many_arguments)] // Append controls without shifting existing arguments.
     /// Detect communities/components. Returns an Arrow IPC `Buffer`.
-    #[napi]
+    ///
+    /// Optional controls go in one `options` object; existing defaults apply
+    /// when fields are omitted. Unknown option keys are refused.
+    #[napi(ts_args_type = "label: string, by: string, options?: ClusterOptionsInput | null")]
     pub fn cluster(
         &self,
+        env: Env,
         label: String,
         by: String,
-        via: Option<String>,
-        directed: Option<bool>,
-        write_property: Option<String>,
-        vector_property: Option<String>,
-        synchronous_iterations: Option<f64>,
-        initial_label_property: Option<String>,
+        options: Option<Object<'_>>,
     ) -> Result<Buffer> {
         let g = self.open_guard()?;
-        let options = graphforge_api::ClusterOptions {
+        let options =
+            checked_options::<ClusterOptionsInput>(env, options, "cluster", CLUSTER_OPTION_KEYS)?;
+        let options = options.unwrap_or(ClusterOptionsInput {
+            via: None,
+            directed: None,
+            write_property: None,
+            vector_property: None,
+            synchronous_iterations: None,
+            initial_label_property: None,
+        });
+        let cluster_options = graphforge_api::ClusterOptions {
             by: by.parse().map_err(|error| to_napi_err(&error))?,
-            vector_property,
-            via,
-            directed: directed.unwrap_or(false),
-            write_property,
+            vector_property: options.vector_property,
+            via: options.via,
+            directed: options.directed.unwrap_or(false),
+            write_property: options.write_property,
 
             synchronous_label_propagation: synchronous_label_propagation_options(
-                synchronous_iterations,
-                initial_label_property,
+                options.synchronous_iterations,
+                options.initial_label_property,
             )?,
         };
         let batch = g
-            .cluster(&label, options)
+            .cluster(&label, cluster_options)
             .map_err(|error| to_napi_err(&error))?;
         Ok(Buffer::from(
             record_batch_to_ipc(&batch).map_err(|error| to_napi_err(&error))?,

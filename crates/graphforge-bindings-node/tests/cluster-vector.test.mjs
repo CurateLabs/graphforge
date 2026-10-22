@@ -16,7 +16,10 @@ function checkHdbscanCluster() {
       "(:Point {name:'noise', features:[100.0]})",
   );
   const table = tableFromIPC(
-    forge.cluster("Point", "hdbscan", undefined, true, undefined, "features"),
+    forge.cluster("Point", "hdbscan", {
+      directed: true,
+      vectorProperty: "features",
+    }),
   );
   assert.deepEqual(
     table.schema.fields.map((field) => field.name),
@@ -34,7 +37,10 @@ function checkHdbscanCluster() {
     [0n, 0n, 0n, 0n, 0n, 1n, 1n, 1n, 1n, 1n, -1n],
   );
   const repeated = tableFromIPC(
-    forge.cluster("Point", "hdbscan", undefined, false, undefined, "features"),
+    forge.cluster("Point", "hdbscan", {
+      directed: false,
+      vectorProperty: "features",
+    }),
   );
   assert.deepEqual(
     [...repeated.getChild("node_uuid").toArray()],
@@ -61,14 +67,11 @@ function checkKMeansCluster() {
   forge.execute(`CREATE ${nodes}`);
   const cluster = (directed, writeProperty) =>
     tableFromIPC(
-      forge.cluster(
-        "Point",
-        "k_means",
-        undefined,
-        directed,
-        writeProperty,
-        "features",
-      ),
+      forge.cluster("Point", "k_means", {
+        directed: directed,
+        writeProperty: writeProperty,
+        vectorProperty: "features",
+      }),
     );
   const table = cluster(true, undefined);
   assert.deepEqual(
@@ -154,21 +157,21 @@ function checkKMeansCluster() {
   );
   assert.throws(
     () =>
-      forge.cluster("Point", "k_means", "KNOWS", false, undefined, "features"),
+      forge.cluster("Point", "k_means", {
+        via: "KNOWS",
+        directed: false,
+        vectorProperty: "features",
+      }),
     (error) => error.code === "ValidationError",
   );
   const small = new GraphForge();
   small.execute("CREATE (:Point {features:[0.0]}), (:Point {features:[1.0]})");
   assert.throws(
     () =>
-      small.cluster(
-        "Point",
-        "k_means",
-        undefined,
-        false,
-        undefined,
-        "features",
-      ),
+      small.cluster("Point", "k_means", {
+        directed: false,
+        vectorProperty: "features",
+      }),
     (error) => error.code === "ExecutionError",
   );
 }
@@ -185,13 +188,11 @@ function checkApproximateMaxCutCluster() {
   );
   const cluster = (directed, writeProperty) =>
     tableFromIPC(
-      forge.cluster(
-        "Person",
-        "approximate_max_k_cut",
-        "KNOWS",
-        directed,
-        writeProperty,
-      ),
+      forge.cluster("Person", "approximate_max_k_cut", {
+        via: "KNOWS",
+        directed: directed,
+        writeProperty: writeProperty,
+      }),
     );
   const table = cluster(true, undefined);
   assert.deepEqual(
@@ -270,14 +271,10 @@ function checkApproximateMaxCutCluster() {
 
   assert.throws(
     () =>
-      forge.cluster(
-        "Person",
-        "approximate_max_k_cut",
-        undefined,
-        false,
-        undefined,
-        "features",
-      ),
+      forge.cluster("Person", "approximate_max_k_cut", {
+        directed: false,
+        vectorProperty: "features",
+      }),
     (error) => error.code === "ValidationError",
   );
   const oversized = new GraphForge();

@@ -183,6 +183,7 @@ const PAGES = [
   'adr/0058-initial-builds-run-on-a-bulk-builder.md',
   'adr/0059-edge-properties-are-read-through-a-derived-shard-index.md',
   'adr/0060-query-memory-handoffs.md',
+  'adr/0062-project-and-ontology-identity.md',
   // END generated ADR records
   "releases/roadmap.md",
   "legal/licensing.md",

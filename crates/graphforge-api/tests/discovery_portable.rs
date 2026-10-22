@@ -77,7 +77,7 @@ fn digest(marker: char) -> Sha256Digest {
 }
 
 fn discovery(package_digest: String) -> (DiscoveryManifest, RefSet, RepositoryIdentity) {
-    let repository = RepositoryIdentity::parse("openalex/openalex").unwrap();
+    let repository = RepositoryIdentity::parse("opendata/openalex").unwrap();
     let immutable_version = digest('a');
     let manifest = DiscoveryManifest {
         format: DISCOVERY_FORMAT.into(),

@@ -30,13 +30,13 @@ npx @curatelabs/graphforge-cli skills remove
 npx @curatelabs/graphforge-cli config validate
 npx @curatelabs/graphforge-cli config resolve --json
 npx @curatelabs/graphforge-cli infra validate --target production --json
-npx @curatelabs/graphforge-cli clone openalex/openalex
-npx @curatelabs/graphforge-cli clone https://graphforge.sh/openalex/openalex openalex-copy
+npx @curatelabs/graphforge-cli clone opendata/openalex
+npx @curatelabs/graphforge-cli clone https://graphforge.sh/opendata/openalex openalex-copy
 npx @curatelabs/graphforge-cli hub list curate/claims
 npx @curatelabs/graphforge-cli clone curate/claims --ref feature/score claims-feature
-npx @curatelabs/graphforge-cli ontology module fetch openalex/openalex \
-  --ontology-id https://openalex.org/ontology/works --version 2026.01 \
-  --digest f1f475dfcf01bdfe7a578afb0203bac26831dc0b48f4cd009bdc418b506981b4 \
+npx @curatelabs/graphforge-cli ontology module fetch opendata/openalex \
+  --ontology-id https://graphforge.sh/ont_drqf2xw8w33cxaxj --version 2026.01 \
+  --digest 64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11 \
   --output works-ontology.json
 ```
 
@@ -88,7 +88,7 @@ select the bypass secret with `--protection-bypass-env PREVIEW_BYPASS_SECRET`:
 
 ```bash
 # Supply these variables through your shell or CI secret store.
-gf clone openalex/openalex --hub https://preview.example \
+gf clone opendata/openalex --hub https://preview.example \
   --token-env HUB_READ_TOKEN --protection-bypass-env PREVIEW_BYPASS_SECRET
 ```
 
@@ -270,11 +270,11 @@ the `graphforge-hub-module-fetch/1` receipt:
 ```json
 {
   "contract": "graphforge-hub-module-fetch/1",
-  "repository": "openalex/openalex",
+  "repository": "opendata/openalex",
   "module": {
-    "ontology_id": "https://openalex.org/ontology/works",
+    "ontology_id": "https://graphforge.sh/ont_drqf2xw8w33cxaxj",
     "authored_version": "2026.01",
-    "canonical_digest": "f1f475df...81b4"
+    "canonical_digest": "64cbfecf...3f11"
   },
   "package_digest": "sha256:8528501d...77b0",
   "module_sha256": "<SHA-256 hex of the written file>",

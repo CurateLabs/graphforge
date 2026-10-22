@@ -17,7 +17,7 @@ const recorded = readJson(
   "crates",
   "graphforge-protocol-wasm",
   "tests",
-  "openalex-commitment.json",
+  "opendata-openalex-commitment.json",
 );
 const manifest = readText(...fixtureDir, "manifest.json");
 const manifestObject = JSON.parse(manifest);
@@ -48,8 +48,8 @@ const body = {
     expected_revision: null,
   },
   rename: {
-    identity: { owner: "openalex", repository: "renamed" },
-    template: "https://control.example/openalex/renamed/sha256/{hex}",
+    identity: { owner: "opendata", repository: "renamed" },
+    template: "https://control.example/opendata/renamed/sha256/{hex}",
   },
 };
 

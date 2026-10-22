@@ -352,7 +352,7 @@ fn digest(c: char) -> String {
 
 fn base_manifest() -> Value {
     json!({
-        "format":"graphforge-discovery/1","version":{"major":1,"minor":0},"repository":{"owner":"openalex","repository":"openalex"},
+        "format":"graphforge-discovery/1","version":{"major":1,"minor":0},"repository":{"owner":"opendata","repository":"openalex"},
         "default_ref":"main","resolved_ref":"main","immutable_version":digest('a'),
         "package":{"format":"graphforge-project/2","package_digest":digest('b'),"producing_core_version":"0.6.0","object_digest":digest('c')},
         "requirements":[{"capability":"portable","major":1}],"capabilities":[{"capability":"range-requests","major":1}],
@@ -363,18 +363,18 @@ fn base_manifest() -> Value {
 
 fn base_refs() -> Value {
     json!({
-        "format":"graphforge-discovery/1","version":{"major":1,"minor":0},"repository":{"owner":"openalex","repository":"openalex"},
+        "format":"graphforge-discovery/1","version":{"major":1,"minor":0},"repository":{"owner":"opendata","repository":"openalex"},
         "default_ref":"main","refs":[{"name":"main","target":digest('a'),"validator":digest('d')}]
     })
 }
 
-const MODULE_ID: &str = "https://openalex.org/ontology/works";
-const BRIDGE_ID: &str = "https://openalex.org/bridge/works-authors";
+const MODULE_ID: &str = "https://graphforge.sh/ont_drqf2xw8w33cxaxj";
+const BRIDGE_ID: &str = "https://graphforge.sh/brg_n6snj7dqz2zqkp8t";
 
 fn base_summary() -> Value {
     json!({
         "format":"graphforge-project-summary/1","version":{"major":1,"minor":2},
-        "repository":{"owner":"openalex","repository":"openalex"},
+        "repository":{"owner":"opendata","repository":"openalex"},
         "immutable_version":digest('a'),
         "package":{"format":"graphforge-project/2","package_digest":digest('b'),"producing_core_version":"0.6.0","package_class":"complete"},
         "requirements":[{"capability":"project-summary","major":1}],"capabilities":[],
@@ -429,7 +429,7 @@ const LINEAGE_PROPOSAL: &str = "01900000-0000-7000-8000-000000000030";
 fn base_lineage() -> Value {
     json!({
         "boundary_anchors":[],"format":"graphforge-research-lineage/2","version":{"major":1,"minor":2},
-        "repository":{"owner":"openalex","repository":"openalex-fork"},
+        "repository":{"owner":"opendata","repository":"openalex-fork"},
         "immutable_version":digest('a'),
         "project_uuid":LINEAGE_PROJECT,
         "requirements":[{"capability":"research-lineage","major":2}],"capabilities":[],
@@ -462,7 +462,7 @@ fn lineage_digest(lineage: &Value) -> String {
 fn refs_with_research_branches() -> Value {
     json!({
         "format":"graphforge-discovery/1","version":{"major":1,"minor":0},
-        "repository":{"owner":"openalex","repository":"openalex-fork"},
+        "repository":{"owner":"opendata","repository":"openalex-fork"},
         "default_ref":"main",
         "refs":[
             {"name":"feature/claims","target":digest('a'),"validator":digest('b')},
@@ -474,7 +474,7 @@ fn refs_with_research_branches() -> Value {
 fn manifest_with_research_lineage() -> Value {
     let lineage = base_lineage();
     let mut v = base_manifest();
-    v["repository"] = json!({"owner":"openalex","repository":"openalex-fork"});
+    v["repository"] = json!({"owner":"opendata","repository":"openalex-fork"});
     v["objects"] = json!([
         {"digest":digest('0'),"length":42,"media_type":"application/vnd.graphforge.project","locations":["https://data.graphforge.sh/objects/0"]},
         {"digest":digest('5'),"length":2048,"media_type":"application/vnd.graphforge.project","locations":["https://data.graphforge.sh/objects/5"]},
@@ -689,7 +689,7 @@ fn corpus() -> Corpus {
             Document::Manifest,
             "invalid_identity",
             Some("repository"),
-            |v| v["repository"]["owner"] = json!("OpenAlex"),
+            |v| v["repository"]["owner"] = json!("OpenData"),
         ),
         (
             "invalid-digest",
