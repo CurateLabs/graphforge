@@ -370,6 +370,55 @@ that removal or its directory synchronization succeeded. Re-exporting the same p
 selection is deterministic; host paths, runtime catalog IDs, session state, and
 machine configuration cannot enter the semantic package identity.
 
+## Data from another Core version
+
+Before v1.0.0, data is only guaranteed to work with the GraphForge Core version
+that wrote it. GraphForge detects a different version and warns; it does not
+refuse on that alone, and it does not convert the data. Unreadable data still
+fails with `GF_UNSUPPORTED_PROJECT_FORMAT` before anything changes.
+
+The check runs when you open a durable project, import a package, and clone a
+Hub Version. "Same version" means the exact version string. A durable project
+records the Core version of its last write, so reopening it with another Core
+and then writing replaces the stamp. Projects written before the stamp existed
+carry none and never warn.
+
+On a mismatch the warning has the stable code `GF_CORE_VERSION_MISMATCH` and
+names both versions:
+
+```text
+warning GF_CORE_VERSION_MISMATCH: data was produced by GraphForge Core 0.6.0, but
+this is Core 0.7.0; it may not read correctly. Use a matching runtime: ...
+```
+
+Where it appears:
+
+- **CLI:** on standard error, as the line above, or as one `{"warning": {...}}`
+  JSON line with `--json`. `gf import` and `gf clone` also list it under
+  `warnings` in their `--json` result. `gf clone` prints it before it downloads
+  any graph object, so you can stop with Ctrl-C.
+- **Python:** `GraphForge(path).open_warnings`, and `warnings` in the result of
+  `GraphForge.import_portable`. Each warning is a dict with `code`,
+  `producing_core_version`, `running_core_version` and `message`.
+- **Node:** `forge.openWarnings`, and `warnings` on the result of
+  `GraphForge.importPortable`, with `producingCoreVersion` and
+  `runningCoreVersion`.
+- **Rust:** `GraphForge::open_warnings()` and `PortableImportResult::warnings`.
+
+A matching version gives no warning, and `warnings` is empty.
+
+To get a matching runtime, install the version the warning names:
+
+```bash
+python -m pip install "graphforge==0.6.0"         # Python
+npm install @curatelabs/graphforge@0.6.0 apache-arrow   # Node
+npx @curatelabs/graphforge-cli@0.6.0 --help        # CLI
+```
+
+Use `--pre` or `@next` only when the named version is a pre-release you
+installed that way. Keep the original source data and construction code, so you
+can rebuild with the current version if the matching one is not available.
+
 ## Clone from a Hub
 
 `gf clone OWNER/REPOSITORY [DESTINATION]` downloads a published package,

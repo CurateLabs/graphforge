@@ -389,6 +389,9 @@ pub use graphforge_core::algorithms::{
     Algorithm, AlgorithmField, AlgorithmFieldType, AlgorithmResultSchema, AlgorithmVerb,
     AnalyzeAlgorithm, ClusterAlgorithm, PathAlgorithm, RankAlgorithm, SimilarAlgorithm,
 };
+pub use graphforge_core::core_version::{
+    CORE_VERSION_MISMATCH_CODE, CoreVersionWarning, check_core_version,
+};
 pub use graphforge_core::embedding_options::{
     EmbeddingAnalyzeOptions, EmbeddingOptions, FastRpOptions, GraphSageAggregator,
     GraphSageOptions, HashGnnOptions, Node2VecOptions,
@@ -646,6 +649,17 @@ pub use search_index::SearchIndexOptions;
 // GraphForge
 // ---------------------------------------------------------------------------
 
+/// The Core version warnings for a generation: the one place a resolved
+/// generation's producing version is compared with the running Core, shared by
+/// opening a project and previewing a revert.
+pub(crate) fn core_version_warnings(
+    generation: &ResolvedProjectGeneration,
+) -> Vec<CoreVersionWarning> {
+    check_core_version(generation.producing_core_version())
+        .into_iter()
+        .collect()
+}
+
 /// The GraphForge engine — the public entry point for openCypher execution.
 ///
 /// Built with [`new`](Self::new) (in-memory or Parquet-backed), then queried via
@@ -818,6 +832,17 @@ impl GraphForge {
     /// Capture closed, identity-free storage evidence for ordinary consumers.
     pub fn storage_attribution_receipt(&self) -> Result<StorageAttributionReceipt, GfError> {
         graphforge_storage::storage_attribution_receipt_from_snapshot(&self.storage_attribution()?)
+    }
+
+    /// Warnings raised by opening this project: one when the generation it
+    /// opened was written by a different Core version.
+    ///
+    /// The facade pins one generation at open, so this is the open-time result.
+    /// A generation written before the stamp existed, and one written by the
+    /// running Core, give none. Opening never refuses on a mismatch alone.
+    #[must_use]
+    pub fn open_warnings(&self) -> Vec<CoreVersionWarning> {
+        core_version_warnings(&self.resolved_generation)
     }
 
     /// Create a new in-memory (`None`) or Parquet-backed (`Some(path)`) instance.

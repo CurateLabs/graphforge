@@ -298,6 +298,7 @@ fn import_result_json(result: &graphforge_api::PortableImportResult) -> serde_js
         "transport_digest": result.transport_digest,
         "generation_uuid": result.generation_uuid.to_string(),
         "idempotent_replay": result.idempotent_replay,
+        "warnings": result.warnings,
     })
 }
 

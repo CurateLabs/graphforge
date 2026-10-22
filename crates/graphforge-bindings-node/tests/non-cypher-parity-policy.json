@@ -1,8 +1,8 @@
 {
   "contractVersion": 1,
   "rustManifest": "../../../tests/contracts/non-cypher-rust-surface.json",
-  "releaseSurfaceCount": 356,
-  "releaseSurfaceDigest": "6aaea1fb842909a607554ddf9241bc76ae6f5be2a4aa8a924c9a6dfa228eaf61",
+  "releaseSurfaceCount": 357,
+  "releaseSurfaceDigest": "f6d38f2a05020d48c2f889016218a1d502d55aaa9e546a5700a723a5427e193e",
   "requiredEquivalent": [
     "GraphForge.adopt_ontology",
     "GraphForge.clear_ontology",
@@ -48,7 +48,8 @@
     "research-upstream": "researchUpstream",
     "research-interchange": "researchInterchange",
     "external-decision-results": "decisionResults",
-    "saved-queries": "savedQueries"
+    "saved-queries": "savedQueries",
+    "core-version-warning": "coreVersionWarning"
   },
   "classification": {
     "equivalent": [
@@ -275,7 +276,8 @@
       "GraphForge.update_saved_query",
       "GraphForge.delete_saved_query",
       "GraphForge.saved_query",
-      "GraphForge.saved_queries"
+      "GraphForge.saved_queries",
+      "GraphForge.open_warnings"
     ],
     "languageSpecific": {
       "DecisionBatchV1.validate": {
@@ -780,6 +782,15 @@
       "saved-queries.test.mjs": [
         "saved query CRUD, parameter validation and historical aggregates survive reopen",
         "JSON numbers follow the pinned saved parameter declaration"
+      ]
+    },
+    "coreVersionWarning": {
+      "core-version-warning.test.mjs": [
+        "opening another Core's data warns naming both versions",
+        "opening data from the running Core does not warn",
+        "opening a generation without a stamp does not warn",
+        "importing another Core's package warns and imports",
+        "importing the running Core's package does not warn"
       ]
     }
   }

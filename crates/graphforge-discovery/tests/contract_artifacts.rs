@@ -245,6 +245,11 @@ const COMPONENT_KINDS: [&str; 10] = [
 ];
 
 fn summary_schema() -> Value {
+    let byte_kinds: Vec<&str> = COMPONENT_KINDS
+        .iter()
+        .copied()
+        .chain(["package-control"])
+        .collect();
     schema(
         "summary",
         &[
@@ -307,12 +312,13 @@ fn summary_schema() -> Value {
                 "name":{"$ref":"#/$defs/credit_name"},"email":{"$ref":"#/$defs/credit_email"},"orcid":{"$ref":"#/$defs/credit_orcid"},
                 "roles":{"enum":[["author"],["committer"],["author","committer"]]}}}));
             map.insert("facts".into(), json!({"type":"object","additionalProperties":false,
-                "required":["ontology_mode","components","research_present","evidence_present","payload_bytes","ontology_composition"],
+                "required":["ontology_mode","components","research_present","evidence_present","payload_bytes","bytes_by_kind","ontology_composition"],
                 "properties":{
                     "ontology_mode":{"enum":["none","advisory","strict"]},
                     "components":{"type":"object","propertyNames":{"enum":COMPONENT_KINDS},"additionalProperties":{"type":"integer","minimum":1}},
                     "research_present":{"type":"boolean"},"evidence_present":{"type":"boolean"},
                     "payload_bytes":{"type":"integer","minimum":0},
+                    "bytes_by_kind":{"type":"object","propertyNames":{"enum":byte_kinds},"additionalProperties":{"type":"integer","minimum":0}},
                     "ontology_composition":{"anyOf":[{"type":"object","additionalProperties":false,"required":["composition_digest","modules","bridge_sets"],"properties":{
                         "composition_digest":{"$ref":"#/$defs/digest"},
                         "modules":{"type":"array","maxItems":4096,"items":{"type":"object","additionalProperties":false,"required":["id","version","content_digest","dialect","profile"],"properties":{"id":{"$ref":"#/$defs/identity_text"},"version":{"$ref":"#/$defs/identity_text"},"content_digest":{"$ref":"#/$defs/digest"},"dialect":{"$ref":"#/$defs/identity_text"},"profile":{"$ref":"#/$defs/identity_text"}}}},
@@ -388,6 +394,7 @@ fn base_summary() -> Value {
             "ontology_mode":"advisory",
             "components":{"ontology":1,"research":1,"settings":2},
             "research_present":true,"evidence_present":false,"payload_bytes":4096,
+            "bytes_by_kind":{"ontology":1024,"package-control":2048,"research":512,"settings":512},
             "ontology_composition":{
                 "composition_digest":digest('e'),
                 "modules":[{"id":MODULE_ID,"version":"2026.01","content_digest":digest('f'),"dialect":"graphforge-ontology","profile":"advisory"}],
@@ -1333,6 +1340,48 @@ fn summary_cases() -> Vec<Case> {
             "malformed_response",
             Some("facts.components"),
             |v| v["facts"]["components"]["schema"] = json!(0),
+        ),
+        (
+            "summary-byte-totals-omit-a-component-kind",
+            Document::Summary,
+            "malformed_response",
+            Some("facts.bytes_by_kind"),
+            |v| {
+                // The omitted kind's bytes move to package control, so the
+                // totals still sum to the payload.
+                v["facts"]["bytes_by_kind"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("research");
+                v["facts"]["bytes_by_kind"]["package-control"] = json!(2560);
+            },
+        ),
+        (
+            "summary-byte-totals-outside-the-component-histogram",
+            Document::Summary,
+            "malformed_response",
+            Some("facts.bytes_by_kind"),
+            |v| {
+                v["facts"]["bytes_by_kind"]["migration"] = json!(16);
+                v["facts"]["bytes_by_kind"]["package-control"] = json!(2032);
+            },
+        ),
+        (
+            "summary-byte-totals-do-not-sum-to-the-payload",
+            Document::Summary,
+            "malformed_response",
+            Some("facts.bytes_by_kind"),
+            |v| v["facts"]["bytes_by_kind"]["ontology"] = json!(1023),
+        ),
+        (
+            "summary-byte-totals-unknown-kind",
+            Document::Summary,
+            "malformed_response",
+            Some("facts.bytes_by_kind"),
+            |v| {
+                v["facts"]["bytes_by_kind"]["mystery"] = json!(16);
+                v["facts"]["bytes_by_kind"]["package-control"] = json!(2032);
+            },
         ),
         (
             "summary-unknown-ontology-mode",

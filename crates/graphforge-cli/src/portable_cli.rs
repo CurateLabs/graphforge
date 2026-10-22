@@ -849,6 +849,7 @@ mod lifecycle_storage_tests {
 
     fn import_result() -> graphforge_api::PortableImportResult {
         graphforge_api::PortableImportResult {
+            warnings: Vec::new(),
             package_digest: format!("sha256:{}", "0".repeat(64)),
             transport_digest: Some(format!("sha256:{}", "1".repeat(64))),
             generation_uuid: Uuid::nil(),
@@ -971,6 +972,7 @@ pub(crate) fn run_import(
     args: PortableImportArgs,
     json: bool,
     output: &mut dyn Write,
+    diagnostics: &mut crate::Diagnostics<'_>,
     allocation: Option<&graphforge_api::StorageAllocationDiagnostics>,
 ) -> Result<(), crate::CliRuntimeError> {
     let request = PortableImportRequest {
@@ -984,6 +986,7 @@ pub(crate) fn run_import(
     }
     .map_err(map_portable)?;
     let transient_peak_allocated_bytes = import_transient_peak(&result)?;
+    diagnostics.warn(&result.warnings);
     if json {
         write_json(
             &serde_json::json!({
@@ -993,6 +996,7 @@ pub(crate) fn run_import(
                 "transport_digest": result.transport_digest,
                 "generation_uuid": result.generation_uuid,
                 "idempotent_replay": result.idempotent_replay,
+                "warnings": result.warnings,
                 "transient_peak_allocated_bytes": transient_peak_allocated_bytes,
             }),
             output,

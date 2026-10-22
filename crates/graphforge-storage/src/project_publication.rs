@@ -1947,6 +1947,7 @@ fn make_generation_durable(staged: &StagedProjectGeneration) -> Result<[u8; 32],
             })
             .collect(),
         participants: staged.participants.clone(),
+        producing_core_version: Some(graphforge_core::manifest::GRAPHFORGE_VERSION.to_owned()),
     };
     let manifest_bytes = canonical_line(&manifest)?;
     let manifest_path = staged.generation_root.join(MANIFEST_FILE);
