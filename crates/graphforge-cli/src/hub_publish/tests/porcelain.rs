@@ -816,6 +816,30 @@ fn publication_records_only_what_the_receipt_confirmed() {
 }
 
 #[test]
+fn an_interrupted_publication_is_recorded_when_it_is_replayed() {
+    let hub = LoopbackHub::start();
+    let root = tempfile::tempdir().unwrap();
+    let alice = seeded(root.path(), "alice");
+    ok(&hub, &alice, &["branch", "main", "--author", ALICE]);
+    // The Hub committed the publication, but the process died before recording it.
+    let graph = GraphForge::new(alice.to_str()).unwrap();
+    publish_ok(&hub, &graph, &on_ref("curate/claims", "main"))
+        .result
+        .unwrap();
+    drop(graph);
+    assert!(
+        ok(&hub, &alice, &["status"])
+            .get("upstream")
+            .is_none_or(Value::is_null)
+    );
+    // Rerunning the command replays the committed operation and records it.
+    ok(&hub, &alice, &["push", REPOSITORY]);
+    let status = ok(&hub, &alice, &["status"]);
+    assert_eq!(status["upstream"]["ref"], "main");
+    assert_eq!(status["ahead"], 0);
+}
+
+#[test]
 fn a_clone_selects_its_branch_for_the_verbs() {
     let hub = LoopbackHub::start();
     let root = tempfile::tempdir().unwrap();

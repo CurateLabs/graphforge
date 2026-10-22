@@ -360,7 +360,7 @@ pub(crate) fn publish_with_credentials(
         resolution: Some(resolution),
     };
     let outcome = publish(transport, graph, args, &mut environment)?;
-    record_upstream(graph, &outcome)?;
+    record_upstream(graph, transport, args, &outcome)?;
     write_outcome(&outcome, json, output)
 }
 
@@ -368,25 +368,71 @@ pub(crate) fn publish_with_credentials(
 /// the remote citation clone and fetch maintain records the published head. A
 /// refused or failed publication never reaches this, and a citation the Project
 /// already holds is left alone, so repeating a completed publication writes nothing.
-fn record_upstream(graph: &mut GraphForge, outcome: &PublishOutcome) -> Result<(), GfError> {
-    let Some(PublishedHead {
-        branch_uuid,
-        repository_url,
-        documents: Some((manifest, lineage)),
-    }) = &outcome.published
-    else {
+///
+/// A replayed publication carries no documents (the replay derives none). When the
+/// Project has no citation yet, which is the case after an interrupted first run,
+/// the served documents are read and used if they still are the ones the receipt
+/// commits to; a repository that cannot be read or has moved on records nothing.
+fn record_upstream(
+    graph: &mut GraphForge,
+    transport: &dyn Transport,
+    args: &PublishArgs,
+    outcome: &PublishOutcome,
+) -> Result<(), GfError> {
+    let Some(head) = &outcome.published else {
         return Ok(());
+    };
+    let documents = match &head.documents {
+        Some(documents) => documents.clone(),
+        None if outcome.replayed => {
+            let tracked = graph
+                .research_version_retention()?
+                .remote_branches
+                .values()
+                .any(|citation| {
+                    citation.branch_uuid == head.branch_uuid
+                        && citation.repository_url == head.repository_url
+                });
+            if tracked {
+                return Ok(());
+            }
+            let served = crate::hub_clone::remote_read::read_remote(
+                transport,
+                &crate::hub_clone::remote_read::RemoteRequest {
+                    repository: &head.repository_url,
+                    hub: None,
+                    token_env: None,
+                    protection_bypass_env: args.protection_bypass_env.as_deref(),
+                },
+                None,
+            );
+            let Ok((served, _)) = served else {
+                return Ok(());
+            };
+            let Some(documents) = PublishedHead {
+                branch_uuid: head.branch_uuid,
+                repository_url: head.repository_url.clone(),
+                documents: None,
+            }
+            .confirmed_by(&outcome.receipt, &served.manifest, &served.lineage)
+            .documents
+            else {
+                return Ok(());
+            };
+            documents
+        }
+        None => return Ok(()),
     };
     graph
         .record_research_publication(
             &graphforge_api::RecordResearchPublicationRequest {
                 operation_uuid: Uuid::now_v7(),
                 expected_generation_uuid: graph.committed_generation_identity()?.generation_uuid,
-                branch_uuid: *branch_uuid,
-                repository_url: repository_url.clone(),
+                branch_uuid: head.branch_uuid,
+                repository_url: head.repository_url.clone(),
                 receipt: outcome.receipt.clone(),
-                manifest: manifest.clone(),
-                lineage: lineage.clone(),
+                manifest: documents.0,
+                lineage: documents.1,
             },
             &CancellationToken::new(),
         )
@@ -2078,14 +2124,6 @@ pub(crate) fn publish(
                         environment.notices,
                     )?;
                 }
-                // The documents the receipt committed to, while the repository still
-                // serves them; a repository that moved on records nothing here.
-                let confirmed = match (confirmed, read_current()?) {
-                    (Some(head), Some(current)) => {
-                        Some(head.confirmed_by(&receipt, &current.manifest, &current.lineage))
-                    }
-                    (head, _) => head,
-                };
                 return Ok(PublishOutcome {
                     receipt,
                     replayed: true,

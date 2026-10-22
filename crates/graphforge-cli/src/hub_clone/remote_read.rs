@@ -31,6 +31,7 @@ pub(crate) struct RemoteRepository {
     pub(crate) refs_bytes: Vec<u8>,
     pub(crate) manifest_bytes: Vec<u8>,
     pub(crate) lineage_bytes: Vec<u8>,
+    pub(crate) manifest: DiscoveryManifest,
     pub(crate) lineage: ResearchLineage,
     pub(crate) limits: DiscoveryLimits,
 }
@@ -106,6 +107,7 @@ pub(crate) fn read_remote(
             refs_bytes,
             manifest_bytes,
             lineage_bytes,
+            manifest,
             lineage,
             limits,
         },
