@@ -86,6 +86,25 @@ test("the Node classification is total, frozen, and backed by non-skipped native
       `stale language-specific classification: ${id}`,
     );
   }
+  for (const [id, reason] of Object.entries(policy.classification.notExposed)) {
+    assert.ok(release.includes(id), `stale not-exposed classification: ${id}`);
+    assert.equal(equivalent.has(id), false, `duplicate classification: ${id}`);
+    assert.equal(
+      languageSpecific.has(id),
+      false,
+      `duplicate classification: ${id}`,
+    );
+    assert.ok(reason, `missing native-only rationale: ${id}`);
+    const [receiver, method] = id.split(".");
+    assert.equal(
+      Object.getOwnPropertyDescriptor(
+        receivers[receiver].prototype,
+        camelCase(method),
+      ),
+      undefined,
+      `unexpected shipped Node member for ${id}`,
+    );
+  }
 
   const counts = { equivalent: 0, languageSpecific: 0, notExposed: 0 };
   for (const id of release) {
@@ -112,7 +131,8 @@ test("the Node classification is total, frozen, and backed by non-skipped native
       continue;
     }
     assert.ok(
-      policy.classification.notExposedDefaults[receiver],
+      policy.classification.notExposed[id] ||
+        policy.classification.notExposedDefaults[receiver],
       `unclassified Rust release entry: ${id}`,
     );
     counts.notExposed += 1;

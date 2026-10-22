@@ -285,6 +285,21 @@ fn matching_composition_inspection_preserves_replay_and_staging() {
     let default_temp = root.join("unavailable-default-temp");
     tempfile::env::override_temp_dir(&default_temp).unwrap();
     assert!(graph.open_research_version(version).is_err());
+    let before = std::fs::read_dir(&stage).unwrap().count();
+    let current_composition = graph
+        .portable_ontology_composition(PortableLimits::default())
+        .unwrap()
+        .expect("the current generation contains the adopted module");
+    let retained_composition = graph
+        .research_version_portable_ontology_composition(version, PortableLimits::default())
+        .unwrap()
+        .expect("the retained Version contains the adopted module");
+    assert_eq!(current_composition, retained_composition);
+    assert_eq!(
+        std::fs::read_dir(&stage).unwrap().count(),
+        before,
+        "composition inspection must not allocate historical staging"
+    );
     let replay = run_publish_with(
         &hub,
         &graph,

@@ -1,8 +1,8 @@
 {
   "contractVersion": 1,
   "rustManifest": "../../../tests/contracts/non-cypher-rust-surface.json",
-  "releaseSurfaceCount": 357,
-  "releaseSurfaceDigest": "f6d38f2a05020d48c2f889016218a1d502d55aaa9e546a5700a723a5427e193e",
+  "releaseSurfaceCount": 359,
+  "releaseSurfaceDigest": "4b25765db6b59d2efa30c9647ae7b8f00577543a65ccb6b80057fec6e59a52ae",
   "requiredEquivalent": [
     "GraphForge.adopt_ontology",
     "GraphForge.clear_ontology",
@@ -509,6 +509,10 @@
       "GraphForge.queryResearchBranch": "Explicit Branch UUID adapter for the native immutable Branch view.",
       "GraphForge.researchBranchFields": "Explicit Branch UUID adapter for the native immutable Branch view.",
       "GraphForge.researchBranchReferences": "Explicit Branch UUID adapter for the native immutable Branch view."
+    },
+    "notExposed": {
+      "GraphForge.portable_ontology_composition": "Bounded ontology composition inspection is owned by native CLI publication admission; no Node product adapter is shipped.",
+      "GraphForge.research_version_portable_ontology_composition": "Bounded ontology composition inspection is owned by native CLI publication admission; no Node product adapter is shipped."
     },
     "notExposedDefaults": {
       "crate": "Rust discovery/repack orchestration remains a CLI/facade workflow; existing Node portable operations use their explicit adapters.",
