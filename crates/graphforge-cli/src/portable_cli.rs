@@ -318,18 +318,20 @@ pub(crate) fn run_portable_without_graph(
             .into())
         }
         PortableCommand::Verify(args) => {
+            let stdin = args.input.as_deref() == Some(std::path::Path::new(STDIN_INPUT));
+            // A stream is read once, so only the full verification applies.
+            if (stdin || args.url.is_some()) && !matches!(args.mode, VerifyMode::Full) {
+                return Err(graphforge_api::GfError::Validation(
+                    "--url and --input - verify a stream and require --mode full".into(),
+                )
+                .into());
+            }
             let report = if let Some(url) = args.url {
                 let url = url::Url::parse(&url)
                     .map_err(|_| graphforge_api::GfError::Validation("invalid URL".into()))?;
                 let transport = HttpTransport::new();
                 verify_portable_url(&transport, url)?
-            } else if args.input.as_deref() == Some(std::path::Path::new(STDIN_INPUT)) {
-                if !matches!(args.mode, VerifyMode::Full) {
-                    return Err(graphforge_api::GfError::Validation(
-                        "--input - verifies a stream and requires --mode full".into(),
-                    )
-                    .into());
-                }
+            } else if stdin {
                 verify_portable_stdin(&mut std::io::stdin().lock())?
             } else {
                 verify_portable(

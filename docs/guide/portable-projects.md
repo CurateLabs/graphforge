@@ -316,7 +316,11 @@ ranged request bound to the original ETag; an object change is rejected.
 The manual container build is `docker build -f containers/portable-verify/Dockerfile -t graphforge-portable-verify .`.
 Run it with `docker run --rm -e GF_VERIFY_URL="$OBJECT_URL" --memory=1g --storage-opt size=2g graphforge-portable-verify`.
 The object URL is a capability, so provide a short lived presigned URL and
-avoid logging it. The container needs up to 2 GiB disk and 1 GiB memory.
+avoid logging it. Verification streams the package, so memory stays bounded,
+but it stages on disk the largest single research Version (its retained files)
+and any graph Parquet entry above the page-walk threshold. Size the container's
+disk to hold the largest of those; a graph package without research history
+needs only that one entry.
 
 With `--json`, a verified package prints exactly one JSON document on stdout:
 the report, including `package_digest`, the component inventory,
