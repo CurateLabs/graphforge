@@ -196,7 +196,10 @@ fn check_version(
                 graphforge_core::GfError::Validation("research object is missing".into())
             })
     };
-    let core = portable::core_objects_admitted(version, length_of, |digest, bound| {
+    // A reader's I/O failure is a storage fault, not the package's; the closure
+    // records it and a failed admission returns it instead of `invalid()`.
+    let mut io_failure: Option<PortableError> = None;
+    let mut read_control = |digest: &str, bound: u64| -> Result<Vec<u8>, graphforge_core::GfError> {
         super::check_cancel(cancelled).map_err(|_| {
             graphforge_core::GfError::Validation("research verification cancelled".into())
         })?;
@@ -212,9 +215,20 @@ fn check_version(
             &object_path(id, digest, false),
             bound.min(limits.max_entry_bytes),
         )
-        .map_err(|_| graphforge_core::GfError::Validation("research object unavailable".into()))
-    })
-    .map_err(|_| super::check_cancel(cancelled).err().unwrap_or_else(invalid))?;
+        .map_err(|error| {
+            if error.code == PortableErrorCode::Io {
+                io_failure = Some(error);
+            }
+            graphforge_core::GfError::Validation("research object unavailable".into())
+        })
+    };
+    let core = portable::core_objects_admitted(version, length_of, &mut read_control)
+        .map_err(|_| {
+            super::check_cancel(cancelled)
+                .err()
+                .or_else(|| io_failure.take())
+                .unwrap_or_else(invalid)
+        })?;
     let evidence = portable::local_evidence(version).map_err(|_| invalid())?;
     let mut required: BTreeMap<&String, Option<u64>> = core.iter().map(|(d, l)| (d, *l)).collect();
     for (digest, length) in &evidence {

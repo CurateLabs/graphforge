@@ -128,9 +128,21 @@ pub(crate) fn validate_version(
         version,
         target.path(),
     )
-    .map_err(|_| invalid())?;
-    validator(&generation, version, registry).map_err(|_| invalid())?;
+    .map_err(classify_native_failure)?;
+    validator(&generation, version, registry).map_err(classify_native_failure)?;
     check_cancel(cancelled)
+}
+
+/// A native-owner failure over the package's content is the archive's
+/// incompatibility; a storage failure keeps the storage class (`Io`).
+fn classify_native_failure(error: graphforge_core::GfError) -> PortableError {
+    match error {
+        graphforge_core::GfError::Storage(_) => PortableError::new(
+            PortableErrorCode::Io,
+            "research validation cannot read its storage",
+        ),
+        _ => invalid(),
+    }
 }
 
 fn private_directory_in(parent: &Path) -> Result<tempfile::TempDir, PortableError> {

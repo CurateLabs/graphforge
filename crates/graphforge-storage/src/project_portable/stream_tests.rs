@@ -140,6 +140,44 @@ fn tar_header_and_payload_read_errors_keep_their_source_classification() {
     }
 }
 
+/// The bundle preflight opens its file itself, so its bounded payload and
+/// padding reads are testable only through the `impl Read` helpers it feeds
+/// its source to. A read failure there is `Io` unless it is the end of the
+/// input, which stays the package's truncation verdict.
+#[test]
+fn the_bundle_preflights_bounded_reads_classify_io_and_truncation() {
+    for (name, kind, expected) in [
+        (
+            "injected I/O",
+            Some(std::io::ErrorKind::Other),
+            PortableErrorCode::Io,
+        ),
+        (
+            "end of input",
+            None,
+            PortableErrorCode::InvalidStructure,
+        ),
+    ] {
+        let payload = vec![7u8; 1024];
+        let mut reader = FailsAt {
+            bytes: Cursor::new(payload.clone()),
+            offset: 8,
+            kind,
+        };
+        let error = read_unhashed_payload(&mut reader, payload.len() as u64, usize::MAX)
+            .unwrap_err();
+        assert_eq!(error.code, expected, "{name}");
+        // Padding of a 600-byte entry: 424 bytes, so the fault lands mid-padding.
+        let mut reader = FailsAt {
+            bytes: Cursor::new(vec![0u8; 512]),
+            offset: 8,
+            kind,
+        };
+        let error = skip_padding(&mut reader, 600).unwrap_err();
+        assert_eq!(error.code, expected, "{name}");
+    }
+}
+
 /// Cut `bytes` mid-header, mid-payload, mid-padding, after the first end block
 /// and before the end blocks: file and stream refuse every cut alike.
 pub(crate) fn assert_truncations_alike(bytes: &[u8]) {
