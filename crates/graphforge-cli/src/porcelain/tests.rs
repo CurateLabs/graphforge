@@ -1,6 +1,6 @@
 //! Argument mapping of the porcelain verbs onto native requests; the end-to-end
 //! behaviour is proved by the walkthrough in `hub_publish::tests::porcelain`.
-use super::local::commit_request;
+use super::local::{commit_intent, commit_request};
 use super::remote::push_args;
 use super::*;
 use clap::Parser as _;
@@ -119,7 +119,36 @@ fn commit_builds_an_execute_request_on_the_resolved_branch() {
         request.query.clone(),
     );
     assert_eq!(again, request);
-    assert_eq!(request.version_uuid, derived_uuid(operation, "version"));
+    // The Version's identity is bound to the complete intent: another query, message
+    // or credit under the same operation identity would have produced another one.
+    let intent = commit_intent(
+        branch,
+        &args,
+        &(signature("Ada"), signature("Grace")),
+        &request.query,
+    );
+    assert_eq!(
+        request.version_uuid,
+        bound_uuid(operation, "version", &intent)
+    );
+    let other_query = commit_request(
+        branch,
+        &args,
+        operation,
+        generation,
+        (signature("Ada"), signature("Grace")),
+        "MATCH (n:Item) SET n.score = 3".into(),
+    );
+    assert_ne!(other_query.version_uuid, request.version_uuid);
+    let other_credit = commit_request(
+        branch,
+        &args,
+        operation,
+        generation,
+        (signature("Ada"), signature("Ada")),
+        request.query.clone(),
+    );
+    assert_ne!(other_credit.version_uuid, request.version_uuid);
     assert_eq!(request.created_at, created_at(operation));
 }
 

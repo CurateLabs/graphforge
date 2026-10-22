@@ -8,6 +8,7 @@ fn set_tag(root: &Path, name: &str, version: Option<Uuid>) -> ResearchOperation 
         mutation: ResearchMutation::SetTag {
             name: name.into(),
             version_uuid: version,
+            intent_sha256: [0; 32],
         },
     }
 }
@@ -123,6 +124,7 @@ fn set_tag_refuses_a_moved_target_and_replays_exactly() {
         expected_generation_uuid: current(root),
         mutation: ResearchMutation::SelectBranch {
             branch_uuid: Uuid::now_v7(),
+            intent_sha256: [0; 32],
         },
     };
     refusal(root, &missing);

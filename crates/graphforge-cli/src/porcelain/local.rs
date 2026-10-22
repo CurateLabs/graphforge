@@ -1,8 +1,9 @@
 //! The porcelain verbs that read or write only the local Project.
 use super::render::{LogEntry, log_line};
 use super::{
-    BranchArgs, CommitArgs, LogArgs, StatusArgs, SwitchArgs, TagArgs, created_at, derived_uuid,
-    emit, operation_uuid, receipt_json, resolve_branch, resolve_version, short,
+    BranchArgs, CommitArgs, LogArgs, StatusArgs, SwitchArgs, TagArgs, bound_uuid, created_at, emit,
+    idempotency_conflict, intent_digest, operation_uuid, receipt_json, resolve_branch,
+    resolve_version, short,
 };
 use graphforge_api::{
     BranchSource, CancellationToken, CreateResearchBranchRequest, ExecuteResearchBranchRequest,
@@ -261,22 +262,49 @@ fn read_query(args: &CommitArgs) -> Result<String, GfError> {
     }
 }
 
-/// The native request `gf commit` publishes.
+/// Everything `gf commit` was asked to do: the Branch, message, the exact query
+/// and who is credited.
+pub(super) fn commit_intent(
+    branch: Uuid,
+    args: &CommitArgs,
+    signatures: &(ResearchSignature, ResearchSignature),
+    query: &str,
+) -> [u8; 32] {
+    use sha2::Digest as _;
+    let query_sha256: String = sha2::Sha256::digest(query.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    intent_digest(
+        "commit",
+        &json!({
+            "branch": branch,
+            "message": args.message,
+            "query_sha256": query_sha256,
+            "author": signatures.0,
+            "committer": signatures.1,
+        }),
+    )
+}
+
+/// The native request `gf commit` publishes. The new Version's identity is bound
+/// to the complete intent, so only that exact request can have produced it.
 pub(super) fn commit_request(
     branch: Uuid,
     args: &CommitArgs,
     operation: Uuid,
     expected_generation: Uuid,
-    (author, committer): (ResearchSignature, ResearchSignature),
+    signatures: (ResearchSignature, ResearchSignature),
     query: String,
 ) -> ExecuteResearchBranchRequest {
+    let intent = commit_intent(branch, args, &signatures, &query);
     ExecuteResearchBranchRequest {
-        author: Some(author),
-        committer: Some(committer),
+        author: Some(signatures.0),
+        committer: Some(signatures.1),
         operation_uuid: operation,
         expected_generation_uuid: expected_generation,
         branch_uuid: branch,
-        version_uuid: derived_uuid(operation, "version"),
+        version_uuid: bound_uuid(operation, "version", &intent),
         query,
         created_at: created_at(operation),
         label: None,
@@ -293,30 +321,24 @@ fn commit(
     let registry = graph.research_version_retention()?;
     let branch = resolve_branch(&registry, args.select.branch.as_deref())?;
     let operation = operation_uuid(args.operation_uuid.as_deref())?;
+    let signatures = crate::identity::resolve_from_process(&args.identity)?;
+    let query = read_query(args)?;
+    let request = commit_request(
+        branch,
+        args,
+        operation,
+        current_generation(graph)?,
+        signatures,
+        query,
+    );
+    // An earlier run of this identity replays only when it was this exact request:
+    // the Version it recorded carries the identity bound to the complete intent.
     let (receipt, was_replayed) = if let Some(receipt) = replayed(&registry, operation) {
-        // The same operation identity is the same commit, or it conflicts.
-        let version = receipt
-            .version_uuid
-            .and_then(|uuid| registry.versions.get(&uuid));
-        if version.is_none_or(|version| {
-            version.context_uuid != branch
-                || version.description.as_deref() != Some(args.message.as_str())
-        }) {
-            return Err(GfError::Validation(
-                "GF_IDEMPOTENCY_CONFLICT: this operation UUID recorded a different commit".into(),
-            ));
+        if receipt.version_uuid != Some(request.version_uuid) {
+            return Err(idempotency_conflict());
         }
         (receipt, true)
     } else {
-        let signatures = crate::identity::resolve_from_process(&args.identity)?;
-        let request = commit_request(
-            branch,
-            args,
-            operation,
-            current_generation(graph)?,
-            signatures,
-            read_query(args)?,
-        );
         (
             graph.execute_research_branch(&request, &CancellationToken::new())?,
             false,
@@ -394,15 +416,23 @@ fn branch(
         return emit(output, json_output, &Value::Array(list), &text);
     };
     let operation = operation_uuid(args.operation_uuid.as_deref())?;
+    let signatures = crate::identity::resolve_from_process(&args.identity)?;
+    // The request as it was typed: a Branch asked for from the head, or from a
+    // named Version, from a named Branch's head, or as the Project's first.
+    let intent = intent_digest(
+        "branch",
+        &json!({
+            "name": name,
+            "from": args.from,
+            "branch": args.select.branch,
+            "author": signatures.0,
+            "committer": signatures.1,
+        }),
+    );
+    let version_uuid = bound_uuid(operation, "version", &intent);
     let (receipt, was_replayed) = if let Some(receipt) = replayed(&registry, operation) {
-        let created = receipt
-            .version_uuid
-            .and_then(|uuid| registry.versions.get(&uuid))
-            .and_then(|version| registry.branches.get(&version.context_uuid));
-        if created.is_none_or(|record| record.label != *name) {
-            return Err(GfError::Validation(
-                "GF_IDEMPOTENCY_CONFLICT: this operation UUID created a different Branch".into(),
-            ));
+        if receipt.version_uuid != Some(version_uuid) {
+            return Err(idempotency_conflict());
         }
         (receipt, true)
     } else {
@@ -412,8 +442,8 @@ fn branch(
                 version_uuid: resolve_version(&registry, text)?,
             },
             None if registry.branches.is_empty() => BranchSource::Current {
-                origin_version_uuid: derived_uuid(operation, "origin"),
-                context_uuid: derived_uuid(operation, "project"),
+                origin_version_uuid: bound_uuid(operation, "origin", &intent),
+                context_uuid: bound_uuid(operation, "project", &intent),
             },
             None => BranchSource::Version {
                 version_uuid: head_of(
@@ -422,16 +452,15 @@ fn branch(
                 )?,
             },
         };
-        let (author, committer) = crate::identity::resolve_from_process(&args.identity)?;
         let request = CreateResearchBranchRequest {
-            author: Some(author),
-            committer: Some(committer),
+            author: Some(signatures.0),
+            committer: Some(signatures.1),
             operation_uuid: operation,
             expected_generation_uuid: current_generation(graph)?,
-            branch_uuid: derived_uuid(operation, "branch"),
-            version_uuid: derived_uuid(operation, "version"),
+            branch_uuid: bound_uuid(operation, "branch", &intent),
+            version_uuid,
             source,
-            creator_uuid: derived_uuid(operation, "creator"),
+            creator_uuid: bound_uuid(operation, "creator", &intent),
             created_at: created_at(operation),
             label: name.clone(),
             description: Some(format!("Create branch {name}")),
@@ -460,7 +489,9 @@ fn switch(
     let registry = graph.research_version_retention()?;
     let target = resolve_branch(&registry, Some(&args.reference))?;
     let operation = operation_uuid(args.operation_uuid.as_deref())?;
-    if registry.current_branch != Some(target) && replayed(&registry, operation).is_none() {
+    // A rerun of the identity goes through the native operation, which replays it
+    // or refuses a different request; otherwise selecting the current Branch is a no-op.
+    if registry.current_branch != Some(target) || replayed(&registry, operation).is_some() {
         let request = SelectResearchBranchRequest {
             operation_uuid: operation,
             expected_generation_uuid: current_generation(graph)?,
@@ -513,20 +544,18 @@ fn tag(
             .join("\n");
         return emit(output, json_output, &Value::Array(list), &text);
     };
-    let receipt = if let Some(receipt) = replayed(&registry, operation) {
-        (receipt, true)
-    } else {
-        let request = SetResearchTagRequest {
-            operation_uuid: operation,
-            expected_generation_uuid: current_generation(graph)?,
-            name: name.clone(),
-            version_uuid: version,
-        };
-        (
-            graph.set_research_tag(&request, &CancellationToken::new())?,
-            false,
-        )
+    // The native operation replays a rerun of the identity and refuses a different request.
+    let was_replayed = replayed(&registry, operation).is_some();
+    let request = SetResearchTagRequest {
+        operation_uuid: operation,
+        expected_generation_uuid: current_generation(graph)?,
+        name: name.clone(),
+        version_uuid: version,
     };
+    let receipt = (
+        graph.set_research_tag(&request, &CancellationToken::new())?,
+        was_replayed,
+    );
     let mut value = receipt_json(&receipt.0, receipt.1);
     value["name"] = json!(name);
     value["version_uuid"] = json!(version);

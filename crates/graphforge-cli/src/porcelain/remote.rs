@@ -2,8 +2,8 @@
 use super::local::{upstream_of, write_log};
 use super::render::LogEntry;
 use super::{
-    BranchSelect, HubFlags, LogArgs, PullArgs, PushArgs, created_at, derived_uuid, emit,
-    operation_uuid, receipt_json, resolve_branch, short,
+    BranchSelect, HubFlags, LogArgs, PullArgs, PushArgs, bound_uuid, created_at, derived_uuid,
+    emit, idempotency_conflict, intent_digest, operation_uuid, receipt_json, resolve_branch, short,
 };
 use crate::hub_clone::remote_read::{RemoteRepository, RemoteRequest, read_remote};
 use crate::hub_http::Transport;
@@ -227,6 +227,47 @@ pub(crate) fn pull(
     let label = registry.branches[&branch].label.clone();
     let repository = repository_of(&registry, branch, args.repository.as_deref(), &args.hub)?;
     let operation = operation_uuid(args.operation_uuid.as_deref())?;
+    let (author, committer) = crate::identity::resolve_from_process(&args.identity)?;
+    // The merge Version's identity is bound to the complete request, so an earlier
+    // run of this identity is replayed from the local ledger, with no network, only
+    // when it was this exact pull.
+    let intent = intent_digest(
+        "pull",
+        &json!({
+            "branch": branch,
+            "repository": repository,
+            "author": author,
+            "committer": committer,
+        }),
+    );
+    let version_uuid = bound_uuid(operation, "version", &intent);
+    if let Some(receipt) = registry.receipts.get(&operation) {
+        if receipt.version_uuid != Some(version_uuid) {
+            return Err(idempotency_conflict());
+        }
+        let parents = registry
+            .versions
+            .get(&version_uuid)
+            .map(|version| version.parents.clone())
+            .unwrap_or_default();
+        let mut value = receipt_json(receipt, true);
+        value["parents"] = json!(parents);
+        value["incorporated"] = json!(
+            registry
+                .upstream
+                .reviews
+                .get(&operation)
+                .map_or(0, |review| review.fields.len())
+        );
+        value["conflicts"] = json!([]);
+        let merged = parents.get(1).map_or_else(String::new, short);
+        return emit(
+            output,
+            json_output,
+            &value,
+            &format!("Merged {merged} into {label}: {}", short(&version_uuid)),
+        );
+    }
     let scratch = tempfile::tempdir()
         .map_err(|_| GfError::Storage("cannot create a download directory".into()))?;
     let request = RemoteRequest {
@@ -338,8 +379,6 @@ pub(crate) fn pull(
             .and_then(|pair| u8::from_str_radix(pair, 16).ok())
             .ok_or_else(|| GfError::Execution("malformed upstream preview digest".into()))?;
     }
-    let (author, committer) = crate::identity::resolve_from_process(&args.identity)?;
-    let version_uuid = derived_uuid(operation, "version");
     let update = UpdateResearchBranchRequest {
         operation_uuid: operation,
         expected_generation_uuid: graph.committed_generation_identity()?.generation_uuid,

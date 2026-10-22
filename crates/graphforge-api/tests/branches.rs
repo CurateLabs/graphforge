@@ -1783,15 +1783,39 @@ fn a_published_head_is_recorded_only_against_native_branch_authority() {
     .version_uuid;
     let foreign = graph.research_version_retention().unwrap().heads[&other.branch_uuid];
     let url = "https://hub.test/curate/claims";
-    let record = |graph: &mut GraphForge, branch: Uuid, head: Uuid, url: &str| {
+    let receipt = |repository: &str, refs: &[&str]| graphforge_hub_publish::PublishReceipt {
+        format: graphforge_hub_publish::HUB_PUBLISH_FORMAT.into(),
+        operation_uuid: Uuid::now_v7(),
+        request_commitment: format!("sha256:{}", "1".repeat(64)),
+        repository: graphforge_discovery::RepositoryIdentity::parse(repository).unwrap(),
+        manifest_validator: format!("sha256:{}", "2".repeat(64)),
+        refs: refs.iter().map(|name| (*name).to_owned()).collect(),
+        previous_revision: None,
+        revision: format!("sha256:{}", "3".repeat(64)),
+    };
+    let record_with = |graph: &mut GraphForge,
+                       branch: Uuid,
+                       head: Uuid,
+                       url: &str,
+                       receipt: graphforge_hub_publish::PublishReceipt| {
         let request = RecordResearchPublicationRequest {
             operation_uuid: Uuid::now_v7(),
             expected_generation_uuid: current(graph),
             branch_uuid: branch,
+            published_version_uuid: head,
             repository_url: url.into(),
-            head_version_uuid: head,
+            receipt,
         };
         graph.record_research_publication(&request, &CancellationToken::new())
+    };
+    let record = |graph: &mut GraphForge, branch: Uuid, head: Uuid, url: &str| {
+        record_with(
+            graph,
+            branch,
+            head,
+            url,
+            receipt("curate/claims", &["main"]),
+        )
     };
 
     // The Branch head, and an ancestor of it, can be the confirmed head.
@@ -1831,6 +1855,20 @@ fn a_published_head_is_recorded_only_against_native_branch_authority() {
         "http://hub.test/curate/claims",
     )
     .unwrap_err();
+    // The Hub's receipt must be for this repository, in this format, and carry the
+    // Branch's ref: another repository's receipt or one for other refs is not a
+    // confirmation of this publication.
+    for refused in [
+        receipt("curate/elsewhere", &["main"]),
+        receipt("curate/claims", &["other"]),
+        receipt("curate/claims", &[]),
+        graphforge_hub_publish::PublishReceipt {
+            format: "graphforge-hub-publish/9".into(),
+            ..receipt("curate/claims", &["main"])
+        },
+    ] {
+        record_with(&mut graph, main.branch_uuid, edited, url, refused).unwrap_err();
+    }
     assert_eq!(
         graph
             .research_version_retention()

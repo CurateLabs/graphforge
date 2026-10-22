@@ -354,17 +354,15 @@ fn record_upstream(graph: &mut GraphForge, outcome: &PublishOutcome) -> Result<(
     let Some(head) = &outcome.published else {
         return Ok(());
     };
-    if !outcome.receipt.refs.contains(&head.ref_name) {
-        return Ok(());
-    }
     graph
         .record_research_publication(
             &graphforge_api::RecordResearchPublicationRequest {
                 operation_uuid: Uuid::now_v7(),
                 expected_generation_uuid: graph.committed_generation_identity()?.generation_uuid,
                 branch_uuid: head.branch_uuid,
+                published_version_uuid: head.version_uuid,
                 repository_url: head.repository_url.clone(),
-                head_version_uuid: head.version_uuid,
+                receipt: outcome.receipt.clone(),
             },
             &CancellationToken::new(),
         )
@@ -805,6 +803,10 @@ struct Selection {
     /// generation (`source_generation`), so the Project package changes exactly
     /// when the generation does, and exports of one generation are identical.
     project_content: String,
+    /// What the publication is made of, without the tracking state a publication
+    /// writes about itself. The intent binds this, so a rerun of a completed
+    /// publication is a replay even though recording it moved CURRENT.
+    publication_content: String,
 }
 
 fn hex_digest(bytes: &[u8; 32]) -> Sha256Digest {
@@ -863,6 +865,7 @@ fn select(graph: &GraphForge, args: &PublishArgs) -> Result<Selection, GfError> 
         identity: hex_digest(identity),
         project_uuid: reference.project_uuid,
         project_content: project_content(graph)?,
+        publication_content: hex_digest(&graph.publication_content_identity()?).0,
     })
 }
 
@@ -908,7 +911,7 @@ fn intent_digest(
         "version_uuid": selection.version_uuid.to_string(),
         "version_identity": selection.identity.0,
         "project_uuid": selection.project_uuid.to_string(),
-        "project_content": selection.project_content,
+        "project_content": selection.publication_content,
         "fork_of": fork_of.map(RepositoryIdentity::canonical_name),
     })))
 }
@@ -1932,10 +1935,10 @@ pub(crate) fn publish(
         .map(|p| p.descriptor.clone())
         .collect::<Vec<_>>();
     let operation_content = if previews.is_empty() {
-        selection.project_content.clone()
+        selection.publication_content.clone()
     } else {
         sha256_digest(&canonical_json(
-            &json!({"project_content":selection.project_content,"previews":preview_metadata}),
+            &json!({"project_content":selection.publication_content,"previews":preview_metadata}),
         ))
     };
     let operation_content = history::bind_flags(operation_content, args);

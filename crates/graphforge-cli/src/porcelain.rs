@@ -279,6 +279,35 @@ pub(crate) fn created_at(operation: Uuid) -> i64 {
     })
 }
 
+/// Commitment to everything a verb was asked to do, independent of the Project's
+/// CURRENT. Two runs under one operation identity are the same request exactly
+/// when their intents are equal.
+pub(crate) fn intent_digest(kind: &str, fields: &Value) -> [u8; 32] {
+    use sha2::Digest as _;
+    let mut digest = sha2::Sha256::new();
+    digest.update(b"graphforge-porcelain-intent/1");
+    digest.update(kind.as_bytes());
+    // `serde_json` keeps object keys sorted, so equal fields encode equally.
+    digest.update(fields.to_string().as_bytes());
+    digest.finalize().into()
+}
+
+/// An identity bound to the operation, its role and the complete intent: a Version
+/// or Branch that carries it can only have come from that exact request.
+pub(crate) fn bound_uuid(operation: Uuid, role: &str, intent: &[u8; 32]) -> Uuid {
+    let hex: String = intent.iter().map(|byte| format!("{byte:02x}")).collect();
+    derived_uuid(operation, &format!("{role}/{hex}"))
+}
+
+/// The idempotency conflict a native operation reports when its identity was
+/// used for another request.
+pub(crate) fn idempotency_conflict() -> GfError {
+    GfError::Project {
+        code: graphforge_api::ProjectErrorCode::TransactionConflict,
+        message: "operation identity has conflicting request content".into(),
+    }
+}
+
 /// A stable identity derived from the operation and the role it plays.
 pub(crate) fn derived_uuid(operation: Uuid, role: &str) -> Uuid {
     use sha2::Digest as _;

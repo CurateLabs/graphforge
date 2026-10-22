@@ -473,11 +473,16 @@ pub enum ResearchMutation {
         name: String,
         /// Version the tag names; `None` deletes the tag.
         version_uuid: Option<Uuid>,
+        /// Commitment to the request without its CURRENT precondition, so a
+        /// rerun under the same operation identity can be matched to it.
+        intent_sha256: [u8; 32],
     },
     /// Select the Branch the porcelain verbs act on (ADR 0061).
     SelectBranch {
         /// Existing Branch with a head.
         branch_uuid: Uuid,
+        /// Commitment to the request without its CURRENT precondition.
+        intent_sha256: [u8; 32],
     },
     /// Release a Version when no head, root or required Version depends on it.
     DeleteVersion {
@@ -1074,11 +1079,13 @@ fn apply_mutation(
             remote::record_published_branch(registry, reference)?;
             None
         }
-        ResearchMutation::SetTag { name, version_uuid } => {
+        ResearchMutation::SetTag {
+            name, version_uuid, ..
+        } => {
             local_state::set_tag(registry, name, *version_uuid)?;
             None
         }
-        ResearchMutation::SelectBranch { branch_uuid } => {
+        ResearchMutation::SelectBranch { branch_uuid, .. } => {
             local_state::select_branch(registry, *branch_uuid)?;
             None
         }
@@ -1290,7 +1297,9 @@ pub fn publish_research_operation_with_mode(
             | ResearchMutation::SubmitProposal { intent_sha256, .. }
             | ResearchMutation::ReviewProposal { intent_sha256, .. }
             | ResearchMutation::ReleaseProposal { intent_sha256, .. }
-            | ResearchMutation::UpdateBranch { intent_sha256, .. } => Some(*intent_sha256),
+            | ResearchMutation::UpdateBranch { intent_sha256, .. }
+            | ResearchMutation::SetTag { intent_sha256, .. }
+            | ResearchMutation::SelectBranch { intent_sha256, .. } => Some(*intent_sha256),
             _ => None,
         },
         operation_uuid: request.operation_uuid,

@@ -162,6 +162,8 @@ pub(super) fn activate_imported_branch(
         super::local_state::install_served_tag(registry, name, *target)?;
     }
     registry.remote_branches.extend(references);
+    // A clone leaves the installed Branch selected for the porcelain verbs.
+    registry.current_branch = Some(*branch_uuid);
     registry.branches.insert(*branch_uuid, branch);
     registry.heads.insert(*branch_uuid, *head_version_uuid);
     Ok(Some(*head_version_uuid))
