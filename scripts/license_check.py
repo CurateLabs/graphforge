@@ -47,6 +47,7 @@ CARGO_PACKAGE_DIRS = tuple(
         "graphforge-ontology",
         "graphforge-plan",
         "graphforge-portable-oci",
+        "graphforge-protocol-wasm",
         "graphforge-provenance",
         "graphforge-rel",
         "graphforge-search",
@@ -59,12 +60,14 @@ LICENSE_COPIES = (
     ROOT / "crates" / "graphforge-bindings-py" / "LICENSE",
     ROOT / "packages" / "agent-skills" / "LICENSE",
     ROOT / "packages" / "cli" / "LICENSE",
+    ROOT / "packages" / "protocol-wasm" / "LICENSE",
 )
 NOTICE_COPIES = (
     ROOT / "NOTICE",
     *(path / "NOTICE" for path in CARGO_PACKAGE_DIRS),
     ROOT / "packages" / "agent-skills" / "NOTICE",
     ROOT / "packages" / "cli" / "NOTICE",
+    ROOT / "packages" / "protocol-wasm" / "NOTICE",
 )
 THIRD_PARTY_NOTICE_COPIES = (
     ROOT / "legal" / "THIRD_PARTY_NOTICES.md",
@@ -72,6 +75,7 @@ THIRD_PARTY_NOTICE_COPIES = (
     ROOT / "crates" / "graphforge-bindings-node" / "THIRD_PARTY_NOTICES.md",
     ROOT / "crates" / "graphforge-cli" / "THIRD_PARTY_NOTICES.md",
     ROOT / "packages" / "cli" / "THIRD_PARTY_NOTICES.md",
+    ROOT / "packages" / "protocol-wasm" / "THIRD_PARTY_NOTICES.md",
 )
 MANIFEST_EXPECTATIONS = {
     ROOT / "Cargo.toml": (
@@ -102,6 +106,13 @@ MANIFEST_EXPECTATIONS = {
         f'"{CANONICAL_REPOSITORY_GIT}"',
     ),
     ROOT / "packages" / "cli" / "package.json": (
+        '"license": "Apache-2.0"',
+        '"LICENSE"',
+        '"NOTICE"',
+        '"THIRD_PARTY_NOTICES.md"',
+        f'"{CANONICAL_REPOSITORY_GIT}"',
+    ),
+    ROOT / "packages" / "protocol-wasm" / "package.json": (
         '"license": "Apache-2.0"',
         '"LICENSE"',
         '"NOTICE"',
@@ -207,6 +218,7 @@ def validate_canonical_repository() -> list[str]:
         ROOT / "crates" / "graphforge-bindings-node" / "package.json",
         ROOT / "packages" / "agent-skills" / "package.json",
         ROOT / "packages" / "cli" / "package.json",
+        ROOT / "packages" / "protocol-wasm" / "package.json",
     )
     for path in publishable_package_json:
         try:

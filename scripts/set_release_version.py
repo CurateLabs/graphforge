@@ -11,6 +11,7 @@ Surfaces:
 - NPX lifecycle CLI ``packages/cli/package.json``
 - NPX skills ``packages/agent-skills/package.json``
 - NPX skills ``packages/agent-skills/compatibility.json``
+- WebAssembly protocol validators ``packages/protocol-wasm/package.json``
 
 Usage:
     python3 scripts/set_release_version.py --check
@@ -59,6 +60,7 @@ NODE_PACKAGE = ROOT / "crates" / "graphforge-bindings-node" / "package.json"
 NODE_NPM_DIR = ROOT / "crates" / "graphforge-bindings-node" / "npm"
 CLI_PACKAGE = ROOT / "packages" / "cli" / "package.json"
 SKILLS_PACKAGE = ROOT / "packages" / "agent-skills" / "package.json"
+PROTOCOL_PACKAGE = ROOT / "packages" / "protocol-wasm" / "package.json"
 SKILLS_COMPATIBILITY = ROOT / "packages" / "agent-skills" / "compatibility.json"
 
 
@@ -269,6 +271,7 @@ def read_current() -> dict[str, str]:
     node = json.loads(NODE_PACKAGE.read_text(encoding="utf-8"))["version"]
     cli = json.loads(CLI_PACKAGE.read_text(encoding="utf-8"))["version"]
     skills = json.loads(SKILLS_PACKAGE.read_text(encoding="utf-8"))["version"]
+    protocol = json.loads(PROTOCOL_PACKAGE.read_text(encoding="utf-8"))["version"]
     if not cargo or not py:
         raise ValueError("could not read Cargo or Python version")
     return {
@@ -277,6 +280,7 @@ def read_current() -> dict[str, str]:
         "node": node,
         "cli": cli,
         "skills": skills,
+        "protocol": protocol,
     }
 
 
@@ -287,6 +291,7 @@ def expected_for(base: str, *, dev: bool, pre: str | None = None) -> dict[str, s
         "node": npm_version(base, dev=dev, pre=pre),
         "cli": npm_version(base, dev=dev, pre=pre),
         "skills": npm_version(base, dev=dev, pre=pre),
+        "protocol": npm_version(base, dev=dev, pre=pre),
     }
 
 
@@ -418,6 +423,7 @@ def apply_version(base: str, *, dev: bool, dry_run: bool, pre: str | None = None
         (NODE_PACKAGE, "node"),
         (CLI_PACKAGE, "cli"),
         (SKILLS_PACKAGE, "skills"),
+        (PROTOCOL_PACKAGE, "protocol"),
     ):
         meta = json.loads(path.read_text(encoding="utf-8"))
         meta["version"] = expected[key]

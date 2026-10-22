@@ -151,3 +151,27 @@ fn openalex_fixture_validates_and_commits_to_the_native_commitment() {
     let recorded: Value = serde_json::from_str(COMMITMENT).unwrap();
     assert_eq!(recorded["request_commitment"], native);
 }
+
+/// Re-home the openalex fixture's single ref closure to another identity.
+fn rehome_openalex() -> engine::Outcome<engine::RehomeResult> {
+    let snapshots = json!([{
+        "manifest": serde_json::from_str::<Value>(MANIFEST).unwrap(),
+        "summary": SUMMARY,
+    }]);
+    engine::rehome_repository(
+        REFS.as_bytes(),
+        &serde_json::to_vec(&snapshots).unwrap(),
+        br#"{"owner":"openalex","repository":"renamed"}"#,
+        "https://control.example/openalex/renamed/sha256/{hex}",
+        DiscoveryLimits::default(),
+    )
+}
+
+#[test]
+fn rehoming_the_openalex_fixture_matches_the_recorded_revision() {
+    let rehomed = rehome_openalex().unwrap();
+    assert_eq!(rehomed.refs.repository.repository, "renamed");
+    let recorded: Value = serde_json::from_str(COMMITMENT).unwrap();
+    assert_eq!(recorded["rehomed_revision"], rehomed.revision);
+    assert_eq!(recorded["rehomed_manifest"], rehomed.refs.refs[0].validator.0);
+}

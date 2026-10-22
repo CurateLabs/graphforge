@@ -223,8 +223,8 @@ environment; do not rename either. Steps for a release are in `RELEASING.md`.
   builds five Node addons (the Linux targets with `--use-napi-cross`, checked
   against a glibc 2.17 floor), loads and runs each where the runner can execute
   it, and package-validates the cross-built aarch64 Linux addon.
-  `npm-packages` packs the 8 npm tarballs and installs three of them in a clean
-  project. `crates` packages all 20 crates in publish order and verifies
+  `npm-packages` builds the WebAssembly protocol package, packs the 9 npm
+  tarballs, and installs four of them in a clean project. `crates` packages all 20 crates in publish order and verifies
   LICENSE and NOTICE in each package.
 - **Publish.** `publish` runs only on a tag push, needs every job above, uses
   the `release` environment (`id-token: write`, `contents: write`), and runs

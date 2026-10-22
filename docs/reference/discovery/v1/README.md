@@ -41,6 +41,12 @@ types or reimplement validation semantics. Rust remains the authority; generated
 TypeScript declarations, if needed, must be treated as disposable build output
 derived from these versioned artifacts.
 
+A TypeScript Hub that needs the validators themselves rather than the schemas
+uses `@curatelabs/graphforge-protocol-wasm` (`packages/protocol-wasm`): the
+`graphforge-discovery` and `graphforge-hub-publish` validators built to
+WebAssembly, with TypeScript declarations generated from the Rust types. CI
+replays this corpus through it.
+
 There is intentionally no checked-in hand-written TypeScript discovery model.
 Schema-derived Hub artifacts consume the required `package.object_digest` field
 from `manifest.schema.json`; regenerating the Rust-owned artifacts updates that

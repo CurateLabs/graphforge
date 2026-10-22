@@ -3,13 +3,38 @@
 // from native Rust; the native contract tests assert the same corpora against
 // the Rust validators, so equal results here are equal results to native Rust.
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { test } from "node:test";
 import { attempt, protocol, readJson } from "./support.mjs";
 
-const discovery = readJson("docs", "reference", "discovery", "v1", "conformance.json");
-const moved = readJson("docs", "reference", "discovery", "v1", "moved-conformance.json");
-const previews = readJson("docs", "reference", "hub-publish", "v1", "previews.json");
-const hubPublish = readJson("docs", "reference", "hub-publish", "v1", "conformance.json");
+const discovery = readJson(
+  "docs",
+  "reference",
+  "discovery",
+  "v1",
+  "conformance.json",
+);
+const moved = readJson(
+  "docs",
+  "reference",
+  "discovery",
+  "v1",
+  "moved-conformance.json",
+);
+const previews = readJson(
+  "docs",
+  "reference",
+  "hub-publish",
+  "v1",
+  "previews.json",
+);
+const hubPublish = readJson(
+  "docs",
+  "reference",
+  "hub-publish",
+  "v1",
+  "conformance.json",
+);
 
 const VALIDATORS = {
   manifest: protocol.validate_manifest,
@@ -35,14 +60,25 @@ test("discovery v1 corpus matches native Rust for every case", () => {
   for (const { name, document, json, limits, expected } of discovery.cases) {
     const outcome = attempt(() => VALIDATORS[document](json, limits));
     if (expected.result === "valid") {
-      assert.ok(outcome.ok, `${name}: ${outcome.ok ? "" : JSON.stringify(outcome.error)}`);
+      assert.ok(
+        outcome.ok,
+        `${name}: ${outcome.ok ? "" : JSON.stringify(outcome.error)}`,
+      );
       assert.equal(outcome.value.canonical_json, expected.canonical_json, name);
       // The same document as a plain object validates to the same canonical form.
       const viaObject = VALIDATORS[document](JSON.parse(json), limits);
-      assert.equal(viaObject.canonical_json, expected.canonical_json, `${name} (object input)`);
+      assert.equal(
+        viaObject.canonical_json,
+        expected.canonical_json,
+        `${name} (object input)`,
+      );
     } else {
       assert.ok(!outcome.ok, `${name}: expected ${expected.code}`);
-      assert.deepEqual(thrownFailure(outcome.error), recordedFailure(expected), name);
+      assert.deepEqual(
+        thrownFailure(outcome.error),
+        recordedFailure(expected),
+        name,
+      );
     }
   }
 });
@@ -54,11 +90,19 @@ test("repository move corpus matches native Rust for every case", () => {
   }
 });
 
-const hex = (text) => Uint8Array.from(text.match(/../g), (byte) => Number.parseInt(byte, 16));
+const hex = (text) =>
+  Uint8Array.from(text.match(/../g), (byte) => Number.parseInt(byte, 16));
 
 test("preview corpus matches native Rust for every case", () => {
-  for (const { name, media_type: mediaType, hex: encoded, utf8, error } of previews) {
-    const bytes = encoded === undefined ? new TextEncoder().encode(utf8) : hex(encoded);
+  for (const {
+    name,
+    media_type: mediaType,
+    hex: encoded,
+    utf8,
+    error,
+  } of previews) {
+    const bytes =
+      encoded === undefined ? new TextEncoder().encode(utf8) : hex(encoded);
     const outcome = attempt(() => protocol.validate_image(mediaType, bytes));
     if (error === null) {
       assert.ok(outcome.ok, `${name}: ${outcome.ok ? "" : outcome.error.code}`);
@@ -90,7 +134,8 @@ const hasVariable = (value) => JSON.stringify(value).includes("${");
 const baseCapabilities = (() => {
   for (const { steps } of hubPublish.cases) {
     for (const { request, expect } of steps) {
-      if (request?.url.endsWith("/.gf/publish") && expect.json) return expect.json;
+      if (request?.url.endsWith("/.gf/publish") && expect.json)
+        return expect.json;
     }
   }
   throw new Error("the corpus carries no capabilities response");
@@ -100,7 +145,10 @@ function capabilitiesFor(owner, repository) {
   return {
     ...baseCapabilities,
     repository: { owner, repository },
-    authorization: { ...baseCapabilities.authorization, scope: `publish:${owner}/${repository}` },
+    authorization: {
+      ...baseCapabilities.authorization,
+      scope: `publish:${owner}/${repository}`,
+    },
     object_location_template: `https://hub.example/${owner}/${repository}/.gf/objects/{digest}`,
   };
 }
@@ -111,10 +159,17 @@ const tally = { accepted: 0, refused: 0, returned: 0, commitments: 0 };
 function checkRequestDocument(label, validate, document, expect) {
   const outcome = attempt(validate);
   if (SUCCESS(expect.status)) {
-    assert.ok(outcome.ok, `${label}: ${outcome.ok ? "" : JSON.stringify(outcome.error)}`);
+    assert.ok(
+      outcome.ok,
+      `${label}: ${outcome.ok ? "" : JSON.stringify(outcome.error)}`,
+    );
     tally.accepted += 1;
   } else if (!outcome.ok) {
-    assert.equal(outcome.error.code, expect.error, `${label}: ${JSON.stringify(outcome.error)}`);
+    assert.equal(
+      outcome.error.code,
+      expect.error,
+      `${label}: ${JSON.stringify(outcome.error)}`,
+    );
     tally.refused += 1;
   }
   return outcome;
@@ -129,31 +184,71 @@ test("hub-publish v1 corpus documents match native Rust for every case", () => {
       const label = `${name}#${index}`;
       const location = OWNER_REPOSITORY.exec(request.url);
       const body = request.json;
-      const target = request.url.replace(/^https:\/\/hub\.example\/[^/]+\/[^/]+/, "");
+      const target = request.url.replace(
+        /^https:\/\/hub\.example\/[^/]+\/[^/]+/,
+        "",
+      );
 
-      if (request.method === "GET" && target === "/.gf/publish" && expect.json) {
+      if (
+        request.method === "GET" &&
+        target === "/.gf/publish" &&
+        expect.json
+      ) {
         protocol.validate_capabilities(expect.json);
         tally.returned += 1;
-      } else if (request.method === "GET" && target === "/.gf/refs" && expect.body_text) {
+      } else if (
+        request.method === "GET" &&
+        target === "/.gf/refs" &&
+        expect.body_text
+      ) {
         const { revision } = protocol.validate_refs(expect.body_text);
-        assert.equal(`"${revision}"`, expect.headers.etag, `${label}: ETag is the refs revision`);
+        assert.equal(
+          `"${revision}"`,
+          expect.headers.etag,
+          `${label}: ETag is the refs revision`,
+        );
         tally.returned += 1;
-      } else if (request.method === "GET" && target.startsWith("/.gf/publish/operations/") && expect.json) {
+      } else if (
+        request.method === "GET" &&
+        target.startsWith("/.gf/publish/operations/") &&
+        expect.json
+      ) {
         protocol.validate_operation_status(expect.json);
         tally.returned += 1;
-      } else if (request.method === "POST" && target === "/.gf/publish/sessions" && body && !hasVariable(body)) {
-        const outcome = checkRequestDocument(label, () => protocol.validate_session_request(body), body, expect);
+      } else if (
+        request.method === "POST" &&
+        target === "/.gf/publish/sessions" &&
+        body &&
+        !hasVariable(body)
+      ) {
+        const outcome = checkRequestDocument(
+          label,
+          () => protocol.validate_session_request(body),
+          body,
+          expect,
+        );
         if (outcome.ok && SUCCESS(expect.status)) {
           for (const variable of Object.keys(expect.capture ?? {})) {
-            if (expect.capture[variable] === "/session_id") sessions.set(variable, body);
+            if (expect.capture[variable] === "/session_id")
+              sessions.set(variable, body);
           }
         }
-      } else if (request.method === "POST" && target.endsWith("/commit") && body && !hasVariable(body)) {
+      } else if (
+        request.method === "POST" &&
+        target.endsWith("/commit") &&
+        body &&
+        !hasVariable(body)
+      ) {
         const [, owner, repository] = location;
         const identity = { owner, repository };
         const variable = /\/sessions\/\$\{([^}]+)\}\/commit$/.exec(target)?.[1];
         const open = sessions.get(variable);
-        const outcome = checkRequestDocument(label, () => protocol.validate_commit_request(body), body, expect);
+        const outcome = checkRequestDocument(
+          label,
+          () => protocol.validate_commit_request(body),
+          body,
+          expect,
+        );
         if (outcome.ok && open) {
           const manifest = protocol.validate_manifest(body.manifest);
           const check = attempt(() =>
@@ -166,7 +261,10 @@ test("hub-publish v1 corpus documents match native Rust for every case", () => {
             }),
           );
           if (SUCCESS(expect.status)) {
-            assert.ok(check.ok, `${label}: ${check.ok ? "" : JSON.stringify(check.error)}`);
+            assert.ok(
+              check.ok,
+              `${label}: ${check.ok ? "" : JSON.stringify(check.error)}`,
+            );
             const commitment = protocol.request_commitment({
               rewrite: body.rewrite ?? false,
               prune: body.prune ?? false,
@@ -177,10 +275,18 @@ test("hub-publish v1 corpus documents match native Rust for every case", () => {
               refs: body.refs,
               expected_revision: body.expected_revision,
             });
-            assert.equal(commitment, open.request_commitment, `${label}: request commitment`);
+            assert.equal(
+              commitment,
+              open.request_commitment,
+              `${label}: request commitment`,
+            );
             tally.commitments += 1;
           } else if (!check.ok) {
-            assert.equal(check.error.code, expect.error, `${label}: ${JSON.stringify(check.error)}`);
+            assert.equal(
+              check.error.code,
+              expect.error,
+              `${label}: ${JSON.stringify(check.error)}`,
+            );
           }
         }
         if (SUCCESS(expect.status) && expect.json?.receipt) {
@@ -196,4 +302,47 @@ test("hub-publish v1 corpus documents match native Rust for every case", () => {
   assert.ok(tally.commitments > 20, JSON.stringify(tally));
   assert.ok(tally.returned > 20, JSON.stringify(tally));
   assert.ok(tally.refused > 0, JSON.stringify(tally));
+});
+
+test("a published research lineage binds its manifest and resolves each Version package", () => {
+  let bound = 0;
+  for (const { name, steps } of hubPublish.cases) {
+    const uploads = new Map(); // object digest -> uploaded text
+    for (const [index, { request, expect }] of steps.entries()) {
+      if (request?.body_text !== undefined) {
+        uploads.set(
+          `sha256:${createHash("sha256").update(request.body_text).digest("hex")}`,
+          request.body_text,
+        );
+      }
+      const manifest = request?.json?.manifest;
+      if (
+        !manifest?.lineage ||
+        !SUCCESS(expect.status) ||
+        !request.url.endsWith("/commit")
+      )
+        continue;
+      const lineageText = uploads.get(manifest.lineage.object_digest);
+      const refs = steps
+        .slice(index + 1)
+        .find(
+          (step) =>
+            step.expect?.body_text && step.request?.url.endsWith("/.gf/refs"),
+        );
+      if (lineageText === undefined || refs === undefined) continue;
+      const lineage = protocol.validate_lineage(lineageText);
+      assert.equal(lineage.digest, manifest.lineage.lineage_digest, name);
+      protocol.bind_lineage(manifest, refs.expect.body_text, lineageText);
+      for (const version of lineage.document.versions) {
+        const selected = protocol.research_version_object(
+          manifest,
+          lineageText,
+          version.version_uuid,
+        );
+        assert.equal(selected.version.version_uuid, version.version_uuid, name);
+      }
+      bound += 1;
+    }
+  }
+  assert.ok(bound > 0, "the corpus publishes at least one research lineage");
 });

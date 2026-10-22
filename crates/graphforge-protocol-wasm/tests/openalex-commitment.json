@@ -1,3 +1,5 @@
 {
-  "request_commitment": "sha256:34e75259b94401d4a37ce8c9a69a9f813bcf54c4f48f81776f9fe2c2f9f57e5f"
+  "request_commitment": "sha256:34e75259b94401d4a37ce8c9a69a9f813bcf54c4f48f81776f9fe2c2f9f57e5f",
+  "rehomed_revision": "sha256:829adf958ae4831d4e2669ca77afdd7fbd068a5d7ef86ff07e7caa7e1bc8f83e",
+  "rehomed_manifest": "sha256:03888c82c044199f9105169503afe1e50926a61b2a2845dc9841fdf78d57f6d1"
 }
