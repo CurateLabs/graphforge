@@ -17,6 +17,7 @@ pub const MAX_PIXELS: u64 = 16_777_216;
 pub const PREVIEW_EXTENSION: &str = "x-graphforge-previews";
 /// Safe, finite refusal classifications shared by clients and Hub admission.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(tsify::Tsify))]
 #[serde(rename_all = "snake_case")]
 pub enum PreviewError {
     /// Type is outside the closed PNG/SVG channel.
@@ -49,6 +50,7 @@ impl std::error::Error for PreviewError {}
 
 /// Version-bound presentation metadata; encoded images are separate objects.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(tsify::Tsify))]
 #[serde(deny_unknown_fields)]
 pub struct PreviewDescriptor {
     /// Exact native research Version UUID, canonical lowercase UUID form.
@@ -58,6 +60,7 @@ pub struct PreviewDescriptor {
     /// Exactly `image/png` or `image/svg+xml`.
     pub media_type: String,
     /// Encoded byte count.
+    #[cfg_attr(feature = "typescript", tsify(type = "bigint"))]
     pub length: u64,
     /// Pixel width.
     pub width: u32,
@@ -303,6 +306,7 @@ pub fn digest(bytes: &[u8]) -> String {
 }
 /// Versioned typed discovery extension. Absence means no previews selected.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(tsify::Tsify))]
 #[serde(deny_unknown_fields)]
 pub struct PreviewSet {
     /// Must equal `graphforge-previews/1`.

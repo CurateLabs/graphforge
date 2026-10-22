@@ -97,6 +97,7 @@ def test_expected_mapping() -> None:
         "node": "0.5.0",
         "cli": "0.5.0",
         "skills": "0.5.0",
+        "protocol": "0.5.0",
     }
     dev = set_release_version.expected_for("0.5.0", dev=True)
     assert dev["cargo"] == "0.5.0-dev"
@@ -104,6 +105,7 @@ def test_expected_mapping() -> None:
     assert dev["node"] == "0.5.0-dev.0"
     assert dev["cli"] == "0.5.0-dev.0"
     assert dev["skills"] == "0.5.0-dev.0"
+    assert dev["protocol"] == "0.5.0-dev.0"
 
 
 def test_expected_mapping_prerelease() -> None:
@@ -115,6 +117,7 @@ def test_expected_mapping_prerelease() -> None:
         "node": "0.6.0-rc.1",
         "cli": "0.6.0-rc.1",
         "skills": "0.6.0-rc.1",
+        "protocol": "0.6.0-rc.1",
     }
 
 
@@ -276,6 +279,7 @@ def test_apply_version_rewrites_every_surface(
     for path, content in (
         (tmp_path / "node" / "package.json", '{"version":"0.5.0"}\n'),
         (tmp_path / "cli" / "package.json", '{"version":"0.5.0"}\n'),
+        (tmp_path / "protocol" / "package.json", '{"version":"0.5.0"}\n'),
         (
             tmp_path / "skills" / "package.json",
             '{"version":"0.5.0","graphforgeCompatibility":{"release":"0.5.0"}}\n',
@@ -294,6 +298,9 @@ def test_apply_version_rewrites_every_surface(
     monkeypatch.setattr(set_release_version, "PYPROJECT", pyproject)
     monkeypatch.setattr(set_release_version, "NODE_PACKAGE", tmp_path / "node" / "package.json")
     monkeypatch.setattr(set_release_version, "CLI_PACKAGE", tmp_path / "cli" / "package.json")
+    monkeypatch.setattr(
+        set_release_version, "PROTOCOL_PACKAGE", tmp_path / "protocol" / "package.json"
+    )
     monkeypatch.setattr(set_release_version, "SKILLS_PACKAGE", tmp_path / "skills" / "package.json")
     monkeypatch.setattr(
         set_release_version, "SKILLS_COMPATIBILITY", tmp_path / "skills" / "compatibility.json"
@@ -338,6 +345,7 @@ def test_apply_version_rewrites_every_surface(
         tmp_path / "node" / "package.json",
         tmp_path / "cli" / "package.json",
         tmp_path / "skills" / "package.json",
+        tmp_path / "protocol" / "package.json",
     ):
         assert json.loads(path.read_text(encoding="utf-8"))["version"] == mapping["node"]
     skills = json.loads((tmp_path / "skills" / "package.json").read_text(encoding="utf-8"))
@@ -400,6 +408,7 @@ def test_apply_version_rewrites_path_pins(tmp_path: Path, monkeypatch: pytest.Mo
     for path, content in (
         (tmp_path / "node" / "package.json", '{"version":"0.5.0"}\n'),
         (tmp_path / "cli" / "package.json", '{"version":"0.5.0"}\n'),
+        (tmp_path / "protocol" / "package.json", '{"version":"0.5.0"}\n'),
         (
             tmp_path / "skills" / "package.json",
             '{"version":"0.5.0","graphforgeCompatibility":{"release":"0.5.0"}}\n',
@@ -418,6 +427,9 @@ def test_apply_version_rewrites_path_pins(tmp_path: Path, monkeypatch: pytest.Mo
     monkeypatch.setattr(set_release_version, "PYPROJECT", pyproject)
     monkeypatch.setattr(set_release_version, "NODE_PACKAGE", tmp_path / "node" / "package.json")
     monkeypatch.setattr(set_release_version, "CLI_PACKAGE", tmp_path / "cli" / "package.json")
+    monkeypatch.setattr(
+        set_release_version, "PROTOCOL_PACKAGE", tmp_path / "protocol" / "package.json"
+    )
     monkeypatch.setattr(set_release_version, "SKILLS_PACKAGE", tmp_path / "skills" / "package.json")
     monkeypatch.setattr(
         set_release_version, "SKILLS_COMPATIBILITY", tmp_path / "skills" / "compatibility.json"
@@ -447,6 +459,7 @@ def test_apply_version_rejects_missing_pins_without_writes(
     for path, content in (
         (tmp_path / "node" / "package.json", '{"version":"0.5.0"}\n'),
         (tmp_path / "cli" / "package.json", '{"version":"0.5.0"}\n'),
+        (tmp_path / "protocol" / "package.json", '{"version":"0.5.0"}\n'),
         (
             tmp_path / "skills" / "package.json",
             '{"version":"0.5.0","graphforgeCompatibility":{"release":"0.5.0"}}\n',
@@ -465,6 +478,9 @@ def test_apply_version_rejects_missing_pins_without_writes(
     monkeypatch.setattr(set_release_version, "PYPROJECT", pyproject)
     monkeypatch.setattr(set_release_version, "NODE_PACKAGE", tmp_path / "node" / "package.json")
     monkeypatch.setattr(set_release_version, "CLI_PACKAGE", tmp_path / "cli" / "package.json")
+    monkeypatch.setattr(
+        set_release_version, "PROTOCOL_PACKAGE", tmp_path / "protocol" / "package.json"
+    )
     monkeypatch.setattr(set_release_version, "SKILLS_PACKAGE", tmp_path / "skills" / "package.json")
     monkeypatch.setattr(
         set_release_version, "SKILLS_COMPATIBILITY", tmp_path / "skills" / "compatibility.json"

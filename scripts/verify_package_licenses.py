@@ -57,6 +57,7 @@ NPM_PACKAGES = (
     ROOT / "crates" / "graphforge-bindings-node",
     ROOT / "packages" / "cli",
     ROOT / "packages" / "agent-skills",
+    ROOT / "packages" / "protocol-wasm",
 )
 
 PYTHON_PYPROJECT = ROOT / "crates" / "graphforge-bindings-py" / "pyproject.toml"
@@ -111,6 +112,7 @@ def verify_npm_package(package_dir: Path) -> list[str]:
     if package_dir in (
         ROOT / "crates" / "graphforge-bindings-node",
         ROOT / "packages" / "cli",
+        ROOT / "packages" / "protocol-wasm",
     ):
         required_files.append("THIRD_PARTY_NOTICES.md")
     package_json = package_dir / "package.json"

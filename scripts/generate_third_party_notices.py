@@ -19,11 +19,13 @@ COPIES = (
     ROOT / "crates" / "graphforge-bindings-node" / "THIRD_PARTY_NOTICES.md",
     ROOT / "crates" / "graphforge-cli" / "THIRD_PARTY_NOTICES.md",
     ROOT / "packages" / "cli" / "THIRD_PARTY_NOTICES.md",
+    ROOT / "packages" / "protocol-wasm" / "THIRD_PARTY_NOTICES.md",
 )
 MANIFESTS = (
     ROOT / "crates" / "graphforge-bindings-py" / "Cargo.toml",
     ROOT / "crates" / "graphforge-bindings-node" / "Cargo.toml",
     ROOT / "crates" / "graphforge-cli" / "Cargo.toml",
+    ROOT / "crates" / "graphforge-protocol-wasm" / "Cargo.toml",
 )
 
 

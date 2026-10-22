@@ -79,6 +79,19 @@ with tempfile.TemporaryDirectory() as raw:
         "@curatelabs/graphforge-agent-skills",
         version,
     )
+    # The WebAssembly protocol package is part of the release too.
+    try:
+        mod.publish_order(root)
+        raise AssertionError("expected the missing protocol-wasm package to fail")
+    except RuntimeError as error:
+        assert "graphforge-protocol-wasm" in str(error)
+
+    pack(
+        root,
+        "curatelabs-graphforge-protocol-wasm-x.tgz",
+        "@curatelabs/graphforge-protocol-wasm",
+        version,
+    )
     names = [name for _, name, _ in mod.publish_order(root)]
     assert names == [
         "@curatelabs/graphforge-darwin-arm64",
@@ -86,6 +99,7 @@ with tempfile.TemporaryDirectory() as raw:
         "@curatelabs/graphforge",
         "@curatelabs/graphforge-cli",
         "@curatelabs/graphforge-agent-skills",
+        "@curatelabs/graphforge-protocol-wasm",
     ], names
 
     # A re-run publishes only what the registry lacks, natives before the main
@@ -100,6 +114,7 @@ with tempfile.TemporaryDirectory() as raw:
         "curatelabs-graphforge-x.tgz",
         "curatelabs-graphforge-cli-x.tgz",
         "curatelabs-graphforge-agent-skills-x.tgz",
+        "curatelabs-graphforge-protocol-wasm-x.tgz",
     ], commands
     assert all(command[-2:] == ["--tag", tag] and "--provenance" in command for command in commands)
 
@@ -110,7 +125,7 @@ with tempfile.TemporaryDirectory() as raw:
     mod.is_published = lambda _name, _version: False
     relative = Path(os.path.relpath(root))
     mod.publish(relative, tag)
-    assert len(commands) == 5, commands
+    assert len(commands) == 6, commands
     assert all(Path(command[2]).is_absolute() for command in commands), commands
 
     # The wrong dist-tag is refused before anything is published.

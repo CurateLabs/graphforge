@@ -225,3 +225,4 @@ target-py-cov/
 !crates/graphforge-bindings-node/lib/**
 !packages/cli/lib/
 !packages/cli/lib/**
+packages/protocol-wasm/dist/

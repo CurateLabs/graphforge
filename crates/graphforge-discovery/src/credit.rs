@@ -20,6 +20,7 @@ pub const ROLE_COMMITTER: &str = "committer";
 
 /// The author or committer credited on a Version, mirroring the native signature.
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(tsify::Tsify))]
 #[serde(deny_unknown_fields)]
 pub struct CreditSignature {
     /// Display name: non-empty, no surrounding whitespace or control characters.
@@ -105,6 +106,7 @@ fn valid_orcid(orcid: &str) -> bool {
 
 /// One person credited in a Project's published history.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(tsify::Tsify))]
 #[serde(deny_unknown_fields)]
 pub struct SummaryPerson {
     /// Display name.

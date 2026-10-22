@@ -1,4 +1,4 @@
-.PHONY: help lint format type-check security workflow-lint license-check third-party-notices third-party-notices-check cargo-deny-licenses test test-rust test-python test-node test-scripts check clean test-tck docstring-coverage test-network benchmark test-perf test-perf-xs test-perf-slow test-perf-large coverage coverage-rust coverage-python coverage-node coverage-quick coverage-report coverage-diff coverage-strict check-coverage check-coverage-rust check-coverage-python check-coverage-node check-patch-coverage test-durations test-analytics docs-serve docs-build docs-clean cargo-build codspeed-build codspeed-build-walltime codspeed-run bench-traversal bench-tck-scenarios tck-perf bench-fixed-hop-limit bench-fixed-hop-livejournal bench-embedded-performance bench-adjacency-200m native-consumers bulk-construction-conformance-check bulk-construction-conformance cargo-test cargo-check cargo-clippy cargo-fmt cargo-fmt-check clean-builds clean-builds-all pnpm-install pnpm-build install build release-version-check package-license-verify publish-dry-run
+.PHONY: help lint format type-check security workflow-lint license-check third-party-notices third-party-notices-check cargo-deny-licenses test test-rust test-python test-node test-protocol-wasm test-scripts check clean test-tck docstring-coverage test-network benchmark test-perf test-perf-xs test-perf-slow test-perf-large coverage coverage-rust coverage-python coverage-node coverage-quick coverage-report coverage-diff coverage-strict check-coverage check-coverage-rust check-coverage-python check-coverage-node check-patch-coverage test-durations test-analytics docs-serve docs-build docs-clean cargo-build codspeed-build codspeed-build-walltime codspeed-run bench-traversal bench-tck-scenarios tck-perf bench-fixed-hop-limit bench-fixed-hop-livejournal bench-embedded-performance bench-adjacency-200m native-consumers bulk-construction-conformance-check bulk-construction-conformance cargo-test cargo-check cargo-clippy cargo-fmt cargo-fmt-check clean-builds clean-builds-all pnpm-install pnpm-build install build release-version-check package-license-verify publish-dry-run
 
 help:  ## Show this help message
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
@@ -217,6 +217,11 @@ test-node:  ## Run every Node binding and CLI suite against the built addon
 	pnpm format:node-cli
 	python3 scripts/test_environment.py -- pnpm smoke:node-cli
 	python3 scripts/test_environment.py -- pnpm --filter @curatelabs/graphforge-cli test:lifecycle
+
+test-protocol-wasm:  ## Build the WebAssembly protocol package and replay the conformance corpora (needs the wasm32 target and a matching wasm-bindgen CLI)
+	pnpm --filter @curatelabs/graphforge-protocol-wasm build
+	pnpm --filter @curatelabs/graphforge-protocol-wasm test
+	pnpm --filter @curatelabs/graphforge-protocol-wasm format:check
 
 test-scripts:  ## Run the scripts/ci self-test suites (needs uv sync --all-extras and pnpm install)
 	scripts/ci/run-self-tests.sh

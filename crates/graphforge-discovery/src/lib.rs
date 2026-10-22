@@ -115,6 +115,7 @@ impl Default for DiscoveryLimits {
 
 /// Stable machine-readable discovery failure classification.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "typescript", derive(tsify::Tsify))]
 #[serde(rename_all = "snake_case")]
 pub enum DiscoveryErrorCode {
     /// The canonical owner/repository identity is invalid.
@@ -139,6 +140,7 @@ pub enum DiscoveryErrorCode {
 
 /// Semantic surface associated with structured version diagnostics.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "typescript", derive(tsify::Tsify))]
 #[serde(rename_all = "snake_case")]
 pub enum DiscoveryVersionSubject {
     /// Discovery response protocol version.
@@ -155,6 +157,7 @@ pub enum DiscoveryVersionSubject {
 
 /// Sanitized supported/requested version metadata for compatibility failures.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "typescript", derive(tsify::Tsify))]
 pub struct DiscoveryVersionDetails {
     /// Versioned semantic surface that failed negotiation.
     pub subject: DiscoveryVersionSubject,
@@ -166,6 +169,7 @@ pub struct DiscoveryVersionDetails {
 
 /// Sanitized discovery error suitable for CLI, Hub, and telemetry projection.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "typescript", derive(tsify::Tsify))]
 pub struct DiscoveryError {
     /// Stable machine-readable code.
     pub code: DiscoveryErrorCode,
@@ -210,6 +214,7 @@ impl std::error::Error for DiscoveryError {}
 
 /// Canonical provider-independent repository identity.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(tsify::Tsify))]
 #[serde(deny_unknown_fields)]
 pub struct RepositoryIdentity {
     /// Namespace owner segment.
@@ -270,6 +275,7 @@ fn valid_slug(value: &str, max: usize) -> bool {
 
 /// Major/minor discovery protocol version.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(tsify::Tsify))]
 #[serde(deny_unknown_fields)]
 pub struct ProtocolVersion {
     /// Required major version.
@@ -301,6 +307,7 @@ impl ProtocolVersion {
 
 /// Lowercase SHA-256 identity with an explicit algorithm prefix.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(tsify::Tsify))]
 #[serde(transparent)]
 pub struct Sha256Digest(pub String);
 
@@ -332,6 +339,7 @@ fn invalid_digest() -> DiscoveryError {
 
 /// Required semantic understood by a reader before it may access objects.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(tsify::Tsify))]
 #[serde(deny_unknown_fields)]
 pub struct ProtocolRequirement {
     /// Stable capability identifier.
@@ -342,6 +350,7 @@ pub struct ProtocolRequirement {
 
 /// Capability a server advertises without requiring client support.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(tsify::Tsify))]
 #[serde(deny_unknown_fields)]
 pub struct ProtocolCapability {
     /// Stable capability identifier.
@@ -352,6 +361,7 @@ pub struct ProtocolCapability {
 
 /// Reference to the semantic portable package verified after download.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(tsify::Tsify))]
 #[serde(deny_unknown_fields)]
 pub struct PortablePackageReference {
     /// Must be [`PORTABLE_FORMAT`] in discovery v1.
@@ -370,11 +380,13 @@ pub struct PortablePackageReference {
 
 /// One immutable directly downloadable object.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(tsify::Tsify))]
 #[serde(deny_unknown_fields)]
 pub struct ObjectDescriptor {
     /// Content digest and object identity.
     pub digest: Sha256Digest,
     /// Exact object length in bytes.
+    #[cfg_attr(feature = "typescript", tsify(type = "bigint"))]
     pub length: u64,
     /// Lowercase Internet media type without parameters.
     pub media_type: String,
@@ -385,6 +397,7 @@ pub struct ObjectDescriptor {
 /// Exact ontology identity: module or bridge-set id, authored version, and
 /// content digest. Distinct from package identity and composition digest.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(tsify::Tsify))]
 #[serde(deny_unknown_fields)]
 pub struct ExactIdentity {
     /// Opaque ontology or bridge identifier (commonly a URI).
@@ -397,6 +410,7 @@ pub struct ExactIdentity {
 
 /// One ontology module advertised by a manifest.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(tsify::Tsify))]
 #[serde(deny_unknown_fields)]
 pub struct OntologyModuleDescriptor {
     /// Opaque ontology identifier.
@@ -427,6 +441,7 @@ impl OntologyModuleDescriptor {
 
 /// One bridge set advertised by identity only.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(tsify::Tsify))]
 #[serde(deny_unknown_fields)]
 pub struct BridgeSetDescriptor {
     /// Opaque bridge-set identifier.
@@ -439,6 +454,7 @@ pub struct BridgeSetDescriptor {
 
 /// Ontology composition inventory of the represented Project version.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(tsify::Tsify))]
 #[serde(deny_unknown_fields)]
 pub struct OntologyInventory {
     /// Semantic identity of the whole composition.
@@ -451,6 +467,7 @@ pub struct OntologyInventory {
 
 /// Reference to a Project summary document carried as a transport object.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(tsify::Tsify))]
 #[serde(deny_unknown_fields)]
 pub struct ProjectSummaryReference {
     /// Must be [`PROJECT_SUMMARY_FORMAT`] in discovery v1.2.
@@ -463,6 +480,7 @@ pub struct ProjectSummaryReference {
 
 /// Validated repository discovery manifest.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(tsify::Tsify))]
 #[serde(deny_unknown_fields)]
 pub struct DiscoveryManifest {
     /// Contract identifier; must equal [`DISCOVERY_FORMAT`].
@@ -496,11 +514,13 @@ pub struct DiscoveryManifest {
     pub objects: Vec<ObjectDescriptor>,
     /// Explicit optional extension values, preserved canonically by readers.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[cfg_attr(feature = "typescript", tsify(type = "Record<string, unknown>"))]
     pub extensions: BTreeMap<String, Value>,
 }
 
 /// One named ref and its immutable target plus strong HTTP validator.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(tsify::Tsify))]
 #[serde(deny_unknown_fields)]
 pub struct RepositoryRef {
     /// Canonical ref name.
@@ -516,6 +536,7 @@ pub struct RepositoryRef {
 
 /// Validated immutable snapshot of repository refs.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(tsify::Tsify))]
 #[serde(deny_unknown_fields)]
 pub struct RefSet {
     /// Contract identifier; must equal [`DISCOVERY_FORMAT`].
@@ -530,6 +551,7 @@ pub struct RefSet {
     pub refs: Vec<RepositoryRef>,
     /// Explicit optional extension values, preserved canonically by readers.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[cfg_attr(feature = "typescript", tsify(type = "Record<string, unknown>"))]
     pub extensions: BTreeMap<String, Value>,
 }
 

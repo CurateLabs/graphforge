@@ -2,5 +2,6 @@ packages:
   - crates/graphforge-bindings-node
   - packages/cli
   - packages/agent-skills
+  - packages/protocol-wasm
   - tests/features/node
   - docs-site

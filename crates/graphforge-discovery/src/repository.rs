@@ -8,6 +8,7 @@ use url::Url;
 
 /// Machine-readable body accompanying an HTTP 308 repository move.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(tsify::Tsify))]
 #[serde(deny_unknown_fields)]
 pub struct RepositoryMoved {
     /// Must equal `graphforge-repository-moved/1`.

@@ -2,9 +2,9 @@
 """Publish the packed GraphForge npm tarballs in dependency order.
 
 The native packages go first, then the main package that depends on them, then
-the CLI and the agent skills. Re-running is safe: a package whose version is
-already on the registry is skipped. Publishing uses npm trusted publishing
-(OIDC) with provenance, so no token is read here.
+the CLI, the agent skills, and the WebAssembly protocol validators. Re-running is
+safe: a package whose version is already on the registry is skipped. Publishing uses
+npm trusted publishing (OIDC) with provenance, so no token is read here.
 
 npm assigns the ``latest`` dist-tag whenever ``npm publish`` runs without
 ``--tag``, so the tag is always passed and always derived from the version: a
@@ -30,7 +30,12 @@ REGISTRY = "https://registry.npmjs.org"
 USER_AGENT = "GraphForge npm publisher (github.com/CurateLabs/graphforge)"
 MAIN = "@curatelabs/graphforge"
 # Published after every native package, in this order.
-DEPENDENTS = (MAIN, "@curatelabs/graphforge-cli", "@curatelabs/graphforge-agent-skills")
+DEPENDENTS = (
+    MAIN,
+    "@curatelabs/graphforge-cli",
+    "@curatelabs/graphforge-agent-skills",
+    "@curatelabs/graphforge-protocol-wasm",
+)
 RELEASE_DIST_TAG = "latest"
 PRERELEASE_DIST_TAG = "next"
 # Official semver 2.0.0 grammar (semver.org); the prerelease group decides the tag.

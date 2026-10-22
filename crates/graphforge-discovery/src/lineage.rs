@@ -27,6 +27,7 @@ const VERSION_KINDS: [&str; 2] = ["complete", "projection"];
 
 /// Fork origin citation for an independent repository identity.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(tsify::Tsify))]
 #[serde(deny_unknown_fields)]
 pub struct LineageForkOrigin {
     /// Original Project repository identity.
@@ -92,6 +93,7 @@ impl LineageForkOrigin {
 
 /// Immutable Branch genealogy and creation selection commitment.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(tsify::Tsify))]
 #[serde(deny_unknown_fields)]
 pub struct LineageBranch {
     /// Stable Branch context UUID.
@@ -118,6 +120,7 @@ pub struct LineageBranch {
 /// Identity-only boundary for a transient native Project capture at Branch creation.
 /// No Version record, authorship, payload, or Branch creation authority is inferred.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(tsify::Tsify))]
 #[serde(deny_unknown_fields)]
 pub struct LineageBoundaryAnchor {
     /// Transient Project capture UUID, not a missing intermediate Branch commit.
@@ -130,6 +133,7 @@ pub struct LineageBoundaryAnchor {
 
 /// One published immutable research Version or distinct projection.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(tsify::Tsify))]
 #[serde(deny_unknown_fields)]
 pub struct LineageVersion {
     /// Immutable research Version UUID.
@@ -158,6 +162,7 @@ pub struct LineageVersion {
 
 /// One published frozen Proposal payload as a distinct projection package.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(tsify::Tsify))]
 #[serde(deny_unknown_fields)]
 pub struct LineageProposal {
     /// Stable Proposal UUID.
@@ -174,6 +179,7 @@ pub struct LineageProposal {
 
 /// Validated research lineage document.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(tsify::Tsify))]
 #[serde(deny_unknown_fields)]
 pub struct ResearchLineage {
     /// Contract identifier; must equal [`RESEARCH_LINEAGE_FORMAT`].
@@ -203,6 +209,7 @@ pub struct ResearchLineage {
     pub proposals: Vec<LineageProposal>,
     /// Explicit optional extension values, preserved canonically by readers.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[cfg_attr(feature = "typescript", tsify(type = "Record<string, unknown>"))]
     pub extensions: BTreeMap<String, Value>,
 }
 
@@ -656,6 +663,7 @@ impl ResearchLineage {
 
 /// Reference to a research lineage document carried as a transport object.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(tsify::Tsify))]
 #[serde(deny_unknown_fields)]
 pub struct ResearchLineageReference {
     /// Must be [`RESEARCH_LINEAGE_FORMAT`] in discovery v1.1.
