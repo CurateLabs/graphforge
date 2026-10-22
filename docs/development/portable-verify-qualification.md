@@ -108,3 +108,40 @@ Restore both afterwards.
 The same command, fed by an object store stream in a container whose disk is
 smaller than the object, is the issue's 100 GiB acceptance. Its stream digest,
 `gf` commit, container limits and result are attached to #1777.
+
+### Reproducing it on one host
+
+`--url` refuses loopback and private addresses, so a local run feeds the same
+stream verifier through `--input -`. The generator is
+`crates/graphforge-cli/examples/generate_large_portable_package.rs`. It streams a
+valid graph bundle of at least `--size-bytes` to a file or standard output,
+deterministically from `--seed`, holding one Parquet file at a time: a graph
+tree of 46 MB graph Parquet files plus one of 74 MB, over the 64 MiB walk
+threshold, so the staged-entry path runs. It prints `package_digest` to standard
+error. The package builder is `crates/graphforge-cli/tests/support/portable_package.rs`,
+shared with the stdin tests.
+
+```bash
+export CARGO_TARGET_DIR=$HOME/gf-target-large-package
+GF=$CARGO_TARGET_DIR/release/gf
+cargo build --release -p graphforge-cli --bin gf --example generate_large_portable_package
+$CARGO_TARGET_DIR/release/examples/generate_large_portable_package \
+  --size-bytes 107374182400 --seed 1 --output package.gfpb
+
+# File mode: the reference verdict.
+/usr/bin/time -v "$GF" --json portable verify --input package.gfpb --mode full > file.json
+
+# Stream mode: 1 GiB of memory, 2 GiB of scratch, one cgroup holding only gf.
+truncate -s 2G scratch.img && sudo mkfs.ext4 -q -F scratch.img
+mkdir -p tmp && sudo mount -o loop scratch.img tmp && sudo chown "$USER" tmp
+cat package.gfpb | sudo systemd-run --scope --quiet -p MemoryMax=1G -p MemorySwapMax=0 \
+  --uid="$USER" --setenv=TMPDIR="$PWD/tmp" \
+  /usr/bin/time -v "$GF" --json portable verify --input - --mode full > stream.json
+
+# Same verdict: only `source` differs.
+diff <(jq -S 'del(.source)' file.json) <(jq -S 'del(.source)' stream.json)
+```
+
+Sample `df` on the scratch volume while the stream run lasts for its peak usage,
+and read `memory.peak` from the scope's cgroup before it exits. Attach both
+reports, the peaks, the exit codes and wall times, and the `gf` commit to #1777.
