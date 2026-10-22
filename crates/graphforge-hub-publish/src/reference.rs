@@ -1244,29 +1244,13 @@ impl ReferenceHub {
 
         // 3. The manifest names this repository and lists exactly the admitted
         //    objects at this Hub's locations.
-        if &manifest.repository != repository {
-            return Err(invalid("manifest repository does not match the URL").into());
-        }
-        let template = self.capabilities(repository);
-        let exact =
-            manifest.objects.len() == session.request.objects.len()
-                && manifest.objects.iter().zip(&session.request.objects).all(
-                    |(listed, admitted)| {
-                        listed.digest.0 == admitted.digest
-                            && listed.length == admitted.length
-                            && listed.media_type == admitted.media_type
-                            && listed.locations == [template.object_location(&admitted.digest)]
-                    },
-                );
-        if !exact {
-            return Err(invalid(
-                "manifest objects must equal the session inventory at this hub's locations",
-            )
-            .into());
-        }
-        if !commit.refs.contains(&manifest.resolved_ref) {
-            return Err(invalid("advanced refs must include the manifest's resolved ref").into());
-        }
+        crate::commit::check_commit_manifest(
+            &manifest,
+            repository,
+            &self.capabilities(repository),
+            &session.request.objects,
+            &commit.refs,
+        )?;
 
         // 4. Expected-revision precondition.
         let current = state.repositories.get(repository);

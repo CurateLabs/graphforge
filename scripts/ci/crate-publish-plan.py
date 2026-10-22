@@ -149,6 +149,7 @@ CRATES_IO_EXCLUDED = frozenset(
     {
         "graphforge-bindings-py",
         "graphforge-bindings-node",
+        "graphforge-protocol-wasm",
     }
 )
 

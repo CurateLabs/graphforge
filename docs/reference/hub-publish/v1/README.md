@@ -272,4 +272,6 @@ refuses responses larger than 95 MiB rather than allocating object-sized RAM.
 The wire types, parsers and validators remain portable Rust. Native-only
 `ReferenceHub` and its temporary-file dependency are excluded on `wasm32`; a
 WASM validator consumes the same wire/corpus verdicts, not a filesystem-backed
-reference HTTP server.
+reference HTTP server. `@curatelabs/graphforge-protocol-wasm` is that validator:
+its tests replay the control documents of this corpus, including the request
+commitment and the commit-time manifest checks (`check_commit_manifest`).

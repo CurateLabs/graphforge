@@ -51,6 +51,7 @@ const ONTOLOGY_MODES: [&str; 3] = ["none", "advisory", "strict"];
 
 /// Portable package the summary describes, by semantic identity only.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(tsify::Tsify))]
 #[serde(deny_unknown_fields)]
 pub struct SummaryPackageReference {
     /// Must be [`PORTABLE_FORMAT`] in summary v1.
@@ -67,6 +68,7 @@ pub struct SummaryPackageReference {
 
 /// Geographic coverage declared in Project metadata.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(tsify::Tsify))]
 #[serde(deny_unknown_fields)]
 pub struct SummaryGeographicCoverage {
     /// Optional human-readable label.
@@ -77,6 +79,7 @@ pub struct SummaryGeographicCoverage {
 
 /// Temporal coverage declared in Project metadata.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(tsify::Tsify))]
 #[serde(deny_unknown_fields)]
 pub struct SummaryTemporalCoverage {
     /// Optional inclusive start label or ISO date.
@@ -89,15 +92,20 @@ pub struct SummaryTemporalCoverage {
 
 /// Caller-declared corpus scale. These are declarations, not computed counts.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(tsify::Tsify))]
 #[serde(deny_unknown_fields)]
 pub struct SummaryCorpusSize {
     /// Optional declared node count.
+    #[cfg_attr(feature = "typescript", tsify(type = "bigint | null"))]
     pub node_count: Option<u64>,
     /// Optional declared relationship count.
+    #[cfg_attr(feature = "typescript", tsify(type = "bigint | null"))]
     pub relationship_count: Option<u64>,
     /// Optional declared source count.
+    #[cfg_attr(feature = "typescript", tsify(type = "bigint | null"))]
     pub source_count: Option<u64>,
     /// Optional declared artifact count.
+    #[cfg_attr(feature = "typescript", tsify(type = "bigint | null"))]
     pub artifact_count: Option<u64>,
 }
 
@@ -109,6 +117,7 @@ pub struct SummaryCorpusSize {
 /// source record: strings are non-empty, at most 4096 bytes, and free of ASCII
 /// control characters; lists hold at most 256 strictly ascending entries.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(tsify::Tsify))]
 #[serde(deny_unknown_fields)]
 pub struct SummaryMetadata {
     /// Human title.
@@ -151,6 +160,7 @@ pub struct SummaryMetadata {
 
 /// One module of the composition a summary reports.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(tsify::Tsify))]
 #[serde(deny_unknown_fields)]
 pub struct SummaryOntologyModule {
     /// Opaque ontology identifier.
@@ -167,6 +177,7 @@ pub struct SummaryOntologyModule {
 
 /// Ontology composition verified in the described package.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(tsify::Tsify))]
 #[serde(deny_unknown_fields)]
 pub struct SummaryOntologyComposition {
     /// Semantic identity of the whole composition.
@@ -179,23 +190,27 @@ pub struct SummaryOntologyComposition {
 
 /// Facts a publisher verified from the portable package without graph payload.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(tsify::Tsify))]
 #[serde(deny_unknown_fields)]
 pub struct SummaryFacts {
     /// Ontology enforcement mode: `none`, `advisory`, or `strict`.
     pub ontology_mode: String,
     /// Histogram of package components by kind. Only kinds with at least one
     /// component appear, so each fact has exactly one representation.
+    #[cfg_attr(feature = "typescript", tsify(type = "Record<string, bigint>"))]
     pub components: BTreeMap<String, u64>,
     /// Whether the package carries a research component.
     pub research_present: bool,
     /// Whether the package carries an evidence component.
     pub evidence_present: bool,
     /// Total verified payload bytes of the package.
+    #[cfg_attr(feature = "typescript", tsify(type = "bigint"))]
     pub payload_bytes: u64,
     /// Verified payload bytes by component kind, with `package-control` for
     /// the entries outside every component. The values sum exactly to
     /// [`Self::payload_bytes`], and the key set is the kinds of
     /// [`Self::components`] plus `package-control` when control bytes exist.
+    #[cfg_attr(feature = "typescript", tsify(type = "Record<string, bigint>"))]
     pub bytes_by_kind: BTreeMap<String, u64>,
     /// Ontology composition, when the package carries one.
     pub ontology_composition: Option<SummaryOntologyComposition>,
@@ -203,6 +218,7 @@ pub struct SummaryFacts {
 
 /// Validated Project summary document.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(tsify::Tsify))]
 #[serde(deny_unknown_fields)]
 pub struct ProjectSummary {
     /// Contract identifier; must equal [`PROJECT_SUMMARY_FORMAT`].
@@ -228,6 +244,7 @@ pub struct ProjectSummary {
     pub people: Vec<SummaryPerson>,
     /// Explicit optional extension values, preserved canonically by readers.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[cfg_attr(feature = "typescript", tsify(type = "Record<string, unknown>"))]
     pub extensions: BTreeMap<String, Value>,
 }
 

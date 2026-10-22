@@ -423,6 +423,7 @@ jobs:
         uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
         with:
           toolchain: "1.96.0"
+          targets: wasm32-unknown-unknown
       - name: Cache Cargo registry
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -485,6 +486,21 @@ jobs:
 
       - name: Node binding and CLI suites
         run: make test-node
+
+      # The WebAssembly build of the Hub validators replays the discovery and
+      # hub-publish corpora and must equal native Rust.
+      - name: Resolve the locked wasm-bindgen version
+        id: wasm_bindgen
+        run: echo "version=$(scripts/ci/install-wasm-bindgen.sh --print-version)" >> "$GITHUB_OUTPUT"
+      - name: Cache the wasm-bindgen CLI
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.wasm-bindgen
+          key: wasm-bindgen-cli-${{ runner.os }}-${{ steps.wasm_bindgen.outputs.version }}
+      - name: WebAssembly protocol package
+        run: |
+          scripts/ci/install-wasm-bindgen.sh "$HOME/.wasm-bindgen"
+          PATH="$HOME/.wasm-bindgen/bin:$PATH" make test-protocol-wasm
 
       # The same scenario through Rust, the CLI, Python, and Node must produce
       # the same report.
