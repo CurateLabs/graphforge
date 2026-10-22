@@ -20,9 +20,11 @@ pnpm add @curatelabs/graphforge
 
 `query()` from the package returns an
 [`apache-arrow`](https://www.npmjs.com/package/apache-arrow) `Table` directly,
-so reading a useful result needs no Arrow IPC decoding. Keep `apache-arrow`
-importable at the matching version when you also want table helpers for raw
-results (`forge.execute()` still returns Arrow IPC buffers).
+so reading a useful result needs no Arrow IPC decoding. `apache-arrow` is an
+optional peer dependency used only by `query()` and your own table helpers;
+install it next to the binding (`npm install @curatelabs/graphforge apache-arrow`
+/ `pnpm add @curatelabs/graphforge apache-arrow`). The native engine and CLI do
+not need it.
 
 Node.js 20 or newer is required. Prebuilt packages are published for:
 

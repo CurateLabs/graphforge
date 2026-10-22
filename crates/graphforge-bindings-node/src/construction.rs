@@ -79,16 +79,13 @@ impl EdgeHandle {
     }
 }
 
-#[napi]
-impl GraphForge {
-    /// Resolve the caller-supplied operation identity, minting a Rust-owned
-    /// UUIDv7 when omitted. Explicit identities keep their canonical
-    /// validation so replay and conflict behavior is unchanged.
-    fn resolve_operation_id(operation_uuid: Option<String>) -> Result<OperationId> {
-        match operation_uuid {
-            Some(value) => canonical_operation_id(&value),
-            None => Ok(OperationId(graphforge_api::new_v7())),
-        }
+/// Resolve the caller-supplied operation identity, minting a Rust-owned
+/// UUIDv7 when omitted. Explicit identities keep their canonical validation so
+/// replay and conflict behavior is unchanged.
+fn resolve_operation_id(operation_uuid: Option<String>) -> Result<OperationId> {
+    match operation_uuid {
+        Some(value) => canonical_operation_id(&value),
+        None => Ok(OperationId(graphforge_api::new_v7())),
     }
 }
 
@@ -142,7 +139,7 @@ impl GraphForge {
         data: Buffer,
         operation_uuid: Option<String>,
     ) -> Result<Buffer> {
-        let operation_uuid = Self::resolve_operation_id(operation_uuid)?;
+        let operation_uuid = resolve_operation_id(operation_uuid)?;
         let batch = ipc_to_record_batch(&data)?;
         let graph = self.open_guard()?;
         let receipt = graph
@@ -164,7 +161,7 @@ impl GraphForge {
         data: Buffer,
         operation_uuid: Option<String>,
     ) -> Result<Buffer> {
-        let operation_uuid = Self::resolve_operation_id(operation_uuid)?;
+        let operation_uuid = resolve_operation_id(operation_uuid)?;
         let batch = ipc_to_record_batch(&data)?;
         let graph = self.open_guard()?;
         let receipt = graph

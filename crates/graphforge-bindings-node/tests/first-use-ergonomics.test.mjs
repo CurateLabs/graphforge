@@ -189,18 +189,11 @@ test("bulk publication mints and exposes an optional operation id", () => {
     assert.equal(projectDigest(project), before);
 
     // The minted identity refuses a conflicting payload.
-    let conflicted = false;
-    try {
-      forge.publishBulkNodes(tableToIpc(nodeBulkTable(["Knuth"])), minted);
-    } catch (error) {
-      conflicted =
-        error?.code === "GF_IDEMPOTENCY_CONFLICT" ||
-        String(error?.message ?? error).includes("IDEMPOTENCY") ||
-        String(error?.message ?? error)
-          .toLowerCase()
-          .includes("conflict");
-    }
-    assert.equal(conflicted, true);
+    assert.throws(
+      () =>
+        forge.publishBulkNodes(tableToIpc(nodeBulkTable(["Knuth"])), minted),
+      (error) => error?.code === "GF_IDEMPOTENCY_CONFLICT",
+    );
     assert.equal(projectDigest(project), before);
 
     forge.close();

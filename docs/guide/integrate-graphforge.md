@@ -21,8 +21,8 @@ This optional section additionally assumes basic JavaScript and npm use. Stay
 with Python if those are unfamiliar.
 
 Install `@curatelabs/graphforge` at the version selected in
-[Installation](installation.md). Save the following as an `.mjs` file and run
-it with Node:
+[Installation](installation.md), plus `apache-arrow`, which `query()` uses to
+return a table. Save the following as an `.mjs` file and run it with Node:
 
 ```js
 import { GraphForge } from "@curatelabs/graphforge";
