@@ -106,24 +106,23 @@ from the Rust wire types; nothing in them is written by hand.
 
 ## Footprint
 
-Measured on the release build (`opt-level = "z"`, LTO, then `wasm-opt -Oz`),
-Node 22:
+Measured on the release build (`opt-level = "z"`, LTO), Node 22:
 
-| Measure                                     | Value                                  |
-| ------------------------------------------- | -------------------------------------- |
-| `.wasm` file                                | 953 KB raw; 381 KB gzip; 299 KB brotli |
-| Linear memory after instantiation           | about 1.3 MiB                          |
-| `validate_manifest`, openalex (2.2 KB)      | about 0.3 ms                           |
-| `validate_lineage`, largest corpus (4.5 KB) | about 0.5 ms                           |
-| `request_commitment`                        | about 20 µs                            |
+| Measure                                     | Value                                                         |
+| ------------------------------------------- | ------------------------------------------------------------- |
+| Delivered `.wasm` size                      | about 352 KB gzip, about 281 KB brotli (1.07 MB uncompressed) |
+| Linear memory after instantiation           | about 1.3 MiB                                                 |
+| `validate_manifest`, openalex (2.2 KB)      | about 0.3 ms                                                  |
+| `validate_lineage`, largest corpus (4.5 KB) | about 0.5 ms                                                  |
+| `request_commitment`                        | about 20 µs                                                   |
 
-`wasm-opt -Oz` (the pinned `binaryen` dev dependency, run by `scripts/build.mjs`)
-cut the file from 1,069,964 B to 952,629 B raw (-11%) but made it compress worse:
-352 KB to 381 KB gzip, 281 KB to 299 KB brotli, because it removes repetition the
-compressor was already exploiting. What a Worker or browser downloads is the
-compressed size, and both are far below the Workers limits.
+The compressed size is what a Worker or browser downloads, and it is far below
+the Workers limits. Running Binaryen's `wasm-opt -Oz` over the module was tried
+and is not applied: it shrinks the uncompressed file by 11% but grows it to
+381 KB gzip and 299 KB brotli, because it removes repetition the compressor was
+already using.
 
-Where the bytes are (function sizes before `wasm-opt`, by crate): `serde_json`
+Where the bytes are (uncompressed function sizes by crate, from `twiggy`; approximate): `serde_json`
 monomorphized for each wire type about 310 KB; `core`, `alloc` and `std` about
 230 KB; compiler-generated glue and closures about 210 KB; Unicode and IDNA
 tables and strings in the data segment about 208 KB; `graphforge-discovery` about
@@ -158,8 +157,8 @@ export PATH="$HOME/.wasm-bindgen/bin:$PATH"
 make test-protocol-wasm
 ```
 
-`pnpm install` also provides the pinned `binaryen` (`wasm-opt`) and `miniflare`
-development dependencies the build and the Worker test use.
+`pnpm install` also provides the pinned `miniflare` development dependency the
+Worker test uses.
 
 The tests replay the discovery v1 and hub-publish v1 corpora
 (`docs/reference/`) through the built module and compare each result with the

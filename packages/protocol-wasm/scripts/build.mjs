@@ -1,12 +1,9 @@
 // Build the WebAssembly module and its ES wrapper into dist/.
 //
 // Needs the wasm32-unknown-unknown Rust target and a `wasm-bindgen` CLI whose
-// version equals the `wasm-bindgen` crate in Cargo.lock (see README.md). The
-// module is then shrunk with Binaryen's `wasm-opt` (the pinned `binaryen` dev
-// dependency); `memory.copy`, which Rust emits, needs bulk-memory enabled.
+// version equals the `wasm-bindgen` crate in Cargo.lock (see README.md).
 import { execFileSync } from "node:child_process";
 import { mkdirSync, rmSync } from "node:fs";
-import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -40,17 +37,4 @@ run("wasm-bindgen", [
     "wasm-release",
     "graphforge_protocol_wasm.wasm",
   ),
-]);
-
-const binaryen = dirname(
-  createRequire(import.meta.url).resolve("binaryen/package.json"),
-);
-const module = join(dist, "graphforge_protocol_wasm_bg.wasm");
-run(process.execPath, [
-  join(binaryen, "bin", "wasm-opt"),
-  "-Oz",
-  "--enable-bulk-memory",
-  module,
-  "-o",
-  module,
 ]);

@@ -51,7 +51,6 @@
     "registry": "https://registry.npmjs.org/"
   },
   "devDependencies": {
-    "binaryen": "132.0.0",
     "miniflare": "3.20250718.3"
   }
 }
