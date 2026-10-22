@@ -629,18 +629,18 @@ END
 
 ### Math Functions
 
-| Function                                      | Description                    |
-| --------------------------------------------- | ------------------------------ |
-| `abs(n)`                                      | Absolute value                 |
-| `ceil(n)`                                     | Round up                       |
-| `floor(n)`                                    | Round down                     |
-| `round(n)`                                    | Round to nearest               |
-| `sqrt(n)`                                     | Square root                    |
-| `power(base, exp)`                            | Power                          |
-| `exp(n)`                                      | e^n                            |
-| `log(base, n)`                                | Logarithm of n to the given base |
-| `rand()`                                      | Random 0.0–1.0                 |
-| `sign(n)`                                     | -1, 0, or 1                    |
+| Function           | Description                      |
+| ------------------ | -------------------------------- |
+| `abs(n)`           | Absolute value                   |
+| `ceil(n)`          | Round up                         |
+| `floor(n)`         | Round down                       |
+| `round(n)`         | Round to nearest                 |
+| `sqrt(n)`          | Square root                      |
+| `power(base, exp)` | Power                            |
+| `exp(n)`           | e^n                              |
+| `log(base, n)`     | Logarithm of n to the given base |
+| `rand()`           | Random 0.0–1.0                   |
+| `sign(n)`          | -1, 0, or 1                      |
 
 ### List Functions
 
