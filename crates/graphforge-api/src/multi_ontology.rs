@@ -18,6 +18,7 @@ use diagnostics::{
 };
 
 use graphforge_core::{GfError as EngineError, ProjectErrorCode};
+use graphforge_discovery::{ItemId, ItemKind};
 use graphforge_ontology::{
     ActivationMode, ActivationRecord, ActivationScope, BridgeDocument, BridgeExportFormat,
     BridgeImportFormatHint, BridgeInspect, BridgeListEntry, BridgeSelector, BridgeSetId,
@@ -717,12 +718,20 @@ impl GraphForge {
     }
 
     /// Create/register a validated non-authoritative module candidate.
+    ///
+    /// Mints a permanent ID when `ontology_id` is empty. Save the returned
+    /// document before adoption; later lifecycle operations require that ID.
     pub fn create_ontology_module(
         &self,
-        document: OntologyDoc,
+        mut document: OntologyDoc,
         dependencies: Vec<OntologyModuleId>,
         enforcement: Option<ActivationMode>,
     ) -> Result<ModuleCandidate, GfError> {
+        if document.ontology_id.is_empty() {
+            document.ontology_id = ItemId::generate(ItemKind::OntologyModule)
+                .map_err(|_| GfError::Validation("secure item ID generation failed"))?
+                .to_uri();
+        }
         let composition = self.required_composition()?;
         let mut inventory = module_inventory(&composition)?;
         inventory
@@ -771,11 +780,16 @@ impl GraphForge {
         format: ImportFormatHint,
         dependencies: Vec<OntologyModuleId>,
     ) -> Result<ModuleCandidate, GfError> {
+        let document = staged_module_document(text, format)?;
+        if document.ontology_id.trim().is_empty() {
+            return Err(GfError::Validation(
+                "missing ontology_id; run ontology module create first",
+            ));
+        }
         let mut inventory = module_inventory(&self.required_composition()?)?;
         let id = inventory
             .import_text(text, format, dependencies.clone(), "candidate")
             .map_err(composition_error)?;
-        let document = staged_module_document(text, format)?;
         Ok(ModuleCandidate {
             id,
             document,
@@ -791,6 +805,11 @@ impl GraphForge {
         request: &ModuleAdoptionRequest,
         cancellation: Option<&CancellationToken>,
     ) -> Result<MultiOntologyMutationReceipt, GfError> {
+        if request.candidate.document.ontology_id.trim().is_empty() {
+            return Err(GfError::Validation(
+                "missing ontology_id; run ontology module create first",
+            ));
+        }
         let mut candidate = self.checked_candidate(&request.authority)?;
         reject_duplicate_module(&candidate, &request.candidate.id)?;
         candidate.modules.push(WorkspaceCompositionModule {
@@ -833,6 +852,11 @@ impl GraphForge {
         request: &ModuleUpdateRequest,
         cancellation: Option<&CancellationToken>,
     ) -> Result<MultiOntologyMutationReceipt, GfError> {
+        if request.document.ontology_id.trim().is_empty() {
+            return Err(GfError::Validation(
+                "missing ontology_id; run ontology module create first",
+            ));
+        }
         let mut candidate = self.checked_candidate(&request.authority)?;
         let index = resolve_module_index(&candidate, &request.selector)?;
         let prior = candidate.modules[index].id.clone();
@@ -884,6 +908,11 @@ impl GraphForge {
         ),
         GfError,
     > {
+        if request.document.ontology_id.trim().is_empty() {
+            return Err(GfError::Validation(
+                "missing ontology_id; run ontology module create first",
+            ));
+        }
         let mut candidate = self.checked_candidate(&request.authority)?;
         let index = resolve_module_index(&candidate, &request.selector)?;
         let previous_module = candidate.modules[index].id.clone();
@@ -1010,10 +1039,18 @@ impl GraphForge {
     }
 
     /// Create/register a validated non-authoritative bridge candidate.
+    ///
+    /// Mints a permanent ID when `bridge_id` is empty. Save the returned
+    /// document before adoption; later lifecycle operations require that ID.
     pub fn create_ontology_bridge(
         &self,
-        document: BridgeDocument,
+        mut document: BridgeDocument,
     ) -> Result<BridgeCandidate, GfError> {
+        if document.bridge_id.is_empty() {
+            document.bridge_id = ItemId::generate(ItemKind::BridgeSet)
+                .map_err(|_| GfError::Validation("secure item ID generation failed"))?
+                .to_uri();
+        }
         let mut inventory = bridge_inventory(&self.required_composition()?)?;
         let id = inventory
             .create_register(document.clone(), "candidate")
@@ -1042,6 +1079,11 @@ impl GraphForge {
                 .map_err(|e| serde_json::Error::io(std::io::Error::other(e))),
         }
         .map_err(|_| GfError::Validation("bridge import is malformed"))?;
+        if document.bridge_id.trim().is_empty() {
+            return Err(GfError::Validation(
+                "missing bridge_id; run ontology bridge create first",
+            ));
+        }
         let mut inventory = bridge_inventory(&self.required_composition()?)?;
         let id = inventory
             .import_text(text, format, "candidate")
@@ -1059,6 +1101,11 @@ impl GraphForge {
         request: &BridgeAdoptionRequest,
         cancellation: Option<&CancellationToken>,
     ) -> Result<MultiOntologyMutationReceipt, GfError> {
+        if request.candidate.document.bridge_id.trim().is_empty() {
+            return Err(GfError::Validation(
+                "missing bridge_id; run ontology bridge create first",
+            ));
+        }
         let mut candidate = self.checked_candidate(&request.authority)?;
         reject_duplicate_bridge(&candidate, &request.candidate.id)?;
         let mut inventory = bridge_inventory(&candidate)?;
@@ -1097,6 +1144,11 @@ impl GraphForge {
         request: &BridgeUpdateRequest,
         cancellation: Option<&CancellationToken>,
     ) -> Result<MultiOntologyMutationReceipt, GfError> {
+        if request.document.bridge_id.trim().is_empty() {
+            return Err(GfError::Validation(
+                "missing bridge_id; run ontology bridge create first",
+            ));
+        }
         let mut candidate = self.checked_candidate(&request.authority)?;
         let index = resolve_bridge_index(&candidate, &request.selector)?;
         let prior_ids = candidate
@@ -1419,6 +1471,241 @@ mod tests {
             expected_project_generation_uuid: state.project_generation_uuid,
             expected_composition_fingerprint: state.composition_fingerprint,
         }
+    }
+
+    #[test]
+    fn create_mints_and_retains_module_identity() {
+        let graph = GraphForge::new(None).unwrap();
+        let document: OntologyDoc =
+            serde_json::from_str(r#"{"version":"1","entity_types":[{"name":"Person"}]}"#).unwrap();
+        let candidate = graph
+            .create_ontology_module(document.clone(), Vec::new(), None)
+            .unwrap();
+        assert_eq!(
+            ItemId::parse_kind(&candidate.id.ontology_id, ItemKind::OntologyModule)
+                .unwrap()
+                .to_uri(),
+            candidate.document.ontology_id
+        );
+        assert_eq!(
+            candidate.id.canonical_digest,
+            graphforge_ontology::module_document_digest(&candidate.document).unwrap()
+        );
+        let repeated = graph
+            .create_ontology_module(candidate.document.clone(), Vec::new(), None)
+            .unwrap();
+        assert_eq!(repeated, candidate);
+        assert_ne!(
+            graph
+                .create_ontology_module(document, Vec::new(), None)
+                .unwrap()
+                .id
+                .ontology_id,
+            candidate.id.ontology_id
+        );
+        for id in [
+            "core",
+            "legacy:abc",
+            "https://example.org/ontology/people",
+            "https://graphforge.sh/ont_7k2m9x4q8r3t5v1w",
+        ] {
+            assert_eq!(
+                graph
+                    .create_ontology_module(self::document(id, "Person"), Vec::new(), None)
+                    .unwrap()
+                    .document
+                    .ontology_id,
+                id
+            );
+        }
+        for id in [
+            "https://graphforge.sh/people",
+            "https://graphforge.sh/brg_7k2m9x4q8r3t5v1w",
+            "https://graphforge.sh/ONT_7K2M9X4Q8R3T5V1W",
+            "https://GRAPHFORGE.SH/ont_7k2m9x4q8r3t5v1w",
+            "https://graphforge.sh/ont_7k2m9x4q8r3t5v1i",
+            "https://graphforge.sh/ont_7k2m9x4q8r3t5v1w/",
+            "https://graphforge.sh/ont_7k2m9x4q8r3t5v1w?q=1",
+            "https://graphforge.sh:443/ont_7k2m9x4q8r3t5v1w",
+        ] {
+            assert!(
+                graph
+                    .create_ontology_module(self::document(id, "Person"), Vec::new(), None)
+                    .is_err(),
+                "{id}"
+            );
+        }
+    }
+
+    #[test]
+    fn create_mints_and_retains_bridge_identity() {
+        let mut graph = GraphForge::new(None).unwrap();
+        let base = adopt_parity_module(&mut graph, "base", Vec::new(), 900);
+        let dependent = adopt_parity_module(&mut graph, "dependent", vec![base.id.clone()], 901);
+        let mut value = serde_json::to_value(parity_bridge(&base.id, &dependent.id)).unwrap();
+        value.as_object_mut().unwrap().remove("bridge_id");
+        let document: BridgeDocument = serde_json::from_value(value).unwrap();
+        let candidate = graph.create_ontology_bridge(document.clone()).unwrap();
+        assert_eq!(
+            ItemId::parse_kind(&candidate.id.bridge_id, ItemKind::BridgeSet)
+                .unwrap()
+                .to_uri(),
+            candidate.document.bridge_id
+        );
+        assert_eq!(
+            candidate.id.canonical_digest,
+            graphforge_ontology::bridge_document_digest(&candidate.document).unwrap()
+        );
+        assert_eq!(
+            graph
+                .create_ontology_bridge(candidate.document.clone())
+                .unwrap(),
+            candidate
+        );
+        assert_ne!(
+            graph
+                .create_ontology_bridge(document.clone())
+                .unwrap()
+                .id
+                .bridge_id,
+            candidate.id.bridge_id
+        );
+        for id in [
+            "core",
+            "legacy:abc",
+            "https://example.org/bridges/people",
+            "https://graphforge.sh/brg_7k2m9x4q8r3t5v1w",
+        ] {
+            let mut document = document.clone();
+            document.bridge_id = id.into();
+            assert_eq!(
+                graph
+                    .create_ontology_bridge(document)
+                    .unwrap()
+                    .document
+                    .bridge_id,
+                id
+            );
+        }
+        for id in [
+            "https://graphforge.sh/bridge/people",
+            "https://graphforge.sh/ont_7k2m9x4q8r3t5v1w",
+            "https://graphforge.sh/BRG_7K2M9X4Q8R3T5V1W",
+            "https://graphforge.sh/brg_7k2m9x4q8r3t5v1i",
+            "https://graphforge.sh/brg_7k2m9x4q8r3t5v1w#fragment",
+        ] {
+            let mut document = document.clone();
+            document.bridge_id = id.into();
+            assert!(graph.create_ontology_bridge(document).is_err(), "{id}");
+        }
+    }
+
+    #[test]
+    fn lifecycle_refuses_missing_item_ids_before_mutation() {
+        let mut graph = GraphForge::new(None).unwrap();
+        let base = adopt_parity_module(&mut graph, "base", Vec::new(), 910);
+        let dependent = adopt_parity_module(&mut graph, "dependent", vec![base.id.clone()], 911);
+        let mut module = base.clone();
+        module.document.ontology_id.clear();
+        let authority = expectation(&graph, 912);
+        let before = graph.ontology_authority_state().unwrap();
+        let assert_hint = |error: MultiOntologyError, kind: &str| {
+            assert_eq!(error.code, "GF_VALIDATION");
+            assert!(
+                error
+                    .to_string()
+                    .contains(&format!("ontology {kind} create first")),
+                "{error}"
+            );
+        };
+        assert_hint(
+            graph
+                .adopt_ontology_module(
+                    &ModuleAdoptionRequest {
+                        authority: authority.clone(),
+                        candidate: module.clone(),
+                    },
+                    None,
+                )
+                .unwrap_err(),
+            "module",
+        );
+        assert_hint(
+            graph
+                .update_ontology_module(
+                    &ModuleUpdateRequest {
+                        authority: authority.clone(),
+                        selector: ModuleSelector::Exact(base.id.clone()),
+                        document: module.document.clone(),
+                        dependencies: Vec::new(),
+                        enforcement: None,
+                    },
+                    None,
+                )
+                .unwrap_err(),
+            "module",
+        );
+        assert_hint(
+            graph
+                .preview_migrate_ontology_module(&ModuleMigrationRequest {
+                    authority: authority.clone(),
+                    selector: ModuleSelector::Exact(base.id.clone()),
+                    document: module.document.clone(),
+                    dependencies: Vec::new(),
+                    enforcement: None,
+                })
+                .unwrap_err(),
+            "module",
+        );
+        assert_hint(
+            graph
+                .import_ontology_module(
+                    &serde_json::to_string(&module.document).unwrap(),
+                    ImportFormatHint::Json,
+                    Vec::new(),
+                )
+                .unwrap_err(),
+            "module",
+        );
+        let mut bridge = graph
+            .create_ontology_bridge(parity_bridge(&base.id, &dependent.id))
+            .unwrap();
+        bridge.document.bridge_id.clear();
+        assert_hint(
+            graph
+                .adopt_ontology_bridge(
+                    &BridgeAdoptionRequest {
+                        authority: authority.clone(),
+                        candidate: bridge.clone(),
+                    },
+                    None,
+                )
+                .unwrap_err(),
+            "bridge",
+        );
+        assert_hint(
+            graph
+                .update_ontology_bridge(
+                    &BridgeUpdateRequest {
+                        authority,
+                        selector: BridgeSelector::Exact(bridge.id.clone()),
+                        document: bridge.document.clone(),
+                    },
+                    None,
+                )
+                .unwrap_err(),
+            "bridge",
+        );
+        assert_hint(
+            graph
+                .import_ontology_bridge(
+                    &serde_json::to_string(&bridge.document).unwrap(),
+                    BridgeImportFormatHint::Json,
+                )
+                .unwrap_err(),
+            "bridge",
+        );
+        assert_eq!(graph.ontology_authority_state().unwrap(), before);
     }
 
     fn parity_fixture() -> serde_json::Value {

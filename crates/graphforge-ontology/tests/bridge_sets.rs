@@ -565,3 +565,48 @@ fn missing_symbol_in_module_rejected() {
     let err = inv.validate_document(&document).unwrap_err();
     assert_eq!(err.code(), Some(DiagnosticCode::BridgeEndpointMissing));
 }
+
+#[test]
+fn authored_bridge_identity_reserves_the_graphforge_namespace() {
+    let (mut inventory, source, target) = base_inventory();
+    let document = |id| {
+        doc(
+            id,
+            "1",
+            &source,
+            &target,
+            vec![assertion(
+                q(&source, SymbolKind::Entity, "Person"),
+                q(&target, SymbolKind::Entity, "Person"),
+                BridgePredicate::Equivalent,
+            )],
+        )
+    };
+    for id in [
+        "https://graphforge.sh/brg_7k2m9x4q8r3t5v1w",
+        "core",
+        "legacy:digest",
+        "https://example.org/bridges/people",
+    ] {
+        let identity = inventory.create_register(document(id), "create").unwrap();
+        assert_eq!(identity.bridge_id, id);
+    }
+    for id in [
+        "",
+        "https://graphforge.sh/BRG_7K2M9X4Q8R3T5V1W",
+        "https://graphforge.sh/ont_7k2m9x4q8r3t5v1w",
+        "https://graphforge.sh/owner/repo/people",
+        "https://graphforge.sh/bridge/brg_7k2m9x4q8r3t5v1w",
+        "https://graphforge.sh/brg_7k2m9x4q8r3t5v1w/",
+        "https://graphforge.sh/brg_7k2m9x4q8r3t5v1i",
+    ] {
+        let error = inventory.validate_document(&document(id)).unwrap_err();
+        assert_eq!(
+            error.diagnostics[0].code,
+            DiagnosticCode::InventoryMalformed,
+            "{id}"
+        );
+    }
+    assert!(inventory.list().is_empty());
+    assert_eq!(inventory.generation(), 0);
+}
