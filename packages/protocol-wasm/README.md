@@ -78,6 +78,13 @@ any three lowercase letters followed by `_` and 16 lowercase Crockford base32
 characters are reserved, including unknown prefixes. It does not normalize case
 or accept a URI. Both calls work without entropy; ID generation is not exported.
 
+`validate_item_descriptor(descriptor)` validates a `graphforge-item/1` discovery
+document and returns `{ document }`. Its generated `ItemDescriptor` type carries
+the canonical bare `id`, matching `kind`, publishing `repository`, and exact
+`module` identity with a canonical URI, plus `discovery` pins for the retained
+refs revision and manifest validator. The validator checks their consistency
+without fetching or interpreting native package bytes.
+
 **Boundary.** Rust never reads a JavaScript object. The package's `index.js`
 turns an object argument into JSON text with `JSON.stringify` and passes only
 strings and bytes to the WebAssembly exports, so an object and its JSON text
@@ -103,7 +110,7 @@ included, are own properties.
 | Area           | Exports                                                                                                                                |
 | -------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
 | Permanent IDs  | `parse_item_id`, `has_item_id_shape`                                                                                                   |
-| Discovery      | `validate_manifest`, `validate_refs`, `validate_summary`, `validate_lineage`, `validate_repository_moved`                              |
+| Discovery      | `validate_item_descriptor`, `validate_manifest`, `validate_refs`, `validate_summary`, `validate_lineage`, `validate_repository_moved`  |
 | Binding        | `bind_summary`, `bind_lineage`, `bind_summary_lineage`, `bind_refs`, `ontology_module_object`, `research_version_object`               |
 | Re-homing      | `rehome_repository`                                                                                                                    |
 | Previews       | `validate_image`, `validate_preview`, `validate_preview_descriptors`, `manifest_preview_descriptors`                                   |

@@ -1143,11 +1143,11 @@ mod tests {
         };
         assert_eq!(args.repository, "opendata/openalex");
         assert_eq!(
-            args.ontology_id,
-            "https://graphforge.sh/ont_drqf2xw8w33cxaxj"
+            args.ontology_id.as_deref(),
+            Some("https://graphforge.sh/ont_drqf2xw8w33cxaxj")
         );
-        assert_eq!(args.version, "2026.01");
-        assert_eq!(args.digest.len(), 64);
+        assert_eq!(args.version.as_deref(), Some("2026.01"));
+        assert_eq!(args.digest.as_ref().unwrap().len(), 64);
         assert_eq!(args.output, PathBuf::from("works.json"));
         assert_eq!(args.hub.as_deref(), Some("https://hub.example"));
 
@@ -1160,12 +1160,30 @@ mod tests {
                 },
             }) if fetch.hub.is_none()
         ));
-        // Every selecting flag and the output are required.
-        for omitted in ["--ontology-id", "--version", "--digest", "--output"] {
+        // Item refs need only output; repository selectors are checked before I/O.
+        {
             let mut args = module_fetch_args("works.json", &[]);
-            let at = args.iter().position(|arg| *arg == omitted).unwrap();
+            let at = args.iter().position(|arg| *arg == "--output").unwrap();
             args.drain(at..=at + 1);
-            assert!(Cli::try_parse_from(args).is_err(), "{omitted} is required");
+            assert!(Cli::try_parse_from(args).is_err(), "--output is required");
+        }
+        for reference in [
+            "ont_7k2m9x4q8r3t5v1w",
+            "https://graphforge.sh/ont_7k2m9x4q8r3t5v1w",
+            "ont_7k2m9x4q8r3t5v1w/2026.01",
+        ] {
+            assert!(
+                Cli::try_parse_from([
+                    "gf",
+                    "ontology",
+                    "module",
+                    "fetch",
+                    reference,
+                    "--output",
+                    "module.json"
+                ])
+                .is_ok()
+            );
         }
         assert!(Cli::try_parse_from(["gf", "ontology", "module", "fetch"]).is_err());
     }

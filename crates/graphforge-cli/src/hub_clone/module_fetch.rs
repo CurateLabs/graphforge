@@ -17,7 +17,7 @@ use graphforge_api::{
     resolve_discovered_ontology_module,
 };
 use graphforge_discovery::{
-    DiscoveryLimits, DiscoveryManifest, ExactIdentity, ObjectDescriptor, RefSet,
+    DiscoveryLimits, DiscoveryManifest, ExactIdentity, ItemId, ObjectDescriptor, RefSet,
     RepositoryIdentity, Sha256Digest,
 };
 use serde::Serialize;
@@ -26,6 +26,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use url::Url;
 
+mod item_fetch;
+
 /// Bound on one per-module package object; a module never needs the bundle bound.
 const MAX_MODULE_PACKAGE_BYTES: u64 = 64 * 1024 * 1024;
 
@@ -33,18 +35,19 @@ const MAX_MODULE_PACKAGE_BYTES: u64 = 64 * 1024 * 1024;
 /// downloading its Project package.
 #[derive(Args)]
 pub(crate) struct ModuleFetchArgs {
-    /// Canonical owner/repository name.
+    /// Permanent item ID, canonical item URI, ID/authored-version, or owner/repository.
+    #[arg(value_name = "REF")]
     pub repository: String,
     /// Exact module ontology identifier, as advertised by the repository.
     #[arg(long)]
-    pub ontology_id: String,
+    pub ontology_id: Option<String>,
     /// Exact module authored version, as advertised by the repository.
     #[arg(long)]
-    pub version: String,
+    pub version: Option<String>,
     /// Exact canonical content digest: 64 lowercase hexadecimal digits,
     /// optionally prefixed with `sha256:`.
     #[arg(long)]
-    pub digest: String,
+    pub digest: Option<String>,
     /// New file that receives the verified module document; never overwritten.
     #[arg(long)]
     pub output: PathBuf,
@@ -115,8 +118,11 @@ fn write_module_fetch_result(
 /// Build the exact module identity the caller asks for. The digest is the
 /// canonical content digest, which is not the package digest nor the document's
 /// file SHA-256.
-fn module_identity(args: &ModuleFetchArgs) -> Result<ExactIdentity, graphforge_api::GfError> {
-    let hex = args.digest.strip_prefix("sha256:").unwrap_or(&args.digest);
+fn digest_pin(args: &ModuleFetchArgs) -> Result<Option<Sha256Digest>, graphforge_api::GfError> {
+    let Some(digest) = args.digest.as_deref() else {
+        return Ok(None);
+    };
+    let hex = digest.strip_prefix("sha256:").unwrap_or(digest);
     let content_digest = Sha256Digest(format!("sha256:{hex}"));
     content_digest.validate().map_err(|_| {
         validation(
@@ -124,11 +130,43 @@ fn module_identity(args: &ModuleFetchArgs) -> Result<ExactIdentity, graphforge_a
             "--digest must be 64 lowercase hexadecimal digits, optionally prefixed with sha256:",
         )
     })?;
-    Ok(ExactIdentity {
-        id: args.ontology_id.clone(),
-        version: args.version.clone(),
-        content_digest,
-    })
+    Ok(Some(content_digest))
+}
+
+fn normalized_id(id: &str) -> String {
+    ItemId::parse_reference(id).map_or_else(|_| id.into(), |id| id.to_uri())
+}
+
+fn repository_module(
+    id: &str,
+    version: &str,
+    manifest: &DiscoveryManifest,
+    pin: Option<Sha256Digest>,
+) -> Result<ExactIdentity, graphforge_api::GfError> {
+    let id = normalized_id(id);
+    let version = version.to_owned();
+    if let Some(content_digest) = pin {
+        return Ok(ExactIdentity {
+            id,
+            version,
+            content_digest,
+        });
+    }
+    let mut matches = manifest
+        .ontology
+        .iter()
+        .flat_map(|inventory| &inventory.modules)
+        .filter(|module| module.id == id && module.version == version);
+    let selected = matches
+        .next()
+        .ok_or_else(|| validation("hub.missing_object", "ontology module is not advertised"))?;
+    if matches.next().is_some() {
+        return Err(validation(
+            "hub.invalid_identity",
+            "module identity is ambiguous; provide --digest",
+        ));
+    }
+    Ok(selected.identity())
 }
 
 /// Refuse an existing output, or one whose directory is absent, before any I/O.
@@ -171,8 +209,24 @@ fn run_module_fetch_job(
     args: &ModuleFetchArgs,
     retry: &RetryPolicy,
 ) -> Result<ModuleFetchResult, graphforge_api::GfError> {
+    if let Some(reference) = item_fetch::parse_reference(&args.repository)? {
+        return item_fetch::fetch(transport, args, &reference, retry);
+    }
     let (identity, base) = parse_input_at(&args.repository, args.hub.as_deref())?;
-    let module = module_identity(args)?;
+    let (Some(ontology_id), Some(version)) = (args.ontology_id.as_deref(), args.version.as_deref())
+    else {
+        return Err(validation(
+            "hub.invalid_identity",
+            "owner/repository fetch requires --ontology-id and --version",
+        ));
+    };
+    if ontology_id.is_empty() || version.is_empty() {
+        return Err(validation(
+            "hub.invalid_identity",
+            "module ID and version must not be empty",
+        ));
+    }
+    let pin = digest_pin(args)?;
     ensure_output_available(&args.output)?;
     let move_transport = crate::hub_http::RepositoryMoveTransport::new(transport, &identity, &base);
     let transport = &move_transport as &dyn Transport;
@@ -193,6 +247,7 @@ fn run_module_fetch_job(
     }
     refs.validate_manifest(&manifest)
         .map_err(|error| protocol_error(&error))?;
+    let module = repository_module(ontology_id, version, &manifest, pin)?;
     let (_, _, object) = manifest
         .ontology_module_selection(&module)
         .map_err(|error| protocol_error(&error))?;
@@ -317,6 +372,7 @@ fn hard_link_error(error: std::io::Error) -> graphforge_api::GfError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    mod item_ids;
     use crate::hub_clone::tests::{RecordingTransport, Scripted, response};
     use crate::hub_clone::{HttpResponse, hash_reader};
     use crate::hub_clone::{TEST_RETRY_POLICY, clear_staging, remove_staging_dir};
@@ -346,9 +402,9 @@ mod tests {
         let module = &manifest.ontology.as_ref().unwrap().modules[0];
         ModuleFetchArgs {
             repository: "opendata/openalex".into(),
-            ontology_id: module.id.clone(),
-            version: module.version.clone(),
-            digest: module.content_digest.0.clone(),
+            ontology_id: Some(module.id.clone()),
+            version: Some(module.version.clone()),
+            digest: Some(module.content_digest.0.clone()),
             output: output.to_path_buf(),
             hub: None,
         }
@@ -471,9 +527,9 @@ mod tests {
             requests[4],
             manifest
                 .ontology_module_selection(&ExactIdentity {
-                    id: args.ontology_id.clone(),
-                    version: args.version.clone(),
-                    content_digest: Sha256Digest(args.digest.clone())
+                    id: args.ontology_id.clone().unwrap(),
+                    version: args.version.clone().unwrap(),
+                    content_digest: Sha256Digest(args.digest.clone().unwrap())
                 })
                 .unwrap()
                 .2
@@ -520,9 +576,9 @@ mod tests {
 
         assert_eq!(transport.inner.remaining(), 0);
         let identity = ExactIdentity {
-            id: args.ontology_id.clone(),
-            version: args.version.clone(),
-            content_digest: Sha256Digest(args.digest.clone()),
+            id: args.ontology_id.clone().unwrap(),
+            version: args.version.clone().unwrap(),
+            content_digest: Sha256Digest(args.digest.clone().unwrap()),
         };
         let (descriptor, advertised, module_object) =
             manifest.ontology_module_selection(&identity).unwrap();
@@ -585,7 +641,14 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let mut args = fixture_module_args(&root.path().join("works.json"));
         // The main fetch test passes the `sha256:`-prefixed form.
-        args.digest = args.digest.strip_prefix("sha256:").unwrap().to_owned();
+        args.digest = Some(
+            args.digest
+                .as_deref()
+                .unwrap()
+                .strip_prefix("sha256:")
+                .unwrap()
+                .to_owned(),
+        );
         args.hub = Some("https://hub.example/prefix/".into());
         fetch_module(&transport, &args).unwrap();
         let requested = transport.requested.lock().unwrap().clone();
@@ -603,15 +666,20 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let good = fixture_module_args(&root.path().join("works.json"));
         let digest = good.digest.clone();
-        let hex = digest.strip_prefix("sha256:").unwrap().to_owned();
+        let hex = digest
+            .as_deref()
+            .unwrap()
+            .strip_prefix("sha256:")
+            .unwrap()
+            .to_owned();
         for (change, code) in [
             (
-                Box::new(|args: &mut ModuleFetchArgs| args.digest = hex.to_uppercase())
+                Box::new(|args: &mut ModuleFetchArgs| args.digest = Some(hex.to_uppercase()))
                     as Box<dyn Fn(&mut ModuleFetchArgs)>,
                 "hub.invalid_identity",
             ),
             (
-                Box::new(|args| args.digest = hex[..63].to_owned()),
+                Box::new(|args| args.digest = Some(hex[..63].to_owned())),
                 "hub.invalid_identity",
             ),
             (
@@ -681,10 +749,12 @@ mod tests {
         let package = fixture_module_package();
         let root = tempfile::tempdir().unwrap();
         for change in [
-            Box::new(|args: &mut ModuleFetchArgs| args.version = "9999.01".into())
+            Box::new(|args: &mut ModuleFetchArgs| args.version = Some("9999.01".into()))
                 as Box<dyn Fn(&mut ModuleFetchArgs)>,
-            Box::new(|args| args.ontology_id = "https://graphforge.sh/ont_kdeke08bwg6cheea".into()),
-            Box::new(|args| args.digest = "0".repeat(64)),
+            Box::new(|args| {
+                args.ontology_id = Some("https://graphforge.sh/ont_kdeke08bwg6cheea".into())
+            }),
+            Box::new(|args| args.digest = Some("0".repeat(64))),
         ] {
             let mut args = fixture_module_args(&root.path().join("works.json"));
             change(&mut args);

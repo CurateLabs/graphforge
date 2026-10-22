@@ -18,6 +18,7 @@
 pub mod preview;
 
 mod credit;
+mod item_descriptor;
 mod item_id;
 mod lineage;
 mod rehome;
@@ -28,6 +29,9 @@ pub use rehome::{RehomedRepository, RepositorySnapshot, rehome_repository};
 pub use repository::{ObjectLocationTemplate, RepositoryMoved};
 
 pub use credit::{CreditSignature, ROLE_AUTHOR, ROLE_COMMITTER, SummaryPerson};
+pub use item_descriptor::{
+    ITEM_DESCRIPTOR_FORMAT, ITEM_DESCRIPTOR_MEDIA_TYPE, ItemDescriptor, ItemDiscoverySnapshot,
+};
 pub use item_id::{
     ITEM_ID_LEN, ITEM_ID_RANDOM_BYTES, ITEM_ID_RANDOM_CHARS, ITEM_ID_URI_BASE, ItemId, ItemIdError,
     ItemKind, has_item_id_shape,
