@@ -50,17 +50,18 @@ fn version(participants: Vec<ResearchParticipantCommitment>) -> ResearchVersionR
 }
 
 /// A one-Version research package whose selected Version archives one saved
-/// query: the registry bytes and the archived participant bytes a real export
-/// carries.
-struct Package {
-    registry_path: String,
-    registry_bytes: Vec<u8>,
-    object_path: String,
-    object_bytes: Vec<u8>,
-    object_digest: String,
+/// query: the registry and the archived participant bytes a real export
+/// carries. Shared with the import-side native validation tests.
+pub(crate) struct Package {
+    pub(crate) registry: crate::research_versions::ResearchRegistry,
+    pub(crate) registry_path: String,
+    pub(crate) registry_bytes: Vec<u8>,
+    pub(crate) object_path: String,
+    pub(crate) object_bytes: Vec<u8>,
+    pub(crate) object_digest: String,
 }
 
-fn package() -> Package {
+pub(crate) fn package() -> Package {
     let query = crate::SavedQuery {
         query_uuid: Uuid::new_v4(),
         name: "Archived analysis".into(),
@@ -121,6 +122,7 @@ fn package() -> Package {
             super::research::NAMESPACE
         ),
         registry_bytes: registry.participant().unwrap().bytes,
+        registry,
         object_path: super::research::object_path(&selected.version_uuid, &digest, false),
         object_bytes: participant.bytes,
         object_digest: digest,

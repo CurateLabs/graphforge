@@ -178,6 +178,212 @@ fn check_cancel(cancelled: Option<&AtomicBool>) -> Result<(), PortableError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{PortableExportLimits, PortableOutput};
+
+    /// A real exported research package staged the way the importer stages it
+    /// before `validate`: verified, privately materialized with captures, and
+    /// re-admitted over the stage by the research semantic validation.
+    struct Staged {
+        owner: tempfile::TempDir,
+        registry: ResearchRegistry,
+        objects: crate::project_portable::research::Objects,
+        captures: BTreeMap<String, crate::project_portable::MaterializedCapture>,
+    }
+
+    impl Staged {
+        fn stage(&self) -> std::path::PathBuf {
+            self.owner.path().join("materialized")
+        }
+    }
+
+    fn staged_research_package() -> Staged {
+        let package = crate::project_portable::research_tests::package();
+        let project = tempfile::tempdir().unwrap();
+        // The parent graph generation every real export carries beside research.
+        crate::open_or_initialize_project(project.path()).unwrap();
+        let tree = tempfile::tempdir().unwrap();
+        std::fs::write(tree.path().join("a.parquet"), b"graph-a").unwrap();
+        std::fs::create_dir(tree.path().join("properties")).unwrap();
+        let property_schema = std::sync::Arc::new(arrow::datatypes::Schema::new(vec![
+            crate::schemas::uuid_field("node_uuid"),
+            arrow::datatypes::Field::new("name", arrow::datatypes::DataType::Utf8, true),
+        ]));
+        let properties = arrow::record_batch::RecordBatch::try_new(
+            property_schema,
+            vec![
+                std::sync::Arc::new(
+                    arrow::array::FixedSizeBinaryArray::try_from_iter(std::iter::once(
+                        graphforge_core::uuid::new_v7().into_bytes(),
+                    ))
+                    .unwrap(),
+                ),
+                std::sync::Arc::new(arrow::array::StringArray::from(vec!["person"])),
+            ],
+        )
+        .unwrap();
+        let mut writer = parquet::arrow::ArrowWriter::try_new(
+            std::fs::File::create(tree.path().join("properties/Person.parquet")).unwrap(),
+            properties.schema(),
+            None,
+        )
+        .unwrap();
+        writer.write(&properties).unwrap();
+        writer.close().unwrap();
+        let (_, inventory) = crate::capture_graph_files(tree.path()).unwrap();
+        let mut participants = crate::empty_workspace_participants().unwrap();
+        participants.insert(0, inventory);
+        let request = crate::ProjectGenerationRequest {
+            transaction_uuid: Uuid::new_v4(),
+            generation_uuid: Uuid::new_v4(),
+            capabilities: vec![
+                crate::ProjectCapability {
+                    capability_id: "graph".into(),
+                    capability_version: 1,
+                },
+                crate::ProjectCapability {
+                    capability_id: "workspace".into(),
+                    capability_version: 1,
+                },
+            ],
+            participants,
+        };
+        let crate::ProjectStageOutcome::Staged(staged) =
+            crate::stage_project_generation_with_graph_tree(
+                project.path(),
+                &request,
+                Some(tree.path()),
+            )
+            .unwrap()
+        else {
+            panic!("fresh parent generation");
+        };
+        staged
+            .validate(|_| Ok(()), |_, _| Ok(()))
+            .unwrap()
+            .publish()
+            .unwrap();
+        // Archive the saved-queries object, then republish with the registry
+        // participant, as the research exporter plans it.
+        crate::graph_object_store::install_graph_object_bytes(
+            project.path(),
+            &package.object_bytes,
+        )
+        .unwrap();
+        let parent = crate::resolve_project_generation(project.path()).unwrap();
+        let mut participants: Vec<crate::ProjectParticipant> = parent
+            .participant_snapshots()
+            .unwrap()
+            .into_iter()
+            .map(|snapshot| crate::ProjectParticipant {
+                capability_id: snapshot.capability_id,
+                capability_version: snapshot.capability_version,
+                record_family_id: snapshot.record_family_id,
+                record_version: snapshot.record_version,
+                encoding: crate::ProjectParticipantEncoding::Json,
+                schema_fingerprint: snapshot.schema_fingerprint,
+                row_count: snapshot.row_count,
+                bytes: snapshot.bytes,
+            })
+            .collect();
+        participants.push(package.registry.participant().unwrap());
+        participants.sort_by(|left, right| {
+            (&left.capability_id, &left.record_family_id)
+                .cmp(&(&right.capability_id, &right.record_family_id))
+        });
+        let request = crate::ProjectGenerationRequest {
+            transaction_uuid: Uuid::new_v4(),
+            generation_uuid: Uuid::new_v4(),
+            capabilities: vec![
+                crate::ProjectCapability {
+                    capability_id: "graph".into(),
+                    capability_version: 1,
+                },
+                crate::ProjectCapability {
+                    capability_id: "research".into(),
+                    capability_version: crate::research_versions::RESEARCH_VERSION,
+                },
+                crate::ProjectCapability {
+                    capability_id: "workspace".into(),
+                    capability_version: 1,
+                },
+            ],
+            participants,
+        };
+        let crate::ProjectStageOutcome::Staged(staged) =
+            crate::stage_project_generation_with_graph_tree(
+                project.path(),
+                &request,
+                Some(&parent.graph_tree_root()),
+            )
+            .unwrap()
+        else {
+            panic!("archive generation");
+        };
+        staged
+            .validate(|_| Ok(()), |_, _| Ok(()))
+            .unwrap()
+            .publish()
+            .unwrap();
+        let generation = crate::resolve_project_generation(project.path()).unwrap();
+        let plan =
+            crate::plan_complete_portable(&generation, PortableExportLimits::default()).unwrap();
+        let output = tempfile::tempdir().unwrap();
+        let bundle = output.path().join("research.gfpb");
+        let cancelled = std::sync::atomic::AtomicBool::new(false);
+        crate::export_complete_portable(
+            &plan,
+            &bundle,
+            PortableOutput::Bundle,
+            PortableExportLimits::default(),
+            &cancelled,
+            |_| {},
+        )
+        .unwrap();
+        let owner = tempfile::tempdir().unwrap();
+        let stage = owner.path().join("materialized");
+        let materialized = crate::project_portable::materialize_verified_portable_observed(
+            &bundle,
+            &stage,
+            PortableLimits::default(),
+            None,
+            |_, _| Ok(()),
+            false,
+        )
+        .unwrap();
+        let (registry, objects) = crate::project_portable::research::validate_stage(
+            &stage,
+            &materialized.report,
+            PortableLimits::default(),
+            None,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(registry, package.registry);
+        Staged {
+            owner,
+            registry,
+            objects,
+            captures: materialized.captures,
+        }
+    }
+
+    fn validate_with(
+        mut validator: impl FnMut(
+            &crate::ResolvedProjectGeneration,
+            &ResearchVersionRecord,
+            &ResearchRegistry,
+        ) -> Result<(), graphforge_core::GfError>,
+    ) -> Result<(), PortableError> {
+        let staged = staged_research_package();
+        validate(
+            &staged.stage(),
+            &staged.registry,
+            &staged.objects,
+            &staged.captures,
+            None,
+            Some(&mut validator),
+        )
+    }
 
     #[test]
     fn research_without_native_owner_is_refused_before_materialization() {
@@ -191,6 +397,27 @@ mod tests {
             None,
         )
         .unwrap_err();
+        assert_eq!(error.code, PortableErrorCode::Incompatible);
+    }
+
+    #[test]
+    fn the_staged_package_reaches_the_native_owner() {
+        validate_with(|_, _, _| Ok(())).unwrap();
+    }
+
+    #[test]
+    fn a_native_owner_storage_failure_keeps_the_storage_class() {
+        let error =
+            validate_with(|_, _, _| Err(graphforge_core::GfError::Storage("injected".into())))
+                .unwrap_err();
+        assert_eq!(error.code, PortableErrorCode::Io);
+    }
+
+    #[test]
+    fn a_native_owner_content_failure_stays_incompatible() {
+        let error =
+            validate_with(|_, _, _| Err(graphforge_core::GfError::Validation("injected".into())))
+                .unwrap_err();
         assert_eq!(error.code, PortableErrorCode::Incompatible);
     }
 }
