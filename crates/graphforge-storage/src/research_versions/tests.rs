@@ -87,6 +87,65 @@ fn execute(root: &Path, request: &ResearchOperation) -> ResearchOperationReceipt
 }
 
 #[test]
+fn single_participant_inspection_authenticates_source_and_compacted_content() {
+    let project = tempfile::tempdir().unwrap();
+    let root = project.path();
+    fixture(root, "selected control");
+    let id = execute(root, &register(root, Uuid::now_v7()))
+        .version_uuid
+        .unwrap();
+    let version = state(root).versions[&id].clone();
+    let key = ResearchParticipantKey {
+        capability: "workspace".into(),
+        family: "research_fixture".into(),
+    };
+    let before = inspect_research_version_participant(root, &version, &key, 1024)
+        .unwrap()
+        .unwrap();
+    assert_eq!(before.bytes, json(&"selected control").unwrap());
+    assert!(inspect_research_version_participant(root, &version, &key, 1).is_err());
+    assert!(
+        inspect_research_version_participant(
+            root,
+            &version,
+            &ResearchParticipantKey {
+                capability: "workspace".into(),
+                family: "absent".into(),
+            },
+            1024
+        )
+        .unwrap()
+        .is_none()
+    );
+    let mut forged = version.clone();
+    forged.content.participants[0].content_sha256 = [7; 32];
+    assert!(inspect_research_version_participant(root, &forged, &key, 1024).is_err());
+    execute(
+        root,
+        &ResearchOperation {
+            operation_uuid: Uuid::now_v7(),
+            expected_generation_uuid: current(root),
+            mutation: ResearchMutation::Compact {
+                versions: BTreeSet::from([id]),
+            },
+        },
+    );
+    assert_eq!(
+        inspect_research_version_participant(root, &version, &key, 1024)
+            .unwrap()
+            .unwrap(),
+        before
+    );
+    assert!(inspect_research_version_participant(root, &version, &key, 1).is_err());
+    let digest = hex(&version.content.participants[0].content_sha256);
+    crate::graph_object_store::corrupt_sealed_graph_object_for_test(
+        &crate::graph_object_path(root, &digest).unwrap(),
+        b"tampered control",
+    );
+    assert!(inspect_research_version_participant(root, &version, &key, 1024).is_err());
+}
+
+#[test]
 fn restoration_preserves_unselected_context_and_operation_history_after_reopen() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();

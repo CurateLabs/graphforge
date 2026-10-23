@@ -848,16 +848,16 @@ fn private_clone_authenticates_metadata_and_objects_then_imports_and_reopens_fix
             calls: RefCell::new(Vec::new()),
             manifest: manifest_bytes.to_vec(),
             refs: fixture!("refs.json").to_vec(),
-            project: fixture!("objects/openalex-openalex.gfpb").to_vec(),
+            project: fixture!("objects/opendata-openalex.gfpb").to_vec(),
             object,
         },
         hub: origin(DEFAULT_HUB).unwrap(),
         metadata: RefCell::new([
-            Url::parse("https://graphforge.sh/openalex/openalex/.gf/refs").unwrap(),
-            Url::parse("https://graphforge.sh/openalex/openalex/.gf/manifest").unwrap(),
+            Url::parse("https://graphforge.sh/opendata/openalex/.gf/refs").unwrap(),
+            Url::parse("https://graphforge.sh/opendata/openalex/.gf/manifest").unwrap(),
         ]),
         identity: std::rc::Rc::new(RefCell::new(
-            graphforge_discovery::RepositoryIdentity::parse("openalex/openalex").unwrap(),
+            graphforge_discovery::RepositoryIdentity::parse("opendata/openalex").unwrap(),
         )),
         discovery_acquire: Box::new(|| Ok(Some("workos-secret".into()))),
         discovery_token: RefCell::new(None),
@@ -876,7 +876,7 @@ fn private_clone_authenticates_metadata_and_objects_then_imports_and_reopens_fix
         &transport,
         crate::hub_clone::CloneArgs {
             tag: None,
-            repository: "openalex/openalex".into(),
+            repository: "opendata/openalex".into(),
             hub: None,
             token_env: None,
             protection_bypass_env: None,
@@ -1013,13 +1013,13 @@ impl MovedPrivateFixture {
         if bearer != Some("Bearer workos-secret") {
             return Ok(PrivateFixture::response(401, Vec::new()));
         }
-        let old = url.path().starts_with("/openalex/openalex/.gf/");
+        let old = url.path().starts_with("/opendata/openalex/.gf/");
         let chained = !old && matches!(self.fault, MoveFault::Chain);
         if old || chained {
             self.marker_reads
                 .set(self.marker_reads.get() + usize::from(old));
             let from = if old {
-                "openalex/openalex"
+                "opendata/openalex"
             } else {
                 "research/renamed"
             };
@@ -1118,7 +1118,7 @@ fn moved_private_transport(
         reference.validator = manifest.canonical_digest().unwrap();
     }
     let identity = std::rc::Rc::new(RefCell::new(
-        graphforge_discovery::RepositoryIdentity::parse("openalex/openalex").unwrap(),
+        graphforge_discovery::RepositoryIdentity::parse("opendata/openalex").unwrap(),
     ));
     let current = identity.clone();
     let grants = std::rc::Rc::new(RefCell::new(Vec::new()));
@@ -1132,7 +1132,7 @@ fn moved_private_transport(
                 manifest: manifest.to_canonical_json().unwrap(),
                 refs: refs.to_canonical_json().unwrap(),
                 project: include_bytes!(
-                    "../../../../tests/fixtures/hub/generated/v1/objects/openalex-openalex.gfpb"
+                    "../../../../tests/fixtures/hub/generated/v1/objects/opendata-openalex.gfpb"
                 )
                 .to_vec(),
                 object,
@@ -1144,8 +1144,8 @@ fn moved_private_transport(
         },
         hub: origin(DEFAULT_HUB).unwrap(),
         metadata: RefCell::new([
-            Url::parse("https://graphforge.sh/openalex/openalex/.gf/refs").unwrap(),
-            Url::parse("https://graphforge.sh/openalex/openalex/.gf/manifest").unwrap(),
+            Url::parse("https://graphforge.sh/opendata/openalex/.gf/refs").unwrap(),
+            Url::parse("https://graphforge.sh/opendata/openalex/.gf/manifest").unwrap(),
         ]),
         identity,
         discovery_acquire: Box::new(|| Ok(Some("workos-secret".into()))),
@@ -1170,7 +1170,7 @@ fn moved_private_transport(
 fn moved_clone_args(destination: &std::path::Path) -> crate::hub_clone::CloneArgs {
     crate::hub_clone::CloneArgs {
         tag: None,
-        repository: "openalex/openalex".into(),
+        repository: "opendata/openalex".into(),
         hub: None,
         token_env: None,
         protection_bypass_env: None,
@@ -1243,8 +1243,8 @@ fn malformed_private_moves_never_acquire_a_current_grant_or_publish_output() {
 #[test]
 fn verified_current_metadata_reapplies_only_configured_same_origin_protection_policy() {
     let (transport, grants) = moved_private_transport(MoveFault::None, true);
-    let base = Url::parse("https://graphforge.sh/openalex/openalex").unwrap();
-    let identity = graphforge_discovery::RepositoryIdentity::parse("openalex/openalex").unwrap();
+    let base = Url::parse("https://graphforge.sh/opendata/openalex").unwrap();
+    let identity = graphforge_discovery::RepositoryIdentity::parse("opendata/openalex").unwrap();
     let credentials =
         crate::hub_http::DiscoveryCredentials::load(&base, None, Some("BYPASS"), |_| {
             Ok("preview-secret".into())

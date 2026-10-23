@@ -691,7 +691,7 @@ fn case(name: &str, description: &str, steps: Vec<Step>) -> Case {
 }
 
 fn demo() -> RepositoryIdentity {
-    identity("openalex", "demo")
+    identity("opendata", "demo")
 }
 
 fn v1(operation_id: u128) -> Publication {
@@ -945,7 +945,7 @@ fn corpus() -> Corpus {
                 "authorization": {
                     "device_authorization_endpoint": format!("{HUB}/.gf/oauth/device_authorization"),
                     "token_endpoint": format!("{HUB}/.gf/oauth/token"),
-                    "scope": "publish:openalex/demo",
+                    "scope": "publish:opendata/demo",
                 },
                 "object_location_template": format!("{}/.gf/objects/{{digest}}", repo_url(&repository)),
                 "limits": {
@@ -989,7 +989,7 @@ fn corpus() -> Corpus {
             )
             .form(&[
                 ("client_id", "client_workos_example"),
-                ("scope", "publish:openalex/demo"),
+                ("scope", "publish:opendata/demo"),
             ]),
             status(200)
                 .capture("device", "/device_code")
@@ -1529,7 +1529,7 @@ fn corpus() -> Corpus {
                         .header("www-authenticate", "Bearer error=\"insufficient_scope\""),
                 ),
                 act(Action::IssueToken {
-                    scope: "publish:openalex/demo".into(),
+                    scope: "publish:opendata/demo".into(),
                     ttl_seconds: 60,
                     capture: "short".into(),
                 }),
@@ -1573,7 +1573,7 @@ fn corpus() -> Corpus {
             vec![
                 token(&repository, "token"),
                 act(Action::SetQuota {
-                    owner: "openalex".into(),
+                    owner: "opendata".into(),
                     bytes: 8,
                 }),
                 send(
@@ -1615,7 +1615,7 @@ fn corpus() -> Corpus {
             send(
                 request(HubMethod::Post, &device).form(&[
                     ("client_id", "graphforge-cli"),
-                    ("scope", "publish:openalex/demo"),
+                    ("scope", "publish:opendata/demo"),
                 ]),
                 status(200)
                     .capture(&format!("{prefix}_device"), "/device_code")
@@ -1659,7 +1659,7 @@ fn corpus() -> Corpus {
                         "access_token": "${token}",
                         "token_type": "Bearer",
                         "expires_in": 900,
-                        "scope": "publish:openalex/demo",
+                        "scope": "publish:opendata/demo",
                     })),
                 ),
                 poll("a", oauth("invalid_grant")),

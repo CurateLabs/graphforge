@@ -705,3 +705,24 @@ async function assertCompositionReceipt(forge, portable, requireBridge) {
     );
   }
 }
+
+test("native create mints a permanent module identity", () => {
+  const forge = new GraphForge();
+  try {
+    const candidate = forge.createOntologyModule({
+      document: { version: "1", entity_types: [{ name: "Person" }] },
+    });
+    const itemId = candidate.id.ontology_id;
+    assert.match(
+      itemId,
+      /^https:\/\/graphforge\.sh\/ont_[0-9a-hjkmnp-tv-z]{16}$/,
+    );
+    assert.equal(candidate.document.ontology_id, itemId);
+    const repeated = forge.createOntologyModule({
+      document: candidate.document,
+    });
+    assert.deepEqual(repeated.id, candidate.id);
+  } finally {
+    forge.close();
+  }
+});

@@ -24,6 +24,17 @@ impl OntologyValidator {
     pub fn validate(doc: &OntologyDoc) -> Result<(), Vec<OntologyValidationError>> {
         let mut errors: Vec<OntologyValidationError> = Vec::new();
 
+        if let Err(message) = crate::item_identity::validate_item_identity(
+            &doc.ontology_id,
+            graphforge_discovery::ItemKind::OntologyModule,
+        ) {
+            errors.push(OntologyValidationError {
+                kind: ValidationErrorKind::InvalidIdentity,
+                location: "ontology_id".into(),
+                message: message.into(),
+            });
+        }
+
         // Build name sets used by multiple rules.
         let entity_names: HashSet<&str> =
             doc.entity_types.iter().map(|e| e.name.as_str()).collect();

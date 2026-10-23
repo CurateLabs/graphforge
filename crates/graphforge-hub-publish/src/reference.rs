@@ -420,7 +420,7 @@ impl ReferenceHub {
         Ok(hub)
     }
 
-    /// Repository URL, e.g. `https://hub.example/openalex/demo`.
+    /// Repository URL, e.g. `https://hub.example/opendata/demo`.
     #[must_use]
     pub fn repository_url(&self, repository: &RepositoryIdentity) -> String {
         format!(

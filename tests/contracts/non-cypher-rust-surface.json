@@ -1,7 +1,7 @@
 {
   "contract_version": 1,
   "scope": "Rust non-Cypher public release surface",
-  "public_method_digest": "4e5b77b49a823b2974e49ccae75d48396d243ed4825b5e9c41fed01da90bb470",
+  "public_method_digest": "7040d200cd440c078f4d95c0236fe4eb64e0be66de5795b32995d1d4673cee84",
   "method_policy": {
     "receiver_defaults": {
       "PortableImportResult": "release-tested",
@@ -1087,8 +1087,10 @@
     "portable-facade": {
       "ids": [
         "GraphForge.export_portable",
+        "GraphForge.portable_ontology_composition",
         "GraphForge.preview_portable_graph_subset",
         "GraphForge.preview_portable_selection",
+        "GraphForge.research_version_portable_ontology_composition",
         "PortableImportResult.transient_peak_allocated_bytes",
         "PortableExportFacadeResult.receipt",
         "crate.verify_discovered_portable",
@@ -1099,10 +1101,15 @@
         "crate.summarize_verified_portable",
         "crate.resolve_discovered_ontology_module",
         "GraphForge.continue_imported_research_branch",
+        "GraphForge.continue_imported_research_tags",
         "crate.read_committed_generation_identity",
         "GraphForge.fetch_research_branch"
       ],
       "test_refs": [
+        {
+          "path": "crates/graphforge-cli/src/hub_publish/tests/composition_proof.rs",
+          "symbol": "matching_composition_inspection_preserves_replay_and_staging"
+        },
         {
           "path": "crates/graphforge-api/src/portable.rs",
           "symbol": "public_v2_export_preview_and_verify_agree_on_package_digest"
@@ -1158,6 +1165,10 @@
         {
           "path": "crates/graphforge-cli/src/hub_publish/tests/remote_fetch.rs",
           "symbol": "verified_same_branch_fetch_preserves_local_head_workspace_and_exact_receipt_replay"
+        },
+        {
+          "path": "crates/graphforge-cli/src/hub_clone/research_clone_tests.rs",
+          "symbol": "version_clone_tag_publications_resume_and_preserve_advanced_staging"
         }
       ]
     },

@@ -114,7 +114,7 @@ def run_python(project: Path) -> dict:
     assert callable(forge.publish_bulk_edges)
     assert callable(forge.add_nodes), "Python container normalization must remain available"
     assert callable(forge.add_edges), "Python container normalization must remain available"
-    empty = forge.publish_bulk_nodes(OP_NODES, empty_node_table())
+    empty = forge.publish_bulk_nodes(empty_node_table(), OP_NODES)
     assert empty.num_rows == 0
 
     # single-row path via convenience helper
@@ -132,19 +132,19 @@ def run_python(project: Path) -> dict:
     project.mkdir(parents=True)
     forge = g.GraphForge(str(project))
 
-    nodes = forge.publish_bulk_nodes(OP_NODES, node_table())
+    nodes = forge.publish_bulk_nodes(node_table(), OP_NODES)
     assert nodes.num_rows == 2
     ids = [uuid.UUID(bytes=value) for value in nodes.column("entity_uuid").to_pylist()]
     assert ids == [NODE_A, NODE_B]
 
     # Exact retry proves idempotency without mutation.
     before = project_digest(project)
-    retry = forge.publish_bulk_nodes(OP_NODES, node_table())
+    retry = forge.publish_bulk_nodes(node_table(), OP_NODES)
     assert [uuid.UUID(bytes=value) for value in retry.column("entity_uuid").to_pylist()] == ids
     assert project_digest(project) == before
 
     try:
-        forge.publish_bulk_edges(OP_MISSING, edge_table(NODE_A, MISSING_ENDPOINT))
+        forge.publish_bulk_edges(edge_table(NODE_A, MISSING_ENDPOINT), OP_MISSING)
     except g.GraphForgeError as exc:
         assert exc.code == "GF_VALIDATION", exc.code
         assert "missing_endpoint" in str(exc) or "GF_BULK_VALIDATION" in str(exc)
@@ -166,7 +166,7 @@ def run_python(project: Path) -> dict:
         schema=node_table().schema,
     )
     try:
-        forge.publish_bulk_nodes(OP_BAD_UUID, bad_uuid_table)
+        forge.publish_bulk_nodes(bad_uuid_table, OP_BAD_UUID)
     except g.GraphForgeError as exc:
         assert exc.code == "GF_VALIDATION", exc.code
         assert "GF_BULK_VALIDATION" in str(exc) or "invalid" in str(exc).lower()
@@ -174,7 +174,7 @@ def run_python(project: Path) -> dict:
         raise SystemExit("python: expected invalid UUID rejection")
     assert project_digest(project) == before
 
-    edges = forge.publish_bulk_edges(OP_EDGES, edge_table(NODE_A, NODE_B))
+    edges = forge.publish_bulk_edges(edge_table(NODE_A, NODE_B), OP_EDGES)
     assert edges.num_rows == 1
     assert edges.column("rel_type").to_pylist() == ["KNOWS"]
 
@@ -305,7 +305,7 @@ assert.equal("addEdges" in forge, false);
 assert.equal(typeof forge.publishBulkNodes, "function");
 assert.equal(typeof forge.publishBulkEdges, "function");
 
-const empty = tableFromIPC(forge.publishBulkNodes(OP_NODES, tableToIpc(new Table(bulkNodeSchema))));
+const empty = tableFromIPC(forge.publishBulkNodes(tableToIpc(new Table(bulkNodeSchema)), OP_NODES));
 assert.equal(empty.numRows, 0);
 
 const nodes = new Table(bulkNodeSchema, {{
@@ -315,7 +315,7 @@ const nodes = new Table(bulkNodeSchema, {{
   name: vectorFromArray(["Alice", "Bob"], new Utf8()),
   score: vectorFromArray([BigInt(10), BigInt(20)], new Int64()),
 }});
-const nodeReceipt = tableFromIPC(forge.publishBulkNodes(OP_NODES, tableToIpc(nodes)));
+const nodeReceipt = tableFromIPC(forge.publishBulkNodes(tableToIpc(nodes), OP_NODES));
 assert.equal(nodeReceipt.numRows, 2);
 const receivedIds = [...nodeReceipt.getChild("entity_uuid")].map((buf) => uuidString(buf));
 const before = projectDigest(project);
@@ -329,7 +329,7 @@ try {{
     target_uuid: vectorFromArray([MISSING], new FixedSizeBinary(16)),
     since: vectorFromArray([BigInt(2020)], new Int64()),
   }});
-  forge.publishBulkEdges(OP_MISSING, tableToIpc(badEdge));
+  forge.publishBulkEdges(tableToIpc(badEdge), OP_MISSING);
 }} catch (error) {{
   missing =
     error?.code === "GF_VALIDATION" ||
@@ -350,7 +350,7 @@ try {{
     name: vectorFromArray(["Bad"], new Utf8()),
     score: vectorFromArray([BigInt(1)], new Int64()),
   }});
-  forge.publishBulkNodes(OP_BAD_UUID, tableToIpc(badTable));
+  forge.publishBulkNodes(tableToIpc(badTable), OP_BAD_UUID);
 }} catch (error) {{
   invalidUuid =
     error?.code === "GF_VALIDATION" &&
@@ -367,7 +367,7 @@ const edge = new Table(bulkEdgeSchema, {{
   target_uuid: vectorFromArray([NODE_B], new FixedSizeBinary(16)),
   since: vectorFromArray([BigInt(2020)], new Int64()),
 }});
-const edgeReceipt = tableFromIPC(forge.publishBulkEdges(OP_EDGES, tableToIpc(edge)));
+const edgeReceipt = tableFromIPC(forge.publishBulkEdges(tableToIpc(edge), OP_EDGES));
 assert.equal(edgeReceipt.numRows, 1);
 
 forge.close();

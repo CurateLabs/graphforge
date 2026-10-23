@@ -26,7 +26,7 @@ const EVIDENCE_PATH: &str = "data/components/evidence/scan-0001/scan.bin";
 const GRAPH_PATH: &str = "data/components/graph-data/graph-tree/topology/nodes.parquet";
 const HUB_BUNDLE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../../tests/fixtures/hub/generated/v1/objects/openalex-openalex.gfpb"
+    "/../../tests/fixtures/hub/generated/v1/objects/opendata-openalex.gfpb"
 );
 /// The evidence artifact: 5 GiB of zero bytes.
 const EVIDENCE_LENGTH: u64 = 5 * GIB;

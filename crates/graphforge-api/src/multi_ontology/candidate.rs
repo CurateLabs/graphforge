@@ -299,16 +299,20 @@ pub(super) fn staged_module_document(
     text: &str,
     format: ImportFormatHint,
 ) -> Result<OntologyDoc, GfError> {
-    match format {
-        ImportFormatHint::Json => graphforge_ontology::OntologyLoader::load_json(text.as_bytes()),
-        ImportFormatHint::Auto if text.trim_start().starts_with('{') => {
-            graphforge_ontology::OntologyLoader::load_json(text.as_bytes())
-        }
-        ImportFormatHint::Yaml | ImportFormatHint::Auto => {
-            graphforge_ontology::OntologyLoader::load_yaml(text.as_bytes())
-        }
+    let as_json = match format {
+        ImportFormatHint::Json => true,
+        ImportFormatHint::Yaml => false,
+        ImportFormatHint::Auto => text.trim_start().starts_with('{'),
+    };
+    // Parse before inventory validation so a missing ID retains the create-first
+    // remediation. The inventory validates the complete document immediately after.
+    if as_json {
+        serde_json::from_str(text)
+            .map_err(|_| GfError::Validation("ontology module import is malformed"))
+    } else {
+        serde_yaml::from_str(text)
+            .map_err(|_| GfError::Validation("ontology module import is malformed"))
     }
-    .map_err(|_| GfError::Validation("ontology module import is malformed"))
 }
 
 pub(super) fn reject_duplicate_module(

@@ -260,7 +260,7 @@ pub(super) fn clone_args(destination: &Path) -> CloneArgs {
         hub: None,
         token_env: None,
         protection_bypass_env: None,
-        repository: "openalex/openalex".into(),
+        repository: "opendata/openalex".into(),
         destination: Some(destination.to_path_buf()),
         telemetry_endpoint: None,
         git_ref: None,
@@ -626,7 +626,7 @@ fn a_rerun_after_the_import_committed_needs_space_only_for_the_remaining_work() 
         // replay's peak, less what its interrupted stage frees, which is less
         // than any fresh clone of the package needs.
         let operation = clone_operation(
-            &RepositoryIdentity::parse("openalex/openalex").unwrap(),
+            &RepositoryIdentity::parse("opendata/openalex").unwrap(),
             &format!("sha256:{}", "a".repeat(64)),
             None,
         );
@@ -986,7 +986,7 @@ fn a_prior_stage_reduces_clones_budget_by_what_removing_it_frees_and_no_more() {
 fn a_refused_replay_keeps_the_project_an_earlier_run_committed() {
     let (_, _, fixture) = helper_fixture();
     let operation = clone_operation(
-        &RepositoryIdentity::parse("openalex/openalex").unwrap(),
+        &RepositoryIdentity::parse("opendata/openalex").unwrap(),
         &format!("sha256:{}", "a".repeat(64)),
         None,
     );

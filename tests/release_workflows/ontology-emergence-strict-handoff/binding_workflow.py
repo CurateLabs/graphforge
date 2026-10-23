@@ -38,7 +38,7 @@ def main() -> None:
             "risk_score": pa.array([0.4, 0.55], type=pa.float64()),
         }
     )
-    source.publish_bulk_nodes(uuid.UUID("018f0f4e-7b8c-7000-8000-000000029901"), table)
+    source.publish_bulk_nodes(table, uuid.UUID("018f0f4e-7b8c-7000-8000-000000029901"))
     source.load_ontology(str(args.ontology))
     assert source.ontology_mode == "advisory"
     source.close()
@@ -66,7 +66,7 @@ def main() -> None:
                 ),
             }
         )
-        target.publish_bulk_nodes(uuid.UUID("018f0f4e-7b8c-7000-8000-000000029903"), bad)
+        target.publish_bulk_nodes(bad, uuid.UUID("018f0f4e-7b8c-7000-8000-000000029903"))
         raise AssertionError("strict unmapped label must fail")
     except Exception as error:  # structured binding error surface
         failure = str(error)

@@ -1410,6 +1410,31 @@ fn version_clone_tag_publications_resume_and_preserve_advanced_staging() {
         let prior = generation(&graph);
         let receipts = graph.research_version_retention().unwrap().receipts;
         drop(graph);
+        let operation = Uuid::parse_str(
+            &std::fs::read_to_string(staged.parent().unwrap().join("operation")).unwrap(),
+        )
+        .unwrap();
+        let continuation = GraphForge::continue_imported_research_tags(
+            &staged,
+            &lineage,
+            published.main_head,
+            operation,
+        );
+        if advance {
+            assert!(
+                continuation
+                    .unwrap_err()
+                    .to_string()
+                    .contains("hub.destination_conflict")
+            );
+        } else {
+            assert_eq!(continuation.unwrap(), Some(prior));
+        }
+        assert_eq!(
+            generation(&GraphForge::new(staged.to_str()).unwrap()),
+            prior,
+            "direct continuation preserves both admitted and advanced staging"
+        );
         let result = clone_into(&hub, &destination, None, Some(published.main_head));
         if advance {
             result.unwrap_err();

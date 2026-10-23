@@ -406,7 +406,7 @@ pub use graphforge_core::manifest::{
     GRAPHFORGE_VERSION, MANIFEST_FILE, ONTOLOGY_FILE, ProjectManifest,
 };
 pub use graphforge_core::uuid::{
-    hub_clone_operation, hub_publish_operation, hub_research_clone_operation,
+    hub_clone_operation, hub_publish_operation, hub_research_clone_operation, new_v7,
     portable_import_generation,
 };
 pub use graphforge_core::{

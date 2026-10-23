@@ -1380,18 +1380,7 @@ fn inspect_with_registry(
     version: &ResearchVersionRecord,
     registry: &ResearchRegistry,
 ) -> Result<Vec<crate::ProjectParticipantSnapshot>, GfError> {
-    if !registry.versions.contains_key(&version.version_uuid) {
-        return Err(GfError::Api {
-            code: ApiErrorCode::ResultNotRetained,
-            message: "historical research Version content is not retained".into(),
-        });
-    }
-    if registry.identities.get(&version.version_uuid) != Some(&identity_digest(version)?) {
-        return Err(error(
-            ProjectErrorCode::TransactionConflict,
-            "historical research Version identity has conflicting content",
-        ));
-    }
+    require_retained_identity(registry, version)?;
     authenticate_evidence(root, &version.content.evidence)?;
     if registry.materialized.contains(&version.version_uuid) {
         return retained_content::inspect(root, version, None);
@@ -1421,6 +1410,78 @@ fn inspect_with_registry(
         snapshots.push(snapshot);
     }
     Ok(snapshots)
+}
+
+fn require_retained_identity(
+    registry: &ResearchRegistry,
+    version: &ResearchVersionRecord,
+) -> Result<(), GfError> {
+    if !registry.versions.contains_key(&version.version_uuid) {
+        return Err(GfError::Api {
+            code: ApiErrorCode::ResultNotRetained,
+            message: "historical research Version content is not retained".into(),
+        });
+    }
+    if registry.identities.get(&version.version_uuid) != Some(&identity_digest(version)?) {
+        return Err(error(
+            ProjectErrorCode::TransactionConflict,
+            "historical research Version identity has conflicting content",
+        ));
+    }
+    Ok(())
+}
+
+/// Authenticate one retained participant without materializing a historical
+/// Project or opening graph payloads and evidence. Sibling participants are untouched.
+pub fn inspect_research_version_participant(
+    root: &Path,
+    version: &ResearchVersionRecord,
+    key: &ResearchParticipantKey,
+    max_bytes: u64,
+) -> Result<Option<crate::ProjectParticipantSnapshot>, GfError> {
+    let current = crate::resolve_project_generation(root)?;
+    let registry = read_research_registry(&current)?;
+    require_retained_identity(&registry, version)?;
+    let Some(participant) = version.content.participants.iter().find(|p| &p.key == key) else {
+        return Ok(None);
+    };
+    let bound = max_bytes.min(participant_byte_bound(participant));
+    let bytes = if registry.materialized.contains(&version.version_uuid) {
+        crate::read_graph_object_by_digest(root, &hex(&participant.content_sha256), bound)?
+    } else {
+        let source = crate::resolve_generation_by_uuid(root, version.content.generation_uuid)?;
+        if source.manifest_sha256() != version.content.manifest_sha256 {
+            return Err(invalid("research source manifest identity changed"));
+        }
+        if !commitments(&source)?.contains(participant) {
+            return Err(invalid("research participant commitment changed"));
+        }
+        if source
+            .portable_participant_identity(&key.capability, &key.family)?
+            .byte_length()
+            > bound
+        {
+            return Err(error(
+                ProjectErrorCode::ResourceLimit,
+                "research participant exceeds inspection bound",
+            ));
+        }
+        source
+            .participant_snapshot(&key.capability, &key.family)?
+            .ok_or_else(|| invalid("research participant is unavailable"))?
+            .bytes
+    };
+    validate_saved_query_participant(participant, &bytes)?;
+    Ok(Some(crate::ProjectParticipantSnapshot {
+        capability_id: key.capability.clone(),
+        capability_version: participant.capability_version,
+        record_family_id: key.family.clone(),
+        record_version: participant.record_version,
+        encoding: participant.encoding.clone(),
+        schema_fingerprint: participant.schema_sha256,
+        row_count: participant.row_count,
+        bytes,
+    }))
 }
 
 fn participant_byte_bound(participant: &ResearchParticipantCommitment) -> u64 {

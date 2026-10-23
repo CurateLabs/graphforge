@@ -13,7 +13,7 @@ const MANIFEST: &str = include_str!("../../../tests/fixtures/hub/generated/v1/ma
 fn capabilities() -> PublishCapabilities {
     let document = json!({
         "format": "graphforge-hub-publish/1",
-        "repository": {"owner": "openalex", "repository": "openalex"},
+        "repository": {"owner": "opendata", "repository": "openalex"},
         "requirements": [
             {"capability": "publish-session", "major": 1},
             {"capability": "publish-negotiation", "major": 1},
@@ -22,7 +22,7 @@ fn capabilities() -> PublishCapabilities {
         "authorization": {
             "device_authorization_endpoint": "https://data.graphforge.sh/.gf/oauth/device_authorization",
             "token_endpoint": "https://data.graphforge.sh/.gf/oauth/token",
-            "scope": "publish:openalex/openalex",
+            "scope": "publish:opendata/openalex",
         },
         "object_location_template": "https://data.graphforge.sh/objects/sha256/{hex}",
         "limits": {
@@ -82,7 +82,7 @@ fn receipts_are_validated_like_every_other_publish_document() {
         "format": "graphforge-hub-publish/1",
         "operation_uuid": "00000000-0000-4000-8000-000000000001",
         "request_commitment": digest('a'),
-        "repository": {"owner": "openalex", "repository": "openalex"},
+        "repository": {"owner": "opendata", "repository": "openalex"},
         "manifest_validator": digest('b'),
         "refs": ["main"],
         "previous_revision": null,

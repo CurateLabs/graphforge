@@ -46,7 +46,7 @@ const { document, canonical_json, digest } =
   protocol.validate_manifest(manifestText);
 protocol.bind_summary(manifestText, summaryText);
 const commitment = protocol.request_commitment({
-  repository: { owner: "openalex", repository: "openalex" },
+  repository: { owner: "opendata", repository: "openalex" },
   intent_digest,
   objects, // [{ digest, length, media_type }], ascending by digest
   manifest_validator: digest,
@@ -58,6 +58,25 @@ const commitment = protocol.request_commitment({
 A document argument is a JSON string, validated byte for byte (duplicate
 members and oversize input are refused as in native Rust), or a plain object.
 Results are plain objects.
+
+Permanent item references use Core's shared grammar directly:
+
+```js
+protocol.parse_item_id("ONT_7K2M9X4Q8R3T5V1W");
+// { id: "ont_7k2m9x4q8r3t5v1w",
+//   uri: "https://graphforge.sh/ont_7k2m9x4q8r3t5v1w",
+//   kind: "ontology_module" }
+protocol.has_item_id_shape("abc_0000000000000000"); // true (reserved name)
+```
+
+`parse_item_id(reference)` accepts a bare ID or `https://graphforge.sh/<id>`,
+folding ASCII case only. It recognizes `ont` (`ontology_module`) and `brg`
+(`bridge_set`), rejects Crockford aliases `i`, `l`, `o`, `u`, unknown prefixes,
+foreign URIs, extra paths, query strings and fragments, and throws a structured
+`invalid_argument` error on failure. `has_item_id_shape(name)` returns a boolean:
+any three lowercase letters followed by `_` and 16 lowercase Crockford base32
+characters are reserved, including unknown prefixes. It does not normalize case
+or accept a URI. Both calls work without entropy; ID generation is not exported.
 
 **Boundary.** Rust never reads a JavaScript object. The package's `index.js`
 turns an object argument into JSON text with `JSON.stringify` and passes only
@@ -83,6 +102,7 @@ included, are own properties.
 
 | Area           | Exports                                                                                                                                |
 | -------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| Permanent IDs  | `parse_item_id`, `has_item_id_shape`                                                                                                   |
 | Discovery      | `validate_manifest`, `validate_refs`, `validate_summary`, `validate_lineage`, `validate_repository_moved`                              |
 | Binding        | `bind_summary`, `bind_lineage`, `bind_summary_lineage`, `bind_refs`, `ontology_module_object`, `research_version_object`               |
 | Re-homing      | `rehome_repository`                                                                                                                    |
@@ -99,28 +119,45 @@ with the code Rust returns: `malformed_response`, `unsupported_future`,
 `integrity_failure`, `limit_exceeded`, ... for discovery;
 `invalid_input`, `auth_denied`, ... for publish documents; `preview.limit`,
 `preview.unsafe_svg`, ... for previews. `invalid_argument` means the argument
-was not the JSON value or string the export needs.
+was not the JSON value or string the export needs, or was an invalid permanent
+item reference.
 
 TypeScript declarations (`dist/graphforge_protocol_wasm.d.ts`) are generated
 from the Rust wire types; nothing in them is written by hand.
 
 ## Footprint
 
-Measured on the release build (`opt-level = "z"`, LTO, no `wasm-opt`), Node 22:
+Measured on the release build (`opt-level = "z"`, LTO), Node 22:
 
-| Measure                                     | Value                 |
-| ------------------------------------------- | --------------------- |
-| `.wasm` file                                | 1.06 MB (350 KB gzip) |
-| Linear memory after instantiation           | about 1.3 MiB         |
-| `validate_manifest`, openalex (2.2 KB)      | about 0.3 ms          |
-| `validate_lineage`, largest corpus (4.5 KB) | about 0.5 ms          |
-| `request_commitment`                        | about 20 µs           |
+| Measure                                     | Value                                                         |
+| ------------------------------------------- | ------------------------------------------------------------- |
+| Delivered `.wasm` size                      | about 354 KB gzip, about 282 KB brotli (1.07 MB uncompressed) |
+| Linear memory after instantiation           | about 1.3 MiB                                                 |
+| `validate_manifest`, openalex (2.2 KB)      | about 0.3 ms                                                  |
+| `validate_lineage`, largest corpus (4.5 KB) | about 0.5 ms                                                  |
+| `request_commitment`                        | about 20 µs                                                   |
 
-About 200 KB of the file is Unicode and IDNA tables from the `url` crate that
-location validation needs. Workers compressed-size limits are well above the
-gzip size; the 1 ms of CPU a typical validation uses is far below the Workers
-CPU limits. Run `node --expose-gc --test tests/*.test.mjs` to print the same
-numbers for your machine (`# {"wasm_bytes": ...}` diagnostic).
+The compressed size is what a Worker or browser downloads, and it is far below
+the Workers limits. Running Binaryen's `wasm-opt -Oz` over the module was tried
+and is not applied: it shrinks the uncompressed file by 11% but grows it to
+381 KB gzip and 299 KB brotli, because it removes repetition the compressor was
+already using.
+
+Where the bytes are (uncompressed function sizes by crate, from `twiggy`; approximate): `serde_json`
+monomorphized for each wire type about 310 KB; `core`, `alloc` and `std` about
+230 KB; compiler-generated glue and closures about 210 KB; Unicode and IDNA
+tables and strings in the data segment about 208 KB; `graphforge-discovery` about
+104 KB; `png` about 43 KB; `serde`, the adapter, `roxmltree`, `url`,
+`graphforge-hub-publish`, `quick-xml` and `wasm-bindgen` about 14-35 KB each.
+
+In a Worker (`tests/worker.test.mjs`, Miniflare 3 running workerd): linear memory
+1.3 MiB (the isolate limit is 128 MB); the whole workerd process grew from about
+66 MB to about 88 MB resident over 200 requests, runtime included; a request that
+validates six documents and computes a commitment took 4-5 ms including the HTTP
+round trip from Node. workerd does not expose CPU time, and a Worker's own timers
+do not advance during computation, so per-request CPU is not measured there. Run
+`node --expose-gc --test tests/*.test.mjs` to print the numbers for your machine
+(`# {"wasm_bytes": ...}` and `# {"linear_memory_bytes": ...}` diagnostics).
 
 A WebAssembly build aborts on a Rust panic, so a panic cannot be turned into a
 thrown error there. The adapter calls only validators that return errors for
@@ -141,6 +178,9 @@ export PATH="$HOME/.wasm-bindgen/bin:$PATH"
 make test-protocol-wasm
 ```
 
+`pnpm install` also provides the pinned `miniflare` development dependency the
+Worker test uses.
+
 The tests replay the discovery v1 and hub-publish v1 corpora
 (`docs/reference/`) through the built module and compare each result with the
 outcome the corpus records from native Rust. The hub-publish corpus drives a
@@ -158,8 +198,12 @@ fixture natively through the same engine functions.
 
 ## Running on Cloudflare Workers
 
-The module needs no Node APIs. In a Worker, import the `.wasm` file as above
-and call `initSync` once at module scope; `wrangler dev` or `wrangler deploy`
-bundles it. Workers are not available in this repository's CI, so the Worker
-run of the openalex acceptance case (`tests/openalex.test.mjs`) is a manual
-step recorded on issue #1766.
+The module needs no Node APIs. In a Worker, import the `.wasm` file as above and
+call `initSync` once at module scope; `wrangler dev` or `wrangler deploy` bundles
+it. `tests/worker.test.mjs` runs such a Worker (`tests/worker/worker.mjs`) in
+Cloudflare's own workerd runtime through Miniflare, with the package's
+specifiers mapped to its files as the `exports` map does, and checks that it
+validates the openalex fixture and computes the request commitment and re-homed
+revision the native Rust tests pin. It needs no account and no network, runs on
+Linux, macOS and Windows (workerd ships for all three) and on Node 20 or newer
+(Miniflare 3). A deployed Worker on Cloudflare's network remains a manual check.

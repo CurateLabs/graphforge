@@ -9,6 +9,8 @@ use std::fmt;
 /// The semantic category of a load-time validation violation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ValidationErrorKind {
+    /// The authored item ID is absent or is not canonical in the GraphForge namespace.
+    InvalidIdentity,
     /// Two items share a name that must be unique (e.g. two entity types named `"Person"`).
     DuplicateName,
     /// A reference points to a name that is not declared in the ontology.
@@ -24,6 +26,7 @@ pub enum ValidationErrorKind {
 impl fmt::Display for ValidationErrorKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::InvalidIdentity => write!(f, "InvalidIdentity"),
             Self::DuplicateName => write!(f, "DuplicateName"),
             Self::UnresolvedReference => write!(f, "UnresolvedReference"),
             Self::InheritanceCycle => write!(f, "InheritanceCycle"),
@@ -134,6 +137,7 @@ mod tests {
     #[test]
     fn validation_kind_and_record_display_are_closed_and_stable() {
         let cases = [
+            (ValidationErrorKind::InvalidIdentity, "InvalidIdentity"),
             (ValidationErrorKind::DuplicateName, "DuplicateName"),
             (
                 ValidationErrorKind::UnresolvedReference,

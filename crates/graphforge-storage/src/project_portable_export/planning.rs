@@ -8,7 +8,6 @@ use crate::project_portable::{
     PortableActivationOverride, PortableActivationProfile, PortableBridgeSet,
     PortableExactIdentity, PortableOntologyComposition, PortableOntologyModule,
 };
-use crate::workspace_participants::MAX_WORKSPACE_ONTOLOGY_COMPOSITION_BYTES;
 use crate::{
     PortableSelectionPlan, PortableSelectionProfile, PortableSelectionRequest,
     ResolvedProjectGeneration, preview_portable_selection, project_portable::canonical_json,
@@ -405,46 +404,15 @@ fn bridge_component_id(digest: &str) -> String {
     reason = "projection appends one authenticated closure to the existing immutable plan"
 )]
 fn project_ontology_composition(
-    generation: &ResolvedProjectGeneration,
-    projected: &[crate::PortableProjectedSelectionEntry],
+    composition: &crate::WorkspaceOntologyComposition,
+    selected: &BTreeSet<PortableExactIdentity>,
     limits: PortableExportLimits,
     total: &mut u64,
     files: &mut Vec<PlannedFile>,
     components: &mut Vec<Component>,
     roots: &mut Vec<String>,
-) -> Result<(), ExportError> {
-    let identity = generation
-        .portable_participant_identity(
-            crate::WORKSPACE_CAPABILITY_ID,
-            crate::WORKSPACE_ONTOLOGY_COMPOSITION_FAMILY,
-        )
-        .map_err(storage)?;
-    if identity.byte_length() > MAX_WORKSPACE_ONTOLOGY_COMPOSITION_BYTES as u64 {
-        return Err(limit(
-            "ontology composition authority exceeds configured limit",
-        ));
-    }
-    // This source came from a selected generation manifest. Read it through
-    // the manifest-authenticated participant boundary, which checks length,
-    // XXH64 and the JSON SHA-256 while allowing its validated carry-forward
-    // hard link. Untrusted/local planning inputs continue through strict
-    // single-link `identity()` checks.
-    let bytes = generation
-        .participant_snapshot(
-            crate::WORKSPACE_CAPABILITY_ID,
-            crate::WORKSPACE_ONTOLOGY_COMPOSITION_FAMILY,
-        )
-        .map_err(storage)?
-        .ok_or_else(|| err("GF_INVALID_STRUCTURE", "ontology composition is missing"))?
-        .bytes;
-    let composition =
-        crate::WorkspaceOntologyComposition::from_canonical_json(&bytes).map_err(storage)?;
-
-    let selected = projected
-        .iter()
-        .map(|entry| entry.identity.clone())
-        .collect::<BTreeSet<_>>();
-    let mut modules = Vec::with_capacity(projected.len());
+) -> Result<PortableOntologyComposition, ExportError> {
+    let mut modules = Vec::with_capacity(selected.len());
     let mut all_dependencies = Vec::new();
     for module in &composition.modules {
         let exact = exact_identity(
@@ -665,7 +633,7 @@ fn project_ontology_composition(
     digest.update(b"graphforge-ontology-composition/1\0");
     digest.update(canonical_json(&unsigned)?);
     control.composition_digest = format!("sha256:{}", hex(digest.finalize().into()));
-    let control_bytes = canonical_json(&serde_json::to_value(control).map_err(storage)?)?;
+    let control_bytes = canonical_json(&serde_json::to_value(&control).map_err(storage)?)?;
     let path = crate::project_portable::ONTOLOGY_COMPOSITION_PATH;
     let file = inline_control(path, control_bytes, limits, total)?;
     let component_file = ComponentFile {
@@ -684,7 +652,52 @@ fn project_ontology_composition(
         required_dependencies: all_dependencies,
         files: vec![component_file],
     });
-    Ok(())
+    Ok(control)
+}
+
+/// Derive the complete portable control using the package export projection.
+/// Only bounded ontology payloads are planned in memory; no graph or package is written.
+pub fn plan_portable_ontology_composition(
+    composition: &crate::WorkspaceOntologyComposition,
+    limits: PortableExportLimits,
+) -> Result<PortableOntologyComposition, ExportError> {
+    validate_limits(limits)?;
+    let mut selected = composition
+        .modules
+        .iter()
+        .map(|module| {
+            exact_identity(
+                &module.id.ontology_id,
+                &module.id.authored_version,
+                &module.id.canonical_digest,
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    for bridge in &composition.bridges {
+        let digest = graphforge_ontology::bridge_document_digest(bridge).map_err(storage)?;
+        selected.insert(exact_identity(
+            &bridge.bridge_id,
+            &bridge.authored_version,
+            &digest,
+        ));
+    }
+    let mut files = Vec::new();
+    let mut components = Vec::new();
+    let control = project_ontology_composition(
+        composition,
+        &selected,
+        limits,
+        &mut 0,
+        &mut files,
+        &mut components,
+        &mut Vec::new(),
+    )?;
+    if files.len() as u64 > limits.max_entries || components.len() as u64 > limits.max_components {
+        return Err(limit(
+            "ontology composition entry count exceeds configured limit",
+        ));
+    }
+    Ok(control)
 }
 
 /// Plan every canonical participant of one already-pinned generation.
@@ -821,9 +834,16 @@ pub fn plan_selected_portable(
         });
     }
     if has_ontology_composition {
+        let composition = super::read_ontology_composition(g, limits)?
+            .ok_or_else(|| err("GF_INVALID_STRUCTURE", "ontology composition is missing"))?;
+        let selected = selection
+            .projected
+            .iter()
+            .map(|entry| entry.identity.clone())
+            .collect();
         project_ontology_composition(
-            g,
-            &selection.projected,
+            &composition,
+            &selected,
             limits,
             &mut total,
             &mut files,

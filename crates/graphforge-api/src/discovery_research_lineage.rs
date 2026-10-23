@@ -416,7 +416,7 @@ mod tests {
         .unwrap();
         BuildResearchLineageRequest {
             repository: RepositoryIdentity {
-                owner: "openalex".into(),
+                owner: "opendata".into(),
                 repository: "demo".into(),
             },
             immutable_version: Sha256Digest(marker('a')),

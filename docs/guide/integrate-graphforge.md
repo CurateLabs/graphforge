@@ -21,34 +21,33 @@ This optional section additionally assumes basic JavaScript and npm use. Stay
 with Python if those are unfamiliar.
 
 Install `@curatelabs/graphforge` at the version selected in
-[Installation](installation.md), plus `apache-arrow` for table helpers. Save
-the following as an `.mjs` file and run it with Node:
+[Installation](installation.md), plus `apache-arrow`, which `query()` uses to
+return a table. Save the following as an `.mjs` file and run it with Node:
 
 ```js
 import { GraphForge } from "@curatelabs/graphforge";
-import { tableFromIPC } from "apache-arrow";
+import { query } from "@curatelabs/graphforge/lib/query.mjs";
 
 const forge = new GraphForge();
 const survey = forge.addNode("Paper", { title: "Survey" });
 const methods = forge.addNode("Paper", { title: "Methods" });
 forge.addEdge(survey, "CITES", methods);
 
-const table = tableFromIPC(
-  forge.execute(`
+const table = query(forge, `
   MATCH (source:Paper)-[:CITES]->(paper:Paper)
   RETURN source.title AS source, paper.title AS title
   ORDER BY source, title
-`),
-);
+`);
 console.log(table.toArray().map((row) => row.toJSON()));
 forge.close();
 ```
 
 The result contains one row: `{ source: 'Survey', title: 'Methods' }`.
-Node's native query result is Arrow IPC bytes. This explicit decoding is an
-integration concern; the basic Python/agent path needs no IPC plumbing.
-Arrow preserves integer widths, so some numeric columns become JavaScript
-`bigint` values rather than JSON numbers.
+`query()` returns an Apache Arrow `Table` directly, so the useful result needs
+no IPC plumbing. Integration code that needs raw bytes keeps
+`forge.execute()`, which returns Arrow IPC; decode it with `tableFromIPC` from
+the `apache-arrow` package. Arrow preserves integer widths, so some numeric
+columns become JavaScript `bigint` values rather than JSON numbers.
 
 ## Rust and CLI
 

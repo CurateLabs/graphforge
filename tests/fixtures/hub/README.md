@@ -2,7 +2,7 @@
 
 This directory is the single GraphForge authority for the public Hub closeout
 fixture. `openalex-source/` is the complete, synthetic, expanded portable
-source state of the `openalex/openalex` Project. `generated/v1/` contains the
+source state of the `opendata/openalex` Project. `generated/v1/` contains the
 deterministic bundle, Project summary, per-module package, and canonical
 discovery manifest and refs emitted by Rust.
 
@@ -56,13 +56,18 @@ described in `tests/fixtures/portable/README.md`.
 durable Project with fixed operation identities, synthetic research metadata
 written by `update_research_metadata` (title "OpenAlex", license "CC0-1.0",
 public/open access, declared corpus size 1000 nodes and 2500 relationships),
-one adopted ontology module (`https://openalex.org/ontology/works` version
+one adopted ontology module (`https://graphforge.sh/ont_drqf2xw8w33cxaxj` version
 `2026.01`: `Work`, `Author`, `Institution`, one `AUTHORED` relationship) with an
 advisory activation profile, then a complete expanded export. The new tree is
 fully verified and swapped in only when complete. The values are fixture
 content, not product behavior. Nothing under `openalex-source/` is edited by
 hand; running `--rebuild-source` twice produces byte-identical trees, and a unit
 test asserts that the rebuild equals the checked-in tree.
+
+The Project is a GraphForge-maintained mirror, so it lives under the `opendata`
+owner rather than the data source's name, and its module carries a GraphForge
+permanent `ont_` ID rather than an IRI in a domain GraphForge does not control
+(#2214, #2215).
 
 ## The generated artifacts
 
@@ -72,8 +77,8 @@ test asserts that the rebuild equals the checked-in tree.
 | --- | --- |
 | `manifest.json` | canonical discovery manifest, including `summary` and `ontology` |
 | `refs.json` | canonical refs; the `main` validator is the manifest digest |
-| `objects/openalex-openalex.gfpb` | the complete Project package (bundle) |
-| `objects/openalex-openalex.summary.json` | the canonical `graphforge-project-summary/1` document |
+| `objects/opendata-openalex.gfpb` | the complete Project package (bundle) |
+| `objects/opendata-openalex.summary.json` | the canonical `graphforge-project-summary/1` document |
 | `objects/ontology-module-<content digest>.gfpb` | a component-selective package carrying exactly one ontology module |
 | `fixture.json` | provenance and the digests that bind the files above |
 

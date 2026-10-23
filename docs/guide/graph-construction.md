@@ -142,41 +142,29 @@ See the [Cypher Guide](cypher-guide.md) for the full clause reference.
 
 For many rows at once, use the Rust-owned bulk surfaces. Prefer
 `publish_bulk_nodes` / `publish_bulk_edges` with a canonical Arrow table, or the
-convenience helpers `add_nodes` / `add_edges`. Always pass a stable
-`operation_uuid`; the call returns a canonical receipt table
-(`entity_uuid`, `row_ordinal`, generation identity, …).
+convenience helpers `add_nodes` / `add_edges`. Each call returns a canonical
+receipt table (`entity_uuid`, `row_ordinal`, operation and generation identity,
+…).
 
-Exact retry with the same operation UUID and same normalized input returns the
-same ordered receipt without another generation. Reusing the UUID with different
-input fails with `GF_IDEMPOTENCY_CONFLICT` and does not mutate storage.
+The `operation_uuid` is optional: when omitted, GraphForge mints a UUIDv7
+operation identity in Rust and returns it in the receipt's `operation_uuid`
+column. Pass that identity back explicitly to retry the same batch; reuse with
+changed input fails with `GF_IDEMPOTENCY_CONFLICT` and does not mutate storage.
+Each publication needs its own identity: reusing the node load's identity for
+the edge load is a conflicting reuse.
 
-The operation identity must be a **UUIDv7**; a UUIDv4 is rejected with
-`GF_BULK_VALIDATION(invalid_uuid)`. Python 3.14 ships `uuid.uuid7()`; on earlier
-versions generate one with the stdlib helper below.
+If a call raises after the identity was minted, the exception carries it as
+`error.operation_uuid`. On any error, retry with
+`operation_uuid=error.operation_uuid` (and the same input) rather than omitting
+it: the commit may have succeeded before the failure, and a retry with a new
+identity would load the data twice.
 
 ```python
-import os
-import time
-import uuid
-
-
-def uuid7() -> uuid.UUID:
-    """RFC 9562 UUIDv7. Use uuid.uuid7() directly on Python 3.14+."""
-    stamp = int(time.time() * 1000).to_bytes(6, "big")
-    raw = bytearray(stamp + os.urandom(10))
-    raw[6] = (raw[6] & 0x0F) | 0x70  # version 7
-    raw[8] = (raw[8] & 0x3F) | 0x80  # RFC 9562 variant
-    return uuid.UUID(bytes=bytes(raw))
-
-
-node_op = str(uuid7())
-edge_op = str(uuid7())
-
 nodes = forge.add_nodes(
     "Person",
     [{"name": "Alice"}, {"name": "Bob"}],
-    operation_uuid=node_op,
 )
+
 edges = forge.add_edges(
     "KNOWS",
     [
@@ -185,7 +173,6 @@ edges = forge.add_edges(
             "dst_id": nodes.column("entity_uuid")[1].as_py(),
         }
     ],
-    operation_uuid=edge_op,
 )
 assert nodes.num_rows == 2 and edges.num_rows == 1
 ```
@@ -209,7 +196,13 @@ For pandas / Polars / Arrow inputs and the full receipt schema, see the
 
 Rust and Node project onto the same bulk contracts. Identity, ontology
 validation, idempotency, and publication stay Rust-owned; bindings only convert
-at the boundary.
+at the boundary. Both bindings accept an omitted operation identity and mint a
+Rust-owned UUIDv7; Node passes it as the optional second argument,
+`publishBulkNodes(batch, operationUuid?)`. An explicitly supplied identity must
+still be a **UUIDv7**; a UUIDv4 is rejected with
+`GF_BULK_VALIDATION(invalid_uuid)`. A thrown error carries the identity as
+`error.operationUuid` (Python: `error.operation_uuid`); on any error, retry with
+that identity.
 
 Node intentionally exposes only `publishBulkNodes` / `publishBulkEdges` for
 bulk construction. The Python-only `add_nodes` / `add_edges` helpers normalize
@@ -239,7 +232,9 @@ python3 scripts/ci/bulk-construction-conformance.py validate
 1. **Use parameters** in Cypher — never interpolate untrusted strings into
    queries.
 2. **Prefer `MERGE`** when re-running ETL or scripts that must be idempotent.
-3. **Pass `operation_uuid` on every bulk call** and keep it stable for retries.
+3. **Keep one operation identity per logical bulk load** for retries: pass
+   `operation_uuid` explicitly, or capture the identity the receipt returns
+   when you omitted it, and reuse exactly that identity and input on retry.
 4. **Close persistent graphs** (`forge.close()`) when finished with a directory
    project. An open instance keeps OS handles on the committed generation it
    reads from, including a directory handle on `generations/<uuid>/graph`;

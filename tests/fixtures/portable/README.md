@@ -45,7 +45,7 @@ staging replay/conflict/cancellation/failure matrix.
 
 `facade-verification-receipts.json` pins the complete Rust-facade/CLI verification
 receipts for the immutable checked-in Hub bundle
-`tests/fixtures/hub/generated/v1/objects/openalex-openalex.gfpb`. It was emitted
+`tests/fixtures/hub/generated/v1/objects/opendata-openalex.gfpb`. It was emitted
 by the same-build `gf --json portable verify --mode full` and `--mode inspect`
 commands; `structure_only` is the binding/API spelling of inspect mode. The CLI
 integration test independently compares both actual facade and CLI results to
@@ -63,6 +63,6 @@ tests compare receipt values, not bytes, so pretty-printing the compact
 `gf --json` output is not a hand edit:
 
 ```bash
-gf --json portable verify --mode full --input <copy of openalex-openalex.gfpb>
-gf --json portable verify --mode inspect --input <copy of openalex-openalex.gfpb>
+gf --json portable verify --mode full --input <copy of opendata-openalex.gfpb>
+gf --json portable verify --mode inspect --input <copy of opendata-openalex.gfpb>
 ```

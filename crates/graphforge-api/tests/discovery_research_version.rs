@@ -183,7 +183,7 @@ fn publish() -> Published {
             ),
         );
     }
-    let repository = RepositoryIdentity::parse("openalex/openalex-fork").unwrap();
+    let repository = RepositoryIdentity::parse("opendata/openalex-fork").unwrap();
     let project_uuid = graph
         .research_reference(
             &graphforge_api::ResearchReferenceTarget::Version { version_uuid: head },

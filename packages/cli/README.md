@@ -30,13 +30,13 @@ npx @curatelabs/graphforge-cli skills remove
 npx @curatelabs/graphforge-cli config validate
 npx @curatelabs/graphforge-cli config resolve --json
 npx @curatelabs/graphforge-cli infra validate --target production --json
-npx @curatelabs/graphforge-cli clone openalex/openalex
-npx @curatelabs/graphforge-cli clone https://graphforge.sh/openalex/openalex openalex-copy
+npx @curatelabs/graphforge-cli clone opendata/openalex
+npx @curatelabs/graphforge-cli clone https://graphforge.sh/opendata/openalex openalex-copy
 npx @curatelabs/graphforge-cli hub list curate/claims
 npx @curatelabs/graphforge-cli clone curate/claims --ref feature/score claims-feature
-npx @curatelabs/graphforge-cli ontology module fetch openalex/openalex \
-  --ontology-id https://openalex.org/ontology/works --version 2026.01 \
-  --digest f1f475dfcf01bdfe7a578afb0203bac26831dc0b48f4cd009bdc418b506981b4 \
+npx @curatelabs/graphforge-cli ontology module fetch opendata/openalex \
+  --ontology-id https://graphforge.sh/ont_drqf2xw8w33cxaxj --version 2026.01 \
+  --digest 64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11 \
   --output works-ontology.json
 ```
 
@@ -88,7 +88,7 @@ select the bypass secret with `--protection-bypass-env PREVIEW_BYPASS_SECRET`:
 
 ```bash
 # Supply these variables through your shell or CI secret store.
-gf clone openalex/openalex --hub https://preview.example \
+gf clone opendata/openalex --hub https://preview.example \
   --token-env HUB_READ_TOKEN --protection-bypass-env PREVIEW_BYPASS_SECRET
 ```
 
@@ -237,6 +237,25 @@ A repository that moved reports `moved_from` and `moved_to`, as `clone` does.
 `null` when absent. `gf publish` does not publish Proposals, so `proposals` is
 empty unless another publisher added them.
 
+`ontology module create --input authored.yaml [--id ID] [--output completed.json]`
+and `ontology bridge create` complete an authored document without changing the
+input. Core mints a permanent `https://graphforge.sh/ont_<16 characters>` module
+ID or `https://graphforge.sh/brg_<16 characters>` bridge ID when the corresponding
+field is absent. The random part contains 80 bits encoded as lowercase Crockford
+base32 (no `i`, `l`, `o`, or `u`). Save the completed document and use it for every
+later operation: creation preserves an existing ID, while adopt, update, and
+module migrate require one and never mint another.
+
+Without `--output`, the completed JSON document goes to stdout. With `--output`,
+it goes to a new file; existing files are never overwritten. With `--json`,
+stdout contains the candidate receipt, including its ID and completed document,
+so use `--output` as well to save the document. `--id` accepts a bare `ont_…` or
+`brg_…` token, its URI, or an IRI in a domain you control. Permanent ID input is
+case-insensitive and is written in canonical lowercase URI form. An explicit ID
+must agree with an ID already in the document. Authored GraphForge IDs must use
+the canonical URI and the correct kind; legacy IDs and other-domain IRIs remain
+unchanged.
+
 `ontology module fetch OWNER/REPOSITORY --ontology-id ID --version VERSION
 --digest HEX --output FILE [--hub URL]` retrieves one exact ontology module from
 a Hub repository without cloning it: it makes exactly three requests (`/.gf/refs`,
@@ -270,11 +289,11 @@ the `graphforge-hub-module-fetch/1` receipt:
 ```json
 {
   "contract": "graphforge-hub-module-fetch/1",
-  "repository": "openalex/openalex",
+  "repository": "opendata/openalex",
   "module": {
-    "ontology_id": "https://openalex.org/ontology/works",
+    "ontology_id": "https://graphforge.sh/ont_drqf2xw8w33cxaxj",
     "authored_version": "2026.01",
-    "canonical_digest": "f1f475df...81b4"
+    "canonical_digest": "64cbfecf...3f11"
   },
   "package_digest": "sha256:8528501d...77b0",
   "module_sha256": "<SHA-256 hex of the written file>",
