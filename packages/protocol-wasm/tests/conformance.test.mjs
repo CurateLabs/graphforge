@@ -198,7 +198,7 @@ function replay(entry) {
 }
 
 test("hub-publish v1 corpus documents have the recorded native verdict, accepted or refused", () => {
-  assert.equal(hubPublish.cases.length, 30);
+  assert.equal(hubPublish.cases.length, 31);
   assert.equal(documents.format, "graphforge-protocol-wasm-hub-documents/1");
   const seen = { accept: 0, refused: 0, mutated: 0 };
   const kinds = new Set();

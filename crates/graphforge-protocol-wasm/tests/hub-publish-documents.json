@@ -538,6 +538,116 @@
       "step": 10
     },
     {
+      "case": "permanent-id-ownership",
+      "kind": "session_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 1
+    },
+    {
+      "case": "permanent-id-ownership",
+      "kind": "commit_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 3
+    },
+    {
+      "case": "permanent-id-ownership",
+      "kind": "commit_manifest",
+      "open_step": 1,
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 3
+    },
+    {
+      "case": "permanent-id-ownership",
+      "kind": "receipt",
+      "outcome": "accept",
+      "pointer": "/expect/json/receipt",
+      "step": 3
+    },
+    {
+      "case": "permanent-id-ownership",
+      "kind": "session_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 5
+    },
+    {
+      "case": "permanent-id-ownership",
+      "kind": "commit_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 7
+    },
+    {
+      "case": "permanent-id-ownership",
+      "kind": "commit_manifest",
+      "open_step": 5,
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 7
+    },
+    {
+      "case": "permanent-id-ownership",
+      "kind": "receipt",
+      "outcome": "accept",
+      "pointer": "/expect/json/receipt",
+      "step": 7
+    },
+    {
+      "case": "permanent-id-ownership",
+      "kind": "session_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 9
+    },
+    {
+      "case": "permanent-id-ownership",
+      "kind": "commit_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 11
+    },
+    {
+      "case": "permanent-id-ownership",
+      "kind": "commit_manifest",
+      "open_step": 9,
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 11
+    },
+    {
+      "case": "permanent-id-ownership",
+      "kind": "commit_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 13
+    },
+    {
+      "case": "permanent-id-ownership",
+      "kind": "commit_manifest",
+      "open_step": 9,
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 13
+    },
+    {
+      "case": "permanent-id-ownership",
+      "kind": "commit_request",
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 15
+    },
+    {
+      "case": "permanent-id-ownership",
+      "kind": "commit_manifest",
+      "open_step": 9,
+      "outcome": "accept",
+      "pointer": "/request/json",
+      "step": 15
+    },
+    {
       "case": "structural-fast-forward",
       "kind": "session_request",
       "outcome": "accept",

@@ -270,6 +270,8 @@ pub use saved_queries::{
     SavedQuerySource,
 };
 #[cfg(feature = "research")]
+mod item_refusals;
+#[cfg(feature = "research")]
 mod research_local_state;
 #[cfg(feature = "research")]
 mod research_versions;
@@ -279,6 +281,8 @@ pub use branches::{
     CreateResearchBranchRequest, ExecuteResearchBranchRequest, ReferenceResearchBranchRequest,
     ResearchBranchView, RestoreResearchBranchRequest, SuppressResearchBranchAssertionRequest,
 };
+#[cfg(feature = "research")]
+pub use item_refusals::{ItemIdRefusalReceipt, ItemIdRegeneration};
 #[cfg(feature = "research")]
 pub use research_local_state::{
     RecordResearchPublicationRequest, SelectResearchBranchRequest, SetResearchTagRequest,

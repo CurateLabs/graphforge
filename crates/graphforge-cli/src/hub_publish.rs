@@ -47,6 +47,7 @@ use uuid::Uuid;
 
 mod history;
 pub(crate) mod publication;
+mod refusals;
 
 /// Set once by the streaming `gf` process; captured invocations (bindings,
 /// tests) never prompt.
@@ -539,6 +540,7 @@ fn resolve_publication(
     let tracker = crate::hub_http::RepositoryMoveTransport::new(transport, identity, base)
         .with_credentials(bypass);
     let hub = Hub {
+        refusal: None,
         transport: &tracker,
         base: base.clone(),
         bypass,
@@ -604,6 +606,9 @@ const fn code_detail(code: HubPublishErrorCode) -> &'static str {
         HubPublishErrorCode::NonFastForward => {
             "the proposed head does not descend from the published Branch"
         }
+        HubPublishErrorCode::IdTaken => {
+            "the Hub refused a permanent item ID owned by another publisher"
+        }
         HubPublishErrorCode::UnsupportedFuture => {
             "the Hub requires an unsupported protocol version or capability"
         }
@@ -621,6 +626,9 @@ const fn code_detail(code: HubPublishErrorCode) -> &'static str {
 /// implies a publish outcome such as an idempotency conflict.
 fn hub_failure(response: &HubResponse) -> GfError {
     match serde_json::from_slice::<HubErrorBody>(&response.body) {
+        Ok(body) if body.code == HubPublishErrorCode::IdTaken && response.status != 409 => {
+            network("Hub refusal status is invalid")
+        }
         Ok(body) => publish_error(body.code, code_detail(body.code)),
         Err(_) => network("Hub returned an unsuccessful status"),
     }
@@ -681,6 +689,7 @@ type Document = (Vec<u8>, Option<String>);
 
 /// Control-plane and data-plane exchange over one transport.
 struct Hub<'a> {
+    refusal: Option<&'a refusals::Capture>,
     bypass: Option<&'a crate::hub_http::DiscoveryCredentials>,
     transport: &'a dyn Transport,
     base: Url,
@@ -767,8 +776,17 @@ impl Hub<'_> {
             request.with_header("authorization", token.authorization()),
             &url,
         )?;
-        self.transport
-            .exchange(&request, MAX_CONTROL_RESPONSE_BYTES)
+        let response = self
+            .transport
+            .exchange(&request, MAX_CONTROL_RESPONSE_BYTES)?;
+        if let Some(capture) = self.refusal {
+            capture.observe(
+                &response,
+                token,
+                request.header("x-vercel-protection-bypass"),
+            )?;
+        }
+        Ok(response)
     }
 
     /// Unauthenticated data-plane request to a Hub-issued upload capability URL.
@@ -1101,6 +1119,7 @@ fn read_published(
     let tracker = crate::hub_http::RepositoryMoveTransport::new(hub.transport, identity, base)
         .with_credentials(hub.bypass.filter(|_| base.origin() == hub.base.origin()));
     let read_hub = Hub {
+        refusal: None,
         transport: &tracker,
         base: hub.base.clone(),
         bypass: hub.bypass,
@@ -2049,12 +2068,30 @@ pub(crate) fn publish(
     publish_with_operation_report(transport, graph, args, environment, |_| Ok(()))
 }
 
-#[allow(clippy::too_many_lines)]
 fn publish_with_operation_report(
     transport: &dyn Transport,
     graph: &GraphForge,
     args: &PublishArgs,
     environment: &mut PublishEnvironment<'_>,
+    report: impl FnMut(Uuid) -> Result<(), GfError>,
+) -> Result<PublishOutcome, GfError> {
+    let captured = refusals::Capture::default();
+    let result = publish_inner(transport, graph, args, environment, &captured, report);
+    if result.is_err()
+        && let Some((version, items)) = captured.take()
+    {
+        return Err(refusals::record(graph, version, &items));
+    }
+    result
+}
+
+#[allow(clippy::too_many_lines)]
+fn publish_inner(
+    transport: &dyn Transport,
+    graph: &GraphForge,
+    args: &PublishArgs,
+    environment: &mut PublishEnvironment<'_>,
+    captured: &refusals::Capture,
     mut report: impl FnMut(Uuid) -> Result<(), GfError>,
 ) -> Result<PublishOutcome, GfError> {
     let (identity, base) = parse_input(&args.repository)?;
@@ -2078,6 +2115,7 @@ fn publish_with_operation_report(
         })?;
     let selection = select(graph, args)?;
     check_ontology_composition(graph, &selection)?;
+    captured.select(selection.version_uuid);
     let previews = select_previews(args, selection.version_uuid)?;
     let preview_metadata = previews
         .iter()
@@ -2145,6 +2183,7 @@ fn publish_with_operation_report(
     graphforge_hub_publish::require_history_capability(&capabilities, args.rewrite, args.prune)
         .map_err(|error| protocol(&error))?;
     let hub = Hub {
+        refusal: Some(captured),
         bypass: environment.bypass,
         transport,
         base: base.clone(),

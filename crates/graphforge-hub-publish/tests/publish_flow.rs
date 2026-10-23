@@ -1,6 +1,8 @@
 //! Publish behaviors driven through the typed wire documents against
 //! [`ReferenceHub`], asserting Hub state as well as responses.
 
+#[path = "publish_flow/id_taken.rs"]
+mod id_taken;
 #[path = "publish_flow/retention.rs"]
 mod retention;
 
@@ -41,6 +43,7 @@ struct Plan {
     bytes: Vec<u8>,
     package_digest: String,
     expected_revision: Option<String>,
+    ontology: Option<Value>,
 }
 
 impl Plan {
@@ -51,6 +54,7 @@ impl Plan {
             bytes: text.as_bytes().to_vec(),
             package_digest: format!("sha256:{}", package.to_string().repeat(64)),
             expected_revision,
+            ontology: None,
         }
     }
 
@@ -85,7 +89,7 @@ impl<'a> Client<'a> {
 
     fn manifest(&self, plan: &Plan) -> serde_json::Value {
         let object = plan.declaration();
-        json!({
+        let mut manifest = json!({
             "format": DISCOVERY_FORMAT,
             "version": {"major": 1, "minor": 2},
             "repository": self.repository,
@@ -97,7 +101,11 @@ impl<'a> Client<'a> {
             "capabilities": [],
             "objects": [{"digest": object.digest, "length": object.length, "media_type": object.media_type,
                 "locations": [self.capabilities.object_location(&object.digest)]}],
-        })
+        });
+        if let Some(ontology) = &plan.ontology {
+            manifest["ontology"] = ontology.clone();
+        }
+        manifest
     }
 
     fn intent(&self, plan: &Plan) -> PublishIntent {

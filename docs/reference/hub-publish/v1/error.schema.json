@@ -1,7 +1,29 @@
 {
+  "$defs": {
+    "slug": {
+      "maxLength": 100,
+      "minLength": 1,
+      "pattern": "^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$",
+      "type": "string"
+    }
+  },
   "$id": "https://graphforge.sh/schemas/hub-publish/v1/error.schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
+  "else": {
+    "not": {
+      "required": [
+        "items"
+      ]
+    }
+  },
+  "if": {
+    "properties": {
+      "code": {
+        "const": "id_taken"
+      }
+    }
+  },
   "properties": {
     "code": {
       "enum": [
@@ -10,11 +32,66 @@
         "idempotency_conflict",
         "ref_conflict",
         "non_fast_forward",
+        "id_taken",
         "unsupported_future",
         "integrity_failure",
         "invalid_input",
         "internal"
       ]
+    },
+    "items": {
+      "description": "Strictly ascending canonical bare IDs, with one entry per refused ID.",
+      "items": {
+        "additionalProperties": false,
+        "oneOf": [
+          {
+            "properties": {
+              "id": {
+                "pattern": "^ont_[0-9a-hjkmnp-tv-z]{16}$"
+              },
+              "kind": {
+                "const": "ontology_module"
+              }
+            }
+          },
+          {
+            "properties": {
+              "id": {
+                "pattern": "^brg_[0-9a-hjkmnp-tv-z]{16}$"
+              },
+              "kind": {
+                "const": "bridge_set"
+              }
+            }
+          }
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "ontology_module",
+              "bridge_set"
+            ]
+          },
+          "owner": {
+            "$ref": "#/$defs/slug"
+          },
+          "publish_as_owner": {
+            "const": true
+          }
+        },
+        "required": [
+          "kind",
+          "id"
+        ],
+        "type": "object"
+      },
+      "maxItems": 8192,
+      "minItems": 1,
+      "type": "array",
+      "uniqueItems": true
     },
     "message": {
       "maxLength": 512,
@@ -25,6 +102,13 @@
     "code",
     "message"
   ],
+  "then": {
+    "properties": {
+      "message": {
+        "const": "permanent item ID is already owned"
+      }
+    }
+  },
   "title": "error",
   "type": "object"
 }

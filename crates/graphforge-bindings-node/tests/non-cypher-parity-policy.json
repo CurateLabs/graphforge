@@ -1,8 +1,8 @@
 {
   "contractVersion": 1,
   "rustManifest": "../../../tests/contracts/non-cypher-rust-surface.json",
-  "releaseSurfaceCount": 364,
-  "releaseSurfaceDigest": "a15b1aeb03af0f9763bf4f8bd72dce1934c61c9a5c01ed5706073ef0c9e86b12",
+  "releaseSurfaceCount": 367,
+  "releaseSurfaceDigest": "50f913474794c2254de7b87f4705a5d250ce3376918255f92b91a754116097cf",
   "requiredEquivalent": [
     "GraphForge.adopt_ontology",
     "GraphForge.clear_ontology",
@@ -442,6 +442,9 @@
       "GraphForge.researchBranchReferences": "Explicit Branch UUID adapter for the native immutable Branch view."
     },
     "notExposed": {
+      "GraphForge.id_taken_receipt": "Private native receipt admission is owned by CLI publication and regeneration.",
+      "GraphForge.record_item_id_regeneration": "Private native receipt admission is owned by CLI publication and regeneration.",
+      "GraphForge.record_publish_id_taken": "Private native receipt admission is owned by CLI publication and regeneration.",
       "GraphForge.portable_ontology_composition": "Bounded ontology composition inspection is owned by native CLI publication admission; no Node product adapter is shipped.",
       "GraphForge.research_version_portable_ontology_composition": "Bounded ontology composition inspection is owned by native CLI publication admission; no Node product adapter is shipped.",
       "GraphForge.continue_imported_research_tags": "Verified discovery tag activation is owned by the native CLI import boundary; no Node product adapter is shipped."

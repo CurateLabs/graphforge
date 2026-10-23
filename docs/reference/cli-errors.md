@@ -150,6 +150,7 @@ escalate to a human when the obvious fix does not clear the failure.
 | `hub.integrity` | fix input | A strong validator disagreed | Rerun to re-download; if it repeats, ask the Hub operator | 2 |
 | `hub.integrity_failure` | fix input | Stored or transported bytes disagree with digests | Rerun to re-download; if it repeats, ask the Hub operator | 2 |
 | `hub.publish.invalid_input` | fix input | The publish request failed structural validation (400, 404 unknown resource, 413 over a limit, 416 upload offset) | Fix the selection, image set, or sizes per the message | 2 |
+| `hub.publish.id_taken` | fix input | A permanent item ID belongs to another publisher (409) | Publish as the owner when authorized, or use a recorded replacement Version; ID regeneration requires an exact local refusal receipt (command is separate work) | 2 |
 | `hub.publish.non_fast_forward` | fix input | The remote head is not an ancestor of the proposed head | Pull/clone the remote head first, or take the explicit `--rewrite` lease deliberately | 2 |
 | `hub.publish.integrity_failure` | fix input | Stored or uploaded bytes disagree with the declared digests | Rerun to rebuild and re-upload; if it repeats, ask the Hub operator | 2 |
 | `hub.unsupported_future` | fix input | Discovery needs a protocol capability this client lacks | Upgrade the GraphForge CLI | 2 |
