@@ -292,6 +292,7 @@ fn classify_failure(error: &graphforge_api::GfError) -> Failure {
         | "hub.unsupported_future"
         | "hub.missing_ref"
         | "hub.missing_object"
+        | "hub.ambiguous_identity"
         | "hub.duplicate"
         | "hub.destination_conflict"
         | "hub.concurrent_clone"
@@ -2580,6 +2581,7 @@ fn protocol_error(error: &DiscoveryError) -> graphforge_api::GfError {
         DiscoveryErrorCode::UnsupportedFuture => "hub.unsupported_future",
         DiscoveryErrorCode::MissingRef => "hub.missing_ref",
         DiscoveryErrorCode::MissingObject => "hub.missing_object",
+        DiscoveryErrorCode::AmbiguousIdentity => "hub.ambiguous_identity",
         DiscoveryErrorCode::IntegrityFailure => "hub.integrity_failure",
         DiscoveryErrorCode::UnsafeLocation => "hub.unsafe_location",
         DiscoveryErrorCode::LimitExceeded => "hub.limit_exceeded",

@@ -53,6 +53,93 @@ Schema-derived Hub artifacts consume the required `package.object_digest` field
 from `manifest.schema.json`; regenerating the Rust-owned artifacts updates that
 versioned input and the conformance cases together.
 
+## Digest-free exact authored-version resolution
+
+`/<id>/<authored_version>` preserves exact `(id, version, content_digest)`
+identity. The authored version is opaque: nonempty, at most 4096 UTF-8 bytes by
+default, compared exactly without ordering, trimming, normalization or SemVer
+parsing. It does not become immutable at publication. The URL adapter represents
+it as one encoded path segment and must preserve the decoded value exactly.
+
+Core's `resolve_item_version` takes a closed `ItemVersionInventory`:
+`{id, version, complete, candidates: ItemDescriptor[]}`. The ID is the canonical
+lowercase bare permanent ID. Every candidate must name that ID and exact version.
+The host supplies the complete set of admitted, retained, currently readable
+publications, filtering authorization and retirement **before input construction
+and bounds**. Core cannot prove authentication, retention or enumeration
+completeness; `complete: true` is a host attestation, never permission to truncate.
+
+After validating the whole inventory, zero candidates mean not found; one
+distinct content digest identifies the exact triple; multiple distinct digests
+refuse ambiguity. Repeated copies of the same triple across repositories,
+snapshots or package digests are equivalent publications, not ambiguity. Candidate
+order never chooses an identity or source. There is no newest, lexical-digest,
+repository-order winner or new digest-qualified lookup.
+
+Identity resolution does not choose a source. The host explicitly nominates any
+eligible equivalent descriptor and calls `bind_item_version_source` with the
+same complete inventory and that witness's actual retained refs and manifest.
+Core requires full descriptor membership, repeats identity resolution and calls
+`ItemDescriptor::bind_snapshot`. It returns that descriptor unchanged. Never
+splice repository, refs, manifest, or package facts across equivalent sources.
+Equivalent sources may change the descriptor representation/validator while
+preserving exact identity. Module fetching still selects and verifies the
+package from the nominated manifest; bridge descriptors remain descriptive.
+
+The fixed candidate bound is 4096, **before deduplication**. The aggregate encoded
+input budget is `DiscoveryLimits.max_response_bytes` (16 MiB by default), including
+inventory, nomination, refs and manifest for source binding. Existing string and
+per-document limits still apply. Native typed inputs use the same bounded
+serialization budget without allocating a full encoding. JSON entrypoints reject
+duplicate and unknown members. Incomplete inventories, invalid records, overflows
+and stale/mismatched bindings fail closed without a descriptor.
+
+`DiscoveryError::item_resolution_http_response` is the total Core HTTP projection:
+
+- Proven absence: HTTP 404, exact body `{"code":"missing_object"}`.
+- Proven ambiguity: HTTP 409, exact body `{"code":"ambiguous_identity"}`.
+- Parsing, invalid inventory, completeness, bounds and binding failures: HTTP 503,
+  **empty body**. This means valid resolution is unavailable; it does not promise
+  malformed state will repair itself. Existing client retries remain bounded.
+
+Refusal JSON uses `application/json`; its generated shape is
+`item-resolution-error.schema.json`. A 404 requires **both** `missing_object` and
+reserved field `item_version_inventory.candidates`, emitted only for validated,
+complete, empty eligible inventory. A 409 requires **both** `ambiguous_identity`
+and reserved field `item_version_inventory.candidates.content_digest`, emitted
+only for proven distinct digests. Nested `MissingObject` fields such as `objects`
+and `ontology.modules.package.object_digest` remain operational failures (503).
+A raw code or message cannot establish either logical refusal. Unknown, missing
+or malformed code/path yields empty 503. Refusals expose no candidate counts,
+digests, owners, repositories or authored diagnostic text.
+
+WASM exposes `resolve_item_version`, `bind_item_version_source` and the same total
+`item_resolution_error_response` projection over its existing `ProtocolError`
+shape (`field` is preserved as `path`). Both diagnostic projection input and CLI
+refusal bodies are bounded to 1 KiB. The CLI recognizes only the closed 409
+ambiguity document on an item-descriptor request, with `hub.ambiguous_identity`,
+`GF_VALIDATION`, exit 2, before metadata/package fetch or output. Existing
+`--digest` remains a verification pin and cannot override canonical ambiguity.
+
+Hidden publications cannot change visible identity, ambiguity, bounds or error
+details. Absent and all-hidden yield identical 404 responses. The host must
+repeat current authorization, retention and resolution before GET, HEAD and
+conditional/304 responses, using a coherent view; a cached former success cannot
+justify 304 after access or resolution changes. HEAD uses the same decision and
+status without a body. These are host obligations: Core conformance fixtures
+exercise supplied eligibility facts, not a production host's enumeration or auth.
+
+Regenerate resolution artifacts from the native test authority:
+
+```bash
+GRAPHFORGE_UPDATE_DISCOVERY_ARTIFACTS=1 \
+  cargo test -p graphforge-discovery --test item_resolution
+```
+
+`item-resolution-conformance.json` is replayed by native Rust and the actual
+protocol-WASM package. The native and WASM source-binding tests additionally
+exercise retained snapshots, nominations, splicing and nested failure provenance.
+
 ## Permanent item descriptors
 
 Tools request `application/vnd.graphforge.item+json` from `GET {hub}/<id>` for

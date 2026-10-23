@@ -7,8 +7,10 @@ use super::{
     fetch_document, normalized_id, parse_input_at, protocol_error, release_staging, validation,
 };
 use graphforge_discovery::{
-    ITEM_DESCRIPTOR_MEDIA_TYPE, ItemDescriptor, ItemKind, has_item_id_shape,
+    ITEM_DESCRIPTOR_MEDIA_TYPE, ITEM_RESOLUTION_ERROR_MAX_BYTES, ItemDescriptor, ItemKind,
+    has_item_id_shape, parse_item_resolution_refusal,
 };
+use std::io::Read;
 
 pub(super) struct ItemReference {
     id: ItemId,
@@ -74,14 +76,31 @@ impl Transport for DescriptorTransport<'_> {
         _if_range: Option<&str>,
         limit: u64,
     ) -> Result<super::super::HttpResponse, graphforge_api::GfError> {
-        self.0.get_discovery(
+        let mut response = self.0.get_discovery(
             url,
             &[(
                 "accept",
                 ureq::http::HeaderValue::from_static(ITEM_DESCRIPTOR_MEDIA_TYPE),
             )],
             limit,
-        )
+        )?;
+        if response.status == 409 {
+            let mut bytes = Vec::new();
+            response
+                .body
+                .by_ref()
+                .take((ITEM_RESOLUTION_ERROR_MAX_BYTES + 1) as u64)
+                .read_to_end(&mut bytes)
+                .map_err(|_| {
+                    validation(
+                        "hub.malformed_response",
+                        "item resolution refusal is unreadable",
+                    )
+                })?;
+            let error = parse_item_resolution_refusal(409, &bytes).unwrap_or_else(|error| error);
+            return Err(protocol_error(&error));
+        }
+        Ok(response)
     }
 }
 
