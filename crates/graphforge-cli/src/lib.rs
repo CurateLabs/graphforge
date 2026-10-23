@@ -1237,6 +1237,8 @@ fn run_with_allocation(
         cli.project_dir.as_deref(),
         cli.json,
         output,
+        diagnostics,
+        allocation,
     )? {
         std::ops::ControlFlow::Break(()) => return Ok(0),
         std::ops::ControlFlow::Continue(command) => command,

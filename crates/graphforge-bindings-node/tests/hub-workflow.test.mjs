@@ -200,15 +200,13 @@ test("HubWorkflowError retains the native semantic code, receipt refusal and env
   }
 });
 
-test("native version warnings preserve the typed history array", (t) => {
-  const project = fixture(t);
-  const source = seed(project);
+function relabelGeneration(projectPath) {
   // Relabel the real writer's generation and recompute its CURRENT commitment.
-  const currentPath = join(source.path, "CURRENT");
+  const currentPath = join(projectPath, "CURRENT");
   const currentText = readFileSync(currentPath, "utf8");
   const current = JSON.parse(currentText);
   const manifestPath = join(
-    source.path,
+    projectPath,
     "generations",
     current.generation_uuid,
     "manifest.json",
@@ -227,9 +225,38 @@ test("native version warnings preserve the typed history array", (t) => {
     currentPath,
     currentText.replace(current.generation_manifest_sha256, digest),
   );
+}
+
+test("native version warnings preserve the typed history array", (t) => {
+  const project = fixture(t);
+  const source = seed(project);
+  relabelGeneration(source.path);
   const history = source.log();
   assert.ok(Array.isArray(history));
   assert.ok(history[0].version_uuid);
   assert.equal(source.warnings[0].code, "GF_CORE_VERSION_MISMATCH");
   assert.equal(source.warnings[0].producing_core_version, "0.0.1");
 });
+
+for (const verb of ["log", "pull", "push"]) {
+  test(`remote ${verb} retains native version warnings from project open`, (t) => {
+    const project = fixture(t);
+    seed(project);
+    const work = project("warning-copy");
+    work.clone(REPOSITORY);
+    relabelGeneration(work.path);
+    if (verb === "log") {
+      const history = work.log(undefined, { remote: true });
+      assert.ok(Array.isArray(history));
+      assert.ok(history[0].version_uuid);
+    } else if (verb === "pull") {
+      work.pull(undefined, { author: AUTHOR });
+    } else {
+      work.push();
+    }
+    assert.equal(work.warnings.length, 1);
+    assert.equal(work.warnings[0].code, "GF_CORE_VERSION_MISMATCH");
+    assert.equal(work.warnings[0].producing_core_version, "0.0.1");
+    assert.equal(work.warnings[0].running_core_version, version());
+  });
+}

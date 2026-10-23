@@ -136,6 +136,8 @@ pub(crate) fn dispatch(
     project_dir: Option<&Path>,
     json: bool,
     output: &mut dyn Write,
+    diagnostics: &mut crate::Diagnostics<'_>,
+    allocation: Option<&graphforge_api::StorageAllocationDiagnostics>,
 ) -> Result<ControlFlow<(), Command>, GfError> {
     let hub = FIXTURE.with(|fixture| fixture.borrow().clone());
     let Some(hub) = hub else {
@@ -156,10 +158,7 @@ pub(crate) fn dispatch(
             project.map(Path::to_path_buf),
             project_dir.map(Path::to_path_buf),
         )?;
-        let mut graph = graphforge_api::GraphForge::new(Some(
-            path.to_str()
-                .ok_or_else(|| GfError::Validation("project path must be UTF-8".into()))?,
-        ))?;
+        let mut graph = crate::open_cli_graph_warning(&path, allocation, diagnostics)?;
         crate::porcelain::remote::run_remote_with(
             &transport,
             &|hub| crate::hub_publish::publish_token(hub.token_env.as_deref()),

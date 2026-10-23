@@ -145,6 +145,26 @@ class HubWorkflowTests(unittest.TestCase):
         self.assertEqual(source.warnings[0]["code"], "GF_CORE_VERSION_MISMATCH")
         self.assertEqual(source.warnings[0]["producing_core_version"], "0.0.1")
 
+    def test_remote_verbs_retain_native_version_warnings_from_project_open(self):
+        self.seed()
+        for verb in ("log", "pull", "push"):
+            with self.subTest(verb=verb):
+                work = self.project(f"warning-{verb}")
+                work.clone(REPOSITORY)
+                _relabel_generation(Path(work.path), "0.0.1")
+                if verb == "log":
+                    history = work.log(remote=True)
+                    self.assertIsInstance(history, list)
+                    self.assertTrue(history[0]["version_uuid"])
+                elif verb == "pull":
+                    work.pull(author=AUTHOR)
+                else:
+                    work.push()
+                self.assertEqual(len(work.warnings), 1)
+                self.assertEqual(work.warnings[0]["code"], "GF_CORE_VERSION_MISMATCH")
+                self.assertEqual(work.warnings[0]["producing_core_version"], "0.0.1")
+                self.assertEqual(work.warnings[0]["running_core_version"], native.__version__)
+
     def test_errors_retain_authoritative_native_codes_and_original_envelope(self):
         source = self.seed()
         identity = operation()
