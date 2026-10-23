@@ -17,7 +17,7 @@ impl Store for SharedStore {
         self.attempts.send(()).unwrap();
         Ok(Box::new(lock_in(&self.parent, origin)?))
     }
-    fn read(&self, _: &str) -> Result<Option<String>, GfError> {
+    fn read(&self, _: &str) -> Result<Option<String>, SavedCredentialError> {
         self.reads.fetch_add(1, Ordering::SeqCst);
         Ok(self.value.lock().unwrap().clone())
     }

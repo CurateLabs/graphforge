@@ -437,6 +437,40 @@ fn clone_authenticates_discovery_but_never_same_or_cross_origin_objects() {
 }
 
 #[test]
+fn anonymous_missing_clone_preserves_http_not_found_without_an_available_vault() {
+    for bypass in [false, true] {
+        let (http, server) = server(vec![Reply {
+            status: 404,
+            location: None,
+            body: format!("private-repository-detail {TOKEN} {BYPASS}").into_bytes(),
+        }]);
+        let transport = crate::auth::tests::unavailable_vault_transport(http);
+        let root = tempfile::tempdir().unwrap();
+        let destination = root.path().join("missing-clone");
+        let mut args = clone_args(&destination);
+        args.repository = "owner/repo".into();
+        args.hub = None;
+        args.token_env = None;
+        args.protection_bypass_env = bypass.then(|| "PREVIEW_SECRET".into());
+        let mut output = Vec::new();
+        let error = clone(&transport, args, &mut output).unwrap_err();
+        let text = error.to_string();
+        assert!(text.contains("hub.not_found"), "{text}");
+        assert!(text.contains("HTTP status 404"));
+        assert_eq!(crate::error_exit_code(&error.into()), 2);
+        for secret in [TOKEN, BYPASS, "private-repository-detail"] {
+            assert!(!text.contains(secret));
+        }
+        assert!(output.is_empty());
+        assert!(!destination.exists());
+        let requests = server.join().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].starts_with("GET /owner/repo/.gf/refs "));
+        assert_headers(&requests[0], false, bypass);
+    }
+}
+
+#[test]
 fn missing_and_malformed_credentials_fail_before_network_access() {
     for secret in [
         "",

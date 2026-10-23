@@ -2,6 +2,9 @@ use super::*;
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 
+mod discovery;
+pub(crate) use discovery::unavailable_vault_transport;
+
 #[derive(Default)]
 struct MemoryStore {
     value: RefCell<Option<String>>,
@@ -11,7 +14,7 @@ impl Store for MemoryStore {
     fn lock(&self, _: &str) -> Result<Box<dyn StoreLock + '_>, GfError> {
         Ok(Box::new(()))
     }
-    fn read(&self, _: &str) -> Result<Option<String>, GfError> {
+    fn read(&self, _: &str) -> Result<Option<String>, SavedCredentialError> {
         Ok(self.value.borrow().clone())
     }
     fn write(&self, _: &str, value: &str) -> Result<(), GfError> {
@@ -363,6 +366,37 @@ fn public_clone_never_reads_saved_credentials() {
     assert!(!transport.inner.calls.borrow()[0].3);
 }
 #[test]
+fn anonymous_missing_metadata_preserves_not_found_when_vault_is_unavailable() {
+    for headers in [false, true] {
+        let mut transport = download_transport(
+            404,
+            Box::new(|| panic!("metadata must not acquire an object credential")),
+        );
+        transport.discovery_acquire = Box::new(|| Err(SavedCredentialError::Unavailable));
+        let url = Url::parse("https://graphforge.sh/owner/repo/.gf/refs").unwrap();
+        let response = if headers {
+            transport.get_discovery(
+                &url,
+                &[(
+                    "x-vercel-protection-bypass",
+                    ureq::http::HeaderValue::from_static("preview-secret"),
+                )],
+                1024,
+            )
+        } else {
+            transport.get(&url, None, None, 1024)
+        };
+        assert_eq!(
+            response
+                .expect("optional vault failure must preserve anonymous 404")
+                .status,
+            404
+        );
+        assert_eq!(transport.inner.calls.borrow().len(), 1);
+        assert!(transport.discovery_token.borrow().is_none());
+    }
+}
+#[test]
 fn private_401_and_masked_404_retry_scoped_and_retain_range_validators() {
     for status in [401, 404] {
         let mut transport = download_transport(
@@ -524,8 +558,8 @@ impl Store for FailedStore {
     fn lock(&self, _: &str) -> Result<Box<dyn StoreLock + '_>, GfError> {
         Err(vault_error())
     }
-    fn read(&self, _: &str) -> Result<Option<String>, GfError> {
-        Err(vault_error())
+    fn read(&self, _: &str) -> Result<Option<String>, SavedCredentialError> {
+        Err(SavedCredentialError::Unavailable)
     }
     fn write(&self, _: &str, _: &str) -> Result<(), GfError> {
         Err(vault_error())
