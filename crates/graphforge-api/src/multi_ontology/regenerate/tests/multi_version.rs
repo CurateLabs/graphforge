@@ -104,6 +104,89 @@ fn assert_field_credit(
 }
 
 #[test]
+fn rewritten_module_dependencies_use_target_digest_order_in_both_directions() {
+    let graph = GraphForge::new(None).unwrap();
+    let mut source = crate::multi_ontology::candidate::empty_composition().unwrap();
+    let mut ids = Vec::new();
+    for name in ["Beta", "Gamma"] {
+        let mut document = create_module(&graph, "2", name).document;
+        document.ontology_id = uri(OTHER);
+        let candidate = graph
+            .create_ontology_module(document, vec![], None)
+            .unwrap();
+        ids.push(candidate.id.clone());
+        source
+            .modules
+            .push(graphforge_storage::WorkspaceCompositionModule {
+                id: candidate.id,
+                document: candidate.document,
+                dependencies: vec![],
+                allow_projected_identity: false,
+            });
+    }
+    let candidate = graph.create_ontology_module(serde_json::from_value(serde_json::json!({
+        "ontology_id":"https://example.org/dependent","version":"1","entity_types":[{"name":"Other"}]
+    })).unwrap(), ids.clone(), None).unwrap();
+    let dependent = candidate.id.clone();
+    source
+        .modules
+        .push(graphforge_storage::WorkspaceCompositionModule {
+            id: candidate.id,
+            document: candidate.document,
+            dependencies: candidate.dependencies,
+            allow_projected_identity: false,
+        });
+    let compiled = compile_candidate(&source).unwrap();
+    let source = WorkspaceOntologyComposition::from_compiled(&compiled, source.bridges);
+    // Fixed document/ID inputs exercise both orders without depending on the
+    // random ID produced by the durable facade test. The second ID is the CI
+    // case whose target digest ordering reverses the prior dependency order.
+    for (next, order) in [
+        (OLD, std::cmp::Ordering::Greater),
+        ("ont_9pnk3pntnkskn0ja", std::cmp::Ordering::Less),
+    ] {
+        let rewritten = graph
+            .regenerate_composition(
+                &source,
+                &ItemId::parse_reference(OTHER).unwrap(),
+                next,
+                Uuid::from_u128(1),
+            )
+            .unwrap();
+        let replacements = ids
+            .iter()
+            .map(|id| {
+                rewritten
+                    .modules
+                    .iter()
+                    .find(|(old, _)| old == id)
+                    .unwrap()
+                    .1
+                    .clone()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            replacements[0]
+                .canonical_digest
+                .cmp(&replacements[1].canonical_digest),
+            order
+        );
+        let mut expected = replacements;
+        expected.sort_by_key(crate::OntologyModuleId::sort_key);
+        let actual = &rewritten
+            .composition
+            .modules
+            .iter()
+            .find(|module| module.id == dependent)
+            .unwrap()
+            .dependencies;
+        assert_eq!(actual, &expected);
+        assert_eq!(actual.len(), 2);
+        assert!(actual[0].sort_key() < actual[1].sort_key());
+    }
+}
+
+#[test]
 fn all_refused_module_identities_rewrite_exact_references_and_reopen_data() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("project");
@@ -281,7 +364,7 @@ fn all_refused_module_identities_rewrite_exact_references_and_reopen_data() {
             .iter()
             .find(|module| module.id == *new)
             .unwrap();
-        let expected = source
+        let mut expected = source
             .dependencies
             .iter()
             .map(|id| {
@@ -293,7 +376,16 @@ fn all_refused_module_identities_rewrite_exact_references_and_reopen_data() {
                     .clone()
             })
             .collect::<Vec<_>>();
+        // Compilation canonicalizes the rewritten identities. Changing the ID
+        // can reverse the digest order of modules sharing an authored version.
+        expected.sort_by_key(crate::OntologyModuleId::sort_key);
         assert_eq!(target.dependencies, expected);
+        assert!(
+            target
+                .dependencies
+                .windows(2)
+                .all(|pair| pair[0].sort_key() < pair[1].sort_key())
+        );
     }
     let mut bridge_pairs: Vec<(BridgeSetId, BridgeSetId)> = Vec::new();
     for old in &before.bridges {
@@ -344,9 +436,7 @@ fn all_refused_module_identities_rewrite_exact_references_and_reopen_data() {
         .find(|module| module.id == other)
         .unwrap();
     expected_ids.sort_by_key(crate::OntologyModuleId::sort_key);
-    let mut dependencies = dependent.dependencies.clone();
-    dependencies.sort_by_key(crate::OntologyModuleId::sort_key);
-    assert_eq!(dependencies, expected_ids);
+    assert_eq!(dependent.dependencies, expected_ids);
     assert_eq!(
         graph
             .open_research_branch(sibling)
