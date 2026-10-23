@@ -281,7 +281,9 @@ ID. A missing receipt or a custom-domain IRI is refused. If the receipt includes
 you own would be a fork and is outside this command's scope.
 
 Core mints an ID of the same kind and atomically records the Project rewrite
-and new head Version. Module regeneration rewrites the module document and
+and new head Version. All adopted versions under the refused ID receive the
+same replacement ID, preserving each authored version and its exact references.
+Module regeneration rewrites the module document and
 digest, dependent modules, bridge endpoints and assertion symbols, cascading
 bridge dependencies and digests, activation subjects, stored semantic bindings
 and their storage routes, research metadata `ontologies`, and the composition

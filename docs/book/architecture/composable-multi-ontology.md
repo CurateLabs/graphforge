@@ -69,7 +69,10 @@ MUST NOT be inferred from the document, a caller-supplied owner, or a new Hub
 lookup in place of the receipt.
 
 Core MUST mint a fresh ID of the same kind and atomically publish the rewrite
-as a new Version and head. A module rewrite MUST reuse the module-migration
+as a new Version and head. Every adopted version under the refused permanent
+ID MUST receive that same replacement ID in one operation, preserving each
+authored version and the exact digest-derived identity of every reference.
+A module rewrite MUST reuse the module-migration
 candidate path, permit only the `ontology_id` change, and preserve local symbol
 IDs through an identity symbol map. It MUST rewrite the module document and
 canonical digest, dependent modules, bridge source/target modules and assertion

@@ -8,6 +8,8 @@ use arrow::array::{Int64Array, StringArray};
 use graphforge_hub_publish::IdTakenItem;
 use graphforge_ontology::BridgeSetId;
 
+mod multi_version;
+
 const OLD: &str = "ont_aaaaaaaaaaaaaaaa";
 const OTHER: &str = "ont_bbbbbbbbbbbbbbbb";
 const BRIDGE: &str = "brg_aaaaaaaaaaaaaaaa";

@@ -10,8 +10,8 @@ use candidate::{
     bridge_id, bridge_inventory, cascade_bridge_identities, compile_candidate,
     composition_from_generation, empty_composition, enrich_module_delete_preview,
     migration_generation_uuid, module_inventory, reject_duplicate_bridge, reject_duplicate_module,
-    resolve_bridge_index, resolve_module_index, rewrite_bridge_symbols_for_migration,
-    rewrite_module_identity, set_module_activation, staged_module_document,
+    resolve_bridge_index, resolve_module_index, rewrite_module_identity, set_module_activation,
+    staged_module_document,
 };
 use diagnostics::{
     bounded_text, composition_change_error, composition_error, dependency_blocked_error,
@@ -915,86 +915,15 @@ impl GraphForge {
         ),
         GfError,
     > {
-        self.module_migration_candidate_for_identity(request, false)
-    }
-
-    fn module_migration_candidate_for_identity(
-        &self,
-        request: &ModuleMigrationRequest,
-        regenerate: bool,
-    ) -> Result<
-        (
-            WorkspaceOntologyComposition,
-            OntologyModuleId,
-            OntologyModuleId,
-            Vec<String>,
-        ),
-        GfError,
-    > {
-        if request.document.ontology_id.trim().is_empty() {
-            return Err(GfError::Validation(
-                "missing ontology_id; run ontology module create first",
-            ));
-        }
-        let mut candidate = self.checked_candidate(&request.authority)?;
-        let index = resolve_module_index(&candidate, &request.selector)?;
-        let previous_module = candidate.modules[index].id.clone();
-        if regenerate {
-            let mut expected = candidate.modules[index].document.clone();
-            expected
-                .ontology_id
-                .clone_from(&request.document.ontology_id);
-            if expected != request.document
-                || request.dependencies != candidate.modules[index].dependencies
-            {
-                return Err(GfError::Validation(
-                    "ID regeneration must preserve the authored module",
-                ));
-            }
-        } else if request.document.ontology_id != previous_module.ontology_id {
-            return Err(GfError::Validation(
-                "module migration must retain ontology_id",
-            ));
-        }
-        let mut inventory = module_inventory(&candidate)?;
-        let next_module = inventory
-            .create_register(
-                request.document.clone(),
-                request.dependencies.clone(),
-                request.enforcement,
-                "migration-validation",
-            )
-            .map_err(composition_error)?;
-        candidate.modules[index] = WorkspaceCompositionModule {
-            id: next_module.clone(),
-            dependencies: request.dependencies.clone(),
-            document: request.document.clone(),
-            allow_projected_identity: false,
-        };
-        let mut affected_bridges = candidate
-            .bridges
-            .iter()
-            .filter(|bridge| {
-                bridge.source_modules.contains(&previous_module)
-                    || bridge.target_modules.contains(&previous_module)
-            })
-            .map(bridge_id)
-            .collect::<Result<Vec<_>, _>>()?
+        let candidate = self.checked_candidate(&request.authority)?;
+        let batch =
+            candidate::module_migration_candidate(candidate, std::slice::from_ref(request), false)?;
+        let (previous, next) = batch
+            .replacements
             .into_iter()
-            .map(|id| id.display_ref())
-            .collect::<Vec<_>>();
-        affected_bridges.sort();
-        rewrite_bridge_symbols_for_migration(
-            &mut candidate,
-            &previous_module,
-            &next_module,
-            &request.document,
-        )?;
-        rewrite_module_identity(&mut candidate, &previous_module, &next_module)?;
-        set_module_activation(&mut candidate, &next_module, request.enforcement);
-        let compiled = compile_candidate(&candidate)?;
-        candidate = WorkspaceOntologyComposition::from_compiled(&compiled, candidate.bridges);
-        Ok((candidate, previous_module, next_module, affected_bridges))
+            .next()
+            .expect("one migration");
+        Ok((batch.composition, previous, next, batch.affected_bridges))
     }
 
     /// Preview safe module deletion, including dependency/activation blockers.

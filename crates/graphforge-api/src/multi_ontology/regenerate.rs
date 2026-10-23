@@ -17,6 +17,14 @@ use graphforge_storage::{
 use std::collections::{BTreeMap, BTreeSet};
 use uuid::Uuid;
 
+// Keep the correspondence chosen while constructing the candidate. An authored
+// version alone cannot identify a module when distinct document digests coexist.
+struct RegeneratedComposition {
+    composition: WorkspaceOntologyComposition,
+    modules: Vec<(crate::OntologyModuleId, crate::OntologyModuleId)>,
+    bridges: Vec<(crate::BridgeSetId, crate::BridgeSetId)>,
+}
+
 fn invalid(message: impl Into<String>) -> GfError {
     GfError::Validation(message.into())
 }
@@ -33,7 +41,8 @@ fn stale() -> GfError {
 
 impl GraphForge {
     /// Replace a GraphForge item ID only after a locally recorded `id_taken`.
-    /// Rust generates a same-kind ID and atomically publishes all references,
+    /// Rust generates one same-kind ID for every adopted version of the item
+    /// and atomically publishes all references,
     /// stored routes, a new Version and the selected Branch head. History is
     /// immutable. Reuse the operation UUID to replay the same ID and Version,
     /// including after reopen, later work or restoration of older content.
@@ -146,8 +155,6 @@ impl GraphForge {
             prior,
             &previous,
             &candidate,
-            &id,
-            &binding.replacement.id,
             &mut prepared,
             &token,
         )?;
@@ -246,101 +253,121 @@ impl GraphForge {
         id: &ItemId,
         next: &str,
         operation: Uuid,
-    ) -> Result<WorkspaceOntologyComposition, GfError> {
+    ) -> Result<RegeneratedComposition, GfError> {
         let next =
             ItemId::parse_reference(next).map_err(|_| invalid("replacement ID is invalid"))?;
-        match id.kind() {
+        let prior_bridges = previous
+            .bridges
+            .iter()
+            .map(bridge_id)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(ontology_error)?;
+        let (composition, replacements, bridges) = match id.kind() {
             ItemKind::OntologyModule => {
-                let module = previous
+                let authority = self.ontology_authority_state().map_err(ontology_error)?;
+                let requests = previous
                     .modules
                     .iter()
-                    .find(|module| same_id(&module.id.ontology_id, id))
-                    .ok_or_else(|| invalid("module not found"))?;
-                let mut document = module.document.clone();
-                document.ontology_id = next.to_uri();
-                let authority = self.ontology_authority_state().map_err(ontology_error)?;
-                let request = ModuleMigrationRequest {
-                    authority: OntologyAuthorityExpectation {
-                        context: WriteContext {
-                            operation_uuid: OperationId(operation),
-                            actor_uuid: None,
-                        },
-                        expected_project_generation_uuid: authority.project_generation_uuid,
-                        expected_composition_fingerprint: authority.composition_fingerprint,
-                    },
-                    selector: ModuleSelector::Exact(module.id.clone()),
-                    document,
-                    dependencies: module.dependencies.clone(),
-                    enforcement: previous
-                        .activation
-                        .iter()
-                        .find(|record| record.subject == module.id.display_ref())
-                        .map(|record| record.mode),
-                };
-                self.module_migration_candidate_for_identity(&request, true)
-                    .map(|value| value.0)
-                    .map_err(ontology_error)
+                    .filter(|module| same_id(&module.id.ontology_id, id))
+                    .map(|module| {
+                        let mut document = module.document.clone();
+                        document.ontology_id = next.to_uri();
+                        ModuleMigrationRequest {
+                            authority: OntologyAuthorityExpectation {
+                                context: WriteContext {
+                                    operation_uuid: OperationId(operation),
+                                    actor_uuid: None,
+                                },
+                                expected_project_generation_uuid: authority.project_generation_uuid,
+                                expected_composition_fingerprint: authority
+                                    .composition_fingerprint
+                                    .clone(),
+                            },
+                            selector: ModuleSelector::Exact(module.id.clone()),
+                            document,
+                            dependencies: module.dependencies.clone(),
+                            enforcement: previous
+                                .activation
+                                .iter()
+                                .find(|record| record.subject == module.id.display_ref())
+                                .map(|record| record.mode),
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                let batch =
+                    super::candidate::module_migration_candidate(previous.clone(), &requests, true)
+                        .map_err(ontology_error)?;
+                (
+                    batch.composition,
+                    batch.replacements,
+                    batch.bridge_replacements,
+                )
             }
             ItemKind::BridgeSet => {
                 let mut candidate = previous.clone();
-                let old = candidate
-                    .bridges
-                    .iter()
-                    .map(bridge_id)
-                    .collect::<Result<Vec<_>, _>>()
-                    .map_err(ontology_error)?;
-                let bridge = candidate
+                for bridge in candidate
                     .bridges
                     .iter_mut()
-                    .find(|bridge| same_id(&bridge.bridge_id, id))
-                    .ok_or_else(|| invalid("bridge not found"))?;
-                bridge.bridge_id = next.to_uri();
-                cascade_bridge_identities(&mut candidate, old).map_err(ontology_error)?;
+                    .filter(|bridge| same_id(&bridge.bridge_id, id))
+                {
+                    bridge.bridge_id = next.to_uri();
+                }
+                cascade_bridge_identities(&mut candidate, prior_bridges.clone())
+                    .map_err(ontology_error)?;
                 let compiled = compile_candidate(&candidate).map_err(ontology_error)?;
-                Ok(WorkspaceOntologyComposition::from_compiled(
-                    &compiled,
-                    candidate.bridges,
-                ))
+                let bridges = prior_bridges
+                    .into_iter()
+                    .zip(
+                        candidate
+                            .bridges
+                            .iter()
+                            .map(bridge_id)
+                            .collect::<Result<Vec<_>, _>>()
+                            .map_err(ontology_error)?,
+                    )
+                    .collect();
+                (
+                    WorkspaceOntologyComposition::from_compiled(&compiled, candidate.bridges),
+                    Vec::new(),
+                    bridges,
+                )
             }
-        }
+        };
+        let modules = previous
+            .modules
+            .iter()
+            .map(|module| {
+                let new = replacements
+                    .iter()
+                    .find(|(old, _)| *old == module.id)
+                    .map_or(&module.id, |(_, new)| new);
+                (module.id.clone(), new.clone())
+            })
+            .collect();
+        Ok(RegeneratedComposition {
+            composition,
+            modules,
+            bridges,
+        })
     }
 
     fn materialize_regeneration(
         &mut self,
         previous: &WorkspaceOntologyComposition,
-        candidate: &WorkspaceOntologyComposition,
+        candidate: &RegeneratedComposition,
         id: &ItemId,
         next: &str,
         token: &CancellationToken,
     ) -> Result<(), GfError> {
         let source = self.generation_for_read()?;
         let before = previous.compile()?;
-        let after = candidate.compile()?;
-        let replacement =
-            ItemId::parse_reference(next).map_err(|_| invalid("invalid replacement ID"))?;
-        let mut pairs = Vec::new();
-        for old in &before.modules {
-            let expected = if same_id(&old.id.ontology_id, id) {
-                let mut document = old.doc.clone();
-                document.ontology_id = replacement.to_uri();
-                crate::OntologyModuleId {
-                    ontology_id: replacement.to_uri(),
-                    authored_version: old.id.authored_version.clone(),
-                    canonical_digest: graphforge_ontology::module_document_digest(&document)
-                        .map_err(invalid)?,
-                }
-            } else {
-                old.id.clone()
-            };
-            let new = after
-                .modules
-                .iter()
-                .find(|module| module.id == expected)
-                .ok_or_else(|| invalid("regeneration target exact module identity is missing"))?;
-            if old.id != new.id {
-                pairs.push((old.id.clone(), new.id.clone()));
-            }
-        }
+        let after = candidate.composition.compile()?;
+        let pairs = candidate
+            .modules
+            .iter()
+            .filter(|(old, new)| old != new)
+            .cloned()
+            .collect::<Vec<_>>();
         let bindings = graphforge_storage::semantic_storage_bindings(&source)?
             .ok_or_else(|| invalid("semantic storage bindings are missing"))?;
         let (tree, _guard, _) = crate::hydrate_graph_workspace(&source, true)?;
@@ -375,7 +402,7 @@ impl GraphForge {
             None,
             &self.workspace_ontology()?,
             &self.workspace_configuration()?,
-            candidate,
+            &candidate.composition,
             &plan.bindings,
             Uuid::now_v7(),
             &candidate_graph,
@@ -433,9 +460,9 @@ fn require_item(composition: &WorkspaceOntologyComposition, id: &ItemId) -> Resu
             .filter(|bridge| same_id(&bridge.bridge_id, id))
             .count(),
     };
-    if count != 1 {
+    if count == 0 {
         return Err(invalid(
-            "regeneration requires exactly one adopted item under the refused ID",
+            "regeneration requires an adopted item under the refused ID",
         ));
     }
     Ok(())
@@ -449,13 +476,10 @@ fn preserve_field_history(
     private: &GraphForge,
     prior: &graphforge_storage::research_versions::ResearchVersionRecord,
     previous: &WorkspaceOntologyComposition,
-    candidate: &WorkspaceOntologyComposition,
-    id: &ItemId,
-    next: &str,
+    candidate: &RegeneratedComposition,
     prepared: &mut graphforge_storage::research_versions::PreparedResearchContent,
     token: &CancellationToken,
 ) -> Result<(), GfError> {
-    let next = ItemId::parse_reference(next).map_err(|_| invalid("invalid replacement ID"))?;
     let mut remap = BTreeMap::new();
     let mut subjects = BTreeMap::new();
     let mut pair = |kind: &str, old: &str, new: &str| {
@@ -467,40 +491,13 @@ fn preserve_field_history(
             crate::branches::context_fields::context_identity(kind, new),
         );
     };
-    for old in &previous.modules {
-        let new = candidate
-            .modules
-            .iter()
-            .find(|new| {
-                new.id.authored_version == old.id.authored_version
-                    && if same_id(&old.id.ontology_id, id) {
-                        same_id(&new.id.ontology_id, &next)
-                    } else {
-                        new.id.ontology_id == old.id.ontology_id
-                    }
-            })
-            .ok_or_else(|| invalid("regenerated module identity is missing"))?;
-        pair("ontology_module", &old.id.ontology_id, &new.id.ontology_id);
-        subjects.insert(old.id.display_ref(), new.id.display_ref());
+    for (old, new) in &candidate.modules {
+        pair("ontology_module", &old.ontology_id, &new.ontology_id);
+        subjects.insert(old.display_ref(), new.display_ref());
     }
-    for old in &previous.bridges {
-        let new = candidate
-            .bridges
-            .iter()
-            .find(|new| {
-                new.authored_version == old.authored_version
-                    && if same_id(&old.bridge_id, id) {
-                        same_id(&new.bridge_id, &next)
-                    } else {
-                        new.bridge_id == old.bridge_id
-                    }
-            })
-            .ok_or_else(|| invalid("regenerated bridge identity is missing"))?;
+    for (old, new) in &candidate.bridges {
         pair("ontology_bridge", &old.bridge_id, &new.bridge_id);
-        subjects.insert(
-            bridge_id(old).map_err(ontology_error)?.display_ref(),
-            bridge_id(new).map_err(ontology_error)?.display_ref(),
-        );
+        subjects.insert(old.display_ref(), new.display_ref());
     }
     for old in &previous.activation {
         let new = subjects.get(&old.subject).unwrap_or(&old.subject);
