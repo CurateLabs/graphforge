@@ -1,0 +1,227 @@
+{
+  "$defs": {
+    "fact": {
+      "additionalProperties": false,
+      "properties": {
+        "claim": {
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "state": {
+                  "const": "unclaimed"
+                }
+              },
+              "required": [
+                "state"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "owner_account_id": {
+                  "$ref": "#/$defs/stableAccount"
+                },
+                "owner_handle": {
+                  "maxLength": 100,
+                  "minLength": 1,
+                  "pattern": "^(?!.*\\.\\.)[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?(?![\\s\\S])",
+                  "type": "string"
+                },
+                "state": {
+                  "const": "claimed"
+                }
+              },
+              "required": [
+                "state",
+                "owner_account_id"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "id": {
+          "pattern": "^(ont|brg)_[0-9a-hjkmnp-tv-z]{16}$",
+          "type": "string"
+        },
+        "owner_visible": {
+          "type": "boolean"
+        },
+        "publish_as_owner": {
+          "type": "boolean"
+        },
+        "tuples": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "content_digest": {
+                "pattern": "^sha256:[0-9a-f]{64}$",
+                "type": "string"
+              },
+              "published": {
+                "type": "boolean"
+              },
+              "version": {
+                "maxLength": 4096,
+                "minLength": 1,
+                "type": "string"
+              }
+            },
+            "required": [
+              "version",
+              "content_digest",
+              "published"
+            ],
+            "type": "object"
+          },
+          "maxItems": 8192,
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "claim",
+        "owner_visible",
+        "publish_as_owner",
+        "tuples"
+      ],
+      "type": "object"
+    },
+    "plan": {
+      "additionalProperties": false,
+      "properties": {
+        "decisions": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "action": {
+                "enum": [
+                  "new_claim",
+                  "owner_update",
+                  "exact_reuse"
+                ]
+              },
+              "content_digest": {
+                "pattern": "^sha256:[0-9a-f]{64}$",
+                "type": "string"
+              },
+              "id": {
+                "pattern": "^(ont|brg)_[0-9a-hjkmnp-tv-z]{16}$",
+                "type": "string"
+              },
+              "kind": {
+                "enum": [
+                  "ontology_module",
+                  "bridge_set"
+                ]
+              },
+              "version": {
+                "maxLength": 4096,
+                "minLength": 1,
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "kind",
+              "version",
+              "content_digest",
+              "action"
+            ],
+            "type": "object"
+          },
+          "maxItems": 8192,
+          "type": "array"
+        },
+        "publisher_account_id": {
+          "$ref": "#/$defs/stableAccount"
+        }
+      },
+      "required": [
+        "publisher_account_id",
+        "decisions"
+      ],
+      "type": "object"
+    },
+    "requirements": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "pattern": "^(ont|brg)_[0-9a-hjkmnp-tv-z]{16}$",
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "ontology_module",
+              "bridge_set"
+            ]
+          },
+          "tuples": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "content_digest": {
+                  "pattern": "^sha256:[0-9a-f]{64}$",
+                  "type": "string"
+                },
+                "version": {
+                  "maxLength": 4096,
+                  "minLength": 1,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "version",
+                "content_digest"
+              ],
+              "type": "object"
+            },
+            "maxItems": 8192,
+            "type": "array"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "tuples"
+        ],
+        "type": "object"
+      },
+      "maxItems": 8192,
+      "type": "array"
+    },
+    "stableAccount": {
+      "maxLength": 4096,
+      "minLength": 1,
+      "type": "string"
+    }
+  },
+  "$id": "https://graphforge.sh/schemas/hub-publish/v1/item-admission.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Host-owned fresh complete facts only; never client HTTP authorization. Rust enforces UTF-8 byte bounds, control-free stable IDs, canonical query set equality, privacy and policy.",
+  "properties": {
+    "facts": {
+      "items": {
+        "$ref": "#/$defs/fact"
+      },
+      "maxItems": 8192,
+      "type": "array"
+    },
+    "manifest": {
+      "$ref": "../../discovery/v1/manifest.schema.json"
+    },
+    "publisher_account_id": {
+      "$ref": "#/$defs/stableAccount"
+    }
+  },
+  "required": [
+    "manifest",
+    "publisher_account_id",
+    "facts"
+  ],
+  "title": "Internal host item admission input",
+  "type": "object"
+}

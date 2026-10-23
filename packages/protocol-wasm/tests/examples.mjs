@@ -144,6 +144,13 @@ const manifestObject = JSON.parse(manifest);
  * Every export with a working argument list. `optional` lists the argument
  * positions that accept `undefined`/`null`.
  */
+const admission = readJson(
+  "docs",
+  "reference",
+  "hub-publish",
+  "v1",
+  "item-admission-conformance.json",
+).cases[0].input;
 const itemDescriptor = {
   format: "graphforge-item/1",
   id: protocol.parse_item_id(module.ontology_id).id,
@@ -167,6 +174,8 @@ const itemInventory = {
 };
 
 export const EXPORTS = {
+  item_admission_requirements: { args: [admission.manifest], optional: [] },
+  plan_item_admission: { args: [admission], optional: [] },
   resolve_item_version: { args: [itemInventory, undefined], optional: [1] },
   bind_item_version_source: {
     args: [itemInventory, itemDescriptor, refs, manifest, undefined],

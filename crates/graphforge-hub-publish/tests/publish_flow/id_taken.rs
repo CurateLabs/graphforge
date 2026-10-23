@@ -196,3 +196,122 @@ fn competing_new_claims_commit_only_one_owner() {
     sorted.sort_unstable();
     assert_eq!(sorted, [200, 409]);
 }
+
+#[test]
+fn reassigned_namespace_cannot_finish_or_replay_an_old_accounts_session() {
+    use graphforge_hub_publish::StableAccountId;
+    for large_objects in [false, true] {
+        let hub = ReferenceHub::with_config(ReferenceHubConfig {
+            large_objects,
+            limits: graphforge_hub_publish::PublishLimits {
+                preferred_chunk_bytes: large_objects.then_some(1024 * 1024),
+                ..ReferenceHubConfig::default().limits
+            },
+            ..ReferenceHubConfig::default()
+        })
+        .unwrap();
+        hub.set_publication_account(
+            "alice",
+            &StableAccountId::new("account-A").unwrap(),
+            "alice",
+        )
+        .unwrap();
+        let original = client(&hub, "alice", "pending");
+        let pending = plan(&[(MODULE, 'a')], &[]);
+        let (session, upload) = original.opened(&pending);
+        assert_eq!(original.put(&upload, 0, &pending.bytes).status, 200);
+        if large_objects {
+            assert_eq!(original.commit(&pending, &session).status, 202);
+        }
+        hub.set_publication_account(
+            "alice",
+            &StableAccountId::new("account-B").unwrap(),
+            "alice",
+        )
+        .unwrap();
+        assert_eq!(original.commit(&pending, &session).status, 403);
+        assert_eq!(original.operation(pending.operation).status, 403);
+        let replacement = client(&hub, "alice", "pending");
+        assert_eq!(replacement.commit(&pending, &session).status, 404);
+        assert_eq!(replacement.operation(pending.operation).status, 404);
+        assert!(replacement.refs().is_none());
+        // The pending transaction applied no claim, including after async polls.
+        assert_eq!(
+            admit(&replacement, &plan(&[(MODULE, 'b')], &[])).status,
+            200
+        );
+    }
+}
+
+#[test]
+fn issued_device_grant_cannot_become_a_reassigned_namespaces_account() {
+    use graphforge_hub_publish::{DeviceAuthorizationResponse, StableAccountId};
+    let hub = ReferenceHub::new();
+    let account = StableAccountId::new("device-account-A").unwrap();
+    hub.set_publication_account("alice", &account, "alice")
+        .unwrap();
+    let response = hub.handle(
+        &HubRequest::new(
+            HubMethod::Post,
+            "https://hub.example/.gf/oauth/device_authorization",
+        )
+        .with_body(b"client_id=graphforge-cli&scope=publish%3Aalice%2Fdemo".to_vec()),
+    );
+    assert_eq!(response.status, 200);
+    let grant: DeviceAuthorizationResponse = serde_json::from_slice(&response.body).unwrap();
+    assert!(hub.approve_device(&grant.user_code));
+    hub.set_publication_account(
+        "alice",
+        &StableAccountId::new("device-account-B").unwrap(),
+        "alice",
+    )
+    .unwrap();
+    let body = url::form_urlencoded::Serializer::new(String::new())
+        .extend_pairs([
+            ("client_id", "graphforge-cli"),
+            ("grant_type", graphforge_hub_publish::DEVICE_CODE_GRANT_TYPE),
+            ("device_code", &grant.device_code),
+        ])
+        .finish()
+        .into_bytes();
+    let response = hub.handle(
+        &HubRequest::new(HubMethod::Post, "https://hub.example/.gf/oauth/token").with_body(body),
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&response.body).unwrap(),
+        json!({"error":"access_denied"})
+    );
+}
+
+#[test]
+fn repository_rehome_preserves_claims_and_foreign_reuse_commits_a_new_witness() {
+    let hub = ReferenceHub::new();
+    let original = client(&hub, "alice", "original");
+    assert_eq!(admit(&original, &plan(&[(MODULE, 'a')], &[])).status, 200);
+    let moved = RepositoryIdentity::parse("bob/moved").unwrap();
+    hub.move_repository(&original.repository, &moved).unwrap();
+    let foreign = Client::new(&hub, moved);
+    let before = foreign.refs().unwrap();
+    let mut reuse = plan(&[(MODULE, 'a')], &[]);
+    reuse.bytes = b"a new foreign publication witness".to_vec();
+    reuse.expected_revision = Some(sha256_digest(&before));
+    let reused = admit(&foreign, &reuse);
+    assert_eq!(reused.status, 200);
+    let receipt = receipt(&reused);
+    assert_eq!(receipt.repository, foreign.repository);
+    assert_ne!(before, foreign.refs().unwrap());
+    let changed = admit(
+        &client(&hub, "bob", "changed"),
+        &plan(&[(MODULE, 'b')], &[]),
+    );
+    assert_eq!(changed.status, 409);
+    assert_eq!(error_code(&changed), HubPublishErrorCode::IdTaken);
+    assert_eq!(
+        admit(
+            &client(&hub, "alice", "still-owned"),
+            &plan(&[(MODULE, 'b')], &[])
+        )
+        .status,
+        200
+    );
+}

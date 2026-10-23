@@ -16,7 +16,8 @@ use graphforge_discovery::{
     RepositorySnapshot, ResearchLineage, Sha256Digest,
 };
 use graphforge_hub_publish::{
-    CommitRequest, HubPublishError, ObjectDeclaration, OpenSessionRequest, OperationStatus,
+    CommitRequest, HubPublishError, IdTakenItem, ItemAdmissionInput, ItemAdmissionPlan,
+    ItemClaimRequirement, ObjectDeclaration, OpenSessionRequest, OperationStatus,
     PublishCapabilities, PublishIntent, PublishReceipt,
 };
 use serde::{Deserialize, Serialize};
@@ -39,6 +40,10 @@ pub struct ProtocolError {
     pub version: Option<DiscoveryVersionDetails>,
     /// Sanitized, non-input-bearing diagnostic text.
     pub message: String,
+    /// Native privacy-filtered publication refusals; absent for unrelated errors.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[tsify(optional)]
+    pub items: Option<Vec<IdTakenItem>>,
 }
 
 impl ProtocolError {
@@ -48,6 +53,7 @@ impl ProtocolError {
             path: None,
             version: None,
             message: message.into(),
+            items: None,
         }
     }
 }
@@ -62,17 +68,20 @@ impl From<DiscoveryError> for ProtocolError {
             path: error.field.map(str::to_owned),
             version: error.version,
             message: error.detail().into(),
+            items: None,
         }
     }
 }
 
 impl From<HubPublishError> for ProtocolError {
     fn from(error: HubPublishError) -> Self {
+        let body = error.body();
         Self {
-            code: error.code.as_str().into(),
+            code: body.code.as_str().into(),
             path: None,
             version: None,
-            message: error.detail().into(),
+            message: body.message,
+            items: body.items,
         }
     }
 }
@@ -84,6 +93,7 @@ impl From<PreviewError> for ProtocolError {
             path: None,
             version: None,
             message: "preview refused by the closed image profile".into(),
+            items: None,
         }
     }
 }
@@ -213,6 +223,35 @@ fn canonical_text(bytes: Vec<u8>) -> Outcome<String> {
 }
 
 // ------------------------------------------------------------------ discovery
+
+/// Canonical advertised query keys, before the host reads authoritative facts.
+pub fn item_admission_requirements(bytes: &[u8]) -> Outcome<Vec<ItemClaimRequirement>> {
+    if bytes.len() > DiscoveryLimits::default().max_response_bytes {
+        return Err(HubPublishError::new(
+            graphforge_hub_publish::HubPublishErrorCode::InvalidInput,
+            "item admission manifest exceeds its byte bound",
+        )
+        .into());
+    }
+    let manifest =
+        DiscoveryManifest::from_json(bytes, DiscoveryLimits::default()).map_err(|error| {
+            HubPublishError::new(
+                if error.code == graphforge_discovery::DiscoveryErrorCode::UnsupportedFuture {
+                    graphforge_hub_publish::HubPublishErrorCode::UnsupportedFuture
+                } else {
+                    graphforge_hub_publish::HubPublishErrorCode::InvalidInput
+                },
+                "item admission manifest is invalid",
+            )
+        })?;
+    graphforge_hub_publish::item_admission_requirements(&manifest).map_err(Into::into)
+}
+
+/// Stateless admission; host facts must come from the live commit transaction.
+pub fn plan_item_admission(bytes: &[u8]) -> Outcome<ItemAdmissionPlan> {
+    let input = ItemAdmissionInput::from_json(bytes)?;
+    Ok(graphforge_hub_publish::plan_item_admission(&input)?)
+}
 
 /// Bound the closed limits argument of the item-resolution entrypoints.
 pub fn item_resolution_limits(bytes: Option<&[u8]>) -> Outcome<DiscoveryLimits> {

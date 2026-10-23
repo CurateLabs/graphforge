@@ -149,6 +149,11 @@ enum Action {
     AdvanceClock {
         seconds: u64,
     },
+    SetPublicationAccount {
+        namespace: String,
+        account: String,
+        canonical_handle: String,
+    },
     ApproveDevice {
         user_code: String,
     },
@@ -2239,6 +2244,18 @@ fn replay(hub: &ReferenceHub, name: &str, steps: &[Step]) {
                     variables.insert(capture.clone(), token);
                 }
                 Action::AdvanceClock { seconds } => hub.advance_clock(*seconds),
+                Action::SetPublicationAccount {
+                    namespace,
+                    account,
+                    canonical_handle,
+                } => {
+                    hub.set_publication_account(
+                        namespace,
+                        &graphforge_hub_publish::StableAccountId::new(account).unwrap(),
+                        canonical_handle,
+                    )
+                    .unwrap();
+                }
                 Action::ApproveDevice { user_code } => {
                     assert!(hub.approve_device(&substitute(user_code, &variables, &label)));
                 }
