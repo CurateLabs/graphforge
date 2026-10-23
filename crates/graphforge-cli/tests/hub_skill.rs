@@ -80,11 +80,9 @@ fn installed_hub_skill_examples_match_binary_help() {
     );
 }
 
-#[test]
-fn previous_bundle_updates_and_hub_edits_remain_protected() {
-    let root = tempdir().unwrap();
-    skills(root.path(), "install");
-    let managed = root.path().join(".agents/skills");
+fn install_previous_bundle(root: &Path) -> std::path::PathBuf {
+    skills(root, "install");
+    let managed = root.join(".agents/skills");
     let manifest_path = managed.join(".graphforge-managed.json");
     let mut manifest: Value = serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
     // Recreate the installed v1 bundle: its other two payloads are unchanged.
@@ -97,6 +95,13 @@ fn previous_bundle_updates_and_hub_edits_remain_protected() {
     });
     fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
     fs::remove_dir_all(managed.join("graphforge-hub")).unwrap();
+    managed
+}
+
+#[test]
+fn previous_bundle_updates_and_hub_edits_remain_protected() {
+    let root = tempdir().unwrap();
+    let managed = install_previous_bundle(root.path());
     assert_eq!(skills(root.path(), "status")["status"], "outdated");
     assert_eq!(skills(root.path(), "update")["changed"], true);
     assert_eq!(skills(root.path(), "status")["status"], "current");
@@ -113,6 +118,34 @@ fn previous_bundle_updates_and_hub_edits_remain_protected() {
             .unwrap();
         assert_eq!(output.status.code(), Some(2));
         assert_eq!(fs::read_to_string(&hub).unwrap(), "researcher edits\n");
+    }
+}
+
+#[test]
+fn previous_bundle_preserves_an_unowned_empty_hub_namespace() {
+    let root = tempdir().unwrap();
+    let managed = install_previous_bundle(root.path());
+    let manifest_path = managed.join(".graphforge-managed.json");
+    let manifest = fs::read(&manifest_path).unwrap();
+    let hub = managed.join("graphforge-hub");
+    fs::create_dir(&hub).unwrap();
+    let status = skills(root.path(), "status");
+    assert_eq!(status["status"], "conflict");
+    assert_eq!(
+        status["edited_files"],
+        serde_json::json!(["graphforge-hub/"])
+    );
+    for action in ["install", "update", "remove"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_gf"))
+            .arg("--project-dir")
+            .arg(root.path())
+            .args(["--json", "skills", action])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2));
+        assert!(hub.is_dir());
+        assert!(fs::read_dir(&hub).unwrap().next().is_none());
+        assert_eq!(fs::read(&manifest_path).unwrap(), manifest);
     }
 }
 

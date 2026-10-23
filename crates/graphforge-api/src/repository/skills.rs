@@ -177,6 +177,13 @@ fn verify_installed_files(
         if !root.exists() {
             continue;
         }
+        let namespace = format!("{name}/");
+        if !expected
+            .iter()
+            .any(|path| path.starts_with(namespace.as_str()))
+        {
+            edited.push(namespace);
+        }
         let mut pending = vec![root.clone()];
         while let Some(directory) = pending.pop() {
             for entry in
