@@ -85,6 +85,30 @@ the canonical bare `id`, matching `kind`, publishing `repository`, and exact
 refs revision and manifest validator. The validator checks their consistency
 without fetching or interpreting native package bytes.
 
+`resolve_item_version({id, version, complete, candidates})` returns one
+`ExactIdentity` without choosing a source. The host filters current authorization
+and retention before providing its complete eligible inventory. Identical triples
+are equivalent; distinct content digests throw `ambiguous_identity`.
+`bind_item_version_source(inventory, nominated, refs, manifest)` accepts any
+explicitly nominated inventory member only after resolving identity and binding
+that witness's actual retained metadata. Package verification remains native.
+
+Pass a caught `ProtocolError` to `item_resolution_error_response(error)` for
+Core's total `{status, body}` HTTP projection: proven complete empty inventory
+produces 404 with `{"code":"missing_object"}`, proven distinct digests produce
+409 with `{"code":"ambiguous_identity"}`, and all other failures produce empty 503. Both code and reserved `path` must agree; nested `missing_object` from broken
+metadata never means absence. Do not infer statuses from messages or implement an
+adapter fallback. Projection input is bounded to 1 KiB, and malformed diagnostics
+yield 503. Unrepresentable JavaScript objects still fail at the ordinary glue
+boundary before Rust, like other exports.
+
+Inventory is limited to 4096 candidates before deduplication, with the existing
+16 MiB aggregate/default string budgets. No truncated inventory, implicit source
+winner, version ordering/immutability rule or digest-query override is supported.
+Hosts must recheck current authorization and resolution before GET, HEAD or 304.
+See the [discovery resolution contract](../../docs/reference/discovery/v1/README.md#digest-free-exact-authored-version-resolution)
+for provenance, bounds, and native/actual-WASM conformance.
+
 **Boundary.** Rust never reads a JavaScript object. The package's `index.js`
 turns an object argument into JSON text with `JSON.stringify` and passes only
 strings and bytes to the WebAssembly exports, so an object and its JSON text
@@ -112,6 +136,7 @@ included, are own properties.
 | Permanent IDs  | `parse_item_id`, `has_item_id_shape`                                                                                                   |
 | Discovery      | `validate_item_descriptor`, `validate_manifest`, `validate_refs`, `validate_summary`, `validate_lineage`, `validate_repository_moved`  |
 | Binding        | `bind_summary`, `bind_lineage`, `bind_summary_lineage`, `bind_refs`, `ontology_module_object`, `research_version_object`               |
+| Resolution     | `resolve_item_version`, `bind_item_version_source`, `item_resolution_error_response`                                                   |
 | Re-homing      | `rehome_repository`                                                                                                                    |
 | Previews       | `validate_image`, `validate_preview`, `validate_preview_descriptors`, `manifest_preview_descriptors`                                   |
 | Publish        | `validate_capabilities`, `validate_session_request`, `validate_commit_request`, `validate_receipt`, `validate_operation_status`        |

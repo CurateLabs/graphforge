@@ -102,6 +102,50 @@ pub fn has_item_id_shape(name: &str) -> bool {
 
 // ------------------------------------------------------------------ discovery
 
+/// Resolve an opaque exact authored version without choosing a source.
+#[wasm_bindgen(unchecked_return_type = "ExactIdentity")]
+pub fn resolve_item_version(
+    #[wasm_bindgen(unchecked_param_type = "JsonInput<ItemVersionInventory>")] inventory: &str,
+    #[wasm_bindgen(unchecked_optional_param_type = "DiscoveryLimitsOverride | null")]
+    limits: Option<String>,
+) -> Result<JsValue, JsValue> {
+    run(|| {
+        engine::resolve_item_version(
+            inventory.as_bytes(),
+            engine::item_resolution_limits(limits.as_deref().map(str::as_bytes))?,
+        )
+    })
+}
+
+/// Validate a nominated equivalent source and its actual retained snapshots.
+#[wasm_bindgen(unchecked_return_type = "ValidatedItemDescriptor")]
+pub fn bind_item_version_source(
+    #[wasm_bindgen(unchecked_param_type = "JsonInput<ItemVersionInventory>")] inventory: &str,
+    #[wasm_bindgen(unchecked_param_type = "JsonInput<ItemDescriptor>")] nominated: &str,
+    #[wasm_bindgen(unchecked_param_type = "JsonInput<RefSet>")] refs: &str,
+    #[wasm_bindgen(unchecked_param_type = "JsonInput<DiscoveryManifest>")] manifest: &str,
+    #[wasm_bindgen(unchecked_optional_param_type = "DiscoveryLimitsOverride | null")]
+    limits: Option<String>,
+) -> Result<JsValue, JsValue> {
+    run(|| {
+        engine::bind_item_version_source(
+            inventory.as_bytes(),
+            nominated.as_bytes(),
+            refs.as_bytes(),
+            manifest.as_bytes(),
+            engine::item_resolution_limits(limits.as_deref().map(str::as_bytes))?,
+        )
+    })
+}
+
+/// Total status/body projection; malformed diagnostics yield empty 503.
+#[wasm_bindgen(unchecked_return_type = "ItemResolutionHttpResponse")]
+pub fn item_resolution_error_response(
+    #[wasm_bindgen(unchecked_param_type = "JsonInput<ProtocolError>")] error: &str,
+) -> Result<JsValue, JsValue> {
+    run(|| Ok(engine::item_resolution_error_response(error.as_bytes())))
+}
+
 /// Parse and validate a permanent item descriptor without fetching module bytes.
 #[wasm_bindgen(unchecked_return_type = "ValidatedItemDescriptor")]
 pub fn validate_item_descriptor(

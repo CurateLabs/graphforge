@@ -126,6 +126,7 @@ escalate to a human when the obvious fix does not clear the failure.
 | `hub.auth_denied` | fix input | Credential missing, unreadable, empty, or not valid for this origin (clone `--token-env`; publish saved-session origin) | Set or correct the credential environment variable (see [Credentials](#credentials)); if a provided token is still denied, a human must mint a scoped token | 2 |
 | `hub.not_found` | fix input | The repository or resource does not exist (404/410) | Check the owner/repository spelling and ref | 2 |
 | `hub.missing_ref` | fix input | The requested ref is absent | Check `--ref` against the repository's advertised refs | 2 |
+| `hub.ambiguous_identity` | fix input | The canonical item/version has multiple eligible content digests (409) | Ask the publisher to resolve the ambiguity; `--digest` is only a verification pin | 2 |
 | `hub.missing_object` | fix input | A referenced object is absent from the Hub | Rerun; if it persists, ask the repository publisher | 2 |
 | `hub.duplicate` | fix input | A canonical identity, ref, or object occurs more than once | Rerun; if it persists, ask the Hub operator | 2 |
 | `hub.limit_exceeded` | fix input | A response or request exceeded a configured bound | Reduce the request size; check `DiscoveryLimits` | 2 |
