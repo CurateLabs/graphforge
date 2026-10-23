@@ -381,6 +381,16 @@ fn module_regeneration_rewrites_all_references_and_stored_routes_in_one_version(
         }
     }
     data(graph);
+    let count = graph.execute("MATCH (n:Thing) RETURN count(n)").unwrap();
+    assert_eq!(
+        count.batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap()
+            .value(0),
+        3
+    );
     let registry = graph.research_version_retention().unwrap();
     assert_eq!(registry.current_branch, Some(fixture.branch));
     assert_eq!(registry.heads[&fixture.branch], result.version_uuid);
@@ -394,6 +404,19 @@ fn module_regeneration_rewrites_all_references_and_stored_routes_in_one_version(
     assert!(registry.materialized.contains(&result.version_uuid));
     let view = graph.open_research_branch(fixture.branch).unwrap();
     data(view.graph());
+    let count = view
+        .graph()
+        .execute("MATCH (n:Thing) RETURN count(n)")
+        .unwrap();
+    assert_eq!(
+        count.batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap()
+            .value(0),
+        3
+    );
     let new_fields = crate::branches::baseline::read(view.graph()).unwrap();
     for row in old_fields.values() {
         let replacement = new_fields
@@ -411,6 +434,16 @@ fn module_regeneration_rewrites_all_references_and_stored_routes_in_one_version(
     )
     .unwrap();
     data(&old_view);
+    let count = old_view.execute("MATCH (n:Thing) RETURN count(n)").unwrap();
+    assert_eq!(
+        count.batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap()
+            .value(0),
+        2
+    );
     let generation = current(graph);
     assert_eq!(
         graph
@@ -436,7 +469,7 @@ fn module_regeneration_rewrites_all_references_and_stored_routes_in_one_version(
                 expected_generation_uuid: current(&graph),
                 branch_uuid: fixture.branch,
                 version_uuid: Uuid::now_v7(),
-                query: "MATCH (n:Thing) WHERE n.name='Ada' SET n.name='Ada edited'".into(),
+                query: "MATCH (a:Thing)-[r:LINK]->(b:Thing) WHERE a.name='Ada' SET a.name='Ada edited',r.weight=43".into(),
                 created_at: 3,
                 label: None,
                 description: None,
@@ -446,6 +479,29 @@ fn module_regeneration_rewrites_all_references_and_stored_routes_in_one_version(
             &CancellationToken::new(),
         )
         .unwrap();
+    let edited = graph.open_research_branch(fixture.branch).unwrap();
+    let result_data = edited
+        .graph()
+        .execute("MATCH (a:Thing)-[r:LINK]->(b:Thing) RETURN a.name,r.weight")
+        .unwrap();
+    assert_eq!(
+        result_data.batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap()
+            .value(0),
+        "Ada edited"
+    );
+    assert_eq!(
+        result_data.batches[0]
+            .column(1)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap()
+            .value(0),
+        43
+    );
     let later = current(&graph);
     assert_eq!(
         graph.regenerate_item_id(OLD, operation, None).unwrap(),
@@ -737,41 +793,41 @@ fn native_publication_faults_and_cancellation_preserve_the_atomic_boundary() {
 }
 
 #[test]
-fn pending_binding_survives_generation_race_refusal_recording_and_competing_operation() {
+fn pending_binding_survives_refusal_recording_and_competing_operation() {
     let fixture = Fixture::new(false);
     let path = fixture.path();
     let operation = Uuid::now_v7();
     drop(fixture.graph);
-    assert!(run_fault(&path, operation, "race").success());
+    assert!(run_fault(&path, operation, "cancel_before").success());
     let before: serde_json::Value = serde_json::from_slice(
         &std::fs::read(path.join(".publish-refusals/id-taken.json")).unwrap(),
     )
     .unwrap();
     let mut graph = GraphForge::new(path.to_str()).unwrap();
-    // An owner-hint response cannot overwrite authorization already bound to an
-    // in-flight operation, nor can another operation consume the same refusal.
+    // Fresh hints gate new attempts while the original execution retains its
+    // exact authorization. Protection from eviction does not freeze guidance.
     refusal(&graph, OLD, fixture.base, true);
     assert!(graph.regenerate_item_id(OLD, Uuid::now_v7(), None).is_err());
-    assert_eq!(
-        graph
-            .regenerate_item_id(OLD, operation, None)
-            .unwrap_err()
-            .code(),
-        "GF_WRITE_CONFLICT"
+    assert!(
+        !graph
+            .research_version_retention()
+            .unwrap()
+            .receipts
+            .contains_key(&operation)
     );
     let after: serde_json::Value = serde_json::from_slice(
         &std::fs::read(path.join(".publish-refusals/id-taken.json")).unwrap(),
     )
     .unwrap();
-    assert_eq!(before, after);
-    assert!(
-        !graph
+    assert_eq!(before["regenerations"], after["regenerations"]);
+    assert_eq!(
+        graph
             .id_taken_receipt(OLD)
             .unwrap()
             .unwrap()
             .item
-            .publish_as_owner
-            .unwrap_or(false)
+            .publish_as_owner,
+        Some(true)
     );
 }
 
@@ -863,4 +919,286 @@ fn private_acknowledgement_recovers_from_exact_native_receipt_after_restore() {
         data(&graph);
         assert!(graph.regenerate_item_id(OTHER, operation, None).is_err());
     }
+}
+
+#[test]
+fn explicit_new_operation_recovers_a_proven_stale_preparation_without_rebasing_it() {
+    let fixture = Fixture::new(false);
+    let path = fixture.path();
+    let operation = Uuid::now_v7();
+    drop(fixture.graph);
+    assert!(run_fault(&path, operation, "race").success());
+    let read = || -> serde_json::Value {
+        serde_json::from_slice(
+            &std::fs::read(path.join(".publish-refusals/id-taken.json")).unwrap(),
+        )
+        .unwrap()
+    };
+    let original_binding = read()["regenerations"][operation.to_string()].clone();
+    let mut graph = GraphForge::new(path.to_str()).unwrap();
+    assert_eq!(
+        graph
+            .regenerate_item_id(OLD, operation, None)
+            .unwrap_err()
+            .code(),
+        "GF_WRITE_CONFLICT"
+    );
+    refusal(&graph, OLD, fixture.base, false);
+    let new_operation = Uuid::now_v7();
+    let replacement = graph.regenerate_item_id(OLD, new_operation, None).unwrap();
+    assert_ne!(
+        replacement.id,
+        original_binding["replacement"]["id"].as_str().unwrap()
+    );
+    assert_eq!(
+        read()["regenerations"][operation.to_string()],
+        original_binding
+    );
+    let generation = current(&graph);
+    assert_eq!(
+        graph
+            .regenerate_item_id(OLD, operation, None)
+            .unwrap_err()
+            .code(),
+        "GF_WRITE_CONFLICT"
+    );
+    assert_eq!(
+        graph.regenerate_item_id(OLD, new_operation, None).unwrap(),
+        replacement
+    );
+    assert_eq!(current(&graph), generation);
+    data(&graph);
+}
+
+#[test]
+fn newer_owner_hint_gates_a_new_attempt_after_a_generation_race() {
+    let fixture = Fixture::new(false);
+    let path = fixture.path();
+    let operation = Uuid::now_v7();
+    drop(fixture.graph);
+    assert!(run_fault(&path, operation, "race").success());
+    let mut graph = GraphForge::new(path.to_str()).unwrap();
+    refusal(&graph, OLD, fixture.base, true);
+    let generation = current(&graph);
+    let error = graph
+        .regenerate_item_id(OLD, Uuid::now_v7(), None)
+        .unwrap_err();
+    assert!(error.to_string().contains("owning organization"), "{error}");
+    assert_eq!(current(&graph), generation);
+    assert_eq!(
+        graph
+            .regenerate_item_id(OLD, operation, None)
+            .unwrap_err()
+            .code(),
+        "GF_WRITE_CONFLICT"
+    );
+    let document: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(path.join(".publish-refusals/id-taken.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(document["regenerations"].as_object().unwrap().len(), 1);
+    assert!(
+        document["regenerations"][operation.to_string()]["refusal"]["item"]
+            .get("publish_as_owner")
+            .is_none()
+    );
+    assert_eq!(
+        graph
+            .id_taken_receipt(OLD)
+            .unwrap()
+            .unwrap()
+            .item
+            .publish_as_owner,
+        Some(true)
+    );
+}
+
+#[test]
+fn a_foreign_native_uuid_consumer_conflicts_locally_without_poisoning_receipt_storage() {
+    let fixture = Fixture::new(false);
+    let path = fixture.path();
+    let operation = Uuid::now_v7();
+    drop(fixture.graph);
+    assert!(run_fault(&path, operation, "cancel_before").success());
+    let mut graph = GraphForge::new(path.to_str()).unwrap();
+    let capture = graph
+        .prepare_research_version(crate::PrepareResearchVersionRequest {
+            operation_uuid: operation,
+            version_uuid: Uuid::now_v7(),
+            context_uuid: Uuid::now_v7(),
+            created_at: 1,
+            required_versions: BTreeSet::new(),
+            label: None,
+            description: None,
+            author: None,
+            committer: None,
+        })
+        .unwrap();
+    graph
+        .commit_research_version_operation(capture, &CancellationToken::new())
+        .unwrap();
+    assert!(graph.id_taken_receipt(OTHER).unwrap().is_none());
+    refusal(&graph, OTHER, fixture.base, false);
+    assert!(graph.id_taken_receipt(OTHER).unwrap().is_some());
+    assert!(
+        graph
+            .id_taken_receipt(OLD)
+            .unwrap()
+            .unwrap()
+            .regenerated
+            .is_none()
+    );
+    assert_eq!(
+        graph
+            .regenerate_item_id(OLD, operation, None)
+            .unwrap_err()
+            .code(),
+        "GF_IDEMPOTENCY_CONFLICT"
+    );
+    let result = graph.regenerate_item_id(OLD, Uuid::now_v7(), None).unwrap();
+    assert_eq!(
+        graph.id_taken_receipt(OLD).unwrap().unwrap().regenerated,
+        Some(result)
+    );
+    assert_eq!(
+        graph
+            .regenerate_item_id(OLD, operation, None)
+            .unwrap_err()
+            .code(),
+        "GF_IDEMPOTENCY_CONFLICT"
+    );
+}
+
+#[test]
+fn unrelated_authored_versions_keep_exact_identities_and_stored_values() {
+    let mut fixture = Fixture::new(false);
+    let unrelated = "https://example.org/unrelated";
+    let mut ids = Vec::new();
+    for (version, name) in [("1", "Alpha"), ("2", "Beta")] {
+        let candidate = fixture.graph.create_ontology_module(serde_json::from_value(serde_json::json!({"ontology_id":unrelated,"version":version,"entity_types":[{"name":name}],"properties":[{"owner":name,"name":"value","type":"utf8"}]})).unwrap(), vec![], None).unwrap();
+        ids.push(candidate.id.clone());
+        fixture
+            .graph
+            .adopt_ontology_module(
+                &ModuleAdoptionRequest {
+                    authority: authority(&fixture.graph),
+                    candidate,
+                },
+                None,
+            )
+            .unwrap();
+        fixture
+            .graph
+            .execute(&format!("CREATE (:`{name}` {{value:'{name} value'}})"))
+            .unwrap();
+    }
+    fixture
+        .graph
+        .regenerate_item_id(OLD, Uuid::now_v7(), None)
+        .unwrap();
+    let path = fixture.path();
+    drop(fixture.graph);
+    let mut graph = GraphForge::new(path.to_str()).unwrap();
+    let composition = graph.workspace_ontology_composition().unwrap().unwrap();
+    for id in ids {
+        assert!(composition.modules.iter().any(|module| module.id == id));
+    }
+    for name in ["Alpha", "Beta"] {
+        let values = graph
+            .execute(&format!("MATCH (n:`{name}`) RETURN n.value"))
+            .unwrap();
+        assert_eq!(
+            values.batches[0]
+                .column(0)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap()
+                .value(0),
+            format!("{name} value")
+        );
+    }
+    for name in ["Alpha", "Beta"] {
+        let nodes = graph
+            .execute(&format!("MATCH (n:`{name}`) RETURN n.node_uuid"))
+            .unwrap();
+        let node = Uuid::from_slice(
+            nodes.batches[0]
+                .column(0)
+                .as_any()
+                .downcast_ref::<arrow::array::FixedSizeBinaryArray>()
+                .unwrap()
+                .value(0),
+        )
+        .unwrap();
+        let pattern = crate::branches::semantic_fields::property_pattern(
+            &graph,
+            "node",
+            node,
+            "value",
+            &CancellationToken::new(),
+        )
+        .unwrap();
+        let values = graph
+            .execute(&format!("MATCH {pattern} RETURN n.value"))
+            .unwrap();
+        assert_eq!(values.batches[0].num_rows(), 1);
+        graph
+            .execute_research_branch(
+                &ExecuteResearchBranchRequest {
+                    operation_uuid: Uuid::now_v7(),
+                    expected_generation_uuid: current(&graph),
+                    branch_uuid: fixture.branch,
+                    version_uuid: Uuid::now_v7(),
+                    query: format!("MATCH (n:`{name}`) SET n.value='{name} edited'"),
+                    created_at: 4,
+                    label: None,
+                    description: None,
+                    author: None,
+                    committer: None,
+                },
+                &CancellationToken::new(),
+            )
+            .unwrap();
+    }
+    let view = graph.open_research_branch(fixture.branch).unwrap();
+    for name in ["Alpha", "Beta"] {
+        let values = view
+            .graph()
+            .execute(&format!("MATCH (n:`{name}`) RETURN n.value"))
+            .unwrap();
+        assert_eq!(
+            values.batches[0]
+                .column(0)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap()
+                .value(0),
+            format!("{name} edited")
+        );
+    }
+    data(&graph);
+}
+
+#[test]
+fn inconsistent_bound_intent_is_corruption_instead_of_a_foreign_uuid_consumer() {
+    let mut fixture = Fixture::new(false);
+    let operation = Uuid::now_v7();
+    fixture
+        .graph
+        .regenerate_item_id(OLD, operation, None)
+        .unwrap();
+    let path = fixture.path().join(".publish-refusals/id-taken.json");
+    let mut document: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    document["regenerations"][operation.to_string()]["created_at"] = serde_json::json!(123);
+    std::fs::write(&path, serde_json::to_vec(&document).unwrap()).unwrap();
+    assert!(fixture.graph.id_taken_receipt(OTHER).is_err());
+    assert_eq!(
+        fixture
+            .graph
+            .regenerate_item_id(OLD, operation, None)
+            .unwrap_err()
+            .code(),
+        "GF_IDEMPOTENCY_CONFLICT"
+    );
 }

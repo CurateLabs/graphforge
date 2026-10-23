@@ -84,6 +84,12 @@ Earlier Versions and their content MUST remain unchanged. Publication SHOULD
 start from the regenerated Version; the new ID does not replace the old ID in
 historical Versions. Replaying the same operation UUID MUST return the original
 replacement receipt without minting another ID or recording another Version.
+A preparation whose source generation loses a write race MUST NOT rebase or
+resample its replacement ID. An explicitly new operation MAY prepare from the
+current workspace only after serialized native recovery proves the earlier
+operation did not commit and its source generation can no longer publish.
+The earlier operation binding MUST remain immutable and continue to refuse as
+stale; committed or uncertain publication evidence MUST remain protected.
 
 ## Inventory, closure, and composition identity
 

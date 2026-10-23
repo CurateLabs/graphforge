@@ -8,6 +8,7 @@ use sha2::Digest as _;
 pub(crate) struct RegenerationBinding {
     pub operation_uuid: Uuid,
     pub old_id: String,
+    pub refusal: ItemIdRefusalReceipt,
     pub replacement: ItemIdRegeneration,
     pub source_generation: Uuid,
     pub branch_uuid: Uuid,
@@ -66,6 +67,19 @@ fn recover(graph: &GraphForge, store: &Store, document: &mut Document) -> Result
         let Some(native) = registry.receipts.get(&binding.operation_uuid) else {
             continue;
         };
+        // A caller-owned UUID may have been committed by another native
+        // operation before regeneration reserved its journal. That authenticated
+        // different intent cannot acknowledge this binding; only its targeted
+        // regeneration replay conflicts. Matching intent still requires every
+        // physical request and Version commitment to authenticate exactly.
+        if native.intent_sha256 != Some(binding.digest()?) {
+            if binding.request_sha256 == Some(native.request_sha256) {
+                // The same physical request cannot carry two logical intents.
+                // This is inconsistent authentication, not a foreign consumer.
+                return Err(conflict());
+            }
+            continue;
+        }
         authenticate(binding, native)?;
         let receipt = document
             .receipts
@@ -99,7 +113,7 @@ impl RegenerationGuard {
         graph: &GraphForge,
         id: &ItemId,
         operation_uuid: Uuid,
-        prepare: impl FnOnce() -> Result<RegenerationBinding, GfError>,
+        prepare: impl FnOnce(&ItemIdRefusalReceipt) -> Result<RegenerationBinding, GfError>,
     ) -> Result<Self, GfError> {
         let store = Store::open(graph, false)?.ok_or_else(|| {
             invalid("regeneration requires an id_taken receipt for that exact ID")
@@ -124,6 +138,49 @@ impl RegenerationGuard {
         {
             return Err(conflict());
         }
+        if document
+            .regenerations
+            .values()
+            .any(|binding| binding.old_id == id.as_str())
+        {
+            // Under the same sidecar lock, recover native journals before
+            // deciding whether an old preparation can still publish. Retain
+            // every immutable binding: its UUID must forever replay or be stale.
+            let root = graph.resolved_generation.container_root();
+            graphforge_storage::recover_project_transactions_with_mode(root, graph.lifecycle_mode)?;
+            recover(graph, &store, &mut document)?;
+            let current = graphforge_storage::resolve_project_generation(root)?;
+            let registry = read_research_registry(&current)?;
+            for binding in document
+                .regenerations
+                .values()
+                .filter(|binding| binding.old_id == id.as_str())
+            {
+                if binding.source_generation == current.generation_uuid() {
+                    return Err(conflict());
+                }
+                if let Some(published) =
+                    graphforge_storage::published_project_transaction(root, binding.operation_uuid)?
+                {
+                    // A permanent native receipt can positively identify a
+                    // foreign UUID consumer. A journal without that matching
+                    // receipt remains uncertain and cannot release this ID.
+                    let intent = binding.digest()?;
+                    let foreign =
+                        registry
+                            .receipts
+                            .get(&binding.operation_uuid)
+                            .is_some_and(|receipt| {
+                                receipt.intent_sha256 != Some(intent)
+                                    && binding.request_sha256 != Some(receipt.request_sha256)
+                                    && receipt.generation_uuid == published.generation_uuid
+                            });
+                    if !foreign {
+                        return Err(conflict());
+                    }
+                }
+            }
+        }
         let receipt = document.receipts.get(id.as_str()).ok_or_else(|| {
             invalid("regeneration requires an id_taken receipt for that exact ID")
         })?;
@@ -132,15 +189,16 @@ impl RegenerationGuard {
                 "publish as the owning organization instead of regenerating this ID",
             ));
         }
-        if receipt.regenerated.is_some()
-            || document
-                .regenerations
-                .values()
-                .any(|binding| binding.old_id == id.as_str())
-        {
+        if receipt.regenerated.is_some() {
             return Err(conflict());
         }
-        let binding = prepare()?;
+        if document.regenerations.len() == MAX_ID_TAKEN_ITEMS {
+            return Err(GfError::Api {
+                code: graphforge_core::ApiErrorCode::ResourceLimit,
+                message: "local ID regeneration binding capacity is full".into(),
+            });
+        }
+        let binding = prepare(receipt)?;
         document
             .regenerations
             .insert(operation_uuid, binding.clone());

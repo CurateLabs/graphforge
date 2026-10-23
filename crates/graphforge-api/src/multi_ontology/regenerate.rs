@@ -26,7 +26,7 @@ fn ontology_error(error: super::MultiOntologyError) -> GfError {
 fn stale() -> GfError {
     GfError::Project {
         code: graphforge_core::ProjectErrorCode::WriteConflict,
-        message: "ID regeneration source generation changed; the bound operation cannot be rebased"
+        message: "ID regeneration source generation changed; the bound operation cannot be rebased; retry explicitly with a new operation UUID"
             .into(),
     }
 }
@@ -55,16 +55,16 @@ impl GraphForge {
                 message: "historical views cannot regenerate IDs".into(),
             });
         }
-        let mut guard = RegenerationGuard::begin(self, &id, operation_uuid, || {
+        let mut guard = RegenerationGuard::begin(self, &id, operation_uuid, |receipt| {
             cancellation.map_or(Ok(()), CancellationToken::checkpoint)?;
-            self.prepare_regeneration_binding(&id, operation_uuid)
+            self.prepare_regeneration_binding(&id, operation_uuid, receipt)
         })?;
         // Replay before reading current composition, Branch selection or source.
         if let Some(result) = guard.replay(self)? {
             return Ok(result);
         }
         self.graph_visibility.health.check()?;
-        let token = cancellation.cloned().unwrap_or_else(CancellationToken::new);
+        let token = cancellation.cloned().unwrap_or_default();
         token.checkpoint()?;
         let root = self.resolved_generation.container_root().to_path_buf();
         let source = graphforge_storage::resolve_project_generation(&root)?;
@@ -188,6 +188,7 @@ impl GraphForge {
         &self,
         id: &ItemId,
         operation: Uuid,
+        refusal: &crate::ItemIdRefusalReceipt,
     ) -> Result<RegenerationBinding, GfError> {
         let source = graphforge_storage::resolve_project_generation(
             self.resolved_generation.container_root(),
@@ -226,6 +227,7 @@ impl GraphForge {
         Ok(RegenerationBinding {
             operation_uuid: operation,
             old_id: id.as_str().into(),
+            refusal: refusal.clone(),
             replacement: ItemIdRegeneration {
                 id: replacement.as_str().into(),
                 version_uuid: Uuid::now_v7(),
@@ -314,21 +316,31 @@ impl GraphForge {
         let source = self.generation_for_read()?;
         let before = previous.compile()?;
         let after = candidate.compile()?;
-        let pairs = before
-            .modules
-            .iter()
-            .filter_map(|old| {
-                let new = after.modules.iter().find(|new| {
-                    if same_id(&old.id.ontology_id, id) {
-                        ItemId::parse_reference(&new.id.ontology_id)
-                            .is_ok_and(|id| id.as_str() == next)
-                    } else {
-                        new.id.ontology_id == old.id.ontology_id
-                    }
-                })?;
-                (old.id != new.id).then(|| (old.id.clone(), new.id.clone()))
-            })
-            .collect::<Vec<_>>();
+        let replacement =
+            ItemId::parse_reference(next).map_err(|_| invalid("invalid replacement ID"))?;
+        let mut pairs = Vec::new();
+        for old in &before.modules {
+            let expected = if same_id(&old.id.ontology_id, id) {
+                let mut document = old.doc.clone();
+                document.ontology_id = replacement.to_uri();
+                crate::OntologyModuleId {
+                    ontology_id: replacement.to_uri(),
+                    authored_version: old.id.authored_version.clone(),
+                    canonical_digest: graphforge_ontology::module_document_digest(&document)
+                        .map_err(invalid)?,
+                }
+            } else {
+                old.id.clone()
+            };
+            let new = after
+                .modules
+                .iter()
+                .find(|module| module.id == expected)
+                .ok_or_else(|| invalid("regeneration target exact module identity is missing"))?;
+            if old.id != new.id {
+                pairs.push((old.id.clone(), new.id.clone()));
+            }
+        }
         let bindings = graphforge_storage::semantic_storage_bindings(&source)?
             .ok_or_else(|| invalid("semantic storage bindings are missing"))?;
         let (tree, _guard, _) = crate::hydrate_graph_workspace(&source, true)?;

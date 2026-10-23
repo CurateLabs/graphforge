@@ -291,7 +291,11 @@ composition fingerprint.
 
 Publish from the regenerated head. Earlier Versions keep their original IDs
 and content; regeneration never rewrites history. Reuse the same operation UUID
-to replay the original result without minting another ID or Version.
+to replay the original result without minting another ID or Version. If another
+write wins before regeneration commits, that operation remains bound to its
+original source and reports a write conflict. Start an explicit new operation
+UUID to try the current workspace: Core first recovers the native journals and
+proves that the earlier preparation did not commit and can no longer publish.
 
 `ontology module fetch REF --output FILE [--digest HEX] [--hub URL]` retrieves
 one verified ontology module without cloning a Project:

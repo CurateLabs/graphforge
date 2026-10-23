@@ -735,3 +735,80 @@ fn cross_id_equivalence_requires_an_id_only_authored_document() {
         }
     }
 }
+
+#[test]
+fn migration_refuses_contradictory_owner_metadata_without_healing_source() {
+    use arrow::{
+        array::{ArrayRef, FixedSizeBinaryArray, StringArray},
+        datatypes::{DataType, Field, Schema},
+        record_batch::RecordBatch,
+    };
+    use std::{collections::HashMap, sync::Arc};
+    let old = compiled_with("1", false, true);
+    let bindings = SemanticStorageBindings::project(&old, None).unwrap();
+    let entity = bindings
+        .bindings
+        .iter()
+        .find(|binding| binding.route_kind == SemanticRouteKind::Entity)
+        .unwrap();
+    for owner_key in ["graphforge.entity_type", "graphforge.rel_type"] {
+        let source = tempfile::tempdir().unwrap();
+        let properties = source.path().join("properties");
+        std::fs::create_dir(&properties).unwrap();
+        let file = properties.join(format!("{}.parquet", entity.route));
+        let schema = Arc::new(Schema::new_with_metadata(
+            vec![
+                Field::new("node_uuid", DataType::FixedSizeBinary(16), false),
+                Field::new("name", DataType::Utf8, true),
+            ],
+            HashMap::from([
+                (SEMANTIC_ROUTE_METADATA_KEY.into(), entity.route.clone()),
+                (
+                    SEMANTIC_COMPOSITION_METADATA_KEY.into(),
+                    old.fingerprint.clone(),
+                ),
+                (owner_key.into(), "contradictory-owner".into()),
+            ]),
+        ));
+        let columns: Vec<ArrayRef> = vec![
+            Arc::new(FixedSizeBinaryArray::try_from_iter([&[1_u8; 16]].into_iter()).unwrap()),
+            Arc::new(StringArray::from(vec!["Ada"])),
+        ];
+        let batch = RecordBatch::try_new(schema.clone(), columns).unwrap();
+        let mut writer = parquet::arrow::ArrowWriter::try_new(
+            File::create(&file).unwrap(),
+            schema,
+            Some(crate::permanent_parquet::writer_properties().build()),
+        )
+        .unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+        let original = std::fs::read(&file).unwrap();
+        let next = renamed_compiled();
+        let plan = SemanticStorageBindings::plan_retained_data_migration(
+            &old,
+            &next,
+            &bindings,
+            source.path(),
+        )
+        .unwrap();
+        let parent = tempfile::tempdir().unwrap();
+        let candidate = parent.path().join("candidate");
+        let error = materialize_semantic_migration(
+            &plan,
+            source.path(),
+            &candidate,
+            SemanticMigrationLimits::default(),
+            || Ok(()),
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("owner metadata disagrees with route"),
+            "{owner_key}: {error}"
+        );
+        assert_eq!(std::fs::read(&file).unwrap(), original);
+        assert!(!candidate.exists());
+    }
+}

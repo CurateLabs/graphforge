@@ -166,12 +166,31 @@ impl SemanticStorageBindings {
             let mapped = identity_equivalent
                 .iter()
                 .find(|(old, _)| old == &old_module.id);
-            let next_module = next.modules.iter().find(|module| {
-                mapped.map_or_else(
-                    || module.id.ontology_id == prior.symbol.module.ontology_id,
-                    |(_, new)| module.id == *new,
-                )
-            });
+            let next_module = if let Some((_, target)) = mapped {
+                next.modules.iter().find(|module| module.id == *target)
+            } else if let Some(exact) = next
+                .modules
+                .iter()
+                .find(|module| module.id == old_module.id)
+            {
+                Some(exact)
+            } else {
+                // Authored upgrades replace one exact source with a newly
+                // introduced identity. Other retained versions of the same
+                // ontology are independent and must never become substitutes.
+                let mut introduced = next.modules.iter().filter(|module| {
+                    module.id.ontology_id == old_module.id.ontology_id
+                        && !previous_composition
+                            .modules
+                            .iter()
+                            .any(|prior| prior.id == module.id)
+                });
+                let target = introduced.next();
+                if introduced.next().is_some() {
+                    return Err(corrupt("authored migration target is ambiguous"));
+                }
+                target
+            };
             let Some(next_module) = next_module else {
                 if binding_has_retained_data_with_authority(prior, pinned_graph_root, &authority)? {
                     return Err(corrupt("module removal would orphan retained data"));

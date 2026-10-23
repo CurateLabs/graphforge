@@ -405,6 +405,7 @@ fn pending_regeneration_authorization_is_not_evictable() {
     let binding = RegenerationBinding {
         operation_uuid: Uuid::now_v7(),
         old_id: old.id.clone(),
+        refusal: receipt(old.clone(), version, false),
         replacement: ItemIdRegeneration {
             id: ItemId::parse_reference(NEW).unwrap().as_str().into(),
             version_uuid: Uuid::now_v7(),

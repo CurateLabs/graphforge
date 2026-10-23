@@ -240,6 +240,18 @@ fn materialize_semantic_migration_selected(
             let new_route = authenticated_old_route
                 .and_then(|route| route_moves.get(route))
                 .cloned();
+            if new_route.is_some() {
+                for key in ["graphforge.entity_type", "graphforge.rel_type"] {
+                    if schema_metadata
+                        .get(key)
+                        .is_some_and(|owner| Some(owner.as_str()) != authenticated_old_route)
+                    {
+                        return Err(corrupt(
+                            "migration Parquet owner metadata disagrees with route",
+                        ));
+                    }
+                }
+            }
             let renames = authenticated_old_route.and_then(|route| property_renames.get(route));
             let target_route = new_route.as_deref().or(authenticated_old_route);
             let fields = builder

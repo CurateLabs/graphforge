@@ -216,11 +216,15 @@ fn retain_receipts(
 }
 
 fn validate_document(document: &Document) -> Result<(), GfError> {
-    if document.format != FORMAT || document.receipts.len() > MAX_ID_TAKEN_ITEMS {
+    if document.format != FORMAT
+        || document.receipts.len() > MAX_ID_TAKEN_ITEMS
+        || document.regenerations.len() > MAX_ID_TAKEN_ITEMS
+    {
         return Err(invalid("local publish refusal document is invalid"));
     }
     let mut bound_ids = BTreeSet::new();
     for (operation, binding) in &document.regenerations {
+        binding.refusal.item.validate().map_err(storage)?;
         let old = parse_id(&binding.old_id)?;
         let new = parse_id(&binding.replacement.id)?;
         if operation.is_nil()
@@ -228,13 +232,18 @@ fn validate_document(document: &Document) -> Result<(), GfError> {
             || binding.source_generation.is_nil()
             || binding.branch_uuid.is_nil()
             || binding.source_version.is_nil()
+            || binding.refusal.refused_version_uuid.is_nil()
+            || binding.refusal.item.id != binding.old_id
+            || binding.refusal.item.kind != old.kind()
+            || binding.refusal.item.publish_as_owner == Some(true)
+            || binding.refusal.regenerated.is_some()
             || binding.replacement.version_uuid.is_nil()
             || old.kind() != new.kind()
             || old == new
             || old.as_str() != binding.old_id
             || new.as_str() != binding.replacement.id
             || !document.receipts.contains_key(old.as_str())
-            || !bound_ids.insert(&binding.old_id)
+            || !bound_ids.insert((&binding.old_id, binding.source_generation))
         {
             return Err(invalid("local ID regeneration binding is invalid"));
         }
@@ -277,10 +286,6 @@ impl GraphForge {
                 .receipts
                 .get(&item.id)
                 .is_some_and(|receipt| receipt.regenerated.is_some())
-                || document
-                    .regenerations
-                    .values()
-                    .any(|binding| binding.old_id == item.id)
             {
                 continue;
             }
