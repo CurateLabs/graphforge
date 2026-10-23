@@ -8,7 +8,7 @@ import { dirname, join } from "node:path";
 import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { Miniflare } from "miniflare";
-import { dist, readJson, readText } from "./support.mjs";
+import { dist, entry, readJson, readText } from "./support.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const fixtureDir = ["tests", "fixtures", "hub", "generated", "v1"];
@@ -65,7 +65,7 @@ const modules = [
   {
     type: "ESModule",
     path: SPECIFIER,
-    contents: readFileSync(join(here, "..", "index.js"), "utf8"),
+    contents: readFileSync(entry, "utf8"),
   },
   {
     type: "ESModule",
