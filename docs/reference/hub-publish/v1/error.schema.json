@@ -78,7 +78,10 @@
           "owner": {
             "maxLength": 100,
             "minLength": 1,
-            "pattern": "^[a-z0-9][a-z0-9._-]*$",
+            "not": {
+              "pattern": "\\.\\.|[^a-z0-9._-]"
+            },
+            "pattern": "^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$",
             "type": "string"
           },
           "publish_as_owner": {

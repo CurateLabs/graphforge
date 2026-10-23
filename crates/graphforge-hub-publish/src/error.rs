@@ -363,4 +363,30 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn owner_handles_use_discovery_slug_boundaries() {
+        let mut item = IdTakenItem {
+            kind: ItemKind::OntologyModule,
+            id: "ont_aaaaaaaaaaaaaaaa".into(),
+            owner: None,
+            publish_as_owner: None,
+        };
+        for owner in ["a", "org-name", "org_name", "org.name"] {
+            item.owner = Some(owner.into());
+            item.validate().unwrap();
+        }
+        for owner in [
+            "org-",
+            "org_",
+            "org.",
+            "org..name",
+            ".org",
+            "Org",
+            "org\nSECRET",
+        ] {
+            item.owner = Some(owner.into());
+            assert!(item.validate().is_err(), "{owner}");
+        }
+    }
 }

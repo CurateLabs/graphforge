@@ -75,7 +75,7 @@ pub(super) fn check(
             IdTakenItem {
                 kind,
                 id: id.to_string(),
-                owner: (visible || publish_as).then(|| claim.owner.clone()),
+                owner: visible.then(|| claim.owner.clone()),
                 publish_as_owner: publish_as.then_some(true),
             },
         );

@@ -66,11 +66,13 @@ fn verify_private_refusal_receipts(large_objects: bool) {
         adopt(&mut owner, id, "1");
     }
     create_branch(&mut owner, "main", current());
-    let hub = LoopbackHub::with_config(ReferenceHubConfig {
+    let mut config = ReferenceHubConfig {
         base_url: HUB.into(),
         large_objects,
         ..Default::default()
-    });
+    };
+    config.limits.preferred_chunk_bytes = large_objects.then_some(config.limits.max_chunk_bytes);
+    let hub = LoopbackHub::with_config(config);
     publish_ok(&hub, &owner, &on_ref("orgsecret/source", "main"))
         .result
         .unwrap();
@@ -83,7 +85,7 @@ fn verify_private_refusal_receipts(large_objects: bool) {
     let (_, version) = create_branch(&mut foreign, "main", current());
     let before = foreign.publication_content_identity().unwrap();
     let version_before = foreign.research_version_retention().unwrap().versions;
-    for (visible, publish_as) in [(false, false), (true, false), (true, true)] {
+    for (visible, publish_as) in [(false, false), (true, false), (true, true), (false, true)] {
         let credential = token(&hub, "alice/copy");
         for id in IDS {
             hub.hub
@@ -106,7 +108,11 @@ fn verify_private_refusal_receipts(large_objects: bool) {
         assert_eq!(message.contains("publish as orgsecret"), visible);
         assert_eq!(
             message.contains("you can publish as this organization"),
-            publish_as
+            publish_as && visible
+        );
+        assert_eq!(
+            message.contains("publish as the owning organization"),
+            publish_as && !visible
         );
         assert_eq!(crate::error_exit_code(&error.into()), 2);
         let state = foreign.publish_id_state().unwrap();

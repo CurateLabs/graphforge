@@ -1095,11 +1095,7 @@ fn apply_mutation(
             None
         }
         ResearchMutation::RecordPublishIdTaken { refusal, .. } => {
-            registry
-                .publish_ids
-                .id_taken
-                .insert(operation_uuid, refusal.clone());
-            None
+            publish_ids::record_refusal(registry, operation_uuid, refusal)?
         }
         ResearchMutation::SetTag {
             name, version_uuid, ..
@@ -1321,8 +1317,8 @@ pub fn publish_research_operation_with_mode(
             | ResearchMutation::ReleaseProposal { intent_sha256, .. }
             | ResearchMutation::UpdateBranch { intent_sha256, .. }
             | ResearchMutation::SetTag { intent_sha256, .. }
-            | ResearchMutation::SelectBranch { intent_sha256, .. } => Some(*intent_sha256),
-            ResearchMutation::RecordPublishIdTaken { intent_sha256, .. } => Some(*intent_sha256),
+            | ResearchMutation::SelectBranch { intent_sha256, .. }
+            | ResearchMutation::RecordPublishIdTaken { intent_sha256, .. } => Some(*intent_sha256),
             _ => None,
         },
         operation_uuid: request.operation_uuid,

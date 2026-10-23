@@ -6,7 +6,8 @@
 use graphforge_core::{GfError, ProjectErrorCode};
 use graphforge_hub_publish::PublishReceipt;
 use graphforge_storage::research_versions::{
-    ResearchMutation, ResearchOperation, ResearchOperationReceipt, ResearchRemoteBranch,
+    PublishIdState, ResearchMutation, ResearchOperation, ResearchOperationReceipt,
+    ResearchRemoteBranch,
 };
 use serde::{Deserialize, Serialize};
 use sha2::Digest as _;
@@ -102,9 +103,7 @@ fn conflict() -> GfError {
 
 impl GraphForge {
     /// Read authenticated project-local refusal receipts and regeneration relations.
-    pub fn publish_id_state(
-        &self,
-    ) -> Result<graphforge_storage::research_versions::PublishIdState, GfError> {
+    pub fn publish_id_state(&self) -> Result<PublishIdState, GfError> {
         Ok(self.research_version_retention()?.publish_ids)
     }
 
@@ -344,7 +343,7 @@ impl GraphForge {
             graphforge_storage::research_versions::read_research_registry(&generation)?;
         registry.remote_branches.clear();
         registry.receipts.clear();
-        registry.publish_ids = Default::default();
+        registry.publish_ids = PublishIdState::default();
         let mut digest = sha2::Sha256::new();
         digest.update(b"graphforge-publication-content/1");
         for participant in generation.participant_descriptors()? {

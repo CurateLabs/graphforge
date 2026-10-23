@@ -42,8 +42,12 @@ pub(super) fn cases() -> Vec<Case> {
         &mut RepoModel::default(),
     ));
     // Exact reuse did not transfer the claim to Alice.
-    let mut next = first.clone();
-    next.operation = operation(3002);
+    let mut next = Publication::new(
+        &owner,
+        operation(3002),
+        vec![Object::package("owner package v2")],
+    );
+    next.package_digest = digest_of('d');
     next.ontology = Some(inventory("2", 'd'));
     let mut model = RepoModel::default();
     model.advance(&first);
@@ -79,6 +83,7 @@ pub(super) fn cases() -> Vec<Case> {
         ("permanent-id-taken-owner-hidden", false, false),
         ("permanent-id-taken-owner-visible", true, false),
         ("permanent-id-taken-publish-as-organization", true, true),
+        ("permanent-id-taken-hidden-organization", false, true),
     ] {
         let (mut steps, _) = setup();
         for id in [MODULE, BRIDGE] {

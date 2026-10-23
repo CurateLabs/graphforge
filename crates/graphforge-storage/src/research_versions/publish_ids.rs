@@ -172,6 +172,20 @@ pub(super) fn preserve(before: &PublishIdState, after: &PublishIdState) -> Resul
     Ok(())
 }
 
+/// Admit local refusal tracking without creating an immutable Version.
+pub(super) fn record_refusal(
+    registry: &mut ResearchRegistry,
+    operation: Uuid,
+    refusal: &PublishIdTakenReceipt,
+) -> Result<Option<Uuid>, GfError> {
+    refusal.validate()?;
+    registry
+        .publish_ids
+        .id_taken
+        .insert(operation, refusal.clone());
+    Ok(None)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -37,6 +37,7 @@ use publication::{
 };
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write as _;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -413,13 +414,9 @@ pub(crate) fn publish_and_report(
         },
     );
     if let Some(refusal) = refusal {
-        let operation_uuid = Uuid::new_v5(
-            &refusal.publish_operation_uuid,
-            &serde_json::to_vec(&refusal).map_err(|_| derivation("refusal cannot be encoded"))?,
-        );
         graph.record_publish_id_taken(
             &graphforge_api::RecordPublishIdTakenRequest {
-                operation_uuid,
+                operation_uuid: Uuid::now_v7(),
                 expected_generation_uuid: graph.committed_generation_identity()?.generation_uuid,
                 refusal,
             },
@@ -713,19 +710,21 @@ fn render_id_taken(
 ) -> GfError {
     let mut detail = code_detail(HubPublishErrorCode::IdTaken).to_owned();
     for item in items {
-        detail.push_str(&format!("; {}: ", item.id));
+        write!(&mut detail, "; {}: ", item.id).expect("string write");
         if let Some(relation) = state
             .regenerations
             .values()
             .find(|relation| relation.old_id == item.id && relation.kind == item.kind)
         {
-            detail.push_str(&format!(
+            write!(
+                &mut detail,
                 "publish from the regenerated Version {} (new ID {})",
                 relation.version_uuid, relation.new_id
-            ));
+            )
+            .expect("string write");
         } else {
             if let Some(owner) = &item.owner {
-                detail.push_str(&format!("publish as {owner}"));
+                write!(&mut detail, "publish as {owner}").expect("string write");
                 if item.publish_as_owner == Some(true) {
                     detail.push_str(" (you can publish as this organization)");
                 }
@@ -735,7 +734,8 @@ fn render_id_taken(
             } else {
                 detail.push_str("publish as the owner, or ");
             }
-            detail.push_str(&format!("run `gf ontology regenerate-id {}`", item.id));
+            write!(&mut detail, "run `gf ontology regenerate-id {}`", item.id)
+                .expect("string write");
         }
     }
     if items.is_empty() {

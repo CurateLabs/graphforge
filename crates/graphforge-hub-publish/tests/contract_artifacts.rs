@@ -1881,6 +1881,8 @@ fn upload_status_schema() -> Value {
 }
 
 fn error_schema() -> Value {
+    let mut owner = defs()["slug"].clone();
+    owner["not"] = json!({"pattern": r"\.\.|[^a-z0-9._-]"});
     schema(
         "error",
         json!({
@@ -1895,7 +1897,7 @@ fn error_schema() -> Value {
                     "items":{"type":"object","additionalProperties":false,"required":["kind","id"],"properties":{
                         "kind":{"enum":["ontology_module","bridge_set"]},
                         "id":{"type":"string","pattern":"^(ont|brg)_[0-9abcdefghjkmnpqrstvwxyz]{16}$"},
-                        "owner":{"type":"string","minLength":1,"maxLength":100,"pattern":"^[a-z0-9][a-z0-9._-]*$"},
+                        "owner":owner,
                         "publish_as_owner":{"const":true}
                     },"allOf":[{"if":{"properties":{"kind":{"const":"ontology_module"}}},"then":{"properties":{"id":{"pattern":"^ont_"}}},"else":{"properties":{"id":{"pattern":"^brg_"}}}}]}}
             },
