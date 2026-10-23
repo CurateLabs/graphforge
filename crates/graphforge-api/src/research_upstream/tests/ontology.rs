@@ -138,6 +138,8 @@ fn typed_updates_require_reviewed_ontology_and_keep_invalid_retention_unresolved
             .any(|key| key.0.starts_with("ontology"))
     );
     let mut update = UpdateResearchBranchRequest {
+        label: None,
+        description: None,
         author: None,
         committer: None,
         operation_uuid: Uuid::now_v7(),
@@ -214,6 +216,8 @@ fn typed_updates_require_reviewed_ontology_and_keep_invalid_retention_unresolved
     graph
         .execute_research_branch(
             &ExecuteResearchBranchRequest {
+                label: None,
+                description: None,
                 author: None,
                 committer: None,
                 operation_uuid: Uuid::now_v7(),

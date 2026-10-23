@@ -136,6 +136,7 @@ fn branch_write_paths_keep_the_whole_map_field_bound() {
 
 fn large_branch_request(graph: &GraphForge) -> CreateResearchBranchRequest {
     CreateResearchBranchRequest {
+        description: None,
         author: None,
         committer: None,
         operation_uuid: Uuid::now_v7(),

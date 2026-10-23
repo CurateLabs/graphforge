@@ -1507,7 +1507,7 @@ impl StagedProjectGeneration {
             composite_validation,
             &crate::research_versions::ResearchPublicationWitness {
                 origin: origin_witness,
-                fetch: None,
+                ..Default::default()
             },
         )
     }

@@ -875,6 +875,7 @@ fn private_clone_authenticates_metadata_and_objects_then_imports_and_reopens_fix
     crate::hub_clone::run_clone_with(
         &transport,
         crate::hub_clone::CloneArgs {
+            tag: None,
             repository: "opendata/openalex".into(),
             hub: None,
             token_env: None,
@@ -1168,6 +1169,7 @@ fn moved_private_transport(
 }
 fn moved_clone_args(destination: &std::path::Path) -> crate::hub_clone::CloneArgs {
     crate::hub_clone::CloneArgs {
+        tag: None,
         repository: "opendata/openalex".into(),
         hub: None,
         token_env: None,

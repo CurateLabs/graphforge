@@ -27,8 +27,8 @@ production_source = runpy.run_path(str(Path(__file__).with_name("native_sources.
     "production_source"
 ]
 PYO3_SOURCE = ROOT / "crates/graphforge-bindings-py/src/lib.rs"
-EXPECTED_RUST_DIGEST = "ba3e90af4a1bc4926439c8625e1ee8f287614fcb6444df0b72efaeb689796a77"
-EXPECTED_RELEASE_DIGEST = "4b25765db6b59d2efa30c9647ae7b8f00577543a65ccb6b80057fec6e59a52ae"
+EXPECTED_RUST_DIGEST = "7040d200cd440c078f4d95c0236fe4eb64e0be66de5795b32995d1d4673cee84"
+EXPECTED_RELEASE_DIGEST = "a15b1aeb03af0f9763bf4f8bd72dce1934c61c9a5c01ed5706073ef0c9e86b12"
 
 PYTHON_ONLY_METHODS = frozenset(
     {
@@ -290,7 +290,7 @@ def _classification_report() -> dict[str, object]:
         for group in manifest["method_evidence_groups"].values()
         for method_id in group["ids"]
     }
-    assert len(release_methods) == 359
+    assert len(release_methods) == 364
     assert _digest(release_methods) == EXPECTED_RELEASE_DIGEST
     assert set(EVIDENCE) == set(manifest["method_evidence_groups"])
 
@@ -410,7 +410,10 @@ def _classification_report() -> dict[str, object]:
         elif rust_id == "GraphForge.fetch_research_branch":
             classification = "not-exposed"
             reason = "verified remote fetch is native filesystem and discovery admission"
-        elif rust_id == "GraphForge.continue_imported_research_branch":
+        elif rust_id in {
+            "GraphForge.continue_imported_research_branch",
+            "GraphForge.continue_imported_research_tags",
+        }:
             classification = "not-exposed"
             reason = "verified discovery activation is owned by the native CLI import boundary"
         elif rust_id == "GraphForge.publication_payload_bytes":

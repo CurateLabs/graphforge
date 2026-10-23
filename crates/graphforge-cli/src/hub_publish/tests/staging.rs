@@ -157,6 +157,8 @@ fn publication_staging_counts_historical_only_graph_payload() {
         .graph
         .execute_research_branch(
             &ExecuteResearchBranchRequest {
+                label: None,
+                description: None,
                 author: None,
                 committer: None,
                 operation_uuid: Uuid::now_v7(),

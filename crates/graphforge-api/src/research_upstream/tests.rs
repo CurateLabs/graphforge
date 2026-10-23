@@ -16,6 +16,7 @@ fn preview_is_pinned_read_only_and_requires_explicit_conflict_selection() {
     let current = |g: &GraphForge| g.generation_for_read().unwrap().generation_uuid();
     let cancel = CancellationToken::new();
     let branch = CreateResearchBranchRequest {
+        description: None,
         author: None,
         committer: None,
         operation_uuid: Uuid::now_v7(),
@@ -28,7 +29,7 @@ fn preview_is_pinned_read_only_and_requires_explicit_conflict_selection() {
         },
         creator_uuid: Uuid::now_v7(),
         created_at: 1,
-        label: "Selective study".into(),
+        label: "Selective-study".into(),
     };
     graph.create_research_branch(&branch, &cancel).unwrap();
     graph
@@ -58,6 +59,8 @@ fn preview_is_pinned_read_only_and_requires_explicit_conflict_selection() {
         digest
     );
     let mut update = UpdateResearchBranchRequest {
+        label: None,
+        description: None,
         author: None,
         committer: None,
         operation_uuid: Uuid::now_v7(),
@@ -76,6 +79,8 @@ fn preview_is_pinned_read_only_and_requires_explicit_conflict_selection() {
     graph
         .execute_research_branch(
             &ExecuteResearchBranchRequest {
+                label: None,
+                description: None,
                 author: None,
                 committer: None,
                 operation_uuid: Uuid::now_v7(),
@@ -242,6 +247,7 @@ fn preference_only_source_update_is_visible_without_changing_immutable_source() 
     let current = |g: &GraphForge| g.generation_for_read().unwrap().generation_uuid();
     let cancel = CancellationToken::new();
     let branch = CreateResearchBranchRequest {
+        description: None,
         author: None,
         committer: None,
         operation_uuid: Uuid::now_v7(),
@@ -254,10 +260,11 @@ fn preference_only_source_update_is_visible_without_changing_immutable_source() 
         },
         creator_uuid: Uuid::now_v7(),
         created_at: 1,
-        label: "Source review".into(),
+        label: "Source-review".into(),
     };
     graph.create_research_branch(&branch, &cancel).unwrap();
     let child = CreateResearchBranchRequest {
+        description: None,
         author: None,
         committer: None,
         operation_uuid: Uuid::now_v7(),
@@ -269,7 +276,7 @@ fn preference_only_source_update_is_visible_without_changing_immutable_source() 
         },
         creator_uuid: Uuid::now_v7(),
         created_at: 2,
-        label: "Nested source review".into(),
+        label: "Nested-source-review".into(),
     };
     graph.create_research_branch(&child, &cancel).unwrap();
     let unselected_artifact = Uuid::now_v7();
@@ -339,6 +346,8 @@ fn preference_only_source_update_is_visible_without_changing_immutable_source() 
     assert_eq!(preferences.events[0].artifact_uuid, first);
     drop(old);
     let mut update = UpdateResearchBranchRequest {
+        label: None,
+        description: None,
         author: None,
         committer: None,
         operation_uuid: Uuid::now_v7(),
@@ -462,6 +471,8 @@ fn preference_only_source_update_is_visible_without_changing_immutable_source() 
         })
         .collect();
     let child_update = UpdateResearchBranchRequest {
+        label: None,
+        description: None,
         author: None,
         committer: None,
         operation_uuid: Uuid::now_v7(),

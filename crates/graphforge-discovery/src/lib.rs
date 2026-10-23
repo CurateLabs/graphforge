@@ -37,9 +37,9 @@ pub use item_id::{
     ItemKind, has_item_id_shape,
 };
 pub use lineage::{
-    LineageBoundaryAnchor, LineageBranch, LineageForkOrigin, LineageProposal, LineageVersion,
-    RESEARCH_LINEAGE_CAPABILITY, RESEARCH_LINEAGE_FORMAT, RESEARCH_LINEAGE_MEDIA_TYPE,
-    ResearchLineage, ResearchLineageReference,
+    LineageBoundaryAnchor, LineageBranch, LineageForkOrigin, LineageProposal, LineageTag,
+    LineageVersion, RESEARCH_LINEAGE_CAPABILITY, RESEARCH_LINEAGE_FORMAT,
+    RESEARCH_LINEAGE_MEDIA_TYPE, ResearchLineage, ResearchLineageReference,
 };
 pub use summary::{
     ProjectSummary, SummaryCorpusSize, SummaryFacts, SummaryGeographicCoverage, SummaryMetadata,
@@ -1512,6 +1512,17 @@ fn validate_media_type(value: &str, limits: DiscoveryLimits) -> Result<(), Disco
         return Err(malformed());
     }
     Ok(())
+}
+
+/// Check `value` against the discovery ref grammar with the default limits.
+///
+/// A research Branch label is a ref (ADR 0061), so Branch creation and publish
+/// share this one grammar with every discovery document.
+///
+/// # Errors
+/// Returns the discovery error naming the violated bound or grammar rule.
+pub fn check_ref_name(value: &str) -> Result<(), DiscoveryError> {
+    validate_ref_name(value, DiscoveryLimits::default())
 }
 
 pub(crate) fn validate_ref_name(

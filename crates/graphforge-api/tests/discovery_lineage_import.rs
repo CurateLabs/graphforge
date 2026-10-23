@@ -18,6 +18,7 @@ fn distinct_imports_reopen_with_identical_version_lineage() {
     graph
         .create_research_branch(
             &CreateResearchBranchRequest {
+                description: None,
                 author: None,
                 committer: None,
                 operation_uuid: Uuid::now_v7(),
@@ -46,6 +47,8 @@ fn distinct_imports_reopen_with_identical_version_lineage() {
     graph
         .execute_research_branch(
             &ExecuteResearchBranchRequest {
+                label: None,
+                description: None,
                 author: None,
                 committer: None,
                 operation_uuid: Uuid::now_v7(),

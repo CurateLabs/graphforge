@@ -34,6 +34,8 @@ fn edit(graph: &mut GraphForge, branch: Uuid, query: &str) -> Uuid {
     graph
         .execute_research_branch(
             &ExecuteResearchBranchRequest {
+                label: None,
+                description: None,
                 author: None,
                 committer: None,
                 operation_uuid: Uuid::now_v7(),
@@ -61,6 +63,7 @@ fn frozen_submission_survives_continued_branch_edits_and_retains_only_selected_f
     graph
         .create_research_branch(
             &CreateResearchBranchRequest {
+                description: None,
                 author: None,
                 committer: None,
                 operation_uuid: Uuid::now_v7(),

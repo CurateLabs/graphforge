@@ -10,6 +10,33 @@ use sha2::Digest;
 use std::collections::BTreeSet;
 use uuid::Uuid;
 
+/// A Branch label is a ref (ADR 0061): clone, publish, push and pull all name
+/// the Branch by it.
+fn check_label(label: &str) -> Result<(), GfError> {
+    graphforge_discovery::check_ref_name(label).map_err(|_| {
+        GfError::Validation(
+            "GF_RESEARCH_BRANCH_LABEL_INVALID: a Branch label must be a valid ref name".into(),
+        )
+    })
+}
+
+fn require_unused_label(
+    registry: &graphforge_storage::research_versions::ResearchRegistry,
+    label: &str,
+) -> Result<(), GfError> {
+    if registry
+        .branches
+        .values()
+        .any(|branch| branch.label == label)
+    {
+        return Err(GfError::Validation(
+            "GF_RESEARCH_BRANCH_LABEL_TAKEN: another Branch of this Project already has this label"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
 struct Source {
     version: Uuid,
     generation: Uuid,
@@ -28,13 +55,12 @@ impl GraphForge {
         if request.branch_uuid.is_nil()
             || request.version_uuid.is_nil()
             || request.creator_uuid.is_nil()
-            || request.label.is_empty()
-            || request.label.len() > 4096
         {
             return Err(GfError::Validation(
-                "Branch identity, creator or label is invalid".into(),
+                "Branch identity or creator is invalid".into(),
             ));
         }
+        check_label(&request.label)?;
         let command = publication::begin(
             self,
             request.operation_uuid,
@@ -45,6 +71,7 @@ impl GraphForge {
         if let Some(receipt) = command.replay(self)? {
             return Ok(receipt);
         }
+        require_unused_label(&command.registry, &request.label)?;
         let selected = super::selection::authenticate(self, &request.source, cancellation)?;
         let source = resolve_source(
             &command,
@@ -61,7 +88,7 @@ impl GraphForge {
             selection: None,
             required_versions: BTreeSet::new(),
             label: Some(request.label.clone()),
-            description: None,
+            description: request.description.clone(),
             created_at: request.created_at,
             evidence: source.evidence,
         };

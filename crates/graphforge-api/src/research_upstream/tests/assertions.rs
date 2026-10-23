@@ -70,6 +70,8 @@ fn individual_assertion_adoption_preserves_unselected_claims_and_graph_values() 
     };
     let review = preview::load(&graph, &request, &cancel).unwrap();
     let update = UpdateResearchBranchRequest {
+        label: None,
+        description: None,
         author: None,
         committer: None,
         operation_uuid: Uuid::now_v7(),
@@ -165,6 +167,8 @@ fn individual_assertion_adoption_preserves_unselected_claims_and_graph_values() 
         .unwrap();
     assert_eq!(changed_status.change, "conflict");
     let mut update = UpdateResearchBranchRequest {
+        label: None,
+        description: None,
         author: None,
         committer: None,
         operation_uuid: Uuid::now_v7(),

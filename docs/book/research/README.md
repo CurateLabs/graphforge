@@ -25,3 +25,11 @@ query does not establish valid interpretation, model quality, or usability.
 Current signatures live in the [API reference](../../reference/api.md).
 Measurement results belong on their owning issue; these notes describe methods
 and limitations rather than offering unqualified latency or quality guarantees.
+
+## Research history from the terminal
+
+Versions are commits, Branches are refs, and a tag names a Version. The terminal
+workflow (`gf branch`, `gf commit`, `gf tag`, `gf push`, `gf pull`, `gf log`,
+`gf status`, `gf switch`) and the one meaning of `--ref` are described in
+[Share with `gf`](../../guide/research-journey.md#share-with-gf); the decision is
+[ADR 0061](../../adr/0061-research-porcelain-and-ref-naming.md).

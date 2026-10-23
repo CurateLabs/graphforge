@@ -9,6 +9,9 @@ whole GraphForge vocabulary to obtain a useful result.
 | Advanced         | [Worked examples](use-cases/README.md), [research and evaluation notes](research/README.md)                                                                                          | Basic Python, database, and terminal skills                                                     |
 | Expert reference | [Architecture](architecture/overview.md), [engineering](../engineering/README.md), [API reference](../reference/api.md)                                                              | Implementers investigating exact contracts, engine design, or contributor workflows             |
 
+To keep research history and share it, see [Share with `gf`](../guide/research-journey.md#share-with-gf):
+`gf branch`, `gf commit`, `gf tag`, `gf push`, `gf pull`, `gf log`.
+
 Advanced examples explain the GraphForge concepts they introduce. Optional
 research history, collaboration, ontology, and external decision validation
 are not prerequisites for Basic work. Evaluation notes separate a valid graph

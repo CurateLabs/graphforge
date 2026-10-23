@@ -785,6 +785,7 @@ fn research_publication(
             }),
         }],
         proposals: vec![],
+        tags: vec![],
         extensions,
     };
     publication.objects.push(research_package);

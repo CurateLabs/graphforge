@@ -10,6 +10,7 @@ fn current(g: &GraphForge) -> Uuid {
 }
 fn branch(g: &mut GraphForge) -> Uuid {
     let r = CreateResearchBranchRequest {
+        description: None,
         author: None,
         committer: None,
         operation_uuid: Uuid::now_v7(),
@@ -22,7 +23,7 @@ fn branch(g: &mut GraphForge) -> Uuid {
         },
         creator_uuid: Uuid::now_v7(),
         created_at: 1,
-        label: "Study".into(),
+        label: format!("study-{}", Uuid::now_v7()),
     };
     g.create_research_branch(&r, &CancellationToken::new())
         .unwrap();
@@ -30,6 +31,8 @@ fn branch(g: &mut GraphForge) -> Uuid {
 }
 fn edit(g: &mut GraphForge, id: Uuid, query: &str) -> Uuid {
     let r = ExecuteResearchBranchRequest {
+        label: None,
+        description: None,
         author: None,
         committer: None,
         operation_uuid: Uuid::now_v7(),

@@ -12,6 +12,7 @@ fn legacy_local_reference_remains_local_after_bring() {
     g.execute("CREATE (:Item)").unwrap();
     let token = CancellationToken::new();
     let b = CreateResearchBranchRequest {
+        description: None,
         author: None,
         committer: None,
         operation_uuid: Uuid::now_v7(),

@@ -5,6 +5,7 @@ fn current(graph: &GraphForge) -> Uuid {
 pub(super) fn prepare(graph: &mut GraphForge) -> UpdateResearchBranchRequest {
     graph.execute("CREATE (:Item {x:0,y:0})").unwrap();
     let branch = CreateResearchBranchRequest {
+        description: None,
         author: None,
         committer: None,
         operation_uuid: Uuid::now_v7(),
@@ -17,7 +18,7 @@ pub(super) fn prepare(graph: &mut GraphForge) -> UpdateResearchBranchRequest {
         },
         creator_uuid: Uuid::now_v7(),
         created_at: 1,
-        label: "Recovered study".into(),
+        label: "Recovered-study".into(),
     };
     graph
         .create_research_branch(&branch, &CancellationToken::new())
@@ -35,6 +36,8 @@ pub(super) fn prepare(graph: &mut GraphForge) -> UpdateResearchBranchRequest {
         .find(|row| row.key.2 == "property:x")
         .unwrap();
     UpdateResearchBranchRequest {
+        label: None,
+        description: None,
         author: None,
         committer: None,
         operation_uuid: Uuid::now_v7(),

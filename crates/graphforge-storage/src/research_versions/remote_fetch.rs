@@ -22,6 +22,11 @@ pub struct ResearchRemoteFetchBinding {
     pub package_sha256: [u8; 32],
     /// Verified downloaded transport object identity from the bound discovery inventory.
     pub object_sha256: [u8; 32],
+    /// Tags the verified lineage serves on Versions this fetch admits. They are
+    /// installed by the same publication as the admission, so a fetch never leaves
+    /// them half applied (ADR 0061).
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub tags: std::collections::BTreeMap<String, Uuid>,
 }
 
 /// Native fetch request witness, reconstructed from an admitted immutable archive.
@@ -228,6 +233,9 @@ pub(super) fn apply(
         .interchange
         .entry(reference.head_version_uuid)
         .or_insert_with(|| *fetch.archive.clone());
+    for (name, target) in &fetch.binding.tags {
+        super::local_state::install_served_tag(registry, name, *target)?;
+    }
     registry
         .remote_branches
         .insert(reference.key()?, reference.clone());
@@ -241,16 +249,36 @@ pub(super) fn preserve(
     parent: &crate::ResolvedProjectGeneration,
     candidate_generation: Uuid,
     witness: Option<&ResearchRemoteBranchFetch>,
+    published: Option<&super::ResearchRemoteBranch>,
 ) -> Result<(), GfError> {
     let refreshed = witness
         .map(|fetch| fetch.binding.reference.key())
         .transpose()?;
+    let recorded = published
+        .map(super::ResearchRemoteBranch::key)
+        .transpose()?;
     for (key, reference) in &before.remote_branches {
-        if Some(key) != refreshed.as_ref() && after.remote_branches.get(key) != Some(reference) {
+        if Some(key) != refreshed.as_ref()
+            && Some(key) != recorded.as_ref()
+            && after.remote_branches.get(key) != Some(reference)
+        {
             return Err(invalid(
                 "publication cannot rewrite remote Branch citations",
             ));
         }
+    }
+    if let (Some(reference), Some(key)) = (published, &recorded)
+        && (after.remote_branches.get(key) != Some(reference)
+            || before.heads != after.heads
+            || before.branches != after.branches
+            || after
+                .remote_branches
+                .keys()
+                .any(|other| other != key && !before.remote_branches.contains_key(other)))
+    {
+        return Err(invalid(
+            "a published-head record changed local authority or another citation",
+        ));
     }
     if let Some(fetch) = witness {
         fetch.validate_identity(before, fetch.binding.reference.project_uuid)?;
@@ -271,6 +299,7 @@ pub(super) fn preserve(
             || after.remote_branches.keys().any(|key| {
                 !before.remote_branches.contains_key(key) && Some(key) != refreshed.as_ref()
             })
+            || !tags_preserved(&before.tags, &after.tags, &fetch.binding.tags)
         {
             return Err(invalid(
                 "fetch changed local authority or differs from its native receipt",
@@ -278,6 +307,58 @@ pub(super) fn preserve(
         }
     }
     Ok(())
+}
+
+/// A fetch leaves every existing tag as it was and adds exactly the tags its binding
+/// names: none may disappear, change, or appear without the binding.
+fn tags_preserved(
+    before: &std::collections::BTreeMap<String, Uuid>,
+    after: &std::collections::BTreeMap<String, Uuid>,
+    installed: &std::collections::BTreeMap<String, Uuid>,
+) -> bool {
+    let mut expected = before.clone();
+    for (name, target) in installed {
+        if *expected.entry(name.clone()).or_insert(*target) != *target {
+            return false;
+        }
+    }
+    *after == expected
+}
+
+#[cfg(test)]
+mod tag_tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    fn tags(items: &[(&str, u128)]) -> BTreeMap<String, Uuid> {
+        items
+            .iter()
+            .map(|(name, id)| ((*name).to_owned(), Uuid::from_u128(*id)))
+            .collect()
+    }
+
+    #[test]
+    fn a_fetch_keeps_every_tag_and_adds_exactly_the_bound_ones() {
+        let keep = tags(&[("keep", 1)]);
+        let bound = tags(&[("served", 2)]);
+        let both = tags(&[("keep", 1), ("served", 2)]);
+        assert!(tags_preserved(&keep, &keep, &BTreeMap::new()));
+        assert!(tags_preserved(&keep, &both, &bound));
+        // An unrelated tag disappearing, with no bound tags at all.
+        assert!(!tags_preserved(&keep, &BTreeMap::new(), &BTreeMap::new()));
+        // ... or disappearing while the bound ones are added.
+        assert!(!tags_preserved(&keep, &bound, &bound));
+        // An existing tag moved, a tag added that no binding names, a bound tag missing.
+        assert!(!tags_preserved(
+            &keep,
+            &tags(&[("keep", 9)]),
+            &BTreeMap::new()
+        ));
+        assert!(!tags_preserved(&keep, &both, &BTreeMap::new()));
+        assert!(!tags_preserved(&keep, &keep, &bound));
+        // A bound tag that disagrees with an existing one is not an addition.
+        assert!(!tags_preserved(&keep, &keep, &tags(&[("keep", 5)])));
+    }
 }
 
 /// Copy only authenticated immutable research content while holding its native CAS lease.

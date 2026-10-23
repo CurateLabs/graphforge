@@ -270,6 +270,8 @@ pub use saved_queries::{
     SavedQuerySource,
 };
 #[cfg(feature = "research")]
+mod research_local_state;
+#[cfg(feature = "research")]
 mod research_versions;
 #[cfg(feature = "research")]
 pub use branches::{
@@ -278,12 +280,16 @@ pub use branches::{
     ResearchBranchView, RestoreResearchBranchRequest, SuppressResearchBranchAssertionRequest,
 };
 #[cfg(feature = "research")]
+pub use research_local_state::{
+    RecordResearchPublicationRequest, SelectResearchBranchRequest, SetResearchTagRequest,
+};
+#[cfg(feature = "research")]
 mod slices;
 #[cfg(feature = "research")]
 pub use graphforge_storage::research_versions::{
     ResearchMutation, ResearchOperation, ResearchOperationReceipt, ResearchRegistry,
-    ResearchRetentionRoot, ResearchRootKind, ResearchSignature, ResearchVersionProvenance,
-    ResearchVersionRecord,
+    ResearchRemoteBranch, ResearchRetentionRoot, ResearchRootKind, ResearchSignature,
+    ResearchVersionProvenance, ResearchVersionRecord,
 };
 #[cfg(feature = "research")]
 pub use research_versions::{PrepareResearchVersionRequest, ResearchVersionView};

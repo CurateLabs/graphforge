@@ -2576,6 +2576,7 @@ dependencies = [
  "graphforge-discovery",
  "graphforge-exec",
  "graphforge-filesystem",
+ "graphforge-hub-publish",
  "graphforge-io",
  "graphforge-ir",
  "graphforge-knowledge",
@@ -2664,6 +2665,7 @@ dependencies = [
  "serde_yaml_ng",
  "sha2 0.11.0",
  "tempfile",
+ "toml_edit",
  "ureq",
  "url",
  "uuid",
@@ -5572,6 +5574,7 @@ dependencies = [
  "indexmap",
  "toml_datetime",
  "toml_parser",
+ "toml_writer",
  "winnow",
 ]
 
@@ -5583,6 +5586,12 @@ checksum = "1d38ac1cf9b95face32296c0a3ede1fdc270627c9d9c02a7274dd6d960dc4d56"
 dependencies = [
  "winnow",
 ]
+
+[[package]]
+name = "toml_writer"
+version = "1.1.3+spec-1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "06bdbd8cfc056b8d2e2e85f29b56a3bdbecb527cef81eb39e3e7b98af4652770"
 
 [[package]]
 name = "tracing"

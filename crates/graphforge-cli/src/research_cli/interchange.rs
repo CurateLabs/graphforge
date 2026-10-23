@@ -85,6 +85,7 @@ mod tests {
         graph
             .create_research_branch(
                 &CreateResearchBranchRequest {
+                    description: None,
                     author: None,
                     committer: None,
                     operation_uuid: Uuid::now_v7(),
@@ -101,7 +102,7 @@ mod tests {
                     },
                     creator_uuid: Uuid::now_v7(),
                     created_at: 1,
-                    label: "CLI research".into(),
+                    label: "CLI-research".into(),
                 },
                 &CancellationToken::new(),
             )

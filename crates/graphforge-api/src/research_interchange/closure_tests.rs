@@ -83,6 +83,7 @@ fn selected_artifact_bytes_external_limits_and_ontology_survive_reopen() {
     graph
         .create_research_branch(
             &CreateResearchBranchRequest {
+                description: None,
                 author: None,
                 committer: None,
                 operation_uuid: Uuid::now_v7(),
@@ -95,7 +96,7 @@ fn selected_artifact_bytes_external_limits_and_ontology_survive_reopen() {
                 },
                 creator_uuid: Uuid::now_v7(),
                 created_at: 1,
-                label: "Evidence study".into(),
+                label: "Evidence-study".into(),
             },
             &CancellationToken::new(),
         )
@@ -270,6 +271,7 @@ pub(crate) fn evidence_bundle(
     graph
         .create_research_branch(
             &CreateResearchBranchRequest {
+                description: None,
                 author: None,
                 committer: None,
                 operation_uuid: Uuid::now_v7(),
@@ -282,7 +284,7 @@ pub(crate) fn evidence_bundle(
                 },
                 creator_uuid: Uuid::now_v7(),
                 created_at: 1,
-                label: "Evidence study".into(),
+                label: "Evidence-study".into(),
             },
             &CancellationToken::new(),
         )
@@ -641,6 +643,8 @@ pub(crate) fn install_ontology(graph: &mut GraphForge, branch_uuid: Uuid) -> Uui
     graph
         .change_research_branch_ontology(
             &ChangeResearchBranchOntologyRequest {
+                label: None,
+                description: None,
                 author: None,
                 committer: None,
                 operation_uuid: Uuid::now_v7(),

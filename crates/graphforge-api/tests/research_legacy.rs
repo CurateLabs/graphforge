@@ -161,6 +161,8 @@ fn research_v6_project_opens_and_its_first_research_write_upgrades_it() {
     assert_eq!(revision(&project), RESEARCH_LEGACY_VERSION);
     // The first research write commits on the v6 head and upgrades the Project.
     let edit = ExecuteResearchBranchRequest {
+        label: None,
+        description: None,
         operation_uuid: Uuid::now_v7(),
         expected_generation_uuid: current(&graph),
         branch_uuid: branch,
@@ -289,6 +291,8 @@ fn checkpoint_diff_spans_the_upgrade() {
     graph
         .execute_research_branch(
             &ExecuteResearchBranchRequest {
+                label: None,
+                description: None,
                 operation_uuid: Uuid::now_v7(),
                 expected_generation_uuid: current(&graph),
                 branch_uuid: ids.uuid("branch_uuid"),

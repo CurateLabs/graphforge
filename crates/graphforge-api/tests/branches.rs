@@ -21,6 +21,7 @@ fn count(graph: &GraphForge, query: &str) -> i64 {
 }
 fn create(graph: &mut GraphForge, label: &str) -> CreateResearchBranchRequest {
     let request = CreateResearchBranchRequest {
+        description: None,
         author: None,
         committer: None,
         operation_uuid: Uuid::now_v7(),
@@ -42,6 +43,8 @@ fn create(graph: &mut GraphForge, label: &str) -> CreateResearchBranchRequest {
 }
 fn edit(graph: &mut GraphForge, branch_uuid: Uuid, query: &str) -> ExecuteResearchBranchRequest {
     let request = ExecuteResearchBranchRequest {
+        label: None,
+        description: None,
         author: None,
         committer: None,
         operation_uuid: Uuid::now_v7(),
@@ -302,6 +305,7 @@ fn slice_branch_preserves_selected_identity_without_parent_graph_membership() {
         frozen_ipc: frozen_character(&graph, version),
     };
     let request = CreateResearchBranchRequest {
+        description: None,
         author: None,
         committer: None,
         operation_uuid: Uuid::now_v7(),
@@ -311,7 +315,7 @@ fn slice_branch_preserves_selected_identity_without_parent_graph_membership() {
         source,
         creator_uuid: Uuid::now_v7(),
         created_at: 2,
-        label: "Selected character".into(),
+        label: "Selected-character".into(),
     };
     graph
         .create_research_branch(&request, &CancellationToken::new())
@@ -513,6 +517,7 @@ fn assertion_slice_branch_retains_only_selected_evidence_after_reopen() {
     }
     writer.finish().unwrap();
     let request = CreateResearchBranchRequest {
+        description: None,
         author: None,
         committer: None,
         operation_uuid: Uuid::now_v7(),
@@ -522,7 +527,7 @@ fn assertion_slice_branch_retains_only_selected_evidence_after_reopen() {
         source: BranchSource::Slice { frozen_ipc },
         creator_uuid: Uuid::now_v7(),
         created_at: 2,
-        label: "Selected assertion".into(),
+        label: "Selected-assertion".into(),
     };
     graph
         .create_research_branch(&request, &CancellationToken::new())
@@ -623,7 +628,7 @@ fn field_origins_and_contributions_survive_local_edits_and_slice_children() {
         .execute("CREATE (:Character {name:'Shared'})")
         .unwrap();
     let object = shared_uuid(&graph);
-    let parent = create(&mut graph, "parent branch");
+    let parent = create(&mut graph, "parent-branch");
     let baseline = graph
         .open_research_branch(parent.branch_uuid)
         .unwrap()
@@ -658,6 +663,7 @@ fn field_origins_and_contributions_survive_local_edits_and_slice_children() {
     );
     assert_eq!(changed[10], "local");
     let child = CreateResearchBranchRequest {
+        description: None,
         author: None,
         committer: None,
         operation_uuid: Uuid::now_v7(),
@@ -669,7 +675,7 @@ fn field_origins_and_contributions_survive_local_edits_and_slice_children() {
         },
         creator_uuid: Uuid::now_v7(),
         created_at: 4,
-        label: "Slice child".into(),
+        label: "Slice-child".into(),
     };
     graph
         .create_research_branch(&child, &CancellationToken::new())
@@ -746,6 +752,7 @@ fn source_only_slice_branch_has_empty_graph_and_selected_source_membership() {
     writer.write(&frozen.batches[0]).unwrap();
     writer.finish().unwrap();
     let request = CreateResearchBranchRequest {
+        description: None,
         author: None,
         committer: None,
         operation_uuid: Uuid::now_v7(),
@@ -755,7 +762,7 @@ fn source_only_slice_branch_has_empty_graph_and_selected_source_membership() {
         source: BranchSource::Slice { frozen_ipc },
         creator_uuid: Uuid::now_v7(),
         created_at: 2,
-        label: "Source only".into(),
+        label: "Source-only".into(),
     };
     graph
         .create_research_branch(&request, &CancellationToken::new())
@@ -830,6 +837,8 @@ fn local_composition_is_exact_and_does_not_change_parent_or_sibling() {
         .unwrap()
         .version_uuid();
     let request = ChangeResearchBranchOntologyRequest {
+        label: None,
+        description: None,
         author: None,
         committer: None,
         operation_uuid: Uuid::now_v7(),
@@ -895,6 +904,7 @@ fn reference_does_not_expand_but_bring_preserves_selected_uuid_and_origin() {
     let shared = shared_uuid(&graph);
     let base = capture(&mut graph);
     let branch = CreateResearchBranchRequest {
+        description: None,
         author: None,
         committer: None,
         operation_uuid: Uuid::now_v7(),
@@ -1065,6 +1075,7 @@ fn selected_branch_releases_large_parent_after_evolution_and_cleanup() {
         let source = capture(&mut graph);
         let source_record = graph.research_version(source).unwrap();
         let request = CreateResearchBranchRequest {
+            description: None,
             author: None,
             committer: None,
             operation_uuid: Uuid::now_v7(),
@@ -1076,7 +1087,7 @@ fn selected_branch_releases_large_parent_after_evolution_and_cleanup() {
             },
             creator_uuid: Uuid::now_v7(),
             created_at: 2,
-            label: "Fixed character".into(),
+            label: "Fixed-character".into(),
         };
         std::fs::write(
             directory.path().join("request.json"),
@@ -1312,6 +1323,7 @@ fn required_roles_survive_branch_and_historical_branch_version_creation() {
     }
     writer.finish().unwrap();
     let parent = CreateResearchBranchRequest {
+        description: None,
         author: None,
         committer: None,
         operation_uuid: Uuid::now_v7(),
@@ -1321,7 +1333,7 @@ fn required_roles_survive_branch_and_historical_branch_version_creation() {
         source: BranchSource::Slice { frozen_ipc },
         creator_uuid: Uuid::now_v7(),
         created_at: 2,
-        label: "Only edge active".into(),
+        label: "Only-edge-active".into(),
     };
     graph
         .create_research_branch(&parent, &CancellationToken::new())
@@ -1387,6 +1399,7 @@ fn required_roles_survive_branch_and_historical_branch_version_creation() {
         },
     ] {
         let child = CreateResearchBranchRequest {
+            description: None,
             author: None,
             committer: None,
             operation_uuid: Uuid::now_v7(),
@@ -1396,7 +1409,7 @@ fn required_roles_survive_branch_and_historical_branch_version_creation() {
             source,
             creator_uuid: Uuid::now_v7(),
             created_at: 3,
-            label: "Child preserves roles".into(),
+            label: format!("child-preserves-roles-{}", Uuid::now_v7()),
         };
         graph
             .create_research_branch(&child, &CancellationToken::new())
@@ -1419,6 +1432,7 @@ fn branch_cancel_stale_current_and_conflicting_retry_preserve_authority() {
     let mut graph = GraphForge::new(root.to_str()).unwrap();
     graph.execute("CREATE (:Story {name:'Original'})").unwrap();
     let create_request = CreateResearchBranchRequest {
+        description: None,
         author: None,
         committer: None,
         operation_uuid: Uuid::now_v7(),
@@ -1458,6 +1472,8 @@ fn branch_cancel_stale_current_and_conflicting_retry_preserve_authority() {
         .unwrap();
 
     let edit_request = ExecuteResearchBranchRequest {
+        label: None,
+        description: None,
         author: None,
         committer: None,
         operation_uuid: Uuid::now_v7(),
@@ -1520,7 +1536,7 @@ fn branch_cancel_stale_current_and_conflicting_retry_preserve_authority() {
             .is_err()
     );
     let mut conflicting_create = create_request.clone();
-    conflicting_create.label = "Different intent".into();
+    conflicting_create.label = "different-intent".into();
     assert_eq!(
         graph
             .create_research_branch(&conflicting_create, &CancellationToken::new())
@@ -1567,4 +1583,217 @@ fn branch_cancel_stale_current_and_conflicting_retry_preserve_authority() {
         ),
         2
     );
+}
+
+fn create_request(graph: &GraphForge, label: &str) -> CreateResearchBranchRequest {
+    CreateResearchBranchRequest {
+        description: None,
+        author: None,
+        committer: None,
+        operation_uuid: Uuid::now_v7(),
+        expected_generation_uuid: current(graph),
+        branch_uuid: Uuid::now_v7(),
+        version_uuid: Uuid::now_v7(),
+        source: BranchSource::Current {
+            origin_version_uuid: Uuid::now_v7(),
+            context_uuid: Uuid::now_v7(),
+        },
+        creator_uuid: Uuid::now_v7(),
+        created_at: 1,
+        label: label.into(),
+    }
+}
+
+#[test]
+fn branch_label_must_be_a_valid_unique_ref() {
+    let root = tempfile::tempdir().unwrap();
+    let mut graph = GraphForge::new(root.path().join("project").to_str()).unwrap();
+    graph.execute("CREATE (:Item {score:0})").unwrap();
+    let too_long = "x".repeat(4097);
+    for label in [
+        "",
+        "has space",
+        "a:b",
+        "a//b",
+        "/leading",
+        "trailing/",
+        "a..b",
+        "a?b",
+        "a#b",
+        "a~b",
+        "a^b",
+        "a\\b",
+        "control\u{1}",
+        too_long.as_str(),
+    ] {
+        let request = create_request(&graph, label);
+        let error = graph
+            .create_research_branch(&request, &CancellationToken::new())
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("GF_RESEARCH_BRANCH_LABEL_INVALID"),
+            "{label:?}: {error}"
+        );
+    }
+    assert!(
+        graph
+            .research_version_retention()
+            .unwrap()
+            .branches
+            .is_empty()
+    );
+
+    let first = create_request(&graph, "feature/score");
+    graph
+        .create_research_branch(&first, &CancellationToken::new())
+        .unwrap();
+    let second = create_request(&graph, "feature/score");
+    let error = graph
+        .create_research_branch(&second, &CancellationToken::new())
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("GF_RESEARCH_BRANCH_LABEL_TAKEN"),
+        "{error}"
+    );
+    // An exact replay of the accepted request is still its receipt, not a clash.
+    graph
+        .create_research_branch(&first, &CancellationToken::new())
+        .unwrap();
+    assert_eq!(
+        graph.research_version_retention().unwrap().branches.len(),
+        1
+    );
+}
+
+#[test]
+fn current_branch_and_tags_persist_through_the_native_operations() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("project");
+    let mut graph = GraphForge::new(path.to_str()).unwrap();
+    graph.execute("CREATE (:Item {score:0})").unwrap();
+    let main = create(&mut graph, "main");
+    let feature = create(&mut graph, "feature/score");
+    let head = graph.research_version_retention().unwrap().heads[&feature.branch_uuid];
+
+    let select = SelectResearchBranchRequest {
+        operation_uuid: Uuid::now_v7(),
+        expected_generation_uuid: current(&graph),
+        branch_uuid: main.branch_uuid,
+    };
+    let receipt = graph
+        .select_research_branch(&select, &CancellationToken::new())
+        .unwrap();
+    assert_eq!(
+        graph
+            .select_research_branch(&select, &CancellationToken::new())
+            .unwrap(),
+        receipt
+    );
+    let unknown = SelectResearchBranchRequest {
+        operation_uuid: Uuid::now_v7(),
+        expected_generation_uuid: current(&graph),
+        branch_uuid: Uuid::now_v7(),
+    };
+    graph
+        .select_research_branch(&unknown, &CancellationToken::new())
+        .unwrap_err();
+
+    let tag = |graph: &GraphForge, name: &str, version| SetResearchTagRequest {
+        operation_uuid: Uuid::now_v7(),
+        expected_generation_uuid: current(graph),
+        name: name.into(),
+        version_uuid: version,
+    };
+    let invalid = tag(&graph, "not a ref", Some(head));
+    graph
+        .set_research_tag(&invalid, &CancellationToken::new())
+        .unwrap_err();
+    let valid = tag(&graph, "release/v1", Some(head));
+    graph
+        .set_research_tag(&valid, &CancellationToken::new())
+        .unwrap();
+
+    drop(graph);
+    let reopened = GraphForge::new(path.to_str()).unwrap();
+    let registry = reopened.research_version_retention().unwrap();
+    assert_eq!(registry.current_branch, Some(main.branch_uuid));
+    assert_eq!(registry.tags["release/v1"], head);
+}
+
+#[test]
+fn execute_records_label_and_description_on_the_new_version() {
+    let root = tempfile::tempdir().unwrap();
+    let mut graph = GraphForge::new(root.path().join("project").to_str()).unwrap();
+    graph.execute("CREATE (:Item {score:0})").unwrap();
+    let mut branch = create_request(&graph, "main");
+    branch.description = Some("start here".into());
+    graph
+        .create_research_branch(&branch, &CancellationToken::new())
+        .unwrap();
+    let base = graph.research_version(branch.version_uuid).unwrap();
+    assert_eq!(base.description.as_deref(), Some("start here"));
+
+    let mut request = ExecuteResearchBranchRequest {
+        author: None,
+        committer: None,
+        operation_uuid: Uuid::now_v7(),
+        expected_generation_uuid: current(&graph),
+        branch_uuid: branch.branch_uuid,
+        version_uuid: Uuid::now_v7(),
+        query: "MATCH (n:Item) SET n.score = 1".into(),
+        created_at: 2,
+        label: Some("first-pass".into()),
+        description: Some("Raise the score\n\nBecause the source changed.".into()),
+    };
+    graph
+        .execute_research_branch(&request, &CancellationToken::new())
+        .unwrap();
+    let recorded = graph.research_version(request.version_uuid).unwrap();
+    assert_eq!(recorded.label.as_deref(), Some("first-pass"));
+    assert_eq!(
+        recorded.description.as_deref(),
+        Some("Raise the score\n\nBecause the source changed.")
+    );
+
+    request.operation_uuid = Uuid::now_v7();
+    request.version_uuid = Uuid::now_v7();
+    request.expected_generation_uuid = current(&graph);
+    request.description = Some("x".repeat(4097));
+    graph
+        .execute_research_branch(&request, &CancellationToken::new())
+        .unwrap_err();
+}
+
+#[test]
+fn publication_content_identity_tracks_what_is_published() {
+    let root = tempfile::tempdir().unwrap();
+    let mut graph = GraphForge::new(root.path().join("project").to_str()).unwrap();
+    graph.execute("CREATE (:Item {score:0})").unwrap();
+    let main = create(&mut graph, "main");
+    let before = graph.publication_content_identity().unwrap();
+    assert_eq!(graph.publication_content_identity().unwrap(), before);
+
+    // A tag, a Version and Project data are all part of what is published.
+    let tag = SetResearchTagRequest {
+        operation_uuid: Uuid::now_v7(),
+        expected_generation_uuid: current(&graph),
+        name: "v1".into(),
+        version_uuid: Some(main.version_uuid),
+    };
+    graph
+        .set_research_tag(&tag, &CancellationToken::new())
+        .unwrap();
+    let tagged = graph.publication_content_identity().unwrap();
+    assert_ne!(tagged, before);
+    edit(
+        &mut graph,
+        main.branch_uuid,
+        "MATCH (n:Item) SET n.score = 1",
+    );
+    let committed = graph.publication_content_identity().unwrap();
+    assert_ne!(committed, tagged);
+    graph.execute("CREATE (:Item {score:5})").unwrap();
+    assert_ne!(graph.publication_content_identity().unwrap(), committed);
 }

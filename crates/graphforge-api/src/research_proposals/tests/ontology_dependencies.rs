@@ -58,6 +58,8 @@ fn relationship_acceptance_requires_reviewed_ontology_and_publishes_both_atomica
     graph
         .change_research_branch_ontology(
             &ChangeResearchBranchOntologyRequest {
+                label: None,
+                description: None,
                 author: None,
                 committer: None,
                 operation_uuid: Uuid::now_v7(),
@@ -318,6 +320,8 @@ fn semantic_secondary_label_and_typed_list_survive_selected_acceptance_and_reope
     graph
         .change_research_branch_ontology(
             &ChangeResearchBranchOntologyRequest {
+                label: None,
+                description: None,
                 author: None,
                 committer: None,
                 operation_uuid: Uuid::now_v7(),

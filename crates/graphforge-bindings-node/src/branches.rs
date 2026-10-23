@@ -2,7 +2,7 @@
 use crate::{Buffer, Env, GraphForge, Result, Task, napi};
 use graphforge_api::CancellationToken;
 enum Mutation {
-    Update(graphforge_api::UpdateResearchBranchRequest),
+    Update(Box<graphforge_api::UpdateResearchBranchRequest>),
     Claim(graphforge_api::ChangeResearchBranchClaimRequest),
     Create(graphforge_api::CreateResearchBranchRequest),
     Execute(graphforge_api::ExecuteResearchBranchRequest),
@@ -64,7 +64,7 @@ impl GraphForge {
         })?;
         Ok(crate::AsyncTask::new(BranchMutationTask {
             engine: std::sync::Arc::clone(&self.inner),
-            operation: Mutation::Update(request),
+            operation: Mutation::Update(Box::new(request)),
             cancellation: crate::slices::cancellation(env, signal)?,
         }))
     }

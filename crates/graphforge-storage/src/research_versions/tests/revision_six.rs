@@ -31,7 +31,7 @@ fn copy_dir(from: &Path, to: &Path) {
     }
 }
 
-fn legacy_project(root: &Path) -> (Uuid, Uuid) {
+pub(super) fn legacy_project(root: &Path) -> (Uuid, Uuid) {
     copy_dir(&Path::new(FIXTURE).join("project"), root);
     let ids: serde_json::Value =
         serde_json::from_slice(&std::fs::read(Path::new(FIXTURE).join("ids.json")).unwrap())

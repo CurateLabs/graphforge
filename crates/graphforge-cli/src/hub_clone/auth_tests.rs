@@ -332,6 +332,7 @@ fn transient_discovery_retry_reauthenticates_only_the_initial_request() {
 
 fn clone_args(destination: &Path) -> CloneArgs {
     CloneArgs {
+        tag: None,
         repository: "opendata/openalex".into(),
         hub: Some("https://hub.example".into()),
         token_env: Some("HUB_TOKEN".into()),

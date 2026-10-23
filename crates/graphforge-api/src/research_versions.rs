@@ -1,4 +1,5 @@
 //! Immutable research Versions, owner-derived capture and exact historical views.
+mod imported_tags;
 mod view;
 pub use view::ResearchVersionView;
 pub(crate) use view::materialize as materialize_version;
@@ -244,6 +245,24 @@ impl GraphForge {
                 "Proposal publication requires the native review and selected-content owner".into(),
             ));
         }
+        if matches!(
+            &operation.mutation,
+            ResearchMutation::RecordPublishedBranch { .. }
+        ) {
+            return Err(GfError::Validation(
+                "a published-head record requires the Hub publication owner".into(),
+            ));
+        }
+        self.publish_research_operation(&operation, cancellation)
+    }
+
+    /// Publish a prepared operation after the public entry has refused the
+    /// mutations that need their own verified owner.
+    pub(crate) fn publish_research_operation(
+        &mut self,
+        operation: &ResearchOperation,
+        cancellation: &CancellationToken,
+    ) -> Result<ResearchOperationReceipt, GfError> {
         if self.read_only {
             return Err(GfError::Project {
                 code: graphforge_core::ProjectErrorCode::ReadOnlyView,
@@ -311,7 +330,7 @@ impl GraphForge {
         };
         let outcome = graphforge_storage::research_versions::publish_research_operation_with_mode(
             &root,
-            &operation,
+            operation,
             cancellation.flag(),
             self.lifecycle_mode,
         );
@@ -508,6 +527,13 @@ fn imported_branch_operation(
         .get(&branch_uuid)
         .ok_or_else(not_retained)?;
     require_discovered_branch(expected, branch, project_uuid)?;
+    // A ref is a Branch label (ADR 0061): a cloned Branch can only be pushed back
+    // under the ref it came from when the publisher's label is that ref.
+    if expected.label != expected.ref_name {
+        return Err(GfError::Validation(
+            "hub.malformed_lineage: Branch label differs from its ref name".into(),
+        ));
+    }
     let mut hash = sha2::Sha256::new();
     hash.update(b"graphforge-clone-branch-continuation/1");
     hash.update(branch_uuid.as_bytes());
@@ -564,6 +590,19 @@ fn imported_branch_operation(
             )
             .into(),
             remote_branches,
+            // A tag is installed with the Version it names; a tag on a Version
+            // outside the cloned history stays on the Hub.
+            tags: lineage
+                .tags
+                .iter()
+                .filter_map(|tag| {
+                    let version = Uuid::parse_str(&tag.version_uuid).ok()?;
+                    state
+                        .identities
+                        .contains_key(&version)
+                        .then(|| (tag.name.clone(), version))
+                })
+                .collect(),
         },
     };
     Ok(operation)

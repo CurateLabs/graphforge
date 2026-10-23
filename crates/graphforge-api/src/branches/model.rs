@@ -56,6 +56,9 @@ pub struct CreateResearchBranchRequest {
     /// Credited committer of the new Version; recorded, not authenticated.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub committer: Option<graphforge_storage::research_versions::ResearchSignature>,
+    /// Optional immutable description of the new Version; a commit message (ADR 0061).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 /// Restore only one Branch's frozen research, preserving other heads and history.
@@ -104,6 +107,12 @@ pub struct ExecuteResearchBranchRequest {
     /// Credited committer of the new Version; recorded, not authenticated.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub committer: Option<graphforge_storage::research_versions::ResearchSignature>,
+    /// Optional immutable citation label of the new Version (ADR 0061).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// Optional immutable description of the new Version; a commit message (ADR 0061).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 /// Exact Branch-local ontology composition replacement.
@@ -132,6 +141,12 @@ pub struct ChangeResearchBranchOntologyRequest {
     /// Credited committer of the new Version; recorded, not authenticated.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub committer: Option<graphforge_storage::research_versions::ResearchSignature>,
+    /// Optional immutable citation label of the new Version (ADR 0061).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// Optional immutable description of the new Version; a commit message (ADR 0061).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 /// Cite historical research without incorporating its objects or retaining its payload.

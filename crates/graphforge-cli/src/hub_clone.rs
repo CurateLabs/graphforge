@@ -43,6 +43,7 @@ use crate::hub_http::{
 use crate::hub_http::{fetch, parse_input};
 
 mod module_fetch;
+pub(crate) mod remote_read;
 pub(crate) mod repository_listing;
 pub(crate) use module_fetch::{ModuleFetchArgs, run_module_fetch};
 pub(crate) use repository_listing::{HubArgs, run_hub};
@@ -80,6 +81,9 @@ pub(crate) struct CloneArgs {
     /// Immutable research Version UUID to clone instead of the Project package.
     #[arg(long)]
     pub version_uuid: Option<String>,
+    /// Tag, published in the research lineage, whose Version to clone.
+    #[arg(long)]
+    pub tag: Option<String>,
 }
 
 #[derive(Clone, Default)]
@@ -493,11 +497,27 @@ fn prepare_research_clone(
     manifest: &DiscoveryManifest,
     refs: &RefSet,
     limits: DiscoveryLimits,
-    git_ref: Option<&str>,
-    version_uuid: Option<&str>,
+    args: &CloneArgs,
     retry: &RetryPolicy,
 ) -> Result<Option<(ObjectDescriptor, ResearchCloneContext)>, graphforge_api::GfError> {
+    let (git_ref, version_uuid, tag) = (
+        args.git_ref.as_deref(),
+        args.version_uuid.as_deref(),
+        args.tag.as_deref(),
+    );
     let (lineage_bytes, lineage) = read_lineage(transport, manifest, refs, limits, retry)?;
+    // A tag names a Version through the lineage, then follows the `--version-uuid` path.
+    let tagged = tag
+        .map(|name| {
+            lineage
+                .tags
+                .iter()
+                .find(|tag| tag.name == name)
+                .map(|tag| tag.version_uuid.clone())
+                .ok_or_else(|| validation("hub.missing_ref", "tag is absent from research lineage"))
+        })
+        .transpose()?;
+    let version_uuid = version_uuid.or(tagged.as_deref());
     let implicit_default = git_ref.is_none() && version_uuid.is_none();
     if implicit_default && lineage.branches.is_empty() {
         return Ok(None);
@@ -1864,10 +1884,19 @@ fn run_clone_job(
     delays: &CloneDelays,
     env: &mut CloneEnv<'_>,
 ) -> Result<CloneResult, graphforge_api::GfError> {
-    if args.git_ref.is_some() && args.version_uuid.is_some() {
+    if [
+        args.git_ref.is_some(),
+        args.version_uuid.is_some(),
+        args.tag.is_some(),
+    ]
+    .iter()
+    .filter(|given| **given)
+    .count()
+        > 1
+    {
         return Err(validation(
             "hub.invalid_identity",
-            "specify only one of --ref and --version-uuid",
+            "specify only one of --ref, --version-uuid and --tag",
         ));
     }
     let requested_destination = args.destination.take();
@@ -2073,7 +2102,8 @@ fn clone_into_staging(
         limits,
     } = *discovered;
     let refs = RefSet::from_json(refs_bytes, limits).map_err(|error| protocol_error(&error))?;
-    let research_requested = args.git_ref.is_some() || args.version_uuid.is_some();
+    let research_requested =
+        args.git_ref.is_some() || args.version_uuid.is_some() || args.tag.is_some();
     let (object, research_context) = if research_requested || manifest.lineage.is_some() {
         if manifest.lineage.is_none() {
             return Err(validation(
@@ -2087,15 +2117,8 @@ fn clone_into_staging(
             HandoffKind::Call,
             None,
         );
-        let prepared = prepare_research_clone(
-            transport,
-            manifest,
-            &refs,
-            limits,
-            args.git_ref.as_deref(),
-            args.version_uuid.as_deref(),
-            &env.retry,
-        )?;
+        let prepared =
+            prepare_research_clone(transport, manifest, &refs, limits, args, &env.retry)?;
         profile.handoff(
             ComponentKind::NetworkTransport,
             ComponentKind::Discovery,
@@ -2290,7 +2313,6 @@ fn clone_into_staging(
             // Research staging is admitted read-only before any constructor or
             // generic error cleanup. Foreign or unreadable projects are preserved.
             if let Some(context) = &research_context
-                && let Some(branch) = &context.selected_branch
                 && existing_project
             {
                 if read_import_operation(staging)?.as_deref()
@@ -2303,26 +2325,45 @@ fn clone_into_staging(
                 }
                 let lineage = ResearchLineage::from_json(&context.lineage_bytes, limits)
                     .map_err(|e| protocol_error(&e))?;
-                let receipt = GraphForge::continue_imported_research_branch(
-                    &staging.project,
-                    branch,
-                    &lineage,
-                    &format!(
-                        "{}/{}",
-                        base.origin().ascii_serialization(),
-                        identity.canonical_name()
-                    ),
-                    operation_id.0,
-                )?;
-                if let Some(receipt) = receipt {
+                if context.selected_branch.is_none()
+                    && let Some(generation_uuid) = GraphForge::continue_imported_research_tags(
+                        &staging.project,
+                        &lineage,
+                        uuid::Uuid::parse_str(&context.version_uuid).map_err(storage)?,
+                        operation_id.0,
+                    )?
+                {
                     return Ok((
                         CloneImported {
                             package_digest: context.package_digest.clone(),
-                            generation_uuid: receipt.generation_uuid,
+                            generation_uuid,
                         },
                         None,
                         None,
                     ));
+                }
+                if let Some(branch) = &context.selected_branch {
+                    let receipt = GraphForge::continue_imported_research_branch(
+                        &staging.project,
+                        branch,
+                        &lineage,
+                        &format!(
+                            "{}/{}",
+                            base.origin().ascii_serialization(),
+                            identity.canonical_name()
+                        ),
+                        operation_id.0,
+                    )?;
+                    if let Some(receipt) = receipt {
+                        return Ok((
+                            CloneImported {
+                                package_digest: context.package_digest.clone(),
+                                generation_uuid: receipt.generation_uuid,
+                            },
+                            None,
+                            None,
+                        ));
+                    }
                 }
             }
             bind_import_target(staging, &operation_id)?;
@@ -2400,6 +2441,20 @@ fn clone_into_staging(
         })?;
         imported.generation_uuid = receipt.generation_uuid;
         clone_failpoint("clone.after_branch_continuation");
+    }
+    if let Some(context) = &research_context
+        && context.selected_branch.is_none()
+    {
+        let lineage = ResearchLineage::from_json(&context.lineage_bytes, limits)
+            .map_err(|error| protocol_error(&error))?;
+        imported.generation_uuid = GraphForge::continue_imported_research_tags(
+            &staging.project,
+            &lineage,
+            uuid::Uuid::parse_str(&context.version_uuid).map_err(storage)?,
+            operation_id.0,
+        )?
+        .ok_or_else(|| validation("hub.destination_conflict", "Version import is unfinished"))?;
+        clone_failpoint("clone.after_version_tags");
     }
     profile.handoff(
         ComponentKind::PortableImport,

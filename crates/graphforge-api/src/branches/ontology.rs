@@ -44,6 +44,11 @@ impl GraphForge {
             request.author.as_ref(),
             request.committer.as_ref(),
         )?;
+        publication::describe(
+            &mut version,
+            request.label.as_deref(),
+            request.description.as_deref(),
+        )?;
         edit::finish(
             self,
             command,

@@ -86,9 +86,20 @@ fn publishing_a_project_from_another_core_warns_before_publishing() {
             .contains(graphforge_api::GRAPHFORGE_VERSION)
     );
 
+    // Recording the confirmed publication as the Branch's upstream is a write by the
+    // running Core, so the Project it leaves is this Core's and no longer warns.
+    let reopened = GraphForge::new(path.to_str()).unwrap();
+    assert!(reopened.open_warnings().is_empty());
+    drop(reopened);
+
     // Under --json nothing separate is printed; the warning is collected for
-    // the command's one document.
-    let json = publish_project(&hub, &path, &on_ref(REPOSITORY, "main"), true);
+    // the command's one document. A second Project from the other Core, on its
+    // own Hub, since the first now is this Core's.
+    let other_root = root.path().join("json");
+    std::fs::create_dir(&other_root).unwrap();
+    let other = project(&other_root, Some(CORE_X));
+    let other_hub = LoopbackHub::start();
+    let json = publish_project(&other_hub, &other, &on_ref(REPOSITORY, "main"), true);
     json.result.unwrap();
     assert_eq!(json.warnings.len(), 1);
     assert_eq!(json.diagnostics_stderr, "");

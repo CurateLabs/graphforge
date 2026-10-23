@@ -184,6 +184,7 @@ fn assert_remote_review_compatibility(registry: &ResearchRegistry, operation: Uu
             lineage_sha256: [2; 32],
             package_sha256: [3; 32],
             object_sha256: [4; 32],
+            tags: Default::default(),
         });
     for revision in [6, 7, 8] {
         assert!(forged.validate_remote_revision(revision).is_err());

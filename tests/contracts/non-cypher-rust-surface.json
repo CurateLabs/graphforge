@@ -1,7 +1,7 @@
 {
   "contract_version": 1,
   "scope": "Rust non-Cypher public release surface",
-  "public_method_digest": "ba3e90af4a1bc4926439c8625e1ee8f287614fcb6444df0b72efaeb689796a77",
+  "public_method_digest": "7040d200cd440c078f4d95c0236fe4eb64e0be66de5795b32995d1d4673cee84",
   "method_policy": {
     "receiver_defaults": {
       "PortableImportResult": "release-tested",
@@ -1101,6 +1101,7 @@
         "crate.summarize_verified_portable",
         "crate.resolve_discovered_ontology_module",
         "GraphForge.continue_imported_research_branch",
+        "GraphForge.continue_imported_research_tags",
         "crate.read_committed_generation_identity",
         "GraphForge.fetch_research_branch"
       ],
@@ -1164,6 +1165,10 @@
         {
           "path": "crates/graphforge-cli/src/hub_publish/tests/remote_fetch.rs",
           "symbol": "verified_same_branch_fetch_preserves_local_head_workspace_and_exact_receipt_replay"
+        },
+        {
+          "path": "crates/graphforge-cli/src/hub_clone/research_clone_tests.rs",
+          "symbol": "version_clone_tag_publications_resume_and_preserve_advanced_staging"
         }
       ]
     },
@@ -1246,9 +1251,13 @@
         "GraphForge.create_research_branch",
         "GraphForge.execute_research_branch",
         "GraphForge.open_research_branch",
+        "GraphForge.publication_content_identity",
+        "GraphForge.record_research_publication",
         "GraphForge.reference_research_branch",
         "GraphForge.research_branch_selection",
         "GraphForge.restore_research_branch",
+        "GraphForge.select_research_branch",
+        "GraphForge.set_research_tag",
         "GraphForge.suppress_research_branch_assertion",
         "ResearchBranchView.fields",
         "ResearchBranchView.graph",
@@ -1308,6 +1317,22 @@
         {
           "path": "crates/graphforge-cli/tests/research_journey.rs",
           "symbol": "two_story_cli_research_survives_partial_review_restore_and_interchange"
+        },
+        {
+          "path": "crates/graphforge-api/tests/branches.rs",
+          "symbol": "current_branch_and_tags_persist_through_the_native_operations"
+        },
+        {
+          "path": "crates/graphforge-cli/src/hub_publish/tests/porcelain.rs",
+          "symbol": "publication_record_is_bound_to_the_asserted_documents"
+        },
+        {
+          "path": "crates/graphforge-api/tests/branches.rs",
+          "symbol": "publication_content_identity_tracks_what_is_published"
+        },
+        {
+          "path": "crates/graphforge-api/tests/research_claims.rs",
+          "symbol": "canonical_decisions_are_part_of_the_publication_content"
         }
       ]
     },

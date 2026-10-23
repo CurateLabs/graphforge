@@ -98,3 +98,36 @@ fn local_reverts_and_repeated_remote_incorporation_use_shared_native_history() {
         3
     );
 }
+
+/// A collaborator pushed and the local Branch made no new Version: the local
+/// head is the shared base, and `AllCompatible` adopts the remote value.
+#[test]
+fn remote_head_descending_from_the_local_head_incorporates_as_a_two_parent_version() {
+    let mut alice = history();
+    let hub = LoopbackHub::start();
+    publish_ok(&hub, &alice.graph, &on_ref("curate/claims", "main"))
+        .result
+        .unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let bob_path = root.path().join("bob");
+    clone_into(&hub, "curate/claims", &bob_path, Some("main"), None);
+    let mut bob = GraphForge::new(bob_path.to_str()).unwrap();
+    let remote = edit_by(&mut alice.graph, alice.branch, 2, "Alice");
+    publish_ok(&hub, &alice.graph, &on_ref("curate/claims", "main"))
+        .result
+        .unwrap();
+    let package = Package::download(&hub, root.path(), remote);
+    let before = generation(&bob);
+    let fetched = package
+        .fetch(&mut bob, alice.branch, Uuid::now_v7(), before)
+        .unwrap();
+    let mut request = review(&bob, &fetched);
+    request.selection = ResearchUpstreamSelection::AllCompatible;
+    bob.update_research_branch(&request, &CancellationToken::new())
+        .unwrap();
+    let state = bob.research_version_retention().unwrap();
+    assert_eq!(
+        state.versions[&request.version_uuid].parents,
+        vec![alice.head, remote]
+    );
+}
