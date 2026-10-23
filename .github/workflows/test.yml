@@ -445,8 +445,9 @@ jobs:
           uvx maturin build \
             --manifest-path crates/graphforge-bindings-py/Cargo.toml \
             --profile dev \
+            --features hub-test-support \
             --out dist
-          pnpm --filter @curatelabs/graphforge exec napi build --platform
+          pnpm --filter @curatelabs/graphforge exec napi build --platform --features hub-test-support
           uv pip install dist/*.whl
 
       - name: Prove the wheel installs and runs without the repository

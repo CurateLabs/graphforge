@@ -42,6 +42,7 @@ from graphforge.decision import (
     YesNoProbabilityPayloadV1,
     YesNoProbabilityValueV1,
 )
+from graphforge.hub import HubProject, HubWorkflowError
 
 __all__ = [
     "CancellationToken",
@@ -58,6 +59,8 @@ __all__ = [
     "GraphForge",
     "GraphForgeError",
     "GraphImportSession",
+    "HubProject",
+    "HubWorkflowError",
     "InvocationDescriptor",
     "LifecycleError",
     "NodeHandle",

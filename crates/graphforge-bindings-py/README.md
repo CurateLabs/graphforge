@@ -62,3 +62,10 @@ point launches the same Rust-owned repository CLI used by `gf` and
 `synchronous_iterations` with an optional Int64 `initial_label_property`.
 Existing calls retain their defaults. See the API reference in the full
 documentation for definitions and invocation descriptors.
+
+## Typed Hub workflow
+
+`graphforge.HubProject` exposes typed clone, commit, tag, push/publish, pull and
+history results through the Rust CLI. See the
+[facade reference and Python example](../../docs/reference/api.md#typed-hub-workflow-facades)
+for results, native errors, Arrow reads and write-capable Hub prerequisites.

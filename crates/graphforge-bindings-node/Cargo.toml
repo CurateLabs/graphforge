@@ -11,6 +11,9 @@ repository.workspace = true
 [lib]
 crate-type = ["cdylib"]
 
+[features]
+hub-test-support = ["graphforge-cli/hub-test-support"]
+
 [dependencies]
 graphforge-api = { version = "0.6.0-rc.5", path = "../graphforge-api", default-features = false, features = ["knowledge", "search", "provenance", "portable", "discovery", "research"] }
 graphforge-cli = { version = "0.6.0-rc.5", path = "../graphforge-cli" }

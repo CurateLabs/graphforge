@@ -21,9 +21,17 @@ Dependency sync does not build. After pulling or editing Rust, rebuild before
 running Python or Node tests. The editable rebuild is fast when `target/` is warm.
 
 ```bash
-uv run maturin develop --release -m crates/graphforge-bindings-py/Cargo.toml
-pnpm --filter @curatelabs/graphforge build
+uv run maturin develop --release --features hub-test-support -m crates/graphforge-bindings-py/Cargo.toml
+pnpm --filter @curatelabs/graphforge exec napi build --platform --release --features hub-test-support
 ```
+
+The full binding suites use `hub-test-support` to inject the native
+`ReferenceHub` transport for collaboration tests. Activation and teardown are
+explicit and local to the calling thread; no server is started. The CLI parser,
+workflow operations, URL validation and native binding entry points still run.
+The feature is absent from distribution builds; omit it when building a release
+artifact. The ordinary Rust test lanes continue to test the production HTTPS
+transport and public-address policy without this feature.
 
 ## Filesystem admission
 
