@@ -144,7 +144,9 @@ Measured on the release build (`opt-level = "z"`, LTO), Node 22:
 | `validate_lineage`, largest corpus (4.5 KB) | about 0.5 ms                                                  |
 | `request_commitment`                        | about 20 µs                                                   |
 
-The compressed size is what a Worker or browser downloads, and it is far below
+The few-hundred-KB package size target refers to compressed download size; the
+uncompressed size is reported separately above. The compressed size is what a
+Worker or browser downloads, and it is far below
 the Workers limits. Running Binaryen's `wasm-opt -Oz` over the module was tried
 and is not applied: it shrinks the uncompressed file by 11% but grows it to
 381 KB gzip and 299 KB brotli, because it removes repetition the compressor was
@@ -187,6 +189,26 @@ make test-protocol-wasm
 
 `pnpm install` also provides the pinned `miniflare` development dependency the
 Worker test uses.
+
+To qualify a clean npm installation, run the same Node suite from the consumer
+directory, passing the absolute path of the matching source checkout:
+
+```sh
+node /path/to/graphforge/scripts/ci/protocol-wasm-packaged-smoke.mjs /path/to/graphforge
+```
+
+Both the packed-tarball and published-registry checks in `publish.yaml` run this
+suite. With development dependencies installed in the source checkout, the
+same installed package can also be checked in local workerd:
+
+```sh
+GRAPHFORGE_PROTOCOL_PACKAGE_ROOT="$PWD" node --expose-gc --test \
+  /path/to/graphforge/packages/protocol-wasm/tests/worker.test.mjs
+```
+
+The consumer directory must contain its own `package.json` and an installation
+of the exact package under test; the source checkout supplies the matching
+corpora and native expectations. These commands never rebuild the module.
 
 The tests replay the discovery v1 and hub-publish v1 corpora
 (`docs/reference/`) through the built module and compare each result with the

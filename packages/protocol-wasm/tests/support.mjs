@@ -1,16 +1,29 @@
 // Shared test setup: load the built module synchronously and locate the
 // checked-in conformance corpora and the openalex fixture.
 import { readFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
 export const root = join(here, "..", "..", "..");
-export const dist = join(here, "..", "dist");
+// Release consumers run these same tests against their clean npm installation.
+// Keep fixtures anchored to this checkout, but resolve every package byte there.
+const consumer = process.env.GRAPHFORGE_PROTOCOL_PACKAGE_ROOT;
+const require = createRequire(
+  join(consumer ?? join(here, ".."), "package.json"),
+);
+export const entry = consumer
+  ? require.resolve("@curatelabs/graphforge-protocol-wasm")
+  : join(here, "..", "index.js");
+const wasmPath = consumer
+  ? require.resolve("@curatelabs/graphforge-protocol-wasm/wasm")
+  : join(here, "..", "dist", "graphforge_protocol_wasm_bg.wasm");
+export const dist = dirname(wasmPath);
 
-export const protocol = await import("../index.js");
+export const protocol = await import(pathToFileURL(entry));
 export const wasm = protocol.initSync({
-  module: readFileSync(join(dist, "graphforge_protocol_wasm_bg.wasm")),
+  module: readFileSync(wasmPath),
 });
 
 export const readJson = (...segments) =>
