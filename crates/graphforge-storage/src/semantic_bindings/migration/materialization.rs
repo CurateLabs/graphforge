@@ -273,6 +273,14 @@ fn materialize_semantic_migration_selected(
                 plan.to_composition_fingerprint.clone(),
             );
             if let Some(route) = new_route {
+                // Property writers use the owner-route metadata when merging
+                // later overlay fragments. Carry it with the path and semantic
+                // route so a valid migrated file remains writable after reopen.
+                for key in ["graphforge.entity_type", "graphforge.rel_type"] {
+                    if metadata.contains_key(key) {
+                        metadata.insert(key.into(), route.clone());
+                    }
+                }
                 metadata.insert(SEMANTIC_ROUTE_METADATA_KEY.into(), route.clone());
                 if metadata.contains_key(crate::property_overlay::PROPERTY_OVERLAY_FORMAT_KEY) {
                     metadata.insert(crate::property_overlay::PROPERTY_ROUTE_KEY.into(), route);

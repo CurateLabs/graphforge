@@ -1,7 +1,7 @@
 {
   "contract_version": 1,
   "scope": "Rust non-Cypher public release surface",
-  "public_method_digest": "1f398c1d2d79113b219cbc0800baf821e85cd5adc0550445e13e5284b2caa965",
+  "public_method_digest": "c16181fe678d766e1a1c2f68bc020d55175ade10c338716d12f42e7cd71f2ce8",
   "method_policy": {
     "receiver_defaults": {
       "PortableImportResult": "release-tested",
@@ -1106,7 +1106,8 @@
         "GraphForge.fetch_research_branch",
         "GraphForge.id_taken_receipt",
         "GraphForge.record_item_id_regeneration",
-        "GraphForge.record_publish_id_taken"
+        "GraphForge.record_publish_id_taken",
+        "GraphForge.regenerate_item_id"
       ],
       "test_refs": [
         {
@@ -1176,6 +1177,10 @@
         {
           "path": "crates/graphforge-api/src/item_refusals/tests.rs",
           "symbol": "exact_refusal_receipt_survives_reopen_and_records_only_a_retained_replacement"
+        },
+        {
+          "path": "crates/graphforge-api/src/multi_ontology/regenerate/tests.rs",
+          "symbol": "module_regeneration_rewrites_all_references_and_stored_routes_in_one_version"
         }
       ]
     },

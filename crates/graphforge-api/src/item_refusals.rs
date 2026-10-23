@@ -1,7 +1,7 @@
 //! Private local publish refusals, separate from portable Project authority.
 //!
-//! The regeneration command is not implemented here. Its later native mutation
-//! can read the exact receipt and record the already-committed replacement.
+//! Regeneration binds private authorization before native CURRENT publication;
+//! authenticated native receipts recover acknowledgement after a crash.
 use crate::{GfError, GraphForge};
 use graphforge_discovery::{ItemId, ItemKind};
 use graphforge_filesystem::StableDirectory;
@@ -20,6 +20,8 @@ const LOCK: &str = "lock";
 const FORMAT: &str = "graphforge-item-refusals/1";
 const MAX_BYTES: u64 = 8 * 1024 * 1024;
 
+mod regeneration;
+pub(crate) use regeneration::{RegenerationBinding, RegenerationGuard};
 #[cfg(test)]
 mod tests;
 
@@ -51,6 +53,8 @@ pub struct ItemIdRefusalReceipt {
 struct Document {
     format: String,
     receipts: BTreeMap<String, ItemIdRefusalReceipt>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    regenerations: BTreeMap<Uuid, RegenerationBinding>,
 }
 
 struct Store {
@@ -116,6 +120,7 @@ impl Store {
                 return Ok(Document {
                     format: FORMAT.into(),
                     receipts: BTreeMap::new(),
+                    regenerations: BTreeMap::new(),
                 });
             }
             Err(error) => return Err(storage(error)),
@@ -179,7 +184,14 @@ fn retain_receipts(
     let removable = document
         .receipts
         .iter()
-        .filter(|(id, receipt)| receipt.regenerated.is_none() && !current.contains(id.as_str()))
+        .filter(|(id, receipt)| {
+            receipt.regenerated.is_none()
+                && !current.contains(id.as_str())
+                && !document
+                    .regenerations
+                    .values()
+                    .any(|binding| binding.old_id == **id)
+        })
         .map(|(id, _)| id.clone())
         .collect::<Vec<_>>();
     // Canonical ID order is deterministic, without adding clocks or changing
@@ -206,6 +218,26 @@ fn retain_receipts(
 fn validate_document(document: &Document) -> Result<(), GfError> {
     if document.format != FORMAT || document.receipts.len() > MAX_ID_TAKEN_ITEMS {
         return Err(invalid("local publish refusal document is invalid"));
+    }
+    let mut bound_ids = BTreeSet::new();
+    for (operation, binding) in &document.regenerations {
+        let old = parse_id(&binding.old_id)?;
+        let new = parse_id(&binding.replacement.id)?;
+        if operation.is_nil()
+            || *operation != binding.operation_uuid
+            || binding.source_generation.is_nil()
+            || binding.branch_uuid.is_nil()
+            || binding.source_version.is_nil()
+            || binding.replacement.version_uuid.is_nil()
+            || old.kind() != new.kind()
+            || old == new
+            || old.as_str() != binding.old_id
+            || new.as_str() != binding.replacement.id
+            || !document.receipts.contains_key(old.as_str())
+            || !bound_ids.insert(&binding.old_id)
+        {
+            return Err(invalid("local ID regeneration binding is invalid"));
+        }
     }
     for (id, receipt) in &document.receipts {
         receipt.item.validate().map_err(storage)?;
@@ -239,12 +271,16 @@ impl GraphForge {
         HubPublishError::id_taken(items.to_vec()).map_err(storage)?;
         self.research_version(version_uuid)?;
         let store = Store::open(self, true)?.expect("create requires a store");
-        let mut document = store.read()?;
+        let mut document = store.read_recovered(self)?;
         for item in items {
             if document
                 .receipts
                 .get(&item.id)
                 .is_some_and(|receipt| receipt.regenerated.is_some())
+                || document
+                    .regenerations
+                    .values()
+                    .any(|binding| binding.old_id == item.id)
             {
                 continue;
             }
@@ -278,7 +314,7 @@ impl GraphForge {
         let Some(store) = Store::open(self, false)? else {
             return Ok(None);
         };
-        Ok(store.read()?.receipts.remove(id.as_str()))
+        Ok(store.read_recovered(self)?.receipts.remove(id.as_str()))
     }
 
     /// Record an already-committed replacement for future stale-Version
@@ -301,7 +337,23 @@ impl GraphForge {
                 "regeneration requires an id_taken receipt for that exact ID",
             ));
         };
-        let mut document = store.read()?;
+        let mut document = store.read_recovered(self)?;
+        if document
+            .regenerations
+            .values()
+            .any(|binding| binding.old_id == old_id.as_str())
+        {
+            let receipt = document
+                .receipts
+                .get(old_id.as_str())
+                .ok_or_else(|| invalid("local refusal receipt is missing"))?;
+            if receipt.regenerated.as_ref().is_some_and(|relation| {
+                relation.id == new_id.as_str() && relation.version_uuid == version_uuid
+            }) {
+                return Ok(receipt.clone());
+            }
+            return Err(invalid("the refused ID has a bound regeneration operation"));
+        }
         let receipt = document.receipts.get_mut(old_id.as_str()).ok_or_else(|| {
             invalid("regeneration requires an id_taken receipt for that exact ID")
         })?;

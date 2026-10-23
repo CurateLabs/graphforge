@@ -158,6 +158,10 @@ fn retained_entity_and_property_rename_materializes_deterministically() {
     first.bindings.validate_physical_routes(&candidate).unwrap();
     let batches = crate::catalog::read_properties(&candidate, &renamed_entity.route).unwrap();
     let schema = batches.first().unwrap().schema();
+    assert_eq!(
+        schema.metadata().get("graphforge.entity_type"),
+        Some(&renamed_entity.route)
+    );
     assert!(schema.field_with_name("display_name").is_ok());
     assert!(schema.field_with_name("birth_year").is_ok());
     assert!(schema.field_with_name("name").is_err());
@@ -674,4 +678,60 @@ fn identity_equivalent_migration_requires_equal_documents() {
         .to_string()
         .contains("changes its schema")
     );
+}
+
+#[test]
+fn cross_id_equivalence_requires_an_id_only_authored_document() {
+    let old = compiled_with("1", false, true);
+    let bindings = SemanticStorageBindings::project(&old, None).unwrap();
+    let source = tempfile::tempdir().unwrap();
+    for changed in ["id", "version", "schema"] {
+        let mut doc = old.modules[0].doc.clone();
+        doc.ontology_id = "https://graphforge.sh/ont_aaaaaaaaaaaaaaaa".into();
+        if changed == "version" {
+            doc.version = "2".into();
+        }
+        if changed == "schema" {
+            doc.properties[0].nullable = !doc.properties[0].nullable;
+        }
+        let authored = AuthoredModule {
+            id: OntologyModuleId {
+                ontology_id: doc.ontology_id.clone(),
+                authored_version: doc.version.clone(),
+                canonical_digest: module_document_digest(&doc).unwrap(),
+            },
+            dependencies: vec![],
+            doc,
+            allow_projected_identity: false,
+        };
+        let next = compile_inventory(InventoryCompileRequest {
+            modules: &[authored],
+            bridges: &[],
+            activation: &[],
+            profile_default: old.profile_default,
+            limits: CompositionLimits::default(),
+            cancelled: None,
+        })
+        .unwrap();
+        let pairs = [(old.modules[0].id.clone(), next.modules[0].id.clone())];
+        let plan = SemanticStorageBindings::plan_retained_data_migration_identity_equivalent(
+            &old,
+            &next,
+            &bindings,
+            source.path(),
+            &pairs,
+        );
+        if changed == "id" {
+            let plan = plan.unwrap();
+            assert_eq!(plan.bindings.bindings.len(), bindings.bindings.len());
+            assert!(
+                plan.bindings
+                    .bindings
+                    .iter()
+                    .all(|binding| binding.symbol.module == next.modules[0].id)
+            );
+        } else {
+            assert!(plan.unwrap_err().to_string().contains("changes its schema"));
+        }
+    }
 }

@@ -5,6 +5,7 @@
 
 mod candidate;
 mod diagnostics;
+mod regenerate;
 use candidate::{
     bridge_id, bridge_inventory, cascade_bridge_identities, compile_candidate,
     composition_from_generation, empty_composition, enrich_module_delete_preview,
@@ -914,6 +915,22 @@ impl GraphForge {
         ),
         GfError,
     > {
+        self.module_migration_candidate_for_identity(request, false)
+    }
+
+    fn module_migration_candidate_for_identity(
+        &self,
+        request: &ModuleMigrationRequest,
+        regenerate: bool,
+    ) -> Result<
+        (
+            WorkspaceOntologyComposition,
+            OntologyModuleId,
+            OntologyModuleId,
+            Vec<String>,
+        ),
+        GfError,
+    > {
         if request.document.ontology_id.trim().is_empty() {
             return Err(GfError::Validation(
                 "missing ontology_id; run ontology module create first",
@@ -922,7 +939,19 @@ impl GraphForge {
         let mut candidate = self.checked_candidate(&request.authority)?;
         let index = resolve_module_index(&candidate, &request.selector)?;
         let previous_module = candidate.modules[index].id.clone();
-        if request.document.ontology_id != previous_module.ontology_id {
+        if regenerate {
+            let mut expected = candidate.modules[index].document.clone();
+            expected
+                .ontology_id
+                .clone_from(&request.document.ontology_id);
+            if expected != request.document
+                || request.dependencies != candidate.modules[index].dependencies
+            {
+                return Err(GfError::Validation(
+                    "ID regeneration must preserve the authored module",
+                ));
+            }
+        } else if request.document.ontology_id != previous_module.ontology_id {
             return Err(GfError::Validation(
                 "module migration must retain ontology_id",
             ));

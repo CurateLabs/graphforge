@@ -326,6 +326,7 @@ fn protected_capacity_exhaustion_keeps_the_exact_previous_document_and_no_partia
     // thousands of unrelated ontology mutations just to exercise retention.
     let mut document = Document {
         format: FORMAT.into(),
+        regenerations: BTreeMap::new(),
         receipts: batch(0, MAX_ID_TAKEN_ITEMS)
             .into_iter()
             .enumerate()
@@ -369,6 +370,7 @@ fn defensive_byte_retention_preserves_current_and_protected_entries_and_exact_si
     let entries = batch(0, 3);
     let mut document = Document {
         format: FORMAT.into(),
+        regenerations: BTreeMap::new(),
         receipts: entries
             .iter()
             .enumerate()
@@ -383,6 +385,7 @@ fn defensive_byte_retention_preserves_current_and_protected_entries_and_exact_si
     // to exercise the defensive byte accounting, including JSON separators.
     let expected_bytes = serde_json::to_vec(&Document {
         format: FORMAT.into(),
+        regenerations: BTreeMap::new(),
         receipts: expected.clone(),
     })
     .unwrap();
@@ -392,4 +395,39 @@ fn defensive_byte_retention_preserves_current_and_protected_entries_and_exact_si
     let error = retain_receipts(&mut document, &current, 3, bytes.len() - 1).unwrap_err();
     assert_eq!(error.code(), "GF_RESOURCE_LIMIT");
     assert_eq!(document.receipts, expected);
+}
+
+#[test]
+fn pending_regeneration_authorization_is_not_evictable() {
+    let version = Uuid::now_v7();
+    let old = item(false);
+    let disposable = batch(0, 1).remove(0);
+    let binding = RegenerationBinding {
+        operation_uuid: Uuid::now_v7(),
+        old_id: old.id.clone(),
+        replacement: ItemIdRegeneration {
+            id: ItemId::parse_reference(NEW).unwrap().as_str().into(),
+            version_uuid: Uuid::now_v7(),
+        },
+        source_generation: Uuid::now_v7(),
+        branch_uuid: Uuid::now_v7(),
+        source_version: version,
+        created_at: 1,
+        request_sha256: None,
+    };
+    let mut document = Document {
+        format: FORMAT.into(),
+        receipts: BTreeMap::from([
+            (old.id.clone(), receipt(old.clone(), version, false)),
+            (
+                disposable.id.clone(),
+                receipt(disposable.clone(), version, false),
+            ),
+        ]),
+        regenerations: BTreeMap::from([(binding.operation_uuid, binding)]),
+    };
+    retain_receipts(&mut document, &BTreeSet::new(), 1, MAX_BYTES as usize).unwrap();
+    assert_eq!(document.receipts.len(), 1);
+    assert!(document.receipts.contains_key(&old.id));
+    assert!(!document.receipts.contains_key(&disposable.id));
 }
