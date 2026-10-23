@@ -29,6 +29,7 @@ mod composition_proof;
 mod core_version_warning;
 mod credit;
 mod hub_listing;
+mod permanent_ids;
 mod porcelain;
 mod producing_version;
 use hub_listing::serve_lineage;

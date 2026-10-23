@@ -396,15 +396,37 @@ pub(crate) fn publish_and_report(
     json: bool,
     output: &mut dyn Write,
 ) -> Result<(), GfError> {
-    let outcome =
-        publish_with_operation_report(transport, graph, args, environment, |operation| {
+    let mut refusal = None;
+    let result = publish_with_operation_report(
+        transport,
+        graph,
+        args,
+        environment,
+        &mut refusal,
+        |operation| {
             if !json {
                 writeln!(output, "Operation UUID: {operation}")
                     .and_then(|()| output.flush())
                     .map_err(|error| GfError::Storage(error.to_string()))?;
             }
             Ok(())
-        })?;
+        },
+    );
+    if let Some(refusal) = refusal {
+        let operation_uuid = Uuid::new_v5(
+            &refusal.publish_operation_uuid,
+            &serde_json::to_vec(&refusal).map_err(|_| derivation("refusal cannot be encoded"))?,
+        );
+        graph.record_publish_id_taken(
+            &graphforge_api::RecordPublishIdTakenRequest {
+                operation_uuid,
+                expected_generation_uuid: graph.committed_generation_identity()?.generation_uuid,
+                refusal,
+            },
+            &CancellationToken::default(),
+        )?;
+    }
+    let outcome = result?;
     record_upstream(graph, transport, args, &outcome)?;
     write_outcome(&outcome, json, output)
 }
@@ -603,6 +625,7 @@ const fn code_detail(code: HubPublishErrorCode) -> &'static str {
     match code {
         HubPublishErrorCode::AuthDenied => "the Hub refused the publish credential",
         HubPublishErrorCode::EntitlementDenied => "the Hub refused the publication entitlement",
+        HubPublishErrorCode::IdTaken => "a permanent item ID is owned by another publisher",
         HubPublishErrorCode::IdempotencyConflict => {
             "the operation identity was already used for a different publication"
         }
@@ -632,6 +655,93 @@ fn hub_failure(response: &HubResponse) -> GfError {
         Ok(body) => publish_error(body.code, code_detail(body.code)),
         Err(_) => network("Hub returned an unsuccessful status"),
     }
+}
+
+/// Keep Hub messages out of output. Only validated structured hints enter local
+/// next actions, and only a commit refusal is retained for regeneration.
+fn publication_failure(
+    response: &HubResponse,
+    graph: &GraphForge,
+    context: &graphforge_api::PublishIdTakenReceipt,
+    refusal: &mut Option<graphforge_api::PublishIdTakenReceipt>,
+) -> GfError {
+    let Ok(body) = serde_json::from_slice::<HubErrorBody>(&response.body) else {
+        return hub_failure(response);
+    };
+    if body.code != HubPublishErrorCode::IdTaken {
+        return hub_failure(response);
+    }
+    if body.items.as_ref().is_some_and(|items| {
+        items.iter().any(|item| {
+            !context
+                .items
+                .iter()
+                .any(|advertised| advertised.id == item.id && advertised.kind == item.kind)
+        })
+    }) {
+        return publish_error(
+            HubPublishErrorCode::IntegrityFailure,
+            "Hub refused an ID outside the advertised ontology inventory",
+        );
+    }
+    let mut receipt = context.clone();
+    receipt.items = body
+        .items
+        .unwrap_or_default()
+        .into_iter()
+        .map(|item| graphforge_api::PublishIdTakenItem {
+            kind: item.kind,
+            id: item.id,
+            owner: item.owner,
+            publish_as_owner: item.publish_as_owner,
+        })
+        .collect();
+    let state = match graph.publish_id_state() {
+        Ok(state) => state,
+        Err(error) => return error,
+    };
+    let error = render_id_taken(&receipt.items, &state);
+    if !receipt.items.is_empty() {
+        *refusal = Some(receipt);
+    }
+    error
+}
+
+fn render_id_taken(
+    items: &[graphforge_api::PublishIdTakenItem],
+    state: &graphforge_api::PublishIdState,
+) -> GfError {
+    let mut detail = code_detail(HubPublishErrorCode::IdTaken).to_owned();
+    for item in items {
+        detail.push_str(&format!("; {}: ", item.id));
+        if let Some(relation) = state
+            .regenerations
+            .values()
+            .find(|relation| relation.old_id == item.id && relation.kind == item.kind)
+        {
+            detail.push_str(&format!(
+                "publish from the regenerated Version {} (new ID {})",
+                relation.version_uuid, relation.new_id
+            ));
+        } else {
+            if let Some(owner) = &item.owner {
+                detail.push_str(&format!("publish as {owner}"));
+                if item.publish_as_owner == Some(true) {
+                    detail.push_str(" (you can publish as this organization)");
+                }
+                detail.push_str(", or ");
+            } else if item.publish_as_owner == Some(true) {
+                detail.push_str("publish as the owning organization, or ");
+            } else {
+                detail.push_str("publish as the owner, or ");
+            }
+            detail.push_str(&format!("run `gf ontology regenerate-id {}`", item.id));
+        }
+    }
+    if items.is_empty() {
+        detail.push_str("; publish as the owner, or run `gf ontology regenerate-id <id>`");
+    }
+    publish_error(HubPublishErrorCode::IdTaken, &detail)
 }
 
 fn protocol(error: &graphforge_hub_publish::HubPublishError) -> GfError {
@@ -1951,27 +2061,28 @@ fn prepare_staging_with_space(
 
 fn poll_commit(
     hub: &Hub<'_>,
-    base: &Url,
     token: &PublishToken,
-    identity: &RepositoryIdentity,
-    operation_uuid: Uuid,
-    intent_digest: &str,
+    request: &OpenSessionRequest,
     wait: &dyn Fn(Duration),
+    failure: &mut dyn FnMut(&HubResponse) -> GfError,
 ) -> Result<PublishReceipt, GfError> {
-    let url = endpoint(base, &format!("publish/operations/{operation_uuid}"));
+    let url = endpoint(
+        &hub.base,
+        &format!("publish/operations/{}", request.operation_uuid),
+    );
     let deadline = std::time::Instant::now() + Duration::from_hours(24);
     // One poll per bounded verification step. No commit resubmission or changed
     // operation identity on unknown outcomes; a later invocation can resume it.
     while std::time::Instant::now() < deadline {
         let response = hub.control(HubRequest::new(HubMethod::Get, url.as_str()), token)?;
         if response.status != 200 {
-            return Err(hub_failure(&response));
+            return Err(failure(&response));
         }
         let status =
             OperationStatus::from_json(&response.body).map_err(|error| protocol(&error))?;
-        if status.repository != *identity
-            || status.operation_uuid != operation_uuid
-            || status.intent_digest != intent_digest
+        if status.repository != request.repository
+            || status.operation_uuid != request.operation_uuid
+            || status.intent_digest != request.intent_digest
         {
             return Err(publish_error(
                 HubPublishErrorCode::IntegrityFailure,
@@ -2054,7 +2165,7 @@ pub(crate) fn publish(
     args: &PublishArgs,
     environment: &mut PublishEnvironment<'_>,
 ) -> Result<PublishOutcome, GfError> {
-    publish_with_operation_report(transport, graph, args, environment, |_| Ok(()))
+    publish_with_operation_report(transport, graph, args, environment, &mut None, |_| Ok(()))
 }
 
 #[allow(clippy::too_many_lines)]
@@ -2063,6 +2174,7 @@ fn publish_with_operation_report(
     graph: &GraphForge,
     args: &PublishArgs,
     environment: &mut PublishEnvironment<'_>,
+    refusal: &mut Option<graphforge_api::PublishIdTakenReceipt>,
     mut report: impl FnMut(Uuid) -> Result<(), GfError>,
 ) -> Result<PublishOutcome, GfError> {
     let (identity, base) = parse_input(&args.repository)?;
@@ -2444,7 +2556,39 @@ fn publish_with_operation_report(
     let commit_url = endpoint(&base, &format!("publish/sessions/{session_id}/commit"));
     let manifest_value = serde_json::to_value(&snapshot.manifest)
         .map_err(|error| GfError::Execution(error.to_string()))?;
-    let committed = session_response(&hub.control(
+    let refusal_context = graphforge_api::PublishIdTakenReceipt {
+        publish_operation_uuid: operation_uuid,
+        repository_url: base.as_str().trim_end_matches('/').to_owned(),
+        version_uuid: selection.version_uuid,
+        items: snapshot
+            .manifest
+            .ontology
+            .iter()
+            .flat_map(|ontology| {
+                ontology
+                    .modules
+                    .iter()
+                    .map(|item| (graphforge_discovery::ItemKind::OntologyModule, &item.id))
+                    .chain(
+                        ontology
+                            .bridge_sets
+                            .iter()
+                            .map(|item| (graphforge_discovery::ItemKind::BridgeSet, &item.id)),
+                    )
+            })
+            .filter_map(|(kind, id)| {
+                graphforge_discovery::ItemId::parse_kind(id, kind)
+                    .ok()
+                    .map(|id| graphforge_api::PublishIdTakenItem {
+                        kind,
+                        id: id.to_string(),
+                        owner: None,
+                        publish_as_owner: None,
+                    })
+            })
+            .collect(),
+    };
+    let commit_response = hub.control(
         HubRequest::new(HubMethod::Post, commit_url.as_str()).with_json(&CommitRequest {
             rewrite: args.rewrite,
             prune: args.prune,
@@ -2453,7 +2597,16 @@ fn publish_with_operation_report(
             expected_revision,
         }),
         &token,
-    )?)?;
+    )?;
+    if !(200..300).contains(&commit_response.status) {
+        return Err(publication_failure(
+            &commit_response,
+            graph,
+            &refusal_context,
+            refusal,
+        ));
+    }
+    let committed = session_response(&commit_response)?;
     let receipt = match committed {
         SessionResponse::Complete { receipt } => receipt,
         SessionResponse::Pending {
@@ -2464,15 +2617,9 @@ fn publish_with_operation_report(
                 .iter()
                 .any(|c| c.capability == "large-object-publish" && c.major == 1) =>
         {
-            poll_commit(
-                &hub,
-                &base,
-                &token,
-                &identity,
-                operation_uuid,
-                &open.intent_digest,
-                environment.wait,
-            )?
+            poll_commit(&hub, &token, &open, environment.wait, &mut |response| {
+                publication_failure(response, graph, &refusal_context, refusal)
+            })?
         }
         _ => {
             return Err(publish_error(

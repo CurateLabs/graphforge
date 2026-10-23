@@ -42,6 +42,10 @@ mod remote;
 pub use ancestry::{MAX_PARENTS, ResearchVersionProvenance};
 pub use remote::ResearchRemoteBranch;
 mod local_state;
+mod publish_ids;
+pub use publish_ids::{
+    OntologyIdRegeneration, PublishIdState, PublishIdTakenItem, PublishIdTakenReceipt,
+};
 mod remote_fetch;
 pub use remote_fetch::{
     ResearchRemoteBranchFetch, ResearchRemoteFetchBinding, stage_remote_branch_fetch,
@@ -255,6 +259,9 @@ pub struct ResearchOperationReceipt {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResearchRegistry {
+    /// Private publication refusals and identity replacements; never shared history.
+    #[serde(default, skip_serializing_if = "PublishIdState::is_empty")]
+    pub publish_ids: PublishIdState,
     /// Read-only remote discovery citations, never native heads or payload roots.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub remote_branches: BTreeMap<String, ResearchRemoteBranch>,
@@ -467,6 +474,13 @@ pub enum ResearchMutation {
         /// Citation of the confirmed head; bound to local Branch authority on apply.
         reference: ResearchRemoteBranch,
     },
+    /// Retain a Hub's per-item refusal as local project tracking state.
+    RecordPublishIdTaken {
+        /// Original publication context and privacy-filtered hints.
+        refusal: PublishIdTakenReceipt,
+        /// Request identity without its CURRENT precondition.
+        intent_sha256: [u8; 32],
+    },
     /// Create (`Some`) or delete (`None`) one tag on an immutable Version (ADR 0061).
     SetTag {
         /// Tag name, a valid discovery ref.
@@ -544,6 +558,7 @@ impl ResearchRegistry {
         self.validate_capacity()?;
         self.validate_remote_branches()?;
         self.validate_local_state()?;
+        self.publish_ids.validate(self)?;
         for (id, version) in &self.versions {
             if id.is_nil()
                 || *id != version.version_uuid
@@ -1079,6 +1094,13 @@ fn apply_mutation(
             remote::record_published_branch(registry, reference)?;
             None
         }
+        ResearchMutation::RecordPublishIdTaken { refusal, .. } => {
+            registry
+                .publish_ids
+                .id_taken
+                .insert(operation_uuid, refusal.clone());
+            None
+        }
         ResearchMutation::SetTag {
             name, version_uuid, ..
         } => {
@@ -1300,6 +1322,7 @@ pub fn publish_research_operation_with_mode(
             | ResearchMutation::UpdateBranch { intent_sha256, .. }
             | ResearchMutation::SetTag { intent_sha256, .. }
             | ResearchMutation::SelectBranch { intent_sha256, .. } => Some(*intent_sha256),
+            ResearchMutation::RecordPublishIdTaken { intent_sha256, .. } => Some(*intent_sha256),
             _ => None,
         },
         operation_uuid: request.operation_uuid,
@@ -1649,6 +1672,7 @@ pub(crate) fn validate_publication_transition(
         after.validate_legacy()?;
     }
     proposals::preserve(&before, &after)?;
+    publish_ids::preserve(&before.publish_ids, &after.publish_ids)?;
     interchange::preserve(&before, &after)?;
     if json(&after)? != bytes {
         return Err(invalid("research registry publication is not canonical"));

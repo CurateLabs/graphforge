@@ -13,6 +13,8 @@
 
 #[path = "contract_artifacts/history.rs"]
 mod history;
+#[path = "contract_artifacts/permanent_ids.rs"]
+mod permanent_ids;
 
 use graphforge_discovery::{
     CreditSignature, DISCOVERY_FORMAT, DiscoveryErrorCode, DiscoveryLimits, DiscoveryManifest,
@@ -34,7 +36,7 @@ use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 const HUB: &str = "https://hub.example";
-const ARTIFACTS: [(&str, &str); 8] = [
+const ARTIFACTS: [(&str, &str); 9] = [
     (
         "capabilities.schema.json",
         include_str!("../../../docs/reference/hub-publish/v1/capabilities.schema.json"),
@@ -66,6 +68,10 @@ const ARTIFACTS: [(&str, &str); 8] = [
     (
         "conformance.json",
         include_str!("../../../docs/reference/hub-publish/v1/conformance.json"),
+    ),
+    (
+        "permanent-ids-conformance.json",
+        include_str!("../../../docs/reference/hub-publish/v1/permanent-ids-conformance.json"),
     ),
 ];
 
@@ -139,6 +145,12 @@ struct Expect {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 enum Action {
+    SetItemPermissions {
+        token: String,
+        id: String,
+        visible: bool,
+        publish_as_owner: bool,
+    },
     IssueToken {
         scope: String,
         ttl_seconds: u64,
@@ -210,6 +222,7 @@ impl Object {
 /// Everything one publication sends, modelled independently of the Hub.
 #[derive(Clone)]
 struct Publication {
+    ontology: Option<Value>,
     rewrite: bool,
     prune: bool,
     repository: RepositoryIdentity,
@@ -236,6 +249,7 @@ impl Publication {
             .unwrap()
             .digest();
         Self {
+            ontology: None,
             rewrite: false,
             prune: false,
             repository: repository.clone(),
@@ -301,6 +315,9 @@ impl Publication {
                 )],
             })).collect::<Vec<_>>(),
         });
+        if let Some(ontology) = &self.ontology {
+            manifest["ontology"] = ontology.clone();
+        }
         if let Some(object) = self
             .objects
             .iter()
@@ -1683,6 +1700,10 @@ fn corpus() -> Corpus {
         ));
     }
 
+    corpus_with(cases)
+}
+
+fn corpus_with(cases: Vec<Case>) -> Corpus {
     Corpus {
         format: "graphforge-hub-publish-conformance/1".into(),
         hub: HUB.into(),
@@ -1866,10 +1887,19 @@ fn error_schema() -> Value {
             "type": "object", "additionalProperties": false,
             "required": ["code", "message"],
             "properties": {
-                "code": {"enum": ["auth_denied", "entitlement_denied", "idempotency_conflict", "ref_conflict",
+                "code": {"enum": ["auth_denied", "entitlement_denied", "id_taken", "idempotency_conflict", "ref_conflict",
                     "non_fast_forward", "unsupported_future", "integrity_failure", "invalid_input", "internal"]},
-                "message": {"type": "string", "maxLength": 512}
-            }
+                "message": {"type": "string", "maxLength": 512},
+                "items": {"type":"array", "minItems":1,"maxItems":4096,
+                    "description":"Strictly ascending by id; owner and organization permission are disclosed only when authorized.",
+                    "items":{"type":"object","additionalProperties":false,"required":["kind","id"],"properties":{
+                        "kind":{"enum":["ontology_module","bridge_set"]},
+                        "id":{"type":"string","pattern":"^(ont|brg)_[0-9abcdefghjkmnpqrstvwxyz]{16}$"},
+                        "owner":{"type":"string","minLength":1,"maxLength":100,"pattern":"^[a-z0-9][a-z0-9._-]*$"},
+                        "publish_as_owner":{"const":true}
+                    },"allOf":[{"if":{"properties":{"kind":{"const":"ontology_module"}}},"then":{"properties":{"id":{"pattern":"^ont_"}}},"else":{"properties":{"id":{"pattern":"^brg_"}}}}]}}
+            },
+            "allOf":[{"if":{"properties":{"code":{"const":"id_taken"}}},"else":{"not":{"required":["items"]}}}]
         }),
     )
 }
@@ -1887,6 +1917,12 @@ fn root() -> PathBuf {
         .join("../..")
         .canonicalize()
         .unwrap()
+}
+
+fn compact(value: &impl Serialize) -> Vec<u8> {
+    let mut bytes = serde_json::to_vec(value).unwrap();
+    bytes.push(b'\n');
+    bytes
 }
 
 fn generated() -> Vec<(&'static str, Vec<u8>)> {
@@ -1910,11 +1946,11 @@ fn generated() -> Vec<(&'static str, Vec<u8>)> {
         ),
         ("upload-status.schema.json", pretty(&upload_status_schema())),
         ("error.schema.json", pretty(&error_schema())),
-        ("conformance.json", {
-            let mut bytes = serde_json::to_vec(&corpus()).unwrap();
-            bytes.push(b'\n');
-            bytes
-        }),
+        ("conformance.json", compact(&corpus())),
+        (
+            "permanent-ids-conformance.json",
+            compact(&corpus_with(permanent_ids::cases())),
+        ),
     ]
 }
 
@@ -2191,6 +2227,19 @@ fn replay(hub: &ReferenceHub, name: &str, steps: &[Step]) {
                 check(&response, expect, &mut variables, &label);
             }
             Step::Action { action } => match action {
+                Action::SetItemPermissions {
+                    token,
+                    id,
+                    visible,
+                    publish_as_owner,
+                } => hub
+                    .set_item_permissions(
+                        &substitute(token, &variables, &label),
+                        id,
+                        *visible,
+                        *publish_as_owner,
+                    )
+                    .unwrap(),
                 Action::IssueToken {
                     scope,
                     ttl_seconds,
@@ -2217,30 +2266,43 @@ fn replay(hub: &ReferenceHub, name: &str, steps: &[Step]) {
 
 #[test]
 fn every_conformance_case_replays_through_the_reference_hub() {
-    let corpus: Corpus = serde_json::from_str(ARTIFACTS[ARTIFACTS.len() - 1].1).unwrap();
-    assert_eq!(corpus.format, "graphforge-hub-publish-conformance/1");
-    assert_eq!(corpus.hub, HUB);
-    assert!(corpus.cases.len() >= 15, "corpus lost cases");
-    for case in &corpus.cases {
-        let hub = if case.large_objects {
-            let mut config = graphforge_hub_publish::ReferenceHubConfig {
-                large_objects: true,
-                ..graphforge_hub_publish::ReferenceHubConfig::default()
+    let corpora: Vec<Corpus> = ARTIFACTS
+        .iter()
+        .filter(|(name, _)| name.ends_with("conformance.json"))
+        .map(|(_, json)| serde_json::from_str(json).unwrap())
+        .collect();
+    assert!(
+        corpora
+            .iter()
+            .map(|corpus| corpus.cases.len())
+            .sum::<usize>()
+            >= 15,
+        "corpus lost cases"
+    );
+    for corpus in corpora {
+        assert_eq!(corpus.format, "graphforge-hub-publish-conformance/1");
+        assert_eq!(corpus.hub, HUB);
+        for case in &corpus.cases {
+            let hub = if case.large_objects {
+                let mut config = graphforge_hub_publish::ReferenceHubConfig {
+                    large_objects: true,
+                    ..graphforge_hub_publish::ReferenceHubConfig::default()
+                };
+                config.limits.preferred_chunk_bytes = Some(config.limits.max_chunk_bytes);
+                ReferenceHub::with_config(config).unwrap()
+            } else if case.negotiated {
+                let mut config = graphforge_hub_publish::ReferenceHubConfig {
+                    authorization_client_id: Some("client_workos_example".into()),
+                    object_location_hex: true,
+                    ..graphforge_hub_publish::ReferenceHubConfig::default()
+                };
+                config.limits.preferred_chunk_bytes = Some(8_388_608);
+                ReferenceHub::with_config(config).unwrap()
+            } else {
+                ReferenceHub::new()
             };
-            config.limits.preferred_chunk_bytes = Some(config.limits.max_chunk_bytes);
-            ReferenceHub::with_config(config).unwrap()
-        } else if case.negotiated {
-            let mut config = graphforge_hub_publish::ReferenceHubConfig {
-                authorization_client_id: Some("client_workos_example".into()),
-                object_location_hex: true,
-                ..graphforge_hub_publish::ReferenceHubConfig::default()
-            };
-            config.limits.preferred_chunk_bytes = Some(8_388_608);
-            ReferenceHub::with_config(config).unwrap()
-        } else {
-            ReferenceHub::new()
-        };
-        replay(&hub, &case.name, &case.steps);
+            replay(&hub, &case.name, &case.steps);
+        }
     }
 }
 

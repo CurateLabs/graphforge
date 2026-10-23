@@ -2,11 +2,30 @@
   "$id": "https://graphforge.sh/schemas/hub-publish/v1/error.schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
+  "allOf": [
+    {
+      "else": {
+        "not": {
+          "required": [
+            "items"
+          ]
+        }
+      },
+      "if": {
+        "properties": {
+          "code": {
+            "const": "id_taken"
+          }
+        }
+      }
+    }
+  ],
   "properties": {
     "code": {
       "enum": [
         "auth_denied",
         "entitlement_denied",
+        "id_taken",
         "idempotency_conflict",
         "ref_conflict",
         "non_fast_forward",
@@ -15,6 +34,66 @@
         "invalid_input",
         "internal"
       ]
+    },
+    "items": {
+      "description": "Strictly ascending by id; owner and organization permission are disclosed only when authorized.",
+      "items": {
+        "additionalProperties": false,
+        "allOf": [
+          {
+            "else": {
+              "properties": {
+                "id": {
+                  "pattern": "^brg_"
+                }
+              }
+            },
+            "if": {
+              "properties": {
+                "kind": {
+                  "const": "ontology_module"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "id": {
+                  "pattern": "^ont_"
+                }
+              }
+            }
+          }
+        ],
+        "properties": {
+          "id": {
+            "pattern": "^(ont|brg)_[0-9abcdefghjkmnpqrstvwxyz]{16}$",
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "ontology_module",
+              "bridge_set"
+            ]
+          },
+          "owner": {
+            "maxLength": 100,
+            "minLength": 1,
+            "pattern": "^[a-z0-9][a-z0-9._-]*$",
+            "type": "string"
+          },
+          "publish_as_owner": {
+            "const": true
+          }
+        },
+        "required": [
+          "kind",
+          "id"
+        ],
+        "type": "object"
+      },
+      "maxItems": 4096,
+      "minItems": 1,
+      "type": "array"
     },
     "message": {
       "maxLength": 512,

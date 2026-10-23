@@ -2940,6 +2940,7 @@ dependencies = [
  "futures",
  "graphforge-core",
  "graphforge-cypher",
+ "graphforge-discovery",
  "graphforge-filesystem",
  "graphforge-ir",
  "graphforge-ontology",

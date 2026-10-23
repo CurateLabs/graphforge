@@ -6,6 +6,7 @@
 //! configurable seed and are predictable. Control state is in memory; object
 //! bytes spill to unlinked temporary files.
 
+mod permanent_ids;
 mod retention;
 
 use crate::canonical::{sha256_digest, validate_digest};
@@ -97,6 +98,8 @@ struct State {
     repositories: BTreeMap<RepositoryIdentity, Repository>,
     moved: BTreeMap<RepositoryIdentity, RepositoryIdentity>,
     quotas: BTreeMap<String, u64>,
+    permanent_ids: BTreeMap<String, permanent_ids::Claim>,
+    item_permissions: BTreeMap<(String, String), (bool, bool)>,
 }
 
 struct IssuedToken {
@@ -1441,7 +1444,12 @@ impl ReferenceHub {
             revision: revision.clone(),
         };
 
-        // 6. Apply: objects, manifest, refs, and receipt together.
+        // The advertised inventory alone owns permanent-ID admission. Check all
+        // items before claiming any, under this commit's existing state lock.
+        permanent_ids::check(state, repository, request, &manifest)?;
+
+        // 6. Apply: permanent IDs, objects, manifest, refs, and receipt together.
+        permanent_ids::claim(state, repository, &manifest);
         let session = state
             .sessions
             .get_mut(session_id.as_str())

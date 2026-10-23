@@ -23,6 +23,7 @@ test-failpoints = []
 test-support = ["graphforge-core/test-support"]
 
 [dependencies]
+graphforge-discovery = { version = "0.6.0-rc.5", path = "../graphforge-discovery", default-features = false }
 graphforge-cypher = { version = "0.6.0-rc.5", path = "../graphforge-cypher" }
 graphforge-value = { version = "0.6.0-rc.5", path = "../graphforge-value" }
 graphforge-core = { version = "0.6.0-rc.5", path = "../graphforge-core" }

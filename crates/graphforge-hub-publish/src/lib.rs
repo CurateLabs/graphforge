@@ -19,7 +19,9 @@ mod wire;
 
 pub use canonical::{canonical_json, parse_unique_json, sha256_digest, validate_digest};
 pub use commit::check_commit_manifest;
-pub use error::{GF_IDEMPOTENCY_CONFLICT, HubErrorBody, HubPublishError, HubPublishErrorCode};
+pub use error::{
+    GF_IDEMPOTENCY_CONFLICT, HubErrorBody, HubPublishError, HubPublishErrorCode, IdTakenItem,
+};
 pub use exchange::{HubExchange, HubMethod, HubRequest, HubResponse};
 pub use history::{
     prune_unreferenced_history, require_history_capability, require_history_requirement,

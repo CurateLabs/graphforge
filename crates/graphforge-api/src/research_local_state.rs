@@ -14,6 +14,18 @@ use uuid::Uuid;
 
 use crate::{CancellationToken, GraphForge};
 
+/// Record privacy-filtered per-ID refusals from a Hub publication in local state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecordPublishIdTakenRequest {
+    /// Stable local recording operation identity, distinct from the Hub operation.
+    pub operation_uuid: Uuid,
+    /// Previewed Project CURRENT.
+    pub expected_generation_uuid: Uuid,
+    /// Original publication and its per-item receipts, as asserted by the caller.
+    pub refusal: graphforge_storage::research_versions::PublishIdTakenReceipt,
+}
+
 /// Create or delete one tag on an immutable Version.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -89,6 +101,63 @@ fn conflict() -> GfError {
 }
 
 impl GraphForge {
+    /// Read authenticated project-local refusal receipts and regeneration relations.
+    pub fn publish_id_state(
+        &self,
+    ) -> Result<graphforge_storage::research_versions::PublishIdState, GfError> {
+        Ok(self.research_version_retention()?.publish_ids)
+    }
+
+    /// Retain a Hub refusal through the ordinary atomic research publication.
+    /// The caller supplies the Hub response; local authentication does not prove
+    /// remote ownership. Repeating an already retained response writes nothing.
+    pub fn record_publish_id_taken(
+        &mut self,
+        request: &RecordPublishIdTakenRequest,
+        cancellation: &CancellationToken,
+    ) -> Result<Option<ResearchOperationReceipt>, GfError> {
+        let registry = self.research_version_retention()?;
+        let bytes = serde_json::to_vec(&request.refusal)
+            .map_err(|_| GfError::Validation("refusal cannot be encoded".into()))?;
+        let intent = intent("publish-id-taken", &[&bytes]);
+        if let Some(receipt) = self.replay_local_state(
+            request.operation_uuid,
+            request.expected_generation_uuid,
+            intent,
+        )? {
+            return Ok(Some(receipt));
+        }
+        if registry
+            .publish_ids
+            .id_taken
+            .values()
+            .any(|old| old == &request.refusal)
+        {
+            return Ok(None);
+        }
+        if !registry
+            .identities
+            .contains_key(&request.refusal.version_uuid)
+        {
+            return Err(GfError::Validation("refused Version does not exist".into()));
+        }
+        request
+            .refusal
+            .validate()
+            .map_err(|_| GfError::Validation("permanent ID refusal receipt is invalid".into()))?;
+        self.publish_research_operation(
+            &ResearchOperation {
+                operation_uuid: request.operation_uuid,
+                expected_generation_uuid: request.expected_generation_uuid,
+                mutation: ResearchMutation::RecordPublishIdTaken {
+                    refusal: request.refusal.clone(),
+                    intent_sha256: intent,
+                },
+            },
+            cancellation,
+        )
+        .map(Some)
+    }
     /// The receipt of an earlier run of `operation_uuid` when `intent` is exactly
     /// what it recorded; a conflict when the identity was used for anything else.
     /// The request's CURRENT precondition is not part of the intent, so a rerun
@@ -275,6 +344,7 @@ impl GraphForge {
             graphforge_storage::research_versions::read_research_registry(&generation)?;
         registry.remote_branches.clear();
         registry.receipts.clear();
+        registry.publish_ids = Default::default();
         let mut digest = sha2::Sha256::new();
         digest.update(b"graphforge-publication-content/1");
         for participant in generation.participant_descriptors()? {

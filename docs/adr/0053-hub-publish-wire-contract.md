@@ -237,7 +237,9 @@ repository.
 
 ### Errors
 
-Every non-OAuth error body is `{code, message}`. `message` is a fixed string
+Every non-OAuth error body is `{code, message, items?}`. `items` is permitted only
+for `id_taken`, directly in hub-publish/1 without capability negotiation (ADR 0054).
+`message` is a fixed string
 chosen by the Hub; it never echoes request input, tokens, or upload URLs. `gf
 publish` classifies a failure only from a parsed `{code, message}` body and
 prints its own fixed text, so a Hub message never reaches CLI output and a bare
@@ -251,6 +253,7 @@ URL is `hub.unsafe_location`.
 | --- | --- | --- | --- |
 | `auth_denied` | 401 (missing, unknown, expired) | 403 (insufficient scope) | `hub.publish.auth_denied` |
 | `entitlement_denied` | 403 | | `hub.publish.entitlement_denied` |
+| `id_taken` | 409 | | `hub.publish.id_taken` |
 | `idempotency_conflict` | 409 | | `GF_IDEMPOTENCY_CONFLICT` |
 | `ref_conflict` | 412 | | `hub.publish.ref_conflict` |
 | `unsupported_future` | 422 | | `hub.publish.unsupported_future` |
@@ -258,10 +261,35 @@ URL is `hub.unsafe_location`.
 | `invalid_input` | 400 | 404 (unknown resource), 413 (over a limit), 416 (upload offset) | `hub.publish.invalid_input` |
 | `internal` | 500 | | `hub.publish.internal` |
 
+`id_taken` optionally carries `items`, in strictly ascending `id` order:
+`[{kind: "ontology_module" | "bridge_set", id: "ont_…" | "brg_…", owner?: <handle>, publish_as_owner?: true}]`.
+IDs are canonical lowercase bare permanent IDs. The Hub includes `owner` only
+when the caller can see the item, and `publish_as_owner: true` only when the
+caller can publish as the owning organization. Hidden ownership stays absent;
+the fixed message is `permanent item ID is owned by another publisher`.
+
+Inside the commit critical section the Hub checks only the manifest's advertised
+`ontology` inventory, never package contents or lineage-only ancestor inventories.
+The first successful publish claims a permanent ID for the repository's owner.
+That owner may publish new content. Any publisher may reuse an exact previously
+published `(id, authored_version, canonical_digest)`; transport package digests
+do not participate in this identity (ADR 0051). Other content under a foreign
+ID is refused with `id_taken`. A rejected batch claims no IDs, and claims and
+published tuples survive repository history pruning.
+
+`gf publish` prints its own next actions: publish as the disclosed owner, or
+`gf ontology regenerate-id <id>`. It retains privacy-filtered per-ID receipts
+in authenticated project-local tracking state, excluded from publication intent,
+research interchange, and discovery/lineage documents. If a local regeneration
+relation exists for a refused ID, it points to the regenerated Version instead
+of asking to regenerate the old immutable Version again. The owning regeneration
+operation installs that relation atomically with its new Version.
+
 ### Conformance
 
-`docs/reference/hub-publish/v1/conformance.json` is a corpus of request/response
-cases. The crate's `contract_artifacts` test regenerates it, then replays every
+`docs/reference/hub-publish/v1/conformance.json` and its sibling
+`permanent-ids-conformance.json` are corpora of request/response
+cases. The crate's `contract_artifacts` test regenerates both, then replays every
 case through a fresh `ReferenceHub`. Another Hub can replay the same corpus
 through its HTTP adapter.
 

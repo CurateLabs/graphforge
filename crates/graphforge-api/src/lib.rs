@@ -281,12 +281,14 @@ pub use branches::{
 };
 #[cfg(feature = "research")]
 pub use research_local_state::{
-    RecordResearchPublicationRequest, SelectResearchBranchRequest, SetResearchTagRequest,
+    RecordPublishIdTakenRequest, RecordResearchPublicationRequest, SelectResearchBranchRequest,
+    SetResearchTagRequest,
 };
 #[cfg(feature = "research")]
 mod slices;
 #[cfg(feature = "research")]
 pub use graphforge_storage::research_versions::{
+    OntologyIdRegeneration, PublishIdState, PublishIdTakenItem, PublishIdTakenReceipt,
     ResearchMutation, ResearchOperation, ResearchOperationReceipt, ResearchRegistry,
     ResearchRemoteBranch, ResearchRetentionRoot, ResearchRootKind, ResearchSignature,
     ResearchVersionProvenance, ResearchVersionRecord,
