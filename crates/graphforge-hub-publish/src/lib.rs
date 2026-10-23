@@ -13,6 +13,7 @@ mod commit;
 mod error;
 mod exchange;
 mod history;
+mod item_admission;
 #[cfg(not(target_arch = "wasm32"))]
 mod reference;
 mod wire;
@@ -27,6 +28,11 @@ pub use exchange::{HubExchange, HubMethod, HubRequest, HubResponse};
 pub use history::{
     prune_unreferenced_history, require_history_capability, require_history_requirement,
     validate_history_transition,
+};
+pub use item_admission::{
+    ItemAdmissionInput, ItemAdmissionPlan, ItemClaimAction, ItemClaimDecision, ItemClaimFact,
+    ItemClaimRequirement, ItemClaimState, ItemExactTuple, ItemTupleFact, MAX_ITEM_ADMISSION_BYTES,
+    StableAccountId, item_admission_requirements, plan_item_admission,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use reference::{ReferenceHub, ReferenceHubConfig};

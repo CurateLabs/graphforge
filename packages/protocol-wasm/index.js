@@ -124,6 +124,8 @@ const limits = ["optional", "limits"];
 
 export const parse_item_id = wrap("parse_item_id", [["string", "reference"]]);
 export const has_item_id_shape = wrap("has_item_id_shape", [["string", "name"]]);
+export const item_admission_requirements = wrap("item_admission_requirements", [doc("manifest")]);
+export const plan_item_admission = wrap("plan_item_admission", [doc("input")]);
 export const validate_item_descriptor = wrap("validate_item_descriptor", [
   doc("descriptor"),
   limits,

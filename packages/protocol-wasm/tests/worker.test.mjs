@@ -173,3 +173,48 @@ test("Worker footprint: linear memory, workerd RSS and request latency", async (
   // Workers allow 128 MB per isolate; the module's linear memory is a few MB.
   assert.ok(result.linear_memory_bytes < 32 * 1024 * 1024);
 });
+
+test("a Worker uses the shared native admission planner and preserves typed refusals", async () => {
+  const corpus = readJson(
+    "docs",
+    "reference",
+    "hub-publish",
+    "v1",
+    "item-admission-conformance.json",
+  );
+  for (const { name, input, expected } of corpus.cases) {
+    const result = await post({ admission: input });
+    assert.equal(result.status, expected.plan ? 200 : 422, name);
+    assert.deepEqual(result.body, expected.plan ?? expected.error, name);
+  }
+  const alias = corpus.cases.find(
+    ({ name }) => name === "canonical-alias-one-tuple",
+  ).input;
+  const query = await post({ admission_query: alias.manifest });
+  assert.equal(query.status, 200);
+  assert.equal(query.body.length, 1);
+  assert.equal(query.body[0].id, "ont_aaaaaaaaaaaaaaaa");
+});
+
+test("a Worker returns the native admission query byte-limit code for a valid oversized manifest", async () => {
+  const corpus = readJson(
+    "docs",
+    "reference",
+    "hub-publish",
+    "v1",
+    "item-admission-conformance.json",
+  );
+  const manifest = structuredClone(corpus.cases[0].input.manifest);
+  const template = manifest.ontology.modules[0];
+  manifest.ontology.modules = Array.from({ length: 4096 }, (_, n) => ({
+    ...template,
+    id: `https://graphforge.sh/ont_${n.toString(16).padStart(16, "0")}`,
+    version: "v".repeat(4096),
+  }));
+  const result = await post({ admission_query: manifest });
+  assert.equal(result.status, 422);
+  assert.deepEqual(result.body, {
+    code: "invalid_input",
+    message: "item admission manifest exceeds its byte bound",
+  });
+});

@@ -18,8 +18,16 @@ export default {
   async fetch(request) {
     // Rust raises a plain object `{code, path?, version?, message}`.
     try {
-      const { manifest, refs, summary, lineage, intent, rename } =
-        await request.json();
+      const payload = await request.json();
+      if (payload.admission) {
+        return json(protocol.plan_item_admission(payload.admission));
+      }
+      if (payload.admission_query) {
+        return json(
+          protocol.item_admission_requirements(payload.admission_query),
+        );
+      }
+      const { manifest, refs, summary, lineage, intent, rename } = payload;
       const validated = {
         manifest: protocol.validate_manifest(manifest),
         refs: protocol.validate_refs(refs),

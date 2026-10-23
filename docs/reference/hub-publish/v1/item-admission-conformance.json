@@ -1,0 +1,3499 @@
+{
+  "cases": [
+    {
+      "expected": {
+        "plan": {
+          "decisions": [
+            {
+              "action": "new_claim",
+              "content_digest": "sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11",
+              "id": "ont_aaaaaaaaaaaaaaaa",
+              "kind": "ontology_module",
+              "version": "same-version"
+            }
+          ],
+          "publisher_account_id": "opaque:publisher"
+        }
+      },
+      "input": {
+        "facts": [
+          {
+            "claim": {
+              "state": "unclaimed"
+            },
+            "id": "ont_aaaaaaaaaaaaaaaa",
+            "owner_visible": false,
+            "publish_as_owner": false,
+            "tuples": [
+              {
+                "content_digest": "sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11",
+                "published": false,
+                "version": "same-version"
+              }
+            ]
+          }
+        ],
+        "manifest": {
+          "capabilities": [],
+          "default_ref": "main",
+          "format": "graphforge-discovery/1",
+          "immutable_version": "sha256:07a0beb91567217d4b0f44f27879ab268630b02575527eb32a6a173a11b3bf38",
+          "objects": [
+            {
+              "digest": "sha256:76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b",
+              "length": 1776,
+              "locations": [
+                "https://data.graphforge.sh/objects/sha256/76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b"
+              ],
+              "media_type": "application/vnd.graphforge.project-summary+json"
+            },
+            {
+              "digest": "sha256:b2d08fdb0bacd23e001c4ace92e4eb86b9fb359da35552460f4d102e2725d775",
+              "length": 21504,
+              "locations": [
+                "https://data.graphforge.sh/objects/sha256/b2d08fdb0bacd23e001c4ace92e4eb86b9fb359da35552460f4d102e2725d775"
+              ],
+              "media_type": "application/vnd.graphforge.project"
+            },
+            {
+              "digest": "sha256:d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7",
+              "length": 12288,
+              "locations": [
+                "https://data.graphforge.sh/objects/sha256/d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7"
+              ],
+              "media_type": "application/vnd.graphforge.project"
+            }
+          ],
+          "ontology": {
+            "bridge_sets": [],
+            "composition_digest": "sha256:1dc9536e766224090b71de485a2bd3d6f35cc45c983441d16dfd3e3fc137e1fa",
+            "modules": [
+              {
+                "content_digest": "sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11",
+                "id": "https://graphforge.sh/ont_aaaaaaaaaaaaaaaa",
+                "package": {
+                  "format": "graphforge-project/2",
+                  "object_digest": "sha256:d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7",
+                  "package_digest": "sha256:79055696ec29ef37a14882a787a71da5a66306ff45d8ef7d594cb8e7fc90af69",
+                  "producing_core_version": "0.6.0-rc.5"
+                },
+                "version": "same-version"
+              }
+            ]
+          },
+          "package": {
+            "format": "graphforge-project/2",
+            "object_digest": "sha256:b2d08fdb0bacd23e001c4ace92e4eb86b9fb359da35552460f4d102e2725d775",
+            "package_digest": "sha256:07a0beb91567217d4b0f44f27879ab268630b02575527eb32a6a173a11b3bf38",
+            "producing_core_version": "0.6.0-rc.5"
+          },
+          "repository": {
+            "owner": "opendata",
+            "repository": "openalex"
+          },
+          "requirements": [
+            {
+              "capability": "portable",
+              "major": 1
+            }
+          ],
+          "resolved_ref": "main",
+          "summary": {
+            "format": "graphforge-project-summary/1",
+            "object_digest": "sha256:76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b",
+            "summary_digest": "sha256:76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b"
+          },
+          "version": {
+            "major": 1,
+            "minor": 2
+          }
+        },
+        "publisher_account_id": "opaque:publisher"
+      },
+      "name": "new-claim"
+    },
+    {
+      "expected": {
+        "plan": {
+          "decisions": [
+            {
+              "action": "owner_update",
+              "content_digest": "sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11",
+              "id": "ont_aaaaaaaaaaaaaaaa",
+              "kind": "ontology_module",
+              "version": "same-version"
+            }
+          ],
+          "publisher_account_id": "opaque:publisher"
+        }
+      },
+      "input": {
+        "facts": [
+          {
+            "claim": {
+              "owner_account_id": "opaque:publisher",
+              "owner_handle": "current-owner",
+              "state": "claimed"
+            },
+            "id": "ont_aaaaaaaaaaaaaaaa",
+            "owner_visible": false,
+            "publish_as_owner": false,
+            "tuples": [
+              {
+                "content_digest": "sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11",
+                "published": false,
+                "version": "same-version"
+              }
+            ]
+          }
+        ],
+        "manifest": {
+          "capabilities": [],
+          "default_ref": "main",
+          "format": "graphforge-discovery/1",
+          "immutable_version": "sha256:07a0beb91567217d4b0f44f27879ab268630b02575527eb32a6a173a11b3bf38",
+          "objects": [
+            {
+              "digest": "sha256:76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b",
+              "length": 1776,
+              "locations": [
+                "https://data.graphforge.sh/objects/sha256/76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b"
+              ],
+              "media_type": "application/vnd.graphforge.project-summary+json"
+            },
+            {
+              "digest": "sha256:b2d08fdb0bacd23e001c4ace92e4eb86b9fb359da35552460f4d102e2725d775",
+              "length": 21504,
+              "locations": [
+                "https://data.graphforge.sh/objects/sha256/b2d08fdb0bacd23e001c4ace92e4eb86b9fb359da35552460f4d102e2725d775"
+              ],
+              "media_type": "application/vnd.graphforge.project"
+            },
+            {
+              "digest": "sha256:d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7",
+              "length": 12288,
+              "locations": [
+                "https://data.graphforge.sh/objects/sha256/d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7"
+              ],
+              "media_type": "application/vnd.graphforge.project"
+            }
+          ],
+          "ontology": {
+            "bridge_sets": [],
+            "composition_digest": "sha256:1dc9536e766224090b71de485a2bd3d6f35cc45c983441d16dfd3e3fc137e1fa",
+            "modules": [
+              {
+                "content_digest": "sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11",
+                "id": "https://graphforge.sh/ont_aaaaaaaaaaaaaaaa",
+                "package": {
+                  "format": "graphforge-project/2",
+                  "object_digest": "sha256:d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7",
+                  "package_digest": "sha256:79055696ec29ef37a14882a787a71da5a66306ff45d8ef7d594cb8e7fc90af69",
+                  "producing_core_version": "0.6.0-rc.5"
+                },
+                "version": "same-version"
+              }
+            ]
+          },
+          "package": {
+            "format": "graphforge-project/2",
+            "object_digest": "sha256:b2d08fdb0bacd23e001c4ace92e4eb86b9fb359da35552460f4d102e2725d775",
+            "package_digest": "sha256:07a0beb91567217d4b0f44f27879ab268630b02575527eb32a6a173a11b3bf38",
+            "producing_core_version": "0.6.0-rc.5"
+          },
+          "repository": {
+            "owner": "opendata",
+            "repository": "openalex"
+          },
+          "requirements": [
+            {
+              "capability": "portable",
+              "major": 1
+            }
+          ],
+          "resolved_ref": "main",
+          "summary": {
+            "format": "graphforge-project-summary/1",
+            "object_digest": "sha256:76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b",
+            "summary_digest": "sha256:76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b"
+          },
+          "version": {
+            "major": 1,
+            "minor": 2
+          }
+        },
+        "publisher_account_id": "opaque:publisher"
+      },
+      "name": "owner-same-version-new-digest"
+    },
+    {
+      "expected": {
+        "plan": {
+          "decisions": [
+            {
+              "action": "exact_reuse",
+              "content_digest": "sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11",
+              "id": "ont_aaaaaaaaaaaaaaaa",
+              "kind": "ontology_module",
+              "version": "same-version"
+            }
+          ],
+          "publisher_account_id": "opaque:publisher"
+        }
+      },
+      "input": {
+        "facts": [
+          {
+            "claim": {
+              "owner_account_id": "opaque:foreign",
+              "owner_handle": "current-owner",
+              "state": "claimed"
+            },
+            "id": "ont_aaaaaaaaaaaaaaaa",
+            "owner_visible": false,
+            "publish_as_owner": false,
+            "tuples": [
+              {
+                "content_digest": "sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11",
+                "published": true,
+                "version": "same-version"
+              }
+            ]
+          }
+        ],
+        "manifest": {
+          "capabilities": [],
+          "default_ref": "main",
+          "format": "graphforge-discovery/1",
+          "immutable_version": "sha256:07a0beb91567217d4b0f44f27879ab268630b02575527eb32a6a173a11b3bf38",
+          "objects": [
+            {
+              "digest": "sha256:76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b",
+              "length": 1776,
+              "locations": [
+                "https://data.graphforge.sh/objects/sha256/76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b"
+              ],
+              "media_type": "application/vnd.graphforge.project-summary+json"
+            },
+            {
+              "digest": "sha256:b2d08fdb0bacd23e001c4ace92e4eb86b9fb359da35552460f4d102e2725d775",
+              "length": 21504,
+              "locations": [
+                "https://data.graphforge.sh/objects/sha256/b2d08fdb0bacd23e001c4ace92e4eb86b9fb359da35552460f4d102e2725d775"
+              ],
+              "media_type": "application/vnd.graphforge.project"
+            },
+            {
+              "digest": "sha256:d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7",
+              "length": 12288,
+              "locations": [
+                "https://data.graphforge.sh/objects/sha256/d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7"
+              ],
+              "media_type": "application/vnd.graphforge.project"
+            }
+          ],
+          "ontology": {
+            "bridge_sets": [],
+            "composition_digest": "sha256:1dc9536e766224090b71de485a2bd3d6f35cc45c983441d16dfd3e3fc137e1fa",
+            "modules": [
+              {
+                "content_digest": "sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11",
+                "id": "https://graphforge.sh/ont_aaaaaaaaaaaaaaaa",
+                "package": {
+                  "format": "graphforge-project/2",
+                  "object_digest": "sha256:d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7",
+                  "package_digest": "sha256:79055696ec29ef37a14882a787a71da5a66306ff45d8ef7d594cb8e7fc90af69",
+                  "producing_core_version": "0.6.0-rc.5"
+                },
+                "version": "same-version"
+              }
+            ]
+          },
+          "package": {
+            "format": "graphforge-project/2",
+            "object_digest": "sha256:b2d08fdb0bacd23e001c4ace92e4eb86b9fb359da35552460f4d102e2725d775",
+            "package_digest": "sha256:07a0beb91567217d4b0f44f27879ab268630b02575527eb32a6a173a11b3bf38",
+            "producing_core_version": "0.6.0-rc.5"
+          },
+          "repository": {
+            "owner": "opendata",
+            "repository": "openalex"
+          },
+          "requirements": [
+            {
+              "capability": "portable",
+              "major": 1
+            }
+          ],
+          "resolved_ref": "main",
+          "summary": {
+            "format": "graphforge-project-summary/1",
+            "object_digest": "sha256:76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b",
+            "summary_digest": "sha256:76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b"
+          },
+          "version": {
+            "major": 1,
+            "minor": 2
+          }
+        },
+        "publisher_account_id": "opaque:publisher"
+      },
+      "name": "foreign-exact-reuse"
+    },
+    {
+      "expected": {
+        "error": {
+          "code": "id_taken",
+          "items": [
+            {
+              "id": "ont_aaaaaaaaaaaaaaaa",
+              "kind": "ontology_module"
+            }
+          ],
+          "message": "permanent item ID is already owned"
+        }
+      },
+      "input": {
+        "facts": [
+          {
+            "claim": {
+              "owner_account_id": "opaque:foreign",
+              "owner_handle": "current-owner",
+              "state": "claimed"
+            },
+            "id": "ont_aaaaaaaaaaaaaaaa",
+            "owner_visible": false,
+            "publish_as_owner": false,
+            "tuples": [
+              {
+                "content_digest": "sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11",
+                "published": false,
+                "version": "same-version"
+              }
+            ]
+          }
+        ],
+        "manifest": {
+          "capabilities": [],
+          "default_ref": "main",
+          "format": "graphforge-discovery/1",
+          "immutable_version": "sha256:07a0beb91567217d4b0f44f27879ab268630b02575527eb32a6a173a11b3bf38",
+          "objects": [
+            {
+              "digest": "sha256:76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b",
+              "length": 1776,
+              "locations": [
+                "https://data.graphforge.sh/objects/sha256/76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b"
+              ],
+              "media_type": "application/vnd.graphforge.project-summary+json"
+            },
+            {
+              "digest": "sha256:b2d08fdb0bacd23e001c4ace92e4eb86b9fb359da35552460f4d102e2725d775",
+              "length": 21504,
+              "locations": [
+                "https://data.graphforge.sh/objects/sha256/b2d08fdb0bacd23e001c4ace92e4eb86b9fb359da35552460f4d102e2725d775"
+              ],
+              "media_type": "application/vnd.graphforge.project"
+            },
+            {
+              "digest": "sha256:d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7",
+              "length": 12288,
+              "locations": [
+                "https://data.graphforge.sh/objects/sha256/d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7"
+              ],
+              "media_type": "application/vnd.graphforge.project"
+            }
+          ],
+          "ontology": {
+            "bridge_sets": [],
+            "composition_digest": "sha256:1dc9536e766224090b71de485a2bd3d6f35cc45c983441d16dfd3e3fc137e1fa",
+            "modules": [
+              {
+                "content_digest": "sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11",
+                "id": "https://graphforge.sh/ont_aaaaaaaaaaaaaaaa",
+                "package": {
+                  "format": "graphforge-project/2",
+                  "object_digest": "sha256:d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7",
+                  "package_digest": "sha256:79055696ec29ef37a14882a787a71da5a66306ff45d8ef7d594cb8e7fc90af69",
+                  "producing_core_version": "0.6.0-rc.5"
+                },
+                "version": "same-version"
+              }
+            ]
+          },
+          "package": {
+            "format": "graphforge-project/2",
+            "object_digest": "sha256:b2d08fdb0bacd23e001c4ace92e4eb86b9fb359da35552460f4d102e2725d775",
+            "package_digest": "sha256:07a0beb91567217d4b0f44f27879ab268630b02575527eb32a6a173a11b3bf38",
+            "producing_core_version": "0.6.0-rc.5"
+          },
+          "repository": {
+            "owner": "opendata",
+            "repository": "openalex"
+          },
+          "requirements": [
+            {
+              "capability": "portable",
+              "major": 1
+            }
+          ],
+          "resolved_ref": "main",
+          "summary": {
+            "format": "graphforge-project-summary/1",
+            "object_digest": "sha256:76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b",
+            "summary_digest": "sha256:76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b"
+          },
+          "version": {
+            "major": 1,
+            "minor": 2
+          }
+        },
+        "publisher_account_id": "opaque:publisher"
+      },
+      "name": "hidden-owner"
+    },
+    {
+      "expected": {
+        "error": {
+          "code": "id_taken",
+          "items": [
+            {
+              "id": "ont_aaaaaaaaaaaaaaaa",
+              "kind": "ontology_module",
+              "owner": "current-owner"
+            }
+          ],
+          "message": "permanent item ID is already owned"
+        }
+      },
+      "input": {
+        "facts": [
+          {
+            "claim": {
+              "owner_account_id": "opaque:foreign",
+              "owner_handle": "current-owner",
+              "state": "claimed"
+            },
+            "id": "ont_aaaaaaaaaaaaaaaa",
+            "owner_visible": true,
+            "publish_as_owner": false,
+            "tuples": [
+              {
+                "content_digest": "sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11",
+                "published": false,
+                "version": "same-version"
+              }
+            ]
+          }
+        ],
+        "manifest": {
+          "capabilities": [],
+          "default_ref": "main",
+          "format": "graphforge-discovery/1",
+          "immutable_version": "sha256:07a0beb91567217d4b0f44f27879ab268630b02575527eb32a6a173a11b3bf38",
+          "objects": [
+            {
+              "digest": "sha256:76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b",
+              "length": 1776,
+              "locations": [
+                "https://data.graphforge.sh/objects/sha256/76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b"
+              ],
+              "media_type": "application/vnd.graphforge.project-summary+json"
+            },
+            {
+              "digest": "sha256:b2d08fdb0bacd23e001c4ace92e4eb86b9fb359da35552460f4d102e2725d775",
+              "length": 21504,
+              "locations": [
+                "https://data.graphforge.sh/objects/sha256/b2d08fdb0bacd23e001c4ace92e4eb86b9fb359da35552460f4d102e2725d775"
+              ],
+              "media_type": "application/vnd.graphforge.project"
+            },
+            {
+              "digest": "sha256:d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7",
+              "length": 12288,
+              "locations": [
+                "https://data.graphforge.sh/objects/sha256/d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7"
+              ],
+              "media_type": "application/vnd.graphforge.project"
+            }
+          ],
+          "ontology": {
+            "bridge_sets": [],
+            "composition_digest": "sha256:1dc9536e766224090b71de485a2bd3d6f35cc45c983441d16dfd3e3fc137e1fa",
+            "modules": [
+              {
+                "content_digest": "sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11",
+                "id": "https://graphforge.sh/ont_aaaaaaaaaaaaaaaa",
+                "package": {
+                  "format": "graphforge-project/2",
+                  "object_digest": "sha256:d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7",
+                  "package_digest": "sha256:79055696ec29ef37a14882a787a71da5a66306ff45d8ef7d594cb8e7fc90af69",
+                  "producing_core_version": "0.6.0-rc.5"
+                },
+                "version": "same-version"
+              }
+            ]
+          },
+          "package": {
+            "format": "graphforge-project/2",
+            "object_digest": "sha256:b2d08fdb0bacd23e001c4ace92e4eb86b9fb359da35552460f4d102e2725d775",
+            "package_digest": "sha256:07a0beb91567217d4b0f44f27879ab268630b02575527eb32a6a173a11b3bf38",
+            "producing_core_version": "0.6.0-rc.5"
+          },
+          "repository": {
+            "owner": "opendata",
+            "repository": "openalex"
+          },
+          "requirements": [
+            {
+              "capability": "portable",
+              "major": 1
+            }
+          ],
+          "resolved_ref": "main",
+          "summary": {
+            "format": "graphforge-project-summary/1",
+            "object_digest": "sha256:76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b",
+            "summary_digest": "sha256:76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b"
+          },
+          "version": {
+            "major": 1,
+            "minor": 2
+          }
+        },
+        "publisher_account_id": "opaque:publisher"
+      },
+      "name": "visible-owner"
+    },
+    {
+      "expected": {
+        "error": {
+          "code": "id_taken",
+          "items": [
+            {
+              "id": "ont_aaaaaaaaaaaaaaaa",
+              "kind": "ontology_module",
+              "publish_as_owner": true
+            }
+          ],
+          "message": "permanent item ID is already owned"
+        }
+      },
+      "input": {
+        "facts": [
+          {
+            "claim": {
+              "owner_account_id": "opaque:foreign",
+              "owner_handle": "current-owner",
+              "state": "claimed"
+            },
+            "id": "ont_aaaaaaaaaaaaaaaa",
+            "owner_visible": false,
+            "publish_as_owner": true,
+            "tuples": [
+              {
+                "content_digest": "sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11",
+                "published": false,
+                "version": "same-version"
+              }
+            ]
+          }
+        ],
+        "manifest": {
+          "capabilities": [],
+          "default_ref": "main",
+          "format": "graphforge-discovery/1",
+          "immutable_version": "sha256:07a0beb91567217d4b0f44f27879ab268630b02575527eb32a6a173a11b3bf38",
+          "objects": [
+            {
+              "digest": "sha256:76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b",
+              "length": 1776,
+              "locations": [
+                "https://data.graphforge.sh/objects/sha256/76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b"
+              ],
+              "media_type": "application/vnd.graphforge.project-summary+json"
+            },
+            {
+              "digest": "sha256:b2d08fdb0bacd23e001c4ace92e4eb86b9fb359da35552460f4d102e2725d775",
+              "length": 21504,
+              "locations": [
+                "https://data.graphforge.sh/objects/sha256/b2d08fdb0bacd23e001c4ace92e4eb86b9fb359da35552460f4d102e2725d775"
+              ],
+              "media_type": "application/vnd.graphforge.project"
+            },
+            {
+              "digest": "sha256:d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7",
+              "length": 12288,
+              "locations": [
+                "https://data.graphforge.sh/objects/sha256/d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7"
+              ],
+              "media_type": "application/vnd.graphforge.project"
+            }
+          ],
+          "ontology": {
+            "bridge_sets": [],
+            "composition_digest": "sha256:1dc9536e766224090b71de485a2bd3d6f35cc45c983441d16dfd3e3fc137e1fa",
+            "modules": [
+              {
+                "content_digest": "sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11",
+                "id": "https://graphforge.sh/ont_aaaaaaaaaaaaaaaa",
+                "package": {
+                  "format": "graphforge-project/2",
+                  "object_digest": "sha256:d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7",
+                  "package_digest": "sha256:79055696ec29ef37a14882a787a71da5a66306ff45d8ef7d594cb8e7fc90af69",
+                  "producing_core_version": "0.6.0-rc.5"
+                },
+                "version": "same-version"
+              }
+            ]
+          },
+          "package": {
+            "format": "graphforge-project/2",
+            "object_digest": "sha256:b2d08fdb0bacd23e001c4ace92e4eb86b9fb359da35552460f4d102e2725d775",
+            "package_digest": "sha256:07a0beb91567217d4b0f44f27879ab268630b02575527eb32a6a173a11b3bf38",
+            "producing_core_version": "0.6.0-rc.5"
+          },
+          "repository": {
+            "owner": "opendata",
+            "repository": "openalex"
+          },
+          "requirements": [
+            {
+              "capability": "portable",
+              "major": 1
+            }
+          ],
+          "resolved_ref": "main",
+          "summary": {
+            "format": "graphforge-project-summary/1",
+            "object_digest": "sha256:76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b",
+            "summary_digest": "sha256:76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b"
+          },
+          "version": {
+            "major": 1,
+            "minor": 2
+          }
+        },
+        "publisher_account_id": "opaque:publisher"
+      },
+      "name": "hidden-owner-org-hint"
+    },
+    {
+      "expected": {
+        "error": {
+          "code": "id_taken",
+          "items": [
+            {
+              "id": "ont_aaaaaaaaaaaaaaaa",
+              "kind": "ontology_module",
+              "owner": "current-owner",
+              "publish_as_owner": true
+            }
+          ],
+          "message": "permanent item ID is already owned"
+        }
+      },
+      "input": {
+        "facts": [
+          {
+            "claim": {
+              "owner_account_id": "opaque:foreign",
+              "owner_handle": "current-owner",
+              "state": "claimed"
+            },
+            "id": "ont_aaaaaaaaaaaaaaaa",
+            "owner_visible": true,
+            "publish_as_owner": true,
+            "tuples": [
+              {
+                "content_digest": "sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11",
+                "published": false,
+                "version": "same-version"
+              }
+            ]
+          }
+        ],
+        "manifest": {
+          "capabilities": [],
+          "default_ref": "main",
+          "format": "graphforge-discovery/1",
+          "immutable_version": "sha256:07a0beb91567217d4b0f44f27879ab268630b02575527eb32a6a173a11b3bf38",
+          "objects": [
+            {
+              "digest": "sha256:76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b",
+              "length": 1776,
+              "locations": [
+                "https://data.graphforge.sh/objects/sha256/76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b"
+              ],
+              "media_type": "application/vnd.graphforge.project-summary+json"
+            },
+            {
+              "digest": "sha256:b2d08fdb0bacd23e001c4ace92e4eb86b9fb359da35552460f4d102e2725d775",
+              "length": 21504,
+              "locations": [
+                "https://data.graphforge.sh/objects/sha256/b2d08fdb0bacd23e001c4ace92e4eb86b9fb359da35552460f4d102e2725d775"
+              ],
+              "media_type": "application/vnd.graphforge.project"
+            },
+            {
+              "digest": "sha256:d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7",
+              "length": 12288,
+              "locations": [
+                "https://data.graphforge.sh/objects/sha256/d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7"
+              ],
+              "media_type": "application/vnd.graphforge.project"
+            }
+          ],
+          "ontology": {
+            "bridge_sets": [],
+            "composition_digest": "sha256:1dc9536e766224090b71de485a2bd3d6f35cc45c983441d16dfd3e3fc137e1fa",
+            "modules": [
+              {
+                "content_digest": "sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11",
+                "id": "https://graphforge.sh/ont_aaaaaaaaaaaaaaaa",
+                "package": {
+                  "format": "graphforge-project/2",
+                  "object_digest": "sha256:d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7",
+                  "package_digest": "sha256:79055696ec29ef37a14882a787a71da5a66306ff45d8ef7d594cb8e7fc90af69",
+                  "producing_core_version": "0.6.0-rc.5"
+                },
+                "version": "same-version"
+              }
+            ]
+          },
+          "package": {
+            "format": "graphforge-project/2",
+            "object_digest": "sha256:b2d08fdb0bacd23e001c4ace92e4eb86b9fb359da35552460f4d102e2725d775",
+            "package_digest": "sha256:07a0beb91567217d4b0f44f27879ab268630b02575527eb32a6a173a11b3bf38",
+            "producing_core_version": "0.6.0-rc.5"
+          },
+          "repository": {
+            "owner": "opendata",
+            "repository": "openalex"
+          },
+          "requirements": [
+            {
+              "capability": "portable",
+              "major": 1
+            }
+          ],
+          "resolved_ref": "main",
+          "summary": {
+            "format": "graphforge-project-summary/1",
+            "object_digest": "sha256:76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b",
+            "summary_digest": "sha256:76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b"
+          },
+          "version": {
+            "major": 1,
+            "minor": 2
+          }
+        },
+        "publisher_account_id": "opaque:publisher"
+      },
+      "name": "visible-owner-org-hint"
+    },
+    {
+      "expected": {
+        "plan": {
+          "decisions": [
+            {
+              "action": "new_claim",
+              "content_digest": "sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11",
+              "id": "ont_aaaaaaaaaaaaaaaa",
+              "kind": "ontology_module",
+              "version": "same-version"
+            }
+          ],
+          "publisher_account_id": "opaque:publisher"
+        }
+      },
+      "input": {
+        "facts": [
+          {
+            "claim": {
+              "state": "unclaimed"
+            },
+            "id": "ont_aaaaaaaaaaaaaaaa",
+            "owner_visible": false,
+            "publish_as_owner": false,
+            "tuples": [
+              {
+                "content_digest": "sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11",
+                "published": false,
+                "version": "same-version"
+              }
+            ]
+          }
+        ],
+        "manifest": {
+          "capabilities": [],
+          "default_ref": "main",
+          "format": "graphforge-discovery/1",
+          "immutable_version": "sha256:07a0beb91567217d4b0f44f27879ab268630b02575527eb32a6a173a11b3bf38",
+          "objects": [
+            {
+              "digest": "sha256:76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b",
+              "length": 1776,
+              "locations": [
+                "https://data.graphforge.sh/objects/sha256/76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b"
+              ],
+              "media_type": "application/vnd.graphforge.project-summary+json"
+            },
+            {
+              "digest": "sha256:b2d08fdb0bacd23e001c4ace92e4eb86b9fb359da35552460f4d102e2725d775",
+              "length": 21504,
+              "locations": [
+                "https://data.graphforge.sh/objects/sha256/b2d08fdb0bacd23e001c4ace92e4eb86b9fb359da35552460f4d102e2725d775"
+              ],
+              "media_type": "application/vnd.graphforge.project"
+            },
+            {
+              "digest": "sha256:d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7",
+              "length": 12288,
+              "locations": [
+                "https://data.graphforge.sh/objects/sha256/d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7"
+              ],
+              "media_type": "application/vnd.graphforge.project"
+            }
+          ],
+          "ontology": {
+            "bridge_sets": [],
+            "composition_digest": "sha256:1dc9536e766224090b71de485a2bd3d6f35cc45c983441d16dfd3e3fc137e1fa",
+            "modules": [
+              {
+                "content_digest": "sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11",
+                "id": "https://graphforge.sh/ONT_AAAAAAAAAAAAAAAA",
+                "package": {
+                  "format": "graphforge-project/2",
+                  "object_digest": "sha256:d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7",
+                  "package_digest": "sha256:79055696ec29ef37a14882a787a71da5a66306ff45d8ef7d594cb8e7fc90af69",
+                  "producing_core_version": "0.6.0-rc.5"
+                },
+                "version": "same-version"
+              },
+              {
+                "content_digest": "sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11",
+                "id": "https://graphforge.sh/ont_aaaaaaaaaaaaaaaa",
+                "package": {
+                  "format": "graphforge-project/2",
+                  "object_digest": "sha256:d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7",
+                  "package_digest": "sha256:79055696ec29ef37a14882a787a71da5a66306ff45d8ef7d594cb8e7fc90af69",
+                  "producing_core_version": "0.6.0-rc.5"
+                },
+                "version": "same-version"
+              }
+            ]
+          },
+          "package": {
+            "format": "graphforge-project/2",
+            "object_digest": "sha256:b2d08fdb0bacd23e001c4ace92e4eb86b9fb359da35552460f4d102e2725d775",
+            "package_digest": "sha256:07a0beb91567217d4b0f44f27879ab268630b02575527eb32a6a173a11b3bf38",
+            "producing_core_version": "0.6.0-rc.5"
+          },
+          "repository": {
+            "owner": "opendata",
+            "repository": "openalex"
+          },
+          "requirements": [
+            {
+              "capability": "portable",
+              "major": 1
+            }
+          ],
+          "resolved_ref": "main",
+          "summary": {
+            "format": "graphforge-project-summary/1",
+            "object_digest": "sha256:76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b",
+            "summary_digest": "sha256:76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b"
+          },
+          "version": {
+            "major": 1,
+            "minor": 2
+          }
+        },
+        "publisher_account_id": "opaque:publisher"
+      },
+      "name": "canonical-alias-one-tuple"
+    },
+    {
+      "expected": {
+        "plan": {
+          "decisions": [],
+          "publisher_account_id": "opaque:publisher"
+        }
+      },
+      "input": {
+        "facts": [],
+        "manifest": {
+          "capabilities": [],
+          "default_ref": "main",
+          "format": "graphforge-discovery/1",
+          "immutable_version": "sha256:07a0beb91567217d4b0f44f27879ab268630b02575527eb32a6a173a11b3bf38",
+          "objects": [
+            {
+              "digest": "sha256:76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b",
+              "length": 1776,
+              "locations": [
+                "https://data.graphforge.sh/objects/sha256/76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b"
+              ],
+              "media_type": "application/vnd.graphforge.project-summary+json"
+            },
+            {
+              "digest": "sha256:b2d08fdb0bacd23e001c4ace92e4eb86b9fb359da35552460f4d102e2725d775",
+              "length": 21504,
+              "locations": [
+                "https://data.graphforge.sh/objects/sha256/b2d08fdb0bacd23e001c4ace92e4eb86b9fb359da35552460f4d102e2725d775"
+              ],
+              "media_type": "application/vnd.graphforge.project"
+            },
+            {
+              "digest": "sha256:d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7",
+              "length": 12288,
+              "locations": [
+                "https://data.graphforge.sh/objects/sha256/d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7"
+              ],
+              "media_type": "application/vnd.graphforge.project"
+            }
+          ],
+          "ontology": {
+            "bridge_sets": [],
+            "composition_digest": "sha256:1dc9536e766224090b71de485a2bd3d6f35cc45c983441d16dfd3e3fc137e1fa",
+            "modules": [
+              {
+                "content_digest": "sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11",
+                "id": "https://example.org/legacy",
+                "package": {
+                  "format": "graphforge-project/2",
+                  "object_digest": "sha256:d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7",
+                  "package_digest": "sha256:79055696ec29ef37a14882a787a71da5a66306ff45d8ef7d594cb8e7fc90af69",
+                  "producing_core_version": "0.6.0-rc.5"
+                },
+                "version": "same-version"
+              }
+            ]
+          },
+          "package": {
+            "format": "graphforge-project/2",
+            "object_digest": "sha256:b2d08fdb0bacd23e001c4ace92e4eb86b9fb359da35552460f4d102e2725d775",
+            "package_digest": "sha256:07a0beb91567217d4b0f44f27879ab268630b02575527eb32a6a173a11b3bf38",
+            "producing_core_version": "0.6.0-rc.5"
+          },
+          "repository": {
+            "owner": "opendata",
+            "repository": "openalex"
+          },
+          "requirements": [
+            {
+              "capability": "portable",
+              "major": 1
+            }
+          ],
+          "resolved_ref": "main",
+          "summary": {
+            "format": "graphforge-project-summary/1",
+            "object_digest": "sha256:76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b",
+            "summary_digest": "sha256:76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b"
+          },
+          "version": {
+            "major": 1,
+            "minor": 2
+          }
+        },
+        "publisher_account_id": "opaque:publisher"
+      },
+      "name": "legacy-iri-ignored"
+    },
+    {
+      "expected": {
+        "plan": {
+          "decisions": [
+            {
+              "action": "new_claim",
+              "content_digest": "sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11",
+              "id": "brg_aaaaaaaaaaaaaaaa",
+              "kind": "bridge_set",
+              "version": "same-version"
+            }
+          ],
+          "publisher_account_id": "opaque:publisher"
+        }
+      },
+      "input": {
+        "facts": [
+          {
+            "claim": {
+              "state": "unclaimed"
+            },
+            "id": "brg_aaaaaaaaaaaaaaaa",
+            "owner_visible": false,
+            "publish_as_owner": false,
+            "tuples": [
+              {
+                "content_digest": "sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11",
+                "published": false,
+                "version": "same-version"
+              }
+            ]
+          }
+        ],
+        "manifest": {
+          "capabilities": [],
+          "default_ref": "main",
+          "format": "graphforge-discovery/1",
+          "immutable_version": "sha256:07a0beb91567217d4b0f44f27879ab268630b02575527eb32a6a173a11b3bf38",
+          "objects": [
+            {
+              "digest": "sha256:76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b",
+              "length": 1776,
+              "locations": [
+                "https://data.graphforge.sh/objects/sha256/76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b"
+              ],
+              "media_type": "application/vnd.graphforge.project-summary+json"
+            },
+            {
+              "digest": "sha256:b2d08fdb0bacd23e001c4ace92e4eb86b9fb359da35552460f4d102e2725d775",
+              "length": 21504,
+              "locations": [
+                "https://data.graphforge.sh/objects/sha256/b2d08fdb0bacd23e001c4ace92e4eb86b9fb359da35552460f4d102e2725d775"
+              ],
+              "media_type": "application/vnd.graphforge.project"
+            },
+            {
+              "digest": "sha256:d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7",
+              "length": 12288,
+              "locations": [
+                "https://data.graphforge.sh/objects/sha256/d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7"
+              ],
+              "media_type": "application/vnd.graphforge.project"
+            }
+          ],
+          "ontology": {
+            "bridge_sets": [
+              {
+                "content_digest": "sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11",
+                "id": "https://graphforge.sh/brg_aaaaaaaaaaaaaaaa",
+                "version": "same-version"
+              }
+            ],
+            "composition_digest": "sha256:1dc9536e766224090b71de485a2bd3d6f35cc45c983441d16dfd3e3fc137e1fa",
+            "modules": []
+          },
+          "package": {
+            "format": "graphforge-project/2",
+            "object_digest": "sha256:b2d08fdb0bacd23e001c4ace92e4eb86b9fb359da35552460f4d102e2725d775",
+            "package_digest": "sha256:07a0beb91567217d4b0f44f27879ab268630b02575527eb32a6a173a11b3bf38",
+            "producing_core_version": "0.6.0-rc.5"
+          },
+          "repository": {
+            "owner": "opendata",
+            "repository": "openalex"
+          },
+          "requirements": [
+            {
+              "capability": "portable",
+              "major": 1
+            }
+          ],
+          "resolved_ref": "main",
+          "summary": {
+            "format": "graphforge-project-summary/1",
+            "object_digest": "sha256:76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b",
+            "summary_digest": "sha256:76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b"
+          },
+          "version": {
+            "major": 1,
+            "minor": 2
+          }
+        },
+        "publisher_account_id": "opaque:publisher"
+      },
+      "name": "bridge-claim"
+    },
+    {
+      "expected": {
+        "error": {
+          "code": "id_taken",
+          "items": [
+            {
+              "id": "brg_aaaaaaaaaaaaaaaa",
+              "kind": "bridge_set"
+            },
+            {
+              "id": "ont_aaaaaaaaaaaaaaaa",
+              "kind": "ontology_module"
+            }
+          ],
+          "message": "permanent item ID is already owned"
+        }
+      },
+      "input": {
+        "facts": [
+          {
+            "claim": {
+              "owner_account_id": "opaque:foreign",
+              "owner_handle": "current-owner",
+              "state": "claimed"
+            },
+            "id": "ont_aaaaaaaaaaaaaaaa",
+            "owner_visible": false,
+            "publish_as_owner": false,
+            "tuples": [
+              {
+                "content_digest": "sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11",
+                "published": false,
+                "version": "same-version"
+              }
+            ]
+          },
+          {
+            "claim": {
+              "owner_account_id": "opaque:foreign",
+              "owner_handle": "current-owner",
+              "state": "claimed"
+            },
+            "id": "brg_aaaaaaaaaaaaaaaa",
+            "owner_visible": false,
+            "publish_as_owner": false,
+            "tuples": [
+              {
+                "content_digest": "sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11",
+                "published": false,
+                "version": "same-version"
+              }
+            ]
+          }
+        ],
+        "manifest": {
+          "capabilities": [],
+          "default_ref": "main",
+          "format": "graphforge-discovery/1",
+          "immutable_version": "sha256:07a0beb91567217d4b0f44f27879ab268630b02575527eb32a6a173a11b3bf38",
+          "objects": [
+            {
+              "digest": "sha256:76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b",
+              "length": 1776,
+              "locations": [
+                "https://data.graphforge.sh/objects/sha256/76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b"
+              ],
+              "media_type": "application/vnd.graphforge.project-summary+json"
+            },
+            {
+              "digest": "sha256:b2d08fdb0bacd23e001c4ace92e4eb86b9fb359da35552460f4d102e2725d775",
+              "length": 21504,
+              "locations": [
+                "https://data.graphforge.sh/objects/sha256/b2d08fdb0bacd23e001c4ace92e4eb86b9fb359da35552460f4d102e2725d775"
+              ],
+              "media_type": "application/vnd.graphforge.project"
+            },
+            {
+              "digest": "sha256:d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7",
+              "length": 12288,
+              "locations": [
+                "https://data.graphforge.sh/objects/sha256/d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7"
+              ],
+              "media_type": "application/vnd.graphforge.project"
+            }
+          ],
+          "ontology": {
+            "bridge_sets": [
+              {
+                "content_digest": "sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11",
+                "id": "https://graphforge.sh/brg_aaaaaaaaaaaaaaaa",
+                "version": "same-version"
+              }
+            ],
+            "composition_digest": "sha256:1dc9536e766224090b71de485a2bd3d6f35cc45c983441d16dfd3e3fc137e1fa",
+            "modules": [
+              {
+                "content_digest": "sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11",
+                "id": "https://graphforge.sh/ont_aaaaaaaaaaaaaaaa",
+                "package": {
+                  "format": "graphforge-project/2",
+                  "object_digest": "sha256:d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7",
+                  "package_digest": "sha256:79055696ec29ef37a14882a787a71da5a66306ff45d8ef7d594cb8e7fc90af69",
+                  "producing_core_version": "0.6.0-rc.5"
+                },
+                "version": "same-version"
+              }
+            ]
+          },
+          "package": {
+            "format": "graphforge-project/2",
+            "object_digest": "sha256:b2d08fdb0bacd23e001c4ace92e4eb86b9fb359da35552460f4d102e2725d775",
+            "package_digest": "sha256:07a0beb91567217d4b0f44f27879ab268630b02575527eb32a6a173a11b3bf38",
+            "producing_core_version": "0.6.0-rc.5"
+          },
+          "repository": {
+            "owner": "opendata",
+            "repository": "openalex"
+          },
+          "requirements": [
+            {
+              "capability": "portable",
+              "major": 1
+            }
+          ],
+          "resolved_ref": "main",
+          "summary": {
+            "format": "graphforge-project-summary/1",
+            "object_digest": "sha256:76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b",
+            "summary_digest": "sha256:76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b"
+          },
+          "version": {
+            "major": 1,
+            "minor": 2
+          }
+        },
+        "publisher_account_id": "opaque:publisher"
+      },
+      "name": "sorted-multiple-kind-refusals"
+    },
+    {
+      "expected": {
+        "plan": {
+          "decisions": [
+            {
+              "action": "new_claim",
+              "content_digest": "sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11",
+              "id": "ont_aaaaaaaaaaaaaaaa",
+              "kind": "ontology_module",
+              "version": "same-version"
+            },
+            {
+              "action": "new_claim",
+              "content_digest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+              "id": "ont_aaaaaaaaaaaaaaaa",
+              "kind": "ontology_module",
+              "version": "same-version"
+            }
+          ],
+          "publisher_account_id": "opaque:publisher"
+        }
+      },
+      "input": {
+        "facts": [
+          {
+            "claim": {
+              "state": "unclaimed"
+            },
+            "id": "ont_aaaaaaaaaaaaaaaa",
+            "owner_visible": false,
+            "publish_as_owner": false,
+            "tuples": [
+              {
+                "content_digest": "sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11",
+                "published": false,
+                "version": "same-version"
+              },
+              {
+                "content_digest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+                "published": false,
+                "version": "same-version"
+              }
+            ]
+          }
+        ],
+        "manifest": {
+          "capabilities": [],
+          "default_ref": "main",
+          "format": "graphforge-discovery/1",
+          "immutable_version": "sha256:07a0beb91567217d4b0f44f27879ab268630b02575527eb32a6a173a11b3bf38",
+          "objects": [
+            {
+              "digest": "sha256:76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b",
+              "length": 1776,
+              "locations": [
+                "https://data.graphforge.sh/objects/sha256/76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b"
+              ],
+              "media_type": "application/vnd.graphforge.project-summary+json"
+            },
+            {
+              "digest": "sha256:b2d08fdb0bacd23e001c4ace92e4eb86b9fb359da35552460f4d102e2725d775",
+              "length": 21504,
+              "locations": [
+                "https://data.graphforge.sh/objects/sha256/b2d08fdb0bacd23e001c4ace92e4eb86b9fb359da35552460f4d102e2725d775"
+              ],
+              "media_type": "application/vnd.graphforge.project"
+            },
+            {
+              "digest": "sha256:d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7",
+              "length": 12288,
+              "locations": [
+                "https://data.graphforge.sh/objects/sha256/d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7"
+              ],
+              "media_type": "application/vnd.graphforge.project"
+            }
+          ],
+          "ontology": {
+            "bridge_sets": [],
+            "composition_digest": "sha256:1dc9536e766224090b71de485a2bd3d6f35cc45c983441d16dfd3e3fc137e1fa",
+            "modules": [
+              {
+                "content_digest": "sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11",
+                "id": "https://graphforge.sh/ont_aaaaaaaaaaaaaaaa",
+                "package": {
+                  "format": "graphforge-project/2",
+                  "object_digest": "sha256:d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7",
+                  "package_digest": "sha256:79055696ec29ef37a14882a787a71da5a66306ff45d8ef7d594cb8e7fc90af69",
+                  "producing_core_version": "0.6.0-rc.5"
+                },
+                "version": "same-version"
+              },
+              {
+                "content_digest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+                "id": "https://graphforge.sh/ont_aaaaaaaaaaaaaaaa",
+                "package": {
+                  "format": "graphforge-project/2",
+                  "object_digest": "sha256:d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7",
+                  "package_digest": "sha256:79055696ec29ef37a14882a787a71da5a66306ff45d8ef7d594cb8e7fc90af69",
+                  "producing_core_version": "0.6.0-rc.5"
+                },
+                "version": "same-version"
+              }
+            ]
+          },
+          "package": {
+            "format": "graphforge-project/2",
+            "object_digest": "sha256:b2d08fdb0bacd23e001c4ace92e4eb86b9fb359da35552460f4d102e2725d775",
+            "package_digest": "sha256:07a0beb91567217d4b0f44f27879ab268630b02575527eb32a6a173a11b3bf38",
+            "producing_core_version": "0.6.0-rc.5"
+          },
+          "repository": {
+            "owner": "opendata",
+            "repository": "openalex"
+          },
+          "requirements": [
+            {
+              "capability": "portable",
+              "major": 1
+            }
+          ],
+          "resolved_ref": "main",
+          "summary": {
+            "format": "graphforge-project-summary/1",
+            "object_digest": "sha256:76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b",
+            "summary_digest": "sha256:76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b"
+          },
+          "version": {
+            "major": 1,
+            "minor": 2
+          }
+        },
+        "publisher_account_id": "opaque:publisher"
+      },
+      "name": "same-id-version-distinct-digests"
+    },
+    {
+      "expected": {
+        "error": {
+          "code": "id_taken",
+          "items": [
+            {
+              "id": "ont_aaaaaaaaaaaaaaaa",
+              "kind": "ontology_module"
+            }
+          ],
+          "message": "permanent item ID is already owned"
+        }
+      },
+      "input": {
+        "facts": [
+          {
+            "claim": {
+              "owner_account_id": "opaque:foreign",
+              "owner_handle": "current-owner",
+              "state": "claimed"
+            },
+            "id": "ont_aaaaaaaaaaaaaaaa",
+            "owner_visible": false,
+            "publish_as_owner": false,
+            "tuples": [
+              {
+                "content_digest": "sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11",
+                "published": true,
+                "version": "same-version"
+              },
+              {
+                "content_digest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+                "published": false,
+                "version": "same-version"
+              }
+            ]
+          }
+        ],
+        "manifest": {
+          "capabilities": [],
+          "default_ref": "main",
+          "format": "graphforge-discovery/1",
+          "immutable_version": "sha256:07a0beb91567217d4b0f44f27879ab268630b02575527eb32a6a173a11b3bf38",
+          "objects": [
+            {
+              "digest": "sha256:76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b",
+              "length": 1776,
+              "locations": [
+                "https://data.graphforge.sh/objects/sha256/76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b"
+              ],
+              "media_type": "application/vnd.graphforge.project-summary+json"
+            },
+            {
+              "digest": "sha256:b2d08fdb0bacd23e001c4ace92e4eb86b9fb359da35552460f4d102e2725d775",
+              "length": 21504,
+              "locations": [
+                "https://data.graphforge.sh/objects/sha256/b2d08fdb0bacd23e001c4ace92e4eb86b9fb359da35552460f4d102e2725d775"
+              ],
+              "media_type": "application/vnd.graphforge.project"
+            },
+            {
+              "digest": "sha256:d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7",
+              "length": 12288,
+              "locations": [
+                "https://data.graphforge.sh/objects/sha256/d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7"
+              ],
+              "media_type": "application/vnd.graphforge.project"
+            }
+          ],
+          "ontology": {
+            "bridge_sets": [],
+            "composition_digest": "sha256:1dc9536e766224090b71de485a2bd3d6f35cc45c983441d16dfd3e3fc137e1fa",
+            "modules": [
+              {
+                "content_digest": "sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11",
+                "id": "https://graphforge.sh/ont_aaaaaaaaaaaaaaaa",
+                "package": {
+                  "format": "graphforge-project/2",
+                  "object_digest": "sha256:d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7",
+                  "package_digest": "sha256:79055696ec29ef37a14882a787a71da5a66306ff45d8ef7d594cb8e7fc90af69",
+                  "producing_core_version": "0.6.0-rc.5"
+                },
+                "version": "same-version"
+              },
+              {
+                "content_digest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+                "id": "https://graphforge.sh/ont_aaaaaaaaaaaaaaaa",
+                "package": {
+                  "format": "graphforge-project/2",
+                  "object_digest": "sha256:d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7",
+                  "package_digest": "sha256:79055696ec29ef37a14882a787a71da5a66306ff45d8ef7d594cb8e7fc90af69",
+                  "producing_core_version": "0.6.0-rc.5"
+                },
+                "version": "same-version"
+              }
+            ]
+          },
+          "package": {
+            "format": "graphforge-project/2",
+            "object_digest": "sha256:b2d08fdb0bacd23e001c4ace92e4eb86b9fb359da35552460f4d102e2725d775",
+            "package_digest": "sha256:07a0beb91567217d4b0f44f27879ab268630b02575527eb32a6a173a11b3bf38",
+            "producing_core_version": "0.6.0-rc.5"
+          },
+          "repository": {
+            "owner": "opendata",
+            "repository": "openalex"
+          },
+          "requirements": [
+            {
+              "capability": "portable",
+              "major": 1
+            }
+          ],
+          "resolved_ref": "main",
+          "summary": {
+            "format": "graphforge-project-summary/1",
+            "object_digest": "sha256:76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b",
+            "summary_digest": "sha256:76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b"
+          },
+          "version": {
+            "major": 1,
+            "minor": 2
+          }
+        },
+        "publisher_account_id": "opaque:publisher"
+      },
+      "name": "partial-exact-reuse-refuses-whole-plan"
+    },
+    {
+      "expected": {
+        "error": {
+          "code": "invalid_input",
+          "message": "advertised permanent ID has the wrong item kind"
+        }
+      },
+      "input": {
+        "facts": [
+          {
+            "claim": {
+              "state": "unclaimed"
+            },
+            "id": "ont_aaaaaaaaaaaaaaaa",
+            "owner_visible": false,
+            "publish_as_owner": false,
+            "tuples": [
+              {
+                "content_digest": "sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11",
+                "published": false,
+                "version": "same-version"
+              }
+            ]
+          }
+        ],
+        "manifest": {
+          "capabilities": [],
+          "default_ref": "main",
+          "format": "graphforge-discovery/1",
+          "immutable_version": "sha256:07a0beb91567217d4b0f44f27879ab268630b02575527eb32a6a173a11b3bf38",
+          "objects": [
+            {
+              "digest": "sha256:76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b",
+              "length": 1776,
+              "locations": [
+                "https://data.graphforge.sh/objects/sha256/76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b"
+              ],
+              "media_type": "application/vnd.graphforge.project-summary+json"
+            },
+            {
+              "digest": "sha256:b2d08fdb0bacd23e001c4ace92e4eb86b9fb359da35552460f4d102e2725d775",
+              "length": 21504,
+              "locations": [
+                "https://data.graphforge.sh/objects/sha256/b2d08fdb0bacd23e001c4ace92e4eb86b9fb359da35552460f4d102e2725d775"
+              ],
+              "media_type": "application/vnd.graphforge.project"
+            },
+            {
+              "digest": "sha256:d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7",
+              "length": 12288,
+              "locations": [
+                "https://data.graphforge.sh/objects/sha256/d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7"
+              ],
+              "media_type": "application/vnd.graphforge.project"
+            }
+          ],
+          "ontology": {
+            "bridge_sets": [],
+            "composition_digest": "sha256:1dc9536e766224090b71de485a2bd3d6f35cc45c983441d16dfd3e3fc137e1fa",
+            "modules": [
+              {
+                "content_digest": "sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11",
+                "id": "brg_aaaaaaaaaaaaaaaa",
+                "package": {
+                  "format": "graphforge-project/2",
+                  "object_digest": "sha256:d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7",
+                  "package_digest": "sha256:79055696ec29ef37a14882a787a71da5a66306ff45d8ef7d594cb8e7fc90af69",
+                  "producing_core_version": "0.6.0-rc.5"
+                },
+                "version": "same-version"
+              }
+            ]
+          },
+          "package": {
+            "format": "graphforge-project/2",
+            "object_digest": "sha256:b2d08fdb0bacd23e001c4ace92e4eb86b9fb359da35552460f4d102e2725d775",
+            "package_digest": "sha256:07a0beb91567217d4b0f44f27879ab268630b02575527eb32a6a173a11b3bf38",
+            "producing_core_version": "0.6.0-rc.5"
+          },
+          "repository": {
+            "owner": "opendata",
+            "repository": "openalex"
+          },
+          "requirements": [
+            {
+              "capability": "portable",
+              "major": 1
+            }
+          ],
+          "resolved_ref": "main",
+          "summary": {
+            "format": "graphforge-project-summary/1",
+            "object_digest": "sha256:76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b",
+            "summary_digest": "sha256:76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b"
+          },
+          "version": {
+            "major": 1,
+            "minor": 2
+          }
+        },
+        "publisher_account_id": "opaque:publisher"
+      },
+      "name": "wrong-kind"
+    },
+    {
+      "expected": {
+        "error": {
+          "code": "invalid_input",
+          "message": "claim facts are incomplete or exceed their bound"
+        }
+      },
+      "input": {
+        "facts": [],
+        "manifest": {
+          "capabilities": [],
+          "default_ref": "main",
+          "format": "graphforge-discovery/1",
+          "immutable_version": "sha256:07a0beb91567217d4b0f44f27879ab268630b02575527eb32a6a173a11b3bf38",
+          "objects": [
+            {
+              "digest": "sha256:76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b",
+              "length": 1776,
+              "locations": [
+                "https://data.graphforge.sh/objects/sha256/76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b"
+              ],
+              "media_type": "application/vnd.graphforge.project-summary+json"
+            },
+            {
+              "digest": "sha256:b2d08fdb0bacd23e001c4ace92e4eb86b9fb359da35552460f4d102e2725d775",
+              "length": 21504,
+              "locations": [
+                "https://data.graphforge.sh/objects/sha256/b2d08fdb0bacd23e001c4ace92e4eb86b9fb359da35552460f4d102e2725d775"
+              ],
+              "media_type": "application/vnd.graphforge.project"
+            },
+            {
+              "digest": "sha256:d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7",
+              "length": 12288,
+              "locations": [
+                "https://data.graphforge.sh/objects/sha256/d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7"
+              ],
+              "media_type": "application/vnd.graphforge.project"
+            }
+          ],
+          "ontology": {
+            "bridge_sets": [],
+            "composition_digest": "sha256:1dc9536e766224090b71de485a2bd3d6f35cc45c983441d16dfd3e3fc137e1fa",
+            "modules": [
+              {
+                "content_digest": "sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11",
+                "id": "https://graphforge.sh/ont_aaaaaaaaaaaaaaaa",
+                "package": {
+                  "format": "graphforge-project/2",
+                  "object_digest": "sha256:d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7",
+                  "package_digest": "sha256:79055696ec29ef37a14882a787a71da5a66306ff45d8ef7d594cb8e7fc90af69",
+                  "producing_core_version": "0.6.0-rc.5"
+                },
+                "version": "same-version"
+              }
+            ]
+          },
+          "package": {
+            "format": "graphforge-project/2",
+            "object_digest": "sha256:b2d08fdb0bacd23e001c4ace92e4eb86b9fb359da35552460f4d102e2725d775",
+            "package_digest": "sha256:07a0beb91567217d4b0f44f27879ab268630b02575527eb32a6a173a11b3bf38",
+            "producing_core_version": "0.6.0-rc.5"
+          },
+          "repository": {
+            "owner": "opendata",
+            "repository": "openalex"
+          },
+          "requirements": [
+            {
+              "capability": "portable",
+              "major": 1
+            }
+          ],
+          "resolved_ref": "main",
+          "summary": {
+            "format": "graphforge-project-summary/1",
+            "object_digest": "sha256:76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b",
+            "summary_digest": "sha256:76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b"
+          },
+          "version": {
+            "major": 1,
+            "minor": 2
+          }
+        },
+        "publisher_account_id": "opaque:publisher"
+      },
+      "name": "missing-fact"
+    },
+    {
+      "expected": {
+        "error": {
+          "code": "invalid_input",
+          "message": "claim tuple facts do not match the advertisement"
+        }
+      },
+      "input": {
+        "facts": [
+          {
+            "claim": {
+              "state": "unclaimed"
+            },
+            "id": "ont_aaaaaaaaaaaaaaaa",
+            "owner_visible": false,
+            "publish_as_owner": false,
+            "tuples": []
+          }
+        ],
+        "manifest": {
+          "capabilities": [],
+          "default_ref": "main",
+          "format": "graphforge-discovery/1",
+          "immutable_version": "sha256:07a0beb91567217d4b0f44f27879ab268630b02575527eb32a6a173a11b3bf38",
+          "objects": [
+            {
+              "digest": "sha256:76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b",
+              "length": 1776,
+              "locations": [
+                "https://data.graphforge.sh/objects/sha256/76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b"
+              ],
+              "media_type": "application/vnd.graphforge.project-summary+json"
+            },
+            {
+              "digest": "sha256:b2d08fdb0bacd23e001c4ace92e4eb86b9fb359da35552460f4d102e2725d775",
+              "length": 21504,
+              "locations": [
+                "https://data.graphforge.sh/objects/sha256/b2d08fdb0bacd23e001c4ace92e4eb86b9fb359da35552460f4d102e2725d775"
+              ],
+              "media_type": "application/vnd.graphforge.project"
+            },
+            {
+              "digest": "sha256:d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7",
+              "length": 12288,
+              "locations": [
+                "https://data.graphforge.sh/objects/sha256/d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7"
+              ],
+              "media_type": "application/vnd.graphforge.project"
+            }
+          ],
+          "ontology": {
+            "bridge_sets": [],
+            "composition_digest": "sha256:1dc9536e766224090b71de485a2bd3d6f35cc45c983441d16dfd3e3fc137e1fa",
+            "modules": [
+              {
+                "content_digest": "sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11",
+                "id": "https://graphforge.sh/ont_aaaaaaaaaaaaaaaa",
+                "package": {
+                  "format": "graphforge-project/2",
+                  "object_digest": "sha256:d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7",
+                  "package_digest": "sha256:79055696ec29ef37a14882a787a71da5a66306ff45d8ef7d594cb8e7fc90af69",
+                  "producing_core_version": "0.6.0-rc.5"
+                },
+                "version": "same-version"
+              }
+            ]
+          },
+          "package": {
+            "format": "graphforge-project/2",
+            "object_digest": "sha256:b2d08fdb0bacd23e001c4ace92e4eb86b9fb359da35552460f4d102e2725d775",
+            "package_digest": "sha256:07a0beb91567217d4b0f44f27879ab268630b02575527eb32a6a173a11b3bf38",
+            "producing_core_version": "0.6.0-rc.5"
+          },
+          "repository": {
+            "owner": "opendata",
+            "repository": "openalex"
+          },
+          "requirements": [
+            {
+              "capability": "portable",
+              "major": 1
+            }
+          ],
+          "resolved_ref": "main",
+          "summary": {
+            "format": "graphforge-project-summary/1",
+            "object_digest": "sha256:76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b",
+            "summary_digest": "sha256:76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b"
+          },
+          "version": {
+            "major": 1,
+            "minor": 2
+          }
+        },
+        "publisher_account_id": "opaque:publisher"
+      },
+      "name": "missing-tuple"
+    },
+    {
+      "expected": {
+        "error": {
+          "code": "invalid_input",
+          "message": "claim ID fact is missing"
+        }
+      },
+      "input": {
+        "facts": [
+          {
+            "claim": {
+              "state": "unclaimed"
+            },
+            "id": "ONT_AAAAAAAAAAAAAAAA",
+            "owner_visible": false,
+            "publish_as_owner": false,
+            "tuples": [
+              {
+                "content_digest": "sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11",
+                "published": false,
+                "version": "same-version"
+              }
+            ]
+          }
+        ],
+        "manifest": {
+          "capabilities": [],
+          "default_ref": "main",
+          "format": "graphforge-discovery/1",
+          "immutable_version": "sha256:07a0beb91567217d4b0f44f27879ab268630b02575527eb32a6a173a11b3bf38",
+          "objects": [
+            {
+              "digest": "sha256:76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b",
+              "length": 1776,
+              "locations": [
+                "https://data.graphforge.sh/objects/sha256/76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b"
+              ],
+              "media_type": "application/vnd.graphforge.project-summary+json"
+            },
+            {
+              "digest": "sha256:b2d08fdb0bacd23e001c4ace92e4eb86b9fb359da35552460f4d102e2725d775",
+              "length": 21504,
+              "locations": [
+                "https://data.graphforge.sh/objects/sha256/b2d08fdb0bacd23e001c4ace92e4eb86b9fb359da35552460f4d102e2725d775"
+              ],
+              "media_type": "application/vnd.graphforge.project"
+            },
+            {
+              "digest": "sha256:d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7",
+              "length": 12288,
+              "locations": [
+                "https://data.graphforge.sh/objects/sha256/d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7"
+              ],
+              "media_type": "application/vnd.graphforge.project"
+            }
+          ],
+          "ontology": {
+            "bridge_sets": [],
+            "composition_digest": "sha256:1dc9536e766224090b71de485a2bd3d6f35cc45c983441d16dfd3e3fc137e1fa",
+            "modules": [
+              {
+                "content_digest": "sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11",
+                "id": "https://graphforge.sh/ont_aaaaaaaaaaaaaaaa",
+                "package": {
+                  "format": "graphforge-project/2",
+                  "object_digest": "sha256:d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7",
+                  "package_digest": "sha256:79055696ec29ef37a14882a787a71da5a66306ff45d8ef7d594cb8e7fc90af69",
+                  "producing_core_version": "0.6.0-rc.5"
+                },
+                "version": "same-version"
+              }
+            ]
+          },
+          "package": {
+            "format": "graphforge-project/2",
+            "object_digest": "sha256:b2d08fdb0bacd23e001c4ace92e4eb86b9fb359da35552460f4d102e2725d775",
+            "package_digest": "sha256:07a0beb91567217d4b0f44f27879ab268630b02575527eb32a6a173a11b3bf38",
+            "producing_core_version": "0.6.0-rc.5"
+          },
+          "repository": {
+            "owner": "opendata",
+            "repository": "openalex"
+          },
+          "requirements": [
+            {
+              "capability": "portable",
+              "major": 1
+            }
+          ],
+          "resolved_ref": "main",
+          "summary": {
+            "format": "graphforge-project-summary/1",
+            "object_digest": "sha256:76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b",
+            "summary_digest": "sha256:76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b"
+          },
+          "version": {
+            "major": 1,
+            "minor": 2
+          }
+        },
+        "publisher_account_id": "opaque:publisher"
+      },
+      "name": "noncanonical-fact"
+    },
+    {
+      "expected": {
+        "error": {
+          "code": "invalid_input",
+          "message": "claim ID fact is missing"
+        }
+      },
+      "input": {
+        "facts": [
+          {
+            "claim": {
+              "state": "unclaimed"
+            },
+            "id": "ont_bbbbbbbbbbbbbbbb",
+            "owner_visible": false,
+            "publish_as_owner": false,
+            "tuples": [
+              {
+                "content_digest": "sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11",
+                "published": false,
+                "version": "same-version"
+              }
+            ]
+          }
+        ],
+        "manifest": {
+          "capabilities": [],
+          "default_ref": "main",
+          "format": "graphforge-discovery/1",
+          "immutable_version": "sha256:07a0beb91567217d4b0f44f27879ab268630b02575527eb32a6a173a11b3bf38",
+          "objects": [
+            {
+              "digest": "sha256:76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b",
+              "length": 1776,
+              "locations": [
+                "https://data.graphforge.sh/objects/sha256/76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b"
+              ],
+              "media_type": "application/vnd.graphforge.project-summary+json"
+            },
+            {
+              "digest": "sha256:b2d08fdb0bacd23e001c4ace92e4eb86b9fb359da35552460f4d102e2725d775",
+              "length": 21504,
+              "locations": [
+                "https://data.graphforge.sh/objects/sha256/b2d08fdb0bacd23e001c4ace92e4eb86b9fb359da35552460f4d102e2725d775"
+              ],
+              "media_type": "application/vnd.graphforge.project"
+            },
+            {
+              "digest": "sha256:d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7",
+              "length": 12288,
+              "locations": [
+                "https://data.graphforge.sh/objects/sha256/d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7"
+              ],
+              "media_type": "application/vnd.graphforge.project"
+            }
+          ],
+          "ontology": {
+            "bridge_sets": [],
+            "composition_digest": "sha256:1dc9536e766224090b71de485a2bd3d6f35cc45c983441d16dfd3e3fc137e1fa",
+            "modules": [
+              {
+                "content_digest": "sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11",
+                "id": "https://graphforge.sh/ont_aaaaaaaaaaaaaaaa",
+                "package": {
+                  "format": "graphforge-project/2",
+                  "object_digest": "sha256:d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7",
+                  "package_digest": "sha256:79055696ec29ef37a14882a787a71da5a66306ff45d8ef7d594cb8e7fc90af69",
+                  "producing_core_version": "0.6.0-rc.5"
+                },
+                "version": "same-version"
+              }
+            ]
+          },
+          "package": {
+            "format": "graphforge-project/2",
+            "object_digest": "sha256:b2d08fdb0bacd23e001c4ace92e4eb86b9fb359da35552460f4d102e2725d775",
+            "package_digest": "sha256:07a0beb91567217d4b0f44f27879ab268630b02575527eb32a6a173a11b3bf38",
+            "producing_core_version": "0.6.0-rc.5"
+          },
+          "repository": {
+            "owner": "opendata",
+            "repository": "openalex"
+          },
+          "requirements": [
+            {
+              "capability": "portable",
+              "major": 1
+            }
+          ],
+          "resolved_ref": "main",
+          "summary": {
+            "format": "graphforge-project-summary/1",
+            "object_digest": "sha256:76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b",
+            "summary_digest": "sha256:76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b"
+          },
+          "version": {
+            "major": 1,
+            "minor": 2
+          }
+        },
+        "publisher_account_id": "opaque:publisher"
+      },
+      "name": "extra-fact"
+    },
+    {
+      "expected": {
+        "error": {
+          "code": "invalid_input",
+          "message": "item admission input is malformed"
+        }
+      },
+      "input": {
+        "facts": [
+          {
+            "claim": {},
+            "id": "ont_aaaaaaaaaaaaaaaa",
+            "owner_visible": false,
+            "publish_as_owner": false,
+            "tuples": [
+              {
+                "content_digest": "sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11",
+                "published": false,
+                "version": "same-version"
+              }
+            ]
+          }
+        ],
+        "manifest": {
+          "capabilities": [],
+          "default_ref": "main",
+          "format": "graphforge-discovery/1",
+          "immutable_version": "sha256:07a0beb91567217d4b0f44f27879ab268630b02575527eb32a6a173a11b3bf38",
+          "objects": [
+            {
+              "digest": "sha256:76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b",
+              "length": 1776,
+              "locations": [
+                "https://data.graphforge.sh/objects/sha256/76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b"
+              ],
+              "media_type": "application/vnd.graphforge.project-summary+json"
+            },
+            {
+              "digest": "sha256:b2d08fdb0bacd23e001c4ace92e4eb86b9fb359da35552460f4d102e2725d775",
+              "length": 21504,
+              "locations": [
+                "https://data.graphforge.sh/objects/sha256/b2d08fdb0bacd23e001c4ace92e4eb86b9fb359da35552460f4d102e2725d775"
+              ],
+              "media_type": "application/vnd.graphforge.project"
+            },
+            {
+              "digest": "sha256:d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7",
+              "length": 12288,
+              "locations": [
+                "https://data.graphforge.sh/objects/sha256/d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7"
+              ],
+              "media_type": "application/vnd.graphforge.project"
+            }
+          ],
+          "ontology": {
+            "bridge_sets": [],
+            "composition_digest": "sha256:1dc9536e766224090b71de485a2bd3d6f35cc45c983441d16dfd3e3fc137e1fa",
+            "modules": [
+              {
+                "content_digest": "sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11",
+                "id": "https://graphforge.sh/ont_aaaaaaaaaaaaaaaa",
+                "package": {
+                  "format": "graphforge-project/2",
+                  "object_digest": "sha256:d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7",
+                  "package_digest": "sha256:79055696ec29ef37a14882a787a71da5a66306ff45d8ef7d594cb8e7fc90af69",
+                  "producing_core_version": "0.6.0-rc.5"
+                },
+                "version": "same-version"
+              }
+            ]
+          },
+          "package": {
+            "format": "graphforge-project/2",
+            "object_digest": "sha256:b2d08fdb0bacd23e001c4ace92e4eb86b9fb359da35552460f4d102e2725d775",
+            "package_digest": "sha256:07a0beb91567217d4b0f44f27879ab268630b02575527eb32a6a173a11b3bf38",
+            "producing_core_version": "0.6.0-rc.5"
+          },
+          "repository": {
+            "owner": "opendata",
+            "repository": "openalex"
+          },
+          "requirements": [
+            {
+              "capability": "portable",
+              "major": 1
+            }
+          ],
+          "resolved_ref": "main",
+          "summary": {
+            "format": "graphforge-project-summary/1",
+            "object_digest": "sha256:76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b",
+            "summary_digest": "sha256:76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b"
+          },
+          "version": {
+            "major": 1,
+            "minor": 2
+          }
+        },
+        "publisher_account_id": "opaque:publisher"
+      },
+      "name": "missing-explicit-absence"
+    },
+    {
+      "expected": {
+        "error": {
+          "code": "invalid_input",
+          "message": "unclaimed item facts are inconsistent"
+        }
+      },
+      "input": {
+        "facts": [
+          {
+            "claim": {
+              "state": "unclaimed"
+            },
+            "id": "ont_aaaaaaaaaaaaaaaa",
+            "owner_visible": false,
+            "publish_as_owner": false,
+            "tuples": [
+              {
+                "content_digest": "sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11",
+                "published": true,
+                "version": "same-version"
+              }
+            ]
+          }
+        ],
+        "manifest": {
+          "capabilities": [],
+          "default_ref": "main",
+          "format": "graphforge-discovery/1",
+          "immutable_version": "sha256:07a0beb91567217d4b0f44f27879ab268630b02575527eb32a6a173a11b3bf38",
+          "objects": [
+            {
+              "digest": "sha256:76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b",
+              "length": 1776,
+              "locations": [
+                "https://data.graphforge.sh/objects/sha256/76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b"
+              ],
+              "media_type": "application/vnd.graphforge.project-summary+json"
+            },
+            {
+              "digest": "sha256:b2d08fdb0bacd23e001c4ace92e4eb86b9fb359da35552460f4d102e2725d775",
+              "length": 21504,
+              "locations": [
+                "https://data.graphforge.sh/objects/sha256/b2d08fdb0bacd23e001c4ace92e4eb86b9fb359da35552460f4d102e2725d775"
+              ],
+              "media_type": "application/vnd.graphforge.project"
+            },
+            {
+              "digest": "sha256:d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7",
+              "length": 12288,
+              "locations": [
+                "https://data.graphforge.sh/objects/sha256/d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7"
+              ],
+              "media_type": "application/vnd.graphforge.project"
+            }
+          ],
+          "ontology": {
+            "bridge_sets": [],
+            "composition_digest": "sha256:1dc9536e766224090b71de485a2bd3d6f35cc45c983441d16dfd3e3fc137e1fa",
+            "modules": [
+              {
+                "content_digest": "sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11",
+                "id": "https://graphforge.sh/ont_aaaaaaaaaaaaaaaa",
+                "package": {
+                  "format": "graphforge-project/2",
+                  "object_digest": "sha256:d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7",
+                  "package_digest": "sha256:79055696ec29ef37a14882a787a71da5a66306ff45d8ef7d594cb8e7fc90af69",
+                  "producing_core_version": "0.6.0-rc.5"
+                },
+                "version": "same-version"
+              }
+            ]
+          },
+          "package": {
+            "format": "graphforge-project/2",
+            "object_digest": "sha256:b2d08fdb0bacd23e001c4ace92e4eb86b9fb359da35552460f4d102e2725d775",
+            "package_digest": "sha256:07a0beb91567217d4b0f44f27879ab268630b02575527eb32a6a173a11b3bf38",
+            "producing_core_version": "0.6.0-rc.5"
+          },
+          "repository": {
+            "owner": "opendata",
+            "repository": "openalex"
+          },
+          "requirements": [
+            {
+              "capability": "portable",
+              "major": 1
+            }
+          ],
+          "resolved_ref": "main",
+          "summary": {
+            "format": "graphforge-project-summary/1",
+            "object_digest": "sha256:76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b",
+            "summary_digest": "sha256:76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b"
+          },
+          "version": {
+            "major": 1,
+            "minor": 2
+          }
+        },
+        "publisher_account_id": "opaque:publisher"
+      },
+      "name": "unclaimed-published"
+    },
+    {
+      "expected": {
+        "error": {
+          "code": "invalid_input",
+          "message": "unclaimed item facts are inconsistent"
+        }
+      },
+      "input": {
+        "facts": [
+          {
+            "claim": {
+              "state": "unclaimed"
+            },
+            "id": "ont_aaaaaaaaaaaaaaaa",
+            "owner_visible": false,
+            "publish_as_owner": true,
+            "tuples": [
+              {
+                "content_digest": "sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11",
+                "published": false,
+                "version": "same-version"
+              }
+            ]
+          }
+        ],
+        "manifest": {
+          "capabilities": [],
+          "default_ref": "main",
+          "format": "graphforge-discovery/1",
+          "immutable_version": "sha256:07a0beb91567217d4b0f44f27879ab268630b02575527eb32a6a173a11b3bf38",
+          "objects": [
+            {
+              "digest": "sha256:76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b",
+              "length": 1776,
+              "locations": [
+                "https://data.graphforge.sh/objects/sha256/76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b"
+              ],
+              "media_type": "application/vnd.graphforge.project-summary+json"
+            },
+            {
+              "digest": "sha256:b2d08fdb0bacd23e001c4ace92e4eb86b9fb359da35552460f4d102e2725d775",
+              "length": 21504,
+              "locations": [
+                "https://data.graphforge.sh/objects/sha256/b2d08fdb0bacd23e001c4ace92e4eb86b9fb359da35552460f4d102e2725d775"
+              ],
+              "media_type": "application/vnd.graphforge.project"
+            },
+            {
+              "digest": "sha256:d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7",
+              "length": 12288,
+              "locations": [
+                "https://data.graphforge.sh/objects/sha256/d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7"
+              ],
+              "media_type": "application/vnd.graphforge.project"
+            }
+          ],
+          "ontology": {
+            "bridge_sets": [],
+            "composition_digest": "sha256:1dc9536e766224090b71de485a2bd3d6f35cc45c983441d16dfd3e3fc137e1fa",
+            "modules": [
+              {
+                "content_digest": "sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11",
+                "id": "https://graphforge.sh/ont_aaaaaaaaaaaaaaaa",
+                "package": {
+                  "format": "graphforge-project/2",
+                  "object_digest": "sha256:d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7",
+                  "package_digest": "sha256:79055696ec29ef37a14882a787a71da5a66306ff45d8ef7d594cb8e7fc90af69",
+                  "producing_core_version": "0.6.0-rc.5"
+                },
+                "version": "same-version"
+              }
+            ]
+          },
+          "package": {
+            "format": "graphforge-project/2",
+            "object_digest": "sha256:b2d08fdb0bacd23e001c4ace92e4eb86b9fb359da35552460f4d102e2725d775",
+            "package_digest": "sha256:07a0beb91567217d4b0f44f27879ab268630b02575527eb32a6a173a11b3bf38",
+            "producing_core_version": "0.6.0-rc.5"
+          },
+          "repository": {
+            "owner": "opendata",
+            "repository": "openalex"
+          },
+          "requirements": [
+            {
+              "capability": "portable",
+              "major": 1
+            }
+          ],
+          "resolved_ref": "main",
+          "summary": {
+            "format": "graphforge-project-summary/1",
+            "object_digest": "sha256:76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b",
+            "summary_digest": "sha256:76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b"
+          },
+          "version": {
+            "major": 1,
+            "minor": 2
+          }
+        },
+        "publisher_account_id": "opaque:publisher"
+      },
+      "name": "unclaimed-permission"
+    },
+    {
+      "expected": {
+        "error": {
+          "code": "invalid_input",
+          "message": "claim tuple facts do not match the advertisement"
+        }
+      },
+      "input": {
+        "facts": [
+          {
+            "claim": {
+              "state": "unclaimed"
+            },
+            "id": "ont_aaaaaaaaaaaaaaaa",
+            "owner_visible": false,
+            "publish_as_owner": false,
+            "tuples": [
+              {
+                "content_digest": "sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11",
+                "published": false,
+                "version": "not-advertised"
+              }
+            ]
+          }
+        ],
+        "manifest": {
+          "capabilities": [],
+          "default_ref": "main",
+          "format": "graphforge-discovery/1",
+          "immutable_version": "sha256:07a0beb91567217d4b0f44f27879ab268630b02575527eb32a6a173a11b3bf38",
+          "objects": [
+            {
+              "digest": "sha256:76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b",
+              "length": 1776,
+              "locations": [
+                "https://data.graphforge.sh/objects/sha256/76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b"
+              ],
+              "media_type": "application/vnd.graphforge.project-summary+json"
+            },
+            {
+              "digest": "sha256:b2d08fdb0bacd23e001c4ace92e4eb86b9fb359da35552460f4d102e2725d775",
+              "length": 21504,
+              "locations": [
+                "https://data.graphforge.sh/objects/sha256/b2d08fdb0bacd23e001c4ace92e4eb86b9fb359da35552460f4d102e2725d775"
+              ],
+              "media_type": "application/vnd.graphforge.project"
+            },
+            {
+              "digest": "sha256:d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7",
+              "length": 12288,
+              "locations": [
+                "https://data.graphforge.sh/objects/sha256/d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7"
+              ],
+              "media_type": "application/vnd.graphforge.project"
+            }
+          ],
+          "ontology": {
+            "bridge_sets": [],
+            "composition_digest": "sha256:1dc9536e766224090b71de485a2bd3d6f35cc45c983441d16dfd3e3fc137e1fa",
+            "modules": [
+              {
+                "content_digest": "sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11",
+                "id": "https://graphforge.sh/ont_aaaaaaaaaaaaaaaa",
+                "package": {
+                  "format": "graphforge-project/2",
+                  "object_digest": "sha256:d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7",
+                  "package_digest": "sha256:79055696ec29ef37a14882a787a71da5a66306ff45d8ef7d594cb8e7fc90af69",
+                  "producing_core_version": "0.6.0-rc.5"
+                },
+                "version": "same-version"
+              }
+            ]
+          },
+          "package": {
+            "format": "graphforge-project/2",
+            "object_digest": "sha256:b2d08fdb0bacd23e001c4ace92e4eb86b9fb359da35552460f4d102e2725d775",
+            "package_digest": "sha256:07a0beb91567217d4b0f44f27879ab268630b02575527eb32a6a173a11b3bf38",
+            "producing_core_version": "0.6.0-rc.5"
+          },
+          "repository": {
+            "owner": "opendata",
+            "repository": "openalex"
+          },
+          "requirements": [
+            {
+              "capability": "portable",
+              "major": 1
+            }
+          ],
+          "resolved_ref": "main",
+          "summary": {
+            "format": "graphforge-project-summary/1",
+            "object_digest": "sha256:76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b",
+            "summary_digest": "sha256:76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b"
+          },
+          "version": {
+            "major": 1,
+            "minor": 2
+          }
+        },
+        "publisher_account_id": "opaque:publisher"
+      },
+      "name": "different-tuple"
+    },
+    {
+      "expected": {
+        "error": {
+          "code": "invalid_input",
+          "message": "item admission string exceeds its bound"
+        }
+      },
+      "input": {
+        "facts": [
+          {
+            "claim": {
+              "state": "unclaimed"
+            },
+            "id": "ont_aaaaaaaaaaaaaaaa",
+            "owner_visible": false,
+            "publish_as_owner": false,
+            "tuples": [
+              {
+                "content_digest": "sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11",
+                "published": false,
+                "version": "same-version"
+              }
+            ]
+          }
+        ],
+        "manifest": {
+          "capabilities": [],
+          "default_ref": "main",
+          "format": "graphforge-discovery/1",
+          "immutable_version": "sha256:07a0beb91567217d4b0f44f27879ab268630b02575527eb32a6a173a11b3bf38",
+          "objects": [
+            {
+              "digest": "sha256:76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b",
+              "length": 1776,
+              "locations": [
+                "https://data.graphforge.sh/objects/sha256/76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b"
+              ],
+              "media_type": "application/vnd.graphforge.project-summary+json"
+            },
+            {
+              "digest": "sha256:b2d08fdb0bacd23e001c4ace92e4eb86b9fb359da35552460f4d102e2725d775",
+              "length": 21504,
+              "locations": [
+                "https://data.graphforge.sh/objects/sha256/b2d08fdb0bacd23e001c4ace92e4eb86b9fb359da35552460f4d102e2725d775"
+              ],
+              "media_type": "application/vnd.graphforge.project"
+            },
+            {
+              "digest": "sha256:d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7",
+              "length": 12288,
+              "locations": [
+                "https://data.graphforge.sh/objects/sha256/d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7"
+              ],
+              "media_type": "application/vnd.graphforge.project"
+            }
+          ],
+          "ontology": {
+            "bridge_sets": [],
+            "composition_digest": "sha256:1dc9536e766224090b71de485a2bd3d6f35cc45c983441d16dfd3e3fc137e1fa",
+            "modules": [
+              {
+                "content_digest": "sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11",
+                "id": "https://graphforge.sh/ont_aaaaaaaaaaaaaaaa",
+                "package": {
+                  "format": "graphforge-project/2",
+                  "object_digest": "sha256:d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7",
+                  "package_digest": "sha256:79055696ec29ef37a14882a787a71da5a66306ff45d8ef7d594cb8e7fc90af69",
+                  "producing_core_version": "0.6.0-rc.5"
+                },
+                "version": "same-version"
+              }
+            ]
+          },
+          "package": {
+            "format": "graphforge-project/2",
+            "object_digest": "sha256:b2d08fdb0bacd23e001c4ace92e4eb86b9fb359da35552460f4d102e2725d775",
+            "package_digest": "sha256:07a0beb91567217d4b0f44f27879ab268630b02575527eb32a6a173a11b3bf38",
+            "producing_core_version": "0.6.0-rc.5"
+          },
+          "repository": {
+            "owner": "opendata",
+            "repository": "openalex"
+          },
+          "requirements": [
+            {
+              "capability": "portable",
+              "major": 1
+            }
+          ],
+          "resolved_ref": "main",
+          "summary": {
+            "format": "graphforge-project-summary/1",
+            "object_digest": "sha256:76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b",
+            "summary_digest": "sha256:76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b"
+          },
+          "version": {
+            "major": 1,
+            "minor": 2
+          }
+        },
+        "publisher_account_id": ""
+      },
+      "name": "empty-account"
+    },
+    {
+      "expected": {
+        "error": {
+          "code": "invalid_input",
+          "message": "stable account identity is invalid"
+        }
+      },
+      "input": {
+        "facts": [
+          {
+            "claim": {
+              "state": "unclaimed"
+            },
+            "id": "ont_aaaaaaaaaaaaaaaa",
+            "owner_visible": false,
+            "publish_as_owner": false,
+            "tuples": [
+              {
+                "content_digest": "sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11",
+                "published": false,
+                "version": "same-version"
+              }
+            ]
+          }
+        ],
+        "manifest": {
+          "capabilities": [],
+          "default_ref": "main",
+          "format": "graphforge-discovery/1",
+          "immutable_version": "sha256:07a0beb91567217d4b0f44f27879ab268630b02575527eb32a6a173a11b3bf38",
+          "objects": [
+            {
+              "digest": "sha256:76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b",
+              "length": 1776,
+              "locations": [
+                "https://data.graphforge.sh/objects/sha256/76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b"
+              ],
+              "media_type": "application/vnd.graphforge.project-summary+json"
+            },
+            {
+              "digest": "sha256:b2d08fdb0bacd23e001c4ace92e4eb86b9fb359da35552460f4d102e2725d775",
+              "length": 21504,
+              "locations": [
+                "https://data.graphforge.sh/objects/sha256/b2d08fdb0bacd23e001c4ace92e4eb86b9fb359da35552460f4d102e2725d775"
+              ],
+              "media_type": "application/vnd.graphforge.project"
+            },
+            {
+              "digest": "sha256:d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7",
+              "length": 12288,
+              "locations": [
+                "https://data.graphforge.sh/objects/sha256/d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7"
+              ],
+              "media_type": "application/vnd.graphforge.project"
+            }
+          ],
+          "ontology": {
+            "bridge_sets": [],
+            "composition_digest": "sha256:1dc9536e766224090b71de485a2bd3d6f35cc45c983441d16dfd3e3fc137e1fa",
+            "modules": [
+              {
+                "content_digest": "sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11",
+                "id": "https://graphforge.sh/ont_aaaaaaaaaaaaaaaa",
+                "package": {
+                  "format": "graphforge-project/2",
+                  "object_digest": "sha256:d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7",
+                  "package_digest": "sha256:79055696ec29ef37a14882a787a71da5a66306ff45d8ef7d594cb8e7fc90af69",
+                  "producing_core_version": "0.6.0-rc.5"
+                },
+                "version": "same-version"
+              }
+            ]
+          },
+          "package": {
+            "format": "graphforge-project/2",
+            "object_digest": "sha256:b2d08fdb0bacd23e001c4ace92e4eb86b9fb359da35552460f4d102e2725d775",
+            "package_digest": "sha256:07a0beb91567217d4b0f44f27879ab268630b02575527eb32a6a173a11b3bf38",
+            "producing_core_version": "0.6.0-rc.5"
+          },
+          "repository": {
+            "owner": "opendata",
+            "repository": "openalex"
+          },
+          "requirements": [
+            {
+              "capability": "portable",
+              "major": 1
+            }
+          ],
+          "resolved_ref": "main",
+          "summary": {
+            "format": "graphforge-project-summary/1",
+            "object_digest": "sha256:76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b",
+            "summary_digest": "sha256:76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b"
+          },
+          "version": {
+            "major": 1,
+            "minor": 2
+          }
+        },
+        "publisher_account_id": "unsafe\naccount"
+      },
+      "name": "control-account"
+    },
+    {
+      "expected": {
+        "error": {
+          "code": "invalid_input",
+          "message": "item admission string exceeds its bound"
+        }
+      },
+      "input": {
+        "facts": [
+          {
+            "claim": {
+              "state": "unclaimed"
+            },
+            "id": "ont_aaaaaaaaaaaaaaaa",
+            "owner_visible": false,
+            "publish_as_owner": false,
+            "tuples": [
+              {
+                "content_digest": "sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11",
+                "published": false,
+                "version": "same-version"
+              }
+            ]
+          }
+        ],
+        "manifest": {
+          "capabilities": [],
+          "default_ref": "main",
+          "format": "graphforge-discovery/1",
+          "immutable_version": "sha256:07a0beb91567217d4b0f44f27879ab268630b02575527eb32a6a173a11b3bf38",
+          "objects": [
+            {
+              "digest": "sha256:76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b",
+              "length": 1776,
+              "locations": [
+                "https://data.graphforge.sh/objects/sha256/76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b"
+              ],
+              "media_type": "application/vnd.graphforge.project-summary+json"
+            },
+            {
+              "digest": "sha256:b2d08fdb0bacd23e001c4ace92e4eb86b9fb359da35552460f4d102e2725d775",
+              "length": 21504,
+              "locations": [
+                "https://data.graphforge.sh/objects/sha256/b2d08fdb0bacd23e001c4ace92e4eb86b9fb359da35552460f4d102e2725d775"
+              ],
+              "media_type": "application/vnd.graphforge.project"
+            },
+            {
+              "digest": "sha256:d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7",
+              "length": 12288,
+              "locations": [
+                "https://data.graphforge.sh/objects/sha256/d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7"
+              ],
+              "media_type": "application/vnd.graphforge.project"
+            }
+          ],
+          "ontology": {
+            "bridge_sets": [],
+            "composition_digest": "sha256:1dc9536e766224090b71de485a2bd3d6f35cc45c983441d16dfd3e3fc137e1fa",
+            "modules": [
+              {
+                "content_digest": "sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11",
+                "id": "https://graphforge.sh/ont_aaaaaaaaaaaaaaaa",
+                "package": {
+                  "format": "graphforge-project/2",
+                  "object_digest": "sha256:d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7",
+                  "package_digest": "sha256:79055696ec29ef37a14882a787a71da5a66306ff45d8ef7d594cb8e7fc90af69",
+                  "producing_core_version": "0.6.0-rc.5"
+                },
+                "version": "same-version"
+              }
+            ]
+          },
+          "package": {
+            "format": "graphforge-project/2",
+            "object_digest": "sha256:b2d08fdb0bacd23e001c4ace92e4eb86b9fb359da35552460f4d102e2725d775",
+            "package_digest": "sha256:07a0beb91567217d4b0f44f27879ab268630b02575527eb32a6a173a11b3bf38",
+            "producing_core_version": "0.6.0-rc.5"
+          },
+          "repository": {
+            "owner": "opendata",
+            "repository": "openalex"
+          },
+          "requirements": [
+            {
+              "capability": "portable",
+              "major": 1
+            }
+          ],
+          "resolved_ref": "main",
+          "summary": {
+            "format": "graphforge-project-summary/1",
+            "object_digest": "sha256:76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b",
+            "summary_digest": "sha256:76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b"
+          },
+          "version": {
+            "major": 1,
+            "minor": 2
+          }
+        },
+        "publisher_account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "name": "overlong-account"
+    },
+    {
+      "expected": {
+        "error": {
+          "code": "invalid_input",
+          "message": "item admission input is malformed"
+        }
+      },
+      "input": {
+        "facts": [
+          {
+            "claim": {
+              "state": "unclaimed",
+              "unexpected": true
+            },
+            "id": "ont_aaaaaaaaaaaaaaaa",
+            "owner_visible": false,
+            "publish_as_owner": false,
+            "tuples": [
+              {
+                "content_digest": "sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11",
+                "published": false,
+                "version": "same-version"
+              }
+            ]
+          }
+        ],
+        "manifest": {
+          "capabilities": [],
+          "default_ref": "main",
+          "format": "graphforge-discovery/1",
+          "immutable_version": "sha256:07a0beb91567217d4b0f44f27879ab268630b02575527eb32a6a173a11b3bf38",
+          "objects": [
+            {
+              "digest": "sha256:76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b",
+              "length": 1776,
+              "locations": [
+                "https://data.graphforge.sh/objects/sha256/76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b"
+              ],
+              "media_type": "application/vnd.graphforge.project-summary+json"
+            },
+            {
+              "digest": "sha256:b2d08fdb0bacd23e001c4ace92e4eb86b9fb359da35552460f4d102e2725d775",
+              "length": 21504,
+              "locations": [
+                "https://data.graphforge.sh/objects/sha256/b2d08fdb0bacd23e001c4ace92e4eb86b9fb359da35552460f4d102e2725d775"
+              ],
+              "media_type": "application/vnd.graphforge.project"
+            },
+            {
+              "digest": "sha256:d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7",
+              "length": 12288,
+              "locations": [
+                "https://data.graphforge.sh/objects/sha256/d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7"
+              ],
+              "media_type": "application/vnd.graphforge.project"
+            }
+          ],
+          "ontology": {
+            "bridge_sets": [],
+            "composition_digest": "sha256:1dc9536e766224090b71de485a2bd3d6f35cc45c983441d16dfd3e3fc137e1fa",
+            "modules": [
+              {
+                "content_digest": "sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11",
+                "id": "https://graphforge.sh/ont_aaaaaaaaaaaaaaaa",
+                "package": {
+                  "format": "graphforge-project/2",
+                  "object_digest": "sha256:d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7",
+                  "package_digest": "sha256:79055696ec29ef37a14882a787a71da5a66306ff45d8ef7d594cb8e7fc90af69",
+                  "producing_core_version": "0.6.0-rc.5"
+                },
+                "version": "same-version"
+              }
+            ]
+          },
+          "package": {
+            "format": "graphforge-project/2",
+            "object_digest": "sha256:b2d08fdb0bacd23e001c4ace92e4eb86b9fb359da35552460f4d102e2725d775",
+            "package_digest": "sha256:07a0beb91567217d4b0f44f27879ab268630b02575527eb32a6a173a11b3bf38",
+            "producing_core_version": "0.6.0-rc.5"
+          },
+          "repository": {
+            "owner": "opendata",
+            "repository": "openalex"
+          },
+          "requirements": [
+            {
+              "capability": "portable",
+              "major": 1
+            }
+          ],
+          "resolved_ref": "main",
+          "summary": {
+            "format": "graphforge-project-summary/1",
+            "object_digest": "sha256:76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b",
+            "summary_digest": "sha256:76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b"
+          },
+          "version": {
+            "major": 1,
+            "minor": 2
+          }
+        },
+        "publisher_account_id": "opaque:publisher"
+      },
+      "name": "unknown-field"
+    },
+    {
+      "expected": {
+        "error": {
+          "code": "invalid_input",
+          "message": "item admission input is malformed"
+        }
+      },
+      "input": {
+        "facts": [
+          {
+            "claim": {
+              "state": "unclaimed"
+            },
+            "id": "ont_aaaaaaaaaaaaaaaa",
+            "publish_as_owner": false,
+            "tuples": [
+              {
+                "content_digest": "sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11",
+                "published": false,
+                "version": "same-version"
+              }
+            ]
+          }
+        ],
+        "manifest": {
+          "capabilities": [],
+          "default_ref": "main",
+          "format": "graphforge-discovery/1",
+          "immutable_version": "sha256:07a0beb91567217d4b0f44f27879ab268630b02575527eb32a6a173a11b3bf38",
+          "objects": [
+            {
+              "digest": "sha256:76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b",
+              "length": 1776,
+              "locations": [
+                "https://data.graphforge.sh/objects/sha256/76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b"
+              ],
+              "media_type": "application/vnd.graphforge.project-summary+json"
+            },
+            {
+              "digest": "sha256:b2d08fdb0bacd23e001c4ace92e4eb86b9fb359da35552460f4d102e2725d775",
+              "length": 21504,
+              "locations": [
+                "https://data.graphforge.sh/objects/sha256/b2d08fdb0bacd23e001c4ace92e4eb86b9fb359da35552460f4d102e2725d775"
+              ],
+              "media_type": "application/vnd.graphforge.project"
+            },
+            {
+              "digest": "sha256:d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7",
+              "length": 12288,
+              "locations": [
+                "https://data.graphforge.sh/objects/sha256/d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7"
+              ],
+              "media_type": "application/vnd.graphforge.project"
+            }
+          ],
+          "ontology": {
+            "bridge_sets": [],
+            "composition_digest": "sha256:1dc9536e766224090b71de485a2bd3d6f35cc45c983441d16dfd3e3fc137e1fa",
+            "modules": [
+              {
+                "content_digest": "sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11",
+                "id": "https://graphforge.sh/ont_aaaaaaaaaaaaaaaa",
+                "package": {
+                  "format": "graphforge-project/2",
+                  "object_digest": "sha256:d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7",
+                  "package_digest": "sha256:79055696ec29ef37a14882a787a71da5a66306ff45d8ef7d594cb8e7fc90af69",
+                  "producing_core_version": "0.6.0-rc.5"
+                },
+                "version": "same-version"
+              }
+            ]
+          },
+          "package": {
+            "format": "graphforge-project/2",
+            "object_digest": "sha256:b2d08fdb0bacd23e001c4ace92e4eb86b9fb359da35552460f4d102e2725d775",
+            "package_digest": "sha256:07a0beb91567217d4b0f44f27879ab268630b02575527eb32a6a173a11b3bf38",
+            "producing_core_version": "0.6.0-rc.5"
+          },
+          "repository": {
+            "owner": "opendata",
+            "repository": "openalex"
+          },
+          "requirements": [
+            {
+              "capability": "portable",
+              "major": 1
+            }
+          ],
+          "resolved_ref": "main",
+          "summary": {
+            "format": "graphforge-project-summary/1",
+            "object_digest": "sha256:76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b",
+            "summary_digest": "sha256:76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b"
+          },
+          "version": {
+            "major": 1,
+            "minor": 2
+          }
+        },
+        "publisher_account_id": "opaque:publisher"
+      },
+      "name": "missing-explicit-visibility"
+    },
+    {
+      "expected": {
+        "error": {
+          "code": "invalid_input",
+          "message": "visible owner handle is missing"
+        }
+      },
+      "input": {
+        "facts": [
+          {
+            "claim": {
+              "owner_account_id": "opaque:foreign",
+              "state": "claimed"
+            },
+            "id": "ont_aaaaaaaaaaaaaaaa",
+            "owner_visible": true,
+            "publish_as_owner": false,
+            "tuples": [
+              {
+                "content_digest": "sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11",
+                "published": false,
+                "version": "same-version"
+              }
+            ]
+          }
+        ],
+        "manifest": {
+          "capabilities": [],
+          "default_ref": "main",
+          "format": "graphforge-discovery/1",
+          "immutable_version": "sha256:07a0beb91567217d4b0f44f27879ab268630b02575527eb32a6a173a11b3bf38",
+          "objects": [
+            {
+              "digest": "sha256:76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b",
+              "length": 1776,
+              "locations": [
+                "https://data.graphforge.sh/objects/sha256/76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b"
+              ],
+              "media_type": "application/vnd.graphforge.project-summary+json"
+            },
+            {
+              "digest": "sha256:b2d08fdb0bacd23e001c4ace92e4eb86b9fb359da35552460f4d102e2725d775",
+              "length": 21504,
+              "locations": [
+                "https://data.graphforge.sh/objects/sha256/b2d08fdb0bacd23e001c4ace92e4eb86b9fb359da35552460f4d102e2725d775"
+              ],
+              "media_type": "application/vnd.graphforge.project"
+            },
+            {
+              "digest": "sha256:d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7",
+              "length": 12288,
+              "locations": [
+                "https://data.graphforge.sh/objects/sha256/d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7"
+              ],
+              "media_type": "application/vnd.graphforge.project"
+            }
+          ],
+          "ontology": {
+            "bridge_sets": [],
+            "composition_digest": "sha256:1dc9536e766224090b71de485a2bd3d6f35cc45c983441d16dfd3e3fc137e1fa",
+            "modules": [
+              {
+                "content_digest": "sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11",
+                "id": "https://graphforge.sh/ont_aaaaaaaaaaaaaaaa",
+                "package": {
+                  "format": "graphforge-project/2",
+                  "object_digest": "sha256:d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7",
+                  "package_digest": "sha256:79055696ec29ef37a14882a787a71da5a66306ff45d8ef7d594cb8e7fc90af69",
+                  "producing_core_version": "0.6.0-rc.5"
+                },
+                "version": "same-version"
+              }
+            ]
+          },
+          "package": {
+            "format": "graphforge-project/2",
+            "object_digest": "sha256:b2d08fdb0bacd23e001c4ace92e4eb86b9fb359da35552460f4d102e2725d775",
+            "package_digest": "sha256:07a0beb91567217d4b0f44f27879ab268630b02575527eb32a6a173a11b3bf38",
+            "producing_core_version": "0.6.0-rc.5"
+          },
+          "repository": {
+            "owner": "opendata",
+            "repository": "openalex"
+          },
+          "requirements": [
+            {
+              "capability": "portable",
+              "major": 1
+            }
+          ],
+          "resolved_ref": "main",
+          "summary": {
+            "format": "graphforge-project-summary/1",
+            "object_digest": "sha256:76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b",
+            "summary_digest": "sha256:76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b"
+          },
+          "version": {
+            "major": 1,
+            "minor": 2
+          }
+        },
+        "publisher_account_id": "opaque:publisher"
+      },
+      "name": "visible-owner-without-handle"
+    },
+    {
+      "expected": {
+        "error": {
+          "code": "invalid_input",
+          "message": "owner display handle is invalid"
+        }
+      },
+      "input": {
+        "facts": [
+          {
+            "claim": {
+              "owner_account_id": "opaque:foreign",
+              "owner_handle": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "state": "claimed"
+            },
+            "id": "ont_aaaaaaaaaaaaaaaa",
+            "owner_visible": false,
+            "publish_as_owner": false,
+            "tuples": [
+              {
+                "content_digest": "sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11",
+                "published": false,
+                "version": "same-version"
+              }
+            ]
+          }
+        ],
+        "manifest": {
+          "capabilities": [],
+          "default_ref": "main",
+          "format": "graphforge-discovery/1",
+          "immutable_version": "sha256:07a0beb91567217d4b0f44f27879ab268630b02575527eb32a6a173a11b3bf38",
+          "objects": [
+            {
+              "digest": "sha256:76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b",
+              "length": 1776,
+              "locations": [
+                "https://data.graphforge.sh/objects/sha256/76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b"
+              ],
+              "media_type": "application/vnd.graphforge.project-summary+json"
+            },
+            {
+              "digest": "sha256:b2d08fdb0bacd23e001c4ace92e4eb86b9fb359da35552460f4d102e2725d775",
+              "length": 21504,
+              "locations": [
+                "https://data.graphforge.sh/objects/sha256/b2d08fdb0bacd23e001c4ace92e4eb86b9fb359da35552460f4d102e2725d775"
+              ],
+              "media_type": "application/vnd.graphforge.project"
+            },
+            {
+              "digest": "sha256:d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7",
+              "length": 12288,
+              "locations": [
+                "https://data.graphforge.sh/objects/sha256/d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7"
+              ],
+              "media_type": "application/vnd.graphforge.project"
+            }
+          ],
+          "ontology": {
+            "bridge_sets": [],
+            "composition_digest": "sha256:1dc9536e766224090b71de485a2bd3d6f35cc45c983441d16dfd3e3fc137e1fa",
+            "modules": [
+              {
+                "content_digest": "sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11",
+                "id": "https://graphforge.sh/ont_aaaaaaaaaaaaaaaa",
+                "package": {
+                  "format": "graphforge-project/2",
+                  "object_digest": "sha256:d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7",
+                  "package_digest": "sha256:79055696ec29ef37a14882a787a71da5a66306ff45d8ef7d594cb8e7fc90af69",
+                  "producing_core_version": "0.6.0-rc.5"
+                },
+                "version": "same-version"
+              }
+            ]
+          },
+          "package": {
+            "format": "graphforge-project/2",
+            "object_digest": "sha256:b2d08fdb0bacd23e001c4ace92e4eb86b9fb359da35552460f4d102e2725d775",
+            "package_digest": "sha256:07a0beb91567217d4b0f44f27879ab268630b02575527eb32a6a173a11b3bf38",
+            "producing_core_version": "0.6.0-rc.5"
+          },
+          "repository": {
+            "owner": "opendata",
+            "repository": "openalex"
+          },
+          "requirements": [
+            {
+              "capability": "portable",
+              "major": 1
+            }
+          ],
+          "resolved_ref": "main",
+          "summary": {
+            "format": "graphforge-project-summary/1",
+            "object_digest": "sha256:76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b",
+            "summary_digest": "sha256:76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b"
+          },
+          "version": {
+            "major": 1,
+            "minor": 2
+          }
+        },
+        "publisher_account_id": "opaque:publisher"
+      },
+      "name": "overlong-display-handle"
+    },
+    {
+      "expected": {
+        "plan": {
+          "decisions": [
+            {
+              "action": "new_claim",
+              "content_digest": "sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11",
+              "id": "ont_aaaaaaaaaaaaaaaa",
+              "kind": "ontology_module",
+              "version": "same-version"
+            }
+          ],
+          "publisher_account_id": "opaque:é账户"
+        }
+      },
+      "input": {
+        "facts": [
+          {
+            "claim": {
+              "state": "unclaimed"
+            },
+            "id": "ont_aaaaaaaaaaaaaaaa",
+            "owner_visible": false,
+            "publish_as_owner": false,
+            "tuples": [
+              {
+                "content_digest": "sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11",
+                "published": false,
+                "version": "same-version"
+              }
+            ]
+          }
+        ],
+        "manifest": {
+          "capabilities": [],
+          "default_ref": "main",
+          "format": "graphforge-discovery/1",
+          "immutable_version": "sha256:07a0beb91567217d4b0f44f27879ab268630b02575527eb32a6a173a11b3bf38",
+          "objects": [
+            {
+              "digest": "sha256:76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b",
+              "length": 1776,
+              "locations": [
+                "https://data.graphforge.sh/objects/sha256/76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b"
+              ],
+              "media_type": "application/vnd.graphforge.project-summary+json"
+            },
+            {
+              "digest": "sha256:b2d08fdb0bacd23e001c4ace92e4eb86b9fb359da35552460f4d102e2725d775",
+              "length": 21504,
+              "locations": [
+                "https://data.graphforge.sh/objects/sha256/b2d08fdb0bacd23e001c4ace92e4eb86b9fb359da35552460f4d102e2725d775"
+              ],
+              "media_type": "application/vnd.graphforge.project"
+            },
+            {
+              "digest": "sha256:d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7",
+              "length": 12288,
+              "locations": [
+                "https://data.graphforge.sh/objects/sha256/d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7"
+              ],
+              "media_type": "application/vnd.graphforge.project"
+            }
+          ],
+          "ontology": {
+            "bridge_sets": [],
+            "composition_digest": "sha256:1dc9536e766224090b71de485a2bd3d6f35cc45c983441d16dfd3e3fc137e1fa",
+            "modules": [
+              {
+                "content_digest": "sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11",
+                "id": "https://graphforge.sh/ont_aaaaaaaaaaaaaaaa",
+                "package": {
+                  "format": "graphforge-project/2",
+                  "object_digest": "sha256:d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7",
+                  "package_digest": "sha256:79055696ec29ef37a14882a787a71da5a66306ff45d8ef7d594cb8e7fc90af69",
+                  "producing_core_version": "0.6.0-rc.5"
+                },
+                "version": "same-version"
+              }
+            ]
+          },
+          "package": {
+            "format": "graphforge-project/2",
+            "object_digest": "sha256:b2d08fdb0bacd23e001c4ace92e4eb86b9fb359da35552460f4d102e2725d775",
+            "package_digest": "sha256:07a0beb91567217d4b0f44f27879ab268630b02575527eb32a6a173a11b3bf38",
+            "producing_core_version": "0.6.0-rc.5"
+          },
+          "repository": {
+            "owner": "opendata",
+            "repository": "openalex"
+          },
+          "requirements": [
+            {
+              "capability": "portable",
+              "major": 1
+            }
+          ],
+          "resolved_ref": "main",
+          "summary": {
+            "format": "graphforge-project-summary/1",
+            "object_digest": "sha256:76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b",
+            "summary_digest": "sha256:76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b"
+          },
+          "version": {
+            "major": 1,
+            "minor": 2
+          }
+        },
+        "publisher_account_id": "opaque:é账户"
+      },
+      "name": "opaque-unicode-account"
+    },
+    {
+      "expected": {
+        "error": {
+          "code": "invalid_input",
+          "message": "claim facts are incomplete or exceed their bound"
+        }
+      },
+      "input": {
+        "facts": [
+          {
+            "claim": {
+              "state": "unclaimed"
+            },
+            "id": "ont_aaaaaaaaaaaaaaaa",
+            "owner_visible": false,
+            "publish_as_owner": false,
+            "tuples": [
+              {
+                "content_digest": "sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11",
+                "published": false,
+                "version": "same-version"
+              }
+            ]
+          },
+          {
+            "claim": {
+              "state": "unclaimed"
+            },
+            "id": "ont_aaaaaaaaaaaaaaaa",
+            "owner_visible": false,
+            "publish_as_owner": false,
+            "tuples": [
+              {
+                "content_digest": "sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11",
+                "published": false,
+                "version": "same-version"
+              }
+            ]
+          }
+        ],
+        "manifest": {
+          "capabilities": [],
+          "default_ref": "main",
+          "format": "graphforge-discovery/1",
+          "immutable_version": "sha256:07a0beb91567217d4b0f44f27879ab268630b02575527eb32a6a173a11b3bf38",
+          "objects": [
+            {
+              "digest": "sha256:76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b",
+              "length": 1776,
+              "locations": [
+                "https://data.graphforge.sh/objects/sha256/76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b"
+              ],
+              "media_type": "application/vnd.graphforge.project-summary+json"
+            },
+            {
+              "digest": "sha256:b2d08fdb0bacd23e001c4ace92e4eb86b9fb359da35552460f4d102e2725d775",
+              "length": 21504,
+              "locations": [
+                "https://data.graphforge.sh/objects/sha256/b2d08fdb0bacd23e001c4ace92e4eb86b9fb359da35552460f4d102e2725d775"
+              ],
+              "media_type": "application/vnd.graphforge.project"
+            },
+            {
+              "digest": "sha256:d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7",
+              "length": 12288,
+              "locations": [
+                "https://data.graphforge.sh/objects/sha256/d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7"
+              ],
+              "media_type": "application/vnd.graphforge.project"
+            }
+          ],
+          "ontology": {
+            "bridge_sets": [],
+            "composition_digest": "sha256:1dc9536e766224090b71de485a2bd3d6f35cc45c983441d16dfd3e3fc137e1fa",
+            "modules": [
+              {
+                "content_digest": "sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11",
+                "id": "https://graphforge.sh/ont_aaaaaaaaaaaaaaaa",
+                "package": {
+                  "format": "graphforge-project/2",
+                  "object_digest": "sha256:d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7",
+                  "package_digest": "sha256:79055696ec29ef37a14882a787a71da5a66306ff45d8ef7d594cb8e7fc90af69",
+                  "producing_core_version": "0.6.0-rc.5"
+                },
+                "version": "same-version"
+              }
+            ]
+          },
+          "package": {
+            "format": "graphforge-project/2",
+            "object_digest": "sha256:b2d08fdb0bacd23e001c4ace92e4eb86b9fb359da35552460f4d102e2725d775",
+            "package_digest": "sha256:07a0beb91567217d4b0f44f27879ab268630b02575527eb32a6a173a11b3bf38",
+            "producing_core_version": "0.6.0-rc.5"
+          },
+          "repository": {
+            "owner": "opendata",
+            "repository": "openalex"
+          },
+          "requirements": [
+            {
+              "capability": "portable",
+              "major": 1
+            }
+          ],
+          "resolved_ref": "main",
+          "summary": {
+            "format": "graphforge-project-summary/1",
+            "object_digest": "sha256:76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b",
+            "summary_digest": "sha256:76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b"
+          },
+          "version": {
+            "major": 1,
+            "minor": 2
+          }
+        },
+        "publisher_account_id": "opaque:publisher"
+      },
+      "name": "duplicate-id"
+    },
+    {
+      "expected": {
+        "error": {
+          "code": "invalid_input",
+          "message": "claim tuple facts are duplicated"
+        }
+      },
+      "input": {
+        "facts": [
+          {
+            "claim": {
+              "state": "unclaimed"
+            },
+            "id": "ont_aaaaaaaaaaaaaaaa",
+            "owner_visible": false,
+            "publish_as_owner": false,
+            "tuples": [
+              {
+                "content_digest": "sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11",
+                "published": false,
+                "version": "same-version"
+              },
+              {
+                "content_digest": "sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11",
+                "published": false,
+                "version": "same-version"
+              }
+            ]
+          }
+        ],
+        "manifest": {
+          "capabilities": [],
+          "default_ref": "main",
+          "format": "graphforge-discovery/1",
+          "immutable_version": "sha256:07a0beb91567217d4b0f44f27879ab268630b02575527eb32a6a173a11b3bf38",
+          "objects": [
+            {
+              "digest": "sha256:76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b",
+              "length": 1776,
+              "locations": [
+                "https://data.graphforge.sh/objects/sha256/76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b"
+              ],
+              "media_type": "application/vnd.graphforge.project-summary+json"
+            },
+            {
+              "digest": "sha256:b2d08fdb0bacd23e001c4ace92e4eb86b9fb359da35552460f4d102e2725d775",
+              "length": 21504,
+              "locations": [
+                "https://data.graphforge.sh/objects/sha256/b2d08fdb0bacd23e001c4ace92e4eb86b9fb359da35552460f4d102e2725d775"
+              ],
+              "media_type": "application/vnd.graphforge.project"
+            },
+            {
+              "digest": "sha256:d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7",
+              "length": 12288,
+              "locations": [
+                "https://data.graphforge.sh/objects/sha256/d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7"
+              ],
+              "media_type": "application/vnd.graphforge.project"
+            }
+          ],
+          "ontology": {
+            "bridge_sets": [],
+            "composition_digest": "sha256:1dc9536e766224090b71de485a2bd3d6f35cc45c983441d16dfd3e3fc137e1fa",
+            "modules": [
+              {
+                "content_digest": "sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11",
+                "id": "https://graphforge.sh/ont_aaaaaaaaaaaaaaaa",
+                "package": {
+                  "format": "graphforge-project/2",
+                  "object_digest": "sha256:d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7",
+                  "package_digest": "sha256:79055696ec29ef37a14882a787a71da5a66306ff45d8ef7d594cb8e7fc90af69",
+                  "producing_core_version": "0.6.0-rc.5"
+                },
+                "version": "same-version"
+              }
+            ]
+          },
+          "package": {
+            "format": "graphforge-project/2",
+            "object_digest": "sha256:b2d08fdb0bacd23e001c4ace92e4eb86b9fb359da35552460f4d102e2725d775",
+            "package_digest": "sha256:07a0beb91567217d4b0f44f27879ab268630b02575527eb32a6a173a11b3bf38",
+            "producing_core_version": "0.6.0-rc.5"
+          },
+          "repository": {
+            "owner": "opendata",
+            "repository": "openalex"
+          },
+          "requirements": [
+            {
+              "capability": "portable",
+              "major": 1
+            }
+          ],
+          "resolved_ref": "main",
+          "summary": {
+            "format": "graphforge-project-summary/1",
+            "object_digest": "sha256:76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b",
+            "summary_digest": "sha256:76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b"
+          },
+          "version": {
+            "major": 1,
+            "minor": 2
+          }
+        },
+        "publisher_account_id": "opaque:publisher"
+      },
+      "name": "duplicate-tuple"
+    }
+  ],
+  "format": "graphforge-item-admission-conformance/1"
+}

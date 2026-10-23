@@ -144,7 +144,16 @@ const manifestObject = JSON.parse(manifest);
  * Every export with a working argument list. `optional` lists the argument
  * positions that accept `undefined`/`null`.
  */
+const admission = readJson(
+  "docs",
+  "reference",
+  "hub-publish",
+  "v1",
+  "item-admission-conformance.json",
+).cases[0].input;
 export const EXPORTS = {
+  item_admission_requirements: { args: [admission.manifest], optional: [] },
+  plan_item_admission: { args: [admission], optional: [] },
   parse_item_id: { args: ["ont_7k2m9x4q8r3t5v1w"], optional: [] },
   has_item_id_shape: {
     args: ["abc_0000000000000000"],

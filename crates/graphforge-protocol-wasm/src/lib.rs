@@ -61,6 +61,7 @@ fn panic_error() -> ProtocolError {
         path: None,
         version: None,
         message: "the validator failed unexpectedly".into(),
+        items: None,
     }
 }
 
@@ -101,6 +102,22 @@ pub fn has_item_id_shape(name: &str) -> bool {
 }
 
 // ------------------------------------------------------------------ discovery
+
+/// Derive canonical ID/tuple requirements without host-language admission rules.
+#[wasm_bindgen(unchecked_return_type = "ItemClaimRequirement[]")]
+pub fn item_admission_requirements(
+    #[wasm_bindgen(unchecked_param_type = "JsonInput<DiscoveryManifest>")] manifest: &str,
+) -> Result<JsValue, JsValue> {
+    run(|| engine::item_admission_requirements(manifest.as_bytes()))
+}
+
+/// Plan permanent-item admission from verified, fresh host transaction facts.
+#[wasm_bindgen(unchecked_return_type = "ItemAdmissionPlan")]
+pub fn plan_item_admission(
+    #[wasm_bindgen(unchecked_param_type = "JsonInput<ItemAdmissionInput>")] input: &str,
+) -> Result<JsValue, JsValue> {
+    run(|| engine::plan_item_admission(input.as_bytes()))
+}
 
 /// Parse and validate a permanent item descriptor without fetching module bytes.
 #[wasm_bindgen(unchecked_return_type = "ValidatedItemDescriptor")]

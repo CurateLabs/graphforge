@@ -64,3 +64,111 @@ pub(super) fn cases() -> Vec<Case> {
         steps,
     )]
 }
+
+fn bind(namespace: &str, account: &str, handle: &str) -> Step {
+    act(Action::SetPublicationAccount {
+        namespace: namespace.into(),
+        account: account.into(),
+        canonical_handle: handle.into(),
+    })
+}
+
+fn stable_accounts() -> Case {
+    let first = publication("organization", "original", 5200, 'a');
+    let mut steps = vec![
+        bind(
+            "organization",
+            "reference-account-0000000000000001",
+            "organization",
+        ),
+        token(&first.repository, "old_token"),
+    ];
+    steps.extend(publish(
+        &first,
+        "old_token",
+        "first",
+        &mut RepoModel::default(),
+    ));
+    let collision = publication("new-publisher", "collision", 5205, 'd');
+    steps.push(token(&collision.repository, "collision_token"));
+    steps.push(open_new(&collision, "collision_token", "collision"));
+    steps.extend(upload_all(&collision, "collision"));
+    steps.push(commit(
+        &collision,
+        "collision_token",
+        "collision",
+        status(409).json(json!({"code":"id_taken", "message":graphforge_hub_publish::ID_TAKEN_MESSAGE, "items":[{"kind":"ontology_module", "id":"ont_aaaaaaaaaaaaaaaa"}]})),
+    ));
+    steps.push(refs_absent(&collision.repository));
+    // A new canonical handle and repository alias still represent account A.
+    let renamed = publication("renamed-owner", "renamed", 5201, 'b');
+    steps.push(bind(
+        "renamed-owner",
+        "reference-account-0000000000000001",
+        "renamed-owner",
+    ));
+    steps.push(token(&renamed.repository, "renamed_token"));
+    steps.extend(publish(
+        &renamed,
+        "renamed_token",
+        "renamed",
+        &mut RepoModel::default(),
+    ));
+    // Handle reuse binds B. Existing grants cannot turn into B's grants, and B
+    // cannot take A's ownership even though it now holds A's former handle.
+    steps.push(bind("organization", "opaque-account-B", "organization"));
+    let fresh = publication("organization", "original", 5202, 'c');
+    steps.push(send(
+        request(
+            HubMethod::Post,
+            format!("{}/.gf/publish/sessions", repo_url(&fresh.repository)),
+        )
+        .bearer("old_token")
+        .json(fresh.open_body()),
+        error(403, "auth_denied"),
+    ));
+    steps.push(token(&first.repository, "new_token"));
+    // Completed operation replay is account-bound too.
+    steps.push(send(
+        request(
+            HubMethod::Post,
+            format!("{}/.gf/publish/sessions", repo_url(&first.repository)),
+        )
+        .bearer("new_token")
+        .json(first.open_body()),
+        error(403, "auth_denied"),
+    ));
+    let reuse = publication("organization", "reuse", 5203, 'a');
+    steps.push(token(&reuse.repository, "reuse_token"));
+    steps.extend(publish(
+        &reuse,
+        "reuse_token",
+        "reuse",
+        &mut RepoModel::default(),
+    ));
+    let changed = publication("organization", "changed", 5204, 'c');
+    steps.push(token(&changed.repository, "changed_token"));
+    steps.push(open_new(&changed, "changed_token", "changed"));
+    steps.extend(upload_all(&changed, "changed"));
+    steps.push(act(Action::SetItemVisibility {
+        publisher: "organization".into(),
+        id: "ont_aaaaaaaaaaaaaaaa".into(),
+        visible: true,
+    }));
+    steps.push(commit(&changed, "changed_token", "changed", status(409).json(json!({
+        "code":"id_taken", "message":graphforge_hub_publish::ID_TAKEN_MESSAGE,
+        "items":[{"kind":"ontology_module", "id":"ont_aaaaaaaaaaaaaaaa", "owner":"renamed-owner"}]
+    }))));
+    steps.push(refs_absent(&changed.repository));
+    case(
+        "permanent-id-stable-accounts",
+        "Stable account ownership survives handle changes and repository aliases; reassigned handles invalidate old grants and cannot replay another account's operation or acquire its ID.",
+        steps,
+    )
+}
+
+#[test]
+fn stable_account_grants_and_handle_reuse_preserve_ownership() {
+    let case = stable_accounts();
+    replay(&ReferenceHub::default(), &case.name, &case.steps);
+}

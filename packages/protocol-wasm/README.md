@@ -121,13 +121,26 @@ included, are own properties.
 `DiscoveryLimitsOverride` (`max_response_bytes`, `max_refs`, ...) naming only
 the bounds to change.
 
-Every failure is thrown as a plain object `{ code, path?, version?, message }`
+Every failure is thrown as a plain object `{ code, path?, version?, message, items? }`
 with the code Rust returns: `malformed_response`, `unsupported_future`,
 `integrity_failure`, `limit_exceeded`, ... for discovery;
 `invalid_input`, `auth_denied`, ... for publish documents; `preview.limit`,
 `preview.unsafe_svg`, ... for previews. `invalid_argument` means the argument
 was not the JSON value or string the export needs, or was an invalid permanent
 item reference.
+
+For a host publication mutation, `item_admission_requirements(manifest)` derives
+canonical query keys before database reads, then
+`plan_item_admission({manifest, publisher_account_id, facts})` evaluates complete
+fresh host-owned facts. These values must come from verified scoped account
+authorization and the host transaction, never HTTP caller JSON. Both APIs share
+the native Rust policy and 16 MiB byte bounds; see the
+[internal admission contract](../../docs/reference/hub-publish/v1/README.md#internal-host-item-admission)
+for closed fact types, stable account identity, privacy, count limits and atomic
+commit requirements. `exact_reuse` skips ownership/membership writes while the
+publication and its actual metadata witness still commit. An `id_taken` failure
+preserves native typed `items` in the existing plain error object; unrelated
+failures omit `items`. This package does not mutate or authorize host storage.
 
 TypeScript declarations (`dist/graphforge_protocol_wasm.d.ts`) are generated
 from the Rust wire types; nothing in them is written by hand.

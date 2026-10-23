@@ -12,7 +12,7 @@ test("the table covers exactly the module's exports", () => {
     .filter((name) => name !== "default" && name !== "initSync")
     .sort();
   assert.deepEqual(Object.keys(EXPORTS).sort(), exported);
-  assert.equal(exported.length, 26);
+  assert.equal(exported.length, 28);
 });
 
 test("every export succeeds on its working arguments", () => {

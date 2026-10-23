@@ -9,6 +9,7 @@
 mod items;
 mod retention;
 
+use crate::StableAccountId;
 use crate::canonical::{sha256_digest, validate_digest};
 use crate::error::{HubPublishError, HubPublishErrorCode, invalid};
 use crate::exchange::{HubExchange, HubMethod, HubRequest, HubResponse};
@@ -24,6 +25,7 @@ use graphforge_discovery::{
     DISCOVERY_FORMAT, DiscoveryErrorCode, DiscoveryLimits, DiscoveryManifest, ProtocolVersion,
     RefSet, RepositoryIdentity, RepositoryRef, Sha256Digest,
 };
+use items::account_for_namespace;
 use serde::Serialize;
 use sha2::{Digest as _, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -99,11 +101,15 @@ struct State {
     moved: BTreeMap<RepositoryIdentity, RepositoryIdentity>,
     quotas: BTreeMap<String, u64>,
     permanent_items: BTreeMap<String, items::PermanentItem>,
-    visible_items: BTreeSet<(String, String)>,
-    organization_publishers: BTreeSet<(String, String)>,
+    account_counter: u64,
+    namespace_accounts: BTreeMap<String, StableAccountId>,
+    account_handles: BTreeMap<StableAccountId, String>,
+    visible_items: BTreeSet<(StableAccountId, String)>,
+    organization_publishers: BTreeSet<(StableAccountId, StableAccountId)>,
 }
 
 struct IssuedToken {
+    account: Option<StableAccountId>,
     scope: String,
     expires_at: u64,
 }
@@ -117,6 +123,7 @@ enum DeviceStatus {
 }
 
 struct DeviceGrant {
+    account: StableAccountId,
     user_code: String,
     scope: String,
     expires_at: u64,
@@ -126,6 +133,7 @@ struct DeviceGrant {
 }
 
 struct Session {
+    account: StableAccountId,
     request: OpenSessionRequest,
     uploads: Vec<Upload>,
     receipt: Option<PublishReceipt>,
@@ -594,7 +602,7 @@ impl ReferenceHub {
         state: &State,
         request: &HubRequest,
         repository: &RepositoryIdentity,
-    ) -> Result<(), Reject> {
+    ) -> Result<StableAccountId, Reject> {
         let Some(token) = request
             .header("authorization")
             .and_then(|value| value.split_once(' '))
@@ -640,7 +648,18 @@ impl ReferenceHub {
             ));
             return Err(rejected);
         }
-        Ok(())
+        let account = issued
+            .account
+            .as_ref()
+            .filter(|account| state.namespace_accounts.get(&repository.owner) == Some(*account))
+            .ok_or_else(|| {
+                reject(
+                    403,
+                    HubPublishErrorCode::AuthDenied,
+                    "publication account grant is no longer authorized",
+                )
+            })?;
+        Ok(account.clone())
     }
 
     fn check_document_size(&self, request: &HubRequest) -> Result<(), Reject> {
@@ -686,7 +705,7 @@ impl ReferenceHub {
         repository: &RepositoryIdentity,
         request: &HubRequest,
     ) -> Handled {
-        Self::authorize(state, request, repository)?;
+        let account = Self::authorize(state, request, repository)?;
         self.check_document_size(request)?;
         let open = OpenSessionRequest::from_json(&request.body)?;
         if &open.repository != repository {
@@ -719,6 +738,13 @@ impl ReferenceHub {
         let superseded = match state.operations.get(&open.operation_uuid) {
             Some(session_id) => {
                 let session = &state.sessions[session_id];
+                if session.account != account {
+                    return Err(reject(
+                        403,
+                        HubPublishErrorCode::AuthDenied,
+                        "operation belongs to another publication account",
+                    ));
+                }
                 if session.request.intent_digest != open.intent_digest
                     || session.request.repository != open.repository
                 {
@@ -810,6 +836,7 @@ impl ReferenceHub {
             .operations
             .insert(open.operation_uuid, session_id.clone());
         let session = Session {
+            account,
             request: open,
             uploads,
             receipt: None,
@@ -829,7 +856,7 @@ impl ReferenceHub {
         operation: &str,
         request: &HubRequest,
     ) -> Handled {
-        Self::authorize(state, request, repository)?;
+        let account = Self::authorize(state, request, repository)?;
         let unknown = || not_found("publish operation is unknown");
         let operation_uuid = Uuid::parse_str(operation).map_err(|_| unknown())?;
         let session_id = state
@@ -840,7 +867,7 @@ impl ReferenceHub {
         let session = state
             .sessions
             .get(&session_id)
-            .filter(|s| &s.request.repository == repository)
+            .filter(|s| &s.request.repository == repository && s.account == account)
             .ok_or_else(unknown)?;
         if session.pending.is_some() {
             self.advance_verification(state, repository, &session_id, request)?;
@@ -849,7 +876,9 @@ impl ReferenceHub {
             .operations
             .get(&operation_uuid)
             .and_then(|session_id| state.sessions.get(session_id))
-            .filter(|session| &session.request.repository == repository)
+            .filter(|session| {
+                &session.request.repository == repository && session.account == account
+            })
             .ok_or_else(unknown)?;
         Ok(json_response(
             200,
@@ -872,8 +901,15 @@ impl ReferenceHub {
     ) -> Result<(), Reject> {
         // Each poll authenticates anew. Only bounded retained bytes are hashed;
         // refs are untouched until all verification and the final CAS succeed.
-        Self::authorize(state, request, repository)?;
+        let account = Self::authorize(state, request, repository)?;
         let session = state.sessions.get_mut(id).expect("operation session");
+        if session.account != account {
+            return Err(reject(
+                403,
+                HubPublishErrorCode::AuthDenied,
+                "session belongs to another publication account",
+            ));
+        }
         let mut pending = session.pending.take().expect("pending commit");
         let mut remaining = VERIFY_BYTES_PER_POLL;
         while pending.object < session.uploads.len() && remaining > 0 {
@@ -1041,14 +1077,16 @@ impl ReferenceHub {
         session_id: &str,
         request: &HubRequest,
     ) -> Handled {
-        Self::authorize(state, request, repository)?;
+        let account = Self::authorize(state, request, repository)?;
         self.check_document_size(request)?;
         let session_id = PublishSessionId::parse(session_id)
             .map_err(|_| not_found("publish session is unknown"))?;
         let session = state
             .sessions
             .get(session_id.as_str())
-            .filter(|session| &session.request.repository == repository)
+            .filter(|session| {
+                &session.request.repository == repository && session.account == account
+            })
             .ok_or_else(|| not_found("publish session is unknown"))?;
         let commit = CommitRequest::from_json(&request.body)?;
         // Destructive semantics must be offered and required on this exact
@@ -1444,11 +1482,11 @@ impl ReferenceHub {
             previous_revision: commit.expected_revision.clone(),
             revision: revision.clone(),
         };
-        let claims = items::plan(state, &manifest, &repository.owner)?;
+        let claims = items::plan(state, &manifest, &account)?;
 
         // 6. Apply: permanent-ID claims, objects, manifest, refs, and receipt
         // together. Nothing below this point can reject the transaction.
-        items::apply(state, &repository.owner, claims);
+        items::apply(state, claims);
         let session = state
             .sessions
             .get_mut(session_id.as_str())
@@ -1510,11 +1548,14 @@ impl ReferenceHub {
         else {
             return oauth_error("invalid_scope");
         };
+        let namespace = scope_repository(scope).expect("validated scope").owner;
+        let account = account_for_namespace(state, &namespace);
         let device_code = self.next_id(state, "device");
         let user_code = user_code(&self.next_id(state, "user"));
         state.devices.insert(
             device_code.clone(),
             DeviceGrant {
+                account,
                 user_code: user_code.clone(),
                 scope: scope.clone(),
                 expires_at: state.now + self.config.device_code_ttl_seconds,
@@ -1582,10 +1623,18 @@ impl ReferenceHub {
             DeviceStatus::Approved => {
                 grant.status = DeviceStatus::Issued;
                 let scope = grant.scope.clone();
+                let account = grant.account.clone();
+                if scope_repository(&scope)
+                    .and_then(|repository| state.namespace_accounts.get(&repository.owner))
+                    != Some(&account)
+                {
+                    return oauth_error("access_denied");
+                }
                 let token = format!("gfp_{}", self.next_id(state, "token"));
                 state.tokens.insert(
                     token.clone(),
                     IssuedToken {
+                        account: Some(account),
                         scope: scope.clone(),
                         expires_at: now + self.config.token_ttl_seconds,
                     },
@@ -1610,9 +1659,12 @@ impl ReferenceHub {
         let mut state = self.state.lock().expect("hub state");
         let token = format!("gfp_{}", self.next_id(&mut state, "token"));
         let expires_at = state.now + ttl_seconds;
+        let account = scope_repository(scope)
+            .map(|repository| account_for_namespace(&mut state, &repository.owner));
         state.tokens.insert(
             token.clone(),
             IssuedToken {
+                account,
                 scope: scope.to_owned(),
                 expires_at,
             },

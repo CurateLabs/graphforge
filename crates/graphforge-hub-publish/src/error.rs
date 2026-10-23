@@ -203,6 +203,7 @@ impl std::error::Error for HubPublishError {}
 
 /// One refused canonical permanent ID, with only caller-visible ownership facts.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(tsify::Tsify))]
 #[serde(deny_unknown_fields)]
 pub struct IdTakenItem {
     /// Item kind, which must match the ID prefix.
@@ -215,6 +216,7 @@ pub struct IdTakenItem {
         deserialize_with = "present",
         skip_serializing_if = "Option::is_none"
     )]
+    #[cfg_attr(feature = "typescript", tsify(optional))]
     pub owner: Option<String>,
     /// Present only as `true` for authorized publication as the owning organization.
     #[serde(
@@ -222,6 +224,7 @@ pub struct IdTakenItem {
         deserialize_with = "present",
         skip_serializing_if = "Option::is_none"
     )]
+    #[cfg_attr(feature = "typescript", tsify(optional))]
     pub publish_as_owner: Option<bool>,
 }
 
