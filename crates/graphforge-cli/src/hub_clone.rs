@@ -802,7 +802,7 @@ fn download(
 }
 
 /// Retry policy for in-process tests: production attempt count, no waiting.
-#[cfg(test)]
+#[cfg(any(test, feature = "hub-test-support"))]
 const TEST_RETRY_POLICY: RetryPolicy = RetryPolicy {
     attempts: RETRY_POLICY.attempts,
     initial_backoff: Duration::ZERO,
@@ -1271,7 +1271,7 @@ struct CloneEnv<'a> {
     warn: Option<WarningSink<'a>>,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "hub-test-support"))]
 impl CloneEnv<'_> {
     fn quiet<'a>() -> CloneEnv<'a> {
         CloneEnv {
@@ -1509,7 +1509,7 @@ fn clone_telemetry_runtime(endpoint: Option<&str>) -> TelemetryRuntime {
     .unwrap_or_default()
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "hub-test-support"))]
 pub(crate) fn run_clone_with(
     transport: &dyn Transport,
     args: CloneArgs,
@@ -1519,7 +1519,7 @@ pub(crate) fn run_clone_with(
     run_clone_profiled(transport, args, json, output, &TelemetryRuntime::default())
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "hub-test-support"))]
 fn run_clone_profiled(
     transport: &dyn Transport,
     args: CloneArgs,

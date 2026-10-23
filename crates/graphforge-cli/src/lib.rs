@@ -28,6 +28,8 @@ mod hub_clone;
 pub mod hub_fixture_artifacts;
 mod hub_http;
 mod hub_publish;
+#[cfg(feature = "hub-test-support")]
+pub mod hub_test_support;
 mod identity;
 mod maintenance_cli;
 mod ontology_cli;
@@ -1228,6 +1230,17 @@ fn run_with_allocation(
     if let Command::Auth(args) = command {
         return auth::run(args, cli.json, output);
     }
+    #[cfg(feature = "hub-test-support")]
+    let command = match hub_test_support::dispatch(
+        command,
+        cli.project.as_deref(),
+        cli.project_dir.as_deref(),
+        cli.json,
+        output,
+    )? {
+        std::ops::ControlFlow::Break(()) => return Ok(0),
+        std::ops::ControlFlow::Continue(command) => command,
+    };
     if let hub @ (Command::Clone(_) | Command::Publish(_) | Command::Hub(_)) = command {
         return hub_publish::run_hub_command(
             hub,

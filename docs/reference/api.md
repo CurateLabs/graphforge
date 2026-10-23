@@ -4001,3 +4001,78 @@ Key public types:
 
 _Python documentation is automatically generated from source code docstrings._
 row order. Python and Node contain no separate closeness implementation or
+
+## Typed Hub workflow facades
+
+Python exposes `graphforge.HubProject(path, hub=None, token_env=None,
+protection_bypass_env=None)` (optional settings are keyword-only). Node exposes
+`HubProject` from `@curatelabs/graphforge/lib/hub.mjs`, constructed with a path
+and optional `{ hub, tokenEnv, protectionBypassEnv }`. These are synchronous,
+thin adapters over the same Rust entry point as `gf`; each verb reopens the
+project. Close other writable handles before a verb and reopen `GraphForge`
+for Arrow graph reads afterward.
+
+Both expose `clone`, `branch`, `commit`, `tag`, `push`/`publish`, `pull`, and
+`log`. The native CLI owns ref resolution, identity, validation, credentials,
+fast-forward/rewrite/prune rules and retry behavior. `publish` aliases the
+current-Branch `push` workflow. Results use native field names: `CloneResult`,
+`BranchResult`, `CommitResult`, `TagResult`, `PublishResult`,
+`PullResult | UpToDateResult`, and history entries with parent UUIDs and credited
+identities. Mutation options include a stable operation UUID for exact replay.
+
+See the [Python facade and typed results](../../crates/graphforge-bindings-py/python/graphforge/hub.py)
+and [Node examples and declarations](../../crates/graphforge-bindings-node/README.md#typed-hub-and-research-workflow).
+`HubWorkflowError` preserves the native envelope and semantic error code; nested
+diagnostics remain available for more specific classification. Publish and
+collaborator pull examples require a separately verified write-capable Hub;
+production graphforge.sh supports public read/clone at launch.
+
+### Python workflow example
+
+
+`HubProject` calls the same in-process Rust entry as `gf`. Each verb opens the
+project afresh; close other writable handles first. Graph reads remain Arrow
+through `GraphForge.query_research_branch()` or `query_research_version()`.
+The metadata results are typed dictionaries with native UUIDs and field names.
+
+Clone/query works with public read-capable repositories. `push`/`publish` and
+collaborator `pull` require a separately verified, conforming write-capable Hub
+and its scoped publish credential. Production graphforge.sh is not a qualified
+hosted publishing target at launch. The native acceptance tests use ReferenceHub
+(Hub publish/1 and discovery/1); they do not prove hosted publishing.
+
+```python
+from contextlib import closing
+from graphforge import GraphForge, HubProject
+
+# Set MY_HUB_TOKEN in the environment using the target Hub's credential flow.
+work = HubProject("./research-copy", token_env="MY_HUB_TOKEN")
+cloned = work.clone("https://your-write-capable-hub.example/owner/repository", ref="main")
+first = work.commit("First score", "MATCH (n:Item) SET n.score=1", author="Alice <alice@example.org>")
+second = work.commit("Second score", "MATCH (n:Item) SET n.score=2", author="Alice <alice@example.org>")
+work.tag("v1")
+receipt = work.push()  # publish() is the same current-Branch operation
+# After a collaborator pushes a compatible change:
+pulled = work.pull(author="Alice <alice@example.org>")
+for entry in work.log(all=True):
+    print(entry["version_uuid"], entry["parents"], entry["description"])
+with closing(GraphForge(work.path)) as reopened:
+    table = reopened.query_research_version(first["version_uuid"], "MATCH (n:Item) RETURN n.score")
+    print(table.to_pylist())
+```
+
+`clone` returns `CloneResult`; `push`/`publish` returns `PublishResult`; `pull`
+returns `PullResult | UpToDateResult`; `log` returns `list[LogEntry]`. Full typed
+signatures and result fields live in `graphforge.hub`. `log(remote=True)` reads
+the published history; `log("v1")` resolves an immutable local tag. Pass an
+`operation_uuid` to mutations to retain an exact retry identity.
+
+`HubWorkflowError` preserves `envelope`, `details`, `exit_code`, `stdout` and
+`stderr`. Its `code` is the native `details.semantic_code` when present, otherwise
+`native_code` (the envelope's outer code). Retained `error.diagnostics` may carry
+more specific multi-ontology codes; inspect them before classifying an outer
+code. See the [Hub publish contract](hub-publish/v1/README.md)
+for native refusals.
+
+The latest native Core version warnings are available in `work.warnings`,
+including when the native CLI wraps a history array with its warning envelope.

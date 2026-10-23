@@ -181,6 +181,20 @@ pub fn version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
 
+/// Start the compile-time-only native acceptance fixture on this thread.
+#[cfg(feature = "hub-test-support")]
+#[napi(js_name = "_testHubStart")]
+pub fn test_hub_start() -> String {
+    graphforge_cli::hub_test_support::start()
+}
+
+/// Release the compile-time-only acceptance fixture on this thread.
+#[cfg(feature = "hub-test-support")]
+#[napi(js_name = "_testHubStop")]
+pub fn test_hub_stop() {
+    graphforge_cli::hub_test_support::stop();
+}
+
 /// Captured output from one Rust-owned CLI invocation.
 #[napi(object)]
 pub struct CliExecutionOutput {

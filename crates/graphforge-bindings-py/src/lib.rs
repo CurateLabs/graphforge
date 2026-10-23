@@ -620,6 +620,20 @@ fn _cli_execute(
     )
 }
 
+/// Start the compile-time-only native acceptance fixture on this thread.
+#[cfg(feature = "hub-test-support")]
+#[pyfunction]
+fn _test_hub_start() -> String {
+    graphforge_cli::hub_test_support::start()
+}
+
+/// Release the compile-time-only acceptance fixture on this thread.
+#[cfg(feature = "hub-test-support")]
+#[pyfunction]
+fn _test_hub_stop() {
+    graphforge_cli::hub_test_support::stop();
+}
+
 /// GraphForge native extension module (`graphforge._graphforge_rs`).
 #[pymodule]
 fn _graphforge_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -633,6 +647,11 @@ fn _graphforge_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(_test_acquire_writer_hold, m)?)?;
     m.add_function(wrap_pyfunction!(_test_release_writer_hold, m)?)?;
     m.add_function(wrap_pyfunction!(_cli_execute, m)?)?;
+    #[cfg(feature = "hub-test-support")]
+    {
+        m.add_function(wrap_pyfunction!(_test_hub_start, m)?)?;
+        m.add_function(wrap_pyfunction!(_test_hub_stop, m)?)?;
+    }
     m.add_class::<GraphForge>()?;
     m.add_class::<transaction::PyGraphTransaction>()?;
     m.add_class::<import_session::PyGraphImportSession>()?;

@@ -156,3 +156,55 @@ to the smallest label. Without the property, initial labels are selected vertex
 ordinals. Rank and cluster invocation descriptors accept the same controls,
 including descriptors prepared from resolved belief projections. Rust owns the
 algorithms and validates their semantics.
+
+## Typed Hub and research workflow
+
+Import `HubProject` from `@curatelabs/graphforge/lib/hub.mjs`; its declarations
+ship in `lib/hub.d.mts`. It calls the same in-process Rust CLI as `gf`,
+synchronously. Each verb opens the project afresh; close other writable handles
+first. Control results retain the native field names and UUIDs. Native graph
+reads continue to return Arrow IPC for `tableFromIPC` or other Arrow consumers.
+
+Public clone/query needs a read-capable Hub. `push`/`publish` and collaborator
+`pull` require a separately verified conforming write-capable Hub and a scoped
+publish token. Production graphforge.sh is not a qualified hosted publishing
+target at launch. Tests use native ReferenceHub (Hub publish/1 and discovery/1),
+which does not establish production hosted publishing.
+
+```js
+import { GraphForge } from "@curatelabs/graphforge";
+import { HubProject, HubWorkflowError } from "@curatelabs/graphforge/lib/hub.mjs";
+import { tableFromIPC } from "apache-arrow";
+
+// Set MY_HUB_TOKEN using your target Hub's credential flow.
+const work = new HubProject("./research-copy", { tokenEnv: "MY_HUB_TOKEN" });
+const cloned = work.clone("https://your-write-capable-hub.example/owner/repository", { ref: "main" });
+const credit = { author: "Alice <alice@example.org>" };
+const first = work.commit("First score", "MATCH (n:Item) SET n.score=1", credit);
+const second = work.commit("Second score", "MATCH (n:Item) SET n.score=2", credit);
+work.tag("v1");
+const receipt = work.push(); // publish() is the same current-Branch operation
+// After a collaborator pushes a compatible change:
+const pulled = work.pull(undefined, credit);
+console.log(work.log(undefined, { all: true }));
+const reopened = new GraphForge(work.path);
+try {
+  console.log(tableFromIPC(reopened.queryResearchVersion(first.version_uuid,
+    "MATCH (n:Item) RETURN n.score")).toArray());
+} finally {
+  reopened.close();
+}
+```
+
+`clone` returns `CloneResult`; `push`/`publish` returns `PublishResult`; `pull`
+returns `PullResult | UpToDateResult`; `log` returns `LogEntry[]`.
+`log(undefined, { remote: true })` reads published history; `log("v1")` resolves
+an immutable local tag. Mutations accept `operationUuid` for exact retry identity.
+
+`HubWorkflowError` retains `envelope`, `details`, `exitCode`, `stdout` and
+`stderr`. Its `code` selects native `details.semantic_code`, falling back to
+`nativeCode` (the outer code). Retained `error.diagnostics` may carry more
+specific multi-ontology codes; inspect those before classifying an outer code.
+
+The latest native Core version warnings are available in `work.warnings`,
+including when the native CLI wraps a history array with its warning envelope.

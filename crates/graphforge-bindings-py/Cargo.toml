@@ -12,6 +12,7 @@ repository.workspace = true
 crate-type = ["cdylib"]
 
 [features]
+hub-test-support = ["graphforge-cli/hub-test-support"]
 # Distribution builds opt in; ordinary Rust tests must link libpython.
 extension-module = ["pyo3/extension-module"]
 
