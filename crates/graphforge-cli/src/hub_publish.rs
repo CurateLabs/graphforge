@@ -347,15 +347,7 @@ pub(crate) fn publish_with_credentials(
             args.protection_bypass_env.as_deref(),
         )?;
         grant
-            .map(|grant| {
-                if grant.origin.origin() != base.origin() {
-                    return Err(validation(
-                        "hub.auth_denied",
-                        "publish capability must match the Hub origin",
-                    ));
-                }
-                Ok(PublishToken::new(grant.token))
-            })
+            .map(|grant| grant.into_publish_token(&base))
             .transpose()
     })?;
     let stderr = std::io::stderr();

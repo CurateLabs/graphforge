@@ -37,7 +37,11 @@ fn main() {
 
     let manifest = root.join("manifest.json");
     let mut files = Vec::new();
-    for name in ["graphforge-bootstrap", "graphforge-build-knowledge"] {
+    for name in [
+        "graphforge-bootstrap",
+        "graphforge-build-knowledge",
+        "graphforge-hub",
+    ] {
         collect(&root, &root.join(name), &mut files);
     }
     files.sort();

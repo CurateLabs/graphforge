@@ -67,6 +67,7 @@ try {
     "project-skills/manifest.json",
     "project-skills/graphforge-bootstrap/SKILL.md",
     "project-skills/graphforge-build-knowledge/SKILL.md",
+    "project-skills/graphforge-hub/SKILL.md",
   ]) {
     assert.equal(
       cliPack.files.some((entry) => entry.path === path),
@@ -104,6 +105,7 @@ try {
   assert.deepEqual(installedManifest.skills, [
     "graphforge-bootstrap",
     "graphforge-build-knowledge",
+    "graphforge-hub",
   ]);
   for (const skill of installedManifest.skills) {
     assert.equal(

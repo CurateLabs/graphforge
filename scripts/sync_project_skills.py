@@ -18,7 +18,7 @@ DISTRIBUTION_COPIES = (
     ROOT / "crates" / "graphforge-bindings-py" / "python" / "graphforge" / "_project_skills",
     ROOT / "packages" / "cli" / "project-skills",
 )
-SKILL_NAMES = ("graphforge-bootstrap", "graphforge-build-knowledge")
+SKILL_NAMES = ("graphforge-bootstrap", "graphforge-build-knowledge", "graphforge-hub")
 
 
 def sha256(path: Path) -> str:
@@ -41,7 +41,7 @@ def expected_manifest() -> dict[str, object]:
     ]
     return {
         "schema_version": 1,
-        "bundle_version": 1,
+        "bundle_version": 2,
         "graphforge_compatibility": ">=0.6.0-dev <0.7.0",
         "skills": list(SKILL_NAMES),
         "files": files,

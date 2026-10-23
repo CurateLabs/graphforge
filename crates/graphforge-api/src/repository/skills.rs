@@ -87,10 +87,8 @@ fn validate_skill_bundle(bundle: &SkillBundle<'_>) -> Result<CanonicalSkillManif
             )));
         }
     }
-    for required in [
-        "graphforge-bootstrap/SKILL.md",
-        "graphforge-build-knowledge/SKILL.md",
-    ] {
+    for name in MANAGED_SKILL_NAMES {
+        let required = format!("{name}/SKILL.md");
         if !manifest.files.iter().any(|file| file.path == required) {
             return Err(validation(format!(
                 "project skill bundle is missing {required}"
@@ -475,10 +473,11 @@ impl RepositoryContext {
             SKILLS_LIFECYCLE_ROOT,
             SKILLS_STAGE,
             SKILLS_BACKUP,
-            ".agents/skills/graphforge-bootstrap",
-            ".agents/skills/graphforge-build-knowledge",
         ] {
             reject_symlink_components(&self.root, &self.root.join(relative))?;
+        }
+        for name in MANAGED_SKILL_NAMES {
+            reject_symlink_components(&self.root, &self.root.join(SKILLS_ROOT).join(name))?;
         }
         Ok(())
     }

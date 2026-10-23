@@ -581,6 +581,21 @@ pub(crate) struct RepositoryToken {
     pub token: String,
     pub origin: Url,
 }
+impl RepositoryToken {
+    /// Publish capabilities must stay on the selected Hub control origin.
+    pub(crate) fn into_publish_token(
+        self,
+        hub: &Url,
+    ) -> Result<graphforge_hub_publish::PublishToken, GfError> {
+        if self.origin.origin() != hub.origin() {
+            return Err(validation(
+                "hub.auth_denied",
+                "publish capability must match the Hub origin",
+            ));
+        }
+        Ok(graphforge_hub_publish::PublishToken::new(self.token))
+    }
+}
 pub(crate) fn repository_token(
     hub: &Url,
     owner: &str,

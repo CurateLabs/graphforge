@@ -509,7 +509,11 @@ try {
 
   const packaged = join(installedCliRoot, "project-skills");
   const managed = join(repository, ".agents", "skills");
-  for (const skill of ["graphforge-bootstrap", "graphforge-build-knowledge"]) {
+  for (const skill of [
+    "graphforge-bootstrap",
+    "graphforge-build-knowledge",
+    "graphforge-hub",
+  ]) {
     assert.deepEqual(
       readFileSync(join(managed, skill, "SKILL.md")),
       readFileSync(join(packaged, skill, "SKILL.md")),
@@ -527,7 +531,11 @@ try {
   );
   const backup = join(lifecycle, "backup");
   mkdirSync(backup);
-  for (const skill of ["graphforge-bootstrap", "graphforge-build-knowledge"]) {
+  for (const skill of [
+    "graphforge-bootstrap",
+    "graphforge-build-knowledge",
+    "graphforge-hub",
+  ]) {
     renameSync(join(managed, skill), join(backup, skill));
     mkdirSync(join(managed, skill), { recursive: true });
     writeFileSync(join(managed, skill, "SKILL.md"), "interrupted\n");

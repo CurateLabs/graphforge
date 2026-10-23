@@ -30,10 +30,11 @@ def test_generated_distribution_assets_are_current() -> None:
 def test_manifest_names_host_discoverable_skills() -> None:
     manifest = json.loads((SOURCE / "manifest.json").read_text())
     assert manifest["schema_version"] == 1
-    assert manifest["bundle_version"] == 1
+    assert manifest["bundle_version"] == 2
     assert manifest["skills"] == [
         "graphforge-bootstrap",
         "graphforge-build-knowledge",
+        "graphforge-hub",
     ]
     for skill in manifest["skills"]:
         assert (SOURCE / skill / "SKILL.md").is_file()
