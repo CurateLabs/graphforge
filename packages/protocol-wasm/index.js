@@ -126,6 +126,17 @@ export const parse_item_id = wrap("parse_item_id", [["string", "reference"]]);
 export const has_item_id_shape = wrap("has_item_id_shape", [["string", "name"]]);
 export const item_admission_requirements = wrap("item_admission_requirements", [doc("manifest")]);
 export const plan_item_admission = wrap("plan_item_admission", [doc("input")]);
+export const resolve_item_version = wrap("resolve_item_version", [doc("inventory"), limits]);
+export const bind_item_version_source = wrap("bind_item_version_source", [
+  doc("inventory"),
+  doc("nominated"),
+  doc("refs"),
+  doc("manifest"),
+  limits,
+]);
+export const item_resolution_error_response = wrap("item_resolution_error_response", [
+  doc("error"),
+]);
 export const validate_item_descriptor = wrap("validate_item_descriptor", [
   doc("descriptor"),
   limits,

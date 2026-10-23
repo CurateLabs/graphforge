@@ -151,9 +151,47 @@ const admission = readJson(
   "v1",
   "item-admission-conformance.json",
 ).cases[0].input;
+const itemDescriptor = {
+  format: "graphforge-item/1",
+  id: protocol.parse_item_id(module.ontology_id).id,
+  kind: "ontology_module",
+  repository: manifestObject.repository,
+  module: {
+    id: module.ontology_id,
+    version: module.version,
+    content_digest: module.content_digest,
+  },
+  discovery: {
+    refs_revision: protocol.validate_refs(refs).revision,
+    manifest_validator: protocol.validate_manifest(manifest).digest,
+  },
+};
+const itemInventory = {
+  id: itemDescriptor.id,
+  version: itemDescriptor.module.version,
+  complete: true,
+  candidates: [itemDescriptor],
+};
+
 export const EXPORTS = {
   item_admission_requirements: { args: [admission.manifest], optional: [] },
   plan_item_admission: { args: [admission], optional: [] },
+  resolve_item_version: { args: [itemInventory, undefined], optional: [1] },
+  bind_item_version_source: {
+    args: [itemInventory, itemDescriptor, refs, manifest, undefined],
+    optional: [4],
+  },
+  item_resolution_error_response: {
+    args: [
+      {
+        code: "ambiguous_identity",
+        path: "item_version_inventory.candidates.content_digest",
+        message: "item version identity is ambiguous",
+      },
+    ],
+    optional: [],
+    totalProjection: true,
+  },
   parse_item_id: { args: ["ont_7k2m9x4q8r3t5v1w"], optional: [] },
   has_item_id_shape: {
     args: ["abc_0000000000000000"],

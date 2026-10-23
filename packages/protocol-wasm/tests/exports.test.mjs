@@ -12,7 +12,7 @@ test("the table covers exactly the module's exports", () => {
     .filter((name) => name !== "default" && name !== "initSync")
     .sort();
   assert.deepEqual(Object.keys(EXPORTS).sort(), exported);
-  assert.equal(exported.length, 28);
+  assert.equal(exported.length, 31);
 });
 
 test("every export succeeds on its working arguments", () => {
@@ -29,7 +29,10 @@ test("damaging an argument yields a structured error or false predicate, never a
   const hostile = hostileValues();
   let calls = 0;
   let glue = 0;
-  for (const [name, { args, optional, predicate }] of Object.entries(EXPORTS)) {
+  for (const [
+    name,
+    { args, optional, predicate, totalProjection },
+  ] of Object.entries(EXPORTS)) {
     for (let position = 0; position < args.length; position += 1) {
       for (const [index, value] of hostile.entries()) {
         const damaged = args.with(position, value);
@@ -39,6 +42,10 @@ test("damaging an argument yields a structured error or false predicate, never a
         if (outcome.ok) {
           if (predicate) {
             assert.equal(outcome.value, false, label);
+            continue;
+          }
+          if (totalProjection) {
+            assert.deepEqual(outcome.value, { status: 503, body: "" }, label);
             continue;
           }
           // Only an optional argument may take a harmless value (`undefined`,

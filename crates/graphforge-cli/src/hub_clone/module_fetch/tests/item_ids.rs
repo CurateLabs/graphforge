@@ -394,3 +394,126 @@ fn real_http_sends_accept_and_exact_selectors_only_on_their_metadata_reads() {
         assert!(!request.to_ascii_lowercase().contains("authorization:"));
     }
 }
+
+#[test]
+fn canonical_ambiguity_is_sanitized_and_stops_before_metadata_packages_or_output() {
+    let descriptor = descriptor();
+    let root = tempfile::tempdir().unwrap();
+    let mut args = item_args(
+        &root.path().join("module.json"),
+        &format!("{}/{}", descriptor.id, descriptor.module.version),
+    );
+    args.digest = Some(descriptor.module.content_digest.0.clone());
+    let transport = ItemTransport(RecordingTransport {
+        inner: Scripted::new(vec![
+            response(409, None, br#"{"code":"ambiguous_identity"}"#),
+            response(200, None, FIXTURE_REFS),
+            response(200, None, FIXTURE_MANIFEST),
+            response(200, None, &fixture_module_package()),
+        ]),
+        requested: Mutex::new(Vec::new()),
+    });
+    let mut output = Vec::new();
+    let error = run_module_fetch_with(&transport, &args, true, &mut output, &TEST_RETRY_POLICY)
+        .unwrap_err();
+    let mut stderr = Vec::new();
+    crate::write_error(&error, true, &mut stderr, &[]).unwrap();
+    let document: serde_json::Value = serde_json::from_slice(&stderr).unwrap();
+    assert_eq!(document["error"]["code"], "GF_VALIDATION");
+    assert_eq!(
+        document["error"]["details"]["semantic_code"],
+        "hub.ambiguous_identity"
+    );
+    assert_eq!(
+        crate::error_exit_code(&crate::CliRuntimeError::Core(error)),
+        2
+    );
+    assert!(output.is_empty());
+    assert!(directory_entries(root.path()).is_empty());
+    assert_eq!(transport.0.requested.lock().unwrap().len(), 1);
+    assert_eq!(
+        transport.0.inner.remaining(),
+        3,
+        "no retained metadata or package request, even with --digest"
+    );
+}
+
+#[test]
+fn untrusted_conflict_bodies_never_become_ambiguity_or_leak_details() {
+    let descriptor = descriptor();
+    for body in [
+        br#"{"code":"missing_object"}"#.to_vec(),
+        br#"{"code":"ambiguous_identity","owners":["SECRET"]}"#.to_vec(),
+        br#"{"code":"ambiguous_identity","code":"ambiguous_identity"}"#.to_vec(),
+        b"SECRET proxy failure".to_vec(),
+        vec![b'S'; 1025],
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let args = item_args(&root.path().join("module.json"), &descriptor.id);
+        let transport = ItemTransport(RecordingTransport {
+            inner: Scripted::new(vec![response(409, None, &body)]),
+            requested: Mutex::new(Vec::new()),
+        });
+        let mut output = Vec::new();
+        let error = run_module_fetch_with(&transport, &args, true, &mut output, &TEST_RETRY_POLICY)
+            .unwrap_err()
+            .to_string();
+        assert!(!error.contains("hub.ambiguous_identity"));
+        assert!(!error.contains("SECRET"));
+        assert!(!error.contains("SSSS"));
+        assert!(
+            error.contains("hub.malformed_response") || error.contains("hub.limit_exceeded"),
+            "{error}"
+        );
+        assert_eq!(transport.0.requested.lock().unwrap().len(), 1);
+        assert!(output.is_empty());
+        assert!(directory_entries(root.path()).is_empty());
+    }
+}
+
+#[test]
+fn canonical_ambiguity_is_recognized_through_the_real_http_read_transport() {
+    use crate::hub_clone::status_tests::{Routed, StatusServer};
+    struct ItemRouted(Routed);
+    impl Transport for ItemRouted {
+        fn get(
+            &self,
+            url: &Url,
+            range: Option<u64>,
+            if_range: Option<&str>,
+            limit: u64,
+        ) -> Result<HttpResponse, graphforge_api::GfError> {
+            self.0.get(url, range, if_range, limit)
+        }
+        fn get_discovery(
+            &self,
+            url: &Url,
+            _headers: &[(&str, ureq::http::HeaderValue)],
+            limit: u64,
+        ) -> Result<HttpResponse, graphforge_api::GfError> {
+            self.0.get(url, None, None, limit)
+        }
+    }
+    let server = StatusServer::start(vec![(
+        409,
+        "Content-Type: application/json\r\n".into(),
+        br#"{"code":"ambiguous_identity"}"#.to_vec(),
+    )]);
+    let descriptor = descriptor();
+    let root = tempfile::tempdir().unwrap();
+    let mut args = item_args(&root.path().join("module.json"), &descriptor.id);
+    args.hub = Some("https://hub.test".into());
+    let mut output = Vec::new();
+    let error = run_module_fetch_with(
+        &ItemRouted(Routed::new(server.address)),
+        &args,
+        true,
+        &mut output,
+        &TEST_RETRY_POLICY,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("hub.ambiguous_identity"));
+    assert!(output.is_empty());
+    assert!(directory_entries(root.path()).is_empty());
+    assert_eq!(server.paths(), vec![format!("/{}", descriptor.id)]);
+}

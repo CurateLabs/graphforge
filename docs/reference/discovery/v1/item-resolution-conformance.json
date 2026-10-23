@@ -1,0 +1,283 @@
+{
+  "cases": [
+    {
+      "expected": {
+        "body": "{\"code\":\"missing_object\"}",
+        "code": "missing_object",
+        "field": "item_version_inventory.candidates",
+        "status": 404
+      },
+      "json": "{\"candidates\":[],\"complete\":true,\"id\":\"ont_drqf2xw8w33cxaxj\",\"version\":\"2026.01\"}",
+      "name": "empty"
+    },
+    {
+      "expected": {
+        "identity": {
+          "content_digest": "sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11",
+          "id": "https://graphforge.sh/ont_drqf2xw8w33cxaxj",
+          "version": "2026.01"
+        }
+      },
+      "json": "{\"candidates\":[{\"discovery\":{\"manifest_validator\":\"sha256:96661819f2e4fa1d19796e1baad5c4ebd0d580ca77b15b6ba486080841fd72e5\",\"refs_revision\":\"sha256:4719c8720bea5763d15668e6a75b6eb4d73d2a95f8e1a311aec30cec376e3298\"},\"format\":\"graphforge-item/1\",\"id\":\"ont_drqf2xw8w33cxaxj\",\"kind\":\"ontology_module\",\"module\":{\"content_digest\":\"sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11\",\"id\":\"https://graphforge.sh/ont_drqf2xw8w33cxaxj\",\"version\":\"2026.01\"},\"repository\":{\"owner\":\"opendata\",\"repository\":\"openalex\"}}],\"complete\":true,\"id\":\"ont_drqf2xw8w33cxaxj\",\"version\":\"2026.01\"}",
+      "name": "one"
+    },
+    {
+      "expected": {
+        "identity": {
+          "content_digest": "sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11",
+          "id": "https://graphforge.sh/ont_drqf2xw8w33cxaxj",
+          "version": "2026.01"
+        }
+      },
+      "json": "{\"candidates\":[{\"discovery\":{\"manifest_validator\":\"sha256:96661819f2e4fa1d19796e1baad5c4ebd0d580ca77b15b6ba486080841fd72e5\",\"refs_revision\":\"sha256:4719c8720bea5763d15668e6a75b6eb4d73d2a95f8e1a311aec30cec376e3298\"},\"format\":\"graphforge-item/1\",\"id\":\"ont_drqf2xw8w33cxaxj\",\"kind\":\"ontology_module\",\"module\":{\"content_digest\":\"sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11\",\"id\":\"https://graphforge.sh/ont_drqf2xw8w33cxaxj\",\"version\":\"2026.01\"},\"repository\":{\"owner\":\"opendata\",\"repository\":\"openalex\"}},{\"discovery\":{\"manifest_validator\":\"sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\",\"refs_revision\":\"sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"},\"format\":\"graphforge-item/1\",\"id\":\"ont_drqf2xw8w33cxaxj\",\"kind\":\"ontology_module\",\"module\":{\"content_digest\":\"sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11\",\"id\":\"https://graphforge.sh/ont_drqf2xw8w33cxaxj\",\"version\":\"2026.01\"},\"repository\":{\"owner\":\"opendata\",\"repository\":\"equivalent\"}},{\"discovery\":{\"manifest_validator\":\"sha256:96661819f2e4fa1d19796e1baad5c4ebd0d580ca77b15b6ba486080841fd72e5\",\"refs_revision\":\"sha256:4719c8720bea5763d15668e6a75b6eb4d73d2a95f8e1a311aec30cec376e3298\"},\"format\":\"graphforge-item/1\",\"id\":\"ont_drqf2xw8w33cxaxj\",\"kind\":\"ontology_module\",\"module\":{\"content_digest\":\"sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11\",\"id\":\"https://graphforge.sh/ont_drqf2xw8w33cxaxj\",\"version\":\"2026.01\"},\"repository\":{\"owner\":\"opendata\",\"repository\":\"openalex\"}}],\"complete\":true,\"id\":\"ont_drqf2xw8w33cxaxj\",\"version\":\"2026.01\"}",
+      "name": "equivalent-copies"
+    },
+    {
+      "expected": {
+        "body": "{\"code\":\"ambiguous_identity\"}",
+        "code": "ambiguous_identity",
+        "field": "item_version_inventory.candidates.content_digest",
+        "status": 409
+      },
+      "json": "{\"candidates\":[{\"discovery\":{\"manifest_validator\":\"sha256:96661819f2e4fa1d19796e1baad5c4ebd0d580ca77b15b6ba486080841fd72e5\",\"refs_revision\":\"sha256:4719c8720bea5763d15668e6a75b6eb4d73d2a95f8e1a311aec30cec376e3298\"},\"format\":\"graphforge-item/1\",\"id\":\"ont_drqf2xw8w33cxaxj\",\"kind\":\"ontology_module\",\"module\":{\"content_digest\":\"sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11\",\"id\":\"https://graphforge.sh/ont_drqf2xw8w33cxaxj\",\"version\":\"2026.01\"},\"repository\":{\"owner\":\"opendata\",\"repository\":\"openalex\"}},{\"discovery\":{\"manifest_validator\":\"sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\",\"refs_revision\":\"sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"},\"format\":\"graphforge-item/1\",\"id\":\"ont_drqf2xw8w33cxaxj\",\"kind\":\"ontology_module\",\"module\":{\"content_digest\":\"sha256:0000000000000000000000000000000000000000000000000000000000000000\",\"id\":\"https://graphforge.sh/ont_drqf2xw8w33cxaxj\",\"version\":\"2026.01\"},\"repository\":{\"owner\":\"opendata\",\"repository\":\"equivalent\"}},{\"discovery\":{\"manifest_validator\":\"sha256:96661819f2e4fa1d19796e1baad5c4ebd0d580ca77b15b6ba486080841fd72e5\",\"refs_revision\":\"sha256:4719c8720bea5763d15668e6a75b6eb4d73d2a95f8e1a311aec30cec376e3298\"},\"format\":\"graphforge-item/1\",\"id\":\"ont_drqf2xw8w33cxaxj\",\"kind\":\"ontology_module\",\"module\":{\"content_digest\":\"sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11\",\"id\":\"https://graphforge.sh/ont_drqf2xw8w33cxaxj\",\"version\":\"2026.01\"},\"repository\":{\"owner\":\"opendata\",\"repository\":\"openalex\"}}],\"complete\":true,\"id\":\"ont_drqf2xw8w33cxaxj\",\"version\":\"2026.01\"}",
+      "name": "distinct-digests"
+    },
+    {
+      "expected": {
+        "identity": {
+          "content_digest": "sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11",
+          "id": "https://graphforge.sh/ont_drqf2xw8w33cxaxj",
+          "version": "01"
+        }
+      },
+      "json": "{\"candidates\":[{\"discovery\":{\"manifest_validator\":\"sha256:96661819f2e4fa1d19796e1baad5c4ebd0d580ca77b15b6ba486080841fd72e5\",\"refs_revision\":\"sha256:4719c8720bea5763d15668e6a75b6eb4d73d2a95f8e1a311aec30cec376e3298\"},\"format\":\"graphforge-item/1\",\"id\":\"ont_drqf2xw8w33cxaxj\",\"kind\":\"ontology_module\",\"module\":{\"content_digest\":\"sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11\",\"id\":\"https://graphforge.sh/ont_drqf2xw8w33cxaxj\",\"version\":\"01\"},\"repository\":{\"owner\":\"opendata\",\"repository\":\"openalex\"}}],\"complete\":true,\"id\":\"ont_drqf2xw8w33cxaxj\",\"version\":\"01\"}",
+      "name": "opaque-version-4"
+    },
+    {
+      "expected": {
+        "identity": {
+          "content_digest": "sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11",
+          "id": "https://graphforge.sh/ont_drqf2xw8w33cxaxj",
+          "version": "1.0+draft"
+        }
+      },
+      "json": "{\"candidates\":[{\"discovery\":{\"manifest_validator\":\"sha256:96661819f2e4fa1d19796e1baad5c4ebd0d580ca77b15b6ba486080841fd72e5\",\"refs_revision\":\"sha256:4719c8720bea5763d15668e6a75b6eb4d73d2a95f8e1a311aec30cec376e3298\"},\"format\":\"graphforge-item/1\",\"id\":\"ont_drqf2xw8w33cxaxj\",\"kind\":\"ontology_module\",\"module\":{\"content_digest\":\"sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11\",\"id\":\"https://graphforge.sh/ont_drqf2xw8w33cxaxj\",\"version\":\"1.0+draft\"},\"repository\":{\"owner\":\"opendata\",\"repository\":\"openalex\"}}],\"complete\":true,\"id\":\"ont_drqf2xw8w33cxaxj\",\"version\":\"1.0+draft\"}",
+      "name": "opaque-version-5"
+    },
+    {
+      "expected": {
+        "identity": {
+          "content_digest": "sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11",
+          "id": "https://graphforge.sh/ont_drqf2xw8w33cxaxj",
+          "version": "draft/β?x#y"
+        }
+      },
+      "json": "{\"candidates\":[{\"discovery\":{\"manifest_validator\":\"sha256:96661819f2e4fa1d19796e1baad5c4ebd0d580ca77b15b6ba486080841fd72e5\",\"refs_revision\":\"sha256:4719c8720bea5763d15668e6a75b6eb4d73d2a95f8e1a311aec30cec376e3298\"},\"format\":\"graphforge-item/1\",\"id\":\"ont_drqf2xw8w33cxaxj\",\"kind\":\"ontology_module\",\"module\":{\"content_digest\":\"sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11\",\"id\":\"https://graphforge.sh/ont_drqf2xw8w33cxaxj\",\"version\":\"draft/β?x#y\"},\"repository\":{\"owner\":\"opendata\",\"repository\":\"openalex\"}}],\"complete\":true,\"id\":\"ont_drqf2xw8w33cxaxj\",\"version\":\"draft/β?x#y\"}",
+      "name": "opaque-version-6"
+    },
+    {
+      "expected": {
+        "identity": {
+          "content_digest": "sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11",
+          "id": "https://graphforge.sh/ont_drqf2xw8w33cxaxj",
+          "version": "."
+        }
+      },
+      "json": "{\"candidates\":[{\"discovery\":{\"manifest_validator\":\"sha256:96661819f2e4fa1d19796e1baad5c4ebd0d580ca77b15b6ba486080841fd72e5\",\"refs_revision\":\"sha256:4719c8720bea5763d15668e6a75b6eb4d73d2a95f8e1a311aec30cec376e3298\"},\"format\":\"graphforge-item/1\",\"id\":\"ont_drqf2xw8w33cxaxj\",\"kind\":\"ontology_module\",\"module\":{\"content_digest\":\"sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11\",\"id\":\"https://graphforge.sh/ont_drqf2xw8w33cxaxj\",\"version\":\".\"},\"repository\":{\"owner\":\"opendata\",\"repository\":\"openalex\"}}],\"complete\":true,\"id\":\"ont_drqf2xw8w33cxaxj\",\"version\":\".\"}",
+      "name": "opaque-version-7"
+    },
+    {
+      "expected": {
+        "identity": {
+          "content_digest": "sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11",
+          "id": "https://graphforge.sh/ont_drqf2xw8w33cxaxj",
+          "version": ".."
+        }
+      },
+      "json": "{\"candidates\":[{\"discovery\":{\"manifest_validator\":\"sha256:96661819f2e4fa1d19796e1baad5c4ebd0d580ca77b15b6ba486080841fd72e5\",\"refs_revision\":\"sha256:4719c8720bea5763d15668e6a75b6eb4d73d2a95f8e1a311aec30cec376e3298\"},\"format\":\"graphforge-item/1\",\"id\":\"ont_drqf2xw8w33cxaxj\",\"kind\":\"ontology_module\",\"module\":{\"content_digest\":\"sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11\",\"id\":\"https://graphforge.sh/ont_drqf2xw8w33cxaxj\",\"version\":\"..\"},\"repository\":{\"owner\":\"opendata\",\"repository\":\"openalex\"}}],\"complete\":true,\"id\":\"ont_drqf2xw8w33cxaxj\",\"version\":\"..\"}",
+      "name": "opaque-version-8"
+    },
+    {
+      "expected": {
+        "identity": {
+          "content_digest": "sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11",
+          "id": "https://graphforge.sh/ont_drqf2xw8w33cxaxj",
+          "version": " é "
+        }
+      },
+      "json": "{\"candidates\":[{\"discovery\":{\"manifest_validator\":\"sha256:96661819f2e4fa1d19796e1baad5c4ebd0d580ca77b15b6ba486080841fd72e5\",\"refs_revision\":\"sha256:4719c8720bea5763d15668e6a75b6eb4d73d2a95f8e1a311aec30cec376e3298\"},\"format\":\"graphforge-item/1\",\"id\":\"ont_drqf2xw8w33cxaxj\",\"kind\":\"ontology_module\",\"module\":{\"content_digest\":\"sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11\",\"id\":\"https://graphforge.sh/ont_drqf2xw8w33cxaxj\",\"version\":\" é \"},\"repository\":{\"owner\":\"opendata\",\"repository\":\"openalex\"}}],\"complete\":true,\"id\":\"ont_drqf2xw8w33cxaxj\",\"version\":\" é \"}",
+      "name": "opaque-version-9"
+    },
+    {
+      "expected": {
+        "identity": {
+          "content_digest": "sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11",
+          "id": "https://graphforge.sh/ont_drqf2xw8w33cxaxj",
+          "version": "\u0000"
+        }
+      },
+      "json": "{\"candidates\":[{\"discovery\":{\"manifest_validator\":\"sha256:96661819f2e4fa1d19796e1baad5c4ebd0d580ca77b15b6ba486080841fd72e5\",\"refs_revision\":\"sha256:4719c8720bea5763d15668e6a75b6eb4d73d2a95f8e1a311aec30cec376e3298\"},\"format\":\"graphforge-item/1\",\"id\":\"ont_drqf2xw8w33cxaxj\",\"kind\":\"ontology_module\",\"module\":{\"content_digest\":\"sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11\",\"id\":\"https://graphforge.sh/ont_drqf2xw8w33cxaxj\",\"version\":\"\\u0000\"},\"repository\":{\"owner\":\"opendata\",\"repository\":\"openalex\"}}],\"complete\":true,\"id\":\"ont_drqf2xw8w33cxaxj\",\"version\":\"\\u0000\"}",
+      "name": "opaque-version-10"
+    },
+    {
+      "bind_source": true,
+      "expected": {
+        "body": "",
+        "code": "malformed_response",
+        "field": "item_version_inventory",
+        "status": 503
+      },
+      "json": "{\"candidates\":[{\"discovery\":{\"manifest_validator\":\"sha256:96661819f2e4fa1d19796e1baad5c4ebd0d580ca77b15b6ba486080841fd72e5\",\"refs_revision\":\"sha256:4719c8720bea5763d15668e6a75b6eb4d73d2a95f8e1a311aec30cec376e3298\"},\"format\":\"graphforge-item/1\",\"id\":\"ont_drqf2xw8w33cxaxj\",\"kind\":\"ontology_module\",\"module\":{\"content_digest\":\"sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11\",\"id\":\"https://graphforge.sh/ont_drqf2xw8w33cxaxj\",\"version\":\"2026.01\"},\"repository\":{\"owner\":\"opendata\",\"repository\":\"openalex\"}},{\"discovery\":{\"manifest_validator\":\"sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\",\"refs_revision\":\"sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"},\"format\":\"graphforge-item/1\",\"id\":\"ont_drqf2xw8w33cxaxj\",\"kind\":\"ontology_module\",\"module\":{\"content_digest\":\"sha256:0000000000000000000000000000000000000000000000000000000000000000\",\"id\":\"https://graphforge.sh/ont_drqf2xw8w33cxaxj\",\"version\":\"2026.01\"},\"repository\":{\"owner\":\"opendata\",\"repository\":\"equivalent\"}},{\"discovery\":{\"manifest_validator\":\"sha256:96661819f2e4fa1d19796e1baad5c4ebd0d580ca77b15b6ba486080841fd72e5\",\"refs_revision\":\"sha256:4719c8720bea5763d15668e6a75b6eb4d73d2a95f8e1a311aec30cec376e3298\"},\"format\":\"graphforge-item/1\",\"id\":\"ont_drqf2xw8w33cxaxj\",\"kind\":\"ontology_module\",\"module\":{\"content_digest\":\"sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11\",\"id\":\"https://graphforge.sh/ont_drqf2xw8w33cxaxj\",\"version\":\"SECRET wrong authored version\"},\"repository\":{\"owner\":\"opendata\",\"repository\":\"openalex\"}}],\"complete\":true,\"id\":\"ont_drqf2xw8w33cxaxj\",\"version\":\"2026.01\"}",
+      "name": "invalid-last-after-distinct-digests"
+    },
+    {
+      "bind_source": true,
+      "expected": {
+        "body": "",
+        "code": "malformed_response",
+        "field": "item_version_inventory",
+        "status": 503
+      },
+      "json": "{\"candidates\":[{\"discovery\":{\"manifest_validator\":\"sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\",\"refs_revision\":\"sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"},\"format\":\"graphforge-item/1\",\"id\":\"ont_drqf2xw8w33cxaxj\",\"kind\":\"ontology_module\",\"module\":{\"content_digest\":\"sha256:0000000000000000000000000000000000000000000000000000000000000000\",\"id\":\"https://graphforge.sh/ont_drqf2xw8w33cxaxj\",\"version\":\"2026.01\"},\"repository\":{\"owner\":\"opendata\",\"repository\":\"equivalent\"}},{\"discovery\":{\"manifest_validator\":\"sha256:96661819f2e4fa1d19796e1baad5c4ebd0d580ca77b15b6ba486080841fd72e5\",\"refs_revision\":\"sha256:4719c8720bea5763d15668e6a75b6eb4d73d2a95f8e1a311aec30cec376e3298\"},\"format\":\"graphforge-item/1\",\"id\":\"ont_drqf2xw8w33cxaxj\",\"kind\":\"ontology_module\",\"module\":{\"content_digest\":\"sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11\",\"id\":\"https://graphforge.sh/ont_drqf2xw8w33cxaxj\",\"version\":\"2026.01\"},\"repository\":{\"owner\":\"opendata\",\"repository\":\"openalex\"}},{\"discovery\":{\"manifest_validator\":\"sha256:96661819f2e4fa1d19796e1baad5c4ebd0d580ca77b15b6ba486080841fd72e5\",\"refs_revision\":\"sha256:4719c8720bea5763d15668e6a75b6eb4d73d2a95f8e1a311aec30cec376e3298\"},\"format\":\"graphforge-item/1\",\"id\":\"ont_drqf2xw8w33cxaxj\",\"kind\":\"ontology_module\",\"module\":{\"content_digest\":\"sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11\",\"id\":\"https://graphforge.sh/ont_drqf2xw8w33cxaxj\",\"version\":\"SECRET wrong authored version\"},\"repository\":{\"owner\":\"opendata\",\"repository\":\"openalex\"}}],\"complete\":true,\"id\":\"ont_drqf2xw8w33cxaxj\",\"version\":\"2026.01\"}",
+      "name": "invalid-last-after-reversed-distinct-digests"
+    },
+    {
+      "bind_source": true,
+      "expected": {
+        "body": "",
+        "code": "malformed_response",
+        "field": "item_version_inventory",
+        "status": 503
+      },
+      "json": "{\"candidates\":[{\"discovery\":{\"manifest_validator\":\"sha256:96661819f2e4fa1d19796e1baad5c4ebd0d580ca77b15b6ba486080841fd72e5\",\"refs_revision\":\"sha256:4719c8720bea5763d15668e6a75b6eb4d73d2a95f8e1a311aec30cec376e3298\"},\"format\":\"graphforge-item/1\",\"id\":\"ont_drqf2xw8w33cxaxj\",\"kind\":\"ontology_module\",\"module\":{\"content_digest\":\"sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11\",\"id\":\"https://graphforge.sh/ont_drqf2xw8w33cxaxj\",\"version\":\"2026.01\"},\"repository\":{\"owner\":\"opendata\",\"repository\":\"openalex\"}},{\"discovery\":{\"manifest_validator\":\"sha256:96661819f2e4fa1d19796e1baad5c4ebd0d580ca77b15b6ba486080841fd72e5\",\"refs_revision\":\"sha256:4719c8720bea5763d15668e6a75b6eb4d73d2a95f8e1a311aec30cec376e3298\"},\"format\":\"graphforge-item/1\",\"id\":\"ont_drqf2xw8w33cxaxj\",\"kind\":\"ontology_module\",\"module\":{\"content_digest\":\"sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11\",\"id\":\"https://graphforge.sh/ont_drqf2xw8w33cxaxj\",\"version\":\"SECRET wrong authored version\"},\"repository\":{\"owner\":\"opendata\",\"repository\":\"openalex\"}},{\"discovery\":{\"manifest_validator\":\"sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\",\"refs_revision\":\"sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"},\"format\":\"graphforge-item/1\",\"id\":\"ont_drqf2xw8w33cxaxj\",\"kind\":\"ontology_module\",\"module\":{\"content_digest\":\"sha256:0000000000000000000000000000000000000000000000000000000000000000\",\"id\":\"https://graphforge.sh/ont_drqf2xw8w33cxaxj\",\"version\":\"2026.01\"},\"repository\":{\"owner\":\"opendata\",\"repository\":\"equivalent\"}}],\"complete\":true,\"id\":\"ont_drqf2xw8w33cxaxj\",\"version\":\"2026.01\"}",
+      "name": "invalid-middle-between-distinct-digests"
+    },
+    {
+      "bind_source": true,
+      "expected": {
+        "body": "",
+        "code": "malformed_response",
+        "field": "item_version_inventory",
+        "status": 503
+      },
+      "json": "{\"candidates\":[{\"discovery\":{\"manifest_validator\":\"sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\",\"refs_revision\":\"sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"},\"format\":\"graphforge-item/1\",\"id\":\"ont_drqf2xw8w33cxaxj\",\"kind\":\"ontology_module\",\"module\":{\"content_digest\":\"sha256:0000000000000000000000000000000000000000000000000000000000000000\",\"id\":\"https://graphforge.sh/ont_drqf2xw8w33cxaxj\",\"version\":\"2026.01\"},\"repository\":{\"owner\":\"opendata\",\"repository\":\"equivalent\"}},{\"discovery\":{\"manifest_validator\":\"sha256:96661819f2e4fa1d19796e1baad5c4ebd0d580ca77b15b6ba486080841fd72e5\",\"refs_revision\":\"sha256:4719c8720bea5763d15668e6a75b6eb4d73d2a95f8e1a311aec30cec376e3298\"},\"format\":\"graphforge-item/1\",\"id\":\"ont_drqf2xw8w33cxaxj\",\"kind\":\"ontology_module\",\"module\":{\"content_digest\":\"sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11\",\"id\":\"https://graphforge.sh/ont_drqf2xw8w33cxaxj\",\"version\":\"SECRET wrong authored version\"},\"repository\":{\"owner\":\"opendata\",\"repository\":\"openalex\"}},{\"discovery\":{\"manifest_validator\":\"sha256:96661819f2e4fa1d19796e1baad5c4ebd0d580ca77b15b6ba486080841fd72e5\",\"refs_revision\":\"sha256:4719c8720bea5763d15668e6a75b6eb4d73d2a95f8e1a311aec30cec376e3298\"},\"format\":\"graphforge-item/1\",\"id\":\"ont_drqf2xw8w33cxaxj\",\"kind\":\"ontology_module\",\"module\":{\"content_digest\":\"sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11\",\"id\":\"https://graphforge.sh/ont_drqf2xw8w33cxaxj\",\"version\":\"2026.01\"},\"repository\":{\"owner\":\"opendata\",\"repository\":\"openalex\"}}],\"complete\":true,\"id\":\"ont_drqf2xw8w33cxaxj\",\"version\":\"2026.01\"}",
+      "name": "invalid-middle-between-reversed-distinct-digests"
+    },
+    {
+      "bind_source": true,
+      "expected": {
+        "body": "",
+        "code": "malformed_response",
+        "field": "item_version_inventory",
+        "status": 503
+      },
+      "json": "{\"candidates\":[{\"discovery\":{\"manifest_validator\":\"sha256:96661819f2e4fa1d19796e1baad5c4ebd0d580ca77b15b6ba486080841fd72e5\",\"refs_revision\":\"sha256:4719c8720bea5763d15668e6a75b6eb4d73d2a95f8e1a311aec30cec376e3298\"},\"format\":\"graphforge-item/1\",\"id\":\"ont_drqf2xw8w33cxaxj\",\"kind\":\"ontology_module\",\"module\":{\"content_digest\":\"sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11\",\"id\":\"https://graphforge.sh/ont_drqf2xw8w33cxaxj\",\"version\":\"SECRET wrong authored version\"},\"repository\":{\"owner\":\"opendata\",\"repository\":\"openalex\"}},{\"discovery\":{\"manifest_validator\":\"sha256:96661819f2e4fa1d19796e1baad5c4ebd0d580ca77b15b6ba486080841fd72e5\",\"refs_revision\":\"sha256:4719c8720bea5763d15668e6a75b6eb4d73d2a95f8e1a311aec30cec376e3298\"},\"format\":\"graphforge-item/1\",\"id\":\"ont_drqf2xw8w33cxaxj\",\"kind\":\"ontology_module\",\"module\":{\"content_digest\":\"sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11\",\"id\":\"https://graphforge.sh/ont_drqf2xw8w33cxaxj\",\"version\":\"2026.01\"},\"repository\":{\"owner\":\"opendata\",\"repository\":\"openalex\"}},{\"discovery\":{\"manifest_validator\":\"sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\",\"refs_revision\":\"sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"},\"format\":\"graphforge-item/1\",\"id\":\"ont_drqf2xw8w33cxaxj\",\"kind\":\"ontology_module\",\"module\":{\"content_digest\":\"sha256:0000000000000000000000000000000000000000000000000000000000000000\",\"id\":\"https://graphforge.sh/ont_drqf2xw8w33cxaxj\",\"version\":\"2026.01\"},\"repository\":{\"owner\":\"opendata\",\"repository\":\"equivalent\"}}],\"complete\":true,\"id\":\"ont_drqf2xw8w33cxaxj\",\"version\":\"2026.01\"}",
+      "name": "invalid-first-before-distinct-digests"
+    },
+    {
+      "bind_source": true,
+      "expected": {
+        "body": "",
+        "code": "malformed_response",
+        "field": "item_version_inventory",
+        "status": 503
+      },
+      "json": "{\"candidates\":[{\"discovery\":{\"manifest_validator\":\"sha256:96661819f2e4fa1d19796e1baad5c4ebd0d580ca77b15b6ba486080841fd72e5\",\"refs_revision\":\"sha256:4719c8720bea5763d15668e6a75b6eb4d73d2a95f8e1a311aec30cec376e3298\"},\"format\":\"graphforge-item/1\",\"id\":\"ont_drqf2xw8w33cxaxj\",\"kind\":\"ontology_module\",\"module\":{\"content_digest\":\"sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11\",\"id\":\"https://graphforge.sh/ont_drqf2xw8w33cxaxj\",\"version\":\"SECRET wrong authored version\"},\"repository\":{\"owner\":\"opendata\",\"repository\":\"openalex\"}},{\"discovery\":{\"manifest_validator\":\"sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\",\"refs_revision\":\"sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"},\"format\":\"graphforge-item/1\",\"id\":\"ont_drqf2xw8w33cxaxj\",\"kind\":\"ontology_module\",\"module\":{\"content_digest\":\"sha256:0000000000000000000000000000000000000000000000000000000000000000\",\"id\":\"https://graphforge.sh/ont_drqf2xw8w33cxaxj\",\"version\":\"2026.01\"},\"repository\":{\"owner\":\"opendata\",\"repository\":\"equivalent\"}},{\"discovery\":{\"manifest_validator\":\"sha256:96661819f2e4fa1d19796e1baad5c4ebd0d580ca77b15b6ba486080841fd72e5\",\"refs_revision\":\"sha256:4719c8720bea5763d15668e6a75b6eb4d73d2a95f8e1a311aec30cec376e3298\"},\"format\":\"graphforge-item/1\",\"id\":\"ont_drqf2xw8w33cxaxj\",\"kind\":\"ontology_module\",\"module\":{\"content_digest\":\"sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11\",\"id\":\"https://graphforge.sh/ont_drqf2xw8w33cxaxj\",\"version\":\"2026.01\"},\"repository\":{\"owner\":\"opendata\",\"repository\":\"openalex\"}}],\"complete\":true,\"id\":\"ont_drqf2xw8w33cxaxj\",\"version\":\"2026.01\"}",
+      "name": "invalid-first-before-reversed-distinct-digests"
+    },
+    {
+      "expected": {
+        "body": "",
+        "code": "malformed_response",
+        "field": "item_version_inventory",
+        "status": 503
+      },
+      "json": "{\"candidates\":[],\"complete\":false,\"id\":\"ont_drqf2xw8w33cxaxj\",\"version\":\"2026.01\"}",
+      "name": "incomplete-empty"
+    },
+    {
+      "expected": {
+        "body": "",
+        "code": "malformed_response",
+        "field": null,
+        "status": 503
+      },
+      "json": "{\"candidates\":[{\"discovery\":{\"manifest_validator\":\"sha256:96661819f2e4fa1d19796e1baad5c4ebd0d580ca77b15b6ba486080841fd72e5\",\"refs_revision\":\"sha256:4719c8720bea5763d15668e6a75b6eb4d73d2a95f8e1a311aec30cec376e3298\"},\"format\":\"graphforge-item/1\",\"id\":\"ont_drqf2xw8w33cxaxj\",\"kind\":\"ontology_module\",\"module\":{\"content_digest\":\"sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11\",\"id\":\"https://graphforge.sh/ont_drqf2xw8w33cxaxj\",\"version\":\"2026.01\"},\"repository\":{\"owner\":\"opendata\",\"repository\":\"openalex\"}}],\"complete\":true,\"id\":\"ont_drqf2xw8w33cxaxj\",\"unexpected\":true,\"version\":\"2026.01\"}",
+      "name": "unknown-member"
+    },
+    {
+      "expected": {
+        "body": "",
+        "code": "limit_exceeded",
+        "field": "item_version_inventory.version",
+        "status": 503
+      },
+      "json": "{\"candidates\":[{\"discovery\":{\"manifest_validator\":\"sha256:96661819f2e4fa1d19796e1baad5c4ebd0d580ca77b15b6ba486080841fd72e5\",\"refs_revision\":\"sha256:4719c8720bea5763d15668e6a75b6eb4d73d2a95f8e1a311aec30cec376e3298\"},\"format\":\"graphforge-item/1\",\"id\":\"ont_drqf2xw8w33cxaxj\",\"kind\":\"ontology_module\",\"module\":{\"content_digest\":\"sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11\",\"id\":\"https://graphforge.sh/ont_drqf2xw8w33cxaxj\",\"version\":\"2026.01\"},\"repository\":{\"owner\":\"opendata\",\"repository\":\"openalex\"}}],\"complete\":true,\"id\":\"ont_drqf2xw8w33cxaxj\",\"version\":\"\"}",
+      "name": "empty-version"
+    },
+    {
+      "expected": {
+        "body": "",
+        "code": "malformed_response",
+        "field": "item_version_inventory",
+        "status": 503
+      },
+      "json": "{\"candidates\":[{\"discovery\":{\"manifest_validator\":\"sha256:96661819f2e4fa1d19796e1baad5c4ebd0d580ca77b15b6ba486080841fd72e5\",\"refs_revision\":\"sha256:4719c8720bea5763d15668e6a75b6eb4d73d2a95f8e1a311aec30cec376e3298\"},\"format\":\"graphforge-item/1\",\"id\":\"ont_drqf2xw8w33cxaxj\",\"kind\":\"ontology_module\",\"module\":{\"content_digest\":\"sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11\",\"id\":\"https://graphforge.sh/ont_drqf2xw8w33cxaxj\",\"version\":\"2026.01\"},\"repository\":{\"owner\":\"opendata\",\"repository\":\"openalex\"}}],\"complete\":true,\"id\":\"ONT_DRQF2XW8W33CXAXJ\",\"version\":\"2026.01\"}",
+      "name": "uppercase-id"
+    },
+    {
+      "expected": {
+        "body": "",
+        "code": "malformed_response",
+        "field": "item_version_inventory",
+        "status": 503
+      },
+      "json": "{\"candidates\":[{\"discovery\":{\"manifest_validator\":\"sha256:96661819f2e4fa1d19796e1baad5c4ebd0d580ca77b15b6ba486080841fd72e5\",\"refs_revision\":\"sha256:4719c8720bea5763d15668e6a75b6eb4d73d2a95f8e1a311aec30cec376e3298\"},\"format\":\"graphforge-item/1\",\"id\":\"ont_drqf2xw8w33cxaxj\",\"kind\":\"ontology_module\",\"module\":{\"content_digest\":\"sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11\",\"id\":\"https://graphforge.sh/ont_drqf2xw8w33cxaxj\",\"version\":\"another\"},\"repository\":{\"owner\":\"opendata\",\"repository\":\"openalex\"}}],\"complete\":true,\"id\":\"ont_drqf2xw8w33cxaxj\",\"version\":\"2026.01\"}",
+      "name": "wrong-version"
+    },
+    {
+      "expected": {
+        "body": "",
+        "code": "integrity_failure",
+        "field": "digest",
+        "status": 503
+      },
+      "json": "{\"candidates\":[{\"discovery\":{\"manifest_validator\":\"sha256:96661819f2e4fa1d19796e1baad5c4ebd0d580ca77b15b6ba486080841fd72e5\",\"refs_revision\":\"sha256:4719c8720bea5763d15668e6a75b6eb4d73d2a95f8e1a311aec30cec376e3298\"},\"format\":\"graphforge-item/1\",\"id\":\"ont_drqf2xw8w33cxaxj\",\"kind\":\"ontology_module\",\"module\":{\"content_digest\":\"bad\",\"id\":\"https://graphforge.sh/ont_drqf2xw8w33cxaxj\",\"version\":\"2026.01\"},\"repository\":{\"owner\":\"opendata\",\"repository\":\"openalex\"}}],\"complete\":true,\"id\":\"ont_drqf2xw8w33cxaxj\",\"version\":\"2026.01\"}",
+      "name": "bad-digest"
+    },
+    {
+      "expected": {
+        "body": "",
+        "code": "malformed_response",
+        "field": null,
+        "status": 503
+      },
+      "json": "{\"candidates\":[{\"discovery\":{\"manifest_validator\":\"sha256:96661819f2e4fa1d19796e1baad5c4ebd0d580ca77b15b6ba486080841fd72e5\",\"refs_revision\":\"sha256:4719c8720bea5763d15668e6a75b6eb4d73d2a95f8e1a311aec30cec376e3298\"},\"format\":\"graphforge-item/1\",\"id\":\"ont_drqf2xw8w33cxaxj\",\"kind\":\"ontology_module\",\"module\":{\"content_digest\":\"sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11\",\"id\":\"https://graphforge.sh/ont_drqf2xw8w33cxaxj\",\"version\":\"2026.01\"},\"repository\":{\"owner\":\"opendata\",\"repository\":\"openalex\"}}],\"id\":\"ont_drqf2xw8w33cxaxj\",\"version\":\"2026.01\"}",
+      "name": "missing-completeness"
+    },
+    {
+      "expected": {
+        "body": "",
+        "code": "malformed_response",
+        "field": null,
+        "status": 503
+      },
+      "json": "{\"candidates\":[{\"discovery\":{\"manifest_validator\":\"sha256:96661819f2e4fa1d19796e1baad5c4ebd0d580ca77b15b6ba486080841fd72e5\",\"refs_revision\":\"sha256:4719c8720bea5763d15668e6a75b6eb4d73d2a95f8e1a311aec30cec376e3298\"},\"format\":\"graphforge-item/1\",\"id\":\"ont_drqf2xw8w33cxaxj\",\"kind\":\"ontology_module\",\"module\":{\"content_digest\":\"sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11\",\"id\":\"https://graphforge.sh/ont_drqf2xw8w33cxaxj\",\"version\":\"2026.01\"},\"repository\":{\"owner\":\"opendata\",\"repository\":\"openalex\"}}],\"complete\":true,\"id\":\"ont_drqf2xw8w33cxaxj\",\"version\":\"2026.01\",\"complete\":true}",
+      "name": "duplicate-json-member"
+    },
+    {
+      "expected": {
+        "body": "",
+        "code": "limit_exceeded",
+        "field": "response",
+        "status": 503
+      },
+      "json": "{\"candidates\":[{\"discovery\":{\"manifest_validator\":\"sha256:96661819f2e4fa1d19796e1baad5c4ebd0d580ca77b15b6ba486080841fd72e5\",\"refs_revision\":\"sha256:4719c8720bea5763d15668e6a75b6eb4d73d2a95f8e1a311aec30cec376e3298\"},\"format\":\"graphforge-item/1\",\"id\":\"ont_drqf2xw8w33cxaxj\",\"kind\":\"ontology_module\",\"module\":{\"content_digest\":\"sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11\",\"id\":\"https://graphforge.sh/ont_drqf2xw8w33cxaxj\",\"version\":\"2026.01\"},\"repository\":{\"owner\":\"opendata\",\"repository\":\"openalex\"}}],\"complete\":true,\"id\":\"ont_drqf2xw8w33cxaxj\",\"version\":\"2026.01\"}",
+      "limits": {
+        "max_response_bytes": 1
+      },
+      "name": "response-budget"
+    }
+  ],
+  "format": "graphforge-item-resolution-conformance/1"
+}

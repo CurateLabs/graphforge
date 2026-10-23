@@ -1,0 +1,18 @@
+{
+  "$id": "https://graphforge.sh/schemas/discovery/v1/item-resolution-error.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "code": {
+      "enum": [
+        "missing_object",
+        "ambiguous_identity"
+      ]
+    }
+  },
+  "required": [
+    "code"
+  ],
+  "title": "item-resolution-error",
+  "type": "object"
+}

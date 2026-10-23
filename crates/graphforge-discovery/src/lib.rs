@@ -18,8 +18,10 @@
 pub mod preview;
 
 mod credit;
+mod input_budget;
 mod item_descriptor;
 mod item_id;
+mod item_resolution;
 mod lineage;
 mod rehome;
 mod repository;
@@ -35,6 +37,12 @@ pub use item_descriptor::{
 pub use item_id::{
     ITEM_ID_LEN, ITEM_ID_RANDOM_BYTES, ITEM_ID_RANDOM_CHARS, ITEM_ID_URI_BASE, ItemId, ItemIdError,
     ItemKind, has_item_id_shape,
+};
+pub use item_resolution::{
+    ITEM_RESOLUTION_ERROR_MAX_BYTES, ITEM_VERSION_ABSENCE_FIELD, ITEM_VERSION_AMBIGUITY_FIELD,
+    ItemResolutionHttpResponse, ItemVersionInventory, MAX_ITEM_VERSION_CANDIDATES,
+    bind_item_version_source, bind_item_version_source_json, item_resolution_error_response,
+    item_resolution_error_response_json, parse_item_resolution_refusal, resolve_item_version,
 };
 pub use lineage::{
     LineageBoundaryAnchor, LineageBranch, LineageForkOrigin, LineageProposal, LineageTag,
@@ -132,6 +140,8 @@ pub enum DiscoveryErrorCode {
     MissingRef,
     /// A referenced object is absent.
     MissingObject,
+    /// A complete eligible item inventory contains distinct content digests.
+    AmbiguousIdentity,
     /// A digest, length, or strong validator disagrees.
     IntegrityFailure,
     /// An object location is not safe protocol input.

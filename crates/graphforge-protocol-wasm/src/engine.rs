@@ -10,9 +10,10 @@
 use graphforge_discovery::preview::{self, PreviewDescriptor, PreviewError};
 use graphforge_discovery::{
     DiscoveryError, DiscoveryLimits, DiscoveryManifest, DiscoveryVersionDetails, ExactIdentity,
-    ItemDescriptor, ItemId, ItemKind, LineageVersion, ObjectDescriptor, ObjectLocationTemplate,
-    OntologyModuleDescriptor, ProjectSummary, RefSet, RehomedRepository, RepositoryIdentity,
-    RepositoryMoved, RepositorySnapshot, ResearchLineage, Sha256Digest,
+    ItemDescriptor, ItemId, ItemKind, ItemResolutionHttpResponse, ItemVersionInventory,
+    LineageVersion, ObjectDescriptor, ObjectLocationTemplate, OntologyModuleDescriptor,
+    ProjectSummary, RefSet, RehomedRepository, RepositoryIdentity, RepositoryMoved,
+    RepositorySnapshot, ResearchLineage, Sha256Digest,
 };
 use graphforge_hub_publish::{
     CommitRequest, HubPublishError, IdTakenItem, ItemAdmissionInput, ItemAdmissionPlan,
@@ -250,6 +251,48 @@ pub fn item_admission_requirements(bytes: &[u8]) -> Outcome<Vec<ItemClaimRequire
 pub fn plan_item_admission(bytes: &[u8]) -> Outcome<ItemAdmissionPlan> {
     let input = ItemAdmissionInput::from_json(bytes)?;
     Ok(graphforge_hub_publish::plan_item_admission(&input)?)
+}
+
+/// Bound the closed limits argument of the item-resolution entrypoints.
+pub fn item_resolution_limits(bytes: Option<&[u8]>) -> Outcome<DiscoveryLimits> {
+    if bytes
+        .is_some_and(|bytes| bytes.len() > graphforge_discovery::ITEM_RESOLUTION_ERROR_MAX_BYTES)
+    {
+        return Err(ProtocolError::argument(
+            "limits argument exceeds byte bound",
+        ));
+    }
+    // The closed derived struct rejects duplicate fields as well as unknown ones.
+    limits(bytes)
+}
+
+/// Resolve one exact identity from a complete eligible inventory; never a source.
+pub fn resolve_item_version(bytes: &[u8], limits: DiscoveryLimits) -> Outcome<ExactIdentity> {
+    let inventory = ItemVersionInventory::from_json(bytes, limits)?;
+    Ok(graphforge_discovery::resolve_item_version(
+        &inventory, limits,
+    )?)
+}
+
+/// Bind an explicit eligible source to its actual retained discovery metadata.
+pub fn bind_item_version_source(
+    inventory: &[u8],
+    nominated: &[u8],
+    refs: &[u8],
+    manifest: &[u8],
+    limits: DiscoveryLimits,
+) -> Outcome<ValidatedItemDescriptor> {
+    Ok(ValidatedItemDescriptor {
+        document: graphforge_discovery::bind_item_version_source_json(
+            inventory, nominated, refs, manifest, limits,
+        )?,
+    })
+}
+
+/// Total Core-owned status/body projection of the existing ProtocolError shape.
+#[must_use]
+pub fn item_resolution_error_response(error: &[u8]) -> ItemResolutionHttpResponse {
+    graphforge_discovery::item_resolution_error_response_json(error)
 }
 
 /// A validated permanent item descriptor.

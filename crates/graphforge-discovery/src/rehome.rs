@@ -1,4 +1,5 @@
 //! Pure repository re-homing over the complete current ref closure.
+use crate::input_budget::InputBudget;
 use crate::{
     DiscoveryError, DiscoveryErrorCode, DiscoveryLimits, DiscoveryManifest, ObjectLocationTemplate,
     ProjectSummary, RefSet, RepositoryIdentity, ResearchLineage, Sha256Digest, sha256_digest,
@@ -39,30 +40,6 @@ fn mismatch() -> DiscoveryError {
     )
 }
 
-// Count encoded typed documents without first allocating their serialization.
-struct Budget(usize);
-impl std::io::Write for Budget {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        self.0 = self
-            .0
-            .checked_sub(bytes.len())
-            .ok_or_else(|| std::io::Error::other("document budget"))?;
-        Ok(bytes.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-fn account<T: Serialize>(budget: &mut Budget, value: &T) -> Result<(), DiscoveryError> {
-    serde_json::to_writer(budget, value).map_err(|_| crate::limit("rehome.input"))
-}
-fn account_bytes(budget: &mut Budget, bytes: &[u8]) -> Result<(), DiscoveryError> {
-    budget.0 = budget
-        .0
-        .checked_sub(bytes.len())
-        .ok_or_else(|| crate::limit("rehome.input"))?;
-    Ok(())
-}
 fn bind_raw(
     manifest: &DiscoveryManifest,
     digest: &Sha256Digest,
@@ -204,13 +181,13 @@ pub fn rehome_repository(
     {
         return Err(mismatch());
     }
-    let mut budget = Budget(limits.max_response_bytes);
-    account(&mut budget, refs)?;
+    let mut budget = InputBudget::new(limits.max_response_bytes, "rehome.input");
+    budget.account(refs)?;
     let mut original = BTreeMap::new();
     for snapshot in snapshots {
-        account(&mut budget, &snapshot.manifest)?;
+        budget.account(&snapshot.manifest)?;
         for bytes in [&snapshot.summary, &snapshot.lineage].into_iter().flatten() {
-            account_bytes(&mut budget, bytes)?;
+            budget.account_bytes(bytes)?;
         }
         validate_snapshot(snapshot, refs, limits)?;
         if original
@@ -274,12 +251,12 @@ pub fn rehome_repository(
     for snapshot in output.values() {
         validate_snapshot(snapshot, &next_refs, limits)?;
     }
-    let mut output_budget = Budget(limits.max_response_bytes);
-    account(&mut output_budget, &next_refs)?;
+    let mut output_budget = InputBudget::new(limits.max_response_bytes, "rehome.input");
+    output_budget.account(&next_refs)?;
     for snapshot in output.values() {
-        account(&mut output_budget, &snapshot.manifest)?;
+        output_budget.account(&snapshot.manifest)?;
         for bytes in [&snapshot.summary, &snapshot.lineage].into_iter().flatten() {
-            account_bytes(&mut output_budget, bytes)?;
+            output_budget.account_bytes(bytes)?;
         }
     }
     let revision = sha256_digest(&next_refs.to_canonical_json()?);
