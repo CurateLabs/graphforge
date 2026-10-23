@@ -67,11 +67,40 @@ impl StoreLock for () {}
 
 trait Store {
     fn lock(&self, origin: &str) -> Result<Box<dyn StoreLock + '_>, GfError>;
-    fn read(&self, origin: &str) -> Result<Option<String>, GfError>;
+    fn read(&self, origin: &str) -> Result<Option<String>, SavedCredentialError>;
     fn write(&self, origin: &str, value: &str) -> Result<(), GfError>;
     fn delete(&self, origin: &str) -> Result<(), GfError>;
 }
 struct Vault;
+/// Only a failed read of an unavailable vault may defer to anonymous 404.
+/// Invalid stored data, lock failures and refresh failures remain strict.
+#[derive(Debug)]
+enum SavedCredentialError {
+    Unavailable,
+    Other(GfError),
+}
+impl From<GfError> for SavedCredentialError {
+    fn from(error: GfError) -> Self {
+        Self::Other(error)
+    }
+}
+impl From<SavedCredentialError> for GfError {
+    fn from(error: SavedCredentialError) -> Self {
+        match error {
+            SavedCredentialError::Unavailable => vault_error(),
+            SavedCredentialError::Other(error) => error,
+        }
+    }
+}
+fn vault_read_error(error: &keyring::Error) -> SavedCredentialError {
+    match error {
+        keyring::Error::PlatformFailure(_) | keyring::Error::NoStorageAccess(_) => {
+            SavedCredentialError::Unavailable
+        }
+        // Encoding, attributes, ambiguity and future error kinds fail closed.
+        _ => SavedCredentialError::Other(vault_error()),
+    }
+}
 fn vault_error() -> GfError {
     denied("OS credential vault unavailable; unlock or configure your system credential service")
 }
@@ -85,14 +114,14 @@ impl Store for Vault {
         Ok(Box::new(lock_in(std::path::Path::new(&parent), origin)?))
     }
 
-    fn read(&self, origin: &str) -> Result<Option<String>, GfError> {
+    fn read(&self, origin: &str) -> Result<Option<String>, SavedCredentialError> {
         match keyring::Entry::new("graphforge-cli", origin)
-            .map_err(|_| vault_error())?
+            .map_err(|error| vault_read_error(&error))?
             .get_password()
         {
             Ok(value) => Ok(Some(value)),
             Err(keyring::Error::NoEntry) => Ok(None),
-            Err(_) => Err(vault_error()),
+            Err(error) => Err(vault_read_error(&error)),
         }
     }
     fn write(&self, origin: &str, value: &str) -> Result<(), GfError> {
@@ -282,6 +311,14 @@ fn session(
     hub: &Url,
     now: u64,
 ) -> Result<Option<Session>, GfError> {
+    session_lookup(store, transport, hub, now).map_err(Into::into)
+}
+fn session_lookup(
+    store: &dyn Store,
+    transport: &dyn Transport,
+    hub: &Url,
+    now: u64,
+) -> Result<Option<Session>, SavedCredentialError> {
     let _guard = store.lock(&hub.origin().ascii_serialization())?;
     session_unlocked(store, transport, hub, now)
 }
@@ -290,7 +327,7 @@ fn session_unlocked(
     transport: &dyn Transport,
     hub: &Url,
     now: u64,
-) -> Result<Option<Session>, GfError> {
+) -> Result<Option<Session>, SavedCredentialError> {
     let Some(value) = store.read(&hub.origin().ascii_serialization())? else {
         return Ok(None);
     };
@@ -327,7 +364,9 @@ fn session_unlocked(
     {
         store.delete(&hub.origin().ascii_serialization())?;
     }
-    save_unlocked(store, hub, response, now).map(Some)
+    save_unlocked(store, hub, response, now)
+        .map(Some)
+        .map_err(Into::into)
 }
 fn verification_url(value: &str) -> Result<Url, GfError> {
     if value.len() > 4096 || value.chars().any(char::is_control) {
@@ -459,7 +498,7 @@ fn logout(
             }
         }),
         Ok(None) => Ok(()),
-        Err(error) => Err(error),
+        Err(error) => Err(error.into()),
     };
     store.delete(&hub.origin().ascii_serialization())?;
     revoked
@@ -684,7 +723,7 @@ pub(crate) struct CloneTransport<T = crate::hub_http::HttpTransport> {
     hub: Url,
     metadata: std::cell::RefCell<[Url; 2]>,
     identity: std::rc::Rc<std::cell::RefCell<graphforge_discovery::RepositoryIdentity>>,
-    discovery_acquire: Box<dyn Fn() -> Result<Option<String>, GfError>>,
+    discovery_acquire: Box<dyn Fn() -> Result<Option<String>, SavedCredentialError>>,
     discovery_token: std::cell::RefCell<Option<String>>,
     acquire: Box<dyn Fn() -> Result<Option<RepositoryToken>, GfError>>,
     token: std::cell::RefCell<Option<RepositoryToken>>,
@@ -740,7 +779,7 @@ fn saved_bearer(
     hub: &Url,
     token_env: Option<&str>,
     bypass_env: Option<&str>,
-) -> Result<Option<String>, GfError> {
+) -> Result<Option<String>, SavedCredentialError> {
     if let Some(name) = token_env {
         let bearer = std::env::var(name).map_err(|_| {
             denied("clone credential environment variable is missing or not Unicode")
@@ -749,7 +788,7 @@ fn saved_bearer(
         Ok(Some(bearer))
     } else {
         Ok(
-            session(&Vault, &PreviewTransport::new(hub, bypass_env)?, hub, now())?
+            session_lookup(&Vault, &PreviewTransport::new(hub, bypass_env)?, hub, now())?
                 .map(|session| session.access_token),
         )
     }
@@ -906,19 +945,29 @@ impl<T: Transport> CloneTransport<T> {
         self.send_authorized(url, range, if_range, limit, &token.token)
     }
     fn discovery(&self, url: &Url, limit: u64) -> Result<crate::hub_http::HttpResponse, GfError> {
+        let anonymous = self.discovery_token.borrow().is_none();
         let response = if let Some(bearer) = self.discovery_token.borrow().as_ref() {
             self.discovery_authorized(url, limit, bearer)?
         } else {
             self.inner.get(url, None, None, limit)?
         };
         if matches!(response.status, 401 | 403 | 404)
-            && let Some(bearer) = (self.discovery_acquire)()?
+            && let Some(bearer) = self.acquire_discovery(response.status, anonymous)?
         {
             let response = self.discovery_authorized(url, limit, &bearer)?;
             self.discovery_token.replace(Some(bearer));
             return Ok(response);
         }
         Ok(response)
+    }
+    fn acquire_discovery(&self, status: u16, anonymous: bool) -> Result<Option<String>, GfError> {
+        match (self.discovery_acquire)() {
+            // A masked private 404 can still retry when saved credentials exist.
+            // Only an initially anonymous 404 may outlive an unavailable implicit
+            // vault read; explicit credentials and all other errors stay strict.
+            Err(SavedCredentialError::Unavailable) if anonymous && status == 404 => Ok(None),
+            result => result.map_err(Into::into),
+        }
     }
 }
 impl<T: Transport> Transport for CloneTransport<T> {
@@ -980,10 +1029,11 @@ impl<T: Transport> Transport for CloneTransport<T> {
         // Explicit Hub bearers take precedence. A preview bypass on its own
         // can be combined with the saved identity after anonymous denial.
         let has_bearer = headers.iter().any(|(name, _)| *name == "authorization");
+        let anonymous = !has_bearer && self.discovery_token.borrow().is_none();
         let response = self.inner.get_discovery(url, headers, limit)?;
         if !has_bearer
             && matches!(response.status, 401 | 403 | 404)
-            && let Some(bearer) = (self.discovery_acquire)()?
+            && let Some(bearer) = self.acquire_discovery(response.status, anonymous)?
         {
             validate_secret(&bearer)?;
             let mut authorization = ureq::http::HeaderValue::from_str(&format!("Bearer {bearer}"))
@@ -1009,7 +1059,7 @@ pub(crate) fn run(
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 #[cfg(test)]
 mod lock_tests;

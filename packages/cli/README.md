@@ -75,7 +75,11 @@ revokes its provider session and deletes local credentials, including when
 remote revocation fails. Expired access tokens refresh and rotate the saved pair.
 `--json auth status` reports authentication and principal identity without tokens.
 
-Public clones stay anonymous and never consult the credential vault. A private
+Successful public discovery stays anonymous and never consults the credential
+vault. If anonymous discovery returns `404` and the optional vault backend is
+unavailable or locked, clone preserves `hub.not_found` and creates no destination.
+Explicit credentials, authentication commands, invalid saved sessions and refresh
+or credential-lock failures still report their authentication errors. A private
 repository may conceal its existence with `404`. After `401` or `404`, clone uses
 the saved session to request a repository-scoped read token from the selected Hub.
 Only that token reaches the data-plane origin the Hub authorizes. Authenticated
