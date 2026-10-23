@@ -10,6 +10,18 @@ fn resolution_corpus_and_http_projection_match_native_authority() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../docs/reference/discovery/v1/item-resolution-conformance.json");
     let corpus: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    let valid: Value = serde_json::from_str(
+        corpus["cases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|case| case["name"] == "one")
+            .unwrap()["json"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    let nominated = serde_json::to_vec(&valid["candidates"][0]).unwrap();
     for case in corpus["cases"].as_array().unwrap() {
         let overrides = case.get("limits").map(|v| serde_json::to_vec(v).unwrap());
         let limits = engine::item_resolution_limits(overrides.as_deref()).unwrap();
@@ -35,6 +47,30 @@ fn resolution_corpus_and_http_projection_match_native_authority() {
                 );
                 assert_eq!(response.body, expected["body"].as_str().unwrap());
             }
+        }
+        if case["bind_source"] == true {
+            let error = engine::bind_item_version_source(
+                case["json"].as_str().unwrap().as_bytes(),
+                &nominated,
+                include_bytes!("../../../tests/fixtures/hub/generated/v1/refs.json"),
+                include_bytes!("../../../tests/fixtures/hub/generated/v1/manifest.json"),
+                limits,
+            )
+            .err()
+            .unwrap();
+            assert_eq!(error.code, expected["code"].as_str().unwrap());
+            assert_eq!(
+                serde_json::to_value(&error.path).unwrap(),
+                expected["field"]
+            );
+            assert!(!error.message.contains("SECRET"));
+            let response =
+                engine::item_resolution_error_response(&serde_json::to_vec(&error).unwrap());
+            assert_eq!(
+                u64::from(response.status),
+                expected["status"].as_u64().unwrap()
+            );
+            assert_eq!(response.body, expected["body"].as_str().unwrap());
         }
     }
 }

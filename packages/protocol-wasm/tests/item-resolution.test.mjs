@@ -49,7 +49,7 @@ function fixture() {
 }
 
 test("actual WASM replays the native resolution and HTTP conformance corpus", () => {
-  for (const { name, json, limits, expected } of corpus.cases) {
+  for (const { name, json, limits, expected, bind_source } of corpus.cases) {
     const outcome = attempt(() => protocol.resolve_item_version(json, limits));
     if (expected.identity) {
       assert.equal(outcome.ok, true, name);
@@ -65,6 +65,27 @@ test("actual WASM replays the native resolution and HTTP conformance corpus", ()
       assert.equal(outcome.error.path, expected.field ?? undefined, name);
       assert.deepEqual(
         project(outcome.error),
+        { status: expected.status, body: expected.body },
+        name,
+      );
+      assert.equal(outcome.error.message.includes("SECRET"), false, name);
+    }
+    if (bind_source) {
+      const { descriptor, refs, manifest } = fixture();
+      const error = refuse(() =>
+        protocol.bind_item_version_source(
+          json,
+          descriptor,
+          refs,
+          manifest,
+          limits,
+        ),
+      );
+      assert.equal(error.code, expected.code, name);
+      assert.equal(error.path, expected.field, name);
+      assert.equal(error.message.includes("SECRET"), false, name);
+      assert.deepEqual(
+        project(error),
         { status: expected.status, body: expected.body },
         name,
       );

@@ -1,10 +1,11 @@
 //! Native authority and generated conformance for digest-free exact versions.
 use graphforge_discovery::{
-    DiscoveryErrorCode, DiscoveryLimits, DiscoveryManifest, ITEM_VERSION_ABSENCE_FIELD,
-    ITEM_VERSION_AMBIGUITY_FIELD, ItemDescriptor, ItemDiscoverySnapshot, ItemId,
-    ItemVersionInventory, MAX_ITEM_VERSION_CANDIDATES, RefSet, Sha256Digest,
-    bind_item_version_source, bind_item_version_source_json, item_resolution_error_response,
-    item_resolution_error_response_json, parse_item_resolution_refusal, resolve_item_version,
+    DiscoveryError, DiscoveryErrorCode, DiscoveryLimits, DiscoveryManifest,
+    ITEM_VERSION_ABSENCE_FIELD, ITEM_VERSION_AMBIGUITY_FIELD, ItemDescriptor,
+    ItemDiscoverySnapshot, ItemId, ItemVersionInventory, MAX_ITEM_VERSION_CANDIDATES, RefSet,
+    Sha256Digest, bind_item_version_source, bind_item_version_source_json,
+    item_resolution_error_response, item_resolution_error_response_json,
+    parse_item_resolution_refusal, resolve_item_version,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -123,6 +124,39 @@ fn corpus() -> Value {
             json!({"identity":expected}),
         ));
     }
+    // The first two publications are individually valid and have distinct
+    // digests. An invalid later record must prevent an early ambiguity verdict.
+    let a = ambiguous["candidates"][0].clone();
+    let b = ambiguous["candidates"][1].clone();
+    let mut invalid = a.clone();
+    invalid["module"]["version"] = json!("SECRET wrong authored version");
+    let candidates = [a, b, invalid];
+    for (name, order) in [
+        ("invalid-last-after-distinct-digests", [0, 1, 2]),
+        ("invalid-last-after-reversed-distinct-digests", [1, 0, 2]),
+        ("invalid-middle-between-distinct-digests", [0, 2, 1]),
+        (
+            "invalid-middle-between-reversed-distinct-digests",
+            [1, 2, 0],
+        ),
+        ("invalid-first-before-distinct-digests", [2, 0, 1]),
+        ("invalid-first-before-reversed-distinct-digests", [2, 1, 0]),
+    ] {
+        let mut input = base.clone();
+        input["candidates"] = json!(order.map(|index| candidates[index].clone()));
+        let mut entry = case(
+            name,
+            &input,
+            refusal(
+                "malformed_response",
+                Some("item_version_inventory"),
+                503,
+                "",
+            ),
+        );
+        entry["bind_source"] = json!(true);
+        cases.push(entry);
+    }
     for (name, pointer, value, code, field) in [
         (
             "incomplete-empty",
@@ -198,6 +232,27 @@ fn corpus() -> Value {
     json!({"format":"graphforge-item-resolution-conformance/1","cases":cases})
 }
 
+fn assert_refusal(error: &DiscoveryError, expected: &Value, name: &Value) {
+    assert_eq!(
+        serde_json::to_value(error.code).unwrap(),
+        expected["code"],
+        "{name}"
+    );
+    assert_eq!(
+        serde_json::to_value(error.field).unwrap(),
+        expected["field"],
+        "{name}"
+    );
+    let response = error.item_resolution_http_response();
+    assert_eq!(
+        u64::from(response.status),
+        expected["status"].as_u64().unwrap(),
+        "{name}"
+    );
+    assert_eq!(response.body, expected["body"].as_str().unwrap(), "{name}");
+    assert!(!error.to_string().contains("SECRET"), "{name}");
+}
+
 #[test]
 fn generated_contract_and_native_resolution_agree() {
     let corpus = corpus();
@@ -234,20 +289,36 @@ fn generated_contract_and_native_resolution_agree() {
                 "{}",
                 case["name"]
             ),
-            Err(error) => {
-                assert_eq!(
-                    serde_json::to_value(error.code).unwrap(),
-                    expected["code"],
-                    "{}",
-                    case["name"]
-                );
-                assert_eq!(
-                    serde_json::to_value(error.field).unwrap(),
-                    expected["field"]
-                );
-                let response = error.item_resolution_http_response();
-                assert_eq!(response.status, expected["status"].as_u64().unwrap() as u16);
-                assert_eq!(response.body, expected["body"].as_str().unwrap());
+            Err(error) => assert_refusal(&error, expected, &case["name"]),
+        }
+        if case["bind_source"] == true {
+            // Deserialize without the validating JSON constructor as well: the
+            // typed primitive itself must validate every candidate before grouping.
+            let input: ItemVersionInventory =
+                serde_json::from_str(case["json"].as_str().unwrap()).unwrap();
+            let (source, refs, manifest) = fixture();
+            let mut valid_pair = input.clone();
+            valid_pair
+                .candidates
+                .retain(|candidate| candidate.module.version == valid_pair.version);
+            assert_eq!(valid_pair.candidates.len(), 2);
+            assert_eq!(
+                resolve_item_version(&valid_pair, limits).unwrap_err().code,
+                DiscoveryErrorCode::AmbiguousIdentity
+            );
+            let typed_error = resolve_item_version(&input, limits).unwrap_err();
+            let binding_error =
+                bind_item_version_source(&input, &source, &refs, &manifest, limits).unwrap_err();
+            let json_binding_error = bind_item_version_source_json(
+                case["json"].as_str().unwrap().as_bytes(),
+                &serde_json::to_vec(&source).unwrap(),
+                &serde_json::to_vec(&refs).unwrap(),
+                &serde_json::to_vec(&manifest).unwrap(),
+                limits,
+            )
+            .unwrap_err();
+            for error in [typed_error, binding_error, json_binding_error] {
+                assert_refusal(&error, expected, &case["name"]);
             }
         }
     }
