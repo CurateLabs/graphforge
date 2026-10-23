@@ -13,11 +13,12 @@ import tempfile
 bundle = files("graphforge").joinpath("_project_skills")
 manifest = json.loads(bundle.joinpath("manifest.json").read_text(encoding="utf-8"))
 assert manifest["schema_version"] == 1
-assert manifest["bundle_version"] == 1
+assert manifest["bundle_version"] == 2
 assert manifest["graphforge_compatibility"] == ">=0.6.0-dev <0.7.0"
 assert manifest["skills"] == [
     "graphforge-bootstrap",
     "graphforge-build-knowledge",
+    "graphforge-hub",
 ]
 for entry in manifest["files"]:
     payload = bundle.joinpath(*entry["path"].split("/")).read_bytes()

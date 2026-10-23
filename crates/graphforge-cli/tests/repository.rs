@@ -424,7 +424,11 @@ fn status_recovers_an_interrupted_remove_before_reporting() {
     let lifecycle = root.path().join(".graphforge/imports/skills-lifecycle");
     let backup = lifecycle.join("backup");
     fs::create_dir(&backup).unwrap();
-    for name in ["graphforge-bootstrap", "graphforge-build-knowledge"] {
+    for name in [
+        "graphforge-bootstrap",
+        "graphforge-build-knowledge",
+        "graphforge-hub",
+    ] {
         fs::rename(skills.join(name), backup.join(name)).unwrap();
     }
     fs::rename(
@@ -451,7 +455,11 @@ fn status_recovers_an_interrupted_remove_before_reporting() {
     );
     let value: Value = serde_json::from_slice(&status.stdout).unwrap();
     assert_eq!(value["status"], "current");
-    for name in ["graphforge-bootstrap", "graphforge-build-knowledge"] {
+    for name in [
+        "graphforge-bootstrap",
+        "graphforge-build-knowledge",
+        "graphforge-hub",
+    ] {
         assert!(skills.join(name).join("SKILL.md").is_file());
     }
     assert!(skills.join(".graphforge-managed.json").is_file());

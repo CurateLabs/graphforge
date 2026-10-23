@@ -3,7 +3,7 @@ use super::*;
 use std::sync::mpsc;
 use tempfile::tempdir;
 
-fn test_skill_manifest() -> (Vec<u8>, [SkillBundleFile<'static>; 2]) {
+fn test_skill_manifest() -> (Vec<u8>, [SkillBundleFile<'static>; 3]) {
     let files = [
         SkillBundleFile {
             path: "graphforge-bootstrap/SKILL.md",
@@ -12,6 +12,10 @@ fn test_skill_manifest() -> (Vec<u8>, [SkillBundleFile<'static>; 2]) {
         SkillBundleFile {
             path: "graphforge-build-knowledge/SKILL.md",
             bytes: b"knowledge",
+        },
+        SkillBundleFile {
+            path: "graphforge-hub/SKILL.md",
+            bytes: b"hub",
         },
     ];
     let manifest = serde_json::to_vec(&json!({
@@ -158,6 +162,13 @@ fn packaged_skill_manifest_rejects_each_contract_mismatch() {
     assert_eq!(
         error_for(changed, &files),
         "validation error: packaged project skill digest mismatch: graphforge-bootstrap/SKILL.md"
+    );
+
+    let mut without_hub = manifest.clone();
+    without_hub["files"].as_array_mut().unwrap().pop();
+    assert_eq!(
+        error_for(without_hub, &files[..2]),
+        "validation error: project skill bundle is missing graphforge-hub/SKILL.md"
     );
 
     let only_bootstrap = [files[0]];

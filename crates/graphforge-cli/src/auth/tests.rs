@@ -1287,3 +1287,111 @@ fn verified_current_metadata_reapplies_only_configured_same_origin_protection_po
     assert_eq!(response.status, 200);
     assert_eq!(&*grants.borrow(), &["research/renamed"]);
 }
+
+#[test]
+fn publish_repository_exchange_requests_exact_capability_and_checks_control_origin() {
+    let hub = origin(DEFAULT_HUB).unwrap();
+    for grant_origin in [DEFAULT_HUB, "https://foreign.example"] {
+        let mock = Mock::new(vec![(
+            200,
+            serde_json::json!({
+                "access_token":"scoped-publish-secret",
+                "token_type":"Bearer",
+                "expires_in":300,
+                "origin":grant_origin,
+                "repository_id":"repo-id",
+            }),
+        )]);
+        let grant =
+            exchange_repository_token(&mock, &hub, "session-secret", "owner", "repo", "publish")
+                .unwrap();
+        let publish = grant.into_publish_token(&hub);
+        if grant_origin == DEFAULT_HUB {
+            let token = publish.unwrap();
+            assert_eq!(token.authorization(), "Bearer scoped-publish-secret");
+            assert_eq!(format!("{token:?}"), "PublishToken(<redacted>)");
+        } else {
+            let error = publish.unwrap_err().to_string();
+            assert!(error.contains("hub.auth_denied"));
+            assert!(error.contains("publish capability must match the Hub origin"));
+            assert!(!error.contains("scoped-publish-secret"));
+            assert!(!error.contains("session-secret"));
+        }
+        let requests = mock.requests.borrow();
+        assert_eq!(
+            requests.len(),
+            1,
+            "never contact the granted foreign origin"
+        );
+        assert_eq!(
+            requests[0].url,
+            format!("{DEFAULT_HUB}/api/cli/repository-token")
+        );
+        assert_eq!(requests[0].method, HubMethod::Post);
+        assert_eq!(
+            requests[0].header("authorization"),
+            Some("Bearer session-secret")
+        );
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&requests[0].body).unwrap(),
+            serde_json::json!({"owner":"owner","name":"repo","capability":"publish"})
+        );
+    }
+}
+
+#[test]
+fn publish_repository_exchange_refuses_invalid_expired_and_denied_grants_without_secrets() {
+    let hub = origin(DEFAULT_HUB).unwrap();
+    let valid = serde_json::json!({
+        "access_token":"scoped-publish-secret",
+        "token_type":"Bearer",
+        "expires_in":300,
+        "origin":DEFAULT_HUB,
+        "repository_id":"repo-id",
+    });
+    let mut replies = vec![
+        (
+            401,
+            serde_json::json!({"error":"expired-session-secret"}),
+            "hub.auth_denied",
+        ),
+        (
+            403,
+            serde_json::json!({"error":"denied-session-secret"}),
+            "hub.auth_denied",
+        ),
+    ];
+    for (field, value) in [
+        ("access_token", serde_json::json!("")),
+        ("access_token", serde_json::json!("bad\nsecret")),
+        ("token_type", serde_json::json!("Basic")),
+        ("expires_in", serde_json::json!(0)),
+        ("repository_id", serde_json::json!("")),
+        ("origin", serde_json::json!("http://foreign.example")),
+    ] {
+        let mut body = valid.clone();
+        body[field] = value;
+        replies.push((
+            200,
+            body,
+            if field == "origin" {
+                "hub.unsafe_location"
+            } else {
+                "hub.auth_denied"
+            },
+        ));
+    }
+    for (status, body, expected_code) in replies {
+        let mock = Mock::new(vec![(status, body)]);
+        let error =
+            exchange_repository_token(&mock, &hub, "session-secret", "owner", "repo", "publish")
+                .err()
+                .expect("invalid grants must be refused")
+                .to_string();
+        assert!(error.contains(expected_code), "{error}");
+        for secret in ["session-secret", "scoped-publish-secret", "bad\nsecret"] {
+            assert!(!error.contains(secret), "{error}");
+        }
+        assert_eq!(mock.requests.borrow().len(), 1);
+    }
+}

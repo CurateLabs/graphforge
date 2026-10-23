@@ -41,7 +41,11 @@ const SKILLS_TRANSACTION: &str = ".graphforge/imports/skills-lifecycle/transacti
 const SKILLS_LOCK: &str = ".graphforge/imports/skills-lifecycle/lock";
 const SKILLS_STAGE: &str = ".graphforge/imports/skills-lifecycle/stage";
 const SKILLS_BACKUP: &str = ".graphforge/imports/skills-lifecycle/backup";
-const MANAGED_SKILL_NAMES: [&str; 2] = ["graphforge-bootstrap", "graphforge-build-knowledge"];
+const MANAGED_SKILL_NAMES: [&str; 3] = [
+    "graphforge-bootstrap",
+    "graphforge-build-knowledge",
+    "graphforge-hub",
+];
 
 #[cfg(test)]
 #[derive(Clone)]
