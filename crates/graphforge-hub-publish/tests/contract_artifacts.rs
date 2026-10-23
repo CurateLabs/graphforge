@@ -13,6 +13,8 @@
 
 #[path = "contract_artifacts/history.rs"]
 mod history;
+#[path = "contract_artifacts/items.rs"]
+mod items;
 
 use graphforge_discovery::{
     CreditSignature, DISCOVERY_FORMAT, DiscoveryErrorCode, DiscoveryLimits, DiscoveryManifest,
@@ -160,6 +162,16 @@ enum Action {
     CorruptObject {
         digest: String,
     },
+    SetItemVisibility {
+        publisher: String,
+        id: String,
+        visible: bool,
+    },
+    SetOrganizationPublishPermission {
+        publisher: String,
+        organization: String,
+        allowed: bool,
+    },
 }
 
 // ------------------------------------------------------------ corpus builders
@@ -224,6 +236,7 @@ struct Publication {
     location_base: Option<String>,
     /// Distinguishes intents under one operation identity.
     intent: char,
+    ontology: Option<Value>,
 }
 
 impl Publication {
@@ -248,6 +261,7 @@ impl Publication {
             expected_revision: None,
             location_base: None,
             intent: 'a',
+            ontology: None,
         }
     }
 
@@ -327,6 +341,9 @@ impl Publication {
                 object_digest: Sha256Digest(object.digest()),
             })
             .unwrap();
+        }
+        if let Some(ontology) = &self.ontology {
+            manifest["ontology"] = ontology.clone();
         }
         manifest
     }
@@ -826,6 +843,7 @@ fn v2(operation_id: u128, expected: Option<String>) -> Publication {
 fn corpus() -> Corpus {
     let repository = demo();
     let mut cases = history::cases();
+    cases.extend(items::cases());
 
     // Structural ancestry is checked by the server, independently of clients.
     for (descends, stale) in [(true, false), (false, false), (false, true)] {
@@ -1865,10 +1883,31 @@ fn error_schema() -> Value {
             "type": "object", "additionalProperties": false,
             "required": ["code", "message"],
             "properties": {
-                "code": {"enum": ["auth_denied", "entitlement_denied", "idempotency_conflict", "ref_conflict",
-                    "non_fast_forward", "unsupported_future", "integrity_failure", "invalid_input", "internal"]},
-                "message": {"type": "string", "maxLength": 512}
-            }
+                "code": {"enum": graphforge_hub_publish::HubPublishErrorCode::ALL.map(|code| code.as_str())},
+                "message": {"type": "string", "maxLength": 512},
+                "items": {
+                    "type": "array", "minItems": 1, "maxItems": graphforge_hub_publish::MAX_ID_TAKEN_ITEMS,
+                    "uniqueItems": true,
+                    "description": "Strictly ascending canonical bare IDs, with one entry per refused ID.",
+                    "items": {
+                        "type": "object", "additionalProperties": false, "required": ["kind", "id"],
+                        "properties": {
+                            "kind": {"enum": ["ontology_module", "bridge_set"]},
+                            "id": {"type": "string"},
+                            "owner": {"$ref": "#/$defs/slug"},
+                            "publish_as_owner": {"const": true}
+                        },
+                        "oneOf": [
+                            {"properties": {"kind": {"const": "ontology_module"}, "id": {"pattern": "^ont_[0-9a-hjkmnp-tv-z]{16}$"}}},
+                            {"properties": {"kind": {"const": "bridge_set"}, "id": {"pattern": "^brg_[0-9a-hjkmnp-tv-z]{16}$"}}}
+                        ]
+                    }
+                }
+            },
+            "if": {"properties": {"code": {"const": "id_taken"}}},
+            "then": {"properties": {"message": {"const": graphforge_hub_publish::ID_TAKEN_MESSAGE}}},
+            "else": {"not": {"required": ["items"]}},
+            "$defs": {"slug": defs()["slug"]}
         }),
     )
 }
@@ -2206,6 +2245,26 @@ fn replay(hub: &ReferenceHub, name: &str, steps: &[Step]) {
                     assert!(hub.deny_device(&substitute(user_code, &variables, &label)));
                 }
                 Action::SetQuota { owner, bytes } => hub.set_quota(owner, *bytes),
+                Action::SetItemVisibility {
+                    publisher,
+                    id,
+                    visible,
+                } => {
+                    hub.set_item_visibility(
+                        publisher,
+                        &graphforge_discovery::ItemId::parse(id).unwrap(),
+                        *visible,
+                    )
+                    .unwrap();
+                }
+                Action::SetOrganizationPublishPermission {
+                    publisher,
+                    organization,
+                    allowed,
+                } => {
+                    hub.set_organization_publish_permission(publisher, organization, *allowed)
+                        .unwrap();
+                }
                 Action::CorruptObject { digest } => {
                     assert!(hub.corrupt_object(digest) > 0, "{label}: nothing corrupted");
                 }

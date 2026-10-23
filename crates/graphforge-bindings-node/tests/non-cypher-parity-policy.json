@@ -1,8 +1,8 @@
 {
   "contractVersion": 1,
   "rustManifest": "../../../tests/contracts/non-cypher-rust-surface.json",
-  "releaseSurfaceCount": 357,
-  "releaseSurfaceDigest": "f6d38f2a05020d48c2f889016218a1d502d55aaa9e546a5700a723a5427e193e",
+  "releaseSurfaceCount": 360,
+  "releaseSurfaceDigest": "f28182bfc8f106f1437496c90ec0cc2e7d46984fb4cbdca35aa2df9e22e3ecce",
   "requiredEquivalent": [
     "GraphForge.adopt_ontology",
     "GraphForge.clear_ontology",
@@ -520,6 +520,11 @@
       "OpenRouterProviderSession": "Rust provider sessions are not exported; Node owns a configured native provider adapter instead.",
       "RepositoryContext": "Rust owns repository lifecycle behavior; the Node command wrapper parity is delivered by issue #226.",
       "GraphImportSession": "Per-operation timing observations are Rust/CLI diagnostics; the Node import adapter keeps its explicitly mapped lifecycle methods."
+    },
+    "notExposed": {
+      "GraphForge.id_taken_receipt": "Private native receipt admission is owned by CLI publication and regeneration.",
+      "GraphForge.record_item_id_regeneration": "Private native receipt admission is owned by CLI publication and regeneration.",
+      "GraphForge.record_publish_id_taken": "Private native receipt admission is owned by CLI publication and regeneration."
     }
   },
   "evidence": {

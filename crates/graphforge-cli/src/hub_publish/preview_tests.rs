@@ -173,6 +173,7 @@ fn only_selected_control_purposes_receive_preview_credentials_on_the_wire() {
     let (wire, server) = wire((0..16).map(|_| response(200, None)).collect());
     let bypass = bypass();
     let hub = Hub {
+        refusal: None,
         transport: &wire,
         base: Url::parse("https://hub.test/owner/repo").unwrap(),
         bypass: Some(&bypass),
@@ -256,6 +257,7 @@ fn redirects_strip_preview_credentials_and_writes_never_follow_them() {
     ]);
     let bypass = bypass();
     let hub = Hub {
+        refusal: None,
         transport: &wire,
         base: Url::parse("https://hub.test/owner/repo").unwrap(),
         bypass: Some(&bypass),
@@ -289,6 +291,7 @@ fn redirects_strip_preview_credentials_and_writes_never_follow_them() {
         302
     );
     let default = Hub {
+        refusal: None,
         transport: &wire,
         base: hub.base.clone(),
         bypass: None,
@@ -412,6 +415,7 @@ fn private_context_shape_status_bounds_and_redirects_fail_closed_on_the_wire() {
     let (transport, server) = wire(replies);
     let bypass = bypass();
     let hub = Hub {
+        refusal: None,
         transport: &transport,
         bypass: Some(&bypass),
         base: Url::parse("https://hub.test/alice/private").unwrap(),

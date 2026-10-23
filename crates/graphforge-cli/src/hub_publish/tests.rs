@@ -28,6 +28,7 @@ mod ancestor_publication;
 mod core_version_warning;
 mod credit;
 mod hub_listing;
+mod id_taken;
 mod producing_version;
 use hub_listing::serve_lineage;
 mod remote_fetch;
@@ -1035,6 +1036,7 @@ fn published_fork_clones_back_with_origin_citation() {
     )
     .unwrap();
     let reader = Hub {
+        refusal: None,
         transport: &transport,
         base: source_base.clone(),
         bypass: bypass.as_ref(),
@@ -1862,6 +1864,7 @@ fn private_context_first_publish_republish_and_replay_use_only_authorized_hub_me
     );
     let transport = hub.transport();
     let control = Hub {
+        refusal: None,
         transport: &transport,
         bypass: Some(&bypass),
         base: Url::parse(&repository_url("curate/claims")).unwrap(),
@@ -1941,6 +1944,7 @@ fn private_context_checks_exact_revision_and_raw_lineage_integrity_and_bindings(
     };
     let transport = server.transport();
     let hub = Hub {
+        refusal: None,
         transport: &transport,
         bypass: None,
         base: base.clone(),

@@ -6,6 +6,7 @@
 //! configurable seed and are predictable. Control state is in memory; object
 //! bytes spill to unlinked temporary files.
 
+mod items;
 mod retention;
 
 use crate::canonical::{sha256_digest, validate_digest};
@@ -97,6 +98,9 @@ struct State {
     repositories: BTreeMap<RepositoryIdentity, Repository>,
     moved: BTreeMap<RepositoryIdentity, RepositoryIdentity>,
     quotas: BTreeMap<String, u64>,
+    permanent_items: BTreeMap<String, items::PermanentItem>,
+    visible_items: BTreeSet<(String, String)>,
+    organization_publishers: BTreeSet<(String, String)>,
 }
 
 struct IssuedToken {
@@ -1440,8 +1444,11 @@ impl ReferenceHub {
             previous_revision: commit.expected_revision.clone(),
             revision: revision.clone(),
         };
+        let claims = items::plan(state, &manifest, &repository.owner)?;
 
-        // 6. Apply: objects, manifest, refs, and receipt together.
+        // 6. Apply: permanent-ID claims, objects, manifest, refs, and receipt
+        // together. Nothing below this point can reject the transaction.
+        items::apply(state, &repository.owner, claims);
         let session = state
             .sessions
             .get_mut(session_id.as_str())

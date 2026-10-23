@@ -237,10 +237,11 @@ repository.
 
 ### Errors
 
-Every non-OAuth error body is `{code, message}`. `message` is a fixed string
+Every non-OAuth error body is `{code, message}` with optional `items` only for
+`id_taken`. `message` is a fixed string
 chosen by the Hub; it never echoes request input, tokens, or upload URLs. `gf
 publish` classifies a failure only from a parsed `{code, message}` body and
-prints its own fixed text, so a Hub message never reaches CLI output and a bare
+prints its own text, so a Hub message never reaches CLI output and a bare
 status (for example a proxy's `409`) is a transport failure, never a publish
 outcome. `GF_IDEMPOTENCY_CONFLICT` exits 1, `internal` and
 transport failures (`hub.network`) exit 3, and every other code exits 2 with the
@@ -252,11 +253,48 @@ URL is `hub.unsafe_location`.
 | `auth_denied` | 401 (missing, unknown, expired) | 403 (insufficient scope) | `hub.publish.auth_denied` |
 | `entitlement_denied` | 403 | | `hub.publish.entitlement_denied` |
 | `idempotency_conflict` | 409 | | `GF_IDEMPOTENCY_CONFLICT` |
+| `id_taken` | 409 | | `hub.publish.id_taken` |
 | `ref_conflict` | 412 | | `hub.publish.ref_conflict` |
 | `unsupported_future` | 422 | | `hub.publish.unsupported_future` |
 | `integrity_failure` | 422 | | `hub.publish.integrity_failure` |
 | `invalid_input` | 400 | 404 (unknown resource), 413 (over a limit), 416 (upload offset) | `hub.publish.invalid_input` |
 | `internal` | 500 | | `hub.publish.internal` |
+
+### Permanent item ownership
+
+At commit, the Hub admits permanent IDs advertised in `manifest.ontology`,
+under the same critical section as objects, manifests, refs and the operation
+receipt. The first publisher claims an ID; its owner may publish new authored
+versions. Another publisher may reuse an already published exact
+`(id, authored_version, canonical_digest)` tuple without acquiring ownership.
+Different content under a foreign permanent ID refuses the whole commit:
+no other item claim, ref, manifest or receipt becomes visible. Legacy IDs and
+own-domain ontology IRIs do not participate in this registry.
+
+`id_taken` has HTTP 409, fixed message `permanent item ID is already owned`, and
+optional `items` sorted by canonical bare ID. Each item contains `kind`
+(`ontology_module` or `bridge_set`) and a matching `ont_…` or `brg_…` ID.
+`owner` is present only when visible to this publisher. `publish_as_owner` may
+only be `true`, and only when the publisher is authorized to publish as the
+owning organization. Neither omitted field implies a negative permission fact.
+The reference Hub exposes explicit visibility and organization-permission hooks
+for conformance; an HTTP adapter supplies its own authenticated permission facts.
+
+The native client prints its own guidance and stores bounded per-item refusal
+receipts privately in the local Project, outside portable packages. It stores
+validated item metadata and Version identities, never bearer tokens or server
+prose. A future regeneration operation must require the exact refused ID and
+refuse the organization hint. The native receipt seam can record an already
+committed replacement only when its retained Version contains the new identity;
+later refusals of an old Version point to that replacement Version. This does
+not implement the regeneration command or reference rewriting.
+
+Before implementing regeneration, audit ancestor publication and Branch-head
+selection: current descendants include ancestor lineage records without
+recursively publishing ancestor packages. Reintroducing ancestor commits could
+retry a refused old ID and strand a valid replacement. The command must also
+advance the selected Branch head, and old-Version publication requires its
+matching ontology composition after a checkout or restore.
 
 ### Conformance
 

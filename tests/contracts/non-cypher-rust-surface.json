@@ -1,7 +1,7 @@
 {
   "contract_version": 1,
   "scope": "Rust non-Cypher public release surface",
-  "public_method_digest": "9b736e5bef2319334e3d5a9fd03ae09fdb8fb50825dfa78d954423099f001419",
+  "public_method_digest": "4ba0248bc4f1b1bb53941c771eeabdbbe939a721d381fbd2e9ab775b17460f57",
   "method_policy": {
     "receiver_defaults": {
       "PortableImportResult": "release-tested",
@@ -1100,7 +1100,10 @@
         "crate.resolve_discovered_ontology_module",
         "GraphForge.continue_imported_research_branch",
         "crate.read_committed_generation_identity",
-        "GraphForge.fetch_research_branch"
+        "GraphForge.fetch_research_branch",
+        "GraphForge.id_taken_receipt",
+        "GraphForge.record_item_id_regeneration",
+        "GraphForge.record_publish_id_taken"
       ],
       "test_refs": [
         {
@@ -1158,6 +1161,10 @@
         {
           "path": "crates/graphforge-cli/src/hub_publish/tests/remote_fetch.rs",
           "symbol": "verified_same_branch_fetch_preserves_local_head_workspace_and_exact_receipt_replay"
+        },
+        {
+          "path": "crates/graphforge-api/src/item_refusals/tests.rs",
+          "symbol": "exact_refusal_receipt_survives_reopen_and_records_only_a_retained_replacement"
         }
       ]
     },

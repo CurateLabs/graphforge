@@ -27,8 +27,8 @@ production_source = runpy.run_path(str(Path(__file__).with_name("native_sources.
     "production_source"
 ]
 PYO3_SOURCE = ROOT / "crates/graphforge-bindings-py/src/lib.rs"
-EXPECTED_RUST_DIGEST = "9b736e5bef2319334e3d5a9fd03ae09fdb8fb50825dfa78d954423099f001419"
-EXPECTED_RELEASE_DIGEST = "f6d38f2a05020d48c2f889016218a1d502d55aaa9e546a5700a723a5427e193e"
+EXPECTED_RUST_DIGEST = "4ba0248bc4f1b1bb53941c771eeabdbbe939a721d381fbd2e9ab775b17460f57"
+EXPECTED_RELEASE_DIGEST = "f28182bfc8f106f1437496c90ec0cc2e7d46984fb4cbdca35aa2df9e22e3ecce"
 
 PYTHON_ONLY_METHODS = frozenset(
     {
@@ -290,7 +290,7 @@ def _classification_report() -> dict[str, object]:
         for group in manifest["method_evidence_groups"].values()
         for method_id in group["ids"]
     }
-    assert len(release_methods) == 357
+    assert len(release_methods) == 360
     assert _digest(release_methods) == EXPECTED_RELEASE_DIGEST
     assert set(EVIDENCE) == set(manifest["method_evidence_groups"])
 
@@ -398,6 +398,14 @@ def _classification_report() -> dict[str, object]:
         elif python_id in python_methods:
             classification = "equivalent"
             reason = "same receiver operation delegates through the compiled PyO3 extension"
+        elif rust_id in {
+            "GraphForge.id_taken_receipt",
+            "GraphForge.record_item_id_regeneration",
+            "GraphForge.record_publish_id_taken",
+        }:
+            assert python_id not in python_methods
+            classification = "not-exposed"
+            reason = "private native receipt admission is owned by CLI publication and regeneration"
         elif rust_id == "GraphForge.execute_saved_query_json":
             classification = "not-exposed"
             reason = (

@@ -2576,6 +2576,7 @@ dependencies = [
  "graphforge-discovery",
  "graphforge-exec",
  "graphforge-filesystem",
+ "graphforge-hub-publish",
  "graphforge-io",
  "graphforge-ir",
  "graphforge-knowledge",

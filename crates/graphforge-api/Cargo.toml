@@ -20,11 +20,12 @@ search = ["dep:graphforge-search"]
 provenance = ["dep:graphforge-provenance"]
 portable = ["dep:graphforge-portable-oci"]
 discovery = ["dep:graphforge-discovery"]
-research = ["knowledge", "portable", "dep:graphforge-discovery"]
+research = ["knowledge", "portable", "dep:graphforge-discovery", "dep:graphforge-hub-publish"]
 
 [dependencies]
 parking_lot = "0.12"
 graphforge-discovery = { version = "0.6.0-rc.5", path = "../graphforge-discovery", optional = true }
+graphforge-hub-publish = { version = "0.6.0-rc.5", path = "../graphforge-hub-publish", optional = true }
 graphforge-portable-oci = { version = "0.6.0-rc.5", path = "../graphforge-portable-oci", optional = true }
 graphforge-value = { version = "0.6.0-rc.5", path = "../graphforge-value" }
 graphforge-core = { version = "0.6.0-rc.5", path = "../graphforge-core" }
