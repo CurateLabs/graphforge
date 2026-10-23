@@ -15,6 +15,7 @@ fn nested_acceptance_deduplicates_per_destination_and_preserves_contribution() {
     graph
         .create_research_branch(
             &CreateResearchBranchRequest {
+                description: None,
                 author: None,
                 committer: None,
                 operation_uuid: Uuid::now_v7(),

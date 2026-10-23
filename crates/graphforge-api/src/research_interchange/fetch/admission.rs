@@ -74,6 +74,7 @@ pub(super) fn prepare(
             .ok_or_else(|| invalid("fetched Branch creation is unavailable"))?,
         archive.source_project_uuid,
     )?;
+    let archive_identities = archive.identities.clone();
     let reference = ResearchRemoteBranch {
         repository_url: request.repository_url.into(),
         project_uuid: Uuid::parse_str(&lineage.project_uuid)
@@ -105,6 +106,7 @@ pub(super) fn prepare(
             .into(),
             package_sha256: digest(&package.package_digest.0)?,
             object_sha256: digest(&package.object_digest.0)?,
+            tags: served_tags(&lineage, &archive_identities),
         },
         archive: Box::new(archive),
     };
@@ -154,4 +156,22 @@ fn digest(value: &str) -> Result<[u8; 32], GfError> {
             .map_err(|_| invalid("invalid fetch digest"))?;
     }
     Ok(output)
+}
+
+/// A served tag is installed with the Version it names, here the ones this fetch
+/// admits; a tag on any other Version stays on the Hub.
+fn served_tags(
+    lineage: &graphforge_discovery::ResearchLineage,
+    admitted: &std::collections::BTreeMap<Uuid, [u8; 32]>,
+) -> std::collections::BTreeMap<String, Uuid> {
+    lineage
+        .tags
+        .iter()
+        .filter_map(|tag| {
+            let version = Uuid::parse_str(&tag.version_uuid).ok()?;
+            admitted
+                .contains_key(&version)
+                .then(|| (tag.name.clone(), version))
+        })
+        .collect()
 }

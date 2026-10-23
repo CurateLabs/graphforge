@@ -28,10 +28,13 @@ mod hub_clone;
 pub mod hub_fixture_artifacts;
 mod hub_http;
 mod hub_publish;
+mod identity;
 mod maintenance_cli;
 mod ontology_cli;
+mod porcelain;
 mod portable_cli;
 mod research_cli;
+mod research_help;
 mod research_versions_cli;
 mod saved_queries_cli;
 mod source_artifact_cli;
@@ -265,6 +268,38 @@ enum Command {
     Clone(hub_clone::CloneArgs),
     Publish(hub_publish::PublishArgs),
     Hub(hub_clone::HubArgs),
+    /// Show the current Branch, its head and its upstream.
+    ///
+    /// Example: `gf status`
+    Status(porcelain::StatusArgs),
+    /// Show history, newest first.
+    ///
+    /// Example: `gf log -n 10`, `gf log v1`, `gf log --remote --all`
+    Log(porcelain::LogArgs),
+    /// Record a new Version of the Branch by running a query, with a message.
+    ///
+    /// Example: `gf commit -m "Raise scores" --query "MATCH (n:Item) SET n.score = 2"`
+    Commit(porcelain::CommitArgs),
+    /// List Branches, or create one at the current head or at `--from`.
+    ///
+    /// Example: `gf branch`, `gf branch feature/score`, `gf branch fix --from v1`
+    Branch(porcelain::BranchArgs),
+    /// Select the Branch the other verbs act on.
+    ///
+    /// Example: `gf switch feature/score`
+    Switch(porcelain::SwitchArgs),
+    /// List tags, create one on a Version, or delete one.
+    ///
+    /// Example: `gf tag`, `gf tag v1`, `gf tag v1 <version-uuid>`, `gf tag -d v1`
+    Tag(porcelain::TagArgs),
+    /// Publish the Branch head to its Hub repository.
+    ///
+    /// Example: `gf push owner/repository` the first time, then `gf push`
+    Push(porcelain::PushArgs),
+    /// Incorporate the Hub's head of the Branch's ref into the local Branch.
+    ///
+    /// Example: `gf pull`
+    Pull(porcelain::PullArgs),
     /// Initialize repository-local GraphForge definitions and state.
     Init(InitArgs),
     /// Compare or reconcile declared definitions and source digests without ingesting data.
@@ -475,6 +510,8 @@ enum ConfigCommand {
     Validate,
     /// Emit deterministic, secret-free resolved configuration.
     Resolve,
+    /// Set or show the credited author and committer (a per-user file).
+    User(identity::UserArgs),
 }
 
 #[derive(Subcommand)]
@@ -883,6 +920,7 @@ fn handle_revert_before_open(
     Ok(false)
 }
 
+#[allow(clippy::too_many_lines)] // one arm per repository command
 fn run_repository(
     command: Command,
     project_dir: Option<PathBuf>,
@@ -955,6 +993,9 @@ fn run_repository(
         Command::Config {
             command: ConfigCommand::Resolve,
         } => Ok(repository.resolve_config()?),
+        Command::Config {
+            command: ConfigCommand::User(_),
+        } => unreachable!("`gf config user` is dispatched before the repository commands"),
         Command::Infra {
             command: InfraCommand::Validate(args),
         } => {
@@ -1055,7 +1096,9 @@ fn is_repository_command(command: &Command) -> bool {
         Command::Init(_)
             | Command::Sync(_)
             | Command::Remove(_)
-            | Command::Config { .. }
+            | Command::Config {
+                command: ConfigCommand::Validate | ConfigCommand::Resolve
+            }
             | Command::Infra { .. }
             | Command::Skills { .. }
     )
@@ -1164,6 +1207,14 @@ fn run_with_allocation(
         Command::Telemetry(args) => return run_telemetry(args, output).map_err(Into::into),
         command => command,
     };
+    if let Command::Config {
+        command: ConfigCommand::User(args),
+    } = &command
+    {
+        return identity::run_config_user(args, cli.json, output)
+            .map(|()| 0)
+            .map_err(Into::into);
+    }
     if is_repository_command(&command) {
         return run_repository_with_bundle(
             command,
@@ -1186,6 +1237,20 @@ fn run_with_allocation(
             output,
             &mut *diagnostics,
         );
+    }
+    if matches!(&command, Command::Push(_) | Command::Pull(_))
+        || matches!(&command, Command::Log(args) if args.remote.is_some())
+    {
+        return porcelain::run_remote(
+            command,
+            cli.project,
+            cli.project_dir,
+            cli.json,
+            output,
+            &mut *diagnostics,
+        )
+        .map(|()| 0)
+        .map_err(Into::into);
     }
     if let Command::Ontology { command } = &command
         && let Some(result) = ontology_cli::run_without_project(command, cli.json, output)
@@ -1244,6 +1309,16 @@ fn run_with_allocation(
     })?;
     let mut graph = open_cli_graph_warning(Path::new(path_text), allocation, &mut *diagnostics)?;
     let command = match command {
+        command @ (Command::Status(_)
+        | Command::Log(_)
+        | Command::Commit(_)
+        | Command::Branch(_)
+        | Command::Switch(_)
+        | Command::Tag(_)) => {
+            return porcelain::run_local(&mut graph, command, cli.json, output)
+                .map(|()| 0)
+                .map_err(Into::into);
+        }
         Command::Export(args) => {
             return portable_cli::run_export(&graph, args, cli.json, output).map(|()| 0);
         }
@@ -1386,7 +1461,7 @@ where
     } else {
         args[0] = "graphforge".into();
     }
-    let cli = match Cli::try_parse_from(&args) {
+    let cli = match parse_cli(&args) {
         Ok(cli) => cli,
         Err(error) => return argument_error_execution(&error, requests_json(&args)),
     };
@@ -1649,10 +1724,20 @@ fn error_exit_code(error: &CliRuntimeError) -> i32 {
     }
 }
 
+/// Parse the arguments with the research help text attached.
+fn parse_cli<I, T>(args: I) -> Result<Cli, clap::Error>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<std::ffi::OsString> + Clone,
+{
+    use clap::FromArgMatches as _;
+    Cli::from_arg_matches(&research_help::command().try_get_matches_from(args)?)
+}
+
 /// Stream process output directly and terminate with the native CLI exit status.
 pub fn run_process() {
     let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
-    let cli = match Cli::try_parse_from(&args) {
+    let cli = match parse_cli(&args) {
         Ok(cli) => cli,
         // Help and the version keep clap's own styled output; a refusal
         // under `--json` is the one JSON error document `execute` gives.

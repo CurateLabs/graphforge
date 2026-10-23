@@ -18,6 +18,8 @@
 use std::fmt;
 use std::str::FromStr;
 
+use serde::{Deserialize, Serialize};
+
 /// Canonical URI base of every permanent ID written into data.
 pub const ITEM_ID_URI_BASE: &str = "https://graphforge.sh/";
 
@@ -34,9 +36,8 @@ pub const ITEM_ID_LEN: usize = 4 + ITEM_ID_RANDOM_CHARS;
 const ALPHABET: &[u8; 32] = b"0123456789abcdefghjkmnpqrstvwxyz";
 
 /// Kind of item a permanent ID names. The prefix is part of the ID.
-#[derive(
-    Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
-)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(tsify::Tsify))]
 #[serde(rename_all = "snake_case")]
 pub enum ItemKind {
     /// Ontology module, prefix `ont`, field `ontology_id`.

@@ -52,6 +52,8 @@ fn repeated_selective_updates_preserve_independent_baselines_and_original_base()
     graph
         .execute_research_branch(
             &ExecuteResearchBranchRequest {
+                label: None,
+                description: None,
                 author: None,
                 committer: None,
                 operation_uuid: Uuid::now_v7(),
@@ -75,6 +77,8 @@ fn repeated_selective_updates_preserve_independent_baselines_and_original_base()
         "conflict"
     );
     let all = UpdateResearchBranchRequest {
+        label: None,
+        description: None,
         author: None,
         committer: None,
         operation_uuid: Uuid::now_v7(),
@@ -130,6 +134,8 @@ fn retain_both_preserves_native_list_values_and_refuses_scalar_conflicts_atomica
     graph
         .execute_research_branch(
             &ExecuteResearchBranchRequest {
+                label: None,
+                description: None,
                 author: None,
                 committer: None,
                 operation_uuid: Uuid::now_v7(),
@@ -150,6 +156,8 @@ fn retain_both_preserves_native_list_values_and_refuses_scalar_conflicts_atomica
         .unwrap();
     assert_eq!(tags.change, "conflict");
     let mut request = UpdateResearchBranchRequest {
+        label: None,
+        description: None,
         author: None,
         committer: None,
         operation_uuid: Uuid::now_v7(),

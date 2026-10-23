@@ -104,6 +104,7 @@ fn create_branch(
     graph
         .create_research_branch(
             &CreateResearchBranchRequest {
+                description: None,
                 author: None,
                 committer: None,
                 operation_uuid: Uuid::now_v7(),
@@ -125,6 +126,8 @@ fn edit(graph: &mut GraphForge, branch_uuid: Uuid, score: i64) -> Uuid {
     graph
         .execute_research_branch(
             &ExecuteResearchBranchRequest {
+                label: None,
+                description: None,
                 author: None,
                 committer: None,
                 operation_uuid: Uuid::now_v7(),
@@ -378,7 +381,7 @@ fn publish_history_shaped(
         BranchSource::Branch {
             branch_uuid: main_branch,
         },
-        "feature",
+        "feature/score",
     );
     let feature_head = edit(&mut fork, feature_branch, 2);
     // A Proposal: a frozen, field-selected projection of the feature head.
@@ -536,6 +539,16 @@ fn lineage_request(published: &Published) -> BuildResearchLineageRequest {
 /// Serve canonical manifest, refs, lineage, and every package object.
 fn serve(published: &Published, lineage: &ResearchLineage) -> Hub {
     let repository = RepositoryIdentity::parse(REPOSITORY).unwrap();
+    let ref_names: BTreeSet<&str> = lineage
+        .branches
+        .iter()
+        .map(|branch| branch.ref_name.as_str())
+        .collect();
+    let default = if ref_names.contains("main") {
+        "main"
+    } else {
+        ref_names.first().copied().unwrap()
+    };
     let lineage_bytes = lineage.to_canonical_json().unwrap();
     let lineage_object = sha256(&lineage_bytes);
     let mut documents = BTreeMap::new();
@@ -567,8 +580,8 @@ fn serve(published: &Published, lineage: &ResearchLineage) -> Hub {
         format: DISCOVERY_FORMAT.into(),
         version: ProtocolVersion::CURRENT,
         repository: repository.clone(),
-        default_ref: "main".into(),
-        resolved_ref: "main".into(),
+        default_ref: default.into(),
+        resolved_ref: default.into(),
         immutable_version: lineage.immutable_version.clone(),
         package: published.project_package.0.clone(),
         summary: None,
@@ -591,8 +604,8 @@ fn serve(published: &Published, lineage: &ResearchLineage) -> Hub {
         format: DISCOVERY_FORMAT.into(),
         version: ProtocolVersion::CURRENT,
         repository,
-        default_ref: "main".into(),
-        refs: ["feature/score", "main"]
+        default_ref: default.into(),
+        refs: ref_names
             .into_iter()
             .map(|name| RepositoryRef {
                 name: name.into(),
@@ -620,6 +633,7 @@ fn clone_into(
     run_clone_with(
         hub,
         CloneArgs {
+            tag: None,
             hub: None,
             token_env: None,
             protection_bypass_env: None,
@@ -1027,7 +1041,15 @@ fn subprocess_research_clone_helper() {
     };
     let destination =
         PathBuf::from(std::env::var("GRAPHFORGE_RESEARCH_CLONE_DESTINATION").unwrap());
-    match clone_into(&hub, &destination, Some("main"), None) {
+    let version = std::env::var("GRAPHFORGE_RESEARCH_CLONE_VERSION")
+        .ok()
+        .map(|text| Uuid::parse_str(&text).unwrap());
+    match clone_into(
+        &hub,
+        &destination,
+        version.is_none().then_some("main"),
+        version,
+    ) {
         Ok(result) => println!("CLONE_OK {}", result["generation_uuid"]),
         Err(error) => println!("CLONE_ERROR {error}"),
     }
@@ -1235,6 +1257,207 @@ fn plain_clone_uses_advertised_default_research_branch_and_explicit_selectors_ov
     }
 }
 
+#[test]
+fn clone_refuses_a_lineage_whose_label_differs_from_its_ref() {
+    let published = publish_history();
+    // The publisher wrote a ref name that is not the Branch label: the cloned
+    // Branch could not be pushed back under the ref it came from.
+    let mut request = lineage_request(&published);
+    request
+        .branch_ref_names
+        .insert(published.main_branch, "trunk".to_owned());
+    let lineage = published
+        .fork
+        .build_research_lineage_for_discovery(&request, &CancellationToken::new())
+        .unwrap();
+    let mut hub = serve(&published, &lineage);
+    default_ref(&mut hub, "trunk");
+    let root = tempfile::tempdir().unwrap();
+    let destination = root.path().join("trunk");
+    let error = clone_into(&hub, &destination, Some("trunk"), None).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("hub.malformed_lineage: Branch label differs from its ref name"),
+        "{error}"
+    );
+    assert!(!destination.exists());
+}
+
+#[test]
+fn clone_installs_lineage_tags() {
+    let mut published = publish_history();
+    for (name, version) in [
+        ("release/v1", published.main_head),
+        ("feature/v0", published.feature_head),
+    ] {
+        let request = graphforge_api::SetResearchTagRequest {
+            operation_uuid: Uuid::now_v7(),
+            expected_generation_uuid: generation(&published.fork),
+            name: name.into(),
+            version_uuid: Some(version),
+        };
+        published
+            .fork
+            .set_research_tag(&request, &CancellationToken::new())
+            .unwrap();
+    }
+    let lineage = published
+        .fork
+        .build_research_lineage_for_discovery(
+            &lineage_request(&published),
+            &CancellationToken::new(),
+        )
+        .unwrap();
+    assert_eq!(lineage.tags.len(), 2);
+    let hub = serve(&published, &lineage);
+    let root = tempfile::tempdir().unwrap();
+    let destination = root.path().join("main");
+    clone_into(&hub, &destination, Some("main"), None).unwrap();
+    let cloned = GraphForge::new(destination.to_str()).unwrap();
+    // A tag installs with the Version it names; the feature Branch is not cloned.
+    assert_eq!(
+        cloned.research_version_retention().unwrap().tags,
+        BTreeMap::from([("release/v1".to_owned(), published.main_head)])
+    );
+    let destination = root.path().join("by-version");
+    clone_into(&hub, &destination, None, Some(published.main_head)).unwrap();
+    assert_eq!(
+        GraphForge::new(destination.to_str())
+            .unwrap()
+            .research_version_retention()
+            .unwrap()
+            .tags,
+        BTreeMap::from([("release/v1".to_owned(), published.main_head)])
+    );
+}
+
+#[test]
+fn version_clone_tag_publications_resume_and_preserve_advanced_staging() {
+    let mut published = publish_history();
+    for name in ["release/v1", "release/stable"] {
+        published
+            .fork
+            .set_research_tag(
+                &graphforge_api::SetResearchTagRequest {
+                    operation_uuid: Uuid::now_v7(),
+                    expected_generation_uuid: generation(&published.fork),
+                    name: name.into(),
+                    version_uuid: Some(published.main_head),
+                },
+                &CancellationToken::new(),
+            )
+            .unwrap();
+    }
+    let lineage = published
+        .fork
+        .build_research_lineage_for_discovery(
+            &lineage_request(&published),
+            &CancellationToken::new(),
+        )
+        .unwrap();
+    let hub = serve(&published, &lineage);
+    let fixture = tempfile::tempdir().unwrap();
+    let mut index = BTreeMap::new();
+    for (number, (url, bytes)) in hub.documents.iter().enumerate() {
+        let file = format!("document-{number}");
+        std::fs::write(fixture.path().join(&file), bytes).unwrap();
+        index.insert(url.clone(), file);
+    }
+    std::fs::write(
+        fixture.path().join("index.json"),
+        serde_json::to_vec(&index).unwrap(),
+    )
+    .unwrap();
+    let root = tempfile::tempdir().unwrap();
+    for advance in [false, true] {
+        let destination = root
+            .path()
+            .join(if advance { "advanced" } else { "resume" });
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                RESEARCH_HELPER,
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env("GRAPHFORGE_RESEARCH_CLONE_FIXTURE", fixture.path())
+            .env("GRAPHFORGE_RESEARCH_CLONE_DESTINATION", &destination)
+            .env(
+                "GRAPHFORGE_RESEARCH_CLONE_VERSION",
+                published.main_head.to_string(),
+            )
+            .env("GRAPHFORGE_CLONE_FAILPOINT", "clone.after_version_tags")
+            .output()
+            .unwrap();
+        assert_eq!(
+            child.status.code(),
+            Some(CLONE_FAILPOINT_EXIT),
+            "{}",
+            String::from_utf8_lossy(&child.stdout)
+        );
+        assert!(!destination.exists());
+        let staged = staging_path(&destination).unwrap().join("project");
+        let graph = GraphForge::new(staged.to_str()).unwrap();
+        let expected = BTreeMap::from([
+            ("release/stable".to_owned(), published.main_head),
+            ("release/v1".to_owned(), published.main_head),
+        ]);
+        assert_eq!(graph.research_version_retention().unwrap().tags, expected);
+        if advance {
+            graph.execute("CREATE (:Foreign {marker:42})").unwrap();
+        }
+        let prior = generation(&graph);
+        let receipts = graph.research_version_retention().unwrap().receipts;
+        drop(graph);
+        let operation = Uuid::parse_str(
+            &std::fs::read_to_string(staged.parent().unwrap().join("operation")).unwrap(),
+        )
+        .unwrap();
+        let continuation = GraphForge::continue_imported_research_tags(
+            &staged,
+            &lineage,
+            published.main_head,
+            operation,
+        );
+        if advance {
+            assert!(
+                continuation
+                    .unwrap_err()
+                    .to_string()
+                    .contains("hub.destination_conflict")
+            );
+        } else {
+            assert_eq!(continuation.unwrap(), Some(prior));
+        }
+        assert_eq!(
+            generation(&GraphForge::new(staged.to_str()).unwrap()),
+            prior,
+            "direct continuation preserves both admitted and advanced staging"
+        );
+        let result = clone_into(&hub, &destination, None, Some(published.main_head));
+        if advance {
+            result.unwrap_err();
+            assert!(!destination.exists());
+            assert_eq!(
+                generation(&GraphForge::new(staged.to_str()).unwrap()),
+                prior
+            );
+        } else {
+            let result = result.unwrap();
+            let reopened = GraphForge::new(destination.to_str()).unwrap();
+            assert_eq!(generation(&reopened), prior);
+            assert_eq!(result["generation_uuid"], prior.to_string());
+            let state = reopened.research_version_retention().unwrap();
+            assert_eq!(state.tags, expected);
+            assert_eq!(
+                state.receipts, receipts,
+                "a retry replays tag receipts without publishing again"
+            );
+        }
+    }
+}
+
 fn branchless_hub(
     package_digest: Sha256Digest,
     bytes: Vec<u8>,
@@ -1256,6 +1479,7 @@ fn branchless_hub(
         branches: vec![],
         versions: vec![],
         proposals: vec![],
+        tags: vec![],
         extensions: BTreeMap::new(),
     };
     let lineage_bytes = lineage.to_canonical_json().unwrap();
@@ -1527,6 +1751,8 @@ fn branch_activation_retries_exact_native_receipt_but_never_resets_advanced_stag
                 graph
                     .execute_research_branch(
                         &ExecuteResearchBranchRequest {
+                            label: None,
+                            description: None,
                             author: None,
                             committer: None,
                             operation_uuid: Uuid::now_v7(),
@@ -1805,6 +2031,7 @@ fn research_verification_and_import_stay_within_their_budgets_with_an_expanded_g
     run_clone_profiled_with_delays(
         &hub,
         CloneArgs {
+            tag: None,
             hub: None,
             token_env: None,
             protection_bypass_env: None,

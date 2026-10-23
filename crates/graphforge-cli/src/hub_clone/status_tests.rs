@@ -187,6 +187,7 @@ fn each_hub_status_class_has_its_semantic_code_and_exit_class_over_real_http() {
         let error = run_clone_with(
             &Routed::new(server.address),
             CloneArgs {
+                tag: None,
                 repository: "https://hub.test/curate/claims".into(),
                 hub: None,
                 token_env: None,
@@ -235,9 +236,9 @@ fn each_hub_status_class_has_its_semantic_code_and_exit_class_over_real_http() {
         &Routed::new(server.address),
         &ModuleFetchArgs {
             repository: "curate/claims".into(),
-            ontology_id: "https://example.org/ontology".into(),
-            version: "1".into(),
-            digest: "a".repeat(64),
+            ontology_id: Some("https://example.org/ontology".into()),
+            version: Some("1".into()),
+            digest: Some("a".repeat(64)),
             output: root.path().join("module.json"),
             hub: Some("https://hub.test".into()),
         },

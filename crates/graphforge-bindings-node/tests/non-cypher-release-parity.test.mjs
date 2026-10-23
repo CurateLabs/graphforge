@@ -61,7 +61,6 @@ test("the Node classification is total, frozen, and backed by non-skipped native
   const languageSpecific = new Set(
     Object.keys(policy.classification.languageSpecific),
   );
-  const notExposed = new Set(Object.keys(policy.classification.notExposed));
   assert.ok(release.includes("GraphForge.explain_stage"));
   assert.equal(equivalent.has("GraphForge.explain_stage"), false);
   assert.equal(languageSpecific.has("GraphForge.explain_stage"), false);
@@ -87,27 +86,23 @@ test("the Node classification is total, frozen, and backed by non-skipped native
       `stale language-specific classification: ${id}`,
     );
   }
-
-  for (const id of notExposed) {
-    assert.ok(release.includes(id), `stale native-only classification: ${id}`);
+  for (const [id, reason] of Object.entries(policy.classification.notExposed)) {
+    assert.ok(release.includes(id), `stale not-exposed classification: ${id}`);
     assert.equal(equivalent.has(id), false, `duplicate classification: ${id}`);
     assert.equal(
       languageSpecific.has(id),
       false,
       `duplicate classification: ${id}`,
     );
-    assert.ok(
-      policy.classification.notExposed[id],
-      `missing native-only rationale: ${id}`,
-    );
+    assert.ok(reason, `missing native-only rationale: ${id}`);
     const [receiver, method] = id.split(".");
     assert.equal(
       Object.getOwnPropertyDescriptor(
-        receivers[receiver]?.prototype ?? {},
+        receivers[receiver].prototype,
         camelCase(method),
       ),
       undefined,
-      `native-only method unexpectedly exposed: ${id}`,
+      `unexpected shipped Node member for ${id}`,
     );
   }
 
@@ -136,7 +131,8 @@ test("the Node classification is total, frozen, and backed by non-skipped native
       continue;
     }
     assert.ok(
-      policy.classification.notExposedDefaults[receiver],
+      policy.classification.notExposed[id] ||
+        policy.classification.notExposedDefaults[receiver],
       `unclassified Rust release entry: ${id}`,
     );
     counts.notExposed += 1;

@@ -35,7 +35,7 @@ class ResearchInterchangeTests(unittest.TestCase):
                     },
                     "creator_uuid": identity(),
                     "created_at": 1,
-                    "label": "Portable research",
+                    "label": "portable-research",
                 }
             )
             target = {"kind": "version", "version_uuid": version}

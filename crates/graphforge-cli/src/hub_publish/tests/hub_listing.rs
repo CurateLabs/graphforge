@@ -149,6 +149,7 @@ fn clone_error(hub: &LoopbackHub, repository: &str, destination: &Path) -> GfErr
     run_clone_with(
         &hub.transport(),
         CloneArgs {
+            tag: None,
             hub: None,
             token_env: None,
             protection_bypass_env: None,

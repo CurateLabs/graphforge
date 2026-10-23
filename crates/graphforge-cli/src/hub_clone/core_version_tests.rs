@@ -134,6 +134,7 @@ fn clone_version(
             telemetry_endpoint: None,
             git_ref: None,
             version_uuid: None,
+            tag: None,
         },
         true,
         &mut output,

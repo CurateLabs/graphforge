@@ -256,17 +256,42 @@ must agree with an ID already in the document. Authored GraphForge IDs must use
 the canonical URI and the correct kind; legacy IDs and other-domain IRIs remain
 unchanged.
 
-`ontology module fetch OWNER/REPOSITORY --ontology-id ID --version VERSION
---digest HEX --output FILE [--hub URL]` retrieves one exact ontology module from
-a Hub repository without cloning it: it makes exactly three requests (`/.gf/refs`,
-`/.gf/manifest`, and the module's own package object) and never downloads the
-Project package or any graph data. It needs no project or repository, and is
-outside the four-surface multi-ontology contract, like `clone`. Pass the three
-parts of the module identity as separate flags, because ids and versions may
-contain `@` and `#`. `--digest` is the module's canonical content digest as 64
+`ontology module fetch REF --output FILE [--digest HEX] [--hub URL]` retrieves
+one verified ontology module without cloning a Project:
+
+```sh
+gf ontology module fetch ont_7k2m9x4q8r3t5v1w --output works.json
+gf ontology module fetch https://graphforge.sh/ont_7k2m9x4q8r3t5v1w --output works.json
+gf ontology module fetch ont_7k2m9x4q8r3t5v1w/2026.01 --output works.json
+```
+
+A bare ID or canonical URI resolves the current authored version. An
+`ID/VERSION` reference, or `--version VERSION` with an item reference, selects
+an exact authored version. Input folds ASCII case only. Bridge IDs are
+descriptive and cannot be fetched as module packages.
+
+The ID path requests a Core-owned `graphforge-item/1` descriptor with
+`Accept: application/vnd.graphforge.item+json`, then the retained repository
+refs and manifest pinned by its `discovery` digests, then the module package.
+It makes four requests and never downloads the Project package or graph data.
+Both metadata digests, the repository, resolved ref and its validator/target,
+and the exact module identity must agree before any package is downloaded.
+An exact version remains verifiable after current refs advance. Missing or
+stale snapshots fail closed; the client never substitutes current metadata.
+
+The existing `OWNER/REPOSITORY --ontology-id ID --version VERSION` form uses
+the same three requests as before (`/.gf/refs`, `/.gf/manifest`, and the module's
+package object). `--ontology-id` accepts a bare permanent ID and normalizes it
+to its canonical URI; custom and legacy identifiers keep their existing
+meaning. Pass IDs and authored versions separately when they contain `@` or
+`#`. An ambiguous repository advertisement requires an explicit digest.
+
+`--digest` is an optional pin to the module's canonical content digest as 64
 lowercase hexadecimal digits; a `sha256:` prefix is also accepted. It is neither
-the package digest nor the SHA-256 of the document file. `--hub` replaces the
-default `https://graphforge.sh` base for an `OWNER/REPOSITORY` name.
+the package digest nor the document file's SHA-256. `--hub` replaces the default
+`https://graphforge.sh` base for item references and owner/repository names;
+explicit repository URLs still name their own Hub. Fetch needs no open local
+Project and remains outside the four-surface multi-ontology contract, like clone.
 
 The fetch applies the same transport rules as `clone`: HTTPS only, no
 credentials, public-network addresses only (rechecked on redirects and DNS),
@@ -355,6 +380,43 @@ change). Messages never repeat the Hub's response body. Exit status 3
 
 `GF_UNSUPPORTED_FILESYSTEM` (exit 1) is a fix-input failure: clone onto a
 supported local volume.
+
+### Research history commands
+
+Git-style commands act on the Project's research history; `gf research ...` stays
+the namespace of the native JSON verbs they wrap ([ADR 0061](https://github.com/CurateLabs/graphforge/blob/main/docs/adr/0061-research-porcelain-and-ref-naming.md)).
+`--ref` always names a Branch by its label, which is also its ref on the Hub.
+
+| Command                                             | What it does                                                                                                     |
+| --------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `gf status [--branch REF]`                          | Current Branch, head Version, upstream, `ahead N` of the upstream head, tags on the head, warnings               |
+| `gf log [VERSION] [-n N] [--all] [--remote [REPO]]` | Newest-first history of the Branch, from a tag or Version, or the Hub's published lineage                        |
+| `gf commit -m MESSAGE (--query CYPHER \| --file F)` | Run the query against the Branch and record a Version; the message is its description                            |
+| `gf branch [NAME] [--from VERSION]`                 | List Branches, or create one (the first Branch starts from the Project's current research)                       |
+| `gf switch REF`                                     | Select the Branch the other commands act on                                                                      |
+| `gf tag [NAME [VERSION]] [-d NAME]`                 | List, create (default: the head) or delete tags; a tag never moves, delete and create again                      |
+| `gf push [REPO] [--ref REF] [--rewrite] [--prune]`  | `gf publish` of the Branch; the repository and ref default from its upstream, which a confirmed publication sets |
+| `gf pull [REPO] [--ref REF]`                        | Fetch the Hub's head of the ref and record a two-parent Version adopting every compatible change                 |
+| `gf clone REPO --tag NAME`                          | Clone the Version a published tag names                                                                          |
+| `gf config user [--name N] [--email E] [--orcid O]` | Set or show the credited author and committer (`$XDG_CONFIG_HOME/graphforge/config.toml`)                        |
+
+A command that records a Version credits an author and committer from
+`--author`/`--committer` (`Name <email>`), then `GF_AUTHOR`/`GF_COMMITTER`, then
+`gf config user`; the committer defaults to the author. The Branch a command acts on
+is `--branch`, then the one `gf switch` selected, then the Project's only Branch.
+Commands that record a Version take `--operation-uuid` (a UUIDv7); rerunning a
+command with it returns the original result. `gf push` and `gf pull` take the same
+`--hub`, `--token-env` and `--protection-bypass-env` as `gf clone`.
+
+| Code                                                                 | Class     | Meaning                                                                                      |
+| -------------------------------------------------------------------- | --------- | -------------------------------------------------------------------------------------------- |
+| `GF_RESEARCH_BRANCH_LABEL_INVALID`, `GF_RESEARCH_BRANCH_LABEL_TAKEN` | fix input | A Branch label must be a valid ref and unused in the Project                                 |
+| `GF_RESEARCH_BRANCH_UNSELECTED`                                      | fix input | Several Branches and none selected; run `gf switch REF`                                      |
+| `GF_RESEARCH_SIGNATURE_MISSING`                                      | fix input | No author configured; pass `--author`, set `GF_AUTHOR` or run `gf config user`               |
+| `GF_RESEARCH_TAG_EXISTS`                                             | fix input | The tag names another Version; delete it first                                               |
+| `GF_RESEARCH_TAG_CONFLICT`                                           | fix input | The Hub serves a tag on another Version than the local tag; delete the local tag, pull again |
+| `GF_HUB_TAG_CONFLICT`                                                | fix input | The Hub already serves the tag on another Version; publish with `--rewrite` to move it       |
+| `GF_RESEARCH_UPSTREAM_UNSET`                                         | fix input | The Branch has no upstream; name the repository                                              |
 
 Clone does not initialize or contact a telemetry exporter. Neither does module fetch. The future opt-in
 GraphForge OpenTelemetry lifecycle will remain Rust-owned and must not attach

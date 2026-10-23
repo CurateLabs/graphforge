@@ -133,6 +133,7 @@ mod tests {
         graph
             .create_research_branch(
                 &CreateResearchBranchRequest {
+                    description: None,
                     author: None,
                     committer: None,
                     operation_uuid: Uuid::now_v7(),
@@ -148,7 +149,7 @@ mod tests {
                     },
                     creator_uuid: author,
                     created_at: 1,
-                    label: "Citable study".into(),
+                    label: "Citable-study".into(),
                 },
                 &cancellation,
             )
@@ -166,6 +167,8 @@ mod tests {
         graph
             .execute_research_branch(
                 &ExecuteResearchBranchRequest {
+                    label: None,
+                    description: None,
                     author: None,
                     committer: None,
                     operation_uuid: Uuid::now_v7(),

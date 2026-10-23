@@ -305,6 +305,8 @@ fn ontology_changes_have_native_semantic_identity_and_local_provenance() {
     let candidate =
         graphforge_storage::WorkspaceOntologyComposition::from_compiled(&compiled, vec![]);
     let r = ChangeResearchBranchOntologyRequest {
+        label: None,
+        description: None,
         author: None,
         committer: None,
         operation_uuid: Uuid::now_v7(),
@@ -343,6 +345,7 @@ fn unrelated_parent_branch_reference_stays_outside_child_comparison() {
     g.execute("CREATE (:Item)").unwrap();
     let parent = branch(&mut g);
     let create = CreateResearchBranchRequest {
+        description: None,
         author: None,
         committer: None,
         operation_uuid: Uuid::now_v7(),

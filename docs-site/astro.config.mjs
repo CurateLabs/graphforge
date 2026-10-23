@@ -550,6 +550,10 @@ export default defineConfig({
                   slug: 'adr/0060-query-memory-handoffs',
                 },
                 {
+                  label: '0061 — Research porcelain and one meaning for a ref',
+                  slug: 'adr/0061-research-porcelain-and-ref-naming',
+                },
+                {
                   label: '0062 — Projects are named like repositories; ontologies and bridge sets have permanent IDs like gists',
                   slug: 'adr/0062-project-and-ontology-identity',
                 },

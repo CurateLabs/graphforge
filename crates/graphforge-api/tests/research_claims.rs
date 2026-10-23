@@ -84,6 +84,7 @@ fn canonical_parent_and_branch_decisions_are_explicit_independent_and_durable() 
     assert_eq!(current(&g), published);
     assert_eq!(count(&g), 1);
     let branch = CreateResearchBranchRequest {
+        description: None,
         author: None,
         committer: None,
         operation_uuid: Uuid::now_v7(),
@@ -96,7 +97,7 @@ fn canonical_parent_and_branch_decisions_are_explicit_independent_and_durable() 
         },
         creator_uuid: Uuid::now_v7(),
         created_at: 11,
-        label: "alternative interpretation".into(),
+        label: "alternative-interpretation".into(),
     };
     g.create_research_branch(&branch, &CancellationToken::new())
         .unwrap();
@@ -280,6 +281,7 @@ fn claim_provenance(g: &GraphForge, id: Uuid) -> Uuid {
 }
 fn create_branch(g: &mut GraphForge) -> Uuid {
     let request = CreateResearchBranchRequest {
+        description: None,
         author: None,
         committer: None,
         operation_uuid: Uuid::now_v7(),
@@ -292,7 +294,7 @@ fn create_branch(g: &mut GraphForge) -> Uuid {
         },
         creator_uuid: Uuid::now_v7(),
         created_at: 20,
-        label: "claims".into(),
+        label: format!("claims-{}", Uuid::now_v7()),
     };
     g.create_research_branch(&request, &CancellationToken::new())
         .unwrap();
@@ -795,6 +797,7 @@ fn child_inherits_frozen_suppression_while_sibling_and_parent_remain_visible() {
     g.change_research_branch_claim(&suppress, &CancellationToken::new())
         .unwrap();
     let child = CreateResearchBranchRequest {
+        description: None,
         author: None,
         committer: None,
         operation_uuid: Uuid::now_v7(),
@@ -806,7 +809,7 @@ fn child_inherits_frozen_suppression_while_sibling_and_parent_remain_visible() {
         },
         creator_uuid: Uuid::now_v7(),
         created_at: 40,
-        label: "Inherited suppression".into(),
+        label: "Inherited-suppression".into(),
     };
     g.create_research_branch(&child, &CancellationToken::new())
         .unwrap();
@@ -1105,4 +1108,24 @@ fn bring_selected_claim_keeps_classification_without_importing_source_authority(
         rows(g.research_decision_history(&context, None).unwrap()),
         1
     );
+}
+
+#[test]
+fn canonical_decisions_are_part_of_the_publication_content() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("project");
+    let mut g = GraphForge::new(root.to_str()).unwrap();
+    g.execute("CREATE (:ClaimSubject {name:'shared evidence'})")
+        .unwrap();
+    let before = g.publication_content_identity().unwrap();
+    let manifest = g.committed_generation_identity().unwrap().manifest_sha256;
+    // A decision moves no Branch head and no tag, yet it is published research.
+    let promote = request(&g, ResearchContext::Project, ResearchDecisionKind::Promote);
+    g.record_research_decisions(&promote, &CancellationToken::new())
+        .unwrap();
+    assert_ne!(
+        g.committed_generation_identity().unwrap().manifest_sha256,
+        manifest
+    );
+    assert_ne!(g.publication_content_identity().unwrap(), before);
 }

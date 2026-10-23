@@ -151,6 +151,27 @@ export const EXPORTS = {
     optional: [],
     predicate: true,
   },
+  validate_item_descriptor: {
+    args: [
+      {
+        format: "graphforge-item/1",
+        id: protocol.parse_item_id(module.ontology_id).id,
+        kind: "ontology_module",
+        repository: manifestObject.repository,
+        module: {
+          id: module.ontology_id,
+          version: module.version,
+          content_digest: module.content_digest,
+        },
+        discovery: {
+          refs_revision: protocol.validate_refs(refs).revision,
+          manifest_validator: protocol.validate_manifest(manifest).digest,
+        },
+      },
+      undefined,
+    ],
+    optional: [1],
+  },
   validate_manifest: { args: [manifest, undefined], optional: [1] },
   validate_refs: { args: [refs, undefined], optional: [1] },
   validate_summary: { args: [summary, undefined], optional: [1] },

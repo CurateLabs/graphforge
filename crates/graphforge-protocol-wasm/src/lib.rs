@@ -102,6 +102,18 @@ pub fn has_item_id_shape(name: &str) -> bool {
 
 // ------------------------------------------------------------------ discovery
 
+/// Parse and validate a permanent item descriptor without fetching module bytes.
+#[wasm_bindgen(unchecked_return_type = "ValidatedItemDescriptor")]
+pub fn validate_item_descriptor(
+    #[wasm_bindgen(unchecked_param_type = "JsonInput<ItemDescriptor>")] descriptor: &str,
+    #[wasm_bindgen(unchecked_optional_param_type = "DiscoveryLimitsOverride | null")]
+    limits: Option<String>,
+) -> Result<JsValue, JsValue> {
+    run(|| {
+        engine::validate_item_descriptor(descriptor.as_bytes(), resolve_limits(limits.as_deref())?)
+    })
+}
+
 /// Parse and validate a discovery manifest; returns its canonical form and digest.
 #[wasm_bindgen(unchecked_return_type = "ValidatedManifest")]
 pub fn validate_manifest(

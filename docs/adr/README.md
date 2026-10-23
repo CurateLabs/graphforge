@@ -65,6 +65,7 @@ Roadmap-only ADRs are not retained in this tree.
 | 0058 | [Initial builds run on a bulk builder derived from the published generation](0058-initial-builds-run-on-a-bulk-builder.md) | `0058-initial-builds-run-on-a-bulk-builder.md` |
 | 0059 | [Edge properties are read through a derived, authenticated shard index](0059-edge-properties-are-read-through-a-derived-shard-index.md) | `0059-edge-properties-are-read-through-a-derived-shard-index.md` |
 | 0060 | [Carry prepaid memory authority across reader handoffs](0060-query-memory-handoffs.md) | `0060-query-memory-handoffs.md` |
+| 0061 | [Research porcelain and one meaning for a ref](0061-research-porcelain-and-ref-naming.md) | `0061-research-porcelain-and-ref-naming.md` |
 | 0062 | [Projects are named like repositories; ontologies and bridge sets have permanent IDs like gists](0062-project-and-ontology-identity.md) | `0062-project-and-ontology-identity.md` |
 
 ## Superseded records

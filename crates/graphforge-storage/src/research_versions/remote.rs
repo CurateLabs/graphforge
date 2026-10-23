@@ -84,6 +84,7 @@ pub(super) fn activate_imported_branch(
     head_version_uuid: &Uuid,
     project_uuid: &Uuid,
     remote_branches: &[ResearchRemoteBranch],
+    tags: &BTreeMap<String, Uuid>,
 ) -> Result<Option<Uuid>, GfError> {
     let archive = registry
         .interchange
@@ -157,10 +158,53 @@ pub(super) fn activate_imported_branch(
     if !selected {
         return Err(invalid("selected Branch remote reference is absent"));
     }
+    for (name, target) in tags {
+        super::local_state::install_served_tag(registry, name, *target)?;
+    }
     registry.remote_branches.extend(references);
+    // A clone leaves the installed Branch selected for the porcelain verbs.
+    registry.current_branch = Some(*branch_uuid);
     registry.branches.insert(*branch_uuid, branch);
     registry.heads.insert(*branch_uuid, *head_version_uuid);
     Ok(Some(*head_version_uuid))
+}
+
+/// Record the head a Hub confirmed it serves for a local Branch's ref. The head
+/// must be the Branch's head or one of its ancestors, with the identity the
+/// registry committed to, and the ref must be the Branch's label.
+pub(super) fn record_published_branch(
+    registry: &mut ResearchRegistry,
+    reference: &ResearchRemoteBranch,
+) -> Result<(), GfError> {
+    let key = reference.key()?;
+    let branch = registry
+        .branches
+        .get(&reference.branch_uuid)
+        .ok_or_else(|| invalid("published-head record requires an existing local Branch"))?;
+    let head = registry
+        .heads
+        .get(&reference.branch_uuid)
+        .ok_or_else(|| invalid("published-head record requires a Branch head"))?;
+    let published = reference.head_version_uuid;
+    if branch.project_uuid != reference.project_uuid
+        || branch.label != reference.ref_name
+        || (published != *head && !registry.ancestors(*head).contains(&published))
+        || registry.identities.get(&published) != Some(&reference.identity_sha256)
+        || registry.remote_branches.get(&key).is_some_and(|old| {
+            old.project_uuid != reference.project_uuid || old.branch_uuid != reference.branch_uuid
+        })
+    {
+        return Err(invalid(
+            "published head differs from native Branch authority",
+        ));
+    }
+    if registry.remote_branches.len() >= MAX_CONTEXTS
+        && !registry.remote_branches.contains_key(&key)
+    {
+        return Err(invalid("remote Branch reference capacity exceeded"));
+    }
+    registry.remote_branches.insert(key, reference.clone());
+    Ok(())
 }
 
 #[cfg(test)]

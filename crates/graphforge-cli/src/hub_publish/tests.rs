@@ -25,15 +25,18 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 mod ancestor_publication;
+mod composition_proof;
 mod core_version_warning;
 mod credit;
 mod hub_listing;
 mod id_taken;
+mod porcelain;
 mod producing_version;
 use hub_listing::serve_lineage;
 mod remote_fetch;
 mod rewrite_prune;
 mod selection;
+mod tags;
 use credit::edit_by;
 use selection::{args, on_ref};
 
@@ -448,6 +451,7 @@ fn create_branch(graph: &mut GraphForge, label: &str, source: BranchSource) -> (
     graph
         .create_research_branch(
             &CreateResearchBranchRequest {
+                description: None,
                 author: None,
                 committer: None,
                 operation_uuid: Uuid::now_v7(),
@@ -477,6 +481,8 @@ fn edit(graph: &mut GraphForge, branch_uuid: Uuid, score: i64) -> Uuid {
     graph
         .execute_research_branch(
             &ExecuteResearchBranchRequest {
+                label: None,
+                description: None,
                 author: None,
                 committer: None,
                 operation_uuid: Uuid::now_v7(),
@@ -638,6 +644,7 @@ fn clone_into(
     run_clone_with(
         &hub.transport(),
         CloneArgs {
+            tag: None,
             hub: None,
             token_env: None,
             protection_bypass_env: None,
@@ -2308,6 +2315,7 @@ fn assert_rehomed_clones(hub: &LoopbackHub, history: &History) {
             run_clone_with(
                 &hub.transport(),
                 CloneArgs {
+                    tag: None,
                     hub: Some(HUB.into()),
                     token_env: None,
                     protection_bypass_env: None,
@@ -2354,6 +2362,7 @@ fn assert_rehomed_clones(hub: &LoopbackHub, history: &History) {
     run_clone_with(
         &hub.transport(),
         CloneArgs {
+            tag: None,
             hub: Some(HUB.into()),
             token_env: None,
             protection_bypass_env: None,

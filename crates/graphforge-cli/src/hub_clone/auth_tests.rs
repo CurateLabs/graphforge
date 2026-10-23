@@ -31,7 +31,7 @@ fn credentials() -> DiscoveryCredentials {
 
 /// Route public virtual origins to a local HTTP server only after the fetcher
 /// performs the real URL validation. DNS/socket routing is the only test seam.
-struct NativeTransport {
+pub(super) struct NativeTransport {
     http: HttpTransport,
     port: u16,
 }
@@ -40,6 +40,7 @@ impl NativeTransport {
     fn route(&self, url: &Url) -> Url {
         let mut routed = Url::parse(&format!("http://127.0.0.1:{}", self.port)).unwrap();
         routed.set_path(url.path());
+        routed.set_query(url.query());
         routed
     }
 }
@@ -65,14 +66,14 @@ impl Transport for NativeTransport {
     }
 }
 
-struct Reply {
+pub(super) struct Reply {
     status: u16,
     location: Option<String>,
     body: Vec<u8>,
 }
 
 impl Reply {
-    fn ok(body: &[u8]) -> Self {
+    pub(super) fn ok(body: &[u8]) -> Self {
         Self {
             status: 200,
             location: None,
@@ -81,7 +82,9 @@ impl Reply {
     }
 }
 
-fn server(replies: Vec<Reply>) -> (NativeTransport, std::thread::JoinHandle<Vec<String>>) {
+pub(super) fn server(
+    replies: Vec<Reply>,
+) -> (NativeTransport, std::thread::JoinHandle<Vec<String>>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     listener.set_nonblocking(true).unwrap();
@@ -329,6 +332,7 @@ fn transient_discovery_retry_reauthenticates_only_the_initial_request() {
 
 fn clone_args(destination: &Path) -> CloneArgs {
     CloneArgs {
+        tag: None,
         repository: "opendata/openalex".into(),
         hub: Some("https://hub.example".into()),
         token_env: Some("HUB_TOKEN".into()),

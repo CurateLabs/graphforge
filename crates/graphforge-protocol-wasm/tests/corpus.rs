@@ -28,7 +28,7 @@ fn limits(case: &Value) -> DiscoveryLimits {
 fn discovery_corpus_yields_the_recorded_native_outcome() {
     let corpus: Value = serde_json::from_str(DISCOVERY).unwrap();
     let cases = corpus["cases"].as_array().unwrap();
-    assert_eq!(cases.len(), 99);
+    assert_eq!(cases.len(), 100);
     for case in cases {
         let name = case["name"].as_str().unwrap();
         let bytes = case["json"].as_str().unwrap().as_bytes();

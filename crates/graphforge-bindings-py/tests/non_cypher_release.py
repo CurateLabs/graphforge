@@ -27,8 +27,8 @@ production_source = runpy.run_path(str(Path(__file__).with_name("native_sources.
     "production_source"
 ]
 PYO3_SOURCE = ROOT / "crates/graphforge-bindings-py/src/lib.rs"
-EXPECTED_RUST_DIGEST = "4ba0248bc4f1b1bb53941c771eeabdbbe939a721d381fbd2e9ab775b17460f57"
-EXPECTED_RELEASE_DIGEST = "f28182bfc8f106f1437496c90ec0cc2e7d46984fb4cbdca35aa2df9e22e3ecce"
+EXPECTED_RUST_DIGEST = "1f398c1d2d79113b219cbc0800baf821e85cd5adc0550445e13e5284b2caa965"
+EXPECTED_RELEASE_DIGEST = "50f913474794c2254de7b87f4705a5d250ce3376918255f92b91a754116097cf"
 
 PYTHON_ONLY_METHODS = frozenset(
     {
@@ -290,7 +290,7 @@ def _classification_report() -> dict[str, object]:
         for group in manifest["method_evidence_groups"].values()
         for method_id in group["ids"]
     }
-    assert len(release_methods) == 360
+    assert len(release_methods) == 367
     assert _digest(release_methods) == EXPECTED_RELEASE_DIGEST
     assert set(EVIDENCE) == set(manifest["method_evidence_groups"])
 
@@ -418,12 +418,21 @@ def _classification_report() -> dict[str, object]:
         elif rust_id == "GraphForge.fetch_research_branch":
             classification = "not-exposed"
             reason = "verified remote fetch is native filesystem and discovery admission"
-        elif rust_id == "GraphForge.continue_imported_research_branch":
+        elif rust_id in {
+            "GraphForge.continue_imported_research_branch",
+            "GraphForge.continue_imported_research_tags",
+        }:
             classification = "not-exposed"
             reason = "verified discovery activation is owned by the native CLI import boundary"
         elif rust_id == "GraphForge.publication_payload_bytes":
             classification = "not-exposed"
             reason = "native filesystem sizing is a Rust/CLI publication preflight diagnostic"
+        elif rust_id in {
+            "GraphForge.portable_ontology_composition",
+            "GraphForge.research_version_portable_ontology_composition",
+        }:
+            classification = "not-exposed"
+            reason = "bounded ontology composition inspection is native CLI publication admission"
         elif rust_id == "GraphImportSession.operation_timings":
             classification = "not-exposed"
             reason = "per-operation timing observations are Rust/CLI diagnostics"
@@ -470,6 +479,12 @@ def _classification_report() -> dict[str, object]:
     assert classifications["GraphForge.execute_saved_query"]["classification"] == "equivalent"
     assert classifications["GraphForge.execute_saved_query_json"]["classification"] == "not-exposed"
     assert classifications["GraphForge.execute_saved_query_json"]["python_id"] == ""
+    for method in (
+        "GraphForge.portable_ontology_composition",
+        "GraphForge.research_version_portable_ontology_composition",
+    ):
+        assert classifications[method]["classification"] == "not-exposed"
+        assert classifications[method]["python_id"] == ""
     assert classifications["GraphForge.saved_query_at"]["python_id"] == "GraphForge.saved_query"
     assert classifications["GraphForge.saved_queries_at"]["python_id"] == "GraphForge.saved_queries"
     assert classifications["DecisionBatchV1.validate"] == {

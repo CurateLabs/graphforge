@@ -28,7 +28,7 @@ test("native upstream review advances only the selected baseline and replays its
       },
       creator_uuid: identity(),
       created_at: 1,
-      label: "Upstream review",
+      label: "upstream-review",
     });
     await graph.execute("MATCH (n:Item) SET n.x=1,n.y=2");
     const previewRequest = { branch_uuid: branch, scope: { kind: "branch" } };

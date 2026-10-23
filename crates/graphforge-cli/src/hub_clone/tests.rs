@@ -393,6 +393,7 @@ fn dangling_destination_symlink_is_a_conflict() {
     let error = run_clone_with(
         &transport,
         CloneArgs {
+            tag: None,
             hub: None,
             token_env: None,
             protection_bypass_env: None,
@@ -489,6 +490,7 @@ fn research_ref_without_lineage_stops_before_project_download() {
     let error = run_clone_with(
         &transport,
         CloneArgs {
+            tag: None,
             hub: None,
             token_env: None,
             protection_bypass_env: None,
@@ -547,6 +549,7 @@ fn unsupported_future_manifest_stops_before_object_access() {
     let error = run_clone_with(
         &transport,
         CloneArgs {
+            tag: None,
             hub: None,
             token_env: None,
             protection_bypass_env: None,
@@ -608,6 +611,7 @@ fn retired_capability_name_stops_before_object_access() {
     let error = run_clone_with(
         &transport,
         CloneArgs {
+            tag: None,
             hub: None,
             token_env: None,
             protection_bypass_env: None,
@@ -772,6 +776,7 @@ fn clone_succeeds_against_the_checked_in_hub_fixture() {
     run_clone_with(
         &transport,
         CloneArgs {
+            tag: None,
             hub: None,
             token_env: None,
             protection_bypass_env: None,
@@ -845,6 +850,7 @@ fn interrupted_clone_retains_resumed_and_transferred_bytes_once() {
     let error = run_clone_profiled(
         &transport,
         CloneArgs {
+            tag: None,
             hub: None,
             token_env: None,
             protection_bypass_env: None,
@@ -934,6 +940,7 @@ fn invalid_clone_emits_one_normalized_terminal_without_identity() {
     let error = run_clone_profiled(
         &Scripted::new(vec![]),
         CloneArgs {
+            tag: None,
             hub: None,
             token_env: None,
             protection_bypass_env: None,
@@ -1105,6 +1112,7 @@ fn both_identity_forms_import_and_reopen_the_same_real_project() {
         run_clone_profiled_with_delays(
             &transport,
             CloneArgs {
+                tag: None,
                 hub: None,
                 token_env: None,
                 protection_bypass_env: None,
@@ -1254,6 +1262,7 @@ fn measure_clone_wall_time() {
         run_clone_profiled(
             &transport,
             CloneArgs {
+                tag: None,
                 hub: None,
                 token_env: None,
                 protection_bypass_env: None,

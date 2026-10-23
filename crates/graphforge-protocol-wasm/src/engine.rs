@@ -10,7 +10,7 @@
 use graphforge_discovery::preview::{self, PreviewDescriptor, PreviewError};
 use graphforge_discovery::{
     DiscoveryError, DiscoveryLimits, DiscoveryManifest, DiscoveryVersionDetails, ExactIdentity,
-    ItemId, ItemKind, LineageVersion, ObjectDescriptor, ObjectLocationTemplate,
+    ItemDescriptor, ItemId, ItemKind, LineageVersion, ObjectDescriptor, ObjectLocationTemplate,
     OntologyModuleDescriptor, ProjectSummary, RefSet, RehomedRepository, RepositoryIdentity,
     RepositoryMoved, RepositorySnapshot, ResearchLineage, Sha256Digest,
 };
@@ -212,6 +212,23 @@ fn canonical_text(bytes: Vec<u8>) -> Outcome<String> {
 }
 
 // ------------------------------------------------------------------ discovery
+
+/// A validated permanent item descriptor.
+#[derive(Serialize, Tsify)]
+pub struct ValidatedItemDescriptor {
+    /// The parsed descriptor; its identity fields are canonical and consistent.
+    pub document: ItemDescriptor,
+}
+
+/// Parse and validate a bounded permanent item descriptor.
+pub fn validate_item_descriptor(
+    bytes: &[u8],
+    limits: DiscoveryLimits,
+) -> Outcome<ValidatedItemDescriptor> {
+    Ok(ValidatedItemDescriptor {
+        document: ItemDescriptor::from_json(bytes, limits)?,
+    })
+}
 
 /// A validated manifest with its canonical form and validator.
 #[derive(Serialize, Tsify)]

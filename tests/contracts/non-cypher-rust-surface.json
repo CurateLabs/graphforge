@@ -1,7 +1,7 @@
 {
   "contract_version": 1,
   "scope": "Rust non-Cypher public release surface",
-  "public_method_digest": "4ba0248bc4f1b1bb53941c771eeabdbbe939a721d381fbd2e9ab775b17460f57",
+  "public_method_digest": "1f398c1d2d79113b219cbc0800baf821e85cd5adc0550445e13e5284b2caa965",
   "method_policy": {
     "receiver_defaults": {
       "PortableImportResult": "release-tested",
@@ -1087,8 +1087,10 @@
     "portable-facade": {
       "ids": [
         "GraphForge.export_portable",
+        "GraphForge.portable_ontology_composition",
         "GraphForge.preview_portable_graph_subset",
         "GraphForge.preview_portable_selection",
+        "GraphForge.research_version_portable_ontology_composition",
         "PortableImportResult.transient_peak_allocated_bytes",
         "PortableExportFacadeResult.receipt",
         "crate.verify_discovered_portable",
@@ -1099,6 +1101,7 @@
         "crate.summarize_verified_portable",
         "crate.resolve_discovered_ontology_module",
         "GraphForge.continue_imported_research_branch",
+        "GraphForge.continue_imported_research_tags",
         "crate.read_committed_generation_identity",
         "GraphForge.fetch_research_branch",
         "GraphForge.id_taken_receipt",
@@ -1106,6 +1109,10 @@
         "GraphForge.record_publish_id_taken"
       ],
       "test_refs": [
+        {
+          "path": "crates/graphforge-cli/src/hub_publish/tests/composition_proof.rs",
+          "symbol": "matching_composition_inspection_preserves_replay_and_staging"
+        },
         {
           "path": "crates/graphforge-api/src/portable.rs",
           "symbol": "public_v2_export_preview_and_verify_agree_on_package_digest"
@@ -1161,6 +1168,10 @@
         {
           "path": "crates/graphforge-cli/src/hub_publish/tests/remote_fetch.rs",
           "symbol": "verified_same_branch_fetch_preserves_local_head_workspace_and_exact_receipt_replay"
+        },
+        {
+          "path": "crates/graphforge-cli/src/hub_clone/research_clone_tests.rs",
+          "symbol": "version_clone_tag_publications_resume_and_preserve_advanced_staging"
         },
         {
           "path": "crates/graphforge-api/src/item_refusals/tests.rs",
@@ -1247,9 +1258,13 @@
         "GraphForge.create_research_branch",
         "GraphForge.execute_research_branch",
         "GraphForge.open_research_branch",
+        "GraphForge.publication_content_identity",
+        "GraphForge.record_research_publication",
         "GraphForge.reference_research_branch",
         "GraphForge.research_branch_selection",
         "GraphForge.restore_research_branch",
+        "GraphForge.select_research_branch",
+        "GraphForge.set_research_tag",
         "GraphForge.suppress_research_branch_assertion",
         "ResearchBranchView.fields",
         "ResearchBranchView.graph",
@@ -1309,6 +1324,22 @@
         {
           "path": "crates/graphforge-cli/tests/research_journey.rs",
           "symbol": "two_story_cli_research_survives_partial_review_restore_and_interchange"
+        },
+        {
+          "path": "crates/graphforge-api/tests/branches.rs",
+          "symbol": "current_branch_and_tags_persist_through_the_native_operations"
+        },
+        {
+          "path": "crates/graphforge-cli/src/hub_publish/tests/porcelain.rs",
+          "symbol": "publication_record_is_bound_to_the_asserted_documents"
+        },
+        {
+          "path": "crates/graphforge-api/tests/branches.rs",
+          "symbol": "publication_content_identity_tracks_what_is_published"
+        },
+        {
+          "path": "crates/graphforge-api/tests/research_claims.rs",
+          "symbol": "canonical_decisions_are_part_of_the_publication_content"
         }
       ]
     },

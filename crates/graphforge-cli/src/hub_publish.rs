@@ -169,13 +169,44 @@ fn select_credential(
 }
 
 /// Published result written to stdout.
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, PartialEq)]
 pub(crate) struct PublishOutcome {
     /// Original Hub receipt.
     pub receipt: PublishReceipt,
     /// Whether this run replayed a committed operation without any upload.
     pub replayed: bool,
     pub moved: Option<graphforge_discovery::RepositoryMoved>,
+    /// The Branch head the Hub's receipt confirmed; absent for a Version publication.
+    pub published: Option<PublishedHead>,
+}
+
+/// A Branch published under its ref.
+#[derive(Debug, PartialEq)]
+pub(crate) struct PublishedHead {
+    pub branch_uuid: Uuid,
+    /// The Version this publication named as the ref's head.
+    pub version_uuid: Uuid,
+    /// Canonical HTTPS repository URL, the key of the local remote Branch citation.
+    pub repository_url: String,
+    /// The documents the Hub's receipt commits to; absent when they are no longer
+    /// available (the repository moved on since a replayed publication).
+    pub documents: Option<(DiscoveryManifest, ResearchLineage)>,
+}
+
+impl PublishedHead {
+    /// Attach the documents when they are the ones `receipt` commits to.
+    fn confirmed_by(
+        mut self,
+        receipt: &PublishReceipt,
+        manifest: &DiscoveryManifest,
+        lineage: &ResearchLineage,
+    ) -> Self {
+        self.documents = manifest
+            .canonical_digest()
+            .is_ok_and(|digest| digest.0 == receipt.manifest_validator)
+            .then(|| (manifest.clone(), lineage.clone()));
+        self
+    }
 }
 
 /// Dispatch the Hub commands, `gf clone` and `gf publish`.
@@ -227,12 +258,22 @@ fn run_command(
     output: &mut dyn Write,
     diagnostics: &mut crate::Diagnostics<'_>,
 ) -> Result<(), GfError> {
-    use std::io::IsTerminal as _;
-    let streaming = DEVICE_FLOW_ALLOWED.load(Ordering::Relaxed);
-    let interactive =
-        streaming && std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
+    run_command_with_token_env(args, None, project, project_dir, json, output, diagnostics)
+}
+
+/// `gf publish` and `gf push`: `token_env` names the variable holding the publish
+/// token, otherwise `GRAPHFORGE_HUB_PUBLISH_TOKEN` is read.
+pub(crate) fn run_command_with_token_env(
+    args: &PublishArgs,
+    token_env: Option<&str>,
+    project: Option<PathBuf>,
+    project_dir: Option<PathBuf>,
+    json: bool,
+    output: &mut dyn Write,
+    diagnostics: &mut crate::Diagnostics<'_>,
+) -> Result<(), GfError> {
     // Locations and arguments are validated before any credential or network use.
-    let (identity, base) = parse_input(&args.repository)?;
+    let (_, base) = parse_input(&args.repository)?;
     if let Some(origin) = &args.fork_of {
         parse_input(origin)?;
     }
@@ -242,15 +283,61 @@ fn run_command(
         args.protection_bypass_env.as_deref(),
         |name| std::env::var(name),
     )?;
-    let explicit = PublishToken::from_env();
-    if explicit.is_none() && !streaming {
+    let explicit = publish_token(token_env)?;
+    let path = crate::resolve_project_path(project, project_dir)?;
+    let path = path
+        .to_str()
+        .ok_or_else(|| GfError::Validation("--project must be valid UTF-8".into()))?;
+    let transport = crate::hub_http::HubTransport::new();
+    publish_with_credentials(&transport, args, explicit, bypass.as_ref(), |environment| {
+        open_and_publish(
+            &transport,
+            path,
+            args,
+            environment,
+            json,
+            output,
+            diagnostics,
+        )
+    })
+}
+
+/// The publish token the process supplies: the variable `token_env` names, else
+/// `GRAPHFORGE_HUB_PUBLISH_TOKEN`. Without one, only a terminal can authorize.
+pub(crate) fn publish_token(token_env: Option<&str>) -> Result<Option<PublishToken>, GfError> {
+    let explicit = match token_env {
+        Some(name) => Some(PublishToken::new(std::env::var(name).map_err(|_| {
+            publish_error(
+                HubPublishErrorCode::AuthDenied,
+                "the --token-env variable is unset or not UTF-8",
+            )
+        })?)),
+        None => PublishToken::from_env(),
+    };
+    if explicit.is_none() && !DEVICE_FLOW_ALLOWED.load(Ordering::Relaxed) {
         return Err(publish_error(
             HubPublishErrorCode::AuthDenied,
             "no publish credential: set GRAPHFORGE_HUB_PUBLISH_TOKEN or run gf publish in a terminal",
         ));
     }
-    let transport = crate::hub_http::HubTransport::new();
-    let resolution = resolve_publication(&transport, &identity, &base, bypass.as_ref())?;
+    Ok(explicit)
+}
+
+/// The publish flow behind `gf publish` and `gf push` over one transport: resolve
+/// the repository, obtain a credential, publish and report.
+pub(crate) fn publish_with_credentials(
+    transport: &dyn Transport,
+    args: &PublishArgs,
+    explicit: Option<PublishToken>,
+    bypass: Option<&crate::hub_http::DiscoveryCredentials>,
+    publish_with: impl FnOnce(&mut PublishEnvironment<'_>) -> Result<(), GfError>,
+) -> Result<(), GfError> {
+    use std::io::IsTerminal as _;
+    let streaming = DEVICE_FLOW_ALLOWED.load(Ordering::Relaxed);
+    let interactive =
+        streaming && std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
+    let (identity, base) = parse_input(&args.repository)?;
+    let resolution = resolve_publication(transport, &identity, &base, bypass)?;
     let (identity, base) = (resolution.identity.clone(), resolution.base.clone());
     let credential = select_credential(explicit, streaming, interactive, || {
         let grant = crate::auth::repository_token(
@@ -272,28 +359,16 @@ fn run_command(
             })
             .transpose()
     })?;
-    let path = crate::resolve_project_path(project, project_dir)?;
-    let path = path
-        .to_str()
-        .ok_or_else(|| GfError::Validation("--project must be valid UTF-8".into()))?;
     let stderr = std::io::stderr();
     let mut notices = stderr.lock();
     let mut environment = PublishEnvironment {
-        bypass: bypass.as_ref(),
+        bypass,
         credential,
         wait: &std::thread::sleep,
         notices: &mut notices,
         resolution: Some(resolution),
     };
-    open_and_publish(
-        &transport,
-        path,
-        args,
-        &mut environment,
-        json,
-        output,
-        diagnostics,
-    )
+    publish_with(&mut environment)
 }
 
 /// Open the Project and publish it. A Core version warning from the open is
@@ -308,10 +383,115 @@ fn open_and_publish(
     output: &mut dyn Write,
     diagnostics: &mut crate::Diagnostics<'_>,
 ) -> Result<(), GfError> {
-    let graph = GraphForge::new(Some(path))?;
+    let mut graph = GraphForge::new(Some(path))?;
     diagnostics.warn(&graph.open_warnings());
-    let outcome = publish(transport, &graph, args, environment)?;
+    publish_and_report(transport, &mut graph, args, environment, json, output)
+}
+
+/// Publish an open Project, record what the Hub confirmed, and report it.
+pub(crate) fn publish_and_report(
+    transport: &dyn Transport,
+    graph: &mut GraphForge,
+    args: &PublishArgs,
+    environment: &mut PublishEnvironment<'_>,
+    json: bool,
+    output: &mut dyn Write,
+) -> Result<(), GfError> {
+    let outcome =
+        publish_with_operation_report(transport, graph, args, environment, |operation| {
+            if !json {
+                writeln!(output, "Operation UUID: {operation}")
+                    .and_then(|()| output.flush())
+                    .map_err(|error| GfError::Storage(error.to_string()))?;
+            }
+            Ok(())
+        })?;
+    record_upstream(graph, transport, args, &outcome)?;
     write_outcome(&outcome, json, output)
+}
+
+/// A Branch whose publication the Hub confirmed tracks that repository and ref:
+/// the remote citation clone and fetch maintain records the published head. A
+/// refused or failed publication never reaches this, and a citation the Project
+/// already holds is left alone, so repeating a completed publication writes nothing.
+///
+/// A replayed publication carries no documents (the replay derives none). When the
+/// Project does not track the head it published, which is the case after an
+/// interrupted run whether or not an earlier head is tracked, the served documents
+/// are read and used if they still are the ones the receipt commits to; a
+/// repository that cannot be read or has moved on records nothing.
+fn record_upstream(
+    graph: &mut GraphForge,
+    transport: &dyn Transport,
+    args: &PublishArgs,
+    outcome: &PublishOutcome,
+) -> Result<(), GfError> {
+    let Some(head) = &outcome.published else {
+        return Ok(());
+    };
+    let documents = match &head.documents {
+        Some(documents) => documents.clone(),
+        None if outcome.replayed => {
+            // Nothing to recover when the Project already tracks this very head.
+            let tracked = graph
+                .research_version_retention()?
+                .remote_branches
+                .values()
+                .any(|citation| {
+                    citation.branch_uuid == head.branch_uuid
+                        && citation.repository_url == head.repository_url
+                        && citation.head_version_uuid == head.version_uuid
+                });
+            if tracked {
+                return Ok(());
+            }
+            let served = crate::hub_clone::remote_read::read_remote(
+                transport,
+                &crate::hub_clone::remote_read::RemoteRequest {
+                    repository: &head.repository_url,
+                    hub: None,
+                    token_env: None,
+                    protection_bypass_env: args.protection_bypass_env.as_deref(),
+                },
+                None,
+            );
+            let Ok((served, _)) = served else {
+                return Ok(());
+            };
+            let Some(documents) = PublishedHead {
+                branch_uuid: head.branch_uuid,
+                version_uuid: head.version_uuid,
+                repository_url: head.repository_url.clone(),
+                documents: None,
+            }
+            .confirmed_by(&outcome.receipt, &served.manifest, &served.lineage)
+            .documents
+            else {
+                return Ok(());
+            };
+            documents
+        }
+        None => return Ok(()),
+    };
+    graph
+        .record_research_publication(
+            &graphforge_api::RecordResearchPublicationRequest {
+                operation_uuid: Uuid::now_v7(),
+                expected_generation_uuid: graph.committed_generation_identity()?.generation_uuid,
+                branch_uuid: head.branch_uuid,
+                repository_url: head.repository_url.clone(),
+                receipt: outcome.receipt.clone(),
+                manifest: documents.0,
+                lineage: documents.1,
+            },
+            &CancellationToken::new(),
+        )
+        .map(|_| ())
+        .map_err(|error| {
+            GfError::Validation(format!(
+                "the Hub confirmed the publication, but recording it as the Branch's upstream failed ({error}); rerun the same command to retry"
+            ))
+        })
 }
 
 pub(crate) fn write_outcome(
@@ -760,6 +940,10 @@ struct Selection {
     /// generation (`source_generation`), so the Project package changes exactly
     /// when the generation does, and exports of one generation are identical.
     project_content: String,
+    /// What the publication is made of, without the tracking state a publication
+    /// writes about itself. The intent binds this, so a rerun of a completed
+    /// publication is a replay even though recording it moved CURRENT.
+    publication_content: String,
 }
 
 fn hex_digest(bytes: &[u8; 32]) -> Sha256Digest {
@@ -818,6 +1002,7 @@ fn select(graph: &GraphForge, args: &PublishArgs) -> Result<Selection, GfError> 
         identity: hex_digest(identity),
         project_uuid: reference.project_uuid,
         project_content: project_content(graph)?,
+        publication_content: hex_digest(&graph.publication_content_identity()?).0,
     })
 }
 
@@ -863,7 +1048,7 @@ fn intent_digest(
         "version_uuid": selection.version_uuid.to_string(),
         "version_identity": selection.identity.0,
         "project_uuid": selection.project_uuid.to_string(),
-        "project_content": selection.project_content,
+        "project_content": selection.publication_content,
         "fork_of": fork_of.map(RepositoryIdentity::canonical_name),
     })))
 }
@@ -1183,6 +1368,46 @@ fn adopt_verified_credit(
     Ok(())
 }
 
+/// Prune unreferenced history; a tag on pruned history goes with it.
+fn prune_history(next: &mut ResearchLineage) {
+    graphforge_hub_publish::prune_unreferenced_history(next);
+    let kept: BTreeSet<_> = next
+        .versions
+        .iter()
+        .map(|version| version.version_uuid.clone())
+        .collect();
+    next.tags.retain(|tag| kept.contains(&tag.version_uuid));
+}
+
+/// Served tags are never removed. A local tag on another Version than the served
+/// one is a moved tag: a non-fast-forward unless the publisher rewrites history.
+fn merge_tags(
+    previous: &ResearchLineage,
+    next: &mut ResearchLineage,
+    rewrite: bool,
+) -> Result<(), GfError> {
+    let mut tags: BTreeMap<String, _> = previous
+        .tags
+        .iter()
+        .map(|tag| (tag.name.clone(), tag.clone()))
+        .collect();
+    for tag in next.tags.drain(..) {
+        if !rewrite
+            && tags
+                .get(&tag.name)
+                .is_some_and(|served| served.version_uuid != tag.version_uuid)
+        {
+            return Err(GfError::Validation(format!(
+                "GF_HUB_TAG_CONFLICT: the repository already serves tag '{}' on another Version; publish with --rewrite to move it",
+                tag.name
+            )));
+        }
+        tags.insert(tag.name.clone(), tag);
+    }
+    next.tags = tags.into_values().collect();
+    Ok(())
+}
+
 fn merge_lineage(
     previous: Option<&ResearchLineage>,
     mut next: ResearchLineage,
@@ -1272,6 +1497,7 @@ fn merge_lineage(
     next.versions = versions.into_values().collect();
     next.branches = branches.into_values().collect();
     next.proposals.clone_from(&previous.proposals);
+    merge_tags(previous, &mut next, rewrite)?;
     let refs = next
         .branches
         .iter()
@@ -1280,7 +1506,7 @@ fn merge_lineage(
         .into_iter()
         .collect::<Vec<_>>();
     if prune {
-        graphforge_hub_publish::prune_unreferenced_history(&mut next);
+        prune_history(&mut next);
     }
     graphforge_hub_publish::validate_history_transition(
         previous,
@@ -1813,15 +2039,52 @@ fn check_receipt(
     Ok(())
 }
 
+/// Refuse to advertise current ontology controls for a different frozen Version.
+fn check_ontology_composition(graph: &GraphForge, selection: &Selection) -> Result<(), GfError> {
+    let current = graph
+        .portable_ontology_composition(PortableLimits::default())
+        .map_err(|error| derivation(&error.to_string()))?;
+    let selected = graph
+        .research_version_portable_ontology_composition(
+            selection.version_uuid,
+            PortableLimits::default(),
+        )
+        .map_err(|error| derivation(&error.to_string()))?;
+    // The export control contains sorted exact module/bridge identities and the
+    // portable digest, including activation profiles; an inventory fingerprint
+    // alone would miss profile-only changes.
+    if current != selected {
+        return Err(validation(
+            "hub.publish.ontology_composition_mismatch",
+            &format!(
+                "workspace ontology composition differs from selected Version {}; check out that Version, or commit the ontology changes as a new Version and publish the current Branch head",
+                selection.version_uuid
+            ),
+        ));
+    }
+    Ok(())
+}
+
 /// Publish one research Version (or Branch head) of `graph`.
+#[cfg(test)]
 pub(crate) fn publish(
     transport: &dyn Transport,
     graph: &GraphForge,
     args: &PublishArgs,
     environment: &mut PublishEnvironment<'_>,
 ) -> Result<PublishOutcome, GfError> {
+    publish_with_operation_report(transport, graph, args, environment, |_| Ok(()))
+}
+
+fn publish_with_operation_report(
+    transport: &dyn Transport,
+    graph: &GraphForge,
+    args: &PublishArgs,
+    environment: &mut PublishEnvironment<'_>,
+    report: impl FnMut(Uuid) -> Result<(), GfError>,
+) -> Result<PublishOutcome, GfError> {
     let captured = refusals::Capture::default();
-    let result = publish_inner(transport, graph, args, environment, &captured);
+    let result = publish_inner(transport, graph, args, environment, &captured, report);
     if result.is_err()
         && let Some((version, items)) = captured.take()
     {
@@ -1837,6 +2100,7 @@ fn publish_inner(
     args: &PublishArgs,
     environment: &mut PublishEnvironment<'_>,
     captured: &refusals::Capture,
+    mut report: impl FnMut(Uuid) -> Result<(), GfError>,
 ) -> Result<PublishOutcome, GfError> {
     let (identity, base) = parse_input(&args.repository)?;
     let fork = args.fork_of.as_deref().map(parse_input).transpose()?;
@@ -1858,6 +2122,7 @@ fn publish_inner(
             )
         })?;
     let selection = select(graph, args)?;
+    check_ontology_composition(graph, &selection)?;
     captured.select(selection.version_uuid);
     let previews = select_previews(args, selection.version_uuid)?;
     let preview_metadata = previews
@@ -1865,10 +2130,10 @@ fn publish_inner(
         .map(|p| p.descriptor.clone())
         .collect::<Vec<_>>();
     let operation_content = if previews.is_empty() {
-        selection.project_content.clone()
+        selection.publication_content.clone()
     } else {
         sha256_digest(&canonical_json(
-            &json!({"project_content":selection.project_content,"previews":preview_metadata}),
+            &json!({"project_content":selection.publication_content,"previews":preview_metadata}),
         ))
     };
     let operation_content = history::bind_flags(operation_content, args);
@@ -1891,6 +2156,19 @@ fn publish_inner(
         capabilities,
         ..
     } = resolution;
+    let confirmed = selection
+        .branch_uuid
+        .map(|branch_uuid| PublishedHead {
+            branch_uuid,
+            version_uuid: selection.version_uuid,
+            repository_url: format!(
+                "{}/{}",
+                base.origin().ascii_serialization(),
+                identity.canonical_name()
+            ),
+            documents: None,
+        })
+        .filter(|_| selection.git_ref.is_some());
 
     let operation_uuid = operation_uuid.unwrap_or_else(|| {
         graphforge_api::hub_publish_operation(
@@ -1900,6 +2178,7 @@ fn publish_inner(
             &operation_content,
         )
     });
+    report(operation_uuid)?;
     let base_intent = intent_digest(&identity, &selection, fork.as_ref().map(|(id, _)| id));
     let intent_digest = if previews.is_empty() {
         base_intent
@@ -1977,6 +2256,7 @@ fn publish_inner(
                     receipt,
                     replayed: true,
                     moved,
+                    published: confirmed,
                 });
             }
         }
@@ -2143,10 +2423,13 @@ fn publish_inner(
     let (session_id, uploads) = match opened {
         SessionResponse::Complete { receipt } => {
             check_receipt(&receipt, &identity, operation_uuid)?;
+            let confirmed =
+                confirmed.map(|head| head.confirmed_by(&receipt, &snapshot.manifest, &lineage));
             return Ok(PublishOutcome {
                 receipt,
                 replayed: true,
                 moved,
+                published: confirmed,
             });
         }
         SessionResponse::Open {
@@ -2246,10 +2529,12 @@ fn publish_inner(
             "the receipt does not bind the committed publication",
         ));
     }
+    let confirmed = confirmed.map(|head| head.confirmed_by(&receipt, &snapshot.manifest, &lineage));
     Ok(PublishOutcome {
         receipt,
         replayed: false,
         moved,
+        published: confirmed,
     })
 }
 

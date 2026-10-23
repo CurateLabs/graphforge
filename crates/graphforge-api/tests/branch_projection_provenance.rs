@@ -146,6 +146,7 @@ fn bring_unions_disjoint_selected_lineage_from_one_operation_without_unselected_
     let a = frozen(&graph, source, "A");
     let b = frozen(&graph, source, "B");
     let create = CreateResearchBranchRequest {
+        description: None,
         author: None,
         committer: None,
         operation_uuid: Uuid::now_v7(),
@@ -155,7 +156,7 @@ fn bring_unions_disjoint_selected_lineage_from_one_operation_without_unselected_
         source: BranchSource::Slice { frozen_ipc: a },
         creator_uuid: Uuid::now_v7(),
         created_at: 2,
-        label: "Selected A then B".into(),
+        label: "Selected-A-then-B".into(),
     };
     graph
         .create_research_branch(&create, &CancellationToken::new())

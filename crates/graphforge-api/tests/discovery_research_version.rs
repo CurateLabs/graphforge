@@ -119,6 +119,7 @@ fn publish() -> Published {
     graph
         .create_research_branch(
             &CreateResearchBranchRequest {
+                description: None,
                 author: Some(signature("Dana")),
                 committer: Some(signature("Dana")),
                 operation_uuid: Uuid::now_v7(),
@@ -140,6 +141,8 @@ fn publish() -> Published {
     graph
         .execute_research_branch(
             &ExecuteResearchBranchRequest {
+                label: None,
+                description: None,
                 author: Some(signature("Alice")),
                 committer: Some(signature("Carol")),
                 operation_uuid: Uuid::now_v7(),

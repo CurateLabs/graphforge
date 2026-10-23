@@ -10,6 +10,7 @@ fn archived_native_baseline_rejects_unknown_origin_without_mutating_source() {
     graph
         .create_research_branch(
             &CreateResearchBranchRequest {
+                description: None,
                 author: None,
                 committer: None,
                 operation_uuid: Uuid::now_v7(),
@@ -267,6 +268,7 @@ fn mapping_fixture() -> MappingFixture {
     graph
         .create_research_branch(
             &CreateResearchBranchRequest {
+                description: None,
                 author: None,
                 committer: None,
                 operation_uuid: Uuid::now_v7(),
@@ -279,7 +281,7 @@ fn mapping_fixture() -> MappingFixture {
                 },
                 creator_uuid: Uuid::now_v7(),
                 created_at: 1,
-                label: "streaming mapping".into(),
+                label: "streaming-mapping".into(),
             },
             &CancellationToken::new(),
         )

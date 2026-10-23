@@ -25,6 +25,7 @@ fn lineage() -> ResearchLineage {
         fork: None,
         boundary_anchors: vec![],
         proposals: vec![],
+        tags: vec![],
         extensions: BTreeMap::default(),
         branches: vec![LineageBranch {
             branch_uuid: uuid(2),

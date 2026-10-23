@@ -79,6 +79,31 @@ on Windows. Native filesystem admission checks still apply. Follow the
 [first graph guide](https://docs.graphforge.sh/guide/quickstart/) to load and
 query connected data.
 
+## Research workflow
+
+Research history has a git-style command set. A Branch is named by its label,
+and the label is the ref on the Hub.
+
+```sh
+gf config user --name "Ada Lovelace" --email ada@example.org   # credit on Versions
+gf branch main                       # first Branch of the Project
+gf commit -m "Raise scores" --query "MATCH (n:Item) SET n.score = 2"
+gf tag v1                            # name the head; list with gf tag, delete with -d
+gf status                            # Branch, head, upstream, commits not yet published
+gf log                               # history; --all, -n <count>, <tag>, --remote
+gf push owner/repository             # publish; later just gf push
+gf clone owner/repository --ref main # or --tag v1
+gf pull                              # incorporate the Hub's head of the same ref
+gf branch feature/score              # another Branch; gf switch feature/score selects it
+```
+
+`gf commit` runs the query against the Branch and records the message as the
+Version description. Author and committer come from `--author`/`--committer`,
+then `GF_AUTHOR`/`GF_COMMITTER`, then `gf config user`. `--ref` always names a
+Branch by its label. `gf pull` records a two-parent Version; it never moves a
+head without one. The `gf research` commands are the underlying native JSON
+verbs; each help text points at its plain-argument form.
+
 ## Publish research history
 
 Authors and committers recorded on Versions are always published, in the lineage

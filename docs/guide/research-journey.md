@@ -179,6 +179,42 @@ operation against a conforming Hub, and the
 [publish contract](../adr/0053-hub-publish-wire-contract.md) states the precise
 refusal rules.
 
+### Share with `gf`
+
+Research history has a git-style command set that needs no JSON and no UUIDs. A
+Branch is named by its label, and that label is the ref on the Hub: `--ref` means
+the same thing in `gf clone`, `gf push` and `gf pull`.
+
+```sh
+gf config user --name "Ada Lovelace" --email ada@example.org  # credited on every Version
+gf branch main                         # the first Branch of the Project
+gf commit -m "Raise scores" --query "MATCH (n:Item) SET n.score = 2"
+gf commit -m "Fix a typo" --query "MATCH (n:Item) SET n.name = 'Ada'"
+gf tag v1                              # a name for the head Version
+gf push owner/repository               # publish the Branch; afterwards just `gf push`
+gf status                              # Branch, head, upstream, commits not yet published
+gf log                                 # history; add --all, -n 5, a tag, or --remote
+```
+
+A collaborator starts from the published ref and brings changes back the same way:
+
+```sh
+gf clone owner/repository --ref main   # or --tag v1 for a tagged Version
+gf commit -m "Add a source" --query "..."
+gf push                                # fast-forward; --rewrite replaces a head
+gf pull                                # take the Hub's newer head of this ref
+```
+
+`gf commit` records its message as the Version description and credits the author
+and committer from `--author`/`--committer`, then `GF_AUTHOR`/`GF_COMMITTER`, then
+`gf config user`. `gf pull` records a Version with your head and the Hub's head as
+its parents, adopting every change that does not conflict; when fields conflict it
+stops, names them, and leaves the explicit review to `gf research upstream update`.
+`gf switch <ref>` selects the Branch the other commands act on when a Project has
+several. Rerun a command with the `--operation-uuid` it printed to get the original
+result instead of a second Version. The `gf research ...` commands are the native
+JSON verbs these wrap.
+
 ## For integrators
 
 The [two-story corpus](https://github.com/CurateLabs/graphforge/tree/main/tests/fixtures/analyst-journey-v1)

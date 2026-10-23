@@ -41,6 +41,7 @@ mod ancestry;
 mod remote;
 pub use ancestry::{MAX_PARENTS, ResearchVersionProvenance};
 pub use remote::ResearchRemoteBranch;
+mod local_state;
 mod remote_fetch;
 pub use remote_fetch::{
     ResearchRemoteBranchFetch, ResearchRemoteFetchBinding, stage_remote_branch_fetch,
@@ -282,6 +283,13 @@ pub struct ResearchRegistry {
     pub ancestry: BTreeMap<Uuid, Vec<Uuid>>,
     /// Versions whose exact participant and graph payloads are rooted in CAS.
     pub materialized: BTreeSet<Uuid>,
+    /// Human names for immutable Versions. Local until published; a published tag
+    /// travels in the lineage document (ADR 0061).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub tags: BTreeMap<String, Uuid>,
+    /// The Branch the porcelain verbs act on; local only, never published (ADR 0061).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_branch: Option<Uuid>,
 }
 
 /// Request to capture frozen research from an authenticated generation.
@@ -332,6 +340,9 @@ pub enum ResearchMutation {
         lineage_sha256: [u8; 32],
         /// Read-only references from the same verified repository snapshot.
         remote_branches: Vec<ResearchRemoteBranch>,
+        /// Lineage tags naming Versions this import makes known (ADR 0061).
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        tags: BTreeMap<String, Uuid>,
     },
     /// Admit an exact fetched remote head without replacing the local Branch/workspace.
     FetchRemoteBranch {
@@ -450,6 +461,29 @@ pub enum ResearchMutation {
         /// Exact releasable root identity.
         root_uuid: Uuid,
     },
+    /// Record the head a Hub's publish receipt confirmed it serves for a local
+    /// Branch's ref, as that Branch's remote citation (ADR 0061).
+    RecordPublishedBranch {
+        /// Citation of the confirmed head; bound to local Branch authority on apply.
+        reference: ResearchRemoteBranch,
+    },
+    /// Create (`Some`) or delete (`None`) one tag on an immutable Version (ADR 0061).
+    SetTag {
+        /// Tag name, a valid discovery ref.
+        name: String,
+        /// Version the tag names; `None` deletes the tag.
+        version_uuid: Option<Uuid>,
+        /// Commitment to the request without its CURRENT precondition, so a
+        /// rerun under the same operation identity can be matched to it.
+        intent_sha256: [u8; 32],
+    },
+    /// Select the Branch the porcelain verbs act on (ADR 0061).
+    SelectBranch {
+        /// Existing Branch with a head.
+        branch_uuid: Uuid,
+        /// Commitment to the request without its CURRENT precondition.
+        intent_sha256: [u8; 32],
+    },
     /// Release a Version when no head, root or required Version depends on it.
     DeleteVersion {
         /// Exact Version to release; receipts remain available.
@@ -509,6 +543,7 @@ impl ResearchRegistry {
     pub fn validate(&self) -> Result<(), GfError> {
         self.validate_capacity()?;
         self.validate_remote_branches()?;
+        self.validate_local_state()?;
         for (id, version) in &self.versions {
             if id.is_nil()
                 || *id != version.version_uuid
@@ -973,12 +1008,14 @@ fn apply_mutation(
             project_uuid,
             lineage_sha256: _,
             remote_branches,
+            tags,
         } => remote::activate_imported_branch(
             registry,
             branch_uuid,
             head_version_uuid,
             project_uuid,
             remote_branches,
+            tags,
         )?,
         ResearchMutation::SubmitProposal { .. }
         | ResearchMutation::ReviewProposal { .. }
@@ -1031,30 +1068,25 @@ fn apply_mutation(
             restore_context(root, registry, mutation)?
         }
         ResearchMutation::RetainRoot { root } => {
-            if registry
-                .roots
-                .get(&root.root_uuid)
-                .is_some_and(|old| old != root)
-            {
-                return Err(error(
-                    ProjectErrorCode::TransactionConflict,
-                    "retention root identity has conflicting dependencies",
-                ));
-            }
-            registry.roots.insert(root.root_uuid, root.clone());
+            retain_root(registry, root)?;
             None
         }
         ResearchMutation::ReleaseRoot { root_uuid } => {
-            let root = registry
-                .roots
-                .get(root_uuid)
-                .ok_or_else(|| invalid("retention root is unavailable"))?;
-            if root.kind == ResearchRootKind::AcceptedProvenance {
-                return Err(invalid(
-                    "accepted provenance cannot be released by research history cleanup",
-                ));
-            }
-            registry.roots.remove(root_uuid);
+            release_root(registry, root_uuid)?;
+            None
+        }
+        ResearchMutation::RecordPublishedBranch { reference } => {
+            remote::record_published_branch(registry, reference)?;
+            None
+        }
+        ResearchMutation::SetTag {
+            name, version_uuid, ..
+        } => {
+            local_state::set_tag(registry, name, *version_uuid)?;
+            None
+        }
+        ResearchMutation::SelectBranch { branch_uuid, .. } => {
+            local_state::select_branch(registry, *branch_uuid)?;
             None
         }
         ResearchMutation::DeleteVersion { version_uuid } => {
@@ -1063,6 +1095,38 @@ fn apply_mutation(
         }
     };
     Ok(version_uuid)
+}
+
+fn retain_root(
+    registry: &mut ResearchRegistry,
+    root: &ResearchRetentionRoot,
+) -> Result<(), GfError> {
+    if registry
+        .roots
+        .get(&root.root_uuid)
+        .is_some_and(|old| old != root)
+    {
+        return Err(error(
+            ProjectErrorCode::TransactionConflict,
+            "retention root identity has conflicting dependencies",
+        ));
+    }
+    registry.roots.insert(root.root_uuid, root.clone());
+    Ok(())
+}
+
+fn release_root(registry: &mut ResearchRegistry, root_uuid: &Uuid) -> Result<(), GfError> {
+    let root = registry
+        .roots
+        .get(root_uuid)
+        .ok_or_else(|| invalid("retention root is unavailable"))?;
+    if root.kind == ResearchRootKind::AcceptedProvenance {
+        return Err(invalid(
+            "accepted provenance cannot be released by research history cleanup",
+        ));
+    }
+    registry.roots.remove(root_uuid);
+    Ok(())
 }
 
 fn delete_version(registry: &mut ResearchRegistry, version_uuid: Uuid) -> Result<(), GfError> {
@@ -1233,7 +1297,9 @@ pub fn publish_research_operation_with_mode(
             | ResearchMutation::SubmitProposal { intent_sha256, .. }
             | ResearchMutation::ReviewProposal { intent_sha256, .. }
             | ResearchMutation::ReleaseProposal { intent_sha256, .. }
-            | ResearchMutation::UpdateBranch { intent_sha256, .. } => Some(*intent_sha256),
+            | ResearchMutation::UpdateBranch { intent_sha256, .. }
+            | ResearchMutation::SetTag { intent_sha256, .. }
+            | ResearchMutation::SelectBranch { intent_sha256, .. } => Some(*intent_sha256),
             _ => None,
         },
         operation_uuid: request.operation_uuid,
@@ -1285,6 +1351,10 @@ pub fn publish_research_operation_with_mode(
                         ResearchMutation::FetchRemoteBranch { fetch } => Some(fetch.as_ref()),
                         _ => None,
                     },
+                    published: match &request.mutation {
+                        ResearchMutation::RecordPublishedBranch { reference } => Some(reference),
+                        _ => None,
+                    },
                 },
             )?
             .publish_with_graph_objects_cancellable(&graph_objects, &mut || {
@@ -1310,18 +1380,7 @@ fn inspect_with_registry(
     version: &ResearchVersionRecord,
     registry: &ResearchRegistry,
 ) -> Result<Vec<crate::ProjectParticipantSnapshot>, GfError> {
-    if !registry.versions.contains_key(&version.version_uuid) {
-        return Err(GfError::Api {
-            code: ApiErrorCode::ResultNotRetained,
-            message: "historical research Version content is not retained".into(),
-        });
-    }
-    if registry.identities.get(&version.version_uuid) != Some(&identity_digest(version)?) {
-        return Err(error(
-            ProjectErrorCode::TransactionConflict,
-            "historical research Version identity has conflicting content",
-        ));
-    }
+    require_retained_identity(registry, version)?;
     authenticate_evidence(root, &version.content.evidence)?;
     if registry.materialized.contains(&version.version_uuid) {
         return retained_content::inspect(root, version, None);
@@ -1351,6 +1410,78 @@ fn inspect_with_registry(
         snapshots.push(snapshot);
     }
     Ok(snapshots)
+}
+
+fn require_retained_identity(
+    registry: &ResearchRegistry,
+    version: &ResearchVersionRecord,
+) -> Result<(), GfError> {
+    if !registry.versions.contains_key(&version.version_uuid) {
+        return Err(GfError::Api {
+            code: ApiErrorCode::ResultNotRetained,
+            message: "historical research Version content is not retained".into(),
+        });
+    }
+    if registry.identities.get(&version.version_uuid) != Some(&identity_digest(version)?) {
+        return Err(error(
+            ProjectErrorCode::TransactionConflict,
+            "historical research Version identity has conflicting content",
+        ));
+    }
+    Ok(())
+}
+
+/// Authenticate one retained participant without materializing a historical
+/// Project or opening graph payloads and evidence. Sibling participants are untouched.
+pub fn inspect_research_version_participant(
+    root: &Path,
+    version: &ResearchVersionRecord,
+    key: &ResearchParticipantKey,
+    max_bytes: u64,
+) -> Result<Option<crate::ProjectParticipantSnapshot>, GfError> {
+    let current = crate::resolve_project_generation(root)?;
+    let registry = read_research_registry(&current)?;
+    require_retained_identity(&registry, version)?;
+    let Some(participant) = version.content.participants.iter().find(|p| &p.key == key) else {
+        return Ok(None);
+    };
+    let bound = max_bytes.min(participant_byte_bound(participant));
+    let bytes = if registry.materialized.contains(&version.version_uuid) {
+        crate::read_graph_object_by_digest(root, &hex(&participant.content_sha256), bound)?
+    } else {
+        let source = crate::resolve_generation_by_uuid(root, version.content.generation_uuid)?;
+        if source.manifest_sha256() != version.content.manifest_sha256 {
+            return Err(invalid("research source manifest identity changed"));
+        }
+        if !commitments(&source)?.contains(participant) {
+            return Err(invalid("research participant commitment changed"));
+        }
+        if source
+            .portable_participant_identity(&key.capability, &key.family)?
+            .byte_length()
+            > bound
+        {
+            return Err(error(
+                ProjectErrorCode::ResourceLimit,
+                "research participant exceeds inspection bound",
+            ));
+        }
+        source
+            .participant_snapshot(&key.capability, &key.family)?
+            .ok_or_else(|| invalid("research participant is unavailable"))?
+            .bytes
+    };
+    validate_saved_query_participant(participant, &bytes)?;
+    Ok(Some(crate::ProjectParticipantSnapshot {
+        capability_id: key.capability.clone(),
+        capability_version: participant.capability_version,
+        record_family_id: key.family.clone(),
+        record_version: participant.record_version,
+        encoding: participant.encoding.clone(),
+        schema_fingerprint: participant.schema_sha256,
+        row_count: participant.row_count,
+        bytes,
+    }))
 }
 
 fn participant_byte_bound(participant: &ResearchParticipantCommitment) -> u64 {
@@ -1484,6 +1615,7 @@ fn registry_publication_revision(
 pub(crate) struct ResearchPublicationWitness<'a> {
     pub(crate) origin: Option<&'a RegisterResearchVersion>,
     pub(crate) fetch: Option<&'a ResearchRemoteBranchFetch>,
+    pub(crate) published: Option<&'a ResearchRemoteBranch>,
 }
 
 pub(crate) fn validate_publication_transition(
@@ -1550,7 +1682,14 @@ pub(crate) fn validate_publication_transition(
         }
     }
     ancestry::preserve(&before, &after)?;
-    remote_fetch::preserve(&before, &after, parent, candidate_generation, witness.fetch)?;
+    remote_fetch::preserve(
+        &before,
+        &after,
+        parent,
+        candidate_generation,
+        witness.fetch,
+        witness.published,
+    )?;
     for (id, root) in &before.roots {
         if root.kind == ResearchRootKind::AcceptedProvenance && after.roots.get(id) != Some(root) {
             return Err(invalid(

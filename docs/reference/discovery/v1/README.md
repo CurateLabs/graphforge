@@ -9,12 +9,13 @@ compatible projection of this contract.
 
 ## Documents
 
-| Document | Schema | Media type |
-| --- | --- | --- |
-| Manifest | `manifest.schema.json` | adapter-defined |
-| Refs | `refs.schema.json` | adapter-defined |
-| Project summary (`graphforge-project-summary/1`) | `summary.schema.json` | `application/vnd.graphforge.project-summary+json` |
-| Research lineage (`graphforge-research-lineage/1`) | `lineage.schema.json` | `application/vnd.graphforge.research-lineage+json` |
+| Document                                           | Schema                 | Media type                                         |
+| -------------------------------------------------- | ---------------------- | -------------------------------------------------- |
+| Manifest                                           | `manifest.schema.json` | adapter-defined                                    |
+| Refs                                               | `refs.schema.json`     | adapter-defined                                    |
+| Permanent item (`graphforge-item/1`)               | `item.schema.json`     | `application/vnd.graphforge.item+json`             |
+| Project summary (`graphforge-project-summary/1`)   | `summary.schema.json`  | `application/vnd.graphforge.project-summary+json`  |
+| Research lineage (`graphforge-research-lineage/1`) | `lineage.schema.json`  | `application/vnd.graphforge.research-lineage+json` |
 
 These checked-in JSON Schemas describe the wire shape of GraphForge discovery
 manifest, refs, and Project summary documents. `conformance.json` supplies valid
@@ -23,7 +24,7 @@ express—canonical ordering, cumulative bounds, safe URLs, capability
 negotiation, and duplicate JSON members—remain authoritative in
 `graphforge-discovery` and are exercised by the corpus.
 
-Regenerate all four artifacts deterministically from the Rust test source:
+Regenerate manifest, refs, summary, and lineage artifacts from the Rust test source:
 
 ```bash
 GRAPHFORGE_UPDATE_DISCOVERY_ARTIFACTS=1 \
@@ -51,6 +52,81 @@ There is intentionally no checked-in hand-written TypeScript discovery model.
 Schema-derived Hub artifacts consume the required `package.object_digest` field
 from `manifest.schema.json`; regenerating the Rust-owned artifacts updates that
 versioned input and the conformance cases together.
+
+## Permanent item descriptors
+
+Tools request `application/vnd.graphforge.item+json` from `GET {hub}/<id>` for
+the current item version, or `GET {hub}/<id>/<authored_version>` for an exact
+authored version. The negotiated document has this closed shape:
+
+```json
+{
+  "format": "graphforge-item/1",
+  "id": "ont_7k2m9x4q8r3t5v1w",
+  "kind": "ontology_module",
+  "repository": { "owner": "opendata", "repository": "openalex" },
+  "module": {
+    "id": "https://graphforge.sh/ont_7k2m9x4q8r3t5v1w",
+    "version": "2026.01",
+    "content_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "discovery": {
+    "refs_revision": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "manifest_validator": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+  }
+}
+```
+
+`id` is always a canonical lowercase bare permanent ID. `kind` is
+`ontology_module` for an `ont_` ID or `bridge_set` for a `brg_` ID. The
+`module: ExactIdentity` field carries that ID's canonical URI, an opaque authored
+version, and its canonical content digest. The ID, kind, and URI must agree;
+case normalization belongs to client input, not to wire descriptors. The
+repository uses the existing canonical `owner/repository` rules.
+
+`discovery` identifies the retained refs snapshot and manifest by their canonical
+SHA-256 digests. `ItemDescriptor::bind_snapshot` recomputes both digests, binds the
+repository, resolved ref, manifest validator and immutable target, and requires
+the exact module identity in that manifest's ontology inventory. A current refs
+snapshot cannot replace the named snapshot after refs advance.
+
+The client reads fixed paths relative to the descriptor's repository:
+`/.gf/refs?revision=<refs_revision>` followed by
+`/.gf/manifest?validator=<manifest_validator>`. Query values are the canonical
+`sha256:` digests (URL-encoded for transport). An immutable authored version or
+Project target is not a metadata selector. HTTP ETags alone are insufficient,
+and missing retained metadata never falls back to the current documents.
+
+A server retains the actual admitted RefSet and manifest atomically, with
+registry reachability pins while it serves their descriptor. These reads remain
+repository-scoped: current visibility and authorization apply before GET, HEAD,
+and conditional/304 responses. Descriptor and snapshot retirement must fail
+consistently; this contract introduces no indefinite retention requirement for
+unreferenced snapshots. Repository moves atomically publish a fresh descriptor
+with pins for the actual rehomed metadata. Stale pins fail closed.
+
+Bridge descriptors are descriptive. Bridge inventory has no package reference,
+so `gf ontology module fetch` rejects bridge kinds and does not claim bridge
+package fetch support.
+
+`ItemDescriptor::from_json` is the Rust-owned parser and validator. It refuses
+duplicate JSON members, unknown members, unsupported formats, inconsistent
+identities, and configured response/string bounds. Its generated TypeScript
+type and `validate_item_descriptor` WebAssembly export are the same contract.
+The schema describes structural constraints; equality of the bare ID and the
+URI's token remains a native validation rule. `item-conformance.json` exercises
+both kinds and the stable failure codes through Rust and WebAssembly.
+
+The descriptor carries no package location or native package bytes. A client
+still binds repository refs to a manifest, selects the exact module package
+advertised there, and runs the existing package and module verification path.
+
+Regenerate these two artifacts with:
+
+```bash
+GRAPHFORGE_UPDATE_DISCOVERY_ARTIFACTS=1 \
+  cargo test -p graphforge-discovery --test item_descriptor
+```
 
 ## Project summary and ontology descriptors (protocol 1.2)
 
@@ -105,7 +181,7 @@ least one component), `payload_bytes`, `research_present`, `evidence_present`,
 and an optional ontology composition. The presence flags must agree with the
 histogram: `research_present` means the package carries a `research`-kind
 component (the research-interchange registry), and `evidence_present` an
-`evidence`-kind component. Research *metadata* presence shows up as non-null
+`evidence`-kind component. Research _metadata_ presence shows up as non-null
 `metadata` fields, not as `research_present`.
 
 `DiscoveryManifest::bind_summary` requires a summary to name the manifest's
@@ -125,11 +201,11 @@ in Rust and still fail schema validation. Rust stays authoritative.
 
 These are distinct fields. None substitutes for another.
 
-| Field | Identifies | Stable across publishing Projects |
-| --- | --- | --- |
-| `package_digest` | One exported portable package, including its source generation | No |
-| `(id, version, content_digest)` | One exact ontology module or bridge set | Yes |
-| `composition_digest` | The whole composition of one Project version | Only for identical compositions |
+| Field                           | Identifies                                                     | Stable across publishing Projects |
+| ------------------------------- | -------------------------------------------------------------- | --------------------------------- |
+| `package_digest`                | One exported portable package, including its source generation | No                                |
+| `(id, version, content_digest)` | One exact ontology module or bridge set                        | Yes                               |
+| `composition_digest`            | The whole composition of one Project version                   | Only for identical compositions   |
 
 A module package's `package_digest` therefore differs between two Projects that
 publish the same module, while the module's `content_digest` does not. Module
@@ -156,7 +232,11 @@ same endpoint under the new canonical owner/repository on the **same HTTPS
 origin**. The bounded JSON body uses `moved.schema.json`:
 
 ```json
-{"format":"graphforge-repository-moved/1","moved_from":{"owner":"curate","repository":"claims"},"moved_to":{"owner":"research","repository":"renamed"}}
+{
+  "format": "graphforge-repository-moved/1",
+  "moved_from": { "owner": "curate", "repository": "claims" },
+  "moved_to": { "owner": "research", "repository": "renamed" }
+}
 ```
 
 Clients accept one identity move only, require refs and manifest to agree, and

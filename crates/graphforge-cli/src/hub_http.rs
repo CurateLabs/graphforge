@@ -1219,9 +1219,7 @@ pub(crate) fn parse_input_at(
     if !value.contains("://") {
         let identity = RepositoryIdentity::parse(value)
             .map_err(|_| validation("hub.invalid_identity", "invalid repository identity"))?;
-        let hub = Url::parse(hub.unwrap_or(DEFAULT_HUB))
-            .map_err(|_| validation("hub.invalid_identity", "invalid Hub URL"))?;
-        validate_url(&hub)?;
+        let hub = hub_base(hub)?;
         let mut base = hub.clone();
         base.set_path(&format!(
             "{}/{}/{}",
@@ -1256,6 +1254,14 @@ pub(crate) fn parse_input_at(
     let identity = RepositoryIdentity::parse(&format!("{}/{}", segments[0], segments[1]))
         .map_err(|_| validation("hub.invalid_identity", "invalid repository identity"))?;
     Ok((identity, base))
+}
+
+/// Validate the configured Hub origin and optional deployment path prefix.
+pub(crate) fn hub_base(hub: Option<&str>) -> Result<Url, graphforge_api::GfError> {
+    let hub = Url::parse(hub.unwrap_or(DEFAULT_HUB))
+        .map_err(|_| validation("hub.invalid_identity", "invalid Hub URL"))?;
+    validate_url(&hub)?;
+    Ok(hub)
 }
 
 pub(crate) fn endpoint(base: &Url, name: &str) -> Url {

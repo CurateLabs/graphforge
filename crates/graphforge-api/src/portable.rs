@@ -404,6 +404,66 @@ impl GraphForge {
         }
     }
 
+    /// Inspect the exact portable ontology composition of the current generation.
+    /// No package or graph payload is written; absence preserves legacy Projects.
+    pub fn portable_ontology_composition(
+        &self,
+        limits: graphforge_core::portable::PortableLimits,
+    ) -> Result<
+        Option<graphforge_core::portable::PortableOntologyComposition>,
+        graphforge_core::portable::PortableError,
+    > {
+        let (generation, _, _) = self
+            .resolve_portable_generation(&PortableSelection::Current)
+            .map_err(portable_resolve_err)?;
+        graphforge_storage::project_portable_export::inspect_portable_ontology_composition(
+            &generation,
+            limits,
+        )
+    }
+
+    /// Inspect the exact portable composition of a retained Version without
+    /// allocating a historical Project or reading graph and evidence payloads.
+    #[cfg(feature = "research")]
+    pub fn research_version_portable_ontology_composition(
+        &self,
+        version_uuid: Uuid,
+        limits: graphforge_core::portable::PortableLimits,
+    ) -> Result<
+        Option<graphforge_core::portable::PortableOntologyComposition>,
+        graphforge_core::portable::PortableError,
+    > {
+        let version = self
+            .research_version(version_uuid)
+            .map_err(portable_resolve_err)?;
+        let snapshot = graphforge_storage::research_versions::inspect_research_version_participant(
+            self.resolved_generation.container_root(),
+            &version,
+            &graphforge_storage::research_versions::ResearchParticipantKey {
+                capability: graphforge_storage::WORKSPACE_CAPABILITY_ID.into(),
+                family: graphforge_storage::WORKSPACE_ONTOLOGY_COMPOSITION_FAMILY.into(),
+            },
+            (graphforge_storage::workspace_participants::MAX_WORKSPACE_ONTOLOGY_COMPOSITION_BYTES
+                as u64)
+                .min(limits.max_manifest_bytes)
+                .min(limits.max_entry_bytes),
+        )
+        .map_err(portable_resolve_err)?;
+        snapshot
+            .map(|snapshot| {
+                let composition =
+                    graphforge_storage::WorkspaceOntologyComposition::from_canonical_json(
+                        &snapshot.bytes,
+                    )
+                    .map_err(portable_resolve_err)?;
+                graphforge_storage::project_portable_export::plan_portable_ontology_composition(
+                    &composition,
+                    limits,
+                )
+            })
+            .transpose()
+    }
+
     /// Preview one content-free portable component selection.
     pub fn preview_portable_selection(
         &self,
