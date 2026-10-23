@@ -256,17 +256,42 @@ must agree with an ID already in the document. Authored GraphForge IDs must use
 the canonical URI and the correct kind; legacy IDs and other-domain IRIs remain
 unchanged.
 
-`ontology module fetch OWNER/REPOSITORY --ontology-id ID --version VERSION
---digest HEX --output FILE [--hub URL]` retrieves one exact ontology module from
-a Hub repository without cloning it: it makes exactly three requests (`/.gf/refs`,
-`/.gf/manifest`, and the module's own package object) and never downloads the
-Project package or any graph data. It needs no project or repository, and is
-outside the four-surface multi-ontology contract, like `clone`. Pass the three
-parts of the module identity as separate flags, because ids and versions may
-contain `@` and `#`. `--digest` is the module's canonical content digest as 64
+`ontology module fetch REF --output FILE [--digest HEX] [--hub URL]` retrieves
+one verified ontology module without cloning a Project:
+
+```sh
+gf ontology module fetch ont_7k2m9x4q8r3t5v1w --output works.json
+gf ontology module fetch https://graphforge.sh/ont_7k2m9x4q8r3t5v1w --output works.json
+gf ontology module fetch ont_7k2m9x4q8r3t5v1w/2026.01 --output works.json
+```
+
+A bare ID or canonical URI resolves the current authored version. An
+`ID/VERSION` reference, or `--version VERSION` with an item reference, selects
+an exact authored version. Input folds ASCII case only. Bridge IDs are
+descriptive and cannot be fetched as module packages.
+
+The ID path requests a Core-owned `graphforge-item/1` descriptor with
+`Accept: application/vnd.graphforge.item+json`, then the retained repository
+refs and manifest pinned by its `discovery` digests, then the module package.
+It makes four requests and never downloads the Project package or graph data.
+Both metadata digests, the repository, resolved ref and its validator/target,
+and the exact module identity must agree before any package is downloaded.
+An exact version remains verifiable after current refs advance. Missing or
+stale snapshots fail closed; the client never substitutes current metadata.
+
+The existing `OWNER/REPOSITORY --ontology-id ID --version VERSION` form uses
+the same three requests as before (`/.gf/refs`, `/.gf/manifest`, and the module's
+package object). `--ontology-id` accepts a bare permanent ID and normalizes it
+to its canonical URI; custom and legacy identifiers keep their existing
+meaning. Pass IDs and authored versions separately when they contain `@` or
+`#`. An ambiguous repository advertisement requires an explicit digest.
+
+`--digest` is an optional pin to the module's canonical content digest as 64
 lowercase hexadecimal digits; a `sha256:` prefix is also accepted. It is neither
-the package digest nor the SHA-256 of the document file. `--hub` replaces the
-default `https://graphforge.sh` base for an `OWNER/REPOSITORY` name.
+the package digest nor the document file's SHA-256. `--hub` replaces the default
+`https://graphforge.sh` base for item references and owner/repository names;
+explicit repository URLs still name their own Hub. Fetch needs no open local
+Project and remains outside the four-surface multi-ontology contract, like clone.
 
 The fetch applies the same transport rules as `clone`: HTTPS only, no
 credentials, public-network addresses only (rechecked on redirects and DNS),

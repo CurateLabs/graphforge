@@ -1,0 +1,295 @@
+{
+  "cases": [
+    {
+      "expected": {
+        "document": {
+          "discovery": {
+            "manifest_validator": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "refs_revision": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          "format": "graphforge-item/1",
+          "id": "ont_7k2m9x4q8r3t5v1w",
+          "kind": "ontology_module",
+          "module": {
+            "content_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "id": "https://graphforge.sh/ont_7k2m9x4q8r3t5v1w",
+            "version": "2026.01"
+          },
+          "repository": {
+            "owner": "opendata",
+            "repository": "openalex"
+          }
+        },
+        "result": "valid"
+      },
+      "json": "{\"discovery\":{\"manifest_validator\":\"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"refs_revision\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"format\":\"graphforge-item/1\",\"id\":\"ont_7k2m9x4q8r3t5v1w\",\"kind\":\"ontology_module\",\"module\":{\"content_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"id\":\"https://graphforge.sh/ont_7k2m9x4q8r3t5v1w\",\"version\":\"2026.01\"},\"repository\":{\"owner\":\"opendata\",\"repository\":\"openalex\"}}",
+      "name": "ontology-module"
+    },
+    {
+      "expected": {
+        "document": {
+          "discovery": {
+            "manifest_validator": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "refs_revision": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          "format": "graphforge-item/1",
+          "id": "brg_7k2m9x4q8r3t5v1w",
+          "kind": "bridge_set",
+          "module": {
+            "content_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "id": "https://graphforge.sh/brg_7k2m9x4q8r3t5v1w",
+            "version": "2026.01"
+          },
+          "repository": {
+            "owner": "opendata",
+            "repository": "openalex"
+          }
+        },
+        "result": "valid"
+      },
+      "json": "{\"discovery\":{\"manifest_validator\":\"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"refs_revision\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"format\":\"graphforge-item/1\",\"id\":\"brg_7k2m9x4q8r3t5v1w\",\"kind\":\"bridge_set\",\"module\":{\"content_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"id\":\"https://graphforge.sh/brg_7k2m9x4q8r3t5v1w\",\"version\":\"2026.01\"},\"repository\":{\"owner\":\"opendata\",\"repository\":\"openalex\"}}",
+      "name": "bridge-set"
+    },
+    {
+      "expected": {
+        "code": "unsupported_future",
+        "field": "format",
+        "result": "invalid"
+      },
+      "json": "{\"discovery\":{\"manifest_validator\":\"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"refs_revision\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"format\":\"graphforge-item/2\",\"id\":\"ont_7k2m9x4q8r3t5v1w\",\"kind\":\"ontology_module\",\"module\":{\"content_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"id\":\"https://graphforge.sh/ont_7k2m9x4q8r3t5v1w\",\"version\":\"2026.01\"},\"repository\":{\"owner\":\"opendata\",\"repository\":\"openalex\"}}",
+      "name": "future-format"
+    },
+    {
+      "expected": {
+        "code": "invalid_identity",
+        "field": "id",
+        "result": "invalid"
+      },
+      "json": "{\"discovery\":{\"manifest_validator\":\"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"refs_revision\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"format\":\"graphforge-item/1\",\"id\":\"ONT_7K2M9X4Q8R3T5V1W\",\"kind\":\"ontology_module\",\"module\":{\"content_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"id\":\"https://graphforge.sh/ont_7k2m9x4q8r3t5v1w\",\"version\":\"2026.01\"},\"repository\":{\"owner\":\"opendata\",\"repository\":\"openalex\"}}",
+      "name": "uppercase-id"
+    },
+    {
+      "expected": {
+        "code": "invalid_identity",
+        "field": "id",
+        "result": "invalid"
+      },
+      "json": "{\"discovery\":{\"manifest_validator\":\"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"refs_revision\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"format\":\"graphforge-item/1\",\"id\":\"https://graphforge.sh/ont_7k2m9x4q8r3t5v1w\",\"kind\":\"ontology_module\",\"module\":{\"content_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"id\":\"https://graphforge.sh/ont_7k2m9x4q8r3t5v1w\",\"version\":\"2026.01\"},\"repository\":{\"owner\":\"opendata\",\"repository\":\"openalex\"}}",
+      "name": "uri-in-id"
+    },
+    {
+      "expected": {
+        "code": "invalid_identity",
+        "field": "id",
+        "result": "invalid"
+      },
+      "json": "{\"discovery\":{\"manifest_validator\":\"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"refs_revision\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"format\":\"graphforge-item/1\",\"id\":\"abc_7k2m9x4q8r3t5v1w\",\"kind\":\"ontology_module\",\"module\":{\"content_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"id\":\"https://graphforge.sh/ont_7k2m9x4q8r3t5v1w\",\"version\":\"2026.01\"},\"repository\":{\"owner\":\"opendata\",\"repository\":\"openalex\"}}",
+      "name": "unknown-prefix"
+    },
+    {
+      "expected": {
+        "code": "invalid_identity",
+        "field": "id",
+        "result": "invalid"
+      },
+      "json": "{\"discovery\":{\"manifest_validator\":\"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"refs_revision\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"format\":\"graphforge-item/1\",\"id\":\"ont_7k2m9x4q8r3t5v1o\",\"kind\":\"ontology_module\",\"module\":{\"content_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"id\":\"https://graphforge.sh/ont_7k2m9x4q8r3t5v1w\",\"version\":\"2026.01\"},\"repository\":{\"owner\":\"opendata\",\"repository\":\"openalex\"}}",
+      "name": "alias-character"
+    },
+    {
+      "expected": {
+        "code": "invalid_identity",
+        "field": "id",
+        "result": "invalid"
+      },
+      "json": "{\"discovery\":{\"manifest_validator\":\"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"refs_revision\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"format\":\"graphforge-item/1\",\"id\":\"éx_0000000000000000\",\"kind\":\"ontology_module\",\"module\":{\"content_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"id\":\"https://graphforge.sh/ont_7k2m9x4q8r3t5v1w\",\"version\":\"2026.01\"},\"repository\":{\"owner\":\"opendata\",\"repository\":\"openalex\"}}",
+      "name": "unicode-id"
+    },
+    {
+      "expected": {
+        "code": "invalid_identity",
+        "field": "kind",
+        "result": "invalid"
+      },
+      "json": "{\"discovery\":{\"manifest_validator\":\"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"refs_revision\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"format\":\"graphforge-item/1\",\"id\":\"ont_7k2m9x4q8r3t5v1w\",\"kind\":\"bridge_set\",\"module\":{\"content_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"id\":\"https://graphforge.sh/ont_7k2m9x4q8r3t5v1w\",\"version\":\"2026.01\"},\"repository\":{\"owner\":\"opendata\",\"repository\":\"openalex\"}}",
+      "name": "kind-disagrees"
+    },
+    {
+      "expected": {
+        "code": "malformed_response",
+        "field": null,
+        "result": "invalid"
+      },
+      "json": "{\"discovery\":{\"manifest_validator\":\"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"refs_revision\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"format\":\"graphforge-item/1\",\"id\":\"ont_7k2m9x4q8r3t5v1w\",\"kind\":\"project\",\"module\":{\"content_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"id\":\"https://graphforge.sh/ont_7k2m9x4q8r3t5v1w\",\"version\":\"2026.01\"},\"repository\":{\"owner\":\"opendata\",\"repository\":\"openalex\"}}",
+      "name": "unknown-kind"
+    },
+    {
+      "expected": {
+        "code": "invalid_identity",
+        "field": "repository",
+        "result": "invalid"
+      },
+      "json": "{\"discovery\":{\"manifest_validator\":\"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"refs_revision\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"format\":\"graphforge-item/1\",\"id\":\"ont_7k2m9x4q8r3t5v1w\",\"kind\":\"ontology_module\",\"module\":{\"content_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"id\":\"https://graphforge.sh/ont_7k2m9x4q8r3t5v1w\",\"version\":\"2026.01\"},\"repository\":{\"owner\":\"a..b\",\"repository\":\"openalex\"}}",
+      "name": "repository-invalid"
+    },
+    {
+      "expected": {
+        "code": "integrity_failure",
+        "field": "module.id",
+        "result": "invalid"
+      },
+      "json": "{\"discovery\":{\"manifest_validator\":\"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"refs_revision\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"format\":\"graphforge-item/1\",\"id\":\"ont_7k2m9x4q8r3t5v1w\",\"kind\":\"ontology_module\",\"module\":{\"content_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"id\":\"https://graphforge.sh/ont_0000000000000000\",\"version\":\"2026.01\"},\"repository\":{\"owner\":\"opendata\",\"repository\":\"openalex\"}}",
+      "name": "different-module-id"
+    },
+    {
+      "expected": {
+        "code": "integrity_failure",
+        "field": "module.id",
+        "result": "invalid"
+      },
+      "json": "{\"discovery\":{\"manifest_validator\":\"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"refs_revision\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"format\":\"graphforge-item/1\",\"id\":\"ont_7k2m9x4q8r3t5v1w\",\"kind\":\"ontology_module\",\"module\":{\"content_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"id\":\"ont_7k2m9x4q8r3t5v1w\",\"version\":\"2026.01\"},\"repository\":{\"owner\":\"opendata\",\"repository\":\"openalex\"}}",
+      "name": "bare-module-id"
+    },
+    {
+      "expected": {
+        "code": "integrity_failure",
+        "field": "module.id",
+        "result": "invalid"
+      },
+      "json": "{\"discovery\":{\"manifest_validator\":\"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"refs_revision\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"format\":\"graphforge-item/1\",\"id\":\"ont_7k2m9x4q8r3t5v1w\",\"kind\":\"ontology_module\",\"module\":{\"content_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"id\":\"HTTPS://GRAPHFORGE.SH/ONT_7K2M9X4Q8R3T5V1W\",\"version\":\"2026.01\"},\"repository\":{\"owner\":\"opendata\",\"repository\":\"openalex\"}}",
+      "name": "uppercase-module-uri"
+    },
+    {
+      "expected": {
+        "code": "integrity_failure",
+        "field": "digest",
+        "result": "invalid"
+      },
+      "json": "{\"discovery\":{\"manifest_validator\":\"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"refs_revision\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"format\":\"graphforge-item/1\",\"id\":\"ont_7k2m9x4q8r3t5v1w\",\"kind\":\"ontology_module\",\"module\":{\"content_digest\":\"sha256:bad\",\"id\":\"https://graphforge.sh/ont_7k2m9x4q8r3t5v1w\",\"version\":\"2026.01\"},\"repository\":{\"owner\":\"opendata\",\"repository\":\"openalex\"}}",
+      "name": "invalid-content-digest"
+    },
+    {
+      "expected": {
+        "code": "limit_exceeded",
+        "field": "module.version",
+        "result": "invalid"
+      },
+      "json": "{\"discovery\":{\"manifest_validator\":\"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"refs_revision\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"format\":\"graphforge-item/1\",\"id\":\"ont_7k2m9x4q8r3t5v1w\",\"kind\":\"ontology_module\",\"module\":{\"content_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"id\":\"https://graphforge.sh/ont_7k2m9x4q8r3t5v1w\",\"version\":\"\"},\"repository\":{\"owner\":\"opendata\",\"repository\":\"openalex\"}}",
+      "name": "empty-version"
+    },
+    {
+      "expected": {
+        "code": "integrity_failure",
+        "field": "digest",
+        "result": "invalid"
+      },
+      "json": "{\"discovery\":{\"manifest_validator\":\"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"refs_revision\":\"sha256:bad\"},\"format\":\"graphforge-item/1\",\"id\":\"ont_7k2m9x4q8r3t5v1w\",\"kind\":\"ontology_module\",\"module\":{\"content_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"id\":\"https://graphforge.sh/ont_7k2m9x4q8r3t5v1w\",\"version\":\"2026.01\"},\"repository\":{\"owner\":\"opendata\",\"repository\":\"openalex\"}}",
+      "name": "invalid-refs-revision"
+    },
+    {
+      "expected": {
+        "code": "integrity_failure",
+        "field": "digest",
+        "result": "invalid"
+      },
+      "json": "{\"discovery\":{\"manifest_validator\":\"sha256:bad\",\"refs_revision\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"format\":\"graphforge-item/1\",\"id\":\"ont_7k2m9x4q8r3t5v1w\",\"kind\":\"ontology_module\",\"module\":{\"content_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"id\":\"https://graphforge.sh/ont_7k2m9x4q8r3t5v1w\",\"version\":\"2026.01\"},\"repository\":{\"owner\":\"opendata\",\"repository\":\"openalex\"}}",
+      "name": "invalid-manifest-validator"
+    },
+    {
+      "expected": {
+        "code": "malformed_response",
+        "field": null,
+        "result": "invalid"
+      },
+      "json": "{\"discovery\":{\"manifest_validator\":\"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"refs_revision\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"extra\":true,\"format\":\"graphforge-item/1\",\"id\":\"ont_7k2m9x4q8r3t5v1w\",\"kind\":\"ontology_module\",\"module\":{\"content_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"id\":\"https://graphforge.sh/ont_7k2m9x4q8r3t5v1w\",\"version\":\"2026.01\"},\"repository\":{\"owner\":\"opendata\",\"repository\":\"openalex\"}}",
+      "name": "unknown-top-member"
+    },
+    {
+      "expected": {
+        "code": "malformed_response",
+        "field": null,
+        "result": "invalid"
+      },
+      "json": "{\"discovery\":{\"manifest_validator\":\"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"refs_revision\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"format\":\"graphforge-item/1\",\"id\":\"ont_7k2m9x4q8r3t5v1w\",\"kind\":\"ontology_module\",\"module\":{\"content_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"extra\":true,\"id\":\"https://graphforge.sh/ont_7k2m9x4q8r3t5v1w\",\"version\":\"2026.01\"},\"repository\":{\"owner\":\"opendata\",\"repository\":\"openalex\"}}",
+      "name": "unknown-module-member"
+    },
+    {
+      "expected": {
+        "code": "malformed_response",
+        "field": null,
+        "result": "invalid"
+      },
+      "json": "{\"discovery\":{\"extra\":true,\"manifest_validator\":\"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"refs_revision\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"format\":\"graphforge-item/1\",\"id\":\"ont_7k2m9x4q8r3t5v1w\",\"kind\":\"ontology_module\",\"module\":{\"content_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"id\":\"https://graphforge.sh/ont_7k2m9x4q8r3t5v1w\",\"version\":\"2026.01\"},\"repository\":{\"owner\":\"opendata\",\"repository\":\"openalex\"}}",
+      "name": "unknown-discovery-member"
+    },
+    {
+      "expected": {
+        "code": "malformed_response",
+        "field": null,
+        "result": "invalid"
+      },
+      "json": "{\"format\":\"graphforge-item/1\",\"id\":\"ont_7k2m9x4q8r3t5v1w\",\"kind\":\"ontology_module\",\"module\":{\"content_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"id\":\"https://graphforge.sh/ont_7k2m9x4q8r3t5v1w\",\"version\":\"2026.01\"},\"repository\":{\"owner\":\"opendata\",\"repository\":\"openalex\"}}",
+      "name": "missing-discovery-snapshot"
+    },
+    {
+      "expected": {
+        "code": "malformed_response",
+        "field": null,
+        "result": "invalid"
+      },
+      "json": "{\"discovery\":{\"manifest_validator\":\"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"format\":\"graphforge-item/1\",\"id\":\"ont_7k2m9x4q8r3t5v1w\",\"kind\":\"ontology_module\",\"module\":{\"content_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"id\":\"https://graphforge.sh/ont_7k2m9x4q8r3t5v1w\",\"version\":\"2026.01\"},\"repository\":{\"owner\":\"opendata\",\"repository\":\"openalex\"}}",
+      "name": "missing-refs-revision"
+    },
+    {
+      "expected": {
+        "code": "malformed_response",
+        "field": null,
+        "result": "invalid"
+      },
+      "json": "{\"discovery\":{\"manifest_validator\":\"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"refs_revision\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"format\":\"graphforge-item/1\",\"id\":\"ignored\",\"id\":\"ont_7k2m9x4q8r3t5v1w\",\"kind\":\"ontology_module\",\"module\":{\"content_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"id\":\"https://graphforge.sh/ont_7k2m9x4q8r3t5v1w\",\"version\":\"2026.01\"},\"repository\":{\"owner\":\"opendata\",\"repository\":\"openalex\"}}",
+      "name": "duplicate-id"
+    },
+    {
+      "expected": {
+        "code": "malformed_response",
+        "field": null,
+        "result": "invalid"
+      },
+      "json": "{\"discovery\":{\"manifest_validator\":\"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"refs_revision\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"format\":\"graphforge-item/1\",\"id\":\"ont_7k2m9x4q8r3t5v1w\",\"kind\":\"ontology_module\",\"module\":{\"content_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"id\":\"https://graphforge.sh/ont_7k2m9x4q8r3t5v1w\",\"version\":\"\\ud800\"},\"repository\":{\"owner\":\"opendata\",\"repository\":\"openalex\"}}",
+      "name": "malformed-unicode"
+    },
+    {
+      "expected": {
+        "code": "malformed_response",
+        "field": null,
+        "result": "invalid"
+      },
+      "json": "{\"discovery\":{\"manifest_validator\":\"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"refs_revision\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"format\":\"graphforge-item/1\",\"id\":\"ont_7k2m9x4q8r3t5v1w\",\"kind\":\"ontology_module\",\"module\":{\"content_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"id\":\"https://graphforge.sh/ont_7k2m9x4q8r3t5v1w\",\"version\":\"2026.01\"},\"repository\":{\"owner\":\"opendata\",\"repository\":\"openalex\"}} null",
+      "name": "trailing-json"
+    },
+    {
+      "expected": {
+        "code": "limit_exceeded",
+        "field": "response",
+        "result": "invalid"
+      },
+      "json": "{\"discovery\":{\"manifest_validator\":\"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"refs_revision\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"format\":\"graphforge-item/1\",\"id\":\"ont_7k2m9x4q8r3t5v1w\",\"kind\":\"ontology_module\",\"module\":{\"content_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"id\":\"https://graphforge.sh/ont_7k2m9x4q8r3t5v1w\",\"version\":\"2026.01\"},\"repository\":{\"owner\":\"opendata\",\"repository\":\"openalex\"}}",
+      "limits": {
+        "max_response_bytes": 1
+      },
+      "name": "response-bound"
+    },
+    {
+      "expected": {
+        "code": "limit_exceeded",
+        "field": "id",
+        "result": "invalid"
+      },
+      "json": "{\"discovery\":{\"manifest_validator\":\"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"refs_revision\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"format\":\"graphforge-item/1\",\"id\":\"ont_7k2m9x4q8r3t5v1w\",\"kind\":\"ontology_module\",\"module\":{\"content_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"id\":\"https://graphforge.sh/ont_7k2m9x4q8r3t5v1w\",\"version\":\"2026.01\"},\"repository\":{\"owner\":\"opendata\",\"repository\":\"openalex\"}}",
+      "limits": {
+        "max_string_bytes": 5
+      },
+      "name": "string-bound"
+    }
+  ],
+  "format": "graphforge-item-conformance/1"
+}

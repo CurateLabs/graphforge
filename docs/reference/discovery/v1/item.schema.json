@@ -1,0 +1,151 @@
+{
+  "$defs": {
+    "digest": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "repository": {
+      "additionalProperties": false,
+      "properties": {
+        "owner": {
+          "$ref": "#/$defs/slug"
+        },
+        "repository": {
+          "$ref": "#/$defs/slug"
+        }
+      },
+      "required": [
+        "owner",
+        "repository"
+      ],
+      "type": "object"
+    },
+    "slug": {
+      "maxLength": 100,
+      "minLength": 1,
+      "not": {
+        "pattern": "\\.\\."
+      },
+      "pattern": "^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$",
+      "type": "string"
+    }
+  },
+  "$id": "https://graphforge.sh/schemas/discovery/v1/item.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "ontology_module"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "id": {
+            "pattern": "^ont_[0-9a-hjkmnp-tv-z]{16}$"
+          },
+          "module": {
+            "properties": {
+              "id": {
+                "pattern": "^https://graphforge\\.sh/ont_[0-9a-hjkmnp-tv-z]{16}$"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "bridge_set"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "id": {
+            "pattern": "^brg_[0-9a-hjkmnp-tv-z]{16}$"
+          },
+          "module": {
+            "properties": {
+              "id": {
+                "pattern": "^https://graphforge\\.sh/brg_[0-9a-hjkmnp-tv-z]{16}$"
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "properties": {
+    "discovery": {
+      "additionalProperties": false,
+      "properties": {
+        "manifest_validator": {
+          "$ref": "#/$defs/digest"
+        },
+        "refs_revision": {
+          "$ref": "#/$defs/digest"
+        }
+      },
+      "required": [
+        "refs_revision",
+        "manifest_validator"
+      ],
+      "type": "object"
+    },
+    "format": {
+      "const": "graphforge-item/1"
+    },
+    "id": {
+      "pattern": "^(ont|brg)_[0-9a-hjkmnp-tv-z]{16}$",
+      "type": "string"
+    },
+    "kind": {
+      "enum": [
+        "ontology_module",
+        "bridge_set"
+      ]
+    },
+    "module": {
+      "additionalProperties": false,
+      "properties": {
+        "content_digest": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "id": {
+          "pattern": "^https://graphforge\\.sh/(ont|brg)_[0-9a-hjkmnp-tv-z]{16}$",
+          "type": "string"
+        },
+        "version": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "version",
+        "content_digest"
+      ],
+      "type": "object"
+    },
+    "repository": {
+      "$ref": "#/$defs/repository"
+    }
+  },
+  "required": [
+    "format",
+    "id",
+    "kind",
+    "repository",
+    "module",
+    "discovery"
+  ],
+  "type": "object"
+}
