@@ -1,7 +1,7 @@
 //! Thin CLI projection of the Rust-owned composable multi-ontology facade (#842).
 
 use std::fs;
-use std::io::Write;
+use std::io::{BufRead as _, IsTerminal as _, Write};
 use std::path::{Path, PathBuf};
 
 use clap::{Args, Subcommand, ValueEnum};
@@ -64,6 +64,9 @@ const CLI_SURFACE_PATHS: &[&str] = &[
 #[derive(Subcommand)]
 #[allow(clippy::large_enum_variant)]
 pub(crate) enum OntologyCommand {
+    /// Replace a refused permanent ID and its references in a new Version.
+    // Like module fetch, this is outside the four-surface multi-ontology contract.
+    RegenerateId(RegenerateIdArgs),
     /// Manage independently identified ontology modules.
     Module {
         #[command(subcommand)]
@@ -84,6 +87,18 @@ pub(crate) enum OntologyCommand {
         #[command(subcommand)]
         command: CompositionCommand,
     },
+}
+
+#[derive(Args)]
+pub(crate) struct RegenerateIdArgs {
+    /// Permanent module or bridge ID (bare token or GraphForge URI).
+    id: String,
+    /// Caller-owned operation identity; reuse it to replay the original result.
+    #[arg(long)]
+    operation_uuid: String,
+    /// Confirm without prompting; required when stdin is not a terminal.
+    #[arg(long)]
+    yes: bool,
 }
 
 #[derive(Subcommand)]
@@ -478,6 +493,17 @@ pub(crate) fn run_ontology(
     output: &mut dyn Write,
 ) -> Result<(), CliRuntimeError> {
     match command {
+        OntologyCommand::RegenerateId(args) => {
+            let operation_uuid = canonical_uuid(&args.operation_uuid)?;
+            if !args.yes {
+                confirm_regeneration()?;
+            }
+            emit(
+                &graph.regenerate_item_id(&args.id, operation_uuid, None)?,
+                json_output,
+                output,
+            )
+        }
         OntologyCommand::Module { command } => run_module(graph, command, json_output, output),
         OntologyCommand::Bridge { command } => run_bridge(graph, command, json_output, output),
         OntologyCommand::Activation { command } => {
@@ -487,6 +513,33 @@ pub(crate) fn run_ontology(
             run_composition(graph, command, json_output, output)
         }
     }
+}
+
+fn confirm_regeneration() -> Result<(), graphforge_api::GfError> {
+    let input = std::io::stdin();
+    if !input.is_terminal() {
+        return Err(graphforge_api::GfError::Validation(
+            "ID regeneration requires --yes when stdin is not a terminal".into(),
+        ));
+    }
+    let mut prompt = std::io::stderr().lock();
+    write!(
+        prompt,
+        "Replace this permanent ID and its Project references in a new Version? [y/N] "
+    )
+    .and_then(|()| prompt.flush())
+    .map_err(|error| graphforge_api::GfError::Execution(error.to_string()))?;
+    let mut answer = String::new();
+    input
+        .lock()
+        .read_line(&mut answer)
+        .map_err(|error| graphforge_api::GfError::Execution(error.to_string()))?;
+    if !matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+        return Err(graphforge_api::GfError::Validation(
+            "ID regeneration cancelled: an explicit yes confirmation is required".into(),
+        ));
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_lines)]

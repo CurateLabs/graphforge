@@ -50,6 +50,41 @@ to stdout, or writes a new `--output FILE`. It MUST NOT rewrite the input.
 `--id` supplies a permanent token/URI or own-domain IRI, canonicalizes permanent
 ID input, and MUST fail if it disagrees with the document.
 
+### Regenerating a refused permanent ID
+
+`gf ontology regenerate-id <id> --operation-uuid UUID [--yes]` MUST invoke the
+Rust facade's `GraphForge::regenerate_item_id`. The CLI MUST obtain an explicit
+affirmative (`y` or `yes`) before invoking the mutation, unless `--yes` is set.
+EOF, an empty or invalid answer, and a negative answer MUST NOT invoke it.
+Non-interactive stdin MUST require `--yes`; piped input MUST NOT confirm it.
+Prompts MUST go to stderr so JSON stdout remains the native
+`ItemIdRegeneration { id, version_uuid }` receipt, whose `id` is a bare ID.
+
+Regeneration MUST require the local `id_taken` receipt stored by `gf publish`
+for that exact permanent GraphForge ID. A missing receipt MUST fail; an
+own-domain IRI MUST NOT be regenerated. If the receipt says `publish_as_owner`,
+Core MUST refuse and point to publication as that owner. Regenerating an owned
+item would create a fork, which this operation does not implement. Ownership
+MUST NOT be inferred from the document, a caller-supplied owner, or a new Hub
+lookup in place of the receipt.
+
+Core MUST mint a fresh ID of the same kind and atomically publish the rewrite
+as a new Version and head. A module rewrite MUST reuse the module-migration
+candidate path, permit only the `ontology_id` change, and preserve local symbol
+IDs through an identity symbol map. It MUST rewrite the module document and
+canonical digest, dependent modules, bridge source/target modules and assertion
+symbols, cascading bridge digests and dependent bridges' exact dependencies,
+activation subjects, stored semantic bindings and derived storage routes,
+workspace research metadata `ontologies`, and the composition fingerprint.
+A bridge rewrite MUST replace `bridge_id`, dependent bridges' exact
+dependencies, and activation subjects, recomputing affected bridge digests and
+the composition fingerprint.
+
+Earlier Versions and their content MUST remain unchanged. Publication SHOULD
+start from the regenerated Version; the new ID does not replace the old ID in
+historical Versions. Replaying the same operation UUID MUST return the original
+replacement receipt without minting another ID or recording another Version.
+
 ## Inventory, closure, and composition identity
 
 An inventory contains unique exact module IDs and bridge IDs. Required module
