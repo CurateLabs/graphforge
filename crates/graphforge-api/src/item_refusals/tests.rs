@@ -182,6 +182,19 @@ fn exact_refusal_receipt_survives_reopen_and_records_only_a_retained_replacement
             .unwrap(),
         mapped
     );
+    // Count pressure cannot discard the retained old-ID/replacement evidence.
+    graph
+        .record_publish_id_taken(base, &batch(0, MAX_ID_TAKEN_ITEMS - 1))
+        .unwrap();
+    let current = batch(MAX_ID_TAKEN_ITEMS, 2);
+    graph.record_publish_id_taken(base, &current).unwrap();
+    assert_eq!(graph.id_taken_receipt(OLD).unwrap(), Some(mapped.clone()));
+    for item in current {
+        assert_eq!(
+            graph.id_taken_receipt(&item.id).unwrap().unwrap().item,
+            item
+        );
+    }
     graph.record_publish_id_taken(base, &[item(true)]).unwrap();
     assert_eq!(
         graph.id_taken_receipt(OLD).unwrap(),
@@ -221,13 +234,162 @@ fn organization_hint_refuses_regeneration_and_invalid_or_oversized_receipts_fail
     let mut invalid = item(false);
     invalid.publish_as_owner = Some(false);
     assert!(graph.record_publish_id_taken(base, &[invalid]).is_err());
+    let mut invalid = item(false);
+    invalid.owner = Some("o".repeat(101));
+    assert_ne!(
+        graph
+            .record_publish_id_taken(base, &[invalid])
+            .unwrap_err()
+            .code(),
+        "GF_RESOURCE_LIMIT"
+    );
     let control = path.join(DIRECTORY).join(DOCUMENT);
     std::fs::write(&control, b"{}").unwrap();
-    assert!(graph.id_taken_receipt(OLD).is_err());
+    assert_eq!(graph.id_taken_receipt(OLD).unwrap_err().code(), "GF_IO");
     let file = std::fs::OpenOptions::new()
         .write(true)
         .open(&control)
         .unwrap();
     file.set_len(MAX_BYTES + 1).unwrap();
-    assert!(graph.id_taken_receipt(OLD).is_err());
+    assert_eq!(
+        graph.id_taken_receipt(OLD).unwrap_err().code(),
+        "GF_VALIDATION"
+    );
+}
+
+fn batch(start: usize, count: usize) -> Vec<IdTakenItem> {
+    (start..start + count)
+        .map(|index| IdTakenItem {
+            kind: ItemKind::OntologyModule,
+            id: format!("ont_{index:016x}"),
+            owner: None,
+            publish_as_owner: None,
+        })
+        .collect()
+}
+
+#[test]
+fn consecutive_refusals_evict_stale_receipts_and_preserve_the_current_batch_after_reopen() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("project");
+    let mut graph = GraphForge::new(path.to_str()).unwrap();
+    let version = capture(&mut graph);
+    let first = batch(0, MAX_ID_TAKEN_ITEMS);
+    graph.record_publish_id_taken(version, &first).unwrap();
+    let mut current = vec![first[0].clone()];
+    current.extend(batch(MAX_ID_TAKEN_ITEMS, 2));
+    let recorded = graph.record_publish_id_taken(version, &current).unwrap();
+    assert_eq!(recorded.len(), current.len());
+    for (receipt, item) in recorded.iter().zip(&current) {
+        assert_eq!(&receipt.item, item);
+    }
+    drop(graph);
+    let graph = GraphForge::new(path.to_str()).unwrap();
+    assert!(graph.id_taken_receipt(&first[1].id).unwrap().is_none());
+    assert!(graph.id_taken_receipt(&first[2].id).unwrap().is_none());
+    assert!(graph.id_taken_receipt(&first[3].id).unwrap().is_some());
+    assert!(
+        graph
+            .record_item_id_regeneration(&first[1].id, NEW, version)
+            .unwrap_err()
+            .to_string()
+            .contains("exact ID")
+    );
+    for receipt in recorded {
+        assert_eq!(
+            graph.id_taken_receipt(&receipt.item.id).unwrap(),
+            Some(receipt)
+        );
+    }
+    let store = Store::open(&graph, false).unwrap().unwrap();
+    assert_eq!(store.read().unwrap().receipts.len(), MAX_ID_TAKEN_ITEMS);
+}
+
+fn receipt(item: IdTakenItem, version: Uuid, protected: bool) -> ItemIdRefusalReceipt {
+    ItemIdRefusalReceipt {
+        item,
+        refused_version_uuid: version,
+        regenerated: protected.then(|| ItemIdRegeneration {
+            id: "ont_bbbbbbbbbbbbbbbb".into(),
+            version_uuid: version,
+        }),
+    }
+}
+
+#[test]
+fn protected_capacity_exhaustion_keeps_the_exact_previous_document_and_no_partial_batch() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("project");
+    let mut graph = GraphForge::new(path.to_str()).unwrap();
+    let version = capture(&mut graph);
+    // Seed a full, structurally valid protected store without manufacturing
+    // thousands of unrelated ontology mutations just to exercise retention.
+    let mut document = Document {
+        format: FORMAT.into(),
+        receipts: batch(0, MAX_ID_TAKEN_ITEMS)
+            .into_iter()
+            .enumerate()
+            .map(|(index, item)| {
+                (
+                    item.id.clone(),
+                    receipt(item, version, index != MAX_ID_TAKEN_ITEMS - 1),
+                )
+            })
+            .collect(),
+    };
+    let store = Store::open(&graph, true).unwrap().unwrap();
+    store.write(&mut document, &BTreeSet::new()).unwrap();
+    drop(store);
+    let control = path.join(DIRECTORY).join(DOCUMENT);
+    let before = std::fs::read(&control).unwrap();
+    let current = batch(MAX_ID_TAKEN_ITEMS, 2);
+    let error = graph
+        .record_publish_id_taken(version, &current)
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        GfError::Api {
+            code: graphforge_core::ApiErrorCode::ResourceLimit,
+            ..
+        }
+    ));
+    assert_eq!(std::fs::read(&control).unwrap(), before);
+    drop(graph);
+    let graph = GraphForge::new(path.to_str()).unwrap();
+    for item in current {
+        assert!(graph.id_taken_receipt(&item.id).unwrap().is_none());
+    }
+    let store = Store::open(&graph, false).unwrap().unwrap();
+    assert_eq!(store.read().unwrap().receipts, document.receipts);
+}
+
+#[test]
+fn defensive_byte_retention_preserves_current_and_protected_entries_and_exact_sizes() {
+    let version = Uuid::now_v7();
+    let entries = batch(0, 3);
+    let mut document = Document {
+        format: FORMAT.into(),
+        receipts: entries
+            .iter()
+            .enumerate()
+            .map(|(index, item)| (item.id.clone(), receipt(item.clone(), version, index == 0)))
+            .collect(),
+    };
+    let current = BTreeSet::from([entries[2].id.as_str()]);
+    let mut expected = document.receipts.clone();
+    expected.remove(&entries[1].id);
+    // Valid current-schema stores cannot hit 8 MiB before the count limit.
+    // Derive a smaller private test budget from genuine serialized receipts
+    // to exercise the defensive byte accounting, including JSON separators.
+    let expected_bytes = serde_json::to_vec(&Document {
+        format: FORMAT.into(),
+        receipts: expected.clone(),
+    })
+    .unwrap();
+    let bytes = retain_receipts(&mut document, &current, 3, expected_bytes.len()).unwrap();
+    assert_eq!(bytes, expected_bytes);
+    assert_eq!(document.receipts, expected);
+    let error = retain_receipts(&mut document, &current, 3, bytes.len() - 1).unwrap_err();
+    assert_eq!(error.code(), "GF_RESOURCE_LIMIT");
+    assert_eq!(document.receipts, expected);
 }

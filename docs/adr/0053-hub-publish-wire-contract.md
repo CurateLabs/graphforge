@@ -289,6 +289,14 @@ committed replacement only when its retained Version contains the new identity;
 later refusals of an old Version point to that replacement Version. This does
 not implement the regeneration command or reference rewriting.
 
+Receipt retention is bounded to 8,192 entries and 8 MiB. A write preserves every
+current-response ID and every recorded replacement relation, evicting unresolved
+receipts outside the current response in canonical ID order as needed. An evicted
+ID requires a fresh exact-ID refusal before regeneration; eviction grants no
+authority. If protected and current records alone exhaust capacity, the native
+API returns `GF_RESOURCE_LIMIT` without changing the previous document. The CLI
+retains `hub.publish.id_taken` with capacity guidance distinct from storage repair.
+
 Before implementing regeneration, audit ancestor publication and Branch-head
 selection: current descendants include ancestor lineage records without
 recursively publishing ancestor packages. Reintroducing ancestor commits could

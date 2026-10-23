@@ -96,11 +96,9 @@ pub(super) fn record(graph: &GraphForge, version: Uuid, items: &[IdTakenItem]) -
             "Hub refusal names an item outside this publication",
         );
     }
-    let Ok(receipts) = graph.record_publish_id_taken(version, items) else {
-        return publish_error(
-            HubPublishErrorCode::IdTaken,
-            "the Hub refused permanent IDs; the local refusal receipt could not be saved; repair local storage and publish again before regenerating",
-        );
+    let receipts = match graph.record_publish_id_taken(version, items) {
+        Ok(receipts) => receipts,
+        Err(error) => return receipt_failure(&error),
     };
     let guidance = items
         .iter()
@@ -133,4 +131,53 @@ pub(super) fn record(graph: &GraphForge, version: Uuid, items: &[IdTakenItem]) -
         .collect::<Vec<_>>()
         .join("\n");
     publish_error(HubPublishErrorCode::IdTaken, &guidance)
+}
+
+fn receipt_failure(error: &GfError) -> GfError {
+    let guidance = match error {
+        GfError::Api {
+            code: graphforge_api::ApiErrorCode::ResourceLimit,
+            ..
+        } => {
+            "the Hub refused permanent IDs; local refusal receipt capacity is full; keep existing replacement records, retry with fewer conflicting IDs or use a separate local Project before regenerating"
+        }
+        _ => {
+            "the Hub refused permanent IDs; the local refusal receipt could not be saved; repair local storage and publish again before regenerating"
+        }
+    };
+    publish_error(HubPublishErrorCode::IdTaken, guidance)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn receipt_capacity_and_storage_failures_have_distinct_sanitized_guidance() {
+        for (failure, capacity) in [
+            (
+                GfError::Api {
+                    code: graphforge_api::ApiErrorCode::ResourceLimit,
+                    message: "private-error-text".into(),
+                },
+                true,
+            ),
+            (GfError::Storage("private-error-text".into()), false),
+            (GfError::Validation("private-error-text".into()), false),
+        ] {
+            let error = receipt_failure(&failure);
+            let text = error.to_string();
+            assert!(
+                matches!(&error, GfError::Validation(message) if message.starts_with("hub.publish.id_taken:"))
+            );
+            assert_eq!(crate::error_exit_code(&error.into()), 2);
+            assert_eq!(text.contains("capacity is full"), capacity);
+            assert_eq!(text.contains("repair local storage"), !capacity);
+            assert!(!text.contains("private-error-text"));
+            if capacity {
+                assert!(text.contains("keep existing replacement records"));
+                assert!(text.contains("separate local Project"));
+            }
+        }
+    }
 }

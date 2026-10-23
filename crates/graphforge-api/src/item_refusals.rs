@@ -8,7 +8,7 @@ use graphforge_filesystem::StableDirectory;
 use graphforge_hub_publish::{HubPublishError, IdTakenItem, MAX_ID_TAKEN_ITEMS};
 use graphforge_storage::durable_commit::{AtomicHooks, publish_atomic_in};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::fs::File;
 use std::io::Read as _;
@@ -135,12 +135,14 @@ impl Store {
         Ok(document)
     }
 
-    fn write(&self, document: &Document) -> Result<(), GfError> {
+    fn write(&self, document: &mut Document, current: &BTreeSet<&str>) -> Result<(), GfError> {
+        let bytes = retain_receipts(
+            document,
+            current,
+            MAX_ID_TAKEN_ITEMS,
+            usize::try_from(MAX_BYTES).map_err(storage)?,
+        )?;
         validate_document(document)?;
-        let bytes = serde_json::to_vec(document).map_err(storage)?;
-        if bytes.len() as u64 > MAX_BYTES {
-            return Err(invalid("local publish refusal storage exceeds its bound"));
-        }
         self.directory
             .revalidate_child_file(OsStr::new(LOCK), &self.lock)
             .map_err(storage)?;
@@ -165,6 +167,40 @@ impl Store {
         .acknowledge(None)
         .map_err(storage)
     }
+}
+
+fn retain_receipts(
+    document: &mut Document,
+    current: &BTreeSet<&str>,
+    max_receipts: usize,
+    max_bytes: usize,
+) -> Result<Vec<u8>, GfError> {
+    let mut byte_count = serde_json::to_vec(document).map_err(storage)?.len();
+    let removable = document
+        .receipts
+        .iter()
+        .filter(|(id, receipt)| receipt.regenerated.is_none() && !current.contains(id.as_str()))
+        .map(|(id, _)| id.clone())
+        .collect::<Vec<_>>();
+    // Canonical ID order is deterministic, without adding clocks or changing
+    // the private format. Current refusals and replacement replay evidence
+    // always win over unresolved receipts from earlier responses.
+    for id in removable {
+        if document.receipts.len() <= max_receipts && byte_count <= max_bytes {
+            break;
+        }
+        let entry = BTreeMap::from([(&id, &document.receipts[&id])]);
+        let entry_bytes = serde_json::to_vec(&entry).map_err(storage)?.len() - 2;
+        byte_count -= entry_bytes + usize::from(document.receipts.len() > 1);
+        document.receipts.remove(&id);
+    }
+    if document.receipts.len() > max_receipts || byte_count > max_bytes {
+        return Err(GfError::Api {
+            code: graphforge_core::ApiErrorCode::ResourceLimit,
+            message: "local publish refusal receipt capacity is full; preserve recorded replacements and retry with fewer conflicting IDs or a separate local Project".into(),
+        });
+    }
+    serde_json::to_vec(document).map_err(storage)
 }
 
 fn validate_document(document: &Document) -> Result<(), GfError> {
@@ -192,6 +228,9 @@ fn validate_document(document: &Document) -> Result<(), GfError> {
 impl GraphForge {
     /// Durably record validated per-item publication refusals without storing
     /// credentials, server text, URLs, or portable Project participant state.
+    /// Evict unresolved receipts outside this response in canonical ID order
+    /// as needed. Every current ID and recorded replacement stays protected;
+    /// capacity exhaustion leaves the previous durable document unchanged.
     pub fn record_publish_id_taken(
         &self,
         version_uuid: Uuid,
@@ -218,7 +257,8 @@ impl GraphForge {
                 },
             );
         }
-        store.write(&document)?;
+        let current = items.iter().map(|item| item.id.as_str()).collect();
+        store.write(&mut document, &current)?;
         items
             .iter()
             .map(|item| {
@@ -285,7 +325,7 @@ impl GraphForge {
         self.validate_item_replacement(&old_id, &new_id, version_uuid)?;
         receipt.regenerated = Some(relation);
         let result = receipt.clone();
-        store.write(&document)?;
+        store.write(&mut document, &BTreeSet::from([old_id.as_str()]))?;
         Ok(result)
     }
 

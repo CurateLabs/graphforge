@@ -83,6 +83,11 @@ That future command is not implemented by this contract change. The native seam
 requires an exact receipt and a retained replacement Version before recording
 an old-ID/new-ID relation; a later old-Version refusal points to that Version.
 Receipts contain no credentials, URLs or server message text.
+Retention preserves the current refusal and all recorded replacement relations,
+evicting other unresolved receipts in canonical ID order to fit 8,192 entries and
+8 MiB. Regenerating an evicted ID requires a fresh exact-ID refusal. If protected
+records fill capacity, the previous file remains unchanged and the CLI reports
+capacity exhaustion rather than asking to repair healthy storage.
 
 [ADR 0053](../../../adr/0053-hub-publish-wire-contract.md#client-snapshot)
 records how the client builds the snapshot.
