@@ -1,8 +1,8 @@
 {
   "contractVersion": 1,
   "rustManifest": "../../../tests/contracts/non-cypher-rust-surface.json",
-  "releaseSurfaceCount": 367,
-  "releaseSurfaceDigest": "50f913474794c2254de7b87f4705a5d250ce3376918255f92b91a754116097cf",
+  "releaseSurfaceCount": 368,
+  "releaseSurfaceDigest": "d42a5466d35bee7c6ee1df781f0b852948b2cc50f8bc31ff9b948652cc091a62",
   "requiredEquivalent": [
     "GraphForge.adopt_ontology",
     "GraphForge.clear_ontology",
@@ -444,6 +444,7 @@
     "notExposed": {
       "GraphForge.id_taken_receipt": "Private native receipt admission is owned by CLI publication and regeneration.",
       "GraphForge.record_item_id_regeneration": "Private native receipt admission is owned by CLI publication and regeneration.",
+      "GraphForge.regenerate_item_id": "Native receipt-authorized identity regeneration is owned by the Rust facade and CLI.",
       "GraphForge.record_publish_id_taken": "Private native receipt admission is owned by CLI publication and regeneration.",
       "GraphForge.portable_ontology_composition": "Bounded ontology composition inspection is owned by native CLI publication admission; no Node product adapter is shipped.",
       "GraphForge.research_version_portable_ontology_composition": "Bounded ontology composition inspection is owned by native CLI publication admission; no Node product adapter is shipped.",

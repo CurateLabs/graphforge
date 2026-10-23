@@ -197,7 +197,8 @@ pub(super) fn publication_fingerprint(request: &super::ResearchOperation) -> Opt
         | ResearchMutation::SubmitProposal { intent_sha256, .. }
         | ResearchMutation::ReviewProposal { intent_sha256, .. }
         | ResearchMutation::ReleaseProposal { intent_sha256, .. }
-        | ResearchMutation::UpdateBranch { intent_sha256, .. } => {
+        | ResearchMutation::UpdateBranch { intent_sha256, .. }
+        | ResearchMutation::RegenerateItemId { intent_sha256, .. } => {
             let mut digest = Sha256::new();
             digest.update(b"graphforge-branch-publication-intent/1");
             digest.update(request.operation_uuid.as_bytes());
@@ -207,4 +208,35 @@ pub(super) fn publication_fingerprint(request: &super::ResearchOperation) -> Opt
         }
         _ => None,
     }
+}
+
+/// Preserve the selected Branch and its origin when installing a native ID rewrite.
+pub(super) fn regenerate(
+    root: &std::path::Path,
+    registry: &mut ResearchRegistry,
+    version: &super::ResearchVersionRecord,
+) -> Result<Uuid, GfError> {
+    let selected = registry
+        .current_branch
+        .filter(|id| registry.branches.contains_key(id))
+        .or_else(|| {
+            (registry.branches.len() == 1)
+                .then(|| *registry.branches.keys().next().expect("one Branch"))
+        });
+    if selected != Some(version.context_uuid) {
+        return Err(invalid("ID regeneration requires the selected Branch"));
+    }
+    let prior = registry
+        .heads
+        .get(&version.context_uuid)
+        .and_then(|head| registry.versions.get(head))
+        .ok_or_else(|| invalid("ID regeneration Branch head is unavailable"))?;
+    if version.content.source_version != prior.content.source_version
+        || version.content.graph_projection.is_some()
+    {
+        return Err(invalid(
+            "ID regeneration must preserve Branch origin lineage",
+        ));
+    }
+    publish(root, registry, None, version, None)
 }

@@ -260,6 +260,45 @@ must agree with an ID already in the document. Authored GraphForge IDs must use
 the canonical URI and the correct kind; legacy IDs and other-domain IRIs remain
 unchanged.
 
+After `gf publish` refuses an item with `id_taken`, replace its permanent ID
+with:
+
+```sh
+gf ontology regenerate-id ont_7k2m9x4q8r3t5v1w --operation-uuid UUID
+# For scripts, confirm explicitly:
+gf ontology regenerate-id ont_7k2m9x4q8r3t5v1w --operation-uuid UUID --yes
+```
+
+The command accepts a bare module or bridge ID or its GraphForge URI. It asks
+for `y` or `yes` before calling the native mutation; no, an empty or invalid
+answer, and EOF cancel it. Non-interactive stdin requires `--yes`, including
+when piping an affirmative answer. The prompt goes to stderr; `--json` returns
+the native receipt `{ "id": "ont_…", "version_uuid": "…" }`, with a bare new ID.
+
+Core requires the local `id_taken` receipt that `gf publish` saved for that exact
+ID. A missing receipt or a custom-domain IRI is refused. If the receipt includes
+`publish_as_owner`, publish as the indicated owner instead; regenerating an ID
+you own would be a fork and is outside this command's scope.
+
+Core mints an ID of the same kind and atomically records the Project rewrite
+and new head Version. All adopted versions under the refused ID receive the
+same replacement ID, preserving each authored version and its exact references.
+Module regeneration rewrites the module document and
+digest, dependent modules, bridge endpoints and assertion symbols, cascading
+bridge dependencies and digests, activation subjects, stored semantic bindings
+and their storage routes, research metadata `ontologies`, and the composition
+fingerprint. Local symbol IDs stay the same. Bridge regeneration rewrites the
+bridge ID, dependent bridges, activation subjects, and affected digests and
+composition fingerprint.
+
+Publish from the regenerated head. Earlier Versions keep their original IDs
+and content; regeneration never rewrites history. Reuse the same operation UUID
+to replay the original result without minting another ID or Version. If another
+write wins before regeneration commits, that operation remains bound to its
+original source and reports a write conflict. Start an explicit new operation
+UUID to try the current workspace: Core first recovers the native journals and
+proves that the earlier preparation did not commit and can no longer publish.
+
 `ontology module fetch REF --output FILE [--digest HEX] [--hub URL]` retrieves
 one verified ontology module without cloning a Project:
 

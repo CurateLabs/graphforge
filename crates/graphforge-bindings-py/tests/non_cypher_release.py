@@ -27,8 +27,8 @@ production_source = runpy.run_path(str(Path(__file__).with_name("native_sources.
     "production_source"
 ]
 PYO3_SOURCE = ROOT / "crates/graphforge-bindings-py/src/lib.rs"
-EXPECTED_RUST_DIGEST = "1f398c1d2d79113b219cbc0800baf821e85cd5adc0550445e13e5284b2caa965"
-EXPECTED_RELEASE_DIGEST = "50f913474794c2254de7b87f4705a5d250ce3376918255f92b91a754116097cf"
+EXPECTED_RUST_DIGEST = "c16181fe678d766e1a1c2f68bc020d55175ade10c338716d12f42e7cd71f2ce8"
+EXPECTED_RELEASE_DIGEST = "d42a5466d35bee7c6ee1df781f0b852948b2cc50f8bc31ff9b948652cc091a62"
 
 PYTHON_ONLY_METHODS = frozenset(
     {
@@ -290,7 +290,7 @@ def _classification_report() -> dict[str, object]:
         for group in manifest["method_evidence_groups"].values()
         for method_id in group["ids"]
     }
-    assert len(release_methods) == 367
+    assert len(release_methods) == 368
     assert _digest(release_methods) == EXPECTED_RELEASE_DIGEST
     assert set(EVIDENCE) == set(manifest["method_evidence_groups"])
 
@@ -401,6 +401,7 @@ def _classification_report() -> dict[str, object]:
         elif rust_id in {
             "GraphForge.id_taken_receipt",
             "GraphForge.record_item_id_regeneration",
+            "GraphForge.regenerate_item_id",
             "GraphForge.record_publish_id_taken",
         }:
             assert python_id not in python_methods

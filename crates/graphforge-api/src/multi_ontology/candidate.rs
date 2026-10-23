@@ -385,6 +385,13 @@ pub(super) fn rewrite_module_identity(
     prior: &OntologyModuleId,
     next: &OntologyModuleId,
 ) -> Result<(), GfError> {
+    rewrite_module_identities(candidate, &[(prior.clone(), next.clone())])
+}
+
+fn rewrite_module_identities(
+    candidate: &mut WorkspaceOntologyComposition,
+    replacements: &[(OntologyModuleId, OntologyModuleId)],
+) -> Result<(), GfError> {
     let prior_bridge_ids = candidate
         .bridges
         .iter()
@@ -392,7 +399,7 @@ pub(super) fn rewrite_module_identity(
         .collect::<Result<Vec<_>, _>>()?;
     for module in &mut candidate.modules {
         for dep in &mut module.dependencies {
-            if dep == prior {
+            if let Some((_, next)) = replacements.iter().find(|(prior, _)| dep == prior) {
                 *dep = next.clone();
             }
         }
@@ -403,25 +410,132 @@ pub(super) fn rewrite_module_identity(
             .iter_mut()
             .chain(bridge.target_modules.iter_mut())
         {
-            if id == prior {
+            if let Some((_, next)) = replacements.iter().find(|(prior, _)| id == prior) {
                 *id = next.clone();
             }
         }
         for assertion in &mut bridge.assertions {
-            if assertion.source.module == *prior {
-                assertion.source.module = next.clone();
-            }
-            if assertion.target.module == *prior {
-                assertion.target.module = next.clone();
+            for symbol in [&mut assertion.source, &mut assertion.target] {
+                if let Some((_, next)) = replacements
+                    .iter()
+                    .find(|(prior, _)| symbol.module == *prior)
+                {
+                    symbol.module = next.clone();
+                }
             }
         }
     }
     for record in &mut candidate.activation {
-        if record.subject == prior.display_ref() {
+        if let Some((_, next)) = replacements
+            .iter()
+            .find(|(prior, _)| record.subject == prior.display_ref())
+        {
             record.subject = next.display_ref();
         }
     }
     cascade_bridge_identities(candidate, prior_bridge_ids)
+}
+
+pub(super) struct ModuleMigrationCandidate {
+    pub composition: WorkspaceOntologyComposition,
+    pub replacements: Vec<(OntologyModuleId, OntologyModuleId)>,
+    pub affected_bridges: Vec<String>,
+    pub bridge_replacements: Vec<(BridgeSetId, BridgeSetId)>,
+}
+
+/// Validate all replacements against one admitted source, then compile the full
+/// candidate once. No intermediate composition is published or reloaded.
+pub(super) fn module_migration_candidate(
+    mut candidate: WorkspaceOntologyComposition,
+    requests: &[ModuleMigrationRequest],
+    regenerate: bool,
+) -> Result<ModuleMigrationCandidate, GfError> {
+    let mut inventory = module_inventory(&candidate)?;
+    let previous_bridges = candidate
+        .bridges
+        .iter()
+        .map(bridge_id)
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut replacements = Vec::new();
+    let mut affected_bridges = Vec::new();
+    for request in requests {
+        if request.document.ontology_id.trim().is_empty() {
+            return Err(GfError::Validation(
+                "missing ontology_id; run ontology module create first",
+            ));
+        }
+        let index = resolve_module_index(&candidate, &request.selector)?;
+        let previous = candidate.modules[index].id.clone();
+        if regenerate {
+            let mut expected = candidate.modules[index].document.clone();
+            expected
+                .ontology_id
+                .clone_from(&request.document.ontology_id);
+            if expected != request.document
+                || request.dependencies != candidate.modules[index].dependencies
+            {
+                return Err(GfError::Validation(
+                    "ID regeneration must preserve the authored module",
+                ));
+            }
+        } else if request.document.ontology_id != previous.ontology_id {
+            return Err(GfError::Validation(
+                "module migration must retain ontology_id",
+            ));
+        }
+        let next = inventory
+            .create_register(
+                request.document.clone(),
+                request.dependencies.clone(),
+                request.enforcement,
+                "migration-validation",
+            )
+            .map_err(composition_error)?;
+        affected_bridges.extend(
+            candidate
+                .bridges
+                .iter()
+                .filter(|bridge| {
+                    bridge.source_modules.contains(&previous)
+                        || bridge.target_modules.contains(&previous)
+                })
+                .map(bridge_id)
+                .collect::<Result<Vec<_>, _>>()?
+                .into_iter()
+                .map(|id| id.display_ref()),
+        );
+        rewrite_bridge_symbols_for_migration(&mut candidate, &previous, &next, &request.document)?;
+        candidate.modules[index] = graphforge_storage::WorkspaceCompositionModule {
+            id: next.clone(),
+            dependencies: request.dependencies.clone(),
+            document: request.document.clone(),
+            allow_projected_identity: false,
+        };
+        replacements.push((previous, next));
+    }
+    rewrite_module_identities(&mut candidate, &replacements)?;
+    for (request, (_, next)) in requests.iter().zip(&replacements) {
+        set_module_activation(&mut candidate, next, request.enforcement);
+    }
+    let compiled = compile_candidate(&candidate)?;
+    let bridge_replacements = previous_bridges
+        .into_iter()
+        .zip(
+            candidate
+                .bridges
+                .iter()
+                .map(bridge_id)
+                .collect::<Result<Vec<_>, _>>()?,
+        )
+        .collect();
+    affected_bridges.sort();
+    affected_bridges.dedup();
+    Ok(ModuleMigrationCandidate {
+        composition: WorkspaceOntologyComposition::from_compiled(&compiled, candidate.bridges),
+        replacements,
+        affected_bridges,
+        bridge_replacements,
+    })
 }
 
 pub(super) fn cascade_bridge_identities(

@@ -229,6 +229,14 @@ impl GraphForge {
     ) -> Result<ResearchOperationReceipt, GfError> {
         if matches!(
             &operation.mutation,
+            ResearchMutation::RegenerateItemId { .. }
+        ) {
+            return Err(GfError::Validation(
+                "ID regeneration requires the native receipt and rewrite owner".into(),
+            ));
+        }
+        if matches!(
+            &operation.mutation,
             ResearchMutation::FetchRemoteBranch { .. }
         ) {
             return Err(GfError::Validation(

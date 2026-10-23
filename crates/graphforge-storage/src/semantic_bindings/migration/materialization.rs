@@ -240,6 +240,18 @@ fn materialize_semantic_migration_selected(
             let new_route = authenticated_old_route
                 .and_then(|route| route_moves.get(route))
                 .cloned();
+            if new_route.is_some() {
+                for key in ["graphforge.entity_type", "graphforge.rel_type"] {
+                    if schema_metadata
+                        .get(key)
+                        .is_some_and(|owner| Some(owner.as_str()) != authenticated_old_route)
+                    {
+                        return Err(corrupt(
+                            "migration Parquet owner metadata disagrees with route",
+                        ));
+                    }
+                }
+            }
             let renames = authenticated_old_route.and_then(|route| property_renames.get(route));
             let target_route = new_route.as_deref().or(authenticated_old_route);
             let fields = builder
@@ -273,6 +285,14 @@ fn materialize_semantic_migration_selected(
                 plan.to_composition_fingerprint.clone(),
             );
             if let Some(route) = new_route {
+                // Property writers use the owner-route metadata when merging
+                // later overlay fragments. Carry it with the path and semantic
+                // route so a valid migrated file remains writable after reopen.
+                for key in ["graphforge.entity_type", "graphforge.rel_type"] {
+                    if metadata.contains_key(key) {
+                        metadata.insert(key.into(), route.clone());
+                    }
+                }
                 metadata.insert(SEMANTIC_ROUTE_METADATA_KEY.into(), route.clone());
                 if metadata.contains_key(crate::property_overlay::PROPERTY_OVERLAY_FORMAT_KEY) {
                     metadata.insert(crate::property_overlay::PROPERTY_ROUTE_KEY.into(), route);

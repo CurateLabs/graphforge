@@ -517,6 +517,37 @@ impl CompositionBindingContext {
         &'a self,
         input: &'a str,
     ) -> Result<(Option<OntologyModuleId>, &'a str), BindingDiagnostic> {
+        // Exact module references contain URI and potentially version colons.
+        // Match an adopted identity plus its delimiter before legacy short names;
+        // splitting at either the first or last colon loses owner information.
+        let mut exact = self
+            .composition
+            .modules
+            .iter()
+            .filter_map(|module| {
+                input
+                    .strip_prefix(format!("{}:", module.id.display_ref()).as_str())
+                    .map(|local| (&module.id, local))
+            })
+            .collect::<Vec<_>>();
+        exact.sort_by_key(|(module, _)| module.sort_key());
+        if let [(module, local)] = exact.as_slice()
+            && !local.is_empty()
+        {
+            return Ok((Some((*module).clone()), *local));
+        }
+        if !exact.is_empty() {
+            return Err(BindingDiagnostic {
+                code: BindingDiagnosticCode::InvalidQualifier,
+                subject: input.to_owned(),
+                candidates: exact
+                    .iter()
+                    .take(self.limits.candidates.max(1))
+                    .map(|(module, _)| module.display_ref())
+                    .collect(),
+                remediation: "use one exact module display_ref and a nonempty local ID".into(),
+            });
+        }
         let Some((qualifier, local_id)) = input.split_once(':') else {
             return Ok((None, input));
         };
@@ -767,6 +798,98 @@ mod identity_tests {
         assert!(checked_storage_ids([(entity.clone(), 0), (entity.clone(), 1)]).is_err());
         assert!(
             checked_storage_ids([(entity, 0), (symbol(SymbolKind::Entity, "Company"), 0),])
+                .is_err()
+        );
+    }
+}
+
+#[cfg(test)]
+mod qualifier_tests {
+    use super::*;
+
+    #[test]
+    fn exact_registered_module_qualifiers_preserve_uri_version_and_property_colons() {
+        use graphforge_ontology::{
+            AuthoredModule, CompositionLimits, InventoryCompileRequest, OntologyDoc,
+            compile_inventory, module_document_digest,
+        };
+        let modules = ["release:one", "release:two"].into_iter().map(|version| {
+            let doc: OntologyDoc = serde_json::from_value(serde_json::json!({
+                "ontology_id":"https://example.test:443/schema", "version":version,
+                "entity_types":[{"name":"Person"}],"relation_types":[{"name":"KNOWS","src":"Person","dst":"Person"}],
+                "properties":[{"owner":"Person","name":"name","type":"utf8"},{"owner":"KNOWS","name":"since","type":"int64"}]
+            })).unwrap();
+            AuthoredModule { id: OntologyModuleId { ontology_id: doc.ontology_id.clone(), authored_version: doc.version.clone(), canonical_digest: module_document_digest(&doc).unwrap() }, dependencies: vec![], doc, allow_projected_identity: false }
+        }).collect::<Vec<_>>();
+        let compiled = compile_inventory(InventoryCompileRequest {
+            modules: &modules,
+            bridges: &[],
+            activation: &[],
+            profile_default: ActivationMode::Strict,
+            limits: CompositionLimits::default(),
+            cancelled: None,
+        })
+        .unwrap();
+        let context = CompositionBindingContext::new(
+            Arc::new(compiled),
+            vec![],
+            CompositionBindingLimits::default(),
+        );
+        for module in &modules {
+            for (kind, local) in [
+                (SymbolKind::Entity, "Person"),
+                (SymbolKind::Relation, "KNOWS"),
+                (SymbolKind::Property, "Person:name"),
+                (SymbolKind::Property, "KNOWS:since"),
+            ] {
+                let input = format!("{}:{local}", module.id.display_ref());
+                let (symbol, _) = context.resolve(kind, &input).unwrap();
+                assert!(
+                    matches!(symbol, SymbolBinding::Qualified(symbol) if symbol.module == module.id && symbol.local_id == local)
+                );
+            }
+            for (kind, owner, name) in [
+                (SymbolKind::Entity, "Person", "name"),
+                (SymbolKind::Relation, "KNOWS", "since"),
+            ] {
+                let (symbol, _) = context
+                    .resolve_owned_property(
+                        kind,
+                        &format!("{}:{owner}", module.id.display_ref()),
+                        name,
+                    )
+                    .unwrap();
+                assert!(
+                    matches!(symbol, SymbolBinding::Qualified(symbol) if symbol.module == module.id)
+                );
+            }
+            assert!(
+                context
+                    .resolve(SymbolKind::Entity, &format!("{}:", module.id.display_ref()))
+                    .is_err()
+            );
+            assert!(
+                context
+                    .resolve(
+                        SymbolKind::Entity,
+                        &format!("{}:Absent", module.id.display_ref())
+                    )
+                    .is_err()
+            );
+        }
+        assert_eq!(
+            context
+                .resolve(SymbolKind::Entity, "schema:Person")
+                .unwrap_err()
+                .code,
+            BindingDiagnosticCode::InvalidQualifier
+        );
+        assert!(
+            context
+                .resolve(
+                    SymbolKind::Entity,
+                    "https://unknown.test/schema@1#000:Person"
+                )
                 .is_err()
         );
     }

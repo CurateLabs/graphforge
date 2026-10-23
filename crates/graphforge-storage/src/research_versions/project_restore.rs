@@ -18,6 +18,9 @@ pub(super) fn prepare(
             .versions
             .get(source_version)
             .ok_or_else(|| invalid("Project restore source is unavailable"))?,
+        ResearchMutation::RegenerateItemId { version, .. } => {
+            return replace_workspace(root, version, registry, publication);
+        }
         ResearchMutation::ReviewProposal {
             destination: Some(version),
             ..
@@ -27,6 +30,15 @@ pub(super) fn prepare(
     if version.content.source_version.is_some() {
         return Err(invalid("Project restore requires a complete Version"));
     }
+    replace_workspace(root, version, registry, publication)
+}
+
+fn replace_workspace(
+    root: &Path,
+    version: &ResearchVersionRecord,
+    registry: &ResearchRegistry,
+    publication: &mut ProjectGenerationRequest,
+) -> Result<Option<tempfile::TempDir>, GfError> {
     let snapshots = super::inspect_with_registry(root, version, registry)?;
     publication.participants.retain(|p| {
         history(&ResearchParticipantKey {
@@ -92,8 +104,10 @@ pub(super) fn prepare(
 }
 
 pub(super) fn replaces_project(mutation: &ResearchMutation) -> bool {
-    matches!(mutation, ResearchMutation::RestoreProject { .. })
-        || matches!(mutation, ResearchMutation::ReviewProposal { destination: Some(version), .. }
+    matches!(
+        mutation,
+        ResearchMutation::RestoreProject { .. } | ResearchMutation::RegenerateItemId { .. }
+    ) || matches!(mutation, ResearchMutation::ReviewProposal { destination: Some(version), .. }
             if version.content.source_version.is_none())
 }
 

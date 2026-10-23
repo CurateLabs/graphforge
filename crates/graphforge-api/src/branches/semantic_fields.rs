@@ -132,7 +132,12 @@ fn scan_bindings(
                 "node_uuid",
                 format!(
                     "(n:`{}`)",
-                    binding.symbol.ambiguity_candidate().replace('`', "``")
+                    format!(
+                        "{}:{}",
+                        binding.symbol.module.display_ref(),
+                        binding.symbol.local_id
+                    )
+                    .replace('`', "``")
                 ),
             ),
             graphforge_storage::SemanticRouteKind::Relation => (
@@ -141,7 +146,12 @@ fn scan_bindings(
                 "edge_uuid",
                 format!(
                     "()-[r:`{}`]->()",
-                    binding.symbol.ambiguity_candidate().replace('`', "``")
+                    format!(
+                        "{}:{}",
+                        binding.symbol.module.display_ref(),
+                        binding.symbol.local_id
+                    )
+                    .replace('`', "``")
                 ),
             ),
             _ => continue,
@@ -271,7 +281,11 @@ pub(crate) fn property_pattern(
                 *n == b.symbol.display() || *n == b.route || *n == b.symbol.ambiguity_candidate()
             })
     }) {
-        let name = binding.symbol.ambiguity_candidate();
+        let name = format!(
+            "{}:{}",
+            binding.symbol.module.display_ref(),
+            binding.symbol.local_id
+        );
         if let Ok((symbol, _)) =
             context.resolve_owned_property(binding.symbol.kind, &name, property)
         {

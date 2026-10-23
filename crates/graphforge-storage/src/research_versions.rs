@@ -403,6 +403,14 @@ pub enum ResearchMutation {
         /// Complete effective Branch state, not a mutable upstream lookup.
         version: Box<ResearchVersionRecord>,
     },
+    /// Publish the native owner's ID-only rewrite of the complete workspace,
+    /// its selected Branch head and replay receipt in one CURRENT transition.
+    RegenerateItemId {
+        /// Commitment to the private, pre-persisted execution binding.
+        intent_sha256: [u8; 32],
+        /// Fully authenticated prepared content, retaining the Branch origin.
+        version: Box<ResearchVersionRecord>,
+    },
     /// Register a separately identified selected graph/evidence closure.
     RegisterGraphProjection {
         /// Metadata and explicit participant/evidence selection from a Version.
@@ -1046,6 +1054,9 @@ fn apply_mutation(
             creation.as_ref(),
             version,
         )?),
+        ResearchMutation::RegenerateItemId { version, .. } => {
+            Some(branches::regenerate(root, registry, version)?)
+        }
         ResearchMutation::RegisterGraphProjection { spec, selection } => {
             if registry.branches.contains_key(&spec.context_uuid) {
                 return Err(invalid("raw projection cannot replace a Branch context"));
@@ -1298,6 +1309,7 @@ pub fn publish_research_operation_with_mode(
             | ResearchMutation::ReviewProposal { intent_sha256, .. }
             | ResearchMutation::ReleaseProposal { intent_sha256, .. }
             | ResearchMutation::UpdateBranch { intent_sha256, .. }
+            | ResearchMutation::RegenerateItemId { intent_sha256, .. }
             | ResearchMutation::SetTag { intent_sha256, .. }
             | ResearchMutation::SelectBranch { intent_sha256, .. } => Some(*intent_sha256),
             _ => None,
