@@ -171,6 +171,38 @@ fn cases() -> Vec<(&'static str, Value, &'static str)> {
     claimed(&mut long_handle, "opaque:foreign");
     long_handle["facts"][0]["claim"]["owner_handle"] = json!("a".repeat(101));
     cases.push(("overlong-display-handle", long_handle, "invalid_input"));
+    for (name, handle, accepted) in [
+        ("owner-handle-single", "a", true),
+        ("owner-handle-dotted", "a.b", true),
+        ("owner-handle-hyphen", "a-b", true),
+        ("owner-handle-underscore", "a_b", true),
+        ("owner-handle-dot-underscore", "a._b", true),
+        ("owner-handle-underscore-dot", "a_.b", true),
+        ("owner-handle-dot-hyphen", "a.-b", true),
+        ("owner-handle-hyphen-dot", "a-.b", true),
+        ("owner-handle-consecutive-dots", "a..b", false),
+        ("owner-handle-leading-dot", ".ab", false),
+        ("owner-handle-trailing-dot", "ab.", false),
+        ("owner-handle-leading-hyphen", "-ab", false),
+        ("owner-handle-trailing-hyphen", "ab-", false),
+        ("owner-handle-leading-underscore", "_ab", false),
+        ("owner-handle-trailing-underscore", "ab_", false),
+        ("owner-handle-trailing-newline", "ab\n", false),
+    ] {
+        let mut value = input();
+        claimed(&mut value, "opaque:publisher");
+        value["facts"][0]["claim"]["owner_handle"] = json!(handle);
+        value["facts"][0]["owner_visible"] = json!(true);
+        cases.push((
+            name,
+            value,
+            if accepted {
+                "owner_update"
+            } else {
+                "invalid_input"
+            },
+        ));
+    }
     let mut unicode = input();
     unicode["publisher_account_id"] = json!("opaque:é账户");
     cases.push(("opaque-unicode-account", unicode, "new_claim"));
@@ -360,6 +392,9 @@ fn generated_item_admission_schema_matches_the_native_contract() {
     let kind = json!({"enum":["ontology_module","bridge_set"]});
     let tuple = json!({"type":"object","additionalProperties":false,"required":["version","content_digest"],"properties":{"version":text,"content_digest":digest}});
     let fact_tuple = json!({"type":"object","additionalProperties":false,"required":["version","content_digest","published"],"properties":{"version":text,"content_digest":digest,"published":{"type":"boolean"}}});
+    // Schema validators can differ on `$` before a final newline. Require
+    // absolute end explicitly, and preserve native dot rules.
+    let owner_handle_pattern = r"^(?!.*\.\.)[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?(?![\s\S])";
     let schema = json!({
         "$schema":"https://json-schema.org/draft/2020-12/schema",
         "$id":"https://graphforge.sh/schemas/hub-publish/v1/item-admission.schema.json",
@@ -377,7 +412,7 @@ fn generated_item_admission_schema_matches_the_native_contract() {
             "fact":{"type":"object","additionalProperties":false,"required":["id","claim","owner_visible","publish_as_owner","tuples"],"properties":{
                 "id":id,"claim":{"oneOf":[
                     {"type":"object","additionalProperties":false,"required":["state"],"properties":{"state":{"const":"unclaimed"}}},
-                    {"type":"object","additionalProperties":false,"required":["state","owner_account_id"],"properties":{"state":{"const":"claimed"},"owner_account_id":{"$ref":"#/$defs/stableAccount"},"owner_handle":{"type":"string","minLength":1,"maxLength":100,"pattern":"^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$"}}}
+                    {"type":"object","additionalProperties":false,"required":["state","owner_account_id"],"properties":{"state":{"const":"claimed"},"owner_account_id":{"$ref":"#/$defs/stableAccount"},"owner_handle":{"type":"string","minLength":1,"maxLength":100,"pattern":owner_handle_pattern}}}
                 ]},"owner_visible":{"type":"boolean"},"publish_as_owner":{"type":"boolean"},"tuples":{"type":"array","maxItems":8192,"items":fact_tuple}
             }},
             "requirements":{"type":"array","maxItems":8192,"items":{"type":"object","additionalProperties":false,"required":["id","kind","tuples"],"properties":{"id":id,"kind":kind,"tuples":{"type":"array","maxItems":8192,"items":tuple}}}},

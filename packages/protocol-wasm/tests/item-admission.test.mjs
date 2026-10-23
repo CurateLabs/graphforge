@@ -157,3 +157,27 @@ test("admission declarations are generated from closed native types", () => {
     /export function plan_item_admission\(input: JsonInput<ItemAdmissionInput>\): ItemAdmissionPlan;/,
   );
 });
+
+test("owner handle schema matches native admission in JavaScript RegExp", () => {
+  const schema = readJson(
+    "docs",
+    "reference",
+    "hub-publish",
+    "v1",
+    "item-admission.schema.json",
+  );
+  const handleSchema = schema.$defs.fact.properties.claim.oneOf.find(
+    (variant) => variant.properties.owner_handle,
+  ).properties.owner_handle;
+  const pattern = new RegExp(handleSchema.pattern);
+  for (const { name, input, expected } of corpus.cases.filter(({ name }) =>
+    name.startsWith("owner-handle-"),
+  )) {
+    const handle = input.facts[0].claim.owner_handle;
+    const accepted =
+      pattern.test(handle) &&
+      handle.length >= handleSchema.minLength &&
+      handle.length <= handleSchema.maxLength;
+    assert.equal(accepted, Boolean(expected.plan), name);
+  }
+});
