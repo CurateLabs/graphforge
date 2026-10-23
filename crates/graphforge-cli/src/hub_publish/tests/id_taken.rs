@@ -1,12 +1,12 @@
 use super::*;
 use graphforge_api::{
-    ModuleAdoptionRequest, ModuleDeleteRequest, ModuleSelector, OntologyAuthorityExpectation,
+    ItemIdRefusalReceipt, ModuleAdoptionRequest, ModuleDeleteRequest, ModuleSelector,
+    OntologyAuthorityExpectation,
 };
 use graphforge_discovery::{ItemId, ItemKind};
 use graphforge_hub_publish::IdTakenItem;
 
 const ID: &str = "https://graphforge.sh/ont_aaaaaaaaaaaaaaaa";
-const NEW: &str = "https://graphforge.sh/ont_bbbbbbbbbbbbbbbb";
 const SERVER_TEXT: &str = "untrusted-server-instructions";
 
 fn authority(graph: &GraphForge) -> OntologyAuthorityExpectation {
@@ -188,40 +188,91 @@ fn sync_and_async_refusals_persist_filtered_metadata_and_client_owned_guidance()
 }
 
 #[test]
-fn old_version_refusal_uses_the_retained_replacement_relation_after_restore_and_reopen() {
+#[allow(clippy::too_many_lines)] // one native collision, regeneration, publication and restore flow
+fn regenerated_head_publishes_without_its_colliding_ancestor_and_guides_old_version_retries() {
     let hub = LoopbackHub::start();
     let (_owner_root, owner, _) = project("1");
     publish_ok(&hub, &owner, &on_ref("organization/owned", "main"))
         .result
         .unwrap();
     let (_root, mut graph, base) = project("2");
-    refused(&hub, &graph, &on_ref("curate/refused", "main"));
+    let arguments = on_ref("curate/refused", "main");
+    let old_version = graph.research_version(base).unwrap();
+    let old_identity = graph.research_version_retention().unwrap().identities[&base];
     let old = graph.ontology_modules().unwrap()[0].id.clone();
-    graph
-        .delete_ontology_module(
-            &ModuleDeleteRequest {
-                authority: authority(&graph),
-                selector: ModuleSelector::Exact(old),
-            },
-            None,
-        )
+    let old_composition = graph
+        .research_version_portable_ontology_composition(base, PortableLimits::default())
+        .unwrap()
         .unwrap();
-    adopt(&mut graph, NEW, "2");
-    // Exercise only the receipt seam after explicit native identity changes;
-    // the regenerate command and reference-rewrite operation are separate work.
-    let (_, replacement) = create_branch(&mut graph, "replacement", current());
-    graph
-        .record_item_id_regeneration(ID, NEW, replacement)
+    assert_eq!(old_composition.modules.len(), 1);
+    assert_eq!(old_composition.modules[0].ontology_id, ID);
+    assert_eq!(old_composition.modules[0].version, "2");
+    let id = ItemId::parse_reference(ID).unwrap();
+    let (text, _) = refused(&hub, &graph, &arguments);
+    assert!(text.contains(&format!("gf ontology regenerate-id {id}")));
+    let mut receipt = ItemIdRefusalReceipt {
+        item: IdTakenItem {
+            kind: ItemKind::OntologyModule,
+            id: id.as_str().into(),
+            owner: None,
+            publish_as_owner: None,
+        },
+        refused_version_uuid: base,
+        regenerated: None,
+    };
+    assert_eq!(graph.id_taken_receipt(ID).unwrap(), Some(receipt.clone()));
+
+    let replacement = graph
+        .regenerate_item_id(id.as_str(), Uuid::now_v7(), None)
         .unwrap();
-    // Publish the new identity, creating the repository needed by explicit
-    // --version-uuid publication. Its old ancestor is lineage-only.
-    publish_ok(&hub, &graph, &on_ref("curate/refused", "replacement"))
-        .result
-        .unwrap();
-    // Restore only the authored ontology inventory, preserving retained
-    // research and the replacement Version. Whole-Project checkpoint revert
-    // intentionally refuses to rewind research history.
-    let new = graph.ontology_modules().unwrap()[0].id.clone();
+    let new_id = ItemId::parse(&replacement.id).unwrap();
+    assert_eq!(new_id.as_str(), replacement.id);
+    assert_eq!(new_id.kind(), id.kind());
+    assert_ne!(new_id, id);
+    assert_ne!(replacement.version_uuid, base);
+    assert!(!replacement.version_uuid.is_nil());
+    let modules = graph.ontology_modules().unwrap();
+    assert_eq!(modules.len(), 1);
+    let new = modules[0].id.clone();
+    assert_eq!(new.ontology_id, new_id.to_uri());
+    assert_eq!(new.authored_version, old.authored_version);
+    assert_ne!(new.canonical_digest, old.canonical_digest);
+    let replacement_version = graph.research_version(replacement.version_uuid).unwrap();
+    assert_eq!(replacement_version.parents, vec![base]);
+    receipt.regenerated = Some(replacement.clone());
+    assert_eq!(graph.id_taken_receipt(ID).unwrap(), Some(receipt.clone()));
+    let outcome = publish_ok(&hub, &graph, &arguments).result.unwrap();
+    assert_eq!(
+        outcome.published.unwrap().version_uuid,
+        replacement.version_uuid
+    );
+    let (manifest, lineage) = served_lineage(&hub, "curate/refused");
+    let published = &manifest.ontology.as_ref().unwrap().modules;
+    assert_eq!(published.len(), 1);
+    assert_eq!(published[0].id, new_id.to_uri());
+    assert_eq!(published[0].version, old.authored_version);
+    assert_eq!(
+        published[0].content_digest.0,
+        format!("sha256:{}", new.canonical_digest)
+    );
+    assert!(
+        lineage
+            .version(&base.to_string())
+            .unwrap()
+            .package
+            .is_none()
+    );
+    assert!(
+        lineage
+            .version(&replacement.version_uuid.to_string())
+            .unwrap()
+            .package
+            .is_some()
+    );
+    assert!(lineage.descends_from(&replacement.version_uuid.to_string(), &base.to_string()));
+
+    // Restore the authored composition through the native facade, preserving
+    // private refusal metadata and retained research history.
     graph
         .delete_ontology_module(
             &ModuleDeleteRequest {
@@ -231,10 +282,17 @@ fn old_version_refusal_uses_the_retained_replacement_relation_after_restore_and_
             None,
         )
         .unwrap();
-    adopt(&mut graph, ID, "2");
+    assert_eq!(adopt(&mut graph, ID, "2"), old);
     let path = graph.path().unwrap().to_owned();
     drop(graph);
     let graph = GraphForge::new(path.to_str()).unwrap();
+    assert_eq!(
+        graph
+            .portable_ontology_composition(PortableLimits::default())
+            .unwrap(),
+        Some(old_composition.clone())
+    );
+    assert_eq!(graph.id_taken_receipt(ID).unwrap(), Some(receipt.clone()));
     let (text, _) = refused(
         &hub,
         &graph,
@@ -244,10 +302,28 @@ fn old_version_refusal_uses_the_retained_replacement_relation_after_restore_and_
             ..args("curate/refused")
         },
     );
-    assert!(text.contains(&replacement.to_string()));
-    assert!(text.contains("ont_bbbbbbbbbbbbbbbb"));
+    assert!(text.contains(&replacement.version_uuid.to_string()));
+    assert!(text.contains(&replacement.id));
     assert!(text.contains("publish from that regenerated Version"));
     assert!(!text.contains("gf ontology regenerate-id"));
+    assert_eq!(graph.id_taken_receipt(ID).unwrap(), Some(receipt));
+    assert_eq!(graph.research_version(base).unwrap(), old_version);
+    assert_eq!(
+        graph.research_version_retention().unwrap().identities[&base],
+        old_identity
+    );
+    assert_eq!(
+        graph
+            .research_version_portable_ontology_composition(base, PortableLimits::default())
+            .unwrap(),
+        Some(old_composition)
+    );
+    assert_eq!(
+        graph.research_version(replacement.version_uuid).unwrap(),
+        replacement_version
+    );
+    let (_, after_refusal) = served_lineage(&hub, "curate/refused");
+    assert_eq!(after_refusal, lineage);
 }
 
 #[test]
