@@ -316,6 +316,11 @@ test("error projection refuses unknown, missing, malformed or duplicate provenan
     { code: "unknown", path: "item_version_inventory.candidates" },
     { code: false, path: "item_version_inventory.candidates" },
     { code: "missing_object", path: [] },
+    {
+      code: "missing_object",
+      path: "item_version_inventory.candidates",
+      version: {},
+    },
     { code: "ambiguous_identity", path: "item_version_inventory.candidates" },
     {
       code: "missing_object",

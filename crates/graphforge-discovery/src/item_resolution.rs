@@ -181,6 +181,9 @@ impl DiscoveryError {
     /// Total resolution HTTP projection, retaining this error's provenance.
     #[must_use]
     pub fn item_resolution_http_response(&self) -> ItemResolutionHttpResponse {
+        if self.version.is_some() {
+            return item_resolution_error_response(None, None);
+        }
         let code = match self.code {
             DiscoveryErrorCode::MissingObject => Some("missing_object"),
             DiscoveryErrorCode::AmbiguousIdentity => Some("ambiguous_identity"),
@@ -230,9 +233,7 @@ pub fn item_resolution_error_response_json(bytes: &[u8]) -> ItemResolutionHttpRe
         .keys()
         .any(|key| !matches!(key.as_str(), "code" | "path" | "message" | "version"))
         || object.get("message").is_some_and(|v| !v.is_string())
-        || object
-            .get("version")
-            .is_some_and(|v| !v.is_null() && !v.is_object())
+        || object.get("version").is_some_and(|v| !v.is_null())
     {
         return unavailable();
     }
@@ -242,7 +243,8 @@ pub fn item_resolution_error_response_json(bytes: &[u8]) -> ItemResolutionHttpRe
     )
 }
 
-/// Parse only the closed resolution refusal matching this HTTP status.
+/// Parse only a closed HTTP 409 resolution ambiguity refusal.
+/// This reader never manufactures the reserved absence provenance from HTTP.
 /// A generic 409, malformed body or body/status disagreement is never ambiguity.
 pub fn parse_item_resolution_refusal(
     status: u16,
@@ -260,11 +262,6 @@ pub fn parse_item_resolution_refusal(
         status,
         object.get("code").and_then(serde_json::Value::as_str),
     ) {
-        (404, Some("missing_object")) => (
-            DiscoveryErrorCode::MissingObject,
-            ITEM_VERSION_ABSENCE_FIELD,
-            "item version is not found",
-        ),
         (409, Some("ambiguous_identity")) => (
             DiscoveryErrorCode::AmbiguousIdentity,
             ITEM_VERSION_AMBIGUITY_FIELD,

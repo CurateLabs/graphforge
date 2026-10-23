@@ -521,17 +521,20 @@ fn projection_is_total_and_never_guesses_from_a_code_or_message() {
         assert_eq!(response.status,503);assert!(response.body.is_empty());
     }
     assert_eq!(
+        item_resolution_error_response_json(
+            br#"{"code":"missing_object","path":"item_version_inventory.candidates","version":{}}"#
+        )
+        .status,
+        503
+    );
+    assert_eq!(
         item_resolution_error_response_json(&vec![b' '; 1025]).status,
         503
     );
+    let error = parse_item_resolution_refusal(409, br#"{"code":"ambiguous_identity"}"#).unwrap();
+    assert_eq!(error.item_resolution_http_response().status, 409);
     for (status, body) in [
-        (409, br#"{"code":"ambiguous_identity"}"#.as_slice()),
-        (404, br#"{"code":"missing_object"}"#),
-    ] {
-        let error = parse_item_resolution_refusal(status, body).unwrap();
-        assert_eq!(error.item_resolution_http_response().status, status);
-    }
-    for (status, body) in [
+        (404, br#"{"code":"missing_object"}"#.as_slice()),
         (409, br#"{"code":"missing_object"}"#.as_slice()),
         (404, br#"{"code":"ambiguous_identity"}"#),
         (409, br#"{"code":"ambiguous_identity","owners":["SECRET"]}"#),
