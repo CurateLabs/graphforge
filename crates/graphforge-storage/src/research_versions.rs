@@ -1055,29 +1055,7 @@ fn apply_mutation(
             version,
         )?),
         ResearchMutation::RegenerateItemId { version, .. } => {
-            let selected = registry
-                .current_branch
-                .filter(|id| registry.branches.contains_key(id))
-                .or_else(|| {
-                    (registry.branches.len() == 1)
-                        .then(|| *registry.branches.keys().next().expect("one Branch"))
-                });
-            if selected != Some(version.context_uuid) {
-                return Err(invalid("ID regeneration requires the selected Branch"));
-            }
-            let prior = registry
-                .heads
-                .get(&version.context_uuid)
-                .and_then(|head| registry.versions.get(head))
-                .ok_or_else(|| invalid("ID regeneration Branch head is unavailable"))?;
-            if version.content.source_version != prior.content.source_version
-                || version.content.graph_projection.is_some()
-            {
-                return Err(invalid(
-                    "ID regeneration must preserve Branch origin lineage",
-                ));
-            }
-            Some(branches::publish(root, registry, None, version, None)?)
+            Some(branches::regenerate(root, registry, version)?)
         }
         ResearchMutation::RegisterGraphProjection { spec, selection } => {
             if registry.branches.contains_key(&spec.context_uuid) {

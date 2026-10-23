@@ -21,7 +21,7 @@ fn invalid(message: impl Into<String>) -> GfError {
     GfError::Validation(message.into())
 }
 fn ontology_error(error: super::MultiOntologyError) -> GfError {
-    invalid(error.to_string())
+    invalid(error.code + ": " + &error.message)
 }
 fn stale() -> GfError {
     GfError::Project {
