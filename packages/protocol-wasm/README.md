@@ -193,7 +193,7 @@ Measured on the release build (`opt-level = "z"`, LTO), Node 22:
 
 | Measure                                     | Value                                                         |
 | ------------------------------------------- | ------------------------------------------------------------- |
-| Delivered `.wasm` size                      | about 354 KB gzip, about 282 KB brotli (1.07 MB uncompressed) |
+| Delivered `.wasm` size                      | about 419 KB gzip, about 327 KB brotli (1.37 MB uncompressed) |
 | Linear memory after instantiation           | about 1.3 MiB                                                 |
 | `validate_manifest`, openalex (2.2 KB)      | about 0.3 ms                                                  |
 | `validate_lineage`, largest corpus (4.5 KB) | about 0.5 ms                                                  |
@@ -202,17 +202,10 @@ Measured on the release build (`opt-level = "z"`, LTO), Node 22:
 The few-hundred-KB package size target refers to compressed download size; the
 uncompressed size is reported separately above. The compressed size is what a
 Worker or browser downloads, and it is far below
-the Workers limits. Running Binaryen's `wasm-opt -Oz` over the module was tried
-and is not applied: it shrinks the uncompressed file by 11% but grows it to
-381 KB gzip and 299 KB brotli, because it removes repetition the compressor was
-already using.
-
-Where the bytes are (uncompressed function sizes by crate, from `twiggy`; approximate): `serde_json`
-monomorphized for each wire type about 310 KB; `core`, `alloc` and `std` about
-230 KB; compiler-generated glue and closures about 210 KB; Unicode and IDNA
-tables and strings in the data segment about 208 KB; `graphforge-discovery` about
-104 KB; `png` about 43 KB; `serde`, the adapter, `roxmltree`, `url`,
-`graphforge-hub-publish`, `quick-xml` and `wasm-bindgen` about 14-35 KB each.
+the Workers limits. The release uses the ordinary Rust/wasm-bindgen output without an additional
+Binaryen optimization pass. Measure compressed delivery again after validator
+exports change; an uncompressed reduction does not necessarily reduce gzip or
+Brotli output.
 
 In a Worker (`tests/worker.test.mjs`, Miniflare 3 running workerd): linear memory
 1.3 MiB (the isolate limit is 128 MB); the whole workerd process grew from about

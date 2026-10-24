@@ -15,8 +15,8 @@ crate-type = ["cdylib"]
 hub-test-support = ["graphforge-cli/hub-test-support"]
 
 [dependencies]
-graphforge-api = { version = "0.6.0-rc.5", path = "../graphforge-api", default-features = false, features = ["knowledge", "search", "provenance", "portable", "discovery", "research"] }
-graphforge-cli = { version = "0.6.0-rc.5", path = "../graphforge-cli" }
+graphforge-api = { version = "0.6.0-rc.6", path = "../graphforge-api", default-features = false, features = ["knowledge", "search", "provenance", "portable", "discovery", "research"] }
+graphforge-cli = { version = "0.6.0-rc.6", path = "../graphforge-cli" }
 # `ipc` (default in arrow 58) serializes execute() results to an Arrow IPC
 # stream Buffer for the JS side to decode with apache-arrow.
 arrow = { workspace = true }

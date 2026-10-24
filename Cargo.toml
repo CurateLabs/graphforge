@@ -34,7 +34,7 @@ members = [
 exclude = ["vendor/datafusion-physical-plan", "vendor/datafusion-optimizer", "vendor/arrow-row"]
 
 [workspace.package]
-version = "0.6.0-rc.5"
+version = "0.6.0-rc.6"
 edition = "2024"
 license = "Apache-2.0"
 license-file = "LICENSE"

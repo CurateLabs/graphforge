@@ -17,8 +17,8 @@ hub-test-support = ["graphforge-cli/hub-test-support"]
 extension-module = ["pyo3/extension-module"]
 
 [dependencies]
-graphforge-api = { version = "0.6.0-rc.5", path = "../graphforge-api", default-features = false, features = ["knowledge", "search", "provenance", "portable", "discovery", "research"] }
-graphforge-cli = { version = "0.6.0-rc.5", path = "../graphforge-cli" }
+graphforge-api = { version = "0.6.0-rc.6", path = "../graphforge-api", default-features = false, features = ["knowledge", "search", "provenance", "portable", "discovery", "research"] }
+graphforge-cli = { version = "0.6.0-rc.6", path = "../graphforge-cli" }
 # `StreamExt::next` drives the facade's async streaming query one batch per pull
 # in the synchronous RecordBatchReader adapter (execute_stream, #587).
 futures = { workspace = true }
