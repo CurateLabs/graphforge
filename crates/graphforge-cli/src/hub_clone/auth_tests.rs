@@ -431,9 +431,107 @@ fn clone_authenticates_discovery_but_never_same_or_cross_origin_objects() {
         let graph = GraphForge::new(destination.to_str()).expect("authenticated clone reopens");
         assert_eq!(
             graph.research_project_metadata().unwrap().title.as_deref(),
-            Some("OpenAlex")
+            Some("Synthetic OpenAlex-themed GraphForge example")
         );
     }
+}
+
+#[test]
+fn synthetic_example_survives_native_http_clone_and_reopen() {
+    let refs = include_bytes!("../../../../tests/fixtures/hub/generated/v1/refs.json");
+    let manifest_bytes =
+        include_bytes!("../../../../tests/fixtures/hub/generated/v1/manifest.json");
+    let project = include_bytes!(
+        "../../../../tests/fixtures/hub/generated/v1/objects/opendata-openalex.gfpb"
+    );
+    let manifest =
+        DiscoveryManifest::from_json(manifest_bytes, DiscoveryLimits::default()).unwrap();
+    let (transport, server) = server(vec![
+        Reply::ok(refs),
+        Reply::ok(manifest_bytes),
+        Reply::ok(project),
+    ]);
+    let root = tempfile::tempdir().unwrap();
+    let destination = root.path().join("clone");
+    clone(&transport, clone_args(&destination), &mut Vec::new()).unwrap();
+    let requests = server.join().unwrap();
+    assert_eq!(requests.len(), 3);
+    let object_url = Url::parse(&manifest.package_object().unwrap().locations[0]).unwrap();
+    assert!(requests[2].starts_with(&format!("GET {} ", object_url.path())));
+    drop(GraphForge::new(destination.to_str()).unwrap());
+    let graph = GraphForge::new(destination.to_str()).expect("durable HTTP clone reopens");
+    let measured = graph.profile_gsi().unwrap();
+    assert_eq!((measured.node_count, measured.edge_count), (5, 4));
+    assert_eq!(
+        graph
+            .node_count("ont_drqf2xw8w33cxaxj:entity:Author")
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        graph
+            .node_count("ont_drqf2xw8w33cxaxj:entity:Work")
+            .unwrap(),
+        3
+    );
+    let result = graph.execute("MATCH (a:Author)-[:AUTHORED]->(w:Work) RETURN a.name, w.title ORDER BY a.name, w.title").unwrap();
+    let mut authorship = Vec::new();
+    for batch in result.batches {
+        for row in 0..batch.num_rows() {
+            authorship.push((
+                arrow::util::display::array_value_to_string(batch.column(0).as_ref(), row).unwrap(),
+                arrow::util::display::array_value_to_string(batch.column(1).as_ref(), row).unwrap(),
+            ));
+        }
+    }
+    assert_eq!(
+        authorship,
+        [
+            ("Ada Example".into(), "A Synthetic Atlas of Ideas".into()),
+            (
+                "Ada Example".into(),
+                "Shared Paths in Example Graphs".into()
+            ),
+            (
+                "Basil Sample".into(),
+                "Invented Networks for Learning".into()
+            ),
+            (
+                "Basil Sample".into(),
+                "Shared Paths in Example Graphs".into()
+            ),
+        ]
+    );
+    let metadata = graph.research_project_metadata().unwrap();
+    let size = metadata.corpus_size.unwrap();
+    assert_eq!(size.node_count, Some(measured.node_count));
+    assert_eq!(size.relationship_count, Some(measured.edge_count));
+    assert_eq!((size.source_count, size.artifact_count), (None, None));
+    let summary = graphforge_discovery::ProjectSummary::from_json(
+        include_bytes!(
+            "../../../../tests/fixtures/hub/generated/v1/objects/opendata-openalex.summary.json"
+        ),
+        DiscoveryLimits::default(),
+    )
+    .unwrap();
+    manifest.bind_summary(&summary).unwrap();
+    assert_eq!(summary.metadata.title, metadata.title);
+    assert_eq!(summary.metadata.description, metadata.description);
+    assert_eq!(summary.metadata.authors, ["GraphForge"]);
+    let composition = graph.workspace_ontology_composition().unwrap().unwrap();
+    assert_eq!(
+        composition.profile_default,
+        graphforge_api::ActivationMode::Advisory
+    );
+    assert_eq!(composition.modules.len(), 1);
+    let expected = &summary.facts.ontology_composition.unwrap().modules[0];
+    let actual = &composition.modules[0].id;
+    assert_eq!(actual.ontology_id, expected.id);
+    assert_eq!(actual.authored_version, expected.version);
+    assert_eq!(
+        actual.canonical_digest,
+        expected.content_digest.0.strip_prefix("sha256:").unwrap()
+    );
 }
 
 #[test]

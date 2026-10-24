@@ -5,35 +5,35 @@
     "contract": "graphforge-portable-verify/1",
     "representation": "bundle",
     "source": "file",
-    "package_digest": "sha256:d43a016acebdc1da82eb876c36e2f9e8a8685de0f505a1f248acaf9d7537dcab",
+    "package_digest": "sha256:98c066e31b73ba97a0f4f8785b7b92fd771464d12ec9c4a03b78b14f93b367c7",
     "package_class": "complete",
     "producing_core_version": "0.6.0-rc.6",
-    "component_count": 7,
-    "entry_count": 12,
-    "payload_bytes": 10243,
+    "component_count": 9,
+    "entry_count": 23,
+    "payload_bytes": 30581,
     "bytes_by_kind": {
-      "compatibility": 1888,
-      "graph-data": 1582,
-      "ontology": 568,
-      "package-control": 5158,
-      "settings": 1047
+      "compatibility": 2227,
+      "graph-data": 16601,
+      "ontology": 732,
+      "package-control": 9706,
+      "settings": 1315
     },
     "plausibility": {
-      "graph_data_bytes": 1582,
-      "graph_data_ratio_ppm": 154446,
+      "graph_data_bytes": 16601,
+      "graph_data_ratio_ppm": 542853,
       "parquet": {
-        "files": 0,
-        "files_with_footer": 0,
-        "row_groups": 0,
-        "node_rows": 0,
-        "edge_rows": 0,
-        "property_rows": 0
+        "files": 6,
+        "files_with_footer": 6,
+        "row_groups": 6,
+        "node_rows": 5,
+        "edge_rows": 4,
+        "property_rows": 9
       }
     },
     "integrity": "verified",
     "compatibility": "supported",
     "authenticity": "unsigned",
-    "transport_digest": "sha256:b1c8bd85ecdee40f248b0dfe8755eeae53b067b9a582ae5b1cf3e35f4aac708f",
+    "transport_digest": "sha256:81d94fbbe6de8ee05379859dce57bc481065b7659823a9866e281a0857c87f6d",
     "ontology_composition": {
       "contract": "graphforge-ontology-composition/1",
       "activation_profile": {
@@ -43,8 +43,8 @@
       "modules": [
         {
           "ontology_id": "https://graphforge.sh/ont_drqf2xw8w33cxaxj",
-          "version": "2026.01",
-          "content_digest": "sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11",
+          "version": "2026.02",
+          "content_digest": "sha256:58a58d8d03535addad7e28fb55c20ff9b3f06f5aa41c35184621402e90818a0e",
           "dialect": "graphforge-ontology",
           "profile": "advisory"
         }
@@ -55,20 +55,20 @@
         "qualified-symbols@1"
       ],
       "optional_features": [],
-      "composition_digest": "sha256:1dc9536e766224090b71de485a2bd3d6f35cc45c983441d16dfd3e3fc137e1fa"
+      "composition_digest": "sha256:9a6fa92d2a5d18936aa42a527f9d94ce44c09538495d85c2dead188581474fbf"
     },
     "ontology_composition_entries": [
       {
         "kind": "ontology",
         "identity": {
           "id": "https://graphforge.sh/ont_drqf2xw8w33cxaxj",
-          "version": "2026.01",
-          "content_digest": "sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11"
+          "version": "2026.02",
+          "content_digest": "sha256:58a58d8d03535addad7e28fb55c20ff9b3f06f5aa41c35184621402e90818a0e"
         },
-        "path": "data/components/ontology/ontology-module-64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11/module.json",
+        "path": "data/components/ontology/ontology-module-58a58d8d03535addad7e28fb55c20ff9b3f06f5aa41c35184621402e90818a0e/module.json",
         "media_type": "application/vnd.graphforge.ontology+json",
-        "length": 451,
-        "sha256": "c127dadfcbdd515758c9e59e81afb22c6391da01a953591d7913e1cb09b8e675",
+        "length": 615,
+        "sha256": "60f64738f2499ffd781f49e14eb6b387c56a42c72eb945f641f2f538cdd7821f",
         "required_dependencies": []
       }
     ]
@@ -79,28 +79,28 @@
     "contract": "graphforge-portable-verify/1",
     "representation": "bundle",
     "source": "file",
-    "package_digest": "sha256:d43a016acebdc1da82eb876c36e2f9e8a8685de0f505a1f248acaf9d7537dcab",
+    "package_digest": "sha256:98c066e31b73ba97a0f4f8785b7b92fd771464d12ec9c4a03b78b14f93b367c7",
     "package_class": "complete",
     "producing_core_version": "0.6.0-rc.6",
-    "component_count": 7,
-    "entry_count": 12,
-    "payload_bytes": 10243,
+    "component_count": 9,
+    "entry_count": 23,
+    "payload_bytes": 30581,
     "bytes_by_kind": {
-      "compatibility": 1888,
-      "graph-data": 1582,
-      "ontology": 568,
-      "package-control": 5158,
-      "settings": 1047
+      "compatibility": 2227,
+      "graph-data": 16601,
+      "ontology": 732,
+      "package-control": 9706,
+      "settings": 1315
     },
     "plausibility": {
-      "graph_data_bytes": 1582,
-      "graph_data_ratio_ppm": 154446,
+      "graph_data_bytes": 16601,
+      "graph_data_ratio_ppm": 542853,
       "parquet": null
     },
     "integrity": "not_checked",
     "compatibility": "supported",
     "authenticity": "unsigned",
-    "transport_digest": "sha256:b1c8bd85ecdee40f248b0dfe8755eeae53b067b9a582ae5b1cf3e35f4aac708f",
+    "transport_digest": "sha256:81d94fbbe6de8ee05379859dce57bc481065b7659823a9866e281a0857c87f6d",
     "ontology_composition": {
       "contract": "graphforge-ontology-composition/1",
       "activation_profile": {
@@ -110,8 +110,8 @@
       "modules": [
         {
           "ontology_id": "https://graphforge.sh/ont_drqf2xw8w33cxaxj",
-          "version": "2026.01",
-          "content_digest": "sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11",
+          "version": "2026.02",
+          "content_digest": "sha256:58a58d8d03535addad7e28fb55c20ff9b3f06f5aa41c35184621402e90818a0e",
           "dialect": "graphforge-ontology",
           "profile": "advisory"
         }
@@ -122,20 +122,20 @@
         "qualified-symbols@1"
       ],
       "optional_features": [],
-      "composition_digest": "sha256:1dc9536e766224090b71de485a2bd3d6f35cc45c983441d16dfd3e3fc137e1fa"
+      "composition_digest": "sha256:9a6fa92d2a5d18936aa42a527f9d94ce44c09538495d85c2dead188581474fbf"
     },
     "ontology_composition_entries": [
       {
         "kind": "ontology",
         "identity": {
           "id": "https://graphforge.sh/ont_drqf2xw8w33cxaxj",
-          "version": "2026.01",
-          "content_digest": "sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11"
+          "version": "2026.02",
+          "content_digest": "sha256:58a58d8d03535addad7e28fb55c20ff9b3f06f5aa41c35184621402e90818a0e"
         },
-        "path": "data/components/ontology/ontology-module-64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11/module.json",
+        "path": "data/components/ontology/ontology-module-58a58d8d03535addad7e28fb55c20ff9b3f06f5aa41c35184621402e90818a0e/module.json",
         "media_type": "application/vnd.graphforge.ontology+json",
-        "length": 451,
-        "sha256": "c127dadfcbdd515758c9e59e81afb22c6391da01a953591d7913e1cb09b8e675",
+        "length": 615,
+        "sha256": "60f64738f2499ffd781f49e14eb6b387c56a42c72eb945f641f2f538cdd7821f",
         "required_dependencies": []
       }
     ]

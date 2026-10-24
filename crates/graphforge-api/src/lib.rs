@@ -1019,6 +1019,24 @@ impl GraphForge {
         })
     }
 
+    /// Configure this handle's facade write clock before constructing data.
+    ///
+    /// The callback returns UTC microseconds since the Unix epoch, or an error
+    /// that aborts a write before publication. Composite graph writes use one
+    /// captured value for topology timestamps and catalog observations. This
+    /// does not override independent compiler/runtime observation clocks.
+    ///
+    /// The clock is handle-local and is shared by derived handles; it is never
+    /// persisted. Opening the Project again uses the default system clock.
+    #[must_use]
+    pub fn with_write_clock(
+        self,
+        clock: impl Fn() -> Result<i64, GfError> + Send + Sync + 'static,
+    ) -> Self {
+        *self.clock.lock().expect("clock lock poisoned") = Arc::new(clock);
+        self
+    }
+
     #[cfg(test)]
     fn set_clock_for_test(&self, clock: impl Fn() -> Result<i64, GfError> + Send + Sync + 'static) {
         *self.clock.lock().expect("clock lock poisoned") = Arc::new(clock);

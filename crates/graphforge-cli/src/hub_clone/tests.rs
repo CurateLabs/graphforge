@@ -813,7 +813,10 @@ fn clone_succeeds_against_the_checked_in_hub_fixture() {
     }
     let cloned = GraphForge::new(destination.to_str()).expect("clone reopens");
     let metadata = cloned.research_project_metadata().unwrap();
-    assert_eq!(metadata.title.as_deref(), Some("OpenAlex"));
+    assert_eq!(
+        metadata.title.as_deref(),
+        Some("Synthetic OpenAlex-themed GraphForge example")
+    );
     assert_eq!(metadata.license.as_deref(), Some("CC0-1.0"));
 }
 
