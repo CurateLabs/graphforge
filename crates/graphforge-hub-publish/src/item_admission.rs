@@ -271,7 +271,9 @@ pub fn item_admission_requirements(
         .collect())
 }
 
-fn check_fact(fact: &ItemClaimFact) -> Result<BTreeMap<ItemExactTuple, bool>, HubPublishError> {
+pub(crate) fn check_fact(
+    fact: &ItemClaimFact,
+) -> Result<BTreeMap<ItemExactTuple, bool>, HubPublishError> {
     let id = ItemId::parse(&fact.id).map_err(|_| invalid("claim fact ID is invalid"))?;
     if id.as_str() != fact.id {
         return Err(invalid("claim fact ID is not canonical"));
@@ -323,7 +325,7 @@ fn check_fact(fact: &ItemClaimFact) -> Result<BTreeMap<ItemExactTuple, bool>, Hu
 
 // Count serialized bytes without allocating an unbounded second copy of typed
 // host input. This keeps the native entry point and JSON/WASM limits identical.
-struct AdmissionByteBudget(usize);
+pub(crate) struct AdmissionByteBudget(pub(crate) usize);
 impl std::io::Write for AdmissionByteBudget {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
         self.0 = self

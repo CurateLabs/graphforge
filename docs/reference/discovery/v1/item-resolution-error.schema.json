@@ -6,7 +6,8 @@
     "code": {
       "enum": [
         "missing_object",
-        "ambiguous_identity"
+        "ambiguous_identity",
+        "gone"
       ]
     }
   },

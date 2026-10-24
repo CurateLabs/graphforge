@@ -22,6 +22,7 @@ mod input_budget;
 mod item_descriptor;
 mod item_id;
 mod item_resolution;
+mod item_source;
 mod lineage;
 mod rehome;
 mod repository;
@@ -40,9 +41,13 @@ pub use item_id::{
 };
 pub use item_resolution::{
     ITEM_RESOLUTION_ERROR_MAX_BYTES, ITEM_VERSION_ABSENCE_FIELD, ITEM_VERSION_AMBIGUITY_FIELD,
-    ItemResolutionHttpResponse, ItemVersionInventory, MAX_ITEM_VERSION_CANDIDATES,
-    bind_item_version_source, bind_item_version_source_json, item_resolution_error_response,
-    item_resolution_error_response_json, parse_item_resolution_refusal, resolve_item_version,
+    ITEM_VERSION_GONE_FIELD, ItemResolutionHttpResponse, ItemVersionInventory,
+    MAX_ITEM_VERSION_CANDIDATES, bind_item_version_source, bind_item_version_source_json,
+    item_resolution_error_response, item_resolution_error_response_json,
+    parse_item_resolution_refusal, resolve_item_version,
+};
+pub use item_source::{
+    ItemRepositoryFact, ItemSourceDesignation, ItemVersionState, StableRepositoryId,
 };
 pub use lineage::{
     LineageBoundaryAnchor, LineageBranch, LineageForkOrigin, LineageProposal, LineageTag,
@@ -142,6 +147,8 @@ pub enum DiscoveryErrorCode {
     MissingObject,
     /// A complete eligible item inventory contains distinct content digests.
     AmbiguousIdentity,
+    /// A currently visible permanent item has been deleted.
+    Gone,
     /// A digest, length, or strong validator disagrees.
     IntegrityFailure,
     /// An object location is not safe protocol input.

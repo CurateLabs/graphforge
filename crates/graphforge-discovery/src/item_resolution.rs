@@ -3,17 +3,20 @@
 use crate::input_budget::InputBudget;
 use crate::{
     DiscoveryError, DiscoveryErrorCode, DiscoveryLimits, DiscoveryManifest, ExactIdentity,
-    ItemDescriptor, ItemId, RefSet, check_response_bound, check_string, limit, malformed,
-    parse_unique_json,
+    ItemDescriptor, ItemId, ItemRepositoryFact, ItemVersionState, RefSet, check_response_bound,
+    check_string, limit, malformed, parse_unique_json,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 
 /// Fixed bound on eligible publications, before deduplication.
 pub const MAX_ITEM_VERSION_CANDIDATES: usize = 4096;
-/// Reserved provenance of a validated, complete, empty eligible inventory.
+/// Reserved provenance of validated complete absent/all-hidden facts.
 pub const ITEM_VERSION_ABSENCE_FIELD: &str = "item_version_inventory.candidates";
 /// Reserved provenance of distinct digests in a validated complete inventory.
 pub const ITEM_VERSION_AMBIGUITY_FIELD: &str = "item_version_inventory.candidates.content_digest";
+/// Reserved provenance of a currently visible permanent-item tombstone.
+pub const ITEM_VERSION_GONE_FIELD: &str = "item_version_inventory.state";
 /// Fixed upper bound when reading a resolution refusal or its diagnostic input.
 pub const ITEM_RESOLUTION_ERROR_MAX_BYTES: usize = 1024;
 const INPUT_FIELD: &str = "item_version_inventory";
@@ -33,6 +36,10 @@ pub struct ItemVersionInventory {
     pub version: String,
     /// Host attestation that no eligible publication was omitted.
     pub complete: bool,
+    /// Fresh authorized lifecycle, distinct from an empty eligible inventory.
+    pub state: ItemVersionState,
+    /// Exactly one fresh stable-ID/path binding per candidate repository.
+    pub repositories: Vec<ItemRepositoryFact>,
     /// Eligible admitted descriptors, in any order; identical copies are allowed.
     pub candidates: Vec<ItemDescriptor>,
 }
@@ -47,7 +54,9 @@ impl ItemVersionInventory {
     }
 
     fn validate(&self, limits: DiscoveryLimits) -> Result<(), DiscoveryError> {
-        if self.candidates.len() > MAX_ITEM_VERSION_CANDIDATES {
+        if self.candidates.len() > MAX_ITEM_VERSION_CANDIDATES
+            || self.repositories.len() > MAX_ITEM_VERSION_CANDIDATES
+        {
             return Err(limit(INPUT_FIELD));
         }
         InputBudget::new(limits.max_response_bytes, INPUT_FIELD).account(self)?;
@@ -56,6 +65,22 @@ impl ItemVersionInventory {
         let id = ItemId::parse(&self.id).map_err(|_| invalid_inventory())?;
         if id.as_str() != self.id || !self.complete {
             return Err(invalid_inventory());
+        }
+        let mut repository_ids = BTreeSet::new();
+        let mut repository_paths = BTreeSet::new();
+        for fact in &self.repositories {
+            fact.validate(limits)?;
+            if !repository_ids.insert(&fact.repository_id)
+                || !repository_paths.insert(&fact.repository)
+            {
+                return Err(invalid_inventory());
+            }
+        }
+        if let ItemVersionState::Published { designation } = &self.state {
+            designation.validate(limits)?;
+            if designation.id != self.id {
+                return Err(invalid_inventory());
+            }
         }
         let uri = id.to_uri();
         // Validate every record before deciding identity. Never let an earlier
@@ -68,6 +93,18 @@ impl ItemVersionInventory {
             {
                 return Err(invalid_inventory());
             }
+        }
+        let candidate_paths: BTreeSet<_> = self
+            .candidates
+            .iter()
+            .map(|candidate| &candidate.repository)
+            .collect();
+        if candidate_paths != repository_paths {
+            return Err(invalid_inventory());
+        }
+        if !matches!(self.state, ItemVersionState::Published { .. }) && !self.candidates.is_empty()
+        {
+            return Err(invalid_inventory());
         }
         Ok(())
     }
@@ -90,12 +127,25 @@ pub fn resolve_item_version(
     limits: DiscoveryLimits,
 ) -> Result<ExactIdentity, DiscoveryError> {
     inventory.validate(limits)?;
+    match &inventory.state {
+        ItemVersionState::AbsentOrHidden {} => {
+            return Err(DiscoveryError::new(
+                DiscoveryErrorCode::MissingObject,
+                Some(ITEM_VERSION_ABSENCE_FIELD),
+                "item version is not found",
+            ));
+        }
+        ItemVersionState::Tombstoned {} => {
+            return Err(DiscoveryError::new(
+                DiscoveryErrorCode::Gone,
+                Some(ITEM_VERSION_GONE_FIELD),
+                "item is gone",
+            ));
+        }
+        ItemVersionState::Published { .. } => {}
+    }
     let Some(first) = inventory.candidates.first() else {
-        return Err(DiscoveryError::new(
-            DiscoveryErrorCode::MissingObject,
-            Some(ITEM_VERSION_ABSENCE_FIELD),
-            "item version is not found",
-        ));
+        return Err(unavailable_source());
     };
     if inventory
         .candidates
@@ -108,8 +158,32 @@ pub fn resolve_item_version(
             "item version identity is ambiguous",
         ));
     }
+    if !inventory
+        .candidates
+        .iter()
+        .any(|candidate| designated_repository(inventory, candidate))
+    {
+        return Err(unavailable_source());
+    }
     // All records have the same identity; this does not select the first source.
     Ok(first.module.clone())
+}
+
+fn unavailable_source() -> DiscoveryError {
+    DiscoveryError::new(
+        DiscoveryErrorCode::IntegrityFailure,
+        Some("item_version_source"),
+        "designated item source is unavailable",
+    )
+}
+
+fn designated_repository(inventory: &ItemVersionInventory, candidate: &ItemDescriptor) -> bool {
+    let ItemVersionState::Published { designation } = &inventory.state else {
+        return false;
+    };
+    inventory.repositories.iter().any(|fact| {
+        fact.repository == candidate.repository && fact.repository_id == designation.repository_id
+    })
 }
 
 /// Validate an explicitly nominated eligible witness and its actual snapshots.
@@ -128,17 +202,21 @@ pub fn bind_item_version_source(
     budget.account(nominated)?;
     budget.account(refs)?;
     budget.account(manifest)?;
-    let identity = resolve_item_version(inventory, limits)?;
+    inventory.validate(limits)?;
     nominated.validate(limits)?;
-    if nominated.module != identity || !inventory.candidates.contains(nominated) {
+    refs.validate(limits)?;
+    manifest.validate(limits)?;
+    let identity = resolve_item_version(inventory, limits)?;
+    if nominated.module != identity
+        || !inventory.candidates.contains(nominated)
+        || !designated_repository(inventory, nominated)
+    {
         return Err(DiscoveryError::new(
             DiscoveryErrorCode::IntegrityFailure,
             Some("item_version_source"),
             "nominated source is not an eligible witness",
         ));
     }
-    refs.validate(limits)?;
-    manifest.validate(limits)?;
     nominated.bind_snapshot(refs, manifest)?;
     Ok(nominated.clone())
 }
@@ -156,8 +234,7 @@ pub fn bind_item_version_source_json(
         budget.account_bytes(bytes)?;
     }
     let inventory = ItemVersionInventory::from_json(inventory, limits)?;
-    // Refuse ambiguous/absent identity before interpreting source metadata.
-    resolve_item_version(&inventory, limits)?;
+    // Parse every supplied record before logical resolution or source selection.
     let nominated = ItemDescriptor::from_json(nominated, limits)?;
     let refs = RefSet::from_json(refs, limits)?;
     let manifest = DiscoveryManifest::from_json(manifest, limits)?;
@@ -171,9 +248,9 @@ pub fn bind_item_version_source_json(
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[cfg_attr(feature = "typescript", derive(tsify::Tsify))]
 pub struct ItemResolutionHttpResponse {
-    /// 404 for proven absence, 409 for proven ambiguity, otherwise 503.
+    /// 404 absence, 409 ambiguity, 410 visible deletion, otherwise 503.
     pub status: u16,
-    /// Fixed sanitized JSON for 404/409, or an empty string for 503.
+    /// Fixed sanitized JSON for logical refusals, or an empty string for 503.
     pub body: String,
 }
 
@@ -187,6 +264,7 @@ impl DiscoveryError {
         let code = match self.code {
             DiscoveryErrorCode::MissingObject => Some("missing_object"),
             DiscoveryErrorCode::AmbiguousIdentity => Some("ambiguous_identity"),
+            DiscoveryErrorCode::Gone => Some("gone"),
             _ => None,
         };
         item_resolution_error_response(code, self.field)
@@ -207,6 +285,7 @@ pub fn item_resolution_error_response(
         (Some("ambiguous_identity"), Some(ITEM_VERSION_AMBIGUITY_FIELD)) => {
             (409, r#"{"code":"ambiguous_identity"}"#)
         }
+        (Some("gone"), Some(ITEM_VERSION_GONE_FIELD)) => (410, r#"{"code":"gone"}"#),
         _ => (503, ""),
     };
     ItemResolutionHttpResponse {

@@ -218,3 +218,37 @@ test("a Worker returns the native admission query byte-limit code for a valid ov
     message: "item admission manifest exceeds its byte bound",
   });
 });
+
+test("a Worker replays per-ID source transitions and resolution refusals through Core", async () => {
+  const source = readJson(
+    "docs",
+    "reference",
+    "hub-publish",
+    "v1",
+    "item-source-conformance.json",
+  );
+  for (const { name, json, expected } of source.cases) {
+    const result = await post({ source_transition: json });
+    assert.equal(result.status, expected.plan ? 200 : 422, name);
+    if (expected.plan) assert.deepEqual(result.body, expected.plan, name);
+    else assert.equal(result.body.code, expected.code, name);
+  }
+  const resolution = readJson(
+    "docs",
+    "reference",
+    "discovery",
+    "v1",
+    "item-resolution-conformance.json",
+  );
+  for (const { name, json, expected } of resolution.cases.filter(
+    (c) => !c.limits,
+  )) {
+    const result = await post({ item_resolution: json });
+    assert.equal(result.status, 200, name);
+    assert.deepEqual(
+      result.body,
+      expected.identity ?? { status: expected.status, body: expected.body },
+      name,
+    );
+  }
+});

@@ -61,34 +61,57 @@ default, compared exactly without ordering, trimming, normalization or SemVer
 parsing. It does not become immutable at publication. The URL adapter represents
 it as one encoded path segment and must preserve the decoded value exactly.
 
-Core's `resolve_item_version` takes a closed `ItemVersionInventory`:
-`{id, version, complete, candidates: ItemDescriptor[]}`. The ID is the canonical
-lowercase bare permanent ID. Every candidate must name that ID and exact version.
-The host supplies the complete set of admitted, retained, currently readable
+Core's `resolve_item_version` takes the closed internal host inventory
+`{id, version, complete, state, repositories, candidates: ItemDescriptor[]}`.
+The ID is canonical lowercase; every candidate names that ID and exact opaque
+version. The host supplies complete admitted, retained, currently readable
 publications, filtering authorization and retirement **before input construction
-and bounds**. Core cannot prove authentication, retention or enumeration
-completeness; `complete: true` is a host attestation, never permission to truncate.
+and bounds**. Completeness and current authorization are host attestations, never
+permission to truncate. These inputs must never come from an HTTP caller.
 
-After validating the whole inventory, zero candidates mean not found; one
-distinct content digest identifies the exact triple; multiple distinct digests
-refuse ambiguity. Repeated copies of the same triple across repositories,
-snapshots or package digests are equivalent publications, not ambiguity. Candidate
-order never chooses an identity or source. There is no newest, lexical-digest,
-repository-order winner or new digest-qualified lookup.
+There is **one designated stable repository per permanent ID, for every version**.
+First owning publication establishes it. Later versions published elsewhere,
+owner updates and foreign exact reuse preserve it; only explicit current item-owner
+rehome changes it. `ItemSourceDesignation` carries the ID, `StableRepositoryId`
+and source CAS revision. Stable repository identity survives repository rename
+and transfer; it is independent of mutable owner/name, item ownership and Project
+identity. No internal repository key is added to public descriptors or URLs.
 
-Identity resolution does not choose a source. The host explicitly nominates any
-eligible equivalent descriptor and calls `bind_item_version_source` with the
-same complete inventory and that witness's actual retained refs and manifest.
-Core requires full descriptor membership, repeats identity resolution and calls
-`ItemDescriptor::bind_snapshot`. It returns that descriptor unchanged. Never
-splice repository, refs, manifest, or package facts across equivalent sources.
-Equivalent sources may change the descriptor representation/validator while
-preserving exact identity. Module fetching still selects and verifies the
-package from the nominated manifest; bridge descriptors remain descriptive.
+`repositories` contains exactly one fresh `ItemRepositoryFact` per candidate
+repository: stable key, current canonical path and host binding revision. Both
+keys and paths are unique. Candidate paths must match that table exactly, with
+no missing or extra rows. No row is required solely for an unavailable designated
+repository. The [inventory schema](item-resolution.schema.json) and
+[source schema](item-source.schema.json) describe these native-owned shapes.
+
+After validating every lifecycle, designation, repository and candidate record,
+Core groups eligible candidates by content digest. Multiple distinct digests
+refuse ambiguity even when no designated-source witness is available. Repeated
+triples across repositories, snapshots or package digests are not ambiguity.
+With one digest, an eligible witness in the designated stable repository is
+required; an exact mirror elsewhere never substitutes. There is no newest,
+lexical-digest, repository-order winner or digest-qualified lookup.
+
+The closed `state` distinguishes established `absent_or_hidden`, currently visible
+permanent-item `tombstoned`, and known visible `published { designation }`.
+Absent/hidden and tombstoned states have empty candidates and repository facts.
+Published state with zero eligible candidates is unavailable, not absence.
+Unknown lifecycle or missing designation/completeness facts fail closed.
+
+`bind_item_version_source` repeats resolution, requires full nominated-descriptor
+membership **within the designated stable repository**, and calls
+`ItemDescriptor::bind_snapshot` with that witness's actual retained refs and
+manifest. Any complete equivalent witness within that repository may bind;
+changed snapshot pins or package digests do not require item rehome. Snapshot
+binding and repository designation are separate facts. It returns the nominated
+descriptor unchanged: never splice repository, refs, manifest or package facts.
+Module fetching still verifies the package from that manifest; bridges remain
+descriptive. Source transitions use the native
+[publication/rehome planner](../../hub-publish/v1/README.md#permanent-item-source-transitions).
 
 The fixed candidate bound is 4096, **before deduplication**. The aggregate encoded
 input budget is `DiscoveryLimits.max_response_bytes` (16 MiB by default), including
-inventory, nomination, refs and manifest for source binding. Existing string and
+inventory (including repository facts), nomination, refs and manifest for source binding. Existing string and
 per-document limits still apply. Native typed inputs use the same bounded
 serialization budget without allocating a full encoding. JSON entrypoints reject
 duplicate and unknown members. Incomplete inventories, invalid records, overflows
@@ -96,20 +119,22 @@ and stale/mismatched bindings fail closed without a descriptor.
 
 `DiscoveryError::item_resolution_http_response` is the total Core HTTP projection:
 
-- Proven absence: HTTP 404, exact body `{"code":"missing_object"}`.
+- Established absence/all-hidden: HTTP 404, exact body `{"code":"missing_object"}`.
 - Proven ambiguity: HTTP 409, exact body `{"code":"ambiguous_identity"}`.
-- Parsing, invalid inventory, completeness, bounds and binding failures: HTTP 503,
+- Currently visible permanent-item tombstone: HTTP 410, exact body `{"code":"gone"}`.
+- Unavailable designated source, parsing, invalid inventory, completeness, bounds and binding failures: HTTP 503,
   **empty body**. This means valid resolution is unavailable; it does not promise
   malformed state will repair itself. Existing client retries remain bounded.
 
 Refusal JSON uses `application/json`; its generated shape is
 `item-resolution-error.schema.json`. A 404 requires **both** `missing_object` and
 reserved field `item_version_inventory.candidates`, emitted only for validated,
-complete, empty eligible inventory. A 409 requires **both** `ambiguous_identity`
+complete, explicitly absent/hidden inventory. A 409 requires **both** `ambiguous_identity`
 and reserved field `item_version_inventory.candidates.content_digest`, emitted
-only for proven distinct digests. Nested `MissingObject` fields such as `objects`
+only for proven distinct digests. A 410 requires both `gone` and reserved field
+`item_version_inventory.state`, emitted for a currently visible tombstone. Nested `MissingObject` fields such as `objects`
 and `ontology.modules.package.object_digest` remain operational failures (503).
-A raw code or message cannot establish either logical refusal. Unknown, missing
+A raw code or message cannot establish a logical refusal. Unknown, missing
 or malformed code/path yields empty 503. Refusals expose no candidate counts,
 digests, owners, repositories or authored diagnostic text.
 
@@ -123,7 +148,7 @@ ambiguity document on an item-descriptor request, with `hub.ambiguous_identity`,
 
 Hidden publications cannot change visible identity, ambiguity, bounds or error
 details. Absent and all-hidden yield identical 404 responses. The host must
-repeat current authorization, retention and resolution before GET, HEAD and
+repeat current authorization, lifecycle, designation, retention and resolution before GET, HEAD and
 conditional/304 responses, using a coherent view; a cached former success cannot
 justify 304 after access or resolution changes. HEAD uses the same decision and
 status without a body. These are host obligations: Core conformance fixtures

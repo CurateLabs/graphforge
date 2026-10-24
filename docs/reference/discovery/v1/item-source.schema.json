@@ -1,0 +1,59 @@
+{
+  "$defs": {
+    "repositoryFact": {
+      "additionalProperties": false,
+      "properties": {
+        "repository": {
+          "$ref": "item.schema.json#/properties/repository"
+        },
+        "repository_id": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+(?![\\s\\S])",
+          "type": "string"
+        },
+        "revision": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+(?![\\s\\S])",
+          "type": "string"
+        }
+      },
+      "required": [
+        "repository_id",
+        "repository",
+        "revision"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://graphforge.sh/schemas/discovery/v1/item-source.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Opaque host keys and ABA-safe revisions; Rust enforces UTF-8 byte limits, canonical ID equality and correlated fresh facts.",
+  "properties": {
+    "id": {
+      "pattern": "^(ont|brg)_[0-9a-hjkmnp-tv-z]{16}(?![\\s\\S])",
+      "type": "string"
+    },
+    "repository_id": {
+      "maxLength": 4096,
+      "minLength": 1,
+      "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+(?![\\s\\S])",
+      "type": "string"
+    },
+    "revision": {
+      "maxLength": 4096,
+      "minLength": 1,
+      "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+(?![\\s\\S])",
+      "type": "string"
+    }
+  },
+  "required": [
+    "id",
+    "repository_id",
+    "revision"
+  ],
+  "title": "Internal host permanent-item source designation",
+  "type": "object"
+}

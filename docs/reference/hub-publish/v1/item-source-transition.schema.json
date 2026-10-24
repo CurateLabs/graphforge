@@ -1,0 +1,201 @@
+{
+  "$id": "https://graphforge.sh/schemas/hub-publish/v1/item-source-transition.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Fresh host facts only. Core validates correlation and policy; the host compares all epochs and applies the plan atomically under its existing lease.",
+  "oneOf": [
+    {
+      "additionalProperties": false,
+      "properties": {
+        "admission": {
+          "$ref": "item-admission.schema.json"
+        },
+        "item_facts": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "id": {
+                "$ref": "../../discovery/v1/item-source.schema.json#/properties/id"
+              },
+              "lifecycle": {
+                "enum": [
+                  "active",
+                  "tombstoned"
+                ]
+              },
+              "ownership_revision": {
+                "maxLength": 4096,
+                "minLength": 1,
+                "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+(?![\\s\\S])",
+                "type": "string"
+              },
+              "source": {
+                "oneOf": [
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "state": {
+                        "const": "absent"
+                      }
+                    },
+                    "required": [
+                      "state"
+                    ],
+                    "type": "object"
+                  },
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "designation": {
+                        "$ref": "../../discovery/v1/item-source.schema.json"
+                      },
+                      "state": {
+                        "const": "designated"
+                      }
+                    },
+                    "required": [
+                      "designation",
+                      "state"
+                    ],
+                    "type": "object"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "id",
+              "lifecycle",
+              "ownership_revision",
+              "source"
+            ],
+            "type": "object"
+          },
+          "maxItems": 8192,
+          "type": "array"
+        },
+        "operation": {
+          "const": "publication"
+        },
+        "refs": {
+          "$ref": "../../discovery/v1/refs.schema.json"
+        },
+        "repository": {
+          "$ref": "../../discovery/v1/item-source.schema.json#/$defs/repositoryFact"
+        }
+      },
+      "required": [
+        "admission",
+        "item_facts",
+        "operation",
+        "refs",
+        "repository"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "current": {
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "$ref": "../../discovery/v1/item-source.schema.json#/properties/id"
+            },
+            "lifecycle": {
+              "enum": [
+                "active",
+                "tombstoned"
+              ]
+            },
+            "ownership_revision": {
+              "maxLength": 4096,
+              "minLength": 1,
+              "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+(?![\\s\\S])",
+              "type": "string"
+            },
+            "source": {
+              "oneOf": [
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "state": {
+                      "const": "absent"
+                    }
+                  },
+                  "required": [
+                    "state"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "designation": {
+                      "$ref": "../../discovery/v1/item-source.schema.json"
+                    },
+                    "state": {
+                      "const": "designated"
+                    }
+                  },
+                  "required": [
+                    "designation",
+                    "state"
+                  ],
+                  "type": "object"
+                }
+              ]
+            }
+          },
+          "required": [
+            "id",
+            "lifecycle",
+            "ownership_revision",
+            "source"
+          ],
+          "type": "object"
+        },
+        "expected_ownership_revision": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+(?![\\s\\S])",
+          "type": "string"
+        },
+        "expected_repository_id": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+(?![\\s\\S])",
+          "type": "string"
+        },
+        "expected_source_revision": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+(?![\\s\\S])",
+          "type": "string"
+        },
+        "operation": {
+          "const": "rehome"
+        },
+        "ownership_fact": {
+          "$ref": "item-admission.schema.json#/$defs/fact"
+        },
+        "target_repository": {
+          "$ref": "../../discovery/v1/item-source.schema.json#/$defs/repositoryFact"
+        },
+        "verified_owner_account_id": {
+          "$ref": "item-admission.schema.json#/$defs/stableAccount"
+        }
+      },
+      "required": [
+        "current",
+        "expected_ownership_revision",
+        "expected_repository_id",
+        "expected_source_revision",
+        "operation",
+        "ownership_fact",
+        "target_repository",
+        "verified_owner_account_id"
+      ],
+      "type": "object"
+    }
+  ],
+  "title": "Internal host item source transition"
+}

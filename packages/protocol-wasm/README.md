@@ -85,18 +85,35 @@ the canonical bare `id`, matching `kind`, publishing `repository`, and exact
 refs revision and manifest validator. The validator checks their consistency
 without fetching or interpreting native package bytes.
 
-`resolve_item_version({id, version, complete, candidates})` returns one
-`ExactIdentity` without choosing a source. The host filters current authorization
-and retention before providing its complete eligible inventory. Identical triples
-are equivalent; distinct content digests throw `ambiguous_identity`.
-`bind_item_version_source(inventory, nominated, refs, manifest)` accepts any
-explicitly nominated inventory member only after resolving identity and binding
-that witness's actual retained metadata. Package verification remains native.
+`resolve_item_version({id, version, complete, state, repositories, candidates})`
+returns one `ExactIdentity` after validating all host facts. A permanent ID has
+one designated stable repository for every version. Stable repository keys are
+internal host identities, independent of display names, accounts and Project
+identity. The host filters current authorization and retention before providing
+its complete inventory and one correlated repository fact per candidate path.
+Identical triples are equivalent; distinct eligible digests throw
+`ambiguous_identity` even without an available designated source.
+`bind_item_version_source(inventory, nominated, refs, manifest)` accepts a full
+member only in the designated repository, then binds its actual retained metadata.
+Any eligible same-repository witness may bind, including changed pins after ref
+advancement. Mirrors cannot replace the source. Package verification remains native.
+
+`plan_item_source_transition(input)` delegates bounded closed JSON and every
+source-publication/rehome decision to Rust. First `new_claim` initializes once
+per permanent ID; later publications/reuse preserve the repository. Explicit
+current-owner rehome checks expected ownership/source epochs and retains the
+target repository-binding revision in its CAS plan. The host applies it atomically
+under its existing lease with fresh authorization, lifecycle and retention checks.
+Completed receipt replay returns before either planner and never restores old
+state. No historical-version migration is required; missing target witnesses
+refuse without fallback. See the [native contract](../../../docs/reference/hub-publish/v1/README.md#permanent-item-source-transitions).
 
 Pass a caught `ProtocolError` to `item_resolution_error_response(error)` for
-Core's total `{status, body}` HTTP projection: proven complete empty inventory
+Core's total `{status, body}` HTTP projection: established absent/all-hidden state
 produces 404 with `{"code":"missing_object"}`, proven distinct digests produce
-409 with `{"code":"ambiguous_identity"}`, and all other failures produce empty 503. Both code and reserved `path` must agree; nested `missing_object` from broken
+409 with `{"code":"ambiguous_identity"}`, visible tombstones produce 410 with
+`{"code":"gone"}`, and unavailable designated sources (including published state
+with zero candidates) or other failures produce empty 503. Both code and reserved `path` must agree; nested `missing_object` from broken
 metadata never means absence. Do not infer statuses from messages or implement an
 adapter fallback. Projection input is bounded to 1 KiB, and malformed diagnostics
 yield 503. Unrepresentable JavaScript objects still fail at the ordinary glue
@@ -136,7 +153,7 @@ included, are own properties.
 | Permanent IDs  | `parse_item_id`, `has_item_id_shape`                                                                                                   |
 | Discovery      | `validate_item_descriptor`, `validate_manifest`, `validate_refs`, `validate_summary`, `validate_lineage`, `validate_repository_moved`  |
 | Binding        | `bind_summary`, `bind_lineage`, `bind_summary_lineage`, `bind_refs`, `ontology_module_object`, `research_version_object`               |
-| Resolution     | `resolve_item_version`, `bind_item_version_source`, `item_resolution_error_response`                                                   |
+| Resolution     | `resolve_item_version`, `bind_item_version_source`, `item_resolution_error_response`, `plan_item_source_transition`                    |
 | Re-homing      | `rehome_repository`                                                                                                                    |
 | Previews       | `validate_image`, `validate_preview`, `validate_preview_descriptors`, `manifest_preview_descriptors`                                   |
 | Publish        | `validate_capabilities`, `validate_session_request`, `validate_commit_request`, `validate_receipt`, `validate_operation_status`        |

@@ -17,8 +17,8 @@ use graphforge_discovery::{
 };
 use graphforge_hub_publish::{
     CommitRequest, HubPublishError, IdTakenItem, ItemAdmissionInput, ItemAdmissionPlan,
-    ItemClaimRequirement, ObjectDeclaration, OpenSessionRequest, OperationStatus,
-    PublishCapabilities, PublishIntent, PublishReceipt,
+    ItemClaimRequirement, ItemSourceTransitionInput, ItemSourceTransitionPlan, ObjectDeclaration,
+    OpenSessionRequest, OperationStatus, PublishCapabilities, PublishIntent, PublishReceipt,
 };
 use serde::{Deserialize, Serialize};
 use tsify::Tsify;
@@ -251,6 +251,12 @@ pub fn item_admission_requirements(bytes: &[u8]) -> Outcome<Vec<ItemClaimRequire
 pub fn plan_item_admission(bytes: &[u8]) -> Outcome<ItemAdmissionPlan> {
     let input = ItemAdmissionInput::from_json(bytes)?;
     Ok(graphforge_hub_publish::plan_item_admission(&input)?)
+}
+
+/// Native-owned per-ID source transitions, including all bounded JSON validation.
+pub fn plan_item_source_transition(bytes: &[u8]) -> Outcome<ItemSourceTransitionPlan> {
+    let input = ItemSourceTransitionInput::from_json(bytes)?;
+    Ok(graphforge_hub_publish::plan_item_source_transition(&input)?)
 }
 
 /// Bound the closed limits argument of the item-resolution entrypoints.

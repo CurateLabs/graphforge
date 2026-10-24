@@ -119,6 +119,14 @@ pub fn plan_item_admission(
     run(|| engine::plan_item_admission(input.as_bytes()))
 }
 
+/// Plan one source initialization or explicit owner rehome without host mutation.
+#[wasm_bindgen(unchecked_return_type = "ItemSourceTransitionPlan")]
+pub fn plan_item_source_transition(
+    #[wasm_bindgen(unchecked_param_type = "JsonInput<ItemSourceTransitionInput>")] input: &str,
+) -> Result<JsValue, JsValue> {
+    run(|| engine::plan_item_source_transition(input.as_bytes()))
+}
+
 /// Resolve an opaque exact authored version without choosing a source.
 #[wasm_bindgen(unchecked_return_type = "ExactIdentity")]
 pub fn resolve_item_version(

@@ -2580,7 +2580,7 @@ fn protocol_error(error: &DiscoveryError) -> graphforge_api::GfError {
         DiscoveryErrorCode::MalformedResponse => "hub.malformed_response",
         DiscoveryErrorCode::UnsupportedFuture => "hub.unsupported_future",
         DiscoveryErrorCode::MissingRef => "hub.missing_ref",
-        DiscoveryErrorCode::MissingObject => "hub.missing_object",
+        DiscoveryErrorCode::MissingObject | DiscoveryErrorCode::Gone => "hub.missing_object",
         DiscoveryErrorCode::AmbiguousIdentity => "hub.ambiguous_identity",
         DiscoveryErrorCode::IntegrityFailure => "hub.integrity_failure",
         DiscoveryErrorCode::UnsafeLocation => "hub.unsafe_location",
