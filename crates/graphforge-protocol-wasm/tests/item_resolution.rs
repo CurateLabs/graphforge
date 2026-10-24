@@ -1,6 +1,7 @@
 //! The native-callable adapter preserves Core's decisions and projection provenance.
 use graphforge_discovery::{
-    DiscoveryLimits, ItemDescriptor, ItemDiscoverySnapshot, ItemId, ItemVersionInventory,
+    DiscoveryLimits, ItemDescriptor, ItemDiscoverySnapshot, ItemId, ItemRepositoryFact,
+    ItemSourceDesignation, ItemVersionInventory, ItemVersionState, StableRepositoryId,
 };
 use graphforge_protocol_wasm::engine;
 use serde_json::{Value, json};
@@ -105,6 +106,18 @@ fn binding_preserves_nested_missing_object_provenance() {
         id: descriptor.id.clone(),
         version: descriptor.module.version.clone(),
         complete: true,
+        state: ItemVersionState::Published {
+            designation: ItemSourceDesignation {
+                id: descriptor.id.clone(),
+                repository_id: StableRepositoryId::new("canonical").unwrap(),
+                revision: "source:1".into(),
+            },
+        },
+        repositories: vec![ItemRepositoryFact {
+            repository_id: StableRepositoryId::new("canonical").unwrap(),
+            repository: descriptor.repository.clone(),
+            revision: "repo:1".into(),
+        }],
         candidates: vec![descriptor.clone()],
     };
     let i = serde_json::to_vec(&inventory).unwrap();

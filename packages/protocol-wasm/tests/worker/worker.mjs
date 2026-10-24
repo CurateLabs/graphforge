@@ -19,6 +19,17 @@ export default {
     // Rust raises a plain object `{code, path?, version?, message}`.
     try {
       const payload = await request.json();
+      if (payload.source_transition)
+        return json(
+          protocol.plan_item_source_transition(payload.source_transition),
+        );
+      if (payload.item_resolution) {
+        try {
+          return json(protocol.resolve_item_version(payload.item_resolution));
+        } catch (error) {
+          return json(protocol.item_resolution_error_response(error));
+        }
+      }
       if (payload.admission) {
         return json(protocol.plan_item_admission(payload.admission));
       }

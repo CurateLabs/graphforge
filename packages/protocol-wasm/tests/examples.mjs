@@ -170,10 +170,35 @@ const itemInventory = {
   id: itemDescriptor.id,
   version: itemDescriptor.module.version,
   complete: true,
+  state: {
+    state: "published",
+    designation: {
+      id: itemDescriptor.id,
+      repository_id: "canonical",
+      revision: "source:1",
+    },
+  },
+  repositories: [
+    {
+      repository_id: "canonical",
+      repository: manifestObject.repository,
+      revision: "repo:1",
+    },
+  ],
   candidates: [itemDescriptor],
 };
 
+const sourceTransition = JSON.parse(
+  readJson(
+    "docs",
+    "reference",
+    "hub-publish",
+    "v1",
+    "item-source-conformance.json",
+  ).cases.find((c) => c.expected.plan).json,
+);
 export const EXPORTS = {
+  plan_item_source_transition: { args: [sourceTransition], optional: [] },
   item_admission_requirements: { args: [admission.manifest], optional: [] },
   plan_item_admission: { args: [admission], optional: [] },
   resolve_item_version: { args: [itemInventory, undefined], optional: [1] },

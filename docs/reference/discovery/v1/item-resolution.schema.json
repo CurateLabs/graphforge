@@ -1,0 +1,77 @@
+{
+  "$id": "https://graphforge.sh/schemas/discovery/v1/item-resolution.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "candidates": {
+      "items": {
+        "$ref": "item.schema.json"
+      },
+      "maxItems": 4096,
+      "type": "array"
+    },
+    "complete": {
+      "type": "boolean"
+    },
+    "id": {
+      "$ref": "item-source.schema.json#/properties/id"
+    },
+    "repositories": {
+      "items": {
+        "$ref": "item-source.schema.json#/$defs/repositoryFact"
+      },
+      "maxItems": 4096,
+      "type": "array"
+    },
+    "state": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "state": {
+              "enum": [
+                "absent_or_hidden",
+                "tombstoned"
+              ]
+            }
+          },
+          "required": [
+            "state"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "designation": {
+              "$ref": "item-source.schema.json"
+            },
+            "state": {
+              "const": "published"
+            }
+          },
+          "required": [
+            "state",
+            "designation"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "version": {
+      "maxLength": 4096,
+      "minLength": 1,
+      "type": "string"
+    }
+  },
+  "required": [
+    "id",
+    "version",
+    "complete",
+    "state",
+    "repositories",
+    "candidates"
+  ],
+  "title": "Internal host item-version inventory",
+  "type": "object"
+}

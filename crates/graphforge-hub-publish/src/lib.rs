@@ -14,6 +14,7 @@ mod error;
 mod exchange;
 mod history;
 mod item_admission;
+mod item_source;
 #[cfg(not(target_arch = "wasm32"))]
 mod reference;
 mod wire;
@@ -33,6 +34,11 @@ pub use item_admission::{
     ItemAdmissionInput, ItemAdmissionPlan, ItemClaimAction, ItemClaimDecision, ItemClaimFact,
     ItemClaimRequirement, ItemClaimState, ItemExactTuple, ItemTupleFact, MAX_ITEM_ADMISSION_BYTES,
     StableAccountId, item_admission_requirements, plan_item_admission,
+};
+pub use item_source::{
+    ItemSourceChange, ItemSourceLifecycle, ItemSourceMutationFact, ItemSourcePrecondition,
+    ItemSourceRecord, ItemSourceTransitionInput, ItemSourceTransitionPlan,
+    plan_item_source_transition,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use reference::{ReferenceHub, ReferenceHubConfig};

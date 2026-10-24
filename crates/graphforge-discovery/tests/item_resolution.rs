@@ -1,9 +1,10 @@
 //! Native authority and generated conformance for digest-free exact versions.
 use graphforge_discovery::{
     DiscoveryError, DiscoveryErrorCode, DiscoveryLimits, DiscoveryManifest,
-    ITEM_VERSION_ABSENCE_FIELD, ITEM_VERSION_AMBIGUITY_FIELD, ItemDescriptor,
-    ItemDiscoverySnapshot, ItemId, ItemVersionInventory, MAX_ITEM_VERSION_CANDIDATES, RefSet,
-    Sha256Digest, bind_item_version_source, bind_item_version_source_json,
+    ITEM_VERSION_ABSENCE_FIELD, ITEM_VERSION_AMBIGUITY_FIELD, ITEM_VERSION_GONE_FIELD,
+    ItemDescriptor, ItemDiscoverySnapshot, ItemId, ItemRepositoryFact, ItemSourceDesignation,
+    ItemVersionInventory, ItemVersionState, MAX_ITEM_VERSION_CANDIDATES, RefSet, Sha256Digest,
+    StableRepositoryId, bind_item_version_source, bind_item_version_source_json,
     item_resolution_error_response, item_resolution_error_response_json,
     parse_item_resolution_refusal, resolve_item_version,
 };
@@ -53,6 +54,33 @@ fn inventory(candidates: Vec<ItemDescriptor>) -> ItemVersionInventory {
         id: descriptor.id,
         version: descriptor.module.version,
         complete: true,
+        state: if candidates.is_empty() {
+            ItemVersionState::AbsentOrHidden {}
+        } else {
+            ItemVersionState::Published {
+                designation: ItemSourceDesignation {
+                    id: fixture().0.id,
+                    repository_id: StableRepositoryId::new("canonical").unwrap(),
+                    revision: "source:1".into(),
+                },
+            }
+        },
+        repositories: candidates
+            .iter()
+            .map(|d| d.repository.clone())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .map(|repository| ItemRepositoryFact {
+                repository_id: StableRepositoryId::new(if repository == fixture().0.repository {
+                    "canonical".into()
+                } else {
+                    repository.canonical_name()
+                })
+                .unwrap(),
+                repository,
+                revision: "repo:1".into(),
+            })
+            .collect(),
         candidates,
     }
 }
@@ -71,12 +99,18 @@ fn corpus() -> Value {
     let identity = serde_json::to_value(&descriptor.module).unwrap();
     let mut absent = base.clone();
     absent["candidates"] = json!([]);
-    let mut copies = base.clone();
+    absent["repositories"] = json!([]);
+    absent["state"] = json!({"state":"absent_or_hidden"});
     let mut other = descriptor.clone();
     other.repository.repository = "equivalent".into();
     other.discovery.refs_revision = Sha256Digest(format!("sha256:{}", "e".repeat(64)));
     other.discovery.manifest_validator = Sha256Digest(format!("sha256:{}", "f".repeat(64)));
-    copies["candidates"] = json!([descriptor, other, descriptor]);
+    let copies = serde_json::to_value(inventory(vec![
+        descriptor.clone(),
+        other,
+        descriptor.clone(),
+    ]))
+    .unwrap();
     let mut ambiguous = copies.clone();
     ambiguous["candidates"][1]["module"]["content_digest"] =
         json!(format!("sha256:{}", "0".repeat(64)));
@@ -104,6 +138,114 @@ fn corpus() -> Value {
             ),
         ),
     ];
+    let mut gone = absent.clone();
+    gone["state"] = json!({"state":"tombstoned"});
+    cases.push(case(
+        "visible-tombstone",
+        &gone,
+        refusal(
+            "gone",
+            Some(ITEM_VERSION_GONE_FIELD),
+            410,
+            r#"{"code":"gone"}"#,
+        ),
+    ));
+    let mut unavailable = base.clone();
+    unavailable["candidates"] = json!([]);
+    unavailable["repositories"] = json!([]);
+    cases.push(case(
+        "published-empty-is-unavailable",
+        &unavailable,
+        refusal("integrity_failure", Some("item_version_source"), 503, ""),
+    ));
+    let mut mirror_only = copies.clone();
+    mirror_only["candidates"] = json!([copies["candidates"][1]]);
+    mirror_only["repositories"] = json!([copies["repositories"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["repository_id"] != "canonical")
+        .unwrap()]);
+    cases.push(case(
+        "mirror-only-is-unavailable",
+        &mirror_only,
+        refusal("integrity_failure", Some("item_version_source"), 503, ""),
+    ));
+    let mut ambiguous_without_source = ambiguous.clone();
+    ambiguous_without_source["state"]["designation"]["repository_id"] =
+        json!("unavailable-repository");
+    cases.push(case(
+        "ambiguity-before-source-availability",
+        &ambiguous_without_source,
+        refusal(
+            "ambiguous_identity",
+            Some(ITEM_VERSION_AMBIGUITY_FIELD),
+            409,
+            r#"{"code":"ambiguous_identity"}"#,
+        ),
+    ));
+    for (name, pointer, value) in [
+        ("missing-repository-fact", "/repositories", json!([])),
+        (
+            "wrong-repository-path",
+            "/repositories/0/repository/repository",
+            json!("wrong"),
+        ),
+        (
+            "wrong-designation-id",
+            "/state/designation/id",
+            json!("ont_bbbbbbbbbbbbbbbb"),
+        ),
+        (
+            "empty-source-revision",
+            "/state/designation/revision",
+            json!(""),
+        ),
+        (
+            "hidden-with-candidates",
+            "/state",
+            json!({"state":"absent_or_hidden"}),
+        ),
+        (
+            "tombstone-with-candidates",
+            "/state",
+            json!({"state":"tombstoned"}),
+        ),
+    ] {
+        let mut input = base.clone();
+        *input.pointer_mut(pointer).unwrap() = value;
+        let error = ItemVersionInventory::from_json(
+            &serde_json::to_vec(&input).unwrap(),
+            DiscoveryLimits::default(),
+        )
+        .and_then(|i| resolve_item_version(&i, DiscoveryLimits::default()))
+        .unwrap_err();
+        cases.push(case(
+            name,
+            &input,
+            refusal(
+                serde_json::to_value(error.code).unwrap().as_str().unwrap(),
+                error.field,
+                503,
+                "",
+            ),
+        ));
+    }
+    let mut duplicated = base.clone();
+    duplicated["repositories"]
+        .as_array_mut()
+        .unwrap()
+        .push(base["repositories"][0].clone());
+    cases.push(case(
+        "duplicate-repository-fact",
+        &duplicated,
+        refusal(
+            "malformed_response",
+            Some("item_version_inventory"),
+            503,
+            "",
+        ),
+    ));
     for version in [
         "01",
         "1.0+draft",
@@ -142,7 +284,7 @@ fn corpus() -> Value {
         ("invalid-first-before-distinct-digests", [2, 0, 1]),
         ("invalid-first-before-reversed-distinct-digests", [2, 1, 0]),
     ] {
-        let mut input = base.clone();
+        let mut input = ambiguous.clone();
         input["candidates"] = json!(order.map(|index| candidates[index].clone()));
         let mut entry = case(
             name,
@@ -253,12 +395,24 @@ fn assert_refusal(error: &DiscoveryError, expected: &Value, name: &Value) {
     assert!(!error.to_string().contains("SECRET"), "{name}");
 }
 
+fn source_schema() -> Value {
+    let text = json!({"type":"string","minLength":1,"maxLength":4096,"pattern":r"^[^\u0000-\u001f\u007f-\u009f]+$"});
+    json!({"$schema":"https://json-schema.org/draft/2020-12/schema","$id":"https://graphforge.sh/schemas/discovery/v1/item-source.schema.json","title":"Internal host permanent-item source designation","description":"Opaque host keys and ABA-safe revisions; Rust enforces UTF-8 byte limits, canonical ID equality and correlated fresh facts.","type":"object","additionalProperties":false,"required":["id","repository_id","revision"],"properties":{"id":{"type":"string","pattern":"^(ont|brg)_[0-9a-hjkmnp-tv-z]{16}$"},"repository_id":text,"revision":text},"$defs":{"repositoryFact":{"type":"object","additionalProperties":false,"required":["repository_id","repository","revision"],"properties":{"repository_id":text,"revision":text,"repository":{"$ref":"item.schema.json#/properties/repository"}}}}})
+}
+fn inventory_schema() -> Value {
+    json!({"$schema":"https://json-schema.org/draft/2020-12/schema","$id":"https://graphforge.sh/schemas/discovery/v1/item-resolution.schema.json","title":"Internal host item-version inventory","type":"object","additionalProperties":false,"required":["id","version","complete","state","repositories","candidates"],"properties":{"id":{"$ref":"item-source.schema.json#/properties/id"},"version":{"type":"string","minLength":1,"maxLength":4096},"complete":{"type":"boolean"},"state":{"oneOf":[{"type":"object","additionalProperties":false,"required":["state"],"properties":{"state":{"enum":["absent_or_hidden","tombstoned"]}}},{"type":"object","additionalProperties":false,"required":["state","designation"],"properties":{"state":{"const":"published"},"designation":{"$ref":"item-source.schema.json"}}}]},"repositories":{"type":"array","maxItems":4096,"items":{"$ref":"item-source.schema.json#/$defs/repositoryFact"}},"candidates":{"type":"array","maxItems":4096,"items":{"$ref":"item.schema.json"}}}})
+}
+
 #[test]
 fn generated_contract_and_native_resolution_agree() {
     let corpus = corpus();
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../docs/reference/discovery/v1");
-    let schema = json!({"$schema":"https://json-schema.org/draft/2020-12/schema","$id":"https://graphforge.sh/schemas/discovery/v1/item-resolution-error.schema.json","title":"item-resolution-error","type":"object","additionalProperties":false,"required":["code"],"properties":{"code":{"enum":["missing_object","ambiguous_identity"]}}});
+    let schema = json!({"$schema":"https://json-schema.org/draft/2020-12/schema","$id":"https://graphforge.sh/schemas/discovery/v1/item-resolution-error.schema.json","title":"item-resolution-error","type":"object","additionalProperties":false,"required":["code"],"properties":{"code":{"enum":["missing_object","ambiguous_identity","gone"]}}});
+    let source_schema = source_schema();
+    let inventory_schema = inventory_schema();
     for (name, value) in [
+        ("item-source.schema.json", &source_schema),
+        ("item-resolution.schema.json", &inventory_schema),
         ("item-resolution-conformance.json", &corpus),
         ("item-resolution-error.schema.json", &schema),
     ] {
@@ -444,7 +598,7 @@ fn eligible_host_facts_change_results_without_hidden_publication_disclosure() {
 }
 
 #[test]
-fn any_equivalent_source_binds_but_splicing_or_an_unlisted_source_does_not() {
+fn designated_repository_binds_but_mirrors_splicing_or_unlisted_sources_do_not() {
     let (a, refs_a, manifest_a) = fixture();
     let mut b = a.clone();
     b.repository.repository = "equivalent".into();
@@ -466,9 +620,43 @@ fn any_equivalent_source_binds_but_splicing_or_an_unlisted_source_does_not() {
     b.discovery.refs_revision = revision(&refs_b);
     let input = inventory(vec![a.clone(), b.clone(), a.clone()]);
     let limits = DiscoveryLimits::default();
-    for (d, r, m) in [(&a, &refs_a, &manifest_a), (&b, &refs_b, &manifest_b)] {
+    assert_eq!(
+        bind_item_version_source(&input, &a, &refs_a, &manifest_a, limits).unwrap(),
+        a
+    );
+    assert_eq!(
+        bind_item_version_source(&input, &b, &refs_b, &manifest_b, limits)
+            .unwrap_err()
+            .item_resolution_http_response()
+            .status,
+        503
+    );
+    assert_eq!(
+        resolve_item_version(&inventory(vec![b.clone()]), limits)
+            .unwrap_err()
+            .item_resolution_http_response()
+            .status,
+        503
+    );
+    // New retained pins in the SAME stable repository are ordinary witnesses.
+    let mut same = b.clone();
+    same.repository = a.repository.clone();
+    let mut same_refs = refs_b.clone();
+    same_refs.repository = a.repository.clone();
+    let mut same_manifest = manifest_b.clone();
+    same_manifest.repository = a.repository.clone();
+    same.discovery.manifest_validator = same_manifest.canonical_digest().unwrap();
+    for reference in &mut same_refs.refs {
+        reference.validator = same.discovery.manifest_validator.clone();
+    }
+    same.discovery.refs_revision = revision(&same_refs);
+    let same_input = inventory(vec![a.clone(), same.clone()]);
+    for (d, r, m) in [
+        (&a, &refs_a, &manifest_a),
+        (&same, &same_refs, &same_manifest),
+    ] {
         assert_eq!(
-            bind_item_version_source(&input, d, r, m, limits).unwrap(),
+            bind_item_version_source(&same_input, d, r, m, limits).unwrap(),
             *d
         );
     }

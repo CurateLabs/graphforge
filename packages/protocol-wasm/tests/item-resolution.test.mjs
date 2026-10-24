@@ -43,8 +43,54 @@ function fixture() {
       id: parsed.id,
       version,
       complete: true,
+      state: {
+        state: "published",
+        designation: {
+          id: parsed.id,
+          repository_id: "canonical",
+          revision: "source:1",
+        },
+      },
+      repositories: [
+        {
+          repository_id: "canonical",
+          repository: manifest.repository,
+          revision: "repo:1",
+        },
+      ],
       candidates: [descriptor],
     },
+  };
+}
+
+function withCandidates(inventory, candidates) {
+  const repositories = [];
+  for (const descriptor of candidates) {
+    if (
+      !repositories.some(
+        (r) =>
+          JSON.stringify(r.repository) ===
+          JSON.stringify(descriptor.repository),
+      )
+    ) {
+      repositories.push(
+        inventory.repositories.find(
+          (r) =>
+            JSON.stringify(r.repository) ===
+            JSON.stringify(descriptor.repository),
+        ) ?? {
+          repository_id: `mirror:${descriptor.repository.owner}/${descriptor.repository.repository}`,
+          repository: descriptor.repository,
+          revision: "repo:1",
+        },
+      );
+    }
+  }
+  return {
+    ...inventory,
+    candidates,
+    repositories,
+    state: candidates.length ? inventory.state : { state: "absent_or_hidden" },
   };
 }
 
@@ -109,7 +155,7 @@ test("all input permutations resolve the same identity or fixed ambiguity", () =
       [c, descriptor, b],
       [c, b, descriptor],
     ]) {
-      const input = { ...inventory, candidates };
+      const input = withCandidates(inventory, candidates);
       if (different)
         assert.deepEqual(
           project(refuse(() => protocol.resolve_item_version(input))),
@@ -129,15 +175,16 @@ test("host eligibility changes cannot expose hidden publications through Core", 
   const other = structuredClone(descriptor);
   other.module.content_digest = `sha256:${"f".repeat(64)}`;
   // Readability and retention are supplied host facts, not inferred by WASM.
-  const eligible = (readA, retainedA, readB) => ({
-    ...inventory,
-    candidates: [
-      [descriptor, readA && retainedA],
-      [other, readB],
-    ]
-      .filter(([, yes]) => yes)
-      .map(([d]) => d),
-  });
+  const eligible = (readA, retainedA, readB) =>
+    withCandidates(
+      inventory,
+      [
+        [descriptor, readA && retainedA],
+        [other, readB],
+      ]
+        .filter(([, yes]) => yes)
+        .map(([d]) => d),
+    );
   assert.deepEqual(
     protocol.resolve_item_version(eligible(true, true, false)),
     descriptor.module,
@@ -153,9 +200,7 @@ test("host eligibility changes cannot expose hidden publications through Core", 
     other.module,
   );
   const absent = project(
-    refuse(() =>
-      protocol.resolve_item_version({ ...inventory, candidates: [] }),
-    ),
+    refuse(() => protocol.resolve_item_version(withCandidates(inventory, []))),
   );
   assert.deepEqual(
     project(
@@ -171,7 +216,7 @@ test("host eligibility changes cannot expose hidden publications through Core", 
   );
 });
 
-test("every nominated equivalent witness binds its own retained snapshots", () => {
+test("only designated repository witnesses bind, including ordinary changed pins", () => {
   const { inventory, descriptor: a, refs: ra, manifest: ma } = fixture();
   const b = structuredClone(a),
     rb = structuredClone(ra),
@@ -187,21 +232,56 @@ test("every nominated equivalent witness binds its own retained snapshots", () =
     ref.validator = b.discovery.manifest_validator;
   }
   b.discovery.refs_revision = protocol.validate_refs(rb).revision;
-  const input = { ...inventory, candidates: [a, b, a] };
+  const input = withCandidates(inventory, [a, b, a]);
   for (const candidates of [
     [a, b, a],
     [b, a, a],
   ]) {
-    for (const [d, r, m] of [
-      [a, ra, ma],
-      [b, rb, mb],
-    ])
-      assert.deepEqual(
-        protocol.bind_item_version_source({ ...input, candidates }, d, r, m)
-          .document,
-        d,
-      );
+    assert.deepEqual(
+      protocol.bind_item_version_source({ ...input, candidates }, a, ra, ma)
+        .document,
+      a,
+    );
+    assert.deepEqual(
+      project(
+        refuse(() =>
+          protocol.bind_item_version_source(
+            { ...input, candidates },
+            b,
+            rb,
+            mb,
+          ),
+        ),
+      ),
+      unavailable,
+    );
   }
+  assert.deepEqual(
+    project(
+      refuse(() =>
+        protocol.resolve_item_version(withCandidates(inventory, [b])),
+      ),
+    ),
+    unavailable,
+  );
+  const same = structuredClone(b),
+    sr = structuredClone(rb),
+    sm = structuredClone(mb);
+  same.repository = structuredClone(a.repository);
+  sr.repository = structuredClone(a.repository);
+  sm.repository = structuredClone(a.repository);
+  same.discovery.manifest_validator = protocol.validate_manifest(sm).digest;
+  for (const ref of sr.refs) ref.validator = same.discovery.manifest_validator;
+  same.discovery.refs_revision = protocol.validate_refs(sr).revision;
+  const si = withCandidates(inventory, [a, same]);
+  for (const [d, r, m] of [
+    [a, ra, ma],
+    [same, sr, sm],
+  ])
+    assert.deepEqual(
+      protocol.bind_item_version_source(si, d, r, m).document,
+      d,
+    );
   for (const [d, r, m] of [
     [a, rb, ma],
     [b, rb, ma],
@@ -263,7 +343,7 @@ test("nested MissingObject maps to empty 503 while proven empty inventory maps t
   assert.deepEqual(
     project(
       refuse(() =>
-        protocol.resolve_item_version({ ...inventory, candidates: [] }),
+        protocol.resolve_item_version(withCandidates(inventory, [])),
       ),
     ),
     { status: 404, body: '{"code":"missing_object"}' },
