@@ -30,6 +30,8 @@ on:
       - scripts/ci/prepare-napi-packages.py
       - scripts/ci/validate-napi-artifacts.py
       - scripts/ci/multi-ontology-packaged-smoke.mjs
+      - scripts/ci/clang-aarch64-gnu.sh
+      - scripts/ci/hub-https-arm64-smoke.mjs
       - scripts/ci/protocol-wasm-packaged-smoke.mjs
       - scripts/ci/install-wasm-bindgen.sh
       - packages/protocol-wasm/**
@@ -183,11 +185,9 @@ jobs:
           - os: blacksmith-12vcpu-macos-15
             target: x86_64-apple-darwin
             node_arch: x64
-            run_addon: "true"
           - os: blacksmith-12vcpu-macos-15
             target: aarch64-apple-darwin
             node_arch: arm64
-            run_addon: "true"
           - os: blacksmith-4vcpu-ubuntu-2404
             target: x86_64-unknown-linux-gnu
             # The napi cross toolchain links against glibc 2.17, the floor the
@@ -201,29 +201,27 @@ jobs:
             node_version: "22"
             runtime_node_version: "20"
             glibc_floor: "2.17"
-            run_addon: "true"
             # The npm packages job packs this lane's napi-generated index.js /
             # index.d.ts, the loaders its smoke tests executed.
             publishes_loaders: "true"
-          - os: blacksmith-4vcpu-ubuntu-2404
+          - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             cross_args: --use-napi-cross
             arm_cflags: -D__ARM_ARCH=8
-            node_arch: x64
+            node_arch: arm64
             glibc_floor: "2.17"
-            # The runner is x64 and the artifact is arm64, so this lane cannot
-            # execute the addon; it validates the packed layout instead.
+            # Execute the shipped arm64 addon on real arm64, including TLS.
+            # Retain the cross sysroot/linker for the glibc 2.17 ABI floor.
             # `--use-napi-cross` unpacks its gcc toolchain with `@napi-rs/lzma`,
             # whose native binding needs Node 22; pnpm silently skips an
             # optional dependency whose engine the running Node does not
             # satisfy, so on Node 20 the toolchain setup dies with "Cannot
             # find native binding".
             node_version: "22"
-            run_addon: "false"
+            runtime_node_version: "20"
           - os: blacksmith-8vcpu-windows-2025
             target: x86_64-pc-windows-msvc
             node_arch: x64
-            run_addon: "true"
             timeout_minutes: 90
     env:
       CARGO_TARGET_DIR: ${{ github.workspace }}/target
@@ -256,12 +254,19 @@ jobs:
       - name: Install workspace dependencies
         run: pnpm install
 
+      - name: Install the arm64 C compiler
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: sudo apt-get update && sudo apt-get install -y clang
+
       - name: Build the addon
         shell: bash
         env:
           CFLAGS_aarch64_unknown_linux_gnu: ${{ matrix.arm_cflags || '' }}
-        run: >-
-          pnpm --filter @curatelabs/graphforge exec napi build --platform --release
+        run: |
+          if [[ '${{ matrix.target }}' == 'aarch64-unknown-linux-gnu' ]]; then
+            export CC_aarch64_unknown_linux_gnu="$GITHUB_WORKSPACE/scripts/ci/clang-aarch64-gnu.sh"
+          fi
+          pnpm --filter @curatelabs/graphforge exec napi build --platform --release \
           --target ${{ matrix.target }} ${{ matrix.cross_args }}
 
       - name: Require the declared glibc floor
@@ -293,7 +298,6 @@ jobs:
           architecture: ${{ matrix.node_arch }}
 
       - name: Load and run the addon
-        if: matrix.run_addon == 'true'
         shell: bash
         run: |
           node -e 'import("./crates/graphforge-bindings-node/index.js").then(m => {
@@ -304,27 +308,9 @@ jobs:
             tests/non-cypher-release-parity.test.mjs \
             tests/async-errors.test.mjs
 
-      - name: Validate the cross-built package layout
-        if: matrix.run_addon != 'true'
-        shell: bash
-        working-directory: crates/graphforge-bindings-node
-        env:
-          NODE_TARGET: ${{ matrix.target }}
-        run: |
-          addons=(*.node)
-          test "${#addons[@]}" -eq 1
-          mkdir -p artifacts
-          cp "${addons[0]}" artifacts/
-          pnpm exec napi create-npm-dirs
-          # `napi artifacts` refuses to run unless an addon exists for every
-          # target in the manifest, so point it at a config declaring only the
-          # one this lane built. The npm packages job runs it against the full
-          # manifest once all five addons are collected.
-          printf '{"targets":["%s"]}\n' "$NODE_TARGET" > "$RUNNER_TEMP/napi-lane-target.json"
-          pnpm exec napi artifacts --output-dir artifacts --npm-dir npm \
-            --config-path "$RUNNER_TEMP/napi-lane-target.json"
-          python3 "$GITHUB_WORKSPACE/scripts/ci/validate-napi-artifacts.py" \
-            --npm-dir npm --manifest package.json --target "$NODE_TARGET"
+      - name: Verify Hub HTTPS from the arm64 addon
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: node scripts/ci/hub-https-arm64-smoke.mjs crates/graphforge-bindings-node/index.js
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
