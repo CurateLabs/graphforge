@@ -255,6 +255,12 @@ fn cases() -> Vec<(&'static str, Value, Option<usize>)> {
             json!("repo\nsecret"),
         ),
         (
+            "trailing-control-stable-repository-id",
+            publication(),
+            "/repository/repository_id",
+            json!("repository:A\n"),
+        ),
+        (
             "unknown-lifecycle",
             publication(),
             "/item_facts/0/lifecycle",
@@ -280,7 +286,7 @@ fn transition_schema() -> Value {
         let required: Vec<_> = properties.as_object().unwrap().keys().cloned().collect();
         json!({"type":"object","additionalProperties":false,"required":required,"properties":properties})
     }
-    let revision = json!({"type":"string","minLength":1,"maxLength":4096,"pattern":r"^[^\u0000-\u001f\u007f-\u009f]+$"});
+    let revision = json!({"type":"string","minLength":1,"maxLength":4096,"pattern":r"^[^\u0000-\u001f\u007f-\u009f]+(?![\s\S])"});
     let source_ref = json!({"$ref":"../../discovery/v1/item-source.schema.json"});
     let repo_ref =
         json!({"$ref":"../../discovery/v1/item-source.schema.json#/$defs/repositoryFact"});

@@ -9,13 +9,13 @@
         "repository_id": {
           "maxLength": 4096,
           "minLength": 1,
-          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$",
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+(?![\\s\\S])",
           "type": "string"
         },
         "revision": {
           "maxLength": 4096,
           "minLength": 1,
-          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$",
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+(?![\\s\\S])",
           "type": "string"
         }
       },
@@ -33,19 +33,19 @@
   "description": "Opaque host keys and ABA-safe revisions; Rust enforces UTF-8 byte limits, canonical ID equality and correlated fresh facts.",
   "properties": {
     "id": {
-      "pattern": "^(ont|brg)_[0-9a-hjkmnp-tv-z]{16}$",
+      "pattern": "^(ont|brg)_[0-9a-hjkmnp-tv-z]{16}(?![\\s\\S])",
       "type": "string"
     },
     "repository_id": {
       "maxLength": 4096,
       "minLength": 1,
-      "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$",
+      "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+(?![\\s\\S])",
       "type": "string"
     },
     "revision": {
       "maxLength": 4096,
       "minLength": 1,
-      "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$",
+      "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+(?![\\s\\S])",
       "type": "string"
     }
   },

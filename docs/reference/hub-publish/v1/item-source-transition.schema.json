@@ -25,7 +25,7 @@
               "ownership_revision": {
                 "maxLength": 4096,
                 "minLength": 1,
-                "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$",
+                "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+(?![\\s\\S])",
                 "type": "string"
               },
               "source": {
@@ -109,7 +109,7 @@
             "ownership_revision": {
               "maxLength": 4096,
               "minLength": 1,
-              "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$",
+              "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+(?![\\s\\S])",
               "type": "string"
             },
             "source": {
@@ -156,19 +156,19 @@
         "expected_ownership_revision": {
           "maxLength": 4096,
           "minLength": 1,
-          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$",
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+(?![\\s\\S])",
           "type": "string"
         },
         "expected_repository_id": {
           "maxLength": 4096,
           "minLength": 1,
-          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$",
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+(?![\\s\\S])",
           "type": "string"
         },
         "expected_source_revision": {
           "maxLength": 4096,
           "minLength": 1,
-          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$",
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+(?![\\s\\S])",
           "type": "string"
         },
         "operation": {

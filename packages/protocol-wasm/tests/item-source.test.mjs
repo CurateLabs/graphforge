@@ -49,3 +49,31 @@ test("source transitions use bounded native JSON and generated types", () => {
   );
   assert.match(declarations, /export type StableRepositoryId = string;/);
 });
+
+test("generated source ID and revision patterns reject trailing controls", () => {
+  const source = readJson(
+    "docs",
+    "reference",
+    "discovery",
+    "v1",
+    "item-source.schema.json",
+  );
+  const transition = readJson(
+    "docs",
+    "reference",
+    "hub-publish",
+    "v1",
+    "item-source-transition.schema.json",
+  );
+  for (const [schema, valid] of [
+    [source.properties.repository_id, "repository:A"],
+    [source.properties.revision, "source:1"],
+    [source.properties.id, "ont_aaaaaaaaaaaaaaaa"],
+    [transition.oneOf[1].properties.expected_source_revision, "source:1"],
+  ]) {
+    const pattern = new RegExp(schema.pattern);
+    assert.equal(pattern.test(valid), true);
+    for (const suffix of ["\n", "\r", "\u0085"])
+      assert.equal(pattern.test(valid + suffix), false);
+  }
+});
