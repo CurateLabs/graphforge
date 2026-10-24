@@ -21,6 +21,16 @@ then npm, then the GitHub Release. Every registry step skips a version that is
 already published. A tag run fails before any upload if the tag is not
 `v<workspace version>`.
 
+Every Node addon is loaded and exercised on its target architecture. The Linux
+arm64 lane uses Clang for C compilation with napi's glibc-2.17 sysroot and linker;
+the archived GCC 4.8.5 toolchain produces incorrect certificate-signature
+verification in ring (#2260). The existing ELF check still enforces the ABI floor.
+The arm64 lane also invokes Core clone against a fresh absent public Hub identity,
+requiring a verified HTTPS response with `hub.not_found` and no destination. This
+tests TLS independently of the fixture namespace and requires access to
+`graphforge.sh`; transport failures fail the smoke test. It does not replace
+successful clone/open/reopen acceptance against an actual published project.
+
 ## Prerequisites
 
 Registry and repository settings are outside this repository; the workflow
