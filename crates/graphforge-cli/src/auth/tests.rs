@@ -930,7 +930,7 @@ fn private_clone_authenticates_metadata_and_objects_then_imports_and_reopens_fix
         graphforge_api::GraphForge::new(destination.to_str()).expect("authenticated clone reopens");
     assert_eq!(
         cloned.research_project_metadata().unwrap().title.as_deref(),
-        Some("OpenAlex")
+        Some("Synthetic OpenAlex-themed GraphForge example")
     );
     let calls = transport.inner.calls.borrow();
     assert_eq!(calls.len(), 5);
@@ -1241,7 +1241,7 @@ fn private_moved_clone_reacquires_current_scope_and_reopens_native_project() {
             .unwrap()
             .title
             .as_deref(),
-        Some("OpenAlex")
+        Some("Synthetic OpenAlex-themed GraphForge example")
     );
 }
 #[test]

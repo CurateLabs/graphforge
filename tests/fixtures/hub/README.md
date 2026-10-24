@@ -1,7 +1,7 @@
 # Rust-owned Hub fixture
 
-This directory is the single GraphForge authority for the public Hub closeout
-fixture. `openalex-source/` is the complete, synthetic, expanded portable
+This directory is the single GraphForge authority for the synthetic OpenAlex-themed Hub
+example. `openalex-source/` is the complete, synthetic, expanded portable
 source state of the `opendata/openalex` Project. `generated/v1/` contains the
 deterministic bundle, Project summary, per-module package, and canonical
 discovery manifest and refs emitted by Rust.
@@ -69,22 +69,70 @@ them; never change an expected verdict by hand to make a candidate pass.
 
 ## The source
 
-`--rebuild-source` builds the source through the public GraphForge facade: a
-durable Project with fixed operation identities, synthetic research metadata
-written by `update_research_metadata` (title "OpenAlex", license "CC0-1.0",
-public/open access, declared corpus size 1000 nodes and 2500 relationships),
-one adopted ontology module (`https://graphforge.sh/ont_drqf2xw8w33cxaxj` version
-`2026.01`: `Work`, `Author`, `Institution`, one `AUTHORED` relationship) with an
-advisory activation profile, then a complete expanded export. The new tree is
-fully verified and swapped in only when complete. The values are fixture
-content, not product behavior. Nothing under `openalex-source/` is edited by
-hand; running `--rebuild-source` twice produces byte-identical trees, and a unit
-test asserts that the rebuild equals the checked-in tree.
+`--rebuild-source` builds a durable Project through the public GraphForge
+facade, with fixed UUIDv7 operation and graph identities. Its handle-local
+`with_write_clock` callback supplies `2026-01-01T00:00:00Z` (UTC microseconds),
+matching the synthetic metadata dates. Composite topology and runtime-catalog
+observations share that captured construction time; ordinary reopened handles
+use the system clock. It adopts the existing
+advisory ontology module, then commits two invented `Author` nodes, three
+invented `Work` nodes and four `AUTHORED` relationships through a native graph
+transaction. `Ada Example` authored `A Synthetic Atlas of Ideas`; `Basil Sample`
+authored `Invented Networks for Learning`; both authored `Shared Paths in Example
+Graphs`. There are no `Institution` records.
 
-The Project is a GraphForge-maintained mirror, so it lives under the `opendata`
-owner rather than the data source's name, and its module carries a GraphForge
-permanent `ont_` ID rather than an IRI in a domain GraphForge does not control
-(#2214, #2215).
+This is GraphForge-generated content, dedicated under CC0-1.0 and maintained by
+GraphForge. It contains no real OpenAlex records and has no official OpenAlex or
+OurResearch affiliation. Its native title is "Synthetic OpenAlex-themed
+GraphForge example". Research metadata counts are measured from the committed
+graph with native inspection, not entered as fixture constants. Unsupported
+source/artifact counts are absent. Summary metadata copies these measured
+declarations from the verified package; summary component and byte facts have a
+different scope and do not independently count graph rows.
+
+The ontology retains permanent identity
+`https://graphforge.sh/ont_drqf2xw8w33cxaxj`, with authored version `2026.02`.
+It preserves the existing `Work`, `Author`, `Institution` entity types and
+`AUTHORED` from Author to Work, and adds only nullable, single-valued UTF-8
+properties `Author.name` and `Work.title`. The exact native content digest is
+recorded in `fixture.json` and the manifest. Composition ownership requires
+these declarations for native transaction construction and useful Cypher
+queries even in advisory mode. Native tests execute these traversals after
+package import and durable reopen.
+
+The earlier authored version `2026.01`, content digest
+`sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11`,
+is retained in immutable publication history and Git history; its empty
+property declarations are not redefined.
+
+After cloning `opendata/openalex`, try:
+
+```cypher
+MATCH (a:Author)-[:AUTHORED]->(w:Work)
+RETURN a.name, w.title ORDER BY a.name, w.title
+```
+
+```cypher
+MATCH (a:Author)-[:AUTHORED]->(w:Work)
+RETURN a.name, count(w) AS works ORDER BY a.name
+```
+
+```cypher
+MATCH (a:Author)-[:AUTHORED]->(w:Work)<-[:AUTHORED]-(b:Author)
+WHERE a.name < b.name
+RETURN a.name, b.name, w.title
+```
+
+The new source tree is fully verified and swapped in only when complete.
+Nothing under `openalex-source/` is edited by hand; a unit test rebuilds it
+independently and compares every byte with the checked-in tree.
+
+`opendata/openalex` remains the repository identity, and `generated/v1/` remains
+the fixture protocol path. Changed graph content produces a new immutable
+Project package identity and new transport/summary/manifest/refs bindings.
+Previously published package bytes remain immutable; Git history retains the
+previous fixture. This local regeneration does not publish or replace live Hub
+content. Hub owns downstream repinning, publication history and live acceptance.
 
 ## The generated artifacts
 

@@ -740,6 +740,86 @@ mod tests {
     }
 
     #[test]
+    fn facade_write_clock_stamps_composite_topology_and_catalog_and_fails_before_mutation() {
+        use arrow::array::TimestampMicrosecondArray;
+        const FIXED: i64 = 1_767_225_600_000_000;
+        let directory = TempDir::new().unwrap();
+        let graph = GraphForge::new(directory.path().to_str())
+            .unwrap()
+            .with_write_clock(|| Ok(FIXED));
+        let tx = graph.begin_transaction(context(80)).unwrap();
+        tx.stage_add_node(
+            uuid7(81),
+            "Person",
+            HashMap::from([("name".into(), PropValue::Str("Ada".into()))]),
+        )
+        .unwrap();
+        tx.stage_add_node(uuid7(82), "Person", HashMap::new())
+            .unwrap();
+        tx.stage_add_edge(uuid7(83), "KNOWS", uuid7(81), uuid7(82), HashMap::new())
+            .unwrap();
+        tx.commit(&graph).unwrap();
+        let files = graph.dir().topology_files().unwrap();
+        let nodes = graphforge_storage::read_nodes_from_files(&files).unwrap();
+        let edges: Vec<_> = files
+            .edge_fragments()
+            .iter()
+            .flat_map(|(_, path, _)| {
+                parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
+                    std::fs::File::open(path).unwrap(),
+                )
+                .unwrap()
+                .build()
+                .unwrap()
+                .map(Result::unwrap)
+                .collect::<Vec<_>>()
+            })
+            .collect();
+        let catalog = graph.runtime_catalog.lock().unwrap().to_record_batch();
+        for (batches, fields) in [
+            (nodes, vec!["created_at", "updated_at"]),
+            (edges, vec!["created_at"]),
+            (vec![catalog], vec!["first_seen", "last_seen"]),
+        ] {
+            assert!(batches.iter().any(|batch| batch.num_rows() > 0));
+            for batch in batches {
+                for field in &fields {
+                    let values = batch
+                        .column_by_name(field)
+                        .unwrap()
+                        .as_any()
+                        .downcast_ref::<TimestampMicrosecondArray>()
+                        .unwrap();
+                    assert!(values.iter().all(|value| value == Some(FIXED)), "{field}");
+                }
+            }
+        }
+        // Clock configuration is transient: a fresh durable open uses system time.
+        let reopened = GraphForge::new(directory.path().to_str()).unwrap();
+        assert!((reopened.clock.lock().unwrap())().unwrap() > FIXED);
+        let before = graph.committed_generation_identity().unwrap();
+        let graph = graph.with_write_clock(|| Err(GfError::Validation("clock unavailable".into())));
+        let tx = graph.begin_transaction(context(84)).unwrap();
+        tx.stage_add_node(uuid7(85), "Person", HashMap::new())
+            .unwrap();
+        assert!(
+            tx.commit(&graph)
+                .unwrap_err()
+                .to_string()
+                .contains("clock unavailable")
+        );
+        assert_eq!(graph.committed_generation_identity().unwrap(), before);
+        assert_eq!(graph.node_count("").unwrap(), 2);
+        assert_eq!(
+            GraphForge::new(directory.path().to_str())
+                .unwrap()
+                .node_count("")
+                .unwrap(),
+            2
+        );
+    }
+
+    #[test]
     fn later_cypher_failure_restores_outer_catalog_data_and_reopen() {
         let directory = TempDir::new().unwrap();
         let graph = GraphForge::new(directory.path().to_str()).unwrap();

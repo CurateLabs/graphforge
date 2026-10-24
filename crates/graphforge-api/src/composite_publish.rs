@@ -888,7 +888,9 @@ fn apply_graph_mutations(
         {
             let type_id = match routes.created_node_types.get(node_uuid) {
                 Some(id) => *id,
-                None => graphforge_value::EntityTypeId::runtime(catalog.intern_label(label)?),
+                None => graphforge_value::EntityTypeId::runtime(
+                    catalog.intern_label_at(label, recorded_at)?,
+                ),
             };
             writer.create_node(*node_uuid, type_id)?;
             let count = label_membership_counts.entry(type_id).or_default();
@@ -910,7 +912,7 @@ fn apply_graph_mutations(
                     let props = properties
                         .iter()
                         .map(|(name, value)| {
-                            catalog.intern_property(name, Some(label))?;
+                            catalog.intern_property_at(name, Some(label), recorded_at)?;
                             Ok((name.clone(), prop_literal(value)?))
                         })
                         .collect::<Result<HashMap<_, _>, GfError>>()?;
@@ -928,7 +930,7 @@ fn apply_graph_mutations(
                 target_uuid,
                 properties,
             } => {
-                catalog.intern_relation_type(rel_type)?;
+                catalog.intern_relation_type_at(rel_type, recorded_at)?;
                 writer.create_edge(
                     *edge_uuid,
                     &routes.edge(edge_uuid)?,
@@ -939,7 +941,7 @@ fn apply_graph_mutations(
                     let props = properties
                         .iter()
                         .map(|(name, value)| {
-                            catalog.intern_property(name, Some(rel_type))?;
+                            catalog.intern_property_at(name, Some(rel_type), recorded_at)?;
                             Ok((name.clone(), prop_literal(value)?))
                         })
                         .collect::<Result<HashMap<_, _>, GfError>>()?;
@@ -954,7 +956,7 @@ fn apply_graph_mutations(
                 property,
                 value,
             } => {
-                catalog.intern_property(property, None)?;
+                catalog.intern_property_at(property, None, recorded_at)?;
                 let literal = prop_literal(value)?;
                 node_sets
                     .entry(routes.node(node_uuid)?)
@@ -968,7 +970,7 @@ fn apply_graph_mutations(
                 property,
                 value,
             } => {
-                catalog.intern_property(property, None)?;
+                catalog.intern_property_at(property, None, recorded_at)?;
                 let literal = prop_literal(value)?;
                 edge_sets
                     .entry(routes.edge(edge_uuid)?)
