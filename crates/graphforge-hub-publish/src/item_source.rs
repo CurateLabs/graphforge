@@ -61,7 +61,7 @@ pub enum ItemSourceTransitionInput {
     /// Evaluate admission once and initialize only newly claimed permanent IDs.
     Publication {
         /// Existing complete admission request; its policy is not duplicated.
-        admission: ItemAdmissionInput,
+        admission: Box<ItemAdmissionInput>,
         /// Stable binding for the repository being committed.
         repository: ItemRepositoryFact,
         /// Proposed post-commit refs, not the previous/current refs snapshot.
@@ -191,98 +191,13 @@ pub fn plan_item_source_transition(
 ) -> Result<ItemSourceTransitionPlan, HubPublishError> {
     serde_json::to_writer(AdmissionByteBudget(MAX_ITEM_ADMISSION_BYTES), input)
         .map_err(|_| invalid("item source input exceeds its byte bound"))?;
-    let limits = DiscoveryLimits::default();
     match input {
         ItemSourceTransitionInput::Publication {
             admission,
             repository,
             refs,
             item_facts,
-        } => {
-            repository
-                .validate(limits)
-                .map_err(|_| invalid("publication repository fact is invalid"))?;
-            refs.validate(limits)
-                .map_err(|_| invalid("post-commit refs are invalid"))?;
-            let requirements = item_admission_requirements(&admission.manifest)?;
-            if item_facts.len() > crate::MAX_ID_TAKEN_ITEMS
-                || item_facts.len() != requirements.len()
-            {
-                return Err(invalid("item source facts are incomplete"));
-            }
-            let mut facts = BTreeMap::new();
-            for fact in item_facts {
-                validate_fact(fact)?;
-                if facts.insert(fact.id.as_str(), fact).is_some() {
-                    return Err(invalid("item source facts are duplicated"));
-                }
-            }
-            if requirements
-                .iter()
-                .any(|r| !facts.contains_key(r.id.as_str()))
-            {
-                return Err(invalid("item source facts do not match admission"));
-            }
-            if refs.repository != repository.repository
-                || admission.manifest.repository != repository.repository
-            {
-                return Err(invalid("publication repository bindings disagree"));
-            }
-            refs.validate_manifest(&admission.manifest)
-                .map_err(|_| invalid("post-commit refs do not bind the publication"))?;
-            let validator = admission
-                .manifest
-                .canonical_digest()
-                .map_err(|_| invalid("publication manifest is invalid"))?;
-            if !refs
-                .refs
-                .iter()
-                .any(|r| r.name == admission.manifest.resolved_ref && r.validator == validator)
-            {
-                return Err(invalid("post-commit manifest validator disagrees"));
-            }
-            // Validate/correlate every source record before any admission refusal.
-            for claim in &admission.facts {
-                check_fact(claim)?;
-                let fact = facts
-                    .get(claim.id.as_str())
-                    .ok_or_else(|| invalid("source fact is missing"))?;
-                correlate(fact, claim)?;
-            }
-            let admission_plan = plan_item_admission(admission)?;
-            if item_facts
-                .iter()
-                .any(|f| f.lifecycle != ItemSourceLifecycle::Active)
-            {
-                return Err(invalid("item is tombstoned"));
-            }
-            let mut changes = BTreeMap::new();
-            for decision in &admission_plan.decisions {
-                if decision.action == ItemClaimAction::NewClaim {
-                    changes.insert(
-                        decision.id.clone(),
-                        ItemSourceChange {
-                            id: decision.id.clone(),
-                            repository_id: repository.repository_id.clone(),
-                        },
-                    );
-                }
-            }
-            let preconditions = admission
-                .facts
-                .iter()
-                .map(|claim| ItemSourcePrecondition {
-                    fact: facts[claim.id.as_str()].clone(),
-                    claim: claim.claim.clone(),
-                })
-                .collect();
-            Ok(ItemSourceTransitionPlan {
-                admission: Some(admission_plan),
-                preconditions,
-                repository: repository.clone(),
-                changes: changes.into_values().collect(),
-            })
-        }
+        } => publication_plan(admission, repository, refs, item_facts),
         ItemSourceTransitionInput::Rehome {
             verified_owner_account_id,
             ownership_fact,
@@ -291,56 +206,166 @@ pub fn plan_item_source_transition(
             expected_source_revision,
             expected_repository_id,
             target_repository,
-        } => {
-            StableAccountId::new(verified_owner_account_id.as_str())?;
-            if ownership_fact.tuples.len() > crate::MAX_ID_TAKEN_ITEMS {
-                return Err(invalid("item source claim tuples exceed their bound"));
-            }
-            check_fact(ownership_fact)?;
-            validate_fact(current)?;
-            correlate(current, ownership_fact)?;
-            revision(expected_ownership_revision)?;
-            revision(expected_source_revision)?;
-            expected_repository_id
-                .validate(limits)
-                .map_err(|_| invalid("expected source repository is invalid"))?;
-            target_repository
-                .validate(limits)
-                .map_err(|_| invalid("target repository fact is invalid"))?;
-            let ItemClaimState::Claimed {
-                owner_account_id, ..
-            } = &ownership_fact.claim
-            else {
-                return Err(invalid("item has no owner"));
-            };
-            let ItemSourceRecord::Designated { designation } = &current.source else {
-                return Err(invalid("item has no source"));
-            };
-            if current.lifecycle != ItemSourceLifecycle::Active
-                || owner_account_id != verified_owner_account_id
-                || current.ownership_revision != *expected_ownership_revision
-                || designation.revision != *expected_source_revision
-                || designation.repository_id != *expected_repository_id
-            {
-                return Err(invalid("item source rehome preconditions disagree"));
-            }
-            let changes = if designation.repository_id == target_repository.repository_id {
-                vec![]
-            } else {
-                vec![ItemSourceChange {
-                    id: current.id.clone(),
-                    repository_id: target_repository.repository_id.clone(),
-                }]
-            };
-            Ok(ItemSourceTransitionPlan {
-                admission: None,
-                preconditions: vec![ItemSourcePrecondition {
-                    fact: current.clone(),
-                    claim: ownership_fact.claim.clone(),
-                }],
-                repository: target_repository.clone(),
-                changes,
-            })
+        } => rehome_plan(
+            verified_owner_account_id,
+            ownership_fact,
+            current,
+            expected_ownership_revision,
+            expected_source_revision,
+            expected_repository_id,
+            target_repository,
+        ),
+    }
+}
+
+fn publication_plan(
+    admission: &ItemAdmissionInput,
+    repository: &ItemRepositoryFact,
+    refs: &RefSet,
+    item_facts: &[ItemSourceMutationFact],
+) -> Result<ItemSourceTransitionPlan, HubPublishError> {
+    let limits = DiscoveryLimits::default();
+    repository
+        .validate(limits)
+        .map_err(|_| invalid("publication repository fact is invalid"))?;
+    refs.validate(limits)
+        .map_err(|_| invalid("post-commit refs are invalid"))?;
+    let requirements = item_admission_requirements(&admission.manifest)?;
+    if item_facts.len() > MAX_ID_TAKEN_ITEMS || item_facts.len() != requirements.len() {
+        return Err(invalid("item source facts are incomplete"));
+    }
+    let mut facts = BTreeMap::new();
+    for fact in item_facts {
+        validate_fact(fact)?;
+        if facts.insert(fact.id.as_str(), fact).is_some() {
+            return Err(invalid("item source facts are duplicated"));
         }
     }
+    if requirements
+        .iter()
+        .any(|r| !facts.contains_key(r.id.as_str()))
+    {
+        return Err(invalid("item source facts do not match admission"));
+    }
+    if refs.repository != repository.repository
+        || admission.manifest.repository != repository.repository
+    {
+        return Err(invalid("publication repository bindings disagree"));
+    }
+    refs.validate_manifest(&admission.manifest)
+        .map_err(|_| invalid("post-commit refs do not bind the publication"))?;
+    let validator = admission
+        .manifest
+        .canonical_digest()
+        .map_err(|_| invalid("publication manifest is invalid"))?;
+    if !refs
+        .refs
+        .iter()
+        .any(|r| r.name == admission.manifest.resolved_ref && r.validator == validator)
+    {
+        return Err(invalid("post-commit manifest validator disagrees"));
+    }
+    // Validate/correlate every source record before any admission refusal.
+    for claim in &admission.facts {
+        check_fact(claim)?;
+        let fact = facts
+            .get(claim.id.as_str())
+            .ok_or_else(|| invalid("source fact is missing"))?;
+        correlate(fact, claim)?;
+    }
+    let admission_plan = plan_item_admission(admission)?;
+    if item_facts
+        .iter()
+        .any(|f| f.lifecycle != ItemSourceLifecycle::Active)
+    {
+        return Err(invalid("item is tombstoned"));
+    }
+    let mut changes = BTreeMap::new();
+    for decision in &admission_plan.decisions {
+        if decision.action == ItemClaimAction::NewClaim {
+            changes.insert(
+                decision.id.clone(),
+                ItemSourceChange {
+                    id: decision.id.clone(),
+                    repository_id: repository.repository_id.clone(),
+                },
+            );
+        }
+    }
+    let mut preconditions: Vec<_> = admission
+        .facts
+        .iter()
+        .map(|claim| ItemSourcePrecondition {
+            fact: facts[claim.id.as_str()].clone(),
+            claim: claim.claim.clone(),
+        })
+        .collect();
+    preconditions.sort_by(|a, b| a.fact.id.cmp(&b.fact.id));
+    Ok(ItemSourceTransitionPlan {
+        admission: Some(admission_plan),
+        preconditions,
+        repository: repository.clone(),
+        changes: changes.into_values().collect(),
+    })
+}
+
+fn rehome_plan(
+    verified_owner_account_id: &StableAccountId,
+    ownership_fact: &ItemClaimFact,
+    current: &ItemSourceMutationFact,
+    expected_ownership_revision: &str,
+    expected_source_revision: &str,
+    expected_repository_id: &StableRepositoryId,
+    target_repository: &ItemRepositoryFact,
+) -> Result<ItemSourceTransitionPlan, HubPublishError> {
+    let limits = DiscoveryLimits::default();
+    StableAccountId::new(verified_owner_account_id.as_str())?;
+    if ownership_fact.tuples.len() > MAX_ID_TAKEN_ITEMS {
+        return Err(invalid("item source claim tuples exceed their bound"));
+    }
+    check_fact(ownership_fact)?;
+    validate_fact(current)?;
+    correlate(current, ownership_fact)?;
+    revision(expected_ownership_revision)?;
+    revision(expected_source_revision)?;
+    expected_repository_id
+        .validate(limits)
+        .map_err(|_| invalid("expected source repository is invalid"))?;
+    target_repository
+        .validate(limits)
+        .map_err(|_| invalid("target repository fact is invalid"))?;
+    let ItemClaimState::Claimed {
+        owner_account_id, ..
+    } = &ownership_fact.claim
+    else {
+        return Err(invalid("item has no owner"));
+    };
+    let ItemSourceRecord::Designated { designation } = &current.source else {
+        return Err(invalid("item has no source"));
+    };
+    if current.lifecycle != ItemSourceLifecycle::Active
+        || owner_account_id != verified_owner_account_id
+        || current.ownership_revision != expected_ownership_revision
+        || designation.revision != expected_source_revision
+        || designation.repository_id != *expected_repository_id
+    {
+        return Err(invalid("item source rehome preconditions disagree"));
+    }
+    let changes = if designation.repository_id == target_repository.repository_id {
+        vec![]
+    } else {
+        vec![ItemSourceChange {
+            id: current.id.clone(),
+            repository_id: target_repository.repository_id.clone(),
+        }]
+    };
+    Ok(ItemSourceTransitionPlan {
+        admission: None,
+        preconditions: vec![ItemSourcePrecondition {
+            fact: current.clone(),
+            claim: ownership_fact.claim.clone(),
+        }],
+        repository: target_repository.clone(),
+        changes,
+    })
 }

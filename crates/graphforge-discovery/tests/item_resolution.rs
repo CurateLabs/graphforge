@@ -246,6 +246,33 @@ fn corpus() -> Value {
             "",
         ),
     ));
+    let mut renamed = base.clone();
+    renamed["repositories"][0]["repository"]["owner"] = json!("transferred");
+    renamed["repositories"][0]["revision"] = json!("binding:after-transfer");
+    renamed["candidates"][0]["repository"] = renamed["repositories"][0]["repository"].clone();
+    cases.push(case(
+        "stable-source-survives-repository-transfer",
+        &renamed,
+        json!({"identity":identity}),
+    ));
+    let mut rehomed_missing = base.clone();
+    rehomed_missing["state"]["designation"]["repository_id"] = json!("repository:after-rehome");
+    cases.push(case(
+        "rehomed-target-missing-version-no-fallback",
+        &rehomed_missing,
+        refusal("integrity_failure", Some("item_version_source"), 503, ""),
+    ));
+    let mut bridge = base.clone();
+    bridge["id"] = json!("brg_aaaaaaaaaaaaaaaa");
+    bridge["state"]["designation"]["id"] = bridge["id"].clone();
+    bridge["candidates"][0]["id"] = bridge["id"].clone();
+    bridge["candidates"][0]["kind"] = json!("bridge_set");
+    bridge["candidates"][0]["module"]["id"] = json!("https://graphforge.sh/brg_aaaaaaaaaaaaaaaa");
+    cases.push(case(
+        "bridge-identity-remains-descriptive",
+        &bridge,
+        json!({"identity":bridge["candidates"][0]["module"]}),
+    ));
     for version in [
         "01",
         "1.0+draft",
@@ -852,5 +879,82 @@ fn source_json_rejects_duplicate_members_and_aggregate_overflow() {
             .unwrap_err()
             .code,
         DiscoveryErrorCode::LimitExceeded
+    );
+}
+
+#[test]
+fn renamed_repository_keeps_source_identity_but_requires_actual_rehomed_snapshots() {
+    let (mut descriptor, mut refs, mut manifest) = fixture();
+    let mut input = inventory(vec![descriptor.clone()]);
+    descriptor.repository.owner = "transferred".into();
+    refs.repository = descriptor.repository.clone();
+    manifest.repository = descriptor.repository.clone();
+    descriptor.discovery.manifest_validator = manifest.canonical_digest().unwrap();
+    for reference in &mut refs.refs {
+        reference.validator = descriptor.discovery.manifest_validator.clone();
+    }
+    descriptor.discovery.refs_revision = revision(&refs);
+    input.candidates = vec![descriptor.clone()];
+    input.repositories[0].repository = descriptor.repository.clone();
+    input.repositories[0].revision = "binding:after-transfer".into();
+    assert_eq!(
+        bind_item_version_source(
+            &input,
+            &descriptor,
+            &refs,
+            &manifest,
+            DiscoveryLimits::default()
+        )
+        .unwrap(),
+        descriptor
+    );
+    // The stable source is unchanged, but the old path/pins cannot be substituted.
+    assert!(
+        bind_item_version_source(
+            &input,
+            &descriptor,
+            &fixture().1,
+            &fixture().2,
+            DiscoveryLimits::default()
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn malformed_supplied_binding_records_are_not_masked_by_ambiguity() {
+    let (source, refs, manifest) = fixture();
+    let mut other = source.clone();
+    other.module.content_digest = Sha256Digest(format!("sha256:{}", "f".repeat(64)));
+    let input = inventory(vec![source.clone(), other]);
+    let limits = DiscoveryLimits::default();
+    assert_eq!(
+        resolve_item_version(&input, limits)
+            .unwrap_err()
+            .item_resolution_http_response()
+            .status,
+        409
+    );
+    let mut malformed = source.clone();
+    malformed.id = "brg_aaaaaaaaaaaaaaaa".into();
+    assert_eq!(
+        bind_item_version_source(&input, &malformed, &refs, &manifest, limits)
+            .unwrap_err()
+            .item_resolution_http_response()
+            .status,
+        503
+    );
+    assert_eq!(
+        bind_item_version_source_json(
+            &serde_json::to_vec(&input).unwrap(),
+            &serde_json::to_vec(&source).unwrap(),
+            b"{",
+            &serde_json::to_vec(&manifest).unwrap(),
+            limits
+        )
+        .unwrap_err()
+        .item_resolution_http_response()
+        .status,
+        503
     );
 }

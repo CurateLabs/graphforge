@@ -11,7 +11,7 @@ use std::collections::BTreeSet;
 
 /// Fixed bound on eligible publications, before deduplication.
 pub const MAX_ITEM_VERSION_CANDIDATES: usize = 4096;
-/// Reserved provenance of a validated, complete, empty eligible inventory.
+/// Reserved provenance of validated complete absent/all-hidden facts.
 pub const ITEM_VERSION_ABSENCE_FIELD: &str = "item_version_inventory.candidates";
 /// Reserved provenance of distinct digests in a validated complete inventory.
 pub const ITEM_VERSION_AMBIGUITY_FIELD: &str = "item_version_inventory.candidates.content_digest";
@@ -202,8 +202,11 @@ pub fn bind_item_version_source(
     budget.account(nominated)?;
     budget.account(refs)?;
     budget.account(manifest)?;
-    let identity = resolve_item_version(inventory, limits)?;
+    inventory.validate(limits)?;
     nominated.validate(limits)?;
+    refs.validate(limits)?;
+    manifest.validate(limits)?;
+    let identity = resolve_item_version(inventory, limits)?;
     if nominated.module != identity
         || !inventory.candidates.contains(nominated)
         || !designated_repository(inventory, nominated)
@@ -214,8 +217,6 @@ pub fn bind_item_version_source(
             "nominated source is not an eligible witness",
         ));
     }
-    refs.validate(limits)?;
-    manifest.validate(limits)?;
     nominated.bind_snapshot(refs, manifest)?;
     Ok(nominated.clone())
 }
@@ -233,8 +234,7 @@ pub fn bind_item_version_source_json(
         budget.account_bytes(bytes)?;
     }
     let inventory = ItemVersionInventory::from_json(inventory, limits)?;
-    // Refuse ambiguous/absent identity before interpreting source metadata.
-    resolve_item_version(&inventory, limits)?;
+    // Parse every supplied record before logical resolution or source selection.
     let nominated = ItemDescriptor::from_json(nominated, limits)?;
     let refs = RefSet::from_json(refs, limits)?;
     let manifest = DiscoveryManifest::from_json(manifest, limits)?;
@@ -248,9 +248,9 @@ pub fn bind_item_version_source_json(
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[cfg_attr(feature = "typescript", derive(tsify::Tsify))]
 pub struct ItemResolutionHttpResponse {
-    /// 404 for proven absence, 409 for proven ambiguity, otherwise 503.
+    /// 404 absence, 409 ambiguity, 410 visible deletion, otherwise 503.
     pub status: u16,
-    /// Fixed sanitized JSON for 404/409, or an empty string for 503.
+    /// Fixed sanitized JSON for logical refusals, or an empty string for 503.
     pub body: String,
 }
 

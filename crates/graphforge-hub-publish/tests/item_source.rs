@@ -55,6 +55,20 @@ fn cases() -> Vec<(&'static str, Value, Option<usize>)> {
         ("first-owning-publication", publication(), Some(1)),
         ("explicit-owner-rehome", rehome(), Some(1)),
     ];
+    let mut unrelated = publication();
+    let mut reference = unrelated["refs"]["refs"][0].clone();
+    reference["name"] = json!("zz-unrelated");
+    reference["target"] = json!(format!("sha256:{}", "0".repeat(64)));
+    reference["validator"] = reference["target"].clone();
+    unrelated["refs"]["refs"]
+        .as_array_mut()
+        .unwrap()
+        .push(reference);
+    out.push((
+        "unrelated-ref-target-does-not-bind-this-manifest",
+        unrelated,
+        Some(1),
+    ));
     let mut owner = publication();
     owned(&mut owner);
     out.push(("owning-update-preserves", owner.clone(), Some(0)));
@@ -273,7 +287,7 @@ fn transition_schema() -> Value {
     let row = closed(
         json!({"id":{"$ref":"../../discovery/v1/item-source.schema.json#/properties/id"},"ownership_revision":revision,"lifecycle":{"enum":["active","tombstoned"]},"source":{"oneOf":[closed(json!({"state":{"const":"absent"}})),closed(json!({"state":{"const":"designated"},"designation":source_ref}))]}}),
     );
-    json!({"$schema":"https://json-schema.org/draft/2020-12/schema","$id":"https://graphforge.sh/schemas/hub-publish/v1/item-source-transition.schema.json","title":"Internal host item source transition","description":"Fresh host facts only. Core validates correlation and policy; the host compares all epochs and applies the plan atomically under its existing lease.","oneOf":[closed(json!({"operation":{"const":"publication"},"admission":{"$ref":"item-admission.schema.json"},"repository":repo_ref,"refs":{"$ref":"../../discovery/v1/refs.schema.json"},"item_facts":{"type":"array","maxItems":4096,"items":row}})),closed(json!({"operation":{"const":"rehome"},"verified_owner_account_id":{"$ref":"item-admission.schema.json#/$defs/stableAccount"},"ownership_fact":{"$ref":"item-admission.schema.json#/$defs/fact"},"current":row,"expected_ownership_revision":revision,"expected_source_revision":revision,"expected_repository_id":revision,"target_repository":repo_ref}))]})
+    json!({"$schema":"https://json-schema.org/draft/2020-12/schema","$id":"https://graphforge.sh/schemas/hub-publish/v1/item-source-transition.schema.json","title":"Internal host item source transition","description":"Fresh host facts only. Core validates correlation and policy; the host compares all epochs and applies the plan atomically under its existing lease.","oneOf":[closed(json!({"operation":{"const":"publication"},"admission":{"$ref":"item-admission.schema.json"},"repository":repo_ref,"refs":{"$ref":"../../discovery/v1/refs.schema.json"},"item_facts":{"type":"array","maxItems":8192,"items":row}})),closed(json!({"operation":{"const":"rehome"},"verified_owner_account_id":{"$ref":"item-admission.schema.json#/$defs/stableAccount"},"ownership_fact":{"$ref":"item-admission.schema.json#/$defs/fact"},"current":row,"expected_ownership_revision":revision,"expected_source_revision":revision,"expected_repository_id":revision,"target_repository":repo_ref}))]})
 }
 
 #[test]

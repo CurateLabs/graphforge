@@ -98,6 +98,55 @@
           "admission": {
             "decisions": [
               {
+                "action": "new_claim",
+                "content_digest": "sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11",
+                "id": "ont_aaaaaaaaaaaaaaaa",
+                "kind": "ontology_module",
+                "version": "same-version"
+              }
+            ],
+            "publisher_account_id": "opaque:publisher"
+          },
+          "changes": [
+            {
+              "id": "ont_aaaaaaaaaaaaaaaa",
+              "repository_id": "repository:A"
+            }
+          ],
+          "preconditions": [
+            {
+              "claim": {
+                "state": "unclaimed"
+              },
+              "fact": {
+                "id": "ont_aaaaaaaaaaaaaaaa",
+                "lifecycle": "active",
+                "ownership_revision": "ownership:1",
+                "source": {
+                  "state": "absent"
+                }
+              }
+            }
+          ],
+          "repository": {
+            "repository": {
+              "owner": "opendata",
+              "repository": "openalex"
+            },
+            "repository_id": "repository:A",
+            "revision": "binding:1"
+          }
+        }
+      },
+      "json": "{\"admission\":{\"facts\":[{\"claim\":{\"state\":\"unclaimed\"},\"id\":\"ont_aaaaaaaaaaaaaaaa\",\"owner_visible\":false,\"publish_as_owner\":false,\"tuples\":[{\"content_digest\":\"sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11\",\"published\":false,\"version\":\"same-version\"}]}],\"manifest\":{\"capabilities\":[],\"default_ref\":\"main\",\"format\":\"graphforge-discovery/1\",\"immutable_version\":\"sha256:07a0beb91567217d4b0f44f27879ab268630b02575527eb32a6a173a11b3bf38\",\"objects\":[{\"digest\":\"sha256:76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b\",\"length\":1776,\"locations\":[\"https://data.graphforge.sh/objects/sha256/76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b\"],\"media_type\":\"application/vnd.graphforge.project-summary+json\"},{\"digest\":\"sha256:b2d08fdb0bacd23e001c4ace92e4eb86b9fb359da35552460f4d102e2725d775\",\"length\":21504,\"locations\":[\"https://data.graphforge.sh/objects/sha256/b2d08fdb0bacd23e001c4ace92e4eb86b9fb359da35552460f4d102e2725d775\"],\"media_type\":\"application/vnd.graphforge.project\"},{\"digest\":\"sha256:d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7\",\"length\":12288,\"locations\":[\"https://data.graphforge.sh/objects/sha256/d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7\"],\"media_type\":\"application/vnd.graphforge.project\"}],\"ontology\":{\"bridge_sets\":[],\"composition_digest\":\"sha256:1dc9536e766224090b71de485a2bd3d6f35cc45c983441d16dfd3e3fc137e1fa\",\"modules\":[{\"content_digest\":\"sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11\",\"id\":\"https://graphforge.sh/ont_aaaaaaaaaaaaaaaa\",\"package\":{\"format\":\"graphforge-project/2\",\"object_digest\":\"sha256:d1b3e39f92c5fa895d8b807ce0f8d4525f8a934f74dadcf2ec0e16bbf0964fb7\",\"package_digest\":\"sha256:79055696ec29ef37a14882a787a71da5a66306ff45d8ef7d594cb8e7fc90af69\",\"producing_core_version\":\"0.6.0-rc.5\"},\"version\":\"same-version\"}]},\"package\":{\"format\":\"graphforge-project/2\",\"object_digest\":\"sha256:b2d08fdb0bacd23e001c4ace92e4eb86b9fb359da35552460f4d102e2725d775\",\"package_digest\":\"sha256:07a0beb91567217d4b0f44f27879ab268630b02575527eb32a6a173a11b3bf38\",\"producing_core_version\":\"0.6.0-rc.5\"},\"repository\":{\"owner\":\"opendata\",\"repository\":\"openalex\"},\"requirements\":[{\"capability\":\"portable\",\"major\":1}],\"resolved_ref\":\"main\",\"summary\":{\"format\":\"graphforge-project-summary/1\",\"object_digest\":\"sha256:76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b\",\"summary_digest\":\"sha256:76768440bd03722020d7652e08945d48033558795a82e395f0cb7edf09f1377b\"},\"version\":{\"major\":1,\"minor\":2}},\"publisher_account_id\":\"opaque:publisher\"},\"item_facts\":[{\"id\":\"ont_aaaaaaaaaaaaaaaa\",\"lifecycle\":\"active\",\"ownership_revision\":\"ownership:1\",\"source\":{\"state\":\"absent\"}}],\"operation\":\"publication\",\"refs\":{\"default_ref\":\"main\",\"format\":\"graphforge-discovery/1\",\"refs\":[{\"name\":\"main\",\"target\":\"sha256:07a0beb91567217d4b0f44f27879ab268630b02575527eb32a6a173a11b3bf38\",\"validator\":\"sha256:5b77a0e503541966fa4a0b0525f2eb1407c351f27de001b00b24d480c376e5d3\"},{\"name\":\"zz-unrelated\",\"target\":\"sha256:0000000000000000000000000000000000000000000000000000000000000000\",\"validator\":\"sha256:0000000000000000000000000000000000000000000000000000000000000000\"}],\"repository\":{\"owner\":\"opendata\",\"repository\":\"openalex\"},\"version\":{\"major\":1,\"minor\":2}},\"repository\":{\"repository\":{\"owner\":\"opendata\",\"repository\":\"openalex\"},\"repository_id\":\"repository:A\",\"revision\":\"binding:1\"}}",
+      "name": "unrelated-ref-target-does-not-bind-this-manifest"
+    },
+    {
+      "expected": {
+        "plan": {
+          "admission": {
+            "decisions": [
+              {
                 "action": "owner_update",
                 "content_digest": "sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11",
                 "id": "ont_aaaaaaaaaaaaaaaa",

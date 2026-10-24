@@ -468,3 +468,37 @@ test("resolution declarations come from the native wire and result types", () =>
     /export function item_resolution_error_response\(error: JsonInput<ProtocolError>\): ItemResolutionHttpResponse;/,
   );
 });
+
+test("stable repository rename binds fresh metadata and malformed binding inputs precede ambiguity", () => {
+  const { inventory, descriptor, refs, manifest } = fixture();
+  descriptor.repository.owner = "transferred";
+  refs.repository = structuredClone(descriptor.repository);
+  manifest.repository = structuredClone(descriptor.repository);
+  descriptor.discovery.manifest_validator =
+    protocol.validate_manifest(manifest).digest;
+  for (const ref of refs.refs)
+    ref.validator = descriptor.discovery.manifest_validator;
+  descriptor.discovery.refs_revision = protocol.validate_refs(refs).revision;
+  inventory.repositories[0].repository = structuredClone(descriptor.repository);
+  inventory.repositories[0].revision = "binding:after-transfer";
+  assert.deepEqual(
+    protocol.bind_item_version_source(inventory, descriptor, refs, manifest)
+      .document,
+    descriptor,
+  );
+  const other = structuredClone(descriptor);
+  other.module.content_digest = `sha256:${"f".repeat(64)}`;
+  inventory.candidates.push(other);
+  assert.equal(
+    project(refuse(() => protocol.resolve_item_version(inventory))).status,
+    409,
+  );
+  assert.deepEqual(
+    project(
+      refuse(() =>
+        protocol.bind_item_version_source(inventory, descriptor, "{", manifest),
+      ),
+    ),
+    unavailable,
+  );
+});

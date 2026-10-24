@@ -240,7 +240,7 @@ test("a Worker replays per-ID source transitions and resolution refusals through
     "v1",
     "item-resolution-conformance.json",
   );
-  for (const { name, json, expected, limits } of resolution.cases.filter(
+  for (const { name, json, expected } of resolution.cases.filter(
     (c) => !c.limits,
   )) {
     const result = await post({ item_resolution: json });

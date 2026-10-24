@@ -517,3 +517,51 @@ fn canonical_ambiguity_is_recognized_through_the_real_http_read_transport() {
     assert!(directory_entries(root.path()).is_empty());
     assert_eq!(server.paths(), vec![format!("/{}", descriptor.id)]);
 }
+
+#[test]
+fn absent_gone_and_unavailable_resolution_stop_before_metadata_packages_or_output() {
+    let descriptor = descriptor();
+    for (status, body) in [
+        (404, br#"{"code":"missing_object"}"#.as_slice()),
+        (410, br#"{"code":"gone"}"#.as_slice()),
+        (503, b"".as_slice()),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let args = item_args(&root.path().join("module.json"), &descriptor.id);
+        let attempts = if status == 503 {
+            TEST_RETRY_POLICY.attempts
+        } else {
+            1
+        };
+        let mut replies = (0..attempts)
+            .map(|_| response(status, None, body))
+            .collect::<Vec<_>>();
+        replies.extend([
+            response(200, None, FIXTURE_REFS),
+            response(200, None, FIXTURE_MANIFEST),
+            response(200, None, &fixture_module_package()),
+        ]);
+        let transport = ItemTransport(RecordingTransport {
+            inner: Scripted::new(replies),
+            requested: Mutex::new(Vec::new()),
+        });
+        let mut output = Vec::new();
+        let error = run_module_fetch_with(&transport, &args, true, &mut output, &TEST_RETRY_POLICY)
+            .unwrap_err();
+        assert!(!error.to_string().contains("repository:A"));
+        assert!(output.is_empty());
+        assert!(directory_entries(root.path()).is_empty());
+        let requested = transport.0.requested.lock().unwrap();
+        assert_eq!(requested.len(), attempts as usize);
+        assert!(
+            requested
+                .iter()
+                .all(|url| Url::parse(url).unwrap().path() == format!("/{}", descriptor.id))
+        );
+        assert_eq!(
+            transport.0.inner.remaining(),
+            3,
+            "no downstream fetch after {status}"
+        );
+    }
+}

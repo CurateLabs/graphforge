@@ -69,7 +69,7 @@
             ],
             "type": "object"
           },
-          "maxItems": 4096,
+          "maxItems": 8192,
           "type": "array"
         },
         "operation": {

@@ -157,11 +157,43 @@
         "identity": {
           "content_digest": "sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11",
           "id": "https://graphforge.sh/ont_drqf2xw8w33cxaxj",
+          "version": "2026.01"
+        }
+      },
+      "json": "{\"candidates\":[{\"discovery\":{\"manifest_validator\":\"sha256:96661819f2e4fa1d19796e1baad5c4ebd0d580ca77b15b6ba486080841fd72e5\",\"refs_revision\":\"sha256:4719c8720bea5763d15668e6a75b6eb4d73d2a95f8e1a311aec30cec376e3298\"},\"format\":\"graphforge-item/1\",\"id\":\"ont_drqf2xw8w33cxaxj\",\"kind\":\"ontology_module\",\"module\":{\"content_digest\":\"sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11\",\"id\":\"https://graphforge.sh/ont_drqf2xw8w33cxaxj\",\"version\":\"2026.01\"},\"repository\":{\"owner\":\"transferred\",\"repository\":\"openalex\"}}],\"complete\":true,\"id\":\"ont_drqf2xw8w33cxaxj\",\"repositories\":[{\"repository\":{\"owner\":\"transferred\",\"repository\":\"openalex\"},\"repository_id\":\"canonical\",\"revision\":\"binding:after-transfer\"}],\"state\":{\"designation\":{\"id\":\"ont_drqf2xw8w33cxaxj\",\"repository_id\":\"canonical\",\"revision\":\"source:1\"},\"state\":\"published\"},\"version\":\"2026.01\"}",
+      "name": "stable-source-survives-repository-transfer"
+    },
+    {
+      "expected": {
+        "body": "",
+        "code": "integrity_failure",
+        "field": "item_version_source",
+        "status": 503
+      },
+      "json": "{\"candidates\":[{\"discovery\":{\"manifest_validator\":\"sha256:96661819f2e4fa1d19796e1baad5c4ebd0d580ca77b15b6ba486080841fd72e5\",\"refs_revision\":\"sha256:4719c8720bea5763d15668e6a75b6eb4d73d2a95f8e1a311aec30cec376e3298\"},\"format\":\"graphforge-item/1\",\"id\":\"ont_drqf2xw8w33cxaxj\",\"kind\":\"ontology_module\",\"module\":{\"content_digest\":\"sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11\",\"id\":\"https://graphforge.sh/ont_drqf2xw8w33cxaxj\",\"version\":\"2026.01\"},\"repository\":{\"owner\":\"opendata\",\"repository\":\"openalex\"}}],\"complete\":true,\"id\":\"ont_drqf2xw8w33cxaxj\",\"repositories\":[{\"repository\":{\"owner\":\"opendata\",\"repository\":\"openalex\"},\"repository_id\":\"canonical\",\"revision\":\"repo:1\"}],\"state\":{\"designation\":{\"id\":\"ont_drqf2xw8w33cxaxj\",\"repository_id\":\"repository:after-rehome\",\"revision\":\"source:1\"},\"state\":\"published\"},\"version\":\"2026.01\"}",
+      "name": "rehomed-target-missing-version-no-fallback"
+    },
+    {
+      "expected": {
+        "identity": {
+          "content_digest": "sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11",
+          "id": "https://graphforge.sh/brg_aaaaaaaaaaaaaaaa",
+          "version": "2026.01"
+        }
+      },
+      "json": "{\"candidates\":[{\"discovery\":{\"manifest_validator\":\"sha256:96661819f2e4fa1d19796e1baad5c4ebd0d580ca77b15b6ba486080841fd72e5\",\"refs_revision\":\"sha256:4719c8720bea5763d15668e6a75b6eb4d73d2a95f8e1a311aec30cec376e3298\"},\"format\":\"graphforge-item/1\",\"id\":\"brg_aaaaaaaaaaaaaaaa\",\"kind\":\"bridge_set\",\"module\":{\"content_digest\":\"sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11\",\"id\":\"https://graphforge.sh/brg_aaaaaaaaaaaaaaaa\",\"version\":\"2026.01\"},\"repository\":{\"owner\":\"opendata\",\"repository\":\"openalex\"}}],\"complete\":true,\"id\":\"brg_aaaaaaaaaaaaaaaa\",\"repositories\":[{\"repository\":{\"owner\":\"opendata\",\"repository\":\"openalex\"},\"repository_id\":\"canonical\",\"revision\":\"repo:1\"}],\"state\":{\"designation\":{\"id\":\"brg_aaaaaaaaaaaaaaaa\",\"repository_id\":\"canonical\",\"revision\":\"source:1\"},\"state\":\"published\"},\"version\":\"2026.01\"}",
+      "name": "bridge-identity-remains-descriptive"
+    },
+    {
+      "expected": {
+        "identity": {
+          "content_digest": "sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11",
+          "id": "https://graphforge.sh/ont_drqf2xw8w33cxaxj",
           "version": "01"
         }
       },
       "json": "{\"candidates\":[{\"discovery\":{\"manifest_validator\":\"sha256:96661819f2e4fa1d19796e1baad5c4ebd0d580ca77b15b6ba486080841fd72e5\",\"refs_revision\":\"sha256:4719c8720bea5763d15668e6a75b6eb4d73d2a95f8e1a311aec30cec376e3298\"},\"format\":\"graphforge-item/1\",\"id\":\"ont_drqf2xw8w33cxaxj\",\"kind\":\"ontology_module\",\"module\":{\"content_digest\":\"sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11\",\"id\":\"https://graphforge.sh/ont_drqf2xw8w33cxaxj\",\"version\":\"01\"},\"repository\":{\"owner\":\"opendata\",\"repository\":\"openalex\"}}],\"complete\":true,\"id\":\"ont_drqf2xw8w33cxaxj\",\"repositories\":[{\"repository\":{\"owner\":\"opendata\",\"repository\":\"openalex\"},\"repository_id\":\"canonical\",\"revision\":\"repo:1\"}],\"state\":{\"designation\":{\"id\":\"ont_drqf2xw8w33cxaxj\",\"repository_id\":\"canonical\",\"revision\":\"source:1\"},\"state\":\"published\"},\"version\":\"01\"}",
-      "name": "opaque-version-15"
+      "name": "opaque-version-18"
     },
     {
       "expected": {
@@ -172,7 +204,7 @@
         }
       },
       "json": "{\"candidates\":[{\"discovery\":{\"manifest_validator\":\"sha256:96661819f2e4fa1d19796e1baad5c4ebd0d580ca77b15b6ba486080841fd72e5\",\"refs_revision\":\"sha256:4719c8720bea5763d15668e6a75b6eb4d73d2a95f8e1a311aec30cec376e3298\"},\"format\":\"graphforge-item/1\",\"id\":\"ont_drqf2xw8w33cxaxj\",\"kind\":\"ontology_module\",\"module\":{\"content_digest\":\"sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11\",\"id\":\"https://graphforge.sh/ont_drqf2xw8w33cxaxj\",\"version\":\"1.0+draft\"},\"repository\":{\"owner\":\"opendata\",\"repository\":\"openalex\"}}],\"complete\":true,\"id\":\"ont_drqf2xw8w33cxaxj\",\"repositories\":[{\"repository\":{\"owner\":\"opendata\",\"repository\":\"openalex\"},\"repository_id\":\"canonical\",\"revision\":\"repo:1\"}],\"state\":{\"designation\":{\"id\":\"ont_drqf2xw8w33cxaxj\",\"repository_id\":\"canonical\",\"revision\":\"source:1\"},\"state\":\"published\"},\"version\":\"1.0+draft\"}",
-      "name": "opaque-version-16"
+      "name": "opaque-version-19"
     },
     {
       "expected": {
@@ -183,7 +215,7 @@
         }
       },
       "json": "{\"candidates\":[{\"discovery\":{\"manifest_validator\":\"sha256:96661819f2e4fa1d19796e1baad5c4ebd0d580ca77b15b6ba486080841fd72e5\",\"refs_revision\":\"sha256:4719c8720bea5763d15668e6a75b6eb4d73d2a95f8e1a311aec30cec376e3298\"},\"format\":\"graphforge-item/1\",\"id\":\"ont_drqf2xw8w33cxaxj\",\"kind\":\"ontology_module\",\"module\":{\"content_digest\":\"sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11\",\"id\":\"https://graphforge.sh/ont_drqf2xw8w33cxaxj\",\"version\":\"draft/β?x#y\"},\"repository\":{\"owner\":\"opendata\",\"repository\":\"openalex\"}}],\"complete\":true,\"id\":\"ont_drqf2xw8w33cxaxj\",\"repositories\":[{\"repository\":{\"owner\":\"opendata\",\"repository\":\"openalex\"},\"repository_id\":\"canonical\",\"revision\":\"repo:1\"}],\"state\":{\"designation\":{\"id\":\"ont_drqf2xw8w33cxaxj\",\"repository_id\":\"canonical\",\"revision\":\"source:1\"},\"state\":\"published\"},\"version\":\"draft/β?x#y\"}",
-      "name": "opaque-version-17"
+      "name": "opaque-version-20"
     },
     {
       "expected": {
@@ -194,7 +226,7 @@
         }
       },
       "json": "{\"candidates\":[{\"discovery\":{\"manifest_validator\":\"sha256:96661819f2e4fa1d19796e1baad5c4ebd0d580ca77b15b6ba486080841fd72e5\",\"refs_revision\":\"sha256:4719c8720bea5763d15668e6a75b6eb4d73d2a95f8e1a311aec30cec376e3298\"},\"format\":\"graphforge-item/1\",\"id\":\"ont_drqf2xw8w33cxaxj\",\"kind\":\"ontology_module\",\"module\":{\"content_digest\":\"sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11\",\"id\":\"https://graphforge.sh/ont_drqf2xw8w33cxaxj\",\"version\":\".\"},\"repository\":{\"owner\":\"opendata\",\"repository\":\"openalex\"}}],\"complete\":true,\"id\":\"ont_drqf2xw8w33cxaxj\",\"repositories\":[{\"repository\":{\"owner\":\"opendata\",\"repository\":\"openalex\"},\"repository_id\":\"canonical\",\"revision\":\"repo:1\"}],\"state\":{\"designation\":{\"id\":\"ont_drqf2xw8w33cxaxj\",\"repository_id\":\"canonical\",\"revision\":\"source:1\"},\"state\":\"published\"},\"version\":\".\"}",
-      "name": "opaque-version-18"
+      "name": "opaque-version-21"
     },
     {
       "expected": {
@@ -205,7 +237,7 @@
         }
       },
       "json": "{\"candidates\":[{\"discovery\":{\"manifest_validator\":\"sha256:96661819f2e4fa1d19796e1baad5c4ebd0d580ca77b15b6ba486080841fd72e5\",\"refs_revision\":\"sha256:4719c8720bea5763d15668e6a75b6eb4d73d2a95f8e1a311aec30cec376e3298\"},\"format\":\"graphforge-item/1\",\"id\":\"ont_drqf2xw8w33cxaxj\",\"kind\":\"ontology_module\",\"module\":{\"content_digest\":\"sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11\",\"id\":\"https://graphforge.sh/ont_drqf2xw8w33cxaxj\",\"version\":\"..\"},\"repository\":{\"owner\":\"opendata\",\"repository\":\"openalex\"}}],\"complete\":true,\"id\":\"ont_drqf2xw8w33cxaxj\",\"repositories\":[{\"repository\":{\"owner\":\"opendata\",\"repository\":\"openalex\"},\"repository_id\":\"canonical\",\"revision\":\"repo:1\"}],\"state\":{\"designation\":{\"id\":\"ont_drqf2xw8w33cxaxj\",\"repository_id\":\"canonical\",\"revision\":\"source:1\"},\"state\":\"published\"},\"version\":\"..\"}",
-      "name": "opaque-version-19"
+      "name": "opaque-version-22"
     },
     {
       "expected": {
@@ -216,7 +248,7 @@
         }
       },
       "json": "{\"candidates\":[{\"discovery\":{\"manifest_validator\":\"sha256:96661819f2e4fa1d19796e1baad5c4ebd0d580ca77b15b6ba486080841fd72e5\",\"refs_revision\":\"sha256:4719c8720bea5763d15668e6a75b6eb4d73d2a95f8e1a311aec30cec376e3298\"},\"format\":\"graphforge-item/1\",\"id\":\"ont_drqf2xw8w33cxaxj\",\"kind\":\"ontology_module\",\"module\":{\"content_digest\":\"sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11\",\"id\":\"https://graphforge.sh/ont_drqf2xw8w33cxaxj\",\"version\":\" é \"},\"repository\":{\"owner\":\"opendata\",\"repository\":\"openalex\"}}],\"complete\":true,\"id\":\"ont_drqf2xw8w33cxaxj\",\"repositories\":[{\"repository\":{\"owner\":\"opendata\",\"repository\":\"openalex\"},\"repository_id\":\"canonical\",\"revision\":\"repo:1\"}],\"state\":{\"designation\":{\"id\":\"ont_drqf2xw8w33cxaxj\",\"repository_id\":\"canonical\",\"revision\":\"source:1\"},\"state\":\"published\"},\"version\":\" é \"}",
-      "name": "opaque-version-20"
+      "name": "opaque-version-23"
     },
     {
       "expected": {
@@ -227,7 +259,7 @@
         }
       },
       "json": "{\"candidates\":[{\"discovery\":{\"manifest_validator\":\"sha256:96661819f2e4fa1d19796e1baad5c4ebd0d580ca77b15b6ba486080841fd72e5\",\"refs_revision\":\"sha256:4719c8720bea5763d15668e6a75b6eb4d73d2a95f8e1a311aec30cec376e3298\"},\"format\":\"graphforge-item/1\",\"id\":\"ont_drqf2xw8w33cxaxj\",\"kind\":\"ontology_module\",\"module\":{\"content_digest\":\"sha256:64cbfecfb43f55bc433b0d06ecd8a75946be20ca8b7f8792b5ceed9aa7a83f11\",\"id\":\"https://graphforge.sh/ont_drqf2xw8w33cxaxj\",\"version\":\"\\u0000\"},\"repository\":{\"owner\":\"opendata\",\"repository\":\"openalex\"}}],\"complete\":true,\"id\":\"ont_drqf2xw8w33cxaxj\",\"repositories\":[{\"repository\":{\"owner\":\"opendata\",\"repository\":\"openalex\"},\"repository_id\":\"canonical\",\"revision\":\"repo:1\"}],\"state\":{\"designation\":{\"id\":\"ont_drqf2xw8w33cxaxj\",\"repository_id\":\"canonical\",\"revision\":\"source:1\"},\"state\":\"published\"},\"version\":\"\\u0000\"}",
-      "name": "opaque-version-21"
+      "name": "opaque-version-24"
     },
     {
       "bind_source": true,
