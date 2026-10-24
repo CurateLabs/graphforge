@@ -16,8 +16,8 @@ publish = false
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-graphforge-discovery = { version = "0.6.0-rc.5", path = "../graphforge-discovery", features = ["typescript"] }
-graphforge-hub-publish = { version = "0.6.0-rc.5", path = "../graphforge-hub-publish", features = ["typescript"] }
+graphforge-discovery = { version = "0.6.0-rc.6", path = "../graphforge-discovery", features = ["typescript"] }
+graphforge-hub-publish = { version = "0.6.0-rc.6", path = "../graphforge-hub-publish", features = ["typescript"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tsify = "0.5"

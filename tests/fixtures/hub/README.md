@@ -48,7 +48,24 @@ so any change of the workspace version requires `--rebuild-source` followed by
 `--update` and regenerated receipts. Never edit the version by hand.
 
 After the artifacts change, regenerate the shared verification receipts as
-described in `tests/fixtures/portable/README.md`.
+described in `tests/fixtures/portable/README.md`. The fixture also supplies inputs
+to native-generated conformance corpora. Regenerate these in order, so the source
+transition corpus consumes the new admission corpus rather than the old one:
+
+```bash
+GRAPHFORGE_UPDATE_ITEM_ADMISSION_ARTIFACTS=1 cargo test -p graphforge-hub-publish \
+  --test item_admission native_admission_oracle_and_checked_in_wasm_corpus
+GRAPHFORGE_UPDATE_DISCOVERY_ARTIFACTS=1 cargo test -p graphforge-hub-publish \
+  --test item_source generated_transitions_preserve_sources_and_cas_preconditions
+GRAPHFORGE_UPDATE_DISCOVERY_ARTIFACTS=1 cargo test -p graphforge-discovery \
+  --test item_resolution generated_contract_and_native_resolution_agree
+GRAPHFORGE_UPDATE_PROTOCOL_WASM_EXPECTED=1 cargo test -p graphforge-protocol-wasm \
+  --test corpus --test hub_documents
+```
+
+Run the native tests again without the update variables and replay the matching
+corpora through the WASM tests. Review generated differences before accepting
+them; never change an expected verdict by hand to make a candidate pass.
 
 ## The source
 
