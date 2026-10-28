@@ -37,8 +37,10 @@ bob = forge.add_node("Person", name="Bob", age=25)
 print(alice.uuid)  # e.g. 018f0f4e-7b8c-7000-8000-00000000a001
 ```
 
-Properties may be strings, numbers, booleans, or nested lists/maps that the
-engine accepts as property values.
+Properties may be null, strings, numbers, booleans, or lists of supported
+property values. Plain nested Python dictionaries are
+not properties. Dictionary-shaped inputs are reserved for validated canonical
+temporal/spatial values; an ordinary dictionary is refused.
 
 ### Add relationships
 

@@ -15,6 +15,16 @@ explains release availability, setup, [platforms and limits](guide/installation.
 Only supported current-format projects can be opened; backward compatibility
 and migration are not guaranteed.
 
+## Start with the public Hub
+
+The coordinated launch path is [browse the production Hub](https://graphforge.sh/hub)
+→ install the exact candidate CLI → clone → reopen/query → continue locally →
+publish back → discover/clone the new Version.
+[The Hub guide](guide/portable-projects.md#public-hub-launch-path) explains the
+prerequisites and current qualification boundary. The intended production
+fixture is not yet available through discovery; this journey is **not yet
+qualified**. Local graph use below remains available.
+
 ## Basic: understand and use a graph
 
 Start here if you are doing your first research project. No programming knowledge

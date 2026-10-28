@@ -89,12 +89,20 @@ you need to reproduce a rendered artifact.
 
 ### Node.js
 
+From the repository root, explicitly install the current published candidate
+instead of the example manifest's historical engine and Arrow pins:
+
 ```bash
-cd examples/visualization
-npm install
-# Prefer a built in-repo binding during development:
-# export GRAPHFORGE_NODE_PATH=/absolute/path/to/crates/graphforge-bindings-node/index.js
+npm install --prefix examples/visualization --no-save --package-lock=false @curatelabs/graphforge@0.6.0-rc.6 apache-arrow@21.2.0
+export GRAPHFORGE_NODE_PATH="$PWD/examples/visualization/node_modules/@curatelabs/graphforge/index.js"
 ```
+
+The `export` line is for a POSIX shell; in another shell, set the same environment
+variable to that installed `index.js`'s absolute path. This explicitly selects
+the registry engine rather than a possibly unbuilt in-repository binding.
+For development, select the absolute path of your rebuilt binding instead.
+Use the exact selected version when qualifying another candidate. Keep the
+working directory at the repository root for all commands below.
 
 Node examples depend on `apache-arrow` for IPC decoding and load Plotly.js,
 Cytoscape.js, and Sigma.js in the generated HTML from public CDNs (no

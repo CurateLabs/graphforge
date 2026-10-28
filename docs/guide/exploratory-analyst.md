@@ -146,7 +146,8 @@ initialization or after `clear_ontology`):
 - **User-defined labels and relationship types** — no ontology declaration needed
 - **User-defined properties** — use supported names and value types; input validation still applies
 - **RuntimeCatalog** — tracks all observed labels, types, and properties
-- **Query support** — full Cypher query support over exploratory data
+- **Query support** — GraphForge's [supported openCypher surface](cypher-guide.md)
+  over exploratory data; unsupported constructs remain unsupported
 - **Analysis verbs** — `forge.rank()`, `forge.cluster()`, `forge.find()` all work
 
 ---

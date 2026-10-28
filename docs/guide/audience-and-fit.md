@@ -10,17 +10,20 @@ durable storage or build an integration.
 
 ## Audience
 
-**v0.6.0 serves technical analysts and integrators most completely**: people
+The core audience is a **nontechnical analyst working with an agent**. The
+[Basic path](overview.md#basic) is written for them. It still needs an agent or
+technical helper to install and run software. Finishing the examples does not
+establish nontechnical usability; actual first-use and comprehension evidence
+belongs to [#1209](https://github.com/CurateLabs/graphforge/issues/1209).
+
+**v0.6.0 initially serves technical analysts and integrators more completely**: people
 who can run Python or Node, read a query result, and (when they choose) work
 through a coding agent. They want to build or load a graph, ask relationship
 questions, and keep the result without operating a database.
 
-The product is designed for a second reader, the **nontechnical analyst working
-with an agent**. The [Basic path](overview.md#basic) is written for them. It
-still needs an agent or technical helper to install and run software. Finishing
-the examples does not show that a nontechnical person can use GraphForge
-without that help; that qualification is tracked separately in
-[#1209](https://github.com/CurateLabs/graphforge/issues/1209).
+The [public Hub launch path](portable-projects.md#public-hub-launch-path) connects
+browse, clone, query, local continuation and publish-back. Its production
+qualification remains blocked; the local jobs below do not depend on it.
 
 ## Two jobs you can complete today
 
@@ -81,12 +84,12 @@ Its numbers describe that workload on that host, not your graph.
 
 ## Shipped, and not yet shipped
 
-| Shipped in the v0.6.0 release scope                                                         | Not part of this release, or not yet qualified                                                                  |
+| Implemented in Core; candidate qualification is separate                                   | Not part of this release, or not yet qualified                                                                  |
 | ------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
 | Python and Node bindings, `gf` CLI, openCypher queries, analyst verbs                       | A client-server database mode                                                                                   |
 | In-memory graphs; durable projects on ext4, xfs, btrfs (Linux), APFS, NTFS                  | Durable projects on unadmitted filesystems                                                                      |
 | Arrow results, Parquet graph storage, JSON metadata                                         | Backward compatibility and migration for earlier project formats (pre-v1)                                       |
-| Portable project export, verify, import; `gf clone` and `gf publish` commands               | A qualified public write target and the hosted publishing interfaces; launch journey tracked in [#1209](https://github.com/CurateLabs/graphforge/issues/1209) and [Hub #19](https://github.com/CurateLabs/graphforge-nextjs/issues/19) |
+| Portable project export, verify, import; `gf clone` and `gf publish` commands               | Production clone and publish-back qualification is still required for launch under [#1209](https://github.com/CurateLabs/graphforge/issues/1209); full hosted catalog/publishing interfaces and private-repository qualification are separate |
 | Optional inquiry records, research history, and decision-workflow building blocks           | Hosted notebooks (Kaggle, Colab) as qualified durable environments                                              |
 | Measured scale evidence listed in [Scale and workload limits](../reference/scale-limits.md) | A 1,000,000 edges/s ingest rate; strong multicore ingest scaling; audited benchmark results                     |
 
