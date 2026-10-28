@@ -24,10 +24,11 @@ Build a graph, ask it questions, and keep what you learn, without running a
 database server. GraphForge runs inside your Python or Node process or through
 the `gf` command.
 
-**Who it is for.** v0.6.0 serves technical analysts and integrators most
-completely: people who write Python or Node, or direct a coding agent. It is
-designed for analysts working with an agent, which still needs that help to
-install and run software. See [Who GraphForge is for](docs/guide/audience-and-fit.md).
+**Who it is for.** The core audience is a nontechnical analyst working with an
+agent. v0.6.0 initially serves technical analysts and integrators more completely:
+people who write Python or Node, or direct a coding agent. Setup and execution
+still need an agent or technical helper. See
+[Who GraphForge is for](docs/guide/audience-and-fit.md).
 
 **Two jobs you can complete today:**
 
@@ -91,7 +92,20 @@ available, and the [installation guide](docs/guide/installation.md) covers
 candidates and source builds. Before v1.0.0 there is no backward-compatibility
 or migration guarantee.
 
-## Quick Start
+## Start with the public Hub
+
+The coordinated launch journey is browse the [production Hub](https://graphforge.sh/hub),
+install the exact candidate CLI, clone a project, reopen and query it, continue
+locally, publish back, then discover and clone the new Version.
+[Follow the Hub launch path](docs/guide/portable-projects.md#public-hub-launch-path).
+
+**Qualification is blocked:** the intended `opendata/openalex` fixture is not yet
+available through production discovery. Production clone/query/publish-back and
+the selected candidate remain subject to
+[#1209](https://github.com/CurateLabs/graphforge/issues/1209#issuecomment-6460385114).
+The local example below is available independently.
+
+## Quick Start: an in-memory graph
 
 ```python
 from graphforge import GraphForge

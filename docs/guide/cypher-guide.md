@@ -134,37 +134,37 @@ execution values and results are not saved with them.
 Find nodes and relationships matching a pattern.
 
 ```cypher
--- All nodes
+// All nodes
 MATCH (n) RETURN n
 
--- Nodes with label
+// Nodes with label
 MATCH (p:Person) RETURN p
 
--- Nodes with multiple labels
+// Nodes with multiple labels
 MATCH (e:Person:Employee) RETURN e
 
--- Nodes with property filter
+// Nodes with property filter
 MATCH (p:Person {name: 'Alice'}) RETURN p
 
--- Directed relationship
+// Directed relationship
 MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a, b
 
--- Undirected relationship
+// Undirected relationship
 MATCH (a:Person)-[:KNOWS]-(b:Person) RETURN a, b
 
--- Multiple relationship types
+// Multiple relationship types
 MATCH (a)-[r:KNOWS|LIKES]->(b) RETURN a, r, b
 
--- Variable-length paths
+// Variable-length paths
 MATCH (a:Person)-[:KNOWS*1..3]->(b:Person) RETURN a, b
 
--- Unbounded variable-length
+// Unbounded variable-length
 MATCH (a)-[*]->(b) RETURN a, b
 
--- Named path
+// Named path
 MATCH p = (a:Person)-[:KNOWS*]->(b:Person) RETURN p
 
--- Multi-hop
+// Multi-hop
 MATCH (a:Person)-[:KNOWS]->(b:Person)-[:WORKS_AT]->(c:Company)
 RETURN a.name, b.name, c.name
 ```
@@ -176,9 +176,9 @@ Left-outer-join semantics: returns NULL for missing matches.
 ```cypher
 MATCH (p:Person)
 OPTIONAL MATCH (p)-[:KNOWS]->(friend:Person)
-RETURN p.name AS person, friend.name AS friend  -- friend.name is NULL if no match
+RETURN p.name AS person, friend.name AS friend  // friend.name is NULL if no match
 
--- Multiple optional matches
+// Multiple optional matches
 MATCH (p:Person)
 OPTIONAL MATCH (p)-[:WORKS_AT]->(company:Company)
 OPTIONAL MATCH (p)-[:LIVES_IN]->(city:City)
@@ -190,37 +190,37 @@ RETURN p.name, company.name, city.name
 Filter by any boolean expression.
 
 ```cypher
--- Comparison
+// Comparison
 MATCH (p:Person) WHERE p.age > 25 RETURN p
 
--- NULL check
+// NULL check
 MATCH (p:Person) WHERE p.email IS NULL RETURN p
 MATCH (p:Person) WHERE p.email IS NOT NULL RETURN p
 
--- Boolean operators
+// Boolean operators
 MATCH (p:Person) WHERE p.age > 25 AND p.city = 'NYC' RETURN p
 MATCH (p:Person) WHERE p.age < 20 OR p.age > 60 RETURN p
 MATCH (p:Person) WHERE NOT p.active RETURN p
 
--- Label predicate
+// Label predicate
 MATCH (n) WHERE n:Person RETURN n
 
--- String predicates
+// String predicates
 MATCH (p:Person) WHERE p.name STARTS WITH 'Al' RETURN p
 MATCH (p:Person) WHERE p.name ENDS WITH 'ice' RETURN p
 MATCH (p:Person) WHERE p.name CONTAINS 'lic' RETURN p
 
--- Regex
+// Regex
 MATCH (p:Person) WHERE p.name =~ 'A.*' RETURN p
 
--- List membership
+// List membership
 MATCH (p:Person) WHERE p.city IN ['NYC', 'Boston', 'London'] RETURN p
 
--- Pattern predicate (not returning path)
+// Pattern predicate (not returning path)
 MATCH (p:Person) WHERE (p)-[:KNOWS]->(:Person {name: 'Alice'}) RETURN p
 MATCH (p:Person) WHERE NOT (p)-[:KNOWS]->() RETURN p
 
--- EXISTS subquery (pattern form)
+// EXISTS subquery (pattern form)
 MATCH (p:Person)
 WHERE EXISTS { (p)-[:KNOWS]->(:Person) }
 RETURN p.name
@@ -231,28 +231,28 @@ RETURN p.name
 Project variables, properties, expressions, and aggregations.
 
 ```cypher
--- Return variable
+// Return variable
 MATCH (p:Person) RETURN p
 
--- Return property
+// Return property
 MATCH (p:Person) RETURN p.name, p.age
 
--- Alias
+// Alias
 MATCH (p:Person) RETURN p.name AS person, p.age AS age
 
--- DISTINCT
+// DISTINCT
 MATCH (p:Person) RETURN DISTINCT p.city
 
--- Aggregation (implicit GROUP BY on non-aggregated columns)
+// Aggregation (implicit GROUP BY on non-aggregated columns)
 MATCH (p:Person) RETURN p.city AS city, count(*) AS total
 
--- All properties (map)
+// All properties (map)
 MATCH (p:Person) RETURN properties(p) AS props
 
--- Arithmetic in return
+// Arithmetic in return
 MATCH (p:Person) RETURN p.name, p.salary * 1.1 AS after_raise
 
--- CASE expression
+// CASE expression
 MATCH (p:Person)
 RETURN p.name,
        CASE
@@ -261,26 +261,26 @@ RETURN p.name,
          ELSE 'Senior'
        END AS category
 
--- Return * (all variables in scope)
+// Return * (all variables in scope)
 MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN *
 ```
 
 ### ORDER BY, LIMIT, SKIP
 
 ```cypher
--- Sort ascending (default)
+// Sort ascending (default)
 MATCH (p:Person) RETURN p.name ORDER BY p.age
 
--- Sort descending
+// Sort descending
 MATCH (p:Person) RETURN p.name ORDER BY p.age DESC
 
--- Multiple sort keys
+// Multiple sort keys
 MATCH (p:Person) RETURN p.name ORDER BY p.city ASC, p.age DESC
 
--- Limit results
+// Limit results
 MATCH (p:Person) RETURN p.name ORDER BY p.age LIMIT 10
 
--- Pagination
+// Pagination
 MATCH (p:Person) RETURN p.name ORDER BY p.name SKIP 20 LIMIT 10
 ```
 
@@ -293,23 +293,23 @@ MATCH (p:Person) RETURN p.name ORDER BY p.name SKIP 20 LIMIT 10
 Create nodes and relationships.
 
 ```cypher
--- Single node
+// Single node
 CREATE (p:Person {name: 'Alice', age: 30})
 
--- Multiple labels
+// Multiple labels
 CREATE (e:Person:Employee {name: 'Charlie'})
 
--- Multiple nodes in one clause
+// Multiple nodes in one clause
 CREATE (a:Person {name: 'Alice'}), (b:Person {name: 'Bob'})
 
--- Relationship between existing nodes
+// Relationship between existing nodes
 MATCH (a:Person {name: 'Alice'}), (b:Person {name: 'Bob'})
 CREATE (a)-[:KNOWS {since: 2020}]->(b)
 
--- Create inline
+// Create inline
 CREATE (a:Person {name: 'Alice'})-[:KNOWS]->(b:Person {name: 'Bob'})
 
--- CREATE ... RETURN
+// CREATE ... RETURN
 CREATE (p:Person {name: 'Alice'})
 RETURN p.name AS name, p.node_uuid AS node_uuid
 ```
@@ -331,19 +331,19 @@ Find or create — safe for idempotent upserts within the shipped Rust subset
 - Row-conditional map actions (`+=` / `=`) when some rows create and others match → `row-conditional MERGE map actions are not implemented yet`
 
 ```cypher
--- Merge node (create if not exists, match if exists)
+// Merge node (create if not exists, match if exists)
 MERGE (p:Person {email: 'alice@example.com'})
 
--- ON CREATE and ON MATCH callbacks
+// ON CREATE and ON MATCH callbacks
 MERGE (p:Person {email: 'alice@example.com'})
 ON CREATE SET p.created = 2024, p.name = 'Alice'
 ON MATCH  SET p.last_seen = 2024
 
--- Merge relationship (both endpoints must already exist)
+// Merge relationship (both endpoints must already exist)
 MATCH (a:Person {name: 'Alice'}), (b:Person {name: 'Bob'})
 MERGE (a)-[:KNOWS]->(b)
 
--- Merge with RETURN
+// Merge with RETURN
 MERGE (p:Person {email: 'alice@example.com'})
 RETURN p
 ```
@@ -355,11 +355,11 @@ Expand a list into rows.
 ```cypher
 UNWIND [1, 2, 3] AS x RETURN x * 2 AS doubled
 
--- Common pattern: batch-create from list
+// Common pattern: batch-create from list
 UNWIND ['Alice', 'Bob', 'Charlie'] AS name
 CREATE (:Person {name: name})
 
--- Expand collected list
+// Expand collected list
 MATCH (p:Person)
 WITH collect(p.name) AS names
 UNWIND names AS name
@@ -375,25 +375,25 @@ RETURN name
 Add or update properties and labels.
 
 ```cypher
--- Set property
+// Set property
 MATCH (p:Person {name: 'Alice'}) SET p.age = 31
 
--- Multiple properties
+// Multiple properties
 MATCH (p:Person {name: 'Alice'})
 SET p.age = 31, p.city = 'Boston', p.active = true
 
--- Set from map
+// Set from map
 MATCH (p:Person {name: 'Alice'})
 SET p += {age: 31, city: 'Boston'}
 
--- Overwrite all properties
+// Overwrite all properties
 MATCH (p:Person {name: 'Alice'})
 SET p = {name: 'Alice', age: 31}
 
--- Add label
+// Add label
 MATCH (p:Person {name: 'Alice'}) SET p:Manager
 
--- SET ... RETURN
+// SET ... RETURN
 MATCH (p:Person {name: 'Alice'})
 SET p.age = 31
 RETURN p.name AS name, p.age AS new_age
@@ -404,29 +404,29 @@ RETURN p.name AS name, p.age AS new_age
 Remove properties and labels.
 
 ```cypher
--- Remove property
+// Remove property
 MATCH (p:Person {name: 'Alice'}) REMOVE p.temp
 
--- Remove multiple
+// Remove multiple
 MATCH (p:Person {name: 'Alice'}) REMOVE p.temp, p.draft
 
--- Remove label
+// Remove label
 MATCH (p:Person {name: 'Alice'}) REMOVE p:Manager
 ```
 
 ### DELETE / DETACH DELETE
 
 ```cypher
--- Delete a relationship
+// Delete a relationship
 MATCH (a)-[r:KNOWS]->(b) WHERE a.name = 'Alice' DELETE r
 
--- Delete a node (no relationships may exist)
+// Delete a node (no relationships may exist)
 MATCH (p:Person {name: 'Alice'}) DELETE p
 
--- DETACH DELETE: remove node and all its relationships
+// DETACH DELETE: remove node and all its relationships
 MATCH (p:Person {name: 'Alice'}) DETACH DELETE p
 
--- Delete everything
+// Delete everything
 MATCH (n) DETACH DELETE n
 ```
 
@@ -439,19 +439,19 @@ MATCH (n) DETACH DELETE n
 Pass results between query stages, filter aggregations, limit scope.
 
 ```cypher
--- Chain match with filter
+// Chain match with filter
 MATCH (p:Person)-[:KNOWS]->(friend)
 WITH p, count(friend) AS friends
 WHERE friends > 5
 RETURN p.name AS person, friends
 
--- Rename and continue
+// Rename and continue
 MATCH (p:Person)
 WITH p.name AS name, p.age AS age
 WHERE age > 25
 RETURN name, age
 
--- Aggregate then match
+// Aggregate then match
 MATCH (p:Person)
 WITH p.city AS town, count(*) AS pop
 WHERE pop > 100
@@ -460,7 +460,7 @@ WHERE p2.city = town
 RETURN p2.name, town, pop
 ORDER BY pop DESC
 
--- WITH DISTINCT
+// WITH DISTINCT
 MATCH (p:Person)-[:KNOWS]->(friend:Person)
 WITH DISTINCT friend
 RETURN friend.name AS mutual_friend
@@ -469,12 +469,12 @@ RETURN friend.name AS mutual_friend
 ### UNION / UNION ALL
 
 ```cypher
--- UNION (removes duplicates)
+// UNION (removes duplicates)
 MATCH (p:Person) RETURN p.name AS name
 UNION
 MATCH (c:Company) RETURN c.name AS name
 
--- UNION ALL (keeps duplicates)
+// UNION ALL (keeps duplicates)
 MATCH (p:Person) RETURN p.name AS name
 UNION ALL
 MATCH (p2:Person) RETURN p2.name AS name
@@ -512,7 +512,7 @@ MATCH (p2:Person) RETURN p2.name AS name
 ### Path Variables
 
 ```cypher
--- Bind path to variable
+// Bind path to variable
 MATCH p = (a:Person)-[:KNOWS*]->(b:Person)
 RETURN length(p) AS hops, nodes(p) AS path_nodes
 ```
@@ -524,67 +524,67 @@ RETURN length(p) AS hops, nodes(p) AS path_nodes
 ### Arithmetic
 
 ```cypher
-RETURN 5 + 3         -- 8
-RETURN 5 - 3         -- 2
-RETURN 5 * 3         -- 15
-RETURN 5 / 2         -- 2 (integer division)
-RETURN 5.0 / 2       -- 2.5
-RETURN 5 % 2         -- 1
-RETURN 2 ^ 10        -- 1024.0
+RETURN 5 + 3         // 8
+RETURN 5 - 3         // 2
+RETURN 5 * 3         // 15
+RETURN 5 / 2         // 2 (integer division)
+RETURN 5.0 / 2       // 2.5
+RETURN 5 % 2         // 1
+RETURN 2 ^ 10        // 1024.0
 ```
 
 ### Comparison
 
 ```cypher
-RETURN 5 = 5        -- true
-RETURN 5 <> 6       -- true
-RETURN 5 < 6        -- true
-RETURN 5 <= 5       -- true
-RETURN 6 > 5        -- true
-RETURN 6 >= 6       -- true
+RETURN 5 = 5        // true
+RETURN 5 <> 6       // true
+RETURN 5 < 6        // true
+RETURN 5 <= 5       // true
+RETURN 6 > 5        // true
+RETURN 6 >= 6       // true
 ```
 
 ### Boolean
 
 ```cypher
-RETURN true AND false   -- false
-RETURN true OR false    -- true
-RETURN NOT true         -- false
-RETURN true XOR true    -- false
+RETURN true AND false   // false
+RETURN true OR false    // true
+RETURN NOT true         // false
+RETURN true XOR true    // false
 
--- NULL propagation
-RETURN null AND true    -- null
-RETURN null OR true     -- true
-RETURN NOT null         -- null
+// NULL propagation
+RETURN null AND true    // null
+RETURN null OR true     // true
+RETURN NOT null         // null
 ```
 
 ### String
 
 ```cypher
-RETURN 'hello' + ' world'          -- 'hello world'
-RETURN 'Alice' STARTS WITH 'Al'    -- true
-RETURN 'Alice' ENDS WITH 'ice'     -- true
-RETURN 'Alice' CONTAINS 'lic'      -- true
-RETURN 'Alice' =~ 'A.*'            -- true (regex)
+RETURN 'hello' + ' world'          // 'hello world'
+RETURN 'Alice' STARTS WITH 'Al'    // true
+RETURN 'Alice' ENDS WITH 'ice'     // true
+RETURN 'Alice' CONTAINS 'lic'      // true
+RETURN 'Alice' =~ 'A.*'            // true (regex)
 ```
 
 ### List Operators
 
 ```cypher
-RETURN [1, 2, 3] + [4, 5]          -- [1, 2, 3, 4, 5]
-RETURN 3 IN [1, 2, 3]              -- true
-RETURN [1, 2, 3][0]                -- 1
-RETURN [1, 2, 3][1..3]             -- [2, 3]
+RETURN [1, 2, 3] + [4, 5]          // [1, 2, 3, 4, 5]
+RETURN 3 IN [1, 2, 3]              // true
+RETURN [1, 2, 3][0]                // 1
+RETURN [1, 2, 3][1..3]             // [2, 3]
 ```
 
 ### NULL
 
 ```cypher
--- NULL propagates through most operations
-RETURN null + 5     -- null
-RETURN null = null  -- null (use IS NULL instead)
+// NULL propagates through most operations
+RETURN null + 5     // null
+RETURN null = null  // null (use IS NULL instead)
 
--- Safe operators
+// Safe operators
 MATCH (p:Person) WHERE p.age IS NULL RETURN p
 MATCH (p:Person) WHERE p.age IS NOT NULL RETURN p
 ```
@@ -592,14 +592,16 @@ MATCH (p:Person) WHERE p.age IS NOT NULL RETURN p
 ### CASE Expression
 
 ```cypher
--- Simple form
+// Simple form
+MATCH (p:Person)
 RETURN CASE p.status
   WHEN 'active'   THEN 'Active User'
   WHEN 'inactive' THEN 'Inactive User'
   ELSE 'Unknown'
 END
 
--- Generic form
+// Generic form
+MATCH (p:Person)
 RETURN CASE
   WHEN p.age < 18 THEN 'Minor'
   WHEN p.age < 65 THEN 'Adult'
@@ -658,81 +660,81 @@ END
 ### List Comprehension and Predicates
 
 ```cypher
--- Filter a list
-RETURN [x IN range(1,10) WHERE x % 2 = 0]  -- [2,4,6,8,10]
+// Filter a list
+RETURN [x IN range(1,10) WHERE x % 2 = 0]  // [2,4,6,8,10]
 
--- Transform a list
-RETURN [x IN range(1,5) | x * x]           -- [1,4,9,16,25]
+// Transform a list
+RETURN [x IN range(1,5) | x * x]           // [1,4,9,16,25]
 
--- Filter + transform
-RETURN [x IN range(1,10) WHERE x > 5 | x * 2]  -- [12,14,16,18,20]
+// Filter + transform
+RETURN [x IN range(1,10) WHERE x > 5 | x * 2]  // [12,14,16,18,20]
 
--- all() — every element satisfies predicate
-RETURN all(x IN [2,4,6] WHERE x % 2 = 0)   -- true
+// all() — every element satisfies predicate
+RETURN all(x IN [2,4,6] WHERE x % 2 = 0)   // true
 
--- any() — at least one element satisfies predicate
-RETURN any(x IN [1,2,3] WHERE x > 2)        -- true
+// any() — at least one element satisfies predicate
+RETURN any(x IN [1,2,3] WHERE x > 2)        // true
 
--- none() — no element satisfies predicate
-RETURN none(x IN [1,2,3] WHERE x > 5)       -- true
+// none() — no element satisfies predicate
+RETURN none(x IN [1,2,3] WHERE x > 5)       // true
 
--- single() — exactly one element satisfies predicate
-RETURN single(x IN [1,2,3] WHERE x = 2)     -- true
+// single() — exactly one element satisfies predicate
+RETURN single(x IN [1,2,3] WHERE x = 2)     // true
 ```
 
 ### Aggregation Functions
 
 ```cypher
--- Count rows
+// Count rows
 MATCH (p:Person) RETURN count(*) AS total
 
--- Count non-null
+// Count non-null
 MATCH (p:Person) RETURN count(p.age) AS with_age
 
--- Count distinct
+// Count distinct
 MATCH (p:Person) RETURN count(DISTINCT p.city) AS cities
 
--- Numeric aggregations
+// Numeric aggregations
 MATCH (p:Person) RETURN sum(p.salary), avg(p.age), min(p.age), max(p.age)
 
--- Collect into list
+// Collect into list
 MATCH (p:Person) RETURN collect(p.name) AS names
 
--- Collect distinct
+// Collect distinct
 MATCH (p:Person) RETURN collect(DISTINCT p.city) AS cities
 
--- Percentile
+// Percentile
 MATCH (p:Person) RETURN percentileDisc(p.age, 0.5) AS median
 ```
 
 ### Graph Functions
 
 ```cypher
--- Node identity (UUID, not a numeric storage ID)
+// Node identity (UUID, not a numeric storage ID)
 MATCH (n:Person) RETURN n.node_uuid
 
--- Labels
-RETURN labels(n)               -- list of labels
-RETURN 'Person' IN labels(n)   -- true/false
+// Labels
+MATCH (n:Person) RETURN labels(n)               // list of labels
+MATCH (n:Person) RETURN 'Person' IN labels(n)   // true/false
 
--- Relationship type
-RETURN type(r)
+// Relationship type
+MATCH ()-[r]->() RETURN type(r)
 
--- Properties (as map)
-RETURN properties(n)
+// Properties (as map)
+MATCH (n:Person) RETURN properties(n)
 
--- Keys (property names)
-RETURN keys(n)
+// Keys (property names)
+MATCH (n:Person) RETURN keys(n)
 
--- Path functions
+// Path functions
 MATCH p = (a)-[*]->(b)
 RETURN nodes(p), relationships(p), length(p)
 
--- Endpoints
+// Endpoints
 MATCH (a)-[r]->(b)
 RETURN startNode(r), endNode(r)
 
--- Degree (count outgoing relationships)
+// Degree (count outgoing relationships)
 MATCH (n:Person {name: 'Alice'})-[:KNOWS]->(other)
 RETURN count(other) AS out_degree
 ```
@@ -740,28 +742,28 @@ RETURN count(other) AS out_degree
 ### Predicate Functions
 
 ```cypher
--- Property exists (use IS NOT NULL)
+// Property exists (use IS NOT NULL)
 MATCH (p:Person) WHERE p.email IS NOT NULL RETURN p
 
--- Empty lists and strings; unknown is separate from empty
-RETURN size([]) = 0    -- true
-RETURN size('') = 0    -- true
-RETURN size(null) = 0  -- null
+// Empty lists and strings; unknown is separate from empty
+RETURN size([]) = 0    // true
+RETURN size('') = 0    // true
+RETURN size(null) = 0  // null
 
--- Null coalescing
-RETURN coalesce(null, null, 'default')   -- 'default'
-RETURN coalesce(p.nickname, p.name)      -- first non-null
+// Null coalescing
+RETURN coalesce(null, null, 'default')   // 'default'
+MATCH (p:Person) RETURN coalesce(p.nickname, p.name) // first non-null
 ```
 
 ### Conversion Functions
 
 ```cypher
-RETURN toInteger('42')         -- 42
-RETURN toInteger(3.7)          -- 3
-RETURN toFloat('3.14')         -- 3.14
-RETURN toString(42)            -- '42'
-RETURN toBoolean('true')       -- true
-RETURN toBoolean('false')      -- false
+RETURN toInteger('42')         // 42
+RETURN toInteger(3.7)          // 3
+RETURN toFloat('3.14')         // 3.14
+RETURN toString(42)            // '42'
+RETURN toBoolean('true')       // true
+RETURN toBoolean('false')      // false
 ```
 
 `toBoolean()` accepts booleans and strings (or null), not numeric values.
@@ -778,14 +780,14 @@ GraphForge implements full openCypher temporal precision including nanoseconds a
 ```cypher
 RETURN date('2024-01-15')
 RETURN date({year: 2024, month: 1, day: 15})
-RETURN date()                          -- current date
+RETURN date()                          // current date
 
-RETURN time('14:30:00.000000789')      -- with nanoseconds
+RETURN time('14:30:00.000000789')      // with nanoseconds
 RETURN time({hour: 14, minute: 30, second: 0, nanosecond: 789})
 
-RETURN datetime('2024-01-15T14:30:00[Europe/London]')  -- IANA timezone
-RETURN datetime('2024-01-15T14:30:00+01:00')           -- offset
-RETURN datetime()                                       -- current datetime
+RETURN datetime('2024-01-15T14:30:00[Europe/London]')  // IANA timezone
+RETURN datetime('2024-01-15T14:30:00+01:00')           // offset
+RETURN datetime()                                       // current datetime
 
 RETURN localdatetime('2024-01-15T14:30:00')
 RETURN duration('P1Y2M3DT4H5M6.789S')
@@ -795,31 +797,31 @@ RETURN duration({years: 1, months: 2, days: 3})
 ### Accessors
 
 ```cypher
-RETURN date('2024-01-15').year         -- 2024
-RETURN date('2024-01-15').month        -- 1
-RETURN date('2024-01-15').day          -- 15
-RETURN date('2024-01-15').week         -- 3 (ISO week)
-RETURN date('2024-01-15').ordinalDay   -- 15
+RETURN date('2024-01-15').year         // 2024
+RETURN date('2024-01-15').month        // 1
+RETURN date('2024-01-15').day          // 15
+RETURN date('2024-01-15').week         // 3 (ISO week)
+RETURN date('2024-01-15').ordinalDay   // 15
 
-RETURN time('14:30:00.000000789').hour        -- 14
-RETURN time('14:30:00.000000789').nanosecond  -- 789
+RETURN time('14:30:00.000000789').hour        // 14
+RETURN time('14:30:00.000000789').nanosecond  // 789
 
 RETURN datetime('2024-01-15T14:30:00[Europe/Stockholm]').timezone
--- 'Europe/Stockholm'
+// 'Europe/Stockholm'
 
-RETURN duration('P1Y2M3DT4H5M6S').years    -- 1
-RETURN duration('P1Y2M3DT4H5M6S').months   -- 2
-RETURN duration('PT0.000000789S').nanoseconds  -- 789
+RETURN duration('P1Y2M3DT4H5M6S').years    // 1
+RETURN duration('P1Y2M3DT4H5M6S').months   // 2
+RETURN duration('PT0.000000789S').nanoseconds  // 789
 ```
 
 ### Arithmetic
 
 ```cypher
-RETURN date('2024-01-01') + duration('P1M')    -- 2024-02-01
-RETURN date('2024-01-01') - duration('P1Y')    -- 2023-01-01
-RETURN duration('P1Y') + duration('P6M')       -- P1Y6M
+RETURN date('2024-01-01') + duration('P1M')    // 2024-02-01
+RETURN date('2024-01-01') - duration('P1Y')    // 2023-01-01
+RETURN duration('P1Y') + duration('P6M')       // P1Y6M
 
--- Between
+// Between
 RETURN duration.between(date('2020-01-01'), date('2024-01-01'))
 RETURN duration.inMonths(date('2020-01-01'), date('2024-01-01'))
 RETURN duration.inDays(datetime('2020-01-01T00:00Z'), datetime('2020-01-15T12:00Z'))
@@ -831,16 +833,16 @@ RETURN duration.inSeconds(time('08:00'), time('16:30'))
 GraphForge supports years outside Python's native range (1–9999):
 
 ```cypher
-RETURN localdatetime('+999999999-12-31T23:59:59').year   -- 999999999
-RETURN localdatetime('-000001-01-01T00:00').year          -- -1
+RETURN localdatetime('+999999999-12-31T23:59:59').year   // 999999999
+RETURN localdatetime('-000001-01-01T00:00').year          // -1
 ```
 
 ### Truncation
 
 ```cypher
-RETURN date.truncate('month', date('2024-07-15'))     -- 2024-07-01
-RETURN datetime.truncate('day', datetime())            -- current day at midnight
-RETURN time.truncate('hour', time('14:37:00'))         -- 14:00:00
+RETURN date.truncate('month', date('2024-07-15'))     // 2024-07-01
+RETURN datetime.truncate('day', datetime())            // current day at midnight
+RETURN time.truncate('hour', time('14:37:00'))         // 14:00:00
 ```
 
 ---
@@ -858,7 +860,7 @@ table = forge.execute(
 ```
 
 ```cypher
--- In Cypher, $name and $min_age are the parameter syntax
+// In Cypher, $name and $min_age are the parameter syntax
 MATCH (p:Person {name: $name})
 WHERE p.age > $min_age
 RETURN p.name, p.age
@@ -921,12 +923,12 @@ RETURN p.name,
 ### EXISTS Subquery
 
 ```cypher
--- Nodes that have at least one outgoing relationship
+// Nodes that have at least one outgoing relationship
 MATCH (p:Person)
 WHERE EXISTS { (p)-[:KNOWS]->() }
 RETURN p.name
 
--- Nodes that have no relationships
+// Nodes that have no relationships
 MATCH (p:Person)
 WHERE NOT (p)-[]-()
 RETURN p.name AS isolated

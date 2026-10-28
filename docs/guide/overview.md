@@ -3,8 +3,12 @@
 The core audience is a **nontechnical analyst working with an agent**; v0.6.0
 initially serves technical analysts and integrators more completely (see
 [Who GraphForge is for](audience-and-fit.md)).
-Both paths start with [a small graph and a question](quickstart.md). Choose by
-your current skills, not by how ambitious your research question is. The docs
+The coordinated launch starts with the
+[public Hub lifecycle](portable-projects.md#public-hub-launch-path), whose
+production fixture and publish-back qualification are still blocked. For a
+local lesson available now, both paths offer
+[a small graph and a question](quickstart.md). Choose by your current skills,
+not by how ambitious your research question is. The docs
 target v0.6.0; [Installation](installation.md) states package availability.
 
 ## Basic

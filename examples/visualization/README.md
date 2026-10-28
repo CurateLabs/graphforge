@@ -28,10 +28,17 @@ edges). Provenance, license/citation, and SHA-256 identities live in
 python -m pip install -r examples/visualization/requirements.txt
 python examples/visualization/dataset/fetch.py
 
-# Node (uses in-repo binding when present; else @curatelabs/graphforge)
-cd examples/visualization
-npm install
+# Node (from repo root; explicitly select the published candidate)
+npm install --prefix examples/visualization --no-save --package-lock=false @curatelabs/graphforge@0.6.0-rc.6 apache-arrow@21.2.0
+export GRAPHFORGE_NODE_PATH="$PWD/examples/visualization/node_modules/@curatelabs/graphforge/index.js"
 ```
+
+The environment assignment above uses a POSIX shell; other shells must set the
+same variable to the installed package's absolute `index.js` path. This overrides
+the example manifest's historical engine/Arrow pins and the loader's local
+binding preference. For development, select your rebuilt native binding instead.
+Use the exact selected version when qualifying another candidate. Run the
+commands below from the repository root; setup does not change directories.
 
 ## Run
 

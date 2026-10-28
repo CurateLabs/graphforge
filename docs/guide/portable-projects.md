@@ -21,6 +21,136 @@ behavior. Python, Node, and the CLI are thin projections of the same operations
 and return the same package identity, selection receipt, state classification,
 progress, and typed failures.
 
+## Public Hub launch path
+
+**Qualification pending.** This is the required coordinated launch journey,
+not a claim that production is ready. The
+[executed first-use check](https://github.com/CurateLabs/graphforge/issues/1209#issuecomment-6460385114)
+found the intended `opendata/openalex` production discovery unavailable; both
+clone forms below refuse with `hub.not_found`. The older advertised
+`openalex/openalex` fixture is not a compatible substitute. Production
+reopen/query, continuation, publish-back and rediscovery remain unqualified.
+Use the [in-memory first graph](quickstart.md) now, or the
+[local save/reopen tutorial](tutorial.md) on supported storage.
+
+### Browse and choose the exact runtime
+
+Start at the [production Hub](https://graphforge.sh/hub). The intended fixture
+page is [opendata/openalex](https://graphforge.sh/opendata/openalex), pending
+production adoption. Before cloning, it must identify its question, license,
+producing Core version, default ref and immutable package or research Version.
+Do not treat a displayed date as a research Version UUID.
+
+The replacement source fixture is a **synthetic OpenAlex-themed GraphForge
+example**, dedicated under CC0-1.0 and maintained by GraphForge. It contains no
+real OpenAlex records and has no official OpenAlex or OurResearch affiliation.
+Its [source and native reopen tests](https://github.com/CurateLabs/graphforge/blob/main/tests/fixtures/hub/README.md)
+describe two invented authors, three works and four authorship relationships.
+Those are source-fixture expectations, not verified production counts.
+
+Use Node.js 20+, Python 3.10+ for the query, and the
+[supported native platform and durable filesystem](installation.md#status-and-limits).
+Prepare an isolated Python environment as described in
+[Installation](installation.md#python). The currently published candidate is
+`0.6.0-rc.6` (PyPI spelling `0.6.0rc6`):
+
+```bash
+npx --yes @curatelabs/graphforge-cli@0.6.0-rc.6 --version
+python -m pip install "graphforge==0.6.0rc6"
+```
+
+This installs/invokes those exact published packages. It does not select the final
+launch candidate. Later source builds carrying the same version label are
+different bytes; #1209 records the tested package and source identities. Match
+the fixture's producing Core version, and follow any
+[version warning](#data-from-another-core-version) before continuing.
+
+### Clone, reopen and ask a useful question
+
+Once the production fixture is available and qualified with the selected
+candidate, both accepted identity forms must produce the same selected state
+in separate new directories:
+
+```bash
+npx --yes @curatelabs/graphforge-cli@0.6.0-rc.6 --json clone opendata/openalex openalex
+npx --yes @curatelabs/graphforge-cli@0.6.0-rc.6 --json clone https://graphforge.sh/opendata/openalex openalex-copy
+```
+
+At present these commands fail at discovery; do not continue after that failure.
+Successful clone must fully verify and durably reopen the package. Compare the
+receipts' `package_digest` and `immutable_version`. Obtain the producing Core
+version and default ref from the verified Hub discovery documents; they are not
+fields in a Project-only clone receipt. Compare receipt `resolved_ref` and
+research Version identity only if the fixture actually advertises Branch lineage.
+Without Branch lineage, a default `main` ref selects a Project package, not a
+research Version.
+
+The source fixture's question is **how many works did each invented author
+write?** Run this in a new Python process from the directory containing both
+clones. It opens each saved directory afresh:
+
+```python
+from graphforge import GraphForge
+
+query = """
+    MATCH (a:Author)-[:AUTHORED]->(w:Work)
+    RETURN a.name, count(w) AS works ORDER BY a.name
+"""
+for path in ("openalex", "openalex-copy"):
+    forge = GraphForge(path)
+    print(path, forge.execute(query).to_pylist())
+    forge.close()
+```
+
+The source test expects Ada Example: **2**, Basil Sample: **2**. Qualification
+must reproduce those rows in both production clones before publishing them as
+an observed launch result. The Python binding returns an Arrow table;
+`to_pylist()` exposes its rows without manual IPC decoding. Closing the handle
+does not discard this durable project.
+
+### Continue, publish back, discover and clone again
+
+Use the [git-style research workflow](research-journey.md#share-with-gf) to
+inspect state, choose a Branch, commit an intentional change and record its
+Version. A Project-only clone needs its first Branch before Branch commits;
+do not invent a pre-existing research history. Author/committer names are
+public credit, not login credentials.
+
+Publishing requires an existing **owner account and repository**, permission
+to write there, and the exact repository scope
+`publish:OWNER/REPOSITORY`. The Hub must provide discovery and a conforming
+`graphforge-hub-publish/1` service. For the production fixture its advertised
+scope is `publish:opendata/openalex`; browsing or cloning it does not grant
+permission to publish there. The capability endpoint's availability alone
+does not establish successful authorization or publication.
+
+With the selected CLI installed as `gf`, an authorized human can run:
+
+```bash
+gf --project openalex publish OWNER/REPOSITORY --ref main
+gf --json hub list OWNER/REPOSITORY
+gf --json clone OWNER/REPOSITORY continued-copy --ref main
+```
+
+`OWNER/REPOSITORY` is the approved target, not an account created by these
+commands; `main` must name the intended local Branch. In a terminal, with no
+explicit publish token or saved session, publish uses the Hub's advertised
+device flow. Open its verification link and approve the displayed code for
+that repository scope before expiry. Core consumes the token in memory; never
+copy tokens into commands, notebooks, Project files or transcripts.
+For an agent, use the installed `graphforge-hub` skill and the
+[scoped credential provisioning path](work-with-an-agent.md#provision-scoped-credentials-for-an-agent-or-ci).
+An unattended agent cannot approve its own owner login.
+
+Compare the publish receipt, discovered head and new clone's Version and
+producing Core identity, then reopen and query the continued result. This
+publish-back → discovery → clone proof is a **required launch gate**, not a
+step waived by successful local export/import. The selected candidate, approved
+target and exact expected continued result still need #1209 qualification.
+Full hosted catalog/publishing interfaces, private-repository/browser-login
+qualification and later seed collections are separate scopes. Report failures
+through [support](../community/support.md).
+
 ## Copy the graph you just saved
 
 After [Query, analyze, and save a graph](tutorial.md), transfer its three-paper

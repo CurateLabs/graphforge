@@ -42,6 +42,10 @@ export default defineConfig({
           items: [
             { label: "Choose your learning path", slug: "guide/overview" },
             { label: "Who it is for", slug: "guide/audience-and-fit" },
+            {
+              label: "Public Hub launch path (qualification pending)",
+              link: "/guide/portable-projects/#public-hub-launch-path",
+            },
             { label: "Your first graph", slug: "guide/quickstart" },
             { label: "Work with an agent", slug: "guide/work-with-an-agent" },
             {
