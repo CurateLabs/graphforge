@@ -55,7 +55,8 @@ query connected data.
 ## Research workflow
 
 Research history has a git-style command set. A Branch is named by its label,
-and the label is the ref on the Hub.
+and the label is the ref on the Hub. From an existing durable Project containing
+the sample `Item` nodes (adapt the query to your graph), work locally:
 
 ```sh
 gf config user --name "Ada Lovelace" --email ada@example.org   # credit on Versions
@@ -64,9 +65,6 @@ gf commit -m "Raise scores" --query "MATCH (n:Item) SET n.score = 2"
 gf tag v1                            # name the head; list with gf tag, delete with -d
 gf status                            # Branch, head, upstream, commits not yet published
 gf log                               # history; --all, -n <count>, <tag>, --remote
-gf push owner/repository             # publish; later just gf push
-gf clone owner/repository --ref main # or --tag v1
-gf pull                              # incorporate the Hub's head of the same ref
 gf branch feature/score              # another Branch; gf switch feature/score selects it
 ```
 
@@ -82,6 +80,28 @@ verbs; each help text points at its plain-argument form.
 Authors and committers recorded on Versions are always published, in the lineage
 and as the Project summary's derived people list; published credit is public and
 permanent, and there is no redaction option.
+
+Use a separately verified server implementing `graphforge-discovery/1` and
+`graphforge-hub-publish/1`, an existing owner account and repository, and a
+`publish:owner/repository`-scoped credential. The CLI walkthrough tests use the
+native reference Hub at `https://hub.test`, not a public write service. These
+tests and examples do not qualify production publishing. Replace the placeholder
+`https://hub.example` below with your verified server; supply the credential
+securely through `GRAPHFORGE_HUB_PUBLISH_TOKEN` (see the
+[agent guide](https://docs.graphforge.sh/guide/work-with-an-agent/)).
+
+```sh
+gf push https://hub.example/owner/repository --ref main --token-env GRAPHFORGE_HUB_PUBLISH_TOKEN
+gf clone https://hub.example/owner/repository collaborator --ref main
+```
+
+Work from the cloned Project's directory before committing. Later `gf push`
+uses its tracked repository/ref; `gf pull` incorporates a collaborator's new
+head of that same ref. Clone with `--tag v1` instead of `--ref main` for the
+tagged Version. Tags travel in the published lineage, not as separate Hub refs.
+Clone/pull here assume public read access; a publish token is not a read token.
+For exchange without a write server, use the
+[portable export/import guide](https://docs.graphforge.sh/guide/portable-projects/).
 
 History replacement is explicit: `gf publish <repository> --ref main --rewrite`
 requests a non-fast-forward replacement under the current revision lease.

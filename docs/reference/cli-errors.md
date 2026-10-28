@@ -3,9 +3,10 @@
 Every `gf` command reports failures as one stable JSON document when you pass
 the global `--json` flag. Agents and other programs branch on the JSON fields;
 they never parse the human-readable message. This page is the authoritative
-contract: every code below is derived from and tested against the CLI source
-(`crates/graphforge-cli`), and a test keeps the table in sync with the codes
-the CLI defines.
+contract: the codes below come from the CLI source (`crates/graphforge-cli`).
+Tests exercise every error class and keep the Hub publish wire-code rows in
+sync with the native protocol vocabulary; local preparation codes are listed
+separately.
 
 ## Which field is authoritative
 
@@ -122,6 +123,7 @@ escalate to a human when the obvious fix does not clear the failure.
 | --- | --- | --- | --- | --- |
 | `hub.publish.auth_denied` | fix input | Publish credential missing, expired, or not scoped to this repository | With no token: set `GRAPHFORGE_HUB_PUBLISH_TOKEN` (see [Credentials](#credentials)). With a token still denied: a human must mint a `publish:owner/repository`-scoped token | 2 |
 | `hub.invalid_identity` | fix input | Repository argument is not `owner/repository` or a valid HTTPS URL | Fix the repository (or `--hub`) argument | 2 |
+| `hub.invalid_input` | fix input | An outgoing request or header is invalid | Correct the request inputs or credential value; keep secret values out of logs | 2 |
 | `hub.unsafe_location` | fix input | URL must be credential-free HTTPS on a public host | Pass the documented Hub URL form | 2 |
 | `hub.auth_denied` | fix input | Credential missing, unreadable, empty, or not valid for this origin (clone `--token-env`; publish saved-session origin) | Set or correct the credential environment variable (see [Credentials](#credentials)); if a provided token is still denied, a human must mint a scoped token | 2 |
 | `hub.not_found` | fix input | The repository or resource does not exist (404/410) | Check the owner/repository spelling and ref | 2 |
@@ -137,6 +139,7 @@ escalate to a human when the obvious fix does not clear the failure.
 | `hub.package.immutable_version_mismatch` | fix input | A retained Version disagrees with its immutable identity | Ask the repository publisher; do not retry blindly | 2 |
 | `hub.package.package_digest_mismatch` | fix input | Package bytes disagree with the declared digest | Rerun to re-download; if it repeats, ask the publisher | 2 |
 | `hub.package.research_version_mismatch` | fix input | Research lineage disagrees with the package | Ask the repository publisher | 2 |
+| `hub.package.producing_core_version_mismatch` | fix input | The manifest and package disagree about the Core version that produced the bytes | Ask the publisher to regenerate matching controls and package bytes; do not relabel the package. This differs from a warning that the running Core version is different | 2 |
 | `hub.module.identity_mismatch` | fix input | An ontology module's identity disagrees with the manifest | Ask the repository publisher | 2 |
 | `hub.module.content_digest_mismatch` | fix input | A module's bytes disagree with its digest | Rerun to re-download; if it repeats, ask the publisher | 2 |
 | `hub.package.invalid_participant` | fix input | The package names an invalid participant | Ask the publisher to republish | 2 |
@@ -151,7 +154,7 @@ escalate to a human when the obvious fix does not clear the failure.
 | `hub.integrity` | fix input | A strong validator disagreed | Rerun to re-download; if it repeats, ask the Hub operator | 2 |
 | `hub.integrity_failure` | fix input | Stored or transported bytes disagree with digests | Rerun to re-download; if it repeats, ask the Hub operator | 2 |
 | `hub.publish.invalid_input` | fix input | The publish request failed structural validation (400, 404 unknown resource, 413 over a limit, 416 upload offset) | Fix the selection, image set, or sizes per the message | 2 |
-| `hub.publish.id_taken` | fix input | A permanent item ID belongs to another publisher (409) | Publish as the owner when authorized, or use a recorded replacement Version; ID regeneration requires an exact local refusal receipt (command is separate work) | 2 |
+| `hub.publish.id_taken` | fix input | A permanent item ID belongs to another publisher (409) | Publish as the owner when authorized. For a refused module or bridge, review `gf ontology regenerate-id ID --operation-uuid UUID`; it requires confirmation and the exact local refusal receipt | 2 |
 | `hub.publish.non_fast_forward` | fix input | The remote head is not an ancestor of the proposed head | Pull/clone the remote head first, or take the explicit `--rewrite` lease deliberately | 2 |
 | `hub.publish.integrity_failure` | fix input | Stored or uploaded bytes disagree with the declared digests | Rerun to rebuild and re-upload; if it repeats, ask the Hub operator | 2 |
 | `hub.unsupported_future` | fix input | Discovery needs a protocol capability this client lacks | Upgrade the GraphForge CLI | 2 |
@@ -176,6 +179,16 @@ escalate to a human when the obvious fix does not clear the failure.
 | `hub.malformed_response` | ask a human | The Hub response violated its contract | Possibly an outdated client: upgrade first; otherwise ask the Hub operator | 2 |
 | `hub.publish.internal` | ask a human | Hub internal failure (500) | Report to the Hub operator | 3 |
 | `hub.publish.idempotency_conflict` | ask a human | The same operation identity was reused with different content (`GF_IDEMPOTENCY_CONFLICT` is the outer `error.code`; no `semantic_code` is emitted) | A human decides: replay (same identity) or intentional new operation (new UUID) | 1 |
+
+### Local publication preparation (fix input)
+
+These CLI validation codes describe publication preparation before upload;
+they are not additional `HubPublishErrorCode` wire values.
+
+| Code | Class | Meaning | Next action | Exit |
+| --- | --- | --- | --- | --- |
+| `hub.publish.derivation` | fix input | The selected Version could not be exported or its publication documents could not be derived | Inspect the diagnostic and repair the selected Version or required project inputs; if valid retained content still fails, report it to the maintainer | 2 |
+| `hub.publish.ontology_composition_mismatch` | fix input | The workspace's ontology modules, bridges or activations differ from the selected frozen Version | Restore the workspace for that Version, or commit the ontology changes as a new Version and publish the current Branch head | 2 |
 
 ### Diagnostic codes (`error.diagnostics[].code`)
 
