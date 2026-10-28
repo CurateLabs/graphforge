@@ -124,21 +124,40 @@ scope is `publish:opendata/openalex`; browsing or cloning it does not grant
 permission to publish there. The capability endpoint's availability alone
 does not establish successful authorization or publication.
 
-With the selected CLI installed as `gf`, an authorized human can run:
+**Human browser/device approval requires the standalone native Rust CLI.** The
+npm launcher used above calls the captured binding interface; it cannot start
+device flow, even from a terminal. Install the exact native candidate into a
+new, dedicated directory and invoke its absolute path so an npm `gf` earlier
+in `PATH` cannot be selected accidentally.
+
+This step requires [Rust/Cargo setup](installation.md#build-from-source).
+The crates.io build also has the
+[stock-DataFusion limitations](installation.md#status-and-limits); it does not
+carry the two fixes bundled with the Python wheel and npm engine. Keep those
+install-route differences when qualifying the selected candidate. The commands
+below use a POSIX shell; on Windows, select the installed `bin/gf.exe` by its
+absolute path.
 
 ```bash
-gf --project openalex publish OWNER/REPOSITORY --ref main
-gf --json hub list OWNER/REPOSITORY
-gf --json clone OWNER/REPOSITORY continued-copy --ref main
+GF_NATIVE_CLI_ROOT="$PWD/graphforge-native-cli"
+cargo install --locked --root "$GF_NATIVE_CLI_ROOT" --version 0.6.0-rc.6 graphforge-cli
+"$GF_NATIVE_CLI_ROOT/bin/gf" --version
+"$GF_NATIVE_CLI_ROOT/bin/gf" --project openalex publish OWNER/REPOSITORY --ref main
+"$GF_NATIVE_CLI_ROOT/bin/gf" --json hub list OWNER/REPOSITORY
+"$GF_NATIVE_CLI_ROOT/bin/gf" --json clone OWNER/REPOSITORY continued-copy --ref main
 ```
 
 `OWNER/REPOSITORY` is the approved target, not an account created by these
-commands; `main` must name the intended local Branch. In a terminal, with no
-explicit publish token or saved session, publish uses the Hub's advertised
-device flow. Open its verification link and approve the displayed code for
+commands; `main` must name the intended local Branch. Replace the exact version
+when qualifying another selected candidate. Run the native publish command
+directly in a terminal, with stdin and stderr attached. With no explicit
+publish token or saved session, it uses the Hub's advertised device flow.
+Open its verification link and approve the displayed code for
 that repository scope before expiry. Core consumes the token in memory; never
 copy tokens into commands, notebooks, Project files or transcripts.
-For an agent, use the installed `graphforge-hub` skill and the
+The npm CLI can publish with an already-provisioned explicit scoped token; it
+cannot perform the human approval step. For an agent, use the installed
+`graphforge-hub` skill and the
 [scoped credential provisioning path](work-with-an-agent.md#provision-scoped-credentials-for-an-agent-or-ci).
 An unattended agent cannot approve its own owner login.
 
