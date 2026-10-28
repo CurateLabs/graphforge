@@ -12,9 +12,16 @@ For a hypothesis you want to challenge and retrieve later, start with
 The research APIs add precise context and history to those tasks. They do not
 require every user to follow an entire lifecycle. This guide explains the
 choices; the [research workspace reference](../book/architecture/research-workspaces.md)
-contains the exact requests and result contracts. A simpler collaboration command
-layer is tracked in [#1772](https://github.com/CurateLabs/graphforge/issues/1772);
-do not assume proposed command names are already available.
+contains the exact requests and result contracts. For Branches, commits, tags
+and collaboration without request files or UUIDs, use the
+[git-style command workflow](#share-with-gf) below. The lower-level API examples
+also cover operations such as retaining a Project-context Version.
+
+Start with the [quickstart](quickstart.md) for a local graph and query, or
+[clone a published project](portable-projects.md#clone-from-a-hub) and follow its
+matching-runtime instructions. Continue the work locally before choosing a
+publishing target. [Portable export and import](portable-projects.md) let you
+exchange verified project bytes without a hosted write service.
 
 ## Keep an exact state while you continue
 
@@ -185,25 +192,63 @@ Research history has a git-style command set that needs no JSON and no UUIDs. A
 Branch is named by its label, and that label is the ref on the Hub: `--ref` means
 the same thing in `gf clone`, `gf push` and `gf pull`.
 
+Run these local commands from an existing durable Project. The sample queries
+assume it contains `Item` nodes; use the labels and properties in your graph.
+
 ```sh
 gf config user --name "Ada Lovelace" --email ada@example.org  # credited on every Version
 gf branch main                         # the first Branch of the Project
 gf commit -m "Raise scores" --query "MATCH (n:Item) SET n.score = 2"
 gf commit -m "Fix a typo" --query "MATCH (n:Item) SET n.name = 'Ada'"
 gf tag v1                              # a name for the head Version
-gf push owner/repository               # publish the Branch; afterwards just `gf push`
 gf status                              # Branch, head, upstream, commits not yet published
 gf log                                 # history; add --all, -n 5, a tag, or --remote
 ```
 
-A collaborator starts from the published ref and brings changes back the same way:
+### Choose a publishing target
+
+Publishing requires a separately verified write-capable server implementing
+`graphforge-discovery/1` and `graphforge-hub-publish/1`, an existing owner account
+and repository, and an approved `publish:owner/repository` credential. See the
+[agent credential path](work-with-an-agent.md#provision-scoped-credentials-for-an-agent-or-ci) for
+provisioning and non-interactive use. Each collaborator needs their own approved
+credential; a recorded author name is credit, not authorization.
+
+The collaboration tests use the native reference Hub at `https://hub.test`;
+that address is not a public service. No public write target is qualified by
+this guide or those reference-Hub tests. A public Hub's availability and
+publishing prerequisites must be verified separately. In the examples below,
+replace `https://hub.example` with your verified target; it is a placeholder,
+not an endpoint to try.
+
+With the scoped token supplied securely in `GRAPHFORGE_HUB_PUBLISH_TOKEN`:
 
 ```sh
-gf clone owner/repository --ref main   # or --tag v1 for a tagged Version
-gf commit -m "Add a source" --query "..."
-gf push                                # fast-forward; --rewrite replaces a head
-gf pull                                # take the Hub's newer head of this ref
+gf push https://hub.example/owner/repository --ref main --token-env GRAPHFORGE_HUB_PUBLISH_TOKEN
 ```
+
+A collaborator clones the published ref, then works inside the clone:
+
+```sh
+gf clone https://hub.example/owner/repository collaborator --ref main
+cd collaborator
+gf config user --name "Grace Hopper" --email grace@example.org
+gf commit -m "Revise scores" --query "MATCH (n:Item) SET n.score = 3"
+gf push                                # reuse the tracked repository and ref
+```
+
+Back in the original Project, incorporate the collaborator's published change:
+
+```sh
+gf pull
+gf log
+```
+
+Use `--tag v1` instead of `--ref main` to clone the tagged Version. Tags travel
+with published research lineage; they are not separate Hub refs.
+The clone and pull examples assume public read access. A publish credential is
+not a read credential; configure read-side authentication separately if required
+by the selected Hub.
 
 `gf commit` records its message as the Version description and credits the author
 and committer from `--author`/`--committer`, then `GF_AUTHOR`/`GF_COMMITTER`, then
@@ -267,7 +312,6 @@ explicitly. The preview commitment includes this base. A local revert therefore
 remains a local change relative to the shared history, including after repeated
 remote incorporations. Immediate-parent reviews keep their existing field baseline
 and canonical preview identity.
-
 
 ### Explicit history replacement and retention
 

@@ -6,13 +6,13 @@
 //! reference for its request.
 use clap::{Command, CommandFactory as _};
 
-const POINTER: &str = "This command takes a native JSON request; see docs/book/research/README.md.\nThe plain-argument workflow is gf status, gf log, gf commit, gf branch, gf switch, gf tag, gf push and gf pull (gf --help).";
+const POINTER: &str = "Request formats and examples: docs/book/research/README.md.\nThe plain-argument workflow is gf status, gf log, gf commit, gf branch, gf switch, gf tag, gf push and gf pull (gf --help).";
 
 fn help(path: &[&str]) -> String {
     match path.join(" ").as_str() {
-        "research branch create" => "Example: gf branch feature/score\nThe plain-argument form of this native request.".to_owned(),
-        "research branch execute" => "Example: gf commit -m \"Raise scores\" --query \"MATCH (n:Item) SET n.score = 2\"\nThe plain-argument form of this native request.".to_owned(),
-        "research upstream update" => "Example: gf pull\nFetches the Hub head of the Branch's ref and incorporates every compatible change; this native request resolves the rest explicitly.".to_owned(),
+        "research branch create" => "Example: gf branch feature/score\nCreate a Branch without a JSON request file.".to_owned(),
+        "research branch execute" => "Example: gf commit -m \"Raise scores\" --query \"MATCH (n:Item) SET n.score = 2\"\nRun a query and record a Version without a JSON request file.".to_owned(),
+        "research upstream update" => "Example: gf pull\nFetch the published Branch head and incorporate compatible changes. Use this advanced command to resolve other changes explicitly.".to_owned(),
         _ => POINTER.to_owned(),
     }
 }

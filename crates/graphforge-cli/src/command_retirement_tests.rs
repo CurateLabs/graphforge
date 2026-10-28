@@ -53,6 +53,10 @@ fn every_research_help_text_has_an_example_or_pointer() {
             help.contains("Example:") || help.contains("gf --help"),
             "gf research ... {name} has neither an example nor a pointer:\n{help}"
         );
+        assert!(
+            !help.contains("Execute the native"),
+            "gf research ... {name} describes an internal request instead of its effect:\n{help}"
+        );
     }
     let branch = found
         .iter()

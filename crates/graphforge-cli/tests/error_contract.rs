@@ -256,7 +256,12 @@ fn doc_publish_code_table_matches_the_code_owned_list() {
         "/../../docs/reference/cli-errors.md"
     ))
     .unwrap();
-    let documented: Vec<String> = doc
+    // Local preparation failures share the `hub.publish` prefix, but are not
+    // additional wire codes. Keep the wire vocabulary comparison exact.
+    let (wire_sections, _) = doc
+        .split_once("### Local publication preparation (fix input)")
+        .expect("local publication preparation section");
+    let documented: Vec<String> = wire_sections
         .lines()
         .filter(|line| line.starts_with("| `hub.publish."))
         .map(|line| {

@@ -7,7 +7,7 @@ use std::{
 };
 #[derive(Args)]
 pub(crate) struct Request {
-    /// Native JSON request, including exact CURRENT and stable operation UUID.
+    /// JSON request file with the expected project generation and operation UUID.
     #[arg(long)]
     file: PathBuf,
 }
@@ -18,19 +18,19 @@ pub(crate) struct Identity {
 }
 #[derive(Subcommand)]
 pub(crate) enum BranchCommand {
-    /// Execute the native Create request.
+    /// Create a Branch from the current research or a retained Version.
     Create(Request),
-    /// Execute the native Execute request.
+    /// Run a query on a Branch and record a new Version.
     Execute(Request),
-    /// Execute the native Restore request.
+    /// Restore a Branch's content from a retained Version.
     Restore(Request),
-    /// Execute the native Ontology request.
+    /// Change the ontology used by a Branch.
     Ontology(Request),
-    /// Execute the native Reference request.
+    /// Add a citation to a retained Version without copying its knowledge.
     Reference(Request),
-    /// Execute the native Bring request.
+    /// Copy a frozen selection into a Branch's active knowledge.
     Bring(Request),
-    /// Execute the native SuppressAssertion request.
+    /// Remove an assertion from a Branch's active knowledge.
     SuppressAssertion(Request),
     /// Inspect genealogy and current Version identity.
     Info(Identity),
