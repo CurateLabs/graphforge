@@ -25,13 +25,13 @@ hub-test-support = []
 
 [dependencies]
 arrow = { workspace = true }
-graphforge-api = { version = "0.6.0-rc.6", path = "../graphforge-api", default-features = false, features = ["knowledge", "search", "provenance", "portable", "discovery", "research"] }
-graphforge-discovery = { version = "0.6.0-rc.6", path = "../graphforge-discovery" }
-graphforge-hub-publish = { version = "0.6.0-rc.6", path = "../graphforge-hub-publish" }
+graphforge-api = { version = "0.6.0-rc.7", path = "../graphforge-api", default-features = false, features = ["knowledge", "search", "provenance", "portable", "discovery", "research"] }
+graphforge-discovery = { version = "0.6.0-rc.7", path = "../graphforge-discovery" }
+graphforge-hub-publish = { version = "0.6.0-rc.7", path = "../graphforge-hub-publish" }
 clap = { workspace = true }
 ctrlc = "3.5"
 fs4 = "1.1"
-graphforge-filesystem = { version = "0.6.0-rc.6", path = "../graphforge-filesystem" }
+graphforge-filesystem = { version = "0.6.0-rc.7", path = "../graphforge-filesystem" }
 uuid = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -53,7 +53,7 @@ keyring = { version = "3.6", features = ["windows-native"] }
 keyring = { version = "3.6", features = ["async-secret-service", "async-io", "crypto-rust"] }
 
 [dev-dependencies]
-graphforge-storage = { version = "0.6.0-rc.6", path = "../graphforge-storage", features = ["test-failpoints"] }
+graphforge-storage = { version = "0.6.0-rc.7", path = "../graphforge-storage", features = ["test-failpoints"] }
 parquet = { workspace = true }
 
 [lints]

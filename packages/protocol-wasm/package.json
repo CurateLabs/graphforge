@@ -1,6 +1,6 @@
 {
   "name": "@curatelabs/graphforge-protocol-wasm",
-  "version": "0.6.0-rc.6",
+  "version": "0.6.0-rc.7",
   "description": "GraphForge Hub discovery and publish validators as a WebAssembly ES module",
   "license": "Apache-2.0",
   "homepage": "https://docs.graphforge.sh/",
