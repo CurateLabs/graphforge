@@ -24,23 +24,23 @@ research = ["knowledge", "portable", "discovery"]
 
 [dependencies]
 parking_lot = "0.12"
-graphforge-discovery = { version = "0.6.0-rc.6", path = "../graphforge-discovery", optional = true }
-graphforge-hub-publish = { version = "0.6.0-rc.6", path = "../graphforge-hub-publish", optional = true }
-graphforge-portable-oci = { version = "0.6.0-rc.6", path = "../graphforge-portable-oci", optional = true }
-graphforge-value = { version = "0.6.0-rc.6", path = "../graphforge-value" }
-graphforge-core = { version = "0.6.0-rc.6", path = "../graphforge-core" }
-graphforge-ir = { version = "0.6.0-rc.6", path = "../graphforge-ir" }
-graphforge-ontology = { version = "0.6.0-rc.6", path = "../graphforge-ontology" }
-graphforge-provenance = { version = "0.6.0-rc.6", path = "../graphforge-provenance", optional = true }
-graphforge-knowledge = { version = "0.6.0-rc.6", path = "../graphforge-knowledge", optional = true }
-graphforge-cypher = { version = "0.6.0-rc.6", path = "../graphforge-cypher" }
-graphforge-rel = { version = "0.6.0-rc.6", path = "../graphforge-rel" }
-graphforge-storage = { version = "0.6.0-rc.6", path = "../graphforge-storage" }
-graphforge-exec = { version = "0.6.0-rc.6", path = "../graphforge-exec" }
-graphforge-io = { version = "0.6.0-rc.6", path = "../graphforge-io" }
-graphforge-observability = { version = "0.6.0-rc.6", path = "../graphforge-observability" }
-graphforge-search = { version = "0.6.0-rc.6", path = "../graphforge-search", optional = true }
-graphforge-filesystem = { version = "0.6.0-rc.6", path = "../graphforge-filesystem" }
+graphforge-discovery = { version = "0.6.0-rc.7", path = "../graphforge-discovery", optional = true }
+graphforge-hub-publish = { version = "0.6.0-rc.7", path = "../graphforge-hub-publish", optional = true }
+graphforge-portable-oci = { version = "0.6.0-rc.7", path = "../graphforge-portable-oci", optional = true }
+graphforge-value = { version = "0.6.0-rc.7", path = "../graphforge-value" }
+graphforge-core = { version = "0.6.0-rc.7", path = "../graphforge-core" }
+graphforge-ir = { version = "0.6.0-rc.7", path = "../graphforge-ir" }
+graphforge-ontology = { version = "0.6.0-rc.7", path = "../graphforge-ontology" }
+graphforge-provenance = { version = "0.6.0-rc.7", path = "../graphforge-provenance", optional = true }
+graphforge-knowledge = { version = "0.6.0-rc.7", path = "../graphforge-knowledge", optional = true }
+graphforge-cypher = { version = "0.6.0-rc.7", path = "../graphforge-cypher" }
+graphforge-rel = { version = "0.6.0-rc.7", path = "../graphforge-rel" }
+graphforge-storage = { version = "0.6.0-rc.7", path = "../graphforge-storage" }
+graphforge-exec = { version = "0.6.0-rc.7", path = "../graphforge-exec" }
+graphforge-io = { version = "0.6.0-rc.7", path = "../graphforge-io" }
+graphforge-observability = { version = "0.6.0-rc.7", path = "../graphforge-observability" }
+graphforge-search = { version = "0.6.0-rc.7", path = "../graphforge-search", optional = true }
+graphforge-filesystem = { version = "0.6.0-rc.7", path = "../graphforge-filesystem" }
 arrow = { workspace = true }
 bytes = "1"
 brotli-decompressor = "6.0.1"

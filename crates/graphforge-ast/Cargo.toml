@@ -10,7 +10,7 @@ homepage.workspace = true
 documentation.workspace = true
 
 [dependencies]
-graphforge-core = { version = "0.6.0-rc.6", path = "../graphforge-core" }
+graphforge-core = { version = "0.6.0-rc.7", path = "../graphforge-core" }
 serde = { workspace = true }
 thiserror = { workspace = true }
 

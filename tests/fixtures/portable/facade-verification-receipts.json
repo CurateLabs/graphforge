@@ -5,9 +5,9 @@
     "contract": "graphforge-portable-verify/1",
     "representation": "bundle",
     "source": "file",
-    "package_digest": "sha256:98c066e31b73ba97a0f4f8785b7b92fd771464d12ec9c4a03b78b14f93b367c7",
+    "package_digest": "sha256:765362b95e5264bf7773bf680dd5d8590c8b9098cff43a8f0f8ef12ed373862c",
     "package_class": "complete",
-    "producing_core_version": "0.6.0-rc.6",
+    "producing_core_version": "0.6.0-rc.7",
     "component_count": 9,
     "entry_count": 23,
     "payload_bytes": 30581,
@@ -33,7 +33,7 @@
     "integrity": "verified",
     "compatibility": "supported",
     "authenticity": "unsigned",
-    "transport_digest": "sha256:81d94fbbe6de8ee05379859dce57bc481065b7659823a9866e281a0857c87f6d",
+    "transport_digest": "sha256:24338c3fc34a52bea8f518d2ce8c7494e62b52a06b44ec65478dca77c6dc7e1b",
     "ontology_composition": {
       "contract": "graphforge-ontology-composition/1",
       "activation_profile": {
@@ -79,9 +79,9 @@
     "contract": "graphforge-portable-verify/1",
     "representation": "bundle",
     "source": "file",
-    "package_digest": "sha256:98c066e31b73ba97a0f4f8785b7b92fd771464d12ec9c4a03b78b14f93b367c7",
+    "package_digest": "sha256:765362b95e5264bf7773bf680dd5d8590c8b9098cff43a8f0f8ef12ed373862c",
     "package_class": "complete",
-    "producing_core_version": "0.6.0-rc.6",
+    "producing_core_version": "0.6.0-rc.7",
     "component_count": 9,
     "entry_count": 23,
     "payload_bytes": 30581,
@@ -100,7 +100,7 @@
     "integrity": "not_checked",
     "compatibility": "supported",
     "authenticity": "unsigned",
-    "transport_digest": "sha256:81d94fbbe6de8ee05379859dce57bc481065b7659823a9866e281a0857c87f6d",
+    "transport_digest": "sha256:24338c3fc34a52bea8f518d2ce8c7494e62b52a06b44ec65478dca77c6dc7e1b",
     "ontology_composition": {
       "contract": "graphforge-ontology-composition/1",
       "activation_profile": {

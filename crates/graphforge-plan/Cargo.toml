@@ -10,9 +10,9 @@ homepage.workspace = true
 documentation.workspace = true
 
 [dependencies]
-graphforge-value = { version = "0.6.0-rc.6", path = "../graphforge-value" }
-graphforge-core = { version = "0.6.0-rc.6", path = "../graphforge-core" }
-graphforge-ir = { version = "0.6.0-rc.6", path = "../graphforge-ir" }
+graphforge-value = { version = "0.6.0-rc.7", path = "../graphforge-value" }
+graphforge-core = { version = "0.6.0-rc.7", path = "../graphforge-core" }
+graphforge-ir = { version = "0.6.0-rc.7", path = "../graphforge-ir" }
 datafusion = { workspace = true }
 thiserror = { workspace = true }
 
