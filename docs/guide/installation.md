@@ -18,10 +18,12 @@ npm install @curatelabs/graphforge@0.6.0-rc.7 apache-arrow@21.2.0
 npx --yes @curatelabs/graphforge-cli@0.6.0-rc.7 --version
 ```
 
-Use the Python or Node setup below first. Publication is not full launch
-qualification: [the earlier rc.6 consumer results](https://github.com/CurateLabs/graphforge/issues/1209#issuecomment-6460385114)
-cover local Linux x86-64 consumers; #1209 must qualify rc.7 and the
-[production Hub journey](portable-projects.md#public-hub-launch-path) separately.
+Use the Python or Node setup below first. The [rc.7 consumer results](https://github.com/CurateLabs/graphforge/issues/1209#issuecomment-6587486441)
+establish Rust/Node queries and durable reopen, Python/Jupyter kernel execution,
+CLI retention and installed skills on Linux x86-64/ext4. These do not qualify
+other entry environments or the
+[production Hub journey](portable-projects.md#public-hub-launch-path), which
+still fails with rc.7. Publication is not full launch qualification.
 Later source builds with the same version label are distinct artifacts; record
 the source revision as well as the version. The selected launch candidate must
 be rechecked before announcement.

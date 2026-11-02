@@ -23,13 +23,14 @@ progress, and typed failures.
 
 ## Public Hub launch path
 
-**Qualification pending.** This is the required coordinated launch journey,
-not a claim that production is ready. The
-[2026-10-28 production checkpoint](https://github.com/CurateLabs/graphforge/issues/1209#issuecomment-6466493328)
-found the intended `opendata/openalex` discovery unavailable with rc.6; it does
-not qualify rc.7. The older advertised `openalex/openalex` fixture is not a
-compatible substitute. Production clone, reopen/query, continuation,
-publish-back and rediscovery still require rc.7 qualification.
+**Production qualification pending.** This is the required coordinated launch
+journey, not a claim that production is ready. In the
+[2026-11-02 rc.7 production check](https://github.com/CurateLabs/graphforge/issues/1209#issuecomment-6587486441),
+both `opendata/openalex` clone forms fail with `hub.not_found`, creating no
+destination. The older advertised `openalex/openalex` forms fail with
+`hub.malformed_response`: their manifest lacks the producing Core version.
+Production clone, reopen/query, continuation, publish-back and rediscovery remain
+blocked; local consumer success does not qualify this journey.
 Use the [in-memory first graph](quickstart.md) now, or the
 [local save/reopen tutorial](tutorial.md) on supported storage.
 
