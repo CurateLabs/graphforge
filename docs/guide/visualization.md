@@ -93,7 +93,7 @@ From the repository root, explicitly install the current published candidate
 instead of the example manifest's historical engine and Arrow pins:
 
 ```bash
-npm install --prefix examples/visualization --no-save --package-lock=false @curatelabs/graphforge@0.6.0-rc.6 apache-arrow@21.2.0
+npm install --prefix examples/visualization --no-save --package-lock=false @curatelabs/graphforge@0.6.0-rc.7 apache-arrow@21.2.0
 export GRAPHFORGE_NODE_PATH="$PWD/examples/visualization/node_modules/@curatelabs/graphforge/index.js"
 ```
 
