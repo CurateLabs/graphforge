@@ -3,14 +3,14 @@
 Comparable, executable paths from a GraphForge public-API result to interactive
 visualizations for:
 
-| Runtime | Library | Entry point |
-| --- | --- | --- |
-| Python | Plotly | `python/plotly_example.py` |
-| Python | Jaal | `python/jaal_example.py` |
-| Python | PyVis | `python/pyvis_example.py` |
-| Node.js | Plotly.js | `node/plotly_example.mjs` |
+| Runtime | Library      | Entry point                  |
+| ------- | ------------ | ---------------------------- |
+| Python  | Plotly       | `python/plotly_example.py`   |
+| Python  | Jaal         | `python/jaal_example.py`     |
+| Python  | PyVis        | `python/pyvis_example.py`    |
+| Node.js | Plotly.js    | `node/plotly_example.mjs`    |
 | Node.js | Cytoscape.js | `node/cytoscape_example.mjs` |
-| Node.js | Sigma.js | `node/sigma_example.mjs` |
+| Node.js | Sigma.js     | `node/sigma_example.mjs`     |
 
 Reader-facing guide: [`docs/guide/visualization.md`](../../docs/guide/visualization.md).
 
@@ -29,7 +29,7 @@ python -m pip install -r examples/visualization/requirements.txt
 python examples/visualization/dataset/fetch.py
 
 # Node (from repo root; explicitly select the published candidate)
-npm install --prefix examples/visualization --no-save --package-lock=false @curatelabs/graphforge@0.6.0-rc.6 apache-arrow@21.2.0
+npm install --prefix examples/visualization --no-save --package-lock=false @curatelabs/graphforge@0.6.0-rc.7 apache-arrow@21.2.0
 export GRAPHFORGE_NODE_PATH="$PWD/examples/visualization/node_modules/@curatelabs/graphforge/index.js"
 ```
 

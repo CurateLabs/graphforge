@@ -9,19 +9,21 @@ pre-release: the latest release is older and does not implement everything
 described here. [GitHub releases](https://github.com/CurateLabs/graphforge/releases)
 lists what is available; a [source build](#build-from-source) also works.
 
-The currently published candidate is `0.6.0-rc.6` (PyPI spelling `0.6.0rc6`).
+The currently published candidate is `0.6.0-rc.7` (PyPI spelling `0.6.0rc7`).
 For a repeatable evaluation, pin it instead of following `--pre` or `@next`:
 
 ```bash
-python -m pip install "graphforge==0.6.0rc6"
-npm install @curatelabs/graphforge@0.6.0-rc.6 apache-arrow
-npx --yes @curatelabs/graphforge-cli@0.6.0-rc.6 --version
+python -m pip install "graphforge==0.6.0rc7"
+npm install @curatelabs/graphforge@0.6.0-rc.7 apache-arrow@21.2.0
+npx --yes @curatelabs/graphforge-cli@0.6.0-rc.7 --version
 ```
 
-Use the Python or Node setup below first. Publication is not full launch
-qualification: [#1209's current results](https://github.com/CurateLabs/graphforge/issues/1209#issuecomment-6460385114)
-cover local Linux x86-64 consumers, while the
-[production Hub journey](portable-projects.md#public-hub-launch-path) is blocked.
+Use the Python or Node setup below first. The [rc.7 consumer results](https://github.com/CurateLabs/graphforge/issues/1209#issuecomment-6587486441)
+establish Rust/Node queries and durable reopen, Python/Jupyter kernel execution,
+CLI retention and installed skills on Linux x86-64/ext4. These do not qualify
+other entry environments or the
+[production Hub journey](portable-projects.md#public-hub-launch-path), which
+still fails with rc.7. Publication is not full launch qualification.
 Later source builds with the same version label are distinct artifacts; record
 the source revision as well as the version. The selected launch candidate must
 be rechecked before announcement.

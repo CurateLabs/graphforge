@@ -23,13 +23,14 @@ progress, and typed failures.
 
 ## Public Hub launch path
 
-**Qualification pending.** This is the required coordinated launch journey,
-not a claim that production is ready. The
-[executed first-use check](https://github.com/CurateLabs/graphforge/issues/1209#issuecomment-6460385114)
-found the intended `opendata/openalex` production discovery unavailable; both
-clone forms below refuse with `hub.not_found`. The older advertised
-`openalex/openalex` fixture is not a compatible substitute. Production
-reopen/query, continuation, publish-back and rediscovery remain unqualified.
+**Production qualification pending.** This is the required coordinated launch
+journey, not a claim that production is ready. In the
+[2026-11-02 rc.7 production check](https://github.com/CurateLabs/graphforge/issues/1209#issuecomment-6587486441),
+both `opendata/openalex` clone forms fail with `hub.not_found`, creating no
+destination. The older advertised `openalex/openalex` forms fail with
+`hub.malformed_response`: their manifest lacks the producing Core version.
+Production clone, reopen/query, continuation, publish-back and rediscovery remain
+blocked; local consumer success does not qualify this journey.
 Use the [in-memory first graph](quickstart.md) now, or the
 [local save/reopen tutorial](tutorial.md) on supported storage.
 
@@ -41,10 +42,10 @@ production adoption. Before cloning, it must identify its question, license,
 producing Core version, default ref and immutable package or research Version.
 Do not treat a displayed date as a research Version UUID.
 
-The replacement source fixture is a **synthetic OpenAlex-themed GraphForge
+The rc.7 source fixture is a **synthetic OpenAlex-themed GraphForge
 example**, dedicated under CC0-1.0 and maintained by GraphForge. It contains no
 real OpenAlex records and has no official OpenAlex or OurResearch affiliation.
-Its [source and native reopen tests](https://github.com/CurateLabs/graphforge/blob/main/tests/fixtures/hub/README.md)
+Its [source and native reopen tests](https://github.com/CurateLabs/graphforge/blob/v0.6.0-rc.7/tests/fixtures/hub/README.md)
 describe two invented authors, three works and four authorship relationships.
 Those are source-fixture expectations, not verified production counts.
 
@@ -52,11 +53,11 @@ Use Node.js 20+, Python 3.10+ for the query, and the
 [supported native platform and durable filesystem](installation.md#status-and-limits).
 Prepare an isolated Python environment as described in
 [Installation](installation.md#python). The currently published candidate is
-`0.6.0-rc.6` (PyPI spelling `0.6.0rc6`):
+`0.6.0-rc.7` (PyPI spelling `0.6.0rc7`):
 
 ```bash
-npx --yes @curatelabs/graphforge-cli@0.6.0-rc.6 --version
-python -m pip install "graphforge==0.6.0rc6"
+npx --yes @curatelabs/graphforge-cli@0.6.0-rc.7 --version
+python -m pip install "graphforge==0.6.0rc7"
 ```
 
 This installs/invokes those exact published packages. It does not select the final
@@ -72,11 +73,11 @@ candidate, both accepted identity forms must produce the same selected state
 in separate new directories:
 
 ```bash
-npx --yes @curatelabs/graphforge-cli@0.6.0-rc.6 --json clone opendata/openalex openalex
-npx --yes @curatelabs/graphforge-cli@0.6.0-rc.6 --json clone https://graphforge.sh/opendata/openalex openalex-copy
+npx --yes @curatelabs/graphforge-cli@0.6.0-rc.7 --json clone opendata/openalex openalex
+npx --yes @curatelabs/graphforge-cli@0.6.0-rc.7 --json clone https://graphforge.sh/opendata/openalex openalex-copy
 ```
 
-At present these commands fail at discovery; do not continue after that failure.
+Stop if either clone fails; do not continue after a discovery failure.
 Successful clone must fully verify and durably reopen the package. Compare the
 receipts' `package_digest` and `immutable_version`. Obtain the producing Core
 version and default ref from the verified Hub discovery documents; they are not
@@ -140,7 +141,7 @@ absolute path.
 
 ```bash
 GF_NATIVE_CLI_ROOT="$PWD/graphforge-native-cli"
-cargo install --locked --root "$GF_NATIVE_CLI_ROOT" --version 0.6.0-rc.6 graphforge-cli
+cargo install --locked --root "$GF_NATIVE_CLI_ROOT" --version 0.6.0-rc.7 graphforge-cli
 "$GF_NATIVE_CLI_ROOT/bin/gf" --version
 "$GF_NATIVE_CLI_ROOT/bin/gf" --project openalex publish OWNER/REPOSITORY --ref main
 "$GF_NATIVE_CLI_ROOT/bin/gf" --json hub list OWNER/REPOSITORY
@@ -733,12 +734,12 @@ authenticity is absent.
 
 All surfaces call the same Rust authority:
 
-| Workflow         | Rust API authority                          | CLI                    |
-| ---------------- | ------------------------------------------- | ---------------------- |
+| Workflow         | Rust API authority                       | CLI                    |
+| ---------------- | ---------------------------------------- | ---------------------- |
 | Preview          | `GraphForge::preview_portable_selection` | `portable preview`     |
-| Export           | `GraphForge::export_portable`            | `export`      |
+| Export           | `GraphForge::export_portable`            | `export`               |
 | Inspect / verify | `verify_portable`                        | `portable verify`      |
-| Complete import  | `GraphForge::import_portable`            | `import`      |
+| Complete import  | `GraphForge::import_portable`            | `import`               |
 | OCI publish      | `publish_portable_oci`                   | `portable publish-oci` |
 | OCI pull         | `pull_portable_oci`                      | `portable pull-oci`    |
 
