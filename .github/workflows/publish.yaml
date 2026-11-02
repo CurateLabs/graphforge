@@ -127,12 +127,20 @@ jobs:
         env:
           WHEEL_TAG: ${{ matrix.wheel_tag }}
         run: |
-          wheels=(dist/*.whl)
-          test "${#wheels[@]}" -eq 1
-          case "${wheels[0]}" in
-            *"-${WHEEL_TAG}.whl") ;;
-            *) printf 'wheel %s does not carry tag %s\n' "${wheels[0]}" "$WHEEL_TAG" >&2; exit 1 ;;
-          esac
+          uv run --no-project --with packaging python - <<'PYTHON'
+          import os
+          from pathlib import Path
+          from packaging.tags import parse_tag
+          from packaging.utils import parse_wheel_filename
+
+          wheels = list(Path("dist").glob("*.whl"))
+          if len(wheels) != 1:
+              raise SystemExit(f"expected one wheel, found {len(wheels)}")
+          actual = parse_wheel_filename(wheels[0].name)[3]
+          expected = parse_tag(os.environ["WHEEL_TAG"])
+          if actual != expected:
+              raise SystemExit(f"wheel {wheels[0]} carries {actual}, expected {expected}")
+          PYTHON
 
       # The manylinux container writes target/ as root; reclaim it so the
       # installed-wheel tests can launch Cargo on the host runner.
