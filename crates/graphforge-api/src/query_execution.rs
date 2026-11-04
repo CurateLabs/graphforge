@@ -36,34 +36,16 @@ impl GraphForge {
         if ast.clauses.is_empty() {
             return Err(GfError::Validation("empty query".into()));
         }
-        let plan = Binder::new(
-            self.ontology.clone(),
-            self.runtime_catalog.clone(),
-            self.ontology_mode,
-        )
-        .with_procedures(self.procedure_snapshot())
-        .bind(&ast)
-        .map_err(|errs| bind_errors_to_gferror(&errs))?;
-        if plan.ops.iter().any(|op| {
-            matches!(
-                op,
-                GraphOp::Create { .. }
-                    | GraphOp::Merge { .. }
-                    | GraphOp::Delete { .. }
-                    | GraphOp::Set { .. }
-                    | GraphOp::Remove { .. }
-            )
-        }) {
+        // Refuse writes before binding, even for callers with a writable facade.
+        if ast.has_mutation_clauses() {
             return Err(GfError::Project {
                 code: ProjectErrorCode::ReadOnlyView,
                 message: "checkpoint views are read-only".into(),
             });
         }
-        shape_result(
-            self.run_plan(&plan, &HashMap::new())?,
-            self.ontology_mode,
-            self.ontology.as_ref(),
-        )
+        // Retained views use their frozen composition and semantic storage
+        // bindings through the same query pipeline as the current Project.
+        self.run_query_with_publish(cypher, &HashMap::new(), false)
     }
 
     /// Execute an openCypher query and return its Arrow-backed result.
@@ -384,37 +366,6 @@ impl GraphForge {
         let result = result.map_err(publicize_query_error)?;
         shape_result(result, self.ontology_mode, self.ontology.as_ref())
             .map_err(publicize_query_error)
-    }
-
-    /// Build a session reflecting the current runtime catalog and run `plan`,
-    /// routing CREATE to the write path and reads to `execute_plan` with `$name`
-    /// parameters substituted where the lowered logical plan still carries them.
-    fn run_plan(
-        &self,
-        plan: &GraphPlan,
-        params: &HashMap<String, IrLiteral>,
-    ) -> Result<ExecutionResult, GfError> {
-        self.run_plan_with_publish(plan, params, true)
-    }
-
-    fn run_plan_with_publish(
-        &self,
-        plan: &GraphPlan,
-        params: &HashMap<String, IrLiteral>,
-        publish: bool,
-    ) -> Result<ExecutionResult, GfError> {
-        self.run_plan_with_publish_and_bindings(
-            plan,
-            params,
-            publish,
-            None,
-            None,
-            None,
-            None,
-            false,
-            false,
-            ReadVisibility::Acquire,
-        )
     }
 
     #[allow(clippy::too_many_lines)] // one visibility lock spans execution and publication
