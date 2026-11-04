@@ -1066,6 +1066,14 @@ fn import_materialized(
             composition_captures.insert(written.participant.source.clone(), written.capture);
             participants.push(written.participant);
         }
+        // A re-export can carry a previous import's non-authoritative candidate.
+        // Its bytes were authenticated and its runtime descriptor validated above;
+        // the current verified package owns the newly reconstructed staging record.
+        participants.retain(|participant| {
+            participant.participant.capability_id != crate::WORKSPACE_CAPABILITY_ID
+                || participant.participant.record_family_id
+                    != crate::WORKSPACE_PORTABLE_ONTOLOGY_STAGING_FAMILY
+        });
         participants.push(candidate);
         Some(receipt)
     } else {
@@ -1950,6 +1958,7 @@ fn parse_digest(value: &str) -> Result<[u8; 32], PortableError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    mod composition;
     mod crash_into_fresh_target;
     mod participant_kind;
     mod returned_errors;
@@ -2596,136 +2605,6 @@ mod tests {
         )
         .unwrap();
         (package_parent, package)
-    }
-
-    #[test]
-    fn durable_composition_staging_reopens_replays_and_fails_without_partial_authority() {
-        let (_package_parent, package) = composition_package();
-        let parent = tempfile::tempdir().unwrap();
-        let target = parent.path().join("imported");
-        let transaction = Uuid::new_v4();
-        let generation = Uuid::new_v4();
-        let paths = crate::StorageAllocationOperation::project_paths(&target).unwrap();
-        let allocation = crate::StorageAllocationOperation::from_paths(&paths).unwrap();
-        let first = import_complete_portable_with_allocation(
-            &package,
-            &target,
-            transaction,
-            generation,
-            &supported(),
-            PortableLimits::default(),
-            None,
-            |_| {},
-            Some(&allocation),
-        )
-        .unwrap();
-        let expected = crate::StorageAllocationOperation::from_paths(&paths).unwrap();
-        let observed = serde_json::to_value(allocation.snapshot().unwrap()).unwrap();
-        let expected = serde_json::to_value(expected.snapshot().unwrap()).unwrap();
-        assert_eq!(observed["active"], expected["active"]);
-        assert_eq!(observed["owners"], expected["owners"]);
-        assert_eq!(
-            first.transient_peak_allocated_bytes,
-            allocation.totals().unwrap().1
-        );
-        assert!(first.staged_composition.is_some());
-        assert!(first.materialized_cleanup.parent_sync_confirmed);
-        assert_eq!(
-            first.materialized_cleanup.removed_identity_allocated_bytes,
-            first.materialized_identity_allocated_bytes
-        );
-        let reopened = crate::resolve_project_generation(&target).unwrap();
-        let staged = load_portable_ontology_staging(&reopened, PortableLimits::default())
-            .unwrap()
-            .expect("verified candidate must survive reopen");
-        assert_eq!(staged.package_digest, first.package_digest);
-        assert!(
-            reopened
-                .participant_snapshots()
-                .unwrap()
-                .iter()
-                .any(|entry| {
-                    entry.record_family_id == crate::WORKSPACE_ONTOLOGY_COMPOSITION_FAMILY
-                })
-        );
-        assert!(
-            crate::semantic_storage_bindings(&reopened)
-                .unwrap()
-                .is_some()
-        );
-
-        let replay = import_complete_portable(
-            &package,
-            &target,
-            transaction,
-            generation,
-            &supported(),
-            PortableLimits::default(),
-            None,
-        )
-        .unwrap();
-        assert_eq!(replay.publication.generation_uuid, generation);
-        assert!(replay.materialized_cleanup.parent_sync_confirmed);
-        assert_eq!(
-            replay.materialized_cleanup.removed_identity_allocated_bytes,
-            replay.materialized_identity_allocated_bytes
-        );
-        let conflict = import_complete_portable(
-            &package,
-            &target,
-            transaction,
-            Uuid::new_v4(),
-            &supported(),
-            PortableLimits::default(),
-            None,
-        )
-        .unwrap_err();
-        assert_eq!(conflict.code, PortableErrorCode::ConcurrentMutation);
-        assert_eq!(
-            crate::resolve_project_generation(&target)
-                .unwrap()
-                .generation_uuid(),
-            generation
-        );
-
-        for (name, capabilities, cancelled, expected) in [
-            (
-                "cancelled",
-                supported(),
-                AtomicBool::new(true),
-                PortableErrorCode::Cancelled,
-            ),
-            (
-                "unsupported",
-                Vec::new(),
-                AtomicBool::new(false),
-                PortableErrorCode::Incompatible,
-            ),
-        ] {
-            let failed = parent.path().join(name);
-            let transaction = Uuid::new_v4();
-            let error = import_complete_portable(
-                &package,
-                &failed,
-                transaction,
-                Uuid::new_v4(),
-                &capabilities,
-                PortableLimits::default(),
-                Some(&cancelled),
-            )
-            .unwrap_err();
-            assert_eq!(error.code, expected, "{name}");
-            assert!(!failed.exists(), "{name} published a target");
-            let residue = parent
-                .path()
-                .join(format!(".{name}.portable-{}", transaction.hyphenated()));
-            assert!(!residue.exists(), "{name} retained private staging");
-            let owner = residue.with_file_name(format!(
-                ".{name}.portable-{}.owner",
-                transaction.hyphenated()
-            ));
-            assert!(!owner.exists(), "{name} retained its ownership marker");
-        }
     }
 
     #[test]
