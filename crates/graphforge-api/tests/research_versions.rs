@@ -1,5 +1,5 @@
 //! Real facade evidence for immutable research, restoration and retained closure.
-use arrow::array::{BinaryArray, Int64Array};
+use arrow::array::{BinaryArray, Int64Array, StringArray};
 use graphforge_api::*;
 use std::collections::BTreeSet;
 use uuid::Uuid;
@@ -56,6 +56,128 @@ fn version_id(operation: &ResearchOperation) -> Uuid {
         ResearchMutation::Register(spec) => spec.version_uuid,
         _ => panic!("capture"),
     }
+}
+
+fn composed_fixture(root: &std::path::Path) -> GraphForge {
+    GraphForge::import_portable(
+        root,
+        &PortableImportRequest {
+            input: std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../tests/fixtures/hub/generated/v1/objects/opendata-openalex.gfpb"),
+            operation_id: OperationId(Uuid::now_v7()),
+            limits: PortableLimits::default(),
+        },
+        None,
+    )
+    .unwrap();
+    GraphForge::new(root.to_str()).unwrap()
+}
+
+const AUTHOR_COUNTS: &str = "MATCH (a:Author)-[:AUTHORED]->(w:Work) \
+    RETURN a.name AS author, count(w) AS works ORDER BY author";
+
+fn author_counts(result: ExecutionResult) -> Vec<(String, i64)> {
+    result
+        .batches
+        .iter()
+        .flat_map(|batch| {
+            let authors = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap();
+            let works = batch
+                .column(1)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap();
+            (0..batch.num_rows()).map(move |i| (authors.value(i).to_owned(), works.value(i)))
+        })
+        .collect()
+}
+
+#[test]
+fn retained_composition_version_resolves_labels_relations_and_original_properties() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("project");
+    let mut graph = composed_fixture(&root);
+    let expected = vec![("Ada Example".into(), 2), ("Basil Sample".into(), 2)];
+    assert_eq!(
+        author_counts(graph.execute(AUTHOR_COUNTS).unwrap()),
+        expected
+    );
+    let captured = capture(&mut graph, Uuid::now_v7());
+    let version = version_id(&captured);
+    graph
+        .execute("MATCH (a:Author {name:'Ada Example'}) SET a.name='Later author'")
+        .unwrap();
+    drop(graph);
+    let graph = GraphForge::new(root.to_str()).unwrap();
+    let before = graph.research_project_summary().unwrap().identity;
+    let view = graph.open_research_version(version).unwrap();
+    assert_eq!(
+        author_counts(view.execute(AUTHOR_COUNTS).unwrap()),
+        expected
+    );
+    for mutation in [
+        "CREATE (:Author {name:'Unexpected'})",
+        "MATCH (a:Author) SET a.name='Unexpected'",
+        "MATCH (a:Author) REMOVE a.name",
+        "MATCH ()-[r:AUTHORED]->() DELETE r",
+        "MERGE (:Author {name:'Unexpected'})",
+    ] {
+        assert_eq!(
+            view.execute(mutation).unwrap_err().code(),
+            "GF_READ_ONLY_VIEW"
+        );
+    }
+    assert_eq!(
+        author_counts(view.execute(AUTHOR_COUNTS).unwrap()),
+        expected
+    );
+    assert_eq!(graph.research_project_summary().unwrap().identity, before);
+    assert_eq!(
+        author_counts(graph.execute(AUTHOR_COUNTS).unwrap()),
+        vec![("Basil Sample".into(), 2), ("Later author".into(), 2)]
+    );
+}
+
+#[test]
+fn retained_composition_checkpoint_resolves_labels_relations_and_stays_pinned() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("project");
+    let graph = composed_fixture(&root);
+    graph
+        .checkpoint(CheckpointRequest {
+            name: "Composed".into(),
+            description: None,
+            idempotency_key: OperationId(Uuid::now_v7()),
+            actor_uuid: None,
+        })
+        .unwrap();
+    graph
+        .execute("MATCH (a:Author {name:'Ada Example'}) SET a.name='Later author'")
+        .unwrap();
+    drop(graph);
+    let graph = GraphForge::new(root.to_str()).unwrap();
+    let before = graph.research_project_summary().unwrap().identity;
+    let view = graph.open_checkpoint("Composed").unwrap();
+    let expected = vec![("Ada Example".into(), 2), ("Basil Sample".into(), 2)];
+    assert_eq!(
+        author_counts(view.execute(AUTHOR_COUNTS).unwrap()),
+        expected
+    );
+    assert_eq!(
+        view.execute("MATCH (a:Author) SET a.name='Unexpected'")
+            .unwrap_err()
+            .code(),
+        "GF_READ_ONLY_VIEW"
+    );
+    assert_eq!(
+        author_counts(view.execute(AUTHOR_COUNTS).unwrap()),
+        expected
+    );
+    assert_eq!(graph.research_project_summary().unwrap().identity, before);
 }
 
 #[test]
