@@ -26,9 +26,9 @@ use graphforge_hub_publish::{
     CommitRequest, DEVICE_CODE_GRANT_TYPE, DeviceAuthorizationResponse, DevicePoll,
     HUB_PUBLISH_FORMAT, HubErrorBody, HubMethod, HubPublishErrorCode, HubRequest, HubResponse,
     ObjectDeclaration, OpenSessionRequest, OperationStatus, PUBLISH_NEGOTIATION_CAPABILITY,
-    PublishCapabilities, PublishIntent, PublishReceipt, PublishToken, SessionResponse,
-    UPLOAD_OFFSET_HEADER, UploadStatus, UploadTarget, canonical_json, content_range,
-    parse_unique_json, publish_scope, sha256_digest,
+    PublishCapabilities, PublishErrorReason, PublishIntent, PublishReceipt, PublishToken,
+    SessionResponse, UPLOAD_OFFSET_HEADER, UploadStatus, UploadTarget, canonical_json,
+    content_range, parse_unique_json, publish_scope, sha256_digest,
 };
 use publication::{
     ManifestInputs, PACKAGE_MEDIA_TYPE, SUMMARY_MEDIA_TYPE, VerifiedBundle, build_manifest,
@@ -75,10 +75,26 @@ const MAX_CONTROL_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 /// Format of the canonical intent whose digest identifies what an operation publishes.
 const INTENT_FORMAT: &str = "graphforge-hub-publish-intent/1";
 
+/// Mutually exclusive optional visibility flags at the CLI boundary.
+#[derive(Args, Default)]
+#[group(multiple = false)]
+pub(crate) struct VisibilityArgs {
+    /// Create a public repository, or require an existing public repository.
+    /// Requires the Hub's publish-visibility capability; never changes visibility.
+    #[arg(long, conflicts_with = "private")]
+    pub public: bool,
+    /// Create a private repository, or require an existing private repository.
+    /// Requires a plan and the Hub's publish-visibility capability.
+    #[arg(long, conflicts_with = "public")]
+    pub private: bool,
+}
+
 /// Publish a research Branch head or exact Version to a GraphForge Hub.
 #[derive(Args)]
 #[command(group(ArgGroup::new("selection").required(true).args(["git_ref", "version_uuid"])))]
 pub(crate) struct PublishArgs {
+    #[command(flatten)]
+    pub visibility: VisibilityArgs,
     /// Explicitly replace a non-descendant head under the current revision lease.
     #[arg(long)]
     pub rewrite: bool,
@@ -116,6 +132,21 @@ pub(crate) struct PublishArgs {
     /// Repeat for multiple images; never reads unselected workbench files.
     #[arg(long = "preview")]
     pub previews: Vec<std::path::PathBuf>,
+}
+
+impl PublishArgs {
+    fn visibility(&self) -> Result<Option<graphforge_hub_publish::PublishVisibility>, GfError> {
+        use graphforge_hub_publish::PublishVisibility;
+        match (self.visibility.public, self.visibility.private) {
+            (true, false) => Ok(Some(PublishVisibility::Public)),
+            (false, true) => Ok(Some(PublishVisibility::Private)),
+            (false, false) => Ok(None),
+            (true, true) => Err(publish_error(
+                HubPublishErrorCode::InvalidInput,
+                "choose only one of --public and --private",
+            )),
+        }
+    }
 }
 
 /// How the CLI obtains its publish token.
@@ -258,14 +289,21 @@ fn run_command(
     output: &mut dyn Write,
     diagnostics: &mut crate::Diagnostics<'_>,
 ) -> Result<(), GfError> {
-    run_command_with_token_env(args, None, project, project_dir, json, output, diagnostics)
+    run_command_with_transport(
+        &crate::hub_http::HubTransport::new(),
+        args,
+        project,
+        project_dir,
+        json,
+        output,
+        diagnostics,
+    )
 }
 
-/// `gf publish` and `gf push`: `token_env` names the variable holding the publish
-/// token, otherwise `GRAPHFORGE_HUB_PUBLISH_TOKEN` is read.
-pub(crate) fn run_command_with_token_env(
+/// The actual command path with an injectable transport for native acceptance.
+fn run_command_with_transport(
+    transport: &dyn Transport,
     args: &PublishArgs,
-    token_env: Option<&str>,
     project: Option<PathBuf>,
     project_dir: Option<PathBuf>,
     json: bool,
@@ -273,7 +311,7 @@ pub(crate) fn run_command_with_token_env(
     diagnostics: &mut crate::Diagnostics<'_>,
 ) -> Result<(), GfError> {
     // Locations and arguments are validated before any credential or network use.
-    let (_, base) = parse_input(&args.repository)?;
+    let (identity, base) = parse_input(&args.repository)?;
     if let Some(origin) = &args.fork_of {
         parse_input(origin)?;
     }
@@ -283,23 +321,40 @@ pub(crate) fn run_command_with_token_env(
         args.protection_bypass_env.as_deref(),
         |name| std::env::var(name),
     )?;
-    let explicit = publish_token(token_env)?;
+    let resolution = if let Some(visibility) = args.visibility()? {
+        let resolution = resolve_publication(transport, &identity, &base, bypass.as_ref())?;
+        graphforge_hub_publish::require_visibility_capability(
+            &resolution.capabilities,
+            Some(visibility),
+        )
+        .map_err(|error| protocol(&error))?;
+        Some(resolution)
+    } else {
+        None
+    };
+    let explicit = publish_token(None)?;
     let path = crate::resolve_project_path(project, project_dir)?;
     let path = path
         .to_str()
         .ok_or_else(|| GfError::Validation("--project must be valid UTF-8".into()))?;
-    let transport = crate::hub_http::HubTransport::new();
-    publish_with_credentials(&transport, args, explicit, bypass.as_ref(), |environment| {
-        open_and_publish(
-            &transport,
-            path,
-            args,
-            environment,
-            json,
-            output,
-            diagnostics,
-        )
-    })
+    publish_with_resolution(
+        transport,
+        args,
+        explicit,
+        bypass.as_ref(),
+        resolution,
+        |environment| {
+            open_and_publish(
+                transport,
+                path,
+                args,
+                environment,
+                json,
+                output,
+                diagnostics,
+            )
+        },
+    )
 }
 
 /// The publish token the process supplies: the variable `token_env` names, else
@@ -332,12 +387,29 @@ pub(crate) fn publish_with_credentials(
     bypass: Option<&crate::hub_http::DiscoveryCredentials>,
     publish_with: impl FnOnce(&mut PublishEnvironment<'_>) -> Result<(), GfError>,
 ) -> Result<(), GfError> {
+    publish_with_resolution(transport, args, explicit, bypass, None, publish_with)
+}
+
+fn publish_with_resolution(
+    transport: &dyn Transport,
+    args: &PublishArgs,
+    explicit: Option<PublishToken>,
+    bypass: Option<&crate::hub_http::DiscoveryCredentials>,
+    resolution: Option<PublicationResolution>,
+    publish_with: impl FnOnce(&mut PublishEnvironment<'_>) -> Result<(), GfError>,
+) -> Result<(), GfError> {
     use std::io::IsTerminal as _;
+    let visibility = args.visibility()?;
     let streaming = DEVICE_FLOW_ALLOWED.load(Ordering::Relaxed);
     let interactive =
         streaming && std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
     let (identity, base) = parse_input(&args.repository)?;
-    let resolution = resolve_publication(transport, &identity, &base, bypass)?;
+    let resolution = match resolution {
+        Some(resolution) => resolution,
+        None => resolve_publication(transport, &identity, &base, bypass)?,
+    };
+    graphforge_hub_publish::require_visibility_capability(&resolution.capabilities, visibility)
+        .map_err(|error| protocol(&error))?;
     let (identity, base) = (resolution.identity.clone(), resolution.base.clone());
     let credential = select_credential(explicit, streaming, interactive, || {
         let grant = crate::auth::repository_token(
@@ -593,10 +665,40 @@ fn publish_error(code: HubPublishErrorCode, detail: &str) -> GfError {
     }
 }
 
+/// Fixed CLI guidance selected only from a validated typed reason.
+const fn reason_detail(reason: PublishErrorReason) -> &'static str {
+    match reason {
+        PublishErrorReason::PrivateRequiresPlan => {
+            "Private repositories need a plan. Publish to a public repository with --public, or upgrade. Publishing never changes an existing repository's visibility; change it on the Hub."
+        }
+        PublishErrorReason::VisibilityRequired => {
+            "Choose --public or --private. Private repositories need a plan."
+        }
+        PublishErrorReason::RepositoryIsPublic => {
+            "This repository is public. Publish with --public, or change its visibility on the Hub. Publishing never changes visibility."
+        }
+        PublishErrorReason::RepositoryIsPrivate => {
+            "This repository is private. Publish with --private, or change its visibility on the Hub. Publishing never changes visibility."
+        }
+        PublishErrorReason::InvalidVisibility => {
+            "Publish visibility must be exactly public or private."
+        }
+        PublishErrorReason::StorageCap => {
+            "The account storage cap is reached. Free published or pending storage, or upgrade."
+        }
+        PublishErrorReason::SessionCap => {
+            "The account publish-session cap is reached. Finish an open session before publishing again."
+        }
+    }
+}
+
 const fn code_detail(code: HubPublishErrorCode) -> &'static str {
     match code {
         HubPublishErrorCode::AuthDenied => "the Hub refused the publish credential",
         HubPublishErrorCode::EntitlementDenied => "the Hub refused the publication entitlement",
+        HubPublishErrorCode::VisibilityMismatch => {
+            "the requested visibility differs from the repository; change visibility on the Hub"
+        }
         HubPublishErrorCode::IdempotencyConflict => {
             "the operation identity was already used for a different publication"
         }
@@ -626,10 +728,20 @@ const fn code_detail(code: HubPublishErrorCode) -> &'static str {
 /// implies a publish outcome such as an idempotency conflict.
 fn hub_failure(response: &HubResponse) -> GfError {
     match serde_json::from_slice::<HubErrorBody>(&response.body) {
-        Ok(body) if body.code == HubPublishErrorCode::IdTaken && response.status != 409 => {
+        Ok(body)
+            if (matches!(
+                body.code,
+                HubPublishErrorCode::IdTaken | HubPublishErrorCode::VisibilityMismatch
+            ) && response.status != 409)
+                || (body.reason.is_some() && response.status != body.code.http_status()) =>
+        {
             network("Hub refusal status is invalid")
         }
-        Ok(body) => publish_error(body.code, code_detail(body.code)),
+        Ok(body) => publish_error(
+            body.code,
+            body.reason
+                .map_or_else(|| code_detail(body.code), reason_detail),
+        ),
         Err(_) => network("Hub returned an unsuccessful status"),
     }
 }
@@ -2094,6 +2206,7 @@ fn publish_inner(
     captured: &refusals::Capture,
     mut report: impl FnMut(Uuid) -> Result<(), GfError>,
 ) -> Result<PublishOutcome, GfError> {
+    let visibility = args.visibility()?;
     let (identity, base) = parse_input(&args.repository)?;
     let fork = args.fork_of.as_deref().map(parse_input).transpose()?;
     if fork.as_ref().is_some_and(|(origin, _)| *origin == identity) {
@@ -2148,6 +2261,8 @@ fn publish_inner(
         capabilities,
         ..
     } = resolution;
+    graphforge_hub_publish::require_visibility_capability(&capabilities, visibility)
+        .map_err(|error| protocol(&error))?;
     let confirmed = selection
         .branch_uuid
         .map(|branch_uuid| PublishedHead {
@@ -2408,10 +2523,14 @@ fn publish_inner(
     };
     negotiated_chunk_size(&capabilities.limits)?;
     let sessions = endpoint(&base, "publish/sessions");
-    let opened = session_response(&hub.control(
-        HubRequest::new(HubMethod::Post, sessions.as_str()).with_json(&open),
-        &token,
-    )?)?;
+    let mut open_request = HubRequest::new(HubMethod::Post, sessions.as_str()).with_json(&open);
+    if let Some(visibility) = visibility {
+        open_request = open_request.with_header(
+            graphforge_hub_publish::PUBLISH_VISIBILITY_HEADER,
+            visibility.as_str(),
+        );
+    }
+    let opened = session_response(&hub.control(open_request, &token)?)?;
     let (session_id, uploads) = match opened {
         SessionResponse::Complete { receipt } => {
             check_receipt(&receipt, &identity, operation_uuid)?;

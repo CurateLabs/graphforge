@@ -107,6 +107,13 @@ with `hub.auth_denied`. Clone does not prompt or store secrets in resume state,
 output, project files, or telemetry. Public clones without these flags read no
 credential variables.
 
+`gf publish --public owner/repository --ref main` requests public publishing.
+Use `--private` for a private repository with the required Hub plan. These
+mutually exclusive flags require the Hub's `publish-visibility` major 1
+capability; an unsupported flag fails before credentials or uploads. Publishing
+never changes an existing repository's visibility; change it on the Hub first.
+Omitting both flags preserves the Hub's default behavior.
+
 `gf publish` uses `GRAPHFORGE_HUB_PUBLISH_TOKEN` when supplied; otherwise it
 exchanges the saved session for the selected repository's publish capability.
 The existing interactive device-flow fallback remains available on compatible

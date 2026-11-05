@@ -37,6 +37,7 @@ mod remote_fetch;
 mod rewrite_prune;
 mod selection;
 mod tags;
+mod visibility;
 use credit::edit_by;
 use selection::{args, on_ref};
 

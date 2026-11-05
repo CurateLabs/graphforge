@@ -43,8 +43,52 @@ pub const PUBLISH_NEGOTIATION_CAPABILITY: &str = "publish-negotiation";
 /// Explicit lease-guarded rewrite and dependency-safe pruning.
 pub const HISTORY_MUTATION_CAPABILITY: &str = "history-mutation";
 
+/// Explicit repository visibility on session open, outside the signed document.
+pub const PUBLISH_VISIBILITY_CAPABILITY: &str = "publish-visibility";
+/// HTTP session-open header carrying an explicit visibility choice.
+pub const PUBLISH_VISIBILITY_HEADER: &str = "GraphForge-Visibility";
+
+/// Repository visibility requested by a publisher. Publishing never changes it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(tsify::Tsify))]
+#[serde(rename_all = "lowercase")]
+pub enum PublishVisibility {
+    /// Public repositories may be published without a private-repository plan.
+    Public,
+    /// Private repositories require the Hub's private-repository entitlement.
+    Private,
+}
+
+impl PublishVisibility {
+    /// Exact lowercase HTTP header value.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Public => "public",
+            Self::Private => "private",
+        }
+    }
+}
+
+/// Refuse an explicit visibility choice before obtaining credentials or uploading.
+pub fn require_visibility_capability(
+    capabilities: &PublishCapabilities,
+    visibility: Option<PublishVisibility>,
+) -> Result<(), HubPublishError> {
+    if visibility.is_some()
+        && !capabilities.capabilities.iter().any(|offered| {
+            offered.capability == PUBLISH_VISIBILITY_CAPABILITY && offered.major == 1
+        })
+    {
+        return Err(unsupported(
+            "Hub does not support explicit publish visibility",
+        ));
+    }
+    Ok(())
+}
+
 /// Capability names this release understands, with the major it supports.
-pub const SUPPORTED_CAPABILITIES: [(&str, u16); 7] = [
+pub const SUPPORTED_CAPABILITIES: [(&str, u16); 8] = [
     ("version-previews", 1),
     ("device-authorization", 1),
     ("publish-session", 1),
@@ -52,6 +96,7 @@ pub const SUPPORTED_CAPABILITIES: [(&str, u16); 7] = [
     (PUBLISH_NEGOTIATION_CAPABILITY, 1),
     (LARGE_OBJECT_PUBLISH_CAPABILITY, 1),
     (HISTORY_MUTATION_CAPABILITY, 1),
+    (PUBLISH_VISIBILITY_CAPABILITY, 1),
 ];
 
 const MAX_REQUIREMENTS: usize = 64;

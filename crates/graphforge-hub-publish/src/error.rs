@@ -29,6 +29,8 @@ pub enum HubPublishErrorCode {
     AuthDenied,
     /// Entitlement or quota denied publication.
     EntitlementDenied,
+    /// Requested visibility differs from the existing repository's visibility.
+    VisibilityMismatch,
     /// Same operation identity with a conflicting request.
     IdempotencyConflict,
     /// Ref advance rejected by an expected-revision precondition.
@@ -49,9 +51,10 @@ pub enum HubPublishErrorCode {
 
 impl HubPublishErrorCode {
     /// Every code, in declaration order.
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::AuthDenied,
         Self::EntitlementDenied,
+        Self::VisibilityMismatch,
         Self::IdempotencyConflict,
         Self::RefConflict,
         Self::NonFastForward,
@@ -68,6 +71,7 @@ impl HubPublishErrorCode {
         match self {
             Self::AuthDenied => "auth_denied",
             Self::EntitlementDenied => "entitlement_denied",
+            Self::VisibilityMismatch => "visibility_mismatch",
             Self::IdempotencyConflict => "idempotency_conflict",
             Self::RefConflict => "ref_conflict",
             Self::NonFastForward => "non_fast_forward",
@@ -89,7 +93,10 @@ impl HubPublishErrorCode {
         match self {
             Self::AuthDenied => 401,
             Self::EntitlementDenied => 403,
-            Self::IdempotencyConflict | Self::NonFastForward | Self::IdTaken => 409,
+            Self::IdempotencyConflict
+            | Self::NonFastForward
+            | Self::IdTaken
+            | Self::VisibilityMismatch => 409,
             Self::RefConflict => 412,
             Self::UnsupportedFuture | Self::IntegrityFailure => 422,
             Self::InvalidInput => 400,
@@ -126,6 +133,7 @@ impl HubPublishError {
         let body = HubErrorBody {
             code: HubPublishErrorCode::IdTaken,
             message: ID_TAKEN_MESSAGE.into(),
+            reason: None,
             items: Some(items.clone()),
         };
         body.validate()?;
@@ -148,6 +156,7 @@ impl HubPublishError {
         match self.code {
             HubPublishErrorCode::AuthDenied => "hub.publish.auth_denied",
             HubPublishErrorCode::EntitlementDenied => "hub.publish.entitlement_denied",
+            HubPublishErrorCode::VisibilityMismatch => "hub.publish.visibility_mismatch",
             HubPublishErrorCode::IdempotencyConflict => "hub.publish.idempotency_conflict",
             HubPublishErrorCode::RefConflict => "hub.publish.ref_conflict",
             HubPublishErrorCode::NonFastForward => "hub.publish.non_fast_forward",
@@ -183,6 +192,7 @@ impl HubPublishError {
             }
             .to_owned(),
             items: self.items.clone(),
+            reason: None,
         }
     }
 }
@@ -252,6 +262,55 @@ impl IdTakenItem {
     }
 }
 
+/// Bounded reason vocabulary for negotiated visibility and quota refusals.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(tsify::Tsify))]
+#[serde(rename_all = "snake_case")]
+pub enum PublishErrorReason {
+    /// A private publication needs a plan.
+    PrivateRequiresPlan,
+    /// The caller must choose a repository visibility.
+    VisibilityRequired,
+    /// The existing repository is public.
+    RepositoryIsPublic,
+    /// The existing repository is private.
+    RepositoryIsPrivate,
+    /// The visibility header has an invalid value.
+    InvalidVisibility,
+    /// The account has exhausted its published/pending byte allowance.
+    StorageCap,
+    /// The account has exhausted its concurrent session allowance.
+    SessionCap,
+}
+
+impl PublishErrorReason {
+    /// Every supported reason, in declaration order.
+    pub const ALL: [Self; 7] = [
+        Self::PrivateRequiresPlan,
+        Self::VisibilityRequired,
+        Self::RepositoryIsPublic,
+        Self::RepositoryIsPrivate,
+        Self::InvalidVisibility,
+        Self::StorageCap,
+        Self::SessionCap,
+    ];
+
+    /// Error code which owns this reason.
+    #[must_use]
+    pub const fn code(self) -> HubPublishErrorCode {
+        match self {
+            Self::PrivateRequiresPlan
+            | Self::VisibilityRequired
+            | Self::StorageCap
+            | Self::SessionCap => HubPublishErrorCode::EntitlementDenied,
+            Self::RepositoryIsPublic | Self::RepositoryIsPrivate => {
+                HubPublishErrorCode::VisibilityMismatch
+            }
+            Self::InvalidVisibility => HubPublishErrorCode::InvalidInput,
+        }
+    }
+}
+
 /// JSON error body `{code, message, items?}` returned by every Hub publish endpoint
 /// except the OAuth token endpoint (which uses RFC 6749 error bodies).
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -261,6 +320,9 @@ pub struct HubErrorBody {
     pub code: HubPublishErrorCode,
     /// Fixed server text. Clients render their own guidance and never echo it.
     pub message: String,
+    /// Typed refusal reason, present only for the negotiated extension.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<PublishErrorReason>,
     /// Sorted unique refused IDs, permitted only for `id_taken`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub items: Option<Vec<IdTakenItem>>,
@@ -272,6 +334,8 @@ struct UncheckedHubErrorBody {
     code: HubPublishErrorCode,
     message: String,
     #[serde(default, deserialize_with = "present")]
+    reason: Option<PublishErrorReason>,
+    #[serde(default, deserialize_with = "present")]
     items: Option<Vec<IdTakenItem>>,
 }
 
@@ -281,6 +345,7 @@ impl TryFrom<UncheckedHubErrorBody> for HubErrorBody {
         let body = Self {
             code: raw.code,
             message: raw.message,
+            reason: raw.reason,
             items: raw.items,
         };
         body.validate()?;
@@ -291,6 +356,9 @@ impl TryFrom<UncheckedHubErrorBody> for HubErrorBody {
 impl HubErrorBody {
     /// Validate refusal details without trusting server-provided prose.
     pub fn validate(&self) -> Result<(), HubPublishError> {
+        if self.reason.is_some_and(|reason| reason.code() != self.code) {
+            return Err(invalid("refusal reason does not match its error code"));
+        }
         if let Some(items) = &self.items {
             if self.code != HubPublishErrorCode::IdTaken
                 || items.is_empty()

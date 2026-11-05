@@ -175,6 +175,7 @@ escalate to a human when the obvious fix does not clear the failure.
 | --- | --- | --- | --- | --- |
 | `hub.unexpected_status` | ask a human | HTTP status without a Hub error body (for example a proxy): a protocol or Hub failure, never a transient one | Check for an outdated client or a proxy rewriting responses; ask the Hub operator | 2 |
 | `hub.publish.entitlement_denied` | ask a human | Quota or entitlement refused publication | Ask the account/Hub owner | 2 |
+| `hub.publish.visibility_mismatch` | fix input | Explicit visibility differs from the existing repository | Use its current visibility or change it on the Hub; publishing never changes visibility | 2 |
 | `hub.access_denied` | ask a human | The repository is private or the credential lacks access | Ask the repository owner for access or a scoped token | 2 |
 | `hub.malformed_response` | ask a human | The Hub response violated its contract | Possibly an outdated client: upgrade first; otherwise ask the Hub operator | 2 |
 | `hub.publish.internal` | ask a human | Hub internal failure (500) | Report to the Hub operator | 3 |

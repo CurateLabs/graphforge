@@ -23,7 +23,7 @@ pub use canonical::{canonical_json, parse_unique_json, sha256_digest, validate_d
 pub use commit::check_commit_manifest;
 pub use error::{
     GF_IDEMPOTENCY_CONFLICT, HubErrorBody, HubPublishError, HubPublishErrorCode, ID_TAKEN_MESSAGE,
-    IdTakenItem, MAX_ID_TAKEN_ITEMS,
+    IdTakenItem, MAX_ID_TAKEN_ITEMS, PublishErrorReason,
 };
 pub use exchange::{HubExchange, HubMethod, HubRequest, HubResponse};
 pub use history::{
@@ -47,11 +47,12 @@ pub use wire::{
     DeviceAuthorizationResponse, DevicePoll, HEX_PLACEHOLDER, HISTORY_MUTATION_CAPABILITY,
     HUB_PUBLISH_FORMAT, LARGE_OBJECT_PUBLISH_CAPABILITY, OAuthErrorBody, ObjectDeclaration,
     OpenSessionRequest, OperationStatus, PUBLISH_NEGOTIATION_CAPABILITY, PUBLISH_TOKEN_ENV,
-    PublishAuthorization, PublishCapabilities, PublishIntent, PublishLimits, PublishReceipt,
-    PublishSessionId, PublishToken, SUPPORTED_CAPABILITIES, SessionResponse, TokenResponse,
+    PUBLISH_VISIBILITY_CAPABILITY, PUBLISH_VISIBILITY_HEADER, PublishAuthorization,
+    PublishCapabilities, PublishIntent, PublishLimits, PublishReceipt, PublishSessionId,
+    PublishToken, PublishVisibility, SUPPORTED_CAPABILITIES, SessionResponse, TokenResponse,
     UPLOAD_LENGTH_HEADER, UPLOAD_OFFSET_HEADER, UploadStatus, UploadTarget, check_format,
-    check_requirements, content_range, parse_content_range, publish_scope, validate_https_url,
-    validate_inventory, validate_ref_list,
+    check_requirements, content_range, parse_content_range, publish_scope,
+    require_visibility_capability, validate_https_url, validate_inventory, validate_ref_list,
 };
 
 /// Reusable Rust image admission API shared by publisher and Hub.
