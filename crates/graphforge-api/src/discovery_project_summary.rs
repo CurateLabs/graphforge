@@ -2,8 +2,8 @@
 //!
 //! One function, [`summarize_verified_portable`], is the only producer of
 //! summary bytes: the package is fully verified first, then only the
-//! `workspace/research_metadata` and `workspace/configuration` participants are
-//! read, through the storage-owned authenticated reader. Publishers and
+//! workspace metadata/configuration and module declarations are read through
+//! the storage-owned authenticated reader. Publishers and
 //! verifiers run the same function over the same package and obtain identical
 //! canonical bytes, whether the package is a bundle or an expanded directory.
 //! Local paths, Project identity, and anything outside the verified package are
@@ -13,20 +13,20 @@ use crate::discovery_portable::DiscoveryPortableError;
 use crate::{PortableVerifyRequest, verify_portable};
 use graphforge_core::portable::{
     PortableLimits, PortableMode, PortableOntologyComposition, PortablePackageClass,
-    PortableParticipantId,
+    PortableParticipantId, PortableReport,
 };
 use graphforge_discovery::{
-    BridgeSetDescriptor, DiscoveryLimits, PORTABLE_FORMAT, PROJECT_SUMMARY_CAPABILITY,
-    PROJECT_SUMMARY_FORMAT, ProjectSummary, ProtocolRequirement, ProtocolVersion,
-    RepositoryIdentity, ResearchLineage, Sha256Digest, SummaryCorpusSize, SummaryFacts,
-    SummaryGeographicCoverage, SummaryMetadata, SummaryOntologyComposition, SummaryOntologyModule,
-    SummaryPackageReference, SummaryTemporalCoverage,
+    BridgeSetDescriptor, DiscoveryLimits, ONTOLOGY_MODULE_METADATA_CAPABILITY, PORTABLE_FORMAT,
+    PROJECT_SUMMARY_CAPABILITY, PROJECT_SUMMARY_FORMAT, ProjectSummary, ProtocolRequirement,
+    ProtocolVersion, RepositoryIdentity, ResearchLineage, Sha256Digest, SummaryCorpusSize,
+    SummaryFacts, SummaryGeographicCoverage, SummaryMetadata, SummaryOntologyComposition,
+    SummaryOntologyModule, SummaryPackageReference, SummaryTemporalCoverage,
 };
 use graphforge_storage::{
-    MAX_WORKSPACE_RESEARCH_METADATA_BYTES, PortablePackageIndex, ResearchCorpusSize,
-    ResearchGeographicCoverage, ResearchTemporalCoverage, WORKSPACE_CAPABILITY_ID,
-    WORKSPACE_CONFIGURATION_FAMILY, WORKSPACE_RESEARCH_METADATA_FAMILY, WorkspaceConfiguration,
-    WorkspaceOntologyMode, WorkspaceResearchMetadata,
+    MAX_WORKSPACE_RESEARCH_METADATA_BYTES, PortableFileRef, PortablePackageIndex,
+    ResearchCorpusSize, ResearchGeographicCoverage, ResearchTemporalCoverage,
+    WORKSPACE_CAPABILITY_ID, WORKSPACE_CONFIGURATION_FAMILY, WORKSPACE_RESEARCH_METADATA_FAMILY,
+    WorkspaceConfiguration, WorkspaceOntologyMode, WorkspaceResearchMetadata,
 };
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -93,8 +93,34 @@ pub fn summarize_verified_portable(
         components,
         payload_bytes: report.payload_bytes,
         bytes_by_kind: report.bytes_by_kind.clone(),
-        ontology_composition: report.ontology_composition.as_ref().map(composition_facts),
+        ontology_composition: report
+            .ontology_composition
+            .as_ref()
+            .map(|composition| composition_facts(composition, &report, &index, request))
+            .transpose()?,
     };
+    let mut requirements = vec![ProtocolRequirement {
+        capability: PROJECT_SUMMARY_CAPABILITY.into(),
+        major: 1,
+    }];
+    if facts
+        .ontology_composition
+        .as_ref()
+        .is_some_and(|composition| {
+            composition
+                .modules
+                .iter()
+                .any(|module| module.label.is_some() || module.description.is_some())
+        })
+    {
+        requirements.insert(
+            0,
+            ProtocolRequirement {
+                capability: ONTOLOGY_MODULE_METADATA_CAPABILITY.into(),
+                major: 1,
+            },
+        );
+    }
     let summary = ProjectSummary {
         format: PROJECT_SUMMARY_FORMAT.into(),
         version: ProtocolVersion::CURRENT,
@@ -106,10 +132,7 @@ pub fn summarize_verified_portable(
             producing_core_version: report.producing_core_version,
             package_class: package_class_label(report.package_class).into(),
         },
-        requirements: vec![ProtocolRequirement {
-            capability: PROJECT_SUMMARY_CAPABILITY.into(),
-            major: 1,
-        }],
+        requirements,
         capabilities: Vec::new(),
         metadata: project_public_metadata(&metadata),
         facts,
@@ -176,20 +199,72 @@ fn read_workspace_records(
 }
 
 /// Mirror the verified composition control in the summary's `sha256:` form.
-fn composition_facts(composition: &PortableOntologyComposition) -> SummaryOntologyComposition {
-    SummaryOntologyComposition {
+fn composition_facts(
+    composition: &PortableOntologyComposition,
+    report: &PortableReport,
+    index: &PortablePackageIndex,
+    request: &ProjectSummaryRequest<'_>,
+) -> Result<SummaryOntologyComposition, DiscoveryPortableError> {
+    let entries: BTreeMap<_, _> = report
+        .ontology_composition_entries
+        .iter()
+        .filter(|entry| entry.kind == "ontology")
+        .map(|entry| {
+            (
+                (
+                    entry.identity.id.as_str(),
+                    entry.identity.version.as_str(),
+                    entry.identity.content_digest.as_str(),
+                ),
+                entry,
+            )
+        })
+        .collect();
+    Ok(SummaryOntologyComposition {
         composition_digest: Sha256Digest(composition.composition_digest.clone()),
         modules: composition
             .modules
             .iter()
-            .map(|module| SummaryOntologyModule {
-                id: module.ontology_id.clone(),
-                version: module.version.clone(),
-                content_digest: Sha256Digest(module.content_digest.clone()),
-                dialect: module.dialect.clone(),
-                profile: module.profile.clone(),
+            .map(|module| {
+                let entry = entries
+                    .get(&(
+                        module.ontology_id.as_str(),
+                        module.version.as_str(),
+                        module.content_digest.as_str(),
+                    ))
+                    .ok_or(DiscoveryPortableError::ReferenceMismatch(
+                        crate::discovery_portable::DiscoveryPortableMismatch::ModuleIdentity,
+                    ))?;
+                let bytes = index
+                    .read(
+                        &PortableFileRef {
+                            path: entry.path.clone(),
+                            length: entry.length,
+                            sha256: entry.sha256.clone(),
+                        },
+                        request.portable_limits.max_manifest_bytes,
+                        request.cancelled,
+                    )
+                    .map_err(DiscoveryPortableError::Portable)?;
+                let document: graphforge_ontology::OntologyDoc = serde_json::from_slice(&bytes)
+                    .map_err(|error| DiscoveryPortableError::Participant {
+                        participant: "ontology module document",
+                        message: error.to_string(),
+                    })?;
+                // Full verification proved this document's canonical module
+                // identity. The index binds these exact bytes to that same
+                // package digest, never to a mutable local inventory.
+                Ok(SummaryOntologyModule {
+                    id: module.ontology_id.clone(),
+                    version: module.version.clone(),
+                    content_digest: Sha256Digest(module.content_digest.clone()),
+                    dialect: module.dialect.clone(),
+                    profile: module.profile.clone(),
+                    label: document.label,
+                    description: document.description,
+                })
             })
-            .collect(),
+            .collect::<Result<_, DiscoveryPortableError>>()?,
         bridge_sets: composition
             .bridge_sets
             .iter()
@@ -199,7 +274,7 @@ fn composition_facts(composition: &PortableOntologyComposition) -> SummaryOntolo
                 content_digest: Sha256Digest(bridge.content_digest.clone()),
             })
             .collect(),
-    }
+    })
 }
 
 /// Project the public-safe subset of research metadata.

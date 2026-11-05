@@ -11,6 +11,8 @@ use graphforge_ontology::{
 
 fn entity_doc(ontology_id: &str, version: &str, entities: &[&str]) -> OntologyDoc {
     OntologyDoc {
+        label: None,
+        description: None,
         ontology_id: ontology_id.to_owned(),
         version: version.to_owned(),
         entity_types: entities

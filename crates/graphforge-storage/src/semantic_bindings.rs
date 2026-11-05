@@ -1315,6 +1315,8 @@ mod tests {
         include_edge_property: bool,
     ) -> CompiledComposition {
         let doc = OntologyDoc {
+            label: None,
+            description: None,
             ontology_id: "https://example.test/core".into(),
             version: version.into(),
             entity_types: vec![EntityTypeDef {

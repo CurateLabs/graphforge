@@ -264,6 +264,8 @@ fn ontology_changes_have_native_semantic_identity_and_local_provenance() {
     g.execute("CREATE (:Character)").unwrap();
     let b = branch(&mut g);
     let document = OntologyDoc {
+        label: None,
+        description: None,
         ontology_id: "branch-local".into(),
         version: "1.0.0".into(),
         entity_types: vec![

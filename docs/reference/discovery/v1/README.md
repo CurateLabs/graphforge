@@ -19,7 +19,10 @@ compatible projection of this contract.
 
 These checked-in JSON Schemas describe the wire shape of GraphForge discovery
 manifest, refs, and Project summary documents. `conformance.json` supplies valid
-and invalid examples with stable Rust error results. Semantic rules that JSON Schema cannot
+and invalid examples with stable Rust error results;
+`module-metadata-conformance.json` adds the module-text capability cases. Both
+corpora are generated and replayed by the same Rust test and the protocol WASM
+suite. Semantic rules that JSON Schema cannot
 express—canonical ordering, cumulative bounds, safe URLs, capability
 negotiation, and duplicate JSON members—remain authoritative in
 `graphforge-discovery` and are exercised by the corpus.
@@ -272,7 +275,7 @@ own manifest to declare the same value.
 
 The summary document embeds `repository`, `immutable_version`, and the package
 reference (`format`, `package_digest`, `producing_core_version`, `package_class`). It carries its own
-closed `requirements`: only `project-summary@1` is understood. An unknown
+closed `requirements`: `project-summary@1` and `ontology-module-metadata@1` are understood. An unknown
 required capability or an unknown format major fails `unsupported_future` during
 parsing, before any other content is read. Unknown optional `capabilities` are
 accepted; unknown fields fail `malformed_response`.
@@ -295,6 +298,24 @@ histogram: `research_present` means the package carries a `research`-kind
 component (the research-interchange registry), and `evidence_present` an
 `evidence`-kind component. Research _metadata_ presence shows up as non-null
 `metadata` fields, not as `research_present`.
+
+Each `facts.ontology_composition.modules[]` entry may carry a human-readable
+`label` and plain-text `description`, read from that exact module declaration
+through the authenticated package reader. A label is nonblank, at most 256
+UTF-8 bytes, on one line, with no Unicode control characters or U+2028/U+2029.
+A description is nonblank, at most 4096 UTF-8 bytes; LF and tab are allowed,
+other control characters are forbidden. They are Unicode strings, not locale
+maps. Text is preserved exactly: no trimming, Unicode normalization, HTML or
+Markdown interpretation. Render it as plain text.
+
+A summary containing either field requires `ontology-module-metadata@1`, before
+`project-summary@1` in the sorted requirements. A publisher with no module text
+omits both fields and the added requirement, preserving historical canonical
+bytes. Older validators reject summaries using this capability; deploy the
+matching protocol WASM before publishing labelled modules. Unknown fields
+remain rejected. Changing either field changes the module's canonical content
+digest and the summary commitment; it never changes the opaque module ID or
+silently rewrites an immutable published version.
 
 `DiscoveryManifest::bind_summary` requires a summary to name the manifest's
 repository, `immutable_version`, and `package_digest`, to hash to

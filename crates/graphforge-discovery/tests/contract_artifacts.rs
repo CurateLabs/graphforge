@@ -24,6 +24,8 @@ const SUMMARY_SCHEMA: &str =
 const LINEAGE_SCHEMA: &str =
     include_str!("../../../docs/reference/discovery/v1/lineage.schema.json");
 const FIXTURES: &str = include_str!("../../../docs/reference/discovery/v1/conformance.json");
+const MODULE_METADATA_FIXTURES: &str =
+    include_str!("../../../docs/reference/discovery/v1/module-metadata-conformance.json");
 
 #[derive(Debug, Deserialize, Serialize)]
 struct Corpus {
@@ -313,6 +315,8 @@ fn summary_schema() -> Value {
             map.insert("person".into(), json!({"type":"object","additionalProperties":false,"required":["name","roles"],"properties":{
                 "name":{"$ref":"#/$defs/credit_name"},"email":{"$ref":"#/$defs/credit_email"},"orcid":{"$ref":"#/$defs/credit_orcid"},
                 "roles":{"enum":[["author"],["committer"],["author","committer"]]}}}));
+            map.insert("module_label".into(), json!({"anyOf":[{"type":"string","minLength":1,"maxLength":256,"description":"At most 256 UTF-8 bytes, nonblank, single line, no control characters or U+2028/U+2029; enforced by Rust."},{"type":"null"}]}));
+            map.insert("module_description".into(), json!({"anyOf":[{"type":"string","minLength":1,"maxLength":4096,"description":"At most 4096 UTF-8 bytes, nonblank plain text; LF and tab allowed, all other controls forbidden; enforced by Rust."},{"type":"null"}]}));
             map.insert("facts".into(), json!({"type":"object","additionalProperties":false,
                 "required":["ontology_mode","components","research_present","evidence_present","payload_bytes","bytes_by_kind","ontology_composition"],
                 "properties":{
@@ -323,7 +327,7 @@ fn summary_schema() -> Value {
                     "bytes_by_kind":{"type":"object","propertyNames":{"enum":byte_kinds},"additionalProperties":{"type":"integer","minimum":0}},
                     "ontology_composition":{"anyOf":[{"type":"object","additionalProperties":false,"required":["composition_digest","modules","bridge_sets"],"properties":{
                         "composition_digest":{"$ref":"#/$defs/digest"},
-                        "modules":{"type":"array","maxItems":4096,"items":{"type":"object","additionalProperties":false,"required":["id","version","content_digest","dialect","profile"],"properties":{"id":{"$ref":"#/$defs/identity_text"},"version":{"$ref":"#/$defs/identity_text"},"content_digest":{"$ref":"#/$defs/digest"},"dialect":{"$ref":"#/$defs/identity_text"},"profile":{"$ref":"#/$defs/identity_text"}}}},
+                        "modules":{"type":"array","maxItems":4096,"items":{"type":"object","additionalProperties":false,"required":["id","version","content_digest","dialect","profile"],"properties":{"id":{"$ref":"#/$defs/identity_text"},"version":{"$ref":"#/$defs/identity_text"},"content_digest":{"$ref":"#/$defs/digest"},"dialect":{"$ref":"#/$defs/identity_text"},"profile":{"$ref":"#/$defs/identity_text"},"label":{"$ref":"#/$defs/module_label"},"description":{"$ref":"#/$defs/module_description"}}}},
                         "bridge_sets":{"type":"array","maxItems":4096,"items":{"$ref":"#/$defs/bridge_descriptor"}}}},{"type":"null"}]}
                 }}));
             defs
@@ -409,6 +413,18 @@ fn base_summary() -> Value {
         ],
         "extensions":{"x-example":true}
     })
+}
+
+fn labelled_summary() -> Value {
+    let mut value = base_summary();
+    value["requirements"] = json!([
+        {"capability":"ontology-module-metadata","major":1},
+        {"capability":"project-summary","major":1}
+    ]);
+    value["facts"]["ontology_composition"]["modules"][0]["label"] = json!("OpenAlex 研究 works");
+    value["facts"]["ontology_composition"]["modules"][0]["description"] =
+        json!("Scholarly works and their authors.\nPublic research metadata.");
+    value
 }
 
 fn summary_digest(summary: &Value) -> String {
@@ -1038,6 +1054,134 @@ fn lineage_cases() -> Vec<Case> {
     cases
 }
 
+fn module_metadata_cases() -> Vec<Case> {
+    let mut cases = Vec::new();
+    cases.push(valid(
+        "summary-labelled-module",
+        Document::Summary,
+        labelled_summary(),
+    ));
+    cases.push(valid(
+        "summary-module-description-without-label",
+        Document::Summary,
+        {
+            let mut value = labelled_summary();
+            value["facts"]["ontology_composition"]["modules"][0]
+                .as_object_mut()
+                .unwrap()
+                .remove("label");
+            value
+        },
+    ));
+    cases.push(valid(
+        "summary-module-text-utf8-boundaries",
+        Document::Summary,
+        {
+            let mut value = labelled_summary();
+            value["facts"]["ontology_composition"]["modules"][0]["label"] = json!("é".repeat(128));
+            value["facts"]["ontology_composition"]["modules"][0]["description"] =
+                json!("界".repeat(1365) + "x");
+            value
+        },
+    ));
+    for (name, field, text, path) in [
+        (
+            "summary-module-blank-label",
+            "label",
+            json!(" \t"),
+            Some("label"),
+        ),
+        (
+            "summary-module-multiline-label",
+            "label",
+            json!("First\nSecond"),
+            Some("label"),
+        ),
+        (
+            "summary-module-oversized-label",
+            "label",
+            json!("é".repeat(128) + "x"),
+            Some("label"),
+        ),
+        (
+            "summary-module-description-control",
+            "description",
+            json!("bad\rtext"),
+            Some("description"),
+        ),
+        (
+            "summary-module-oversized-description",
+            "description",
+            json!("x".repeat(4097)),
+            Some("description"),
+        ),
+        (
+            "summary-module-localized-map-is-not-text",
+            "label",
+            json!({"en":"Works"}),
+            None,
+        ),
+        (
+            "summary-module-unknown-field-is-rejected",
+            "localized_label",
+            json!("Works"),
+            None,
+        ),
+    ] {
+        let mut value = labelled_summary();
+        value["facts"]["ontology_composition"]["modules"][0][field] = text;
+        cases.push(invalid(
+            name,
+            Document::Summary,
+            value,
+            "malformed_response",
+            path,
+        ));
+    }
+    cases.push(invalid(
+        "summary-module-text-requires-capability",
+        Document::Summary,
+        {
+            let mut value = labelled_summary();
+            value["requirements"] = base_summary()["requirements"].clone();
+            value
+        },
+        "malformed_response",
+        Some("requirements"),
+    ));
+    cases.push(invalid_version(
+        "summary-module-text-future-capability",
+        Document::Summary,
+        {
+            let mut value = labelled_summary();
+            value["requirements"][0]["major"] = json!(2);
+            value["facts"]["ontology_composition"]["modules"][0]["future_text"] =
+                json!({"en":"Works"});
+            value
+        },
+        "requirements",
+        "capability",
+        Some(1),
+        2,
+    ));
+    cases.push(invalid_version(
+        "summary-future-fields-checked-after-requirements",
+        Document::Summary,
+        {
+            let mut value = labelled_summary();
+            value["requirements"] = json!([{"capability":"future-summary","major":1}]);
+            value["facts"]["ontology_composition"]["modules"][0]["future_text"] =
+                json!({"en":"Works"});
+            value
+        },
+        "requirements",
+        "capability",
+        None,
+        1,
+    ));
+    cases
+}
+
 /// Cases for the Project summary document and the optional manifest fields.
 /// Appended after the clone-oriented cases, which stay unchanged.
 fn summary_cases() -> Vec<Case> {
@@ -1588,6 +1732,13 @@ fn checked_in_contract_artifacts_match_rust_authority() {
         ("summary.schema.json", pretty(&summary_schema())),
         ("lineage.schema.json", pretty(&lineage_schema())),
         ("conformance.json", pretty(&corpus())),
+        (
+            "module-metadata-conformance.json",
+            pretty(&Corpus {
+                format: "graphforge-discovery-conformance/1".into(),
+                cases: module_metadata_cases(),
+            }),
+        ),
     ];
     if std::env::var_os("GRAPHFORGE_UPDATE_DISCOVERY_ARTIFACTS").is_some() {
         let dir = root().join("docs/reference/discovery/v1");
@@ -1603,6 +1754,7 @@ fn checked_in_contract_artifacts_match_rust_authority() {
         SUMMARY_SCHEMA,
         LINEAGE_SCHEMA,
         FIXTURES,
+        MODULE_METADATA_FIXTURES,
     ]) {
         assert_eq!(
             actual.as_bytes(),
@@ -1610,8 +1762,10 @@ fn checked_in_contract_artifacts_match_rust_authority() {
             "{name} is stale; regenerate with GRAPHFORGE_UPDATE_DISCOVERY_ARTIFACTS=1 cargo test -p graphforge-discovery --test contract_artifacts"
         );
     }
-    let parsed: Corpus = serde_json::from_str(FIXTURES).unwrap();
-    for case in parsed.cases {
+    let cases = [FIXTURES, MODULE_METADATA_FIXTURES]
+        .into_iter()
+        .flat_map(|fixture| serde_json::from_str::<Corpus>(fixture).unwrap().cases);
+    for case in cases {
         let result = match case.document {
             Document::Manifest => {
                 DiscoveryManifest::from_json(case.json.as_bytes(), limits(case.limits))

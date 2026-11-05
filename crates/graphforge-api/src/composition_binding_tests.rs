@@ -96,6 +96,8 @@ pub(crate) fn install_composition_authority(
 
 fn module(name: &str, entities: &[&str]) -> AuthoredModule {
     let doc = OntologyDoc {
+        label: None,
+        description: None,
         ontology_id: format!("https://graphforge.dev/ontology/{name}"),
         version: "1.0.0".to_owned(),
         entity_types: entities

@@ -24,6 +24,14 @@ impl OntologyValidator {
     pub fn validate(doc: &OntologyDoc) -> Result<(), Vec<OntologyValidationError>> {
         let mut errors: Vec<OntologyValidationError> = Vec::new();
 
+        if let Err(error) = doc.validate_metadata() {
+            errors.push(OntologyValidationError {
+                kind: ValidationErrorKind::InvalidMetadata,
+                location: error.field.unwrap_or("module metadata").into(),
+                message: error.to_string(),
+            });
+        }
+
         if let Err(message) = crate::item_identity::validate_item_identity(
             &doc.ontology_id,
             graphforge_discovery::ItemKind::OntologyModule,
@@ -345,6 +353,8 @@ mod tests {
     // Minimal valid document used as a baseline.
     fn valid_doc() -> OntologyDoc {
         OntologyDoc {
+            label: None,
+            description: None,
             ontology_id: "test".to_string(),
             version: "1.0".to_string(),
             entity_types: vec![

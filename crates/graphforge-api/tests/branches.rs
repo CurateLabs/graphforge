@@ -792,6 +792,8 @@ fn local_composition_is_exact_and_does_not_change_parent_or_sibling() {
     let a = create(&mut graph, "A");
     let b = create(&mut graph, "B");
     let document = OntologyDoc {
+        label: None,
+        description: None,
         ontology_id: "branch-local".into(),
         version: "1.0.0".into(),
         entity_types: vec![

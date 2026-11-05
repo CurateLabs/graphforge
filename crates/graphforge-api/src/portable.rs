@@ -1101,6 +1101,8 @@ mod tests {
         let candidate = graph
             .create_ontology_module(
                 OntologyDoc {
+                    label: None,
+                    description: None,
                     ontology_id: "urn:graphforge:portable-lifecycle".into(),
                     version: "1".into(),
                     entity_types: vec![EntityTypeDef {

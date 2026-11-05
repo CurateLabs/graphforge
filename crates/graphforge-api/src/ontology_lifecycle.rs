@@ -97,7 +97,7 @@ pub enum OntologyExportSource {
     /// A caller-reviewed or freshly generated draft. Non-migration declaration
     /// vectors are canonicalized before validation and serialization; authored
     /// migration order is preserved as a semantic tie-breaker.
-    Suggested(OntologyDoc),
+    Suggested(Box<OntologyDoc>),
     /// The ontology currently loaded in this live facade.
     Loaded,
     /// The ontology adopted in the committed workspace generation.
@@ -171,6 +171,8 @@ impl GraphForge {
             .map(|entry| entry.name.clone())
             .collect();
         let document = canonicalize_document(OntologyDoc {
+            label: None,
+            description: None,
             ontology_id: options.ontology_id,
             version: options.version,
             entity_types,
@@ -223,7 +225,7 @@ impl GraphForge {
         format: OntologyExportFormat,
     ) -> Result<(), GfError> {
         let document = match source {
-            OntologyExportSource::Suggested(document) => document,
+            OntologyExportSource::Suggested(document) => *document,
             OntologyExportSource::Loaded => self
                 .ontology_document
                 .clone()
@@ -427,14 +429,14 @@ mod tests {
             let right_path = directory.path().join(format!("right.{extension}"));
             left_graph
                 .export_ontology(
-                    OntologyExportSource::Suggested(left.document.clone()),
+                    OntologyExportSource::Suggested(Box::new(left.document.clone())),
                     &left_path,
                     format,
                 )
                 .unwrap();
             right_graph
                 .export_ontology(
-                    OntologyExportSource::Suggested(right.document.clone()),
+                    OntologyExportSource::Suggested(Box::new(right.document.clone())),
                     &right_path,
                     format,
                 )
@@ -519,7 +521,7 @@ mod tests {
             let path = dir.path().join(name);
             graph
                 .export_ontology(
-                    OntologyExportSource::Suggested(suggestion.document.clone()),
+                    OntologyExportSource::Suggested(Box::new(suggestion.document.clone())),
                     &path,
                     format,
                 )
@@ -535,6 +537,8 @@ mod tests {
     fn suggested_source_is_canonicalized_before_serialization() {
         let graph = GraphForge::new(None).unwrap();
         let ordered = OntologyDoc {
+            label: None,
+            description: None,
             ontology_id: "draft".into(),
             version: "1".into(),
             entity_types: vec![
@@ -565,14 +569,14 @@ mod tests {
             let reversed_path = directory.path().join(format!("reversed.{extension}"));
             graph
                 .export_ontology(
-                    OntologyExportSource::Suggested(ordered.clone()),
+                    OntologyExportSource::Suggested(Box::new(ordered.clone())),
                     &ordered_path,
                     format,
                 )
                 .unwrap();
             graph
                 .export_ontology(
-                    OntologyExportSource::Suggested(reversed.clone()),
+                    OntologyExportSource::Suggested(Box::new(reversed.clone())),
                     &reversed_path,
                     format,
                 )
@@ -591,6 +595,8 @@ mod tests {
         let input = directory.path().join("authored.yaml");
         let output = directory.path().join("exported.yaml");
         let authored = OntologyDoc {
+            label: None,
+            description: None,
             ontology_id: "migration-order".into(),
             version: "1".into(),
             entity_types: vec![],
@@ -659,6 +665,8 @@ mod tests {
     fn validation_and_failed_export_do_not_replace_destination() {
         let graph = GraphForge::new(None).unwrap();
         let invalid = OntologyDoc {
+            label: None,
+            description: None,
             ontology_id: "bad".into(),
             version: "1".into(),
             entity_types: vec![
@@ -685,7 +693,7 @@ mod tests {
         assert!(
             graph
                 .export_ontology(
-                    OntologyExportSource::Suggested(invalid),
+                    OntologyExportSource::Suggested(Box::new(invalid)),
                     &path,
                     OntologyExportFormat::Json,
                 )
@@ -801,7 +809,7 @@ mod tests {
 
         assert!(matches!(
             graph.export_ontology(
-                OntologyExportSource::Suggested(suggestion.document),
+                OntologyExportSource::Suggested(Box::new(suggestion.document)),
                 &destination,
                 OntologyExportFormat::Json,
             ),
@@ -820,15 +828,15 @@ mod tests {
         let missing_parent = parent.path().join("missing").join("ontology.json");
         assert!(matches!(
             graph.export_ontology(
-                OntologyExportSource::Suggested(
+                OntologyExportSource::Suggested(Box::new(
                     graph
                         .suggest_ontology(OntologySuggestionOptions {
                             ontology_id: "draft".into(),
                             version: "1".into(),
                         })
                         .unwrap()
-                        .document,
-                ),
+                        .document
+                )),
                 &missing_parent,
                 OntologyExportFormat::Json,
             ),

@@ -936,6 +936,8 @@ mod tests {
         participants.insert(0, inventory);
         if include_composition {
             let document = graphforge_ontology::OntologyDoc {
+                label: None,
+                description: None,
                 ontology_id: "https://graphforge.dev/ontology/portable".into(),
                 version: "release-2026.08".into(),
                 entity_types: vec![],
@@ -1019,6 +1021,8 @@ mod tests {
 
         let module = |ontology_id: &str| {
             let document = OntologyDoc {
+                label: None,
+                description: None,
                 ontology_id: ontology_id.into(),
                 version: "opaque-v1".into(),
                 entity_types: vec![EntityTypeDef {
@@ -1162,6 +1166,8 @@ mod tests {
         };
         let module = |name: &str, dependencies: Vec<OntologyModuleId>| {
             let document = OntologyDoc {
+                label: None,
+                description: None,
                 ontology_id: format!("https://graphforge.dev/ontology/{name}"),
                 version: "v1".into(),
                 entity_types: vec![EntityTypeDef {

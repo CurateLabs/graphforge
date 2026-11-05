@@ -1056,6 +1056,8 @@ mod tests {
         migrations: Vec<MigrationDef>,
     ) -> WorkspaceOntologyComposition {
         let document = OntologyDoc {
+            label: None,
+            description: None,
             ontology_id: ontology_id.into(),
             version: version.into(),
             entity_types: entity_names
@@ -1103,6 +1105,8 @@ mod tests {
     fn bridged_composition() -> WorkspaceOntologyComposition {
         let module = |ontology_id: &str| {
             let document = OntologyDoc {
+                label: None,
+                description: None,
                 ontology_id: ontology_id.into(),
                 version: "1".into(),
                 entity_types: vec![EntityTypeDef {

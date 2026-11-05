@@ -11,6 +11,8 @@ use std::fmt;
 pub enum ValidationErrorKind {
     /// The authored item ID is absent or is not canonical in the GraphForge namespace.
     InvalidIdentity,
+    /// Human-readable module text violates its shared bounds or character rules.
+    InvalidMetadata,
     /// Two items share a name that must be unique (e.g. two entity types named `"Person"`).
     DuplicateName,
     /// A reference points to a name that is not declared in the ontology.
@@ -27,6 +29,7 @@ impl fmt::Display for ValidationErrorKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidIdentity => write!(f, "InvalidIdentity"),
+            Self::InvalidMetadata => write!(f, "InvalidMetadata"),
             Self::DuplicateName => write!(f, "DuplicateName"),
             Self::UnresolvedReference => write!(f, "UnresolvedReference"),
             Self::InheritanceCycle => write!(f, "InheritanceCycle"),
@@ -138,6 +141,7 @@ mod tests {
     fn validation_kind_and_record_display_are_closed_and_stable() {
         let cases = [
             (ValidationErrorKind::InvalidIdentity, "InvalidIdentity"),
+            (ValidationErrorKind::InvalidMetadata, "InvalidMetadata"),
             (ValidationErrorKind::DuplicateName, "DuplicateName"),
             (
                 ValidationErrorKind::UnresolvedReference,

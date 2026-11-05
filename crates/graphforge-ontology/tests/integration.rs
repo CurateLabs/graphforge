@@ -238,6 +238,8 @@ fn parquet_round_trip() {
 #[test]
 fn parquet_round_trip_preserves_property_owner_namespaces() {
     let doc = OntologyDoc {
+        label: None,
+        description: None,
         ontology_id: "owner-namespaces".into(),
         version: "v1".into(),
         entity_types: vec![EntityTypeDef {
@@ -343,6 +345,8 @@ fn migration_round_trip() {
 #[test]
 fn validation_error_collection() {
     let doc = OntologyDoc {
+        label: None,
+        description: None,
         ontology_id: "bad".to_owned(),
         version: "1.0".to_owned(),
         entity_types: vec![

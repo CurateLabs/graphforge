@@ -1050,6 +1050,8 @@ mod tests {
     #[test]
     fn legacy_ontology_projects_without_rewriting_and_first_composition_is_canonical() {
         let document = OntologyDoc {
+            label: None,
+            description: None,
             ontology_id: "https://graphforge.dev/ontology/legacy".into(),
             version: "1.0.0".into(),
             entity_types: vec![graphforge_ontology::EntityTypeDef {

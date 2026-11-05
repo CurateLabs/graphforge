@@ -9,11 +9,12 @@
 use crate::credit::{SummaryPerson, people_mismatch, validate_people};
 use crate::{
     BridgeSetDescriptor, DiscoveryError, DiscoveryErrorCode, DiscoveryLimits,
-    DiscoveryVersionDetails, DiscoveryVersionSubject, PORTABLE_FORMAT, PROJECT_SUMMARY_CAPABILITY,
-    PROJECT_SUMMARY_FORMAT, PROJECT_SUMMARY_FORMAT_NAME, ProtocolCapability, ProtocolRequirement,
-    ProtocolVersion, RepositoryIdentity, ResearchLineage, Sha256Digest, canonical_json,
-    check_ascending, check_core_version, check_identity_text, check_string, format_major, limit,
-    parse_unique_json, sha256_digest, validate_extensions, validate_semantics,
+    DiscoveryVersionDetails, DiscoveryVersionSubject, ONTOLOGY_MODULE_METADATA_CAPABILITY,
+    PORTABLE_FORMAT, PROJECT_SUMMARY_CAPABILITY, PROJECT_SUMMARY_FORMAT,
+    PROJECT_SUMMARY_FORMAT_NAME, ProtocolCapability, ProtocolRequirement, ProtocolVersion,
+    RepositoryIdentity, ResearchLineage, Sha256Digest, canonical_json, check_ascending,
+    check_core_version, check_identity_text, check_string, format_major, limit, parse_unique_json,
+    sha256_digest, validate_extensions, validate_ontology_module_metadata, validate_semantics,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -173,6 +174,14 @@ pub struct SummaryOntologyModule {
     pub dialect: String,
     /// Ontology profile label.
     pub profile: String,
+    /// Authenticated module label, when declared; at most 256 UTF-8 bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "typescript", tsify(optional))]
+    pub label: Option<String>,
+    /// Authenticated plain-text description, when declared; at most 4096 UTF-8 bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "typescript", tsify(optional))]
+    pub description: Option<String>,
 }
 
 /// Ontology composition verified in the described package.
@@ -231,7 +240,8 @@ pub struct ProjectSummary {
     pub immutable_version: Sha256Digest,
     /// Portable package the summary describes.
     pub package: SummaryPackageReference,
-    /// Required semantics; only `project-summary@1` is understood.
+    /// Required semantics: `project-summary@1` and, for module text,
+    /// `ontology-module-metadata@1`.
     pub requirements: Vec<ProtocolRequirement>,
     /// Optional advertised semantics.
     pub capabilities: Vec<ProtocolCapability>,
@@ -248,6 +258,45 @@ pub struct ProjectSummary {
     pub extensions: BTreeMap<String, Value>,
 }
 
+#[derive(Deserialize)]
+struct SummaryHeader {
+    format: String,
+    version: ProtocolVersion,
+    requirements: Vec<ProtocolRequirement>,
+    capabilities: Vec<ProtocolCapability>,
+}
+
+fn validate_header(
+    format: &str,
+    version: ProtocolVersion,
+    requirements: &[ProtocolRequirement],
+    capabilities: &[ProtocolCapability],
+    limits: DiscoveryLimits,
+) -> Result<(), DiscoveryError> {
+    if format != PROJECT_SUMMARY_FORMAT {
+        let error = DiscoveryError::new(
+            DiscoveryErrorCode::UnsupportedFuture,
+            Some("format"),
+            "project summary format is unsupported",
+        );
+        return Err(match format_major(format, PROJECT_SUMMARY_FORMAT_NAME) {
+            Some(requested_major) => error.with_version(DiscoveryVersionDetails {
+                subject: DiscoveryVersionSubject::ProjectSummary,
+                supported_major: Some(1),
+                requested_major,
+            }),
+            None => error,
+        });
+    }
+    version.validate()?;
+    validate_semantics(
+        requirements,
+        capabilities,
+        PROJECT_SUMMARY_CAPABILITY,
+        limits,
+    )
+}
+
 impl ProjectSummary {
     /// Parse and fully validate untrusted JSON without performing object I/O.
     ///
@@ -259,7 +308,31 @@ impl ProjectSummary {
         if bytes.len() > limits.max_summary_bytes {
             return Err(limit("summary"));
         }
-        let summary: Self = parse_unique_json(bytes)?;
+        let value: Value = parse_unique_json(bytes)?;
+        // Inspect required semantics before decoding the closed module schema.
+        // Future fields must not turn an unsupported requirement into a generic
+        // shape error or be interpreted as current metadata.
+        let header: SummaryHeader = serde_json::from_value(value.clone()).map_err(|_| {
+            DiscoveryError::new(
+                DiscoveryErrorCode::MalformedResponse,
+                None,
+                "project summary header is malformed",
+            )
+        })?;
+        validate_header(
+            &header.format,
+            header.version,
+            &header.requirements,
+            &header.capabilities,
+            limits,
+        )?;
+        let summary: Self = serde_json::from_value(value).map_err(|_| {
+            DiscoveryError::new(
+                DiscoveryErrorCode::MalformedResponse,
+                None,
+                "project summary is malformed",
+            )
+        })?;
         summary.validate(limits)?;
         Ok(summary)
     }
@@ -267,33 +340,38 @@ impl ProjectSummary {
     /// Validate all summary invariants. Unknown required semantics and unknown
     /// format major versions fail before any other content is considered.
     pub fn validate(&self, limits: DiscoveryLimits) -> Result<(), DiscoveryError> {
-        if self.format != PROJECT_SUMMARY_FORMAT {
-            let error = DiscoveryError::new(
-                DiscoveryErrorCode::UnsupportedFuture,
-                Some("format"),
-                "project summary format is unsupported",
-            );
-            return Err(
-                match format_major(&self.format, PROJECT_SUMMARY_FORMAT_NAME) {
-                    Some(requested_major) => error.with_version(DiscoveryVersionDetails {
-                        subject: DiscoveryVersionSubject::ProjectSummary,
-                        supported_major: Some(1),
-                        requested_major,
-                    }),
-                    None => error,
-                },
-            );
-        }
-        self.version.validate()?;
+        validate_header(
+            &self.format,
+            self.version,
+            &self.requirements,
+            &self.capabilities,
+            limits,
+        )?;
         self.repository.validate()?;
         self.immutable_version.validate()?;
         self.validate_package(limits)?;
-        validate_semantics(
-            &self.requirements,
-            &self.capabilities,
-            PROJECT_SUMMARY_CAPABILITY,
-            limits,
-        )?;
+        let has_module_text = self
+            .facts
+            .ontology_composition
+            .as_ref()
+            .is_some_and(|composition| {
+                composition
+                    .modules
+                    .iter()
+                    .any(|module| module.label.is_some() || module.description.is_some())
+            });
+        if has_module_text
+            && !self.requirements.iter().any(|requirement| {
+                requirement.capability == ONTOLOGY_MODULE_METADATA_CAPABILITY
+                    && requirement.major == 1
+            })
+        {
+            return Err(DiscoveryError::new(
+                DiscoveryErrorCode::MalformedResponse,
+                Some("requirements"),
+                "module text requires ontology-module-metadata@1",
+            ));
+        }
         validate_extensions(&self.extensions, limits)?;
         validate_metadata(&self.metadata, limits)?;
         validate_people(&self.people, limits)?;
@@ -534,6 +612,15 @@ fn validate_facts(facts: &SummaryFacts, limits: DiscoveryLimits) -> Result<(), D
         module.content_digest.validate()?;
         check_string(&module.dialect, FIELD, limits)?;
         check_string(&module.profile, FIELD, limits)?;
+        validate_ontology_module_metadata(module.label.as_deref(), module.description.as_deref())?;
+        for (field, value) in [
+            ("label", module.label.as_deref()),
+            ("description", module.description.as_deref()),
+        ] {
+            if value.is_some_and(|value| value.len() > limits.max_string_bytes) {
+                return Err(limit(field));
+            }
+        }
         check_ascending(
             &mut prior,
             (
