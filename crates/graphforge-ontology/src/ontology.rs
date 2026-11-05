@@ -51,6 +51,21 @@ pub struct OntologyDoc {
 }
 
 impl OntologyDoc {
+    /// Compare the schema independently of authored version, migrations and text.
+    ///
+    /// These declaration fields still contribute to the content digest, but do
+    /// not require graph-data transforms. Identity and every schema field must
+    /// remain equal; a cross-ID rewrite is a separate explicitly authorized path.
+    #[must_use]
+    pub fn has_same_schema(&self, other: &Self) -> bool {
+        let mut document = self.clone();
+        document.version.clone_from(&other.version);
+        document.migrations.clone_from(&other.migrations);
+        document.label.clone_from(&other.label);
+        document.description.clone_from(&other.description);
+        document == *other
+    }
+
     /// Validate the module's public text using the native/WASM protocol rules.
     ///
     /// The portable verifier checks this before accepting a module document;

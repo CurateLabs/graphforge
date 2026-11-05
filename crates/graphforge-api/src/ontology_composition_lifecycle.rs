@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use graphforge_core::{GfError, ProjectErrorCode};
 use graphforge_ontology::{
-    ActivationMode, MigrationEngine, OntologyDoc, ResolveRequest, SymbolKind, TransformKind,
+    ActivationMode, MigrationEngine, ResolveRequest, SymbolKind, TransformKind,
 };
 use graphforge_storage::concurrency_attribution::ObservedSha256 as Sha256;
 use graphforge_storage::{
@@ -709,7 +709,7 @@ fn migration_diagnostics(
         if old.id.authored_version == new.id.authored_version {
             continue;
         }
-        if documents_equal_except_version_and_migrations(&old.document, &new.document) {
+        if old.document.has_same_schema(&new.document) {
             continue;
         }
         let migrations = new
@@ -764,9 +764,8 @@ fn migration_diagnostics(
                     .any(|step| matches!(step.transform_kind, TransformKind::Unknown { .. }))
                 {
                     match MigrationEngine::apply_document(old.document.clone(), &steps) {
-                        Ok(mut migrated) => {
-                            migrated.migrations.clone_from(&new.document.migrations);
-                            if migrated != new.document {
+                        Ok(migrated) => {
+                            if !migrated.has_same_schema(&new.document) {
                                 diagnostics.push(CompositionChangeDiagnostic {
                                     code: "migration_result_mismatch".into(),
                                     subject: new.id.ontology_id.clone(),
@@ -790,13 +789,6 @@ fn migration_diagnostics(
     Ok(diagnostics)
 }
 
-fn documents_equal_except_version_and_migrations(left: &OntologyDoc, right: &OntologyDoc) -> bool {
-    let mut left = left.clone();
-    left.version.clone_from(&right.version);
-    left.migrations.clone_from(&right.migrations);
-    left == *right
-}
-
 fn identity_equivalent_upgrades(
     existing: Option<&WorkspaceOntologyComposition>,
     candidate: &WorkspaceOntologyComposition,
@@ -811,7 +803,7 @@ fn identity_equivalent_upgrades(
             candidate.modules.iter().find_map(|new| {
                 (old.id != new.id
                     && old.id.ontology_id == new.id.ontology_id
-                    && documents_equal_except_version_and_migrations(&old.document, &new.document))
+                    && old.document.has_same_schema(&new.document))
                 .then(|| (old.id.clone(), new.id.clone()))
             })
         })
@@ -1073,6 +1065,13 @@ mod tests {
             constraints: Vec::new(),
             migrations,
         };
+        composition_document(document, mode)
+    }
+
+    fn composition_document(
+        document: OntologyDoc,
+        mode: ActivationMode,
+    ) -> WorkspaceOntologyComposition {
         let authored = AuthoredModule {
             id: OntologyModuleId {
                 ontology_id: document.ontology_id.clone(),
@@ -1736,6 +1735,90 @@ mod tests {
                 .code,
             "migration_transform_unknown"
         );
+    }
+
+    fn publish_module_text_upgrade(structural: bool) {
+        let project = tempfile::tempdir().unwrap();
+        let path = project.path().to_str().unwrap();
+        let mut graph = GraphForge::new(Some(path)).unwrap();
+        let initial = request(
+            &graph,
+            8450,
+            composition("1", ActivationMode::Advisory, &["Person"], Vec::new()),
+        );
+        let preview = graph
+            .preview_ontology_composition_change(&initial, None)
+            .unwrap();
+        graph
+            .publish_ontology_composition_change(&initial, &preview, None)
+            .unwrap();
+        graph
+            .execute("CREATE (:Person {name: 'retained'})")
+            .unwrap();
+        let previous = graph.workspace_ontology_composition().unwrap().unwrap();
+        let mut document = previous.modules[0].document.clone();
+        document.version = "2".into();
+        document.label = Some("People".into());
+        document.description = Some("People in the research graph.\nPublic module text.".into());
+        if structural {
+            document.entity_types.push(EntityTypeDef {
+                name: "Company".into(),
+                r#abstract: false,
+                parent: None,
+            });
+            document.migrations.push(MigrationDef {
+                from_version: "1".into(),
+                to_version: "2".into(),
+                transform_kind: "add_type:Company".into(),
+                script_ref: None,
+                checksum: None,
+            });
+        }
+        let candidate = composition_document(document.clone(), ActivationMode::Advisory);
+        assert_ne!(
+            previous.modules[0].id.canonical_digest,
+            candidate.modules[0].id.canonical_digest
+        );
+        let upgrade = request(&graph, 8451, candidate);
+        let preview = graph
+            .preview_ontology_composition_change(&upgrade, None)
+            .unwrap();
+        assert!(preview.diagnostics.is_empty(), "{:?}", preview.diagnostics);
+        graph
+            .publish_ontology_composition_change(&upgrade, &preview, None)
+            .unwrap();
+        drop(graph);
+        let reopened = GraphForge::new(Some(path)).unwrap();
+        let observed = reopened.workspace_ontology_composition().unwrap().unwrap();
+        assert_eq!(observed.modules[0].document, document);
+        let result = reopened
+            .execute("MATCH (n:Person) RETURN properties(n) AS properties")
+            .unwrap();
+        assert_eq!(
+            result
+                .batches
+                .iter()
+                .map(arrow::record_batch::RecordBatch::num_rows)
+                .sum::<usize>(),
+            1
+        );
+        let batch = result
+            .batches
+            .iter()
+            .find(|batch| batch.num_rows() == 1)
+            .unwrap();
+        let properties = arrow::util::display::array_value_to_string(batch.column(0), 0).unwrap();
+        assert!(properties.contains("retained"), "{properties}");
+    }
+
+    #[test]
+    fn module_text_upgrade_needs_no_schema_transform_and_preserves_rows_on_reopen() {
+        publish_module_text_upgrade(false);
+    }
+
+    #[test]
+    fn module_text_upgrade_alongside_a_schema_migration_preserves_rows_on_reopen() {
+        publish_module_text_upgrade(true);
     }
 
     #[test]

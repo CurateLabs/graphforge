@@ -619,16 +619,23 @@ fn semantic_read_fragment_inventory(
 }
 
 fn binding_fragments(binding: &SemanticStorageBinding, routes: &SemanticFragments) -> Vec<PathBuf> {
-    let domain = match binding.route_kind {
-        SemanticRouteKind::Entity => return Vec::new(),
-        SemanticRouteKind::Relation => "topology/edges",
-        SemanticRouteKind::NodeProperty => "properties",
-        SemanticRouteKind::EdgeProperty => "edge_properties",
+    let domains: &[&str] = match binding.route_kind {
+        SemanticRouteKind::Entity | SemanticRouteKind::NodeProperty => &["properties"],
+        SemanticRouteKind::Relation => &["topology/edges", "edge_properties"],
+        SemanticRouteKind::EdgeProperty => &["edge_properties"],
     };
-    routes
-        .get(&(domain.to_owned(), binding.route.clone()))
-        .cloned()
-        .unwrap_or_default()
+    // Advisory properties may have no individual schema declaration. Their
+    // owner still authenticates the exact table route and its join-key domain.
+    domains
+        .iter()
+        .flat_map(|domain| {
+            routes
+                .get(&(domain.to_string(), binding.route.clone()))
+                .into_iter()
+                .flatten()
+                .cloned()
+        })
+        .collect()
 }
 
 fn semantic_route_fragments(
@@ -737,9 +744,8 @@ fn validate_semantic_route_fragment(
         )));
     }
     let join_key = match binding.route_kind {
-        SemanticRouteKind::NodeProperty => "node_uuid",
+        SemanticRouteKind::Entity | SemanticRouteKind::NodeProperty => "node_uuid",
         SemanticRouteKind::Relation | SemanticRouteKind::EdgeProperty => "edge_uuid",
-        SemanticRouteKind::Entity => unreachable!(),
     };
     let join_field = schema
         .field_with_name(join_key)
@@ -1482,6 +1488,157 @@ mod tests {
         let injected = dir.path().join("properties/s-deadbeef.parquet");
         std::fs::write(injected, b"unlisted route must be rejected before decode").unwrap();
         assert!(bindings.validate_physical_routes(dir.path()).is_err());
+    }
+
+    fn assert_owner_table_checks(
+        bindings: &SemanticStorageBindings,
+        root: &Path,
+        owner: &SemanticStorageBinding,
+        join_key: &str,
+    ) {
+        let domain = if join_key == "node_uuid" {
+            "properties"
+        } else {
+            "edge_properties"
+        };
+        let inventory = crate::capture_graph_read_inventory(root).unwrap();
+        let routes = semantic_read_fragment_inventory(root, &inventory).unwrap();
+        let path = &routes[&(domain.to_owned(), owner.route.clone())][0];
+        let original = std::fs::read(path).unwrap();
+        let batch = admitted_semantic_parquet(path)
+            .unwrap()
+            .build()
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap();
+        for invalid in ["route", "composition", "join"] {
+            let mut metadata = batch.schema().metadata().clone();
+            let mut fields = batch
+                .schema()
+                .fields()
+                .iter()
+                .map(|field| field.as_ref().clone())
+                .collect::<Vec<_>>();
+            match invalid {
+                "route" => {
+                    metadata.insert(SEMANTIC_ROUTE_METADATA_KEY.into(), "s-unlisted".into());
+                }
+                "composition" => {
+                    metadata.insert(SEMANTIC_COMPOSITION_METADATA_KEY.into(), "0".repeat(64));
+                }
+                "join" => {
+                    let index = fields
+                        .iter()
+                        .position(|field| field.name() == join_key)
+                        .unwrap();
+                    fields[index] = fields[index].clone().with_name("untrusted_join");
+                }
+                _ => unreachable!(),
+            }
+            let schema = std::sync::Arc::new(arrow::datatypes::Schema::new_with_metadata(
+                fields, metadata,
+            ));
+            let altered =
+                arrow::record_batch::RecordBatch::try_new(schema, batch.columns().to_vec())
+                    .unwrap();
+            let mut writer = parquet::arrow::ArrowWriter::try_new(
+                File::create(path).unwrap(),
+                altered.schema(),
+                None,
+            )
+            .unwrap();
+            writer.write(&altered).unwrap();
+            writer.close().unwrap();
+            assert!(
+                bindings.validate_physical_routes(root).is_err(),
+                "{domain}: {invalid}"
+            );
+            std::fs::write(path, &original).unwrap();
+        }
+        bindings.validate_physical_routes(root).unwrap();
+    }
+
+    #[test]
+    fn advisory_owner_tables_need_no_declared_properties_but_keep_route_and_join_authority() {
+        let mut module = AuthoredModule {
+            id: compiled("1").modules[0].id.clone(),
+            dependencies: Vec::new(),
+            doc: compiled("1").modules[0].doc.clone(),
+            allow_projected_identity: false,
+        };
+        module.doc.properties.clear();
+        module.id.canonical_digest = module_document_digest(&module.doc).unwrap();
+        let composition = compile_inventory(InventoryCompileRequest {
+            modules: &[module],
+            bridges: &[],
+            activation: &[],
+            profile_default: ActivationMode::Advisory,
+            limits: CompositionLimits::default(),
+            cancelled: None,
+        })
+        .unwrap();
+        let bindings = SemanticStorageBindings::project(&composition, None).unwrap();
+        assert_eq!(
+            bindings.bindings.len(),
+            2,
+            "only entity and relation owner bindings"
+        );
+        let entity = bindings
+            .bindings
+            .iter()
+            .find(|b| b.route_kind == SemanticRouteKind::Entity)
+            .unwrap();
+        let relation = bindings
+            .bindings
+            .iter()
+            .find(|b| b.route_kind == SemanticRouteKind::Relation)
+            .unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let mut writer =
+            crate::GraphWriter::open_at(root.path(), graphforge_core::OntologyMode::Advisory, 1)
+                .unwrap()
+                .with_semantic_composition_fingerprint(Some(composition.fingerprint.clone()));
+        let left = graphforge_core::uuid::new_v7();
+        let right = graphforge_core::uuid::new_v7();
+        let label =
+            graphforge_value::EntityTypeId::ontology(graphforge_core::TypeId(entity.storage_id))
+                .unwrap();
+        for node in [left, right] {
+            writer.create_node(node, label).unwrap();
+        }
+        writer
+            .set_properties(
+                &left,
+                Some(&entity.route),
+                HashMap::from([("name".into(), graphforge_ir::IrLiteral::Str("Ada".into()))]),
+            )
+            .unwrap();
+        let edge = graphforge_core::uuid::new_v7();
+        writer
+            .create_edge(edge, &relation.route, &left, &right)
+            .unwrap();
+        writer
+            .set_edge_properties(
+                &edge,
+                Some(&relation.route),
+                HashMap::from([("since".into(), graphforge_ir::IrLiteral::Int(2026))]),
+            )
+            .unwrap();
+        writer.flush().unwrap();
+        bindings.validate_physical_routes(root.path()).unwrap();
+        let (inventory, _) = crate::capture_graph_files(root.path()).unwrap();
+        bindings
+            .validate_physical_routes_with_inventory(root.path(), Some(&inventory))
+            .unwrap();
+        assert_owner_table_checks(&bindings, root.path(), entity, "node_uuid");
+        assert_owner_table_checks(&bindings, root.path(), relation, "edge_uuid");
+        std::fs::write(
+            root.path().join("properties/s-unlisted.parquet"),
+            b"unlisted",
+        )
+        .unwrap();
+        assert!(bindings.validate_physical_routes(root.path()).is_err());
     }
 
     #[test]
