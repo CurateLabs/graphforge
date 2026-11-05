@@ -80,10 +80,14 @@ original input files needed to reproduce your work.
 
 ## Hosted notebooks
 
-Kaggle and Colab are not assumed equivalent to a local notebook. Package
-installation, available native wheels, filesystem admission, session resets,
-and retention/export must be qualified in that environment. v0.6.0 qualification
-is tracked in [#1209](https://github.com/CurateLabs/graphforge/issues/1209).
+Kaggle and Colab remain runtime-unqualified. In the
+[recorded access check](https://github.com/CurateLabs/graphforge/issues/1209#issuecomment-6639323044),
+each available session was signed out and no authorized kernel was available.
+That records an access limitation, not an unsupported-platform result. Native
+installation, execution, filesystem admission, session reset and retention/export
+were not tested there. A successful local Jupyter kernel does not establish any
+of those hosted outcomes. Use the local notebook path above for the qualified
+workflow; assess each hosted environment separately before relying on it.
 
 If a hosted environment supports the native package, memory-only work remains
 ephemeral. Do not bypass a `GF_UNSUPPORTED_FILESYSTEM` error to claim durable

@@ -13,8 +13,8 @@ durable storage or build an integration.
 The core audience is a **nontechnical analyst working with an agent**. The
 [Basic path](overview.md#basic) is written for them. It still needs an agent or
 technical helper to install and run software. Finishing the examples does not
-establish nontechnical usability; actual first-use and comprehension evidence
-belongs to [#1209](https://github.com/CurateLabs/graphforge/issues/1209).
+establish general nontechnical usability; post-release user pilots belong to
+[#1211](https://github.com/CurateLabs/graphforge/issues/1211).
 
 **v0.6.0 initially serves technical analysts and integrators more completely**: people
 who can run Python or Node, read a query result, and (when they choose) work
@@ -22,8 +22,9 @@ through a coding agent. They want to build or load a graph, ask relationship
 questions, and keep the result without operating a database.
 
 The [public Hub launch path](portable-projects.md#public-hub-launch-path) connects
-browse, clone, query, local continuation and publish-back. Its production
-qualification remains blocked; the local jobs below do not depend on it.
+browse, clone, query and local continuation with the selected candidate.
+Publishing requires a separately authorized destination and machine session.
+The local jobs below also work without a Hub.
 
 ## Two jobs you can complete today
 
@@ -84,14 +85,14 @@ Its numbers describe that workload on that host, not your graph.
 
 ## Shipped, and not yet shipped
 
-| Implemented in Core; candidate qualification is separate                                   | Not part of this release, or not yet qualified                                                                  |
-| ------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
-| Python and Node bindings, `gf` CLI, openCypher queries, analyst verbs                       | A client-server database mode                                                                                   |
-| In-memory graphs; durable projects on ext4, xfs, btrfs (Linux), APFS, NTFS                  | Durable projects on unadmitted filesystems                                                                      |
-| Arrow results, Parquet graph storage, JSON metadata                                         | Backward compatibility and migration for earlier project formats (pre-v1)                                       |
-| Portable project export, verify, import; `gf clone` and `gf publish` commands               | Production clone and publish-back qualification is still required for launch under [#1209](https://github.com/CurateLabs/graphforge/issues/1209); full hosted catalog/publishing interfaces and private-repository qualification are separate |
-| Optional inquiry records, research history, and decision-workflow building blocks           | Hosted notebooks (Kaggle, Colab) as qualified durable environments                                              |
-| Measured scale evidence listed in [Scale and workload limits](../reference/scale-limits.md) | A 1,000,000 edges/s ingest rate; strong multicore ingest scaling; audited benchmark results                     |
+| Implemented in Core; candidate qualification is separate                                    | Not part of this release, or not yet qualified                                                                                                                                                                                                                                                       |
+| ------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Python and Node bindings, `gf` CLI, openCypher queries, analyst verbs                       | A client-server database mode                                                                                                                                                                                                                                                                        |
+| In-memory graphs; durable projects on ext4, xfs, btrfs (Linux), APFS, NTFS                  | Durable projects on unadmitted filesystems                                                                                                                                                                                                                                                           |
+| Arrow results, Parquet graph storage, JSON metadata                                         | Backward compatibility and migration for earlier project formats (pre-v1)                                                                                                                                                                                                                            |
+| Portable project export, verify, import; `gf clone` and `gf publish` commands               | Production reads are qualified under [#1209](https://github.com/CurateLabs/graphforge/issues/1209); production publish-back follows under [#1095](https://github.com/CurateLabs/graphforge/issues/1095). Full hosted catalog/publishing interfaces and private-repository qualification are separate |
+| Optional inquiry records, research history, and decision-workflow building blocks           | Hosted notebooks (Kaggle, Colab) as qualified durable environments                                                                                                                                                                                                                                   |
+| Measured scale evidence listed in [Scale and workload limits](../reference/scale-limits.md) | A 1,000,000 edges/s ingest rate; strong multicore ingest scaling; audited benchmark results                                                                                                                                                                                                          |
 
 The [roadmap](../releases/roadmap.md) has delivery detail. A capability in
 this table is a statement about what the code supports, not about adoption or

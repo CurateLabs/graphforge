@@ -23,58 +23,56 @@ progress, and typed failures.
 
 ## Public Hub launch path
 
-**Production qualification pending.** This is the required coordinated launch
-journey, not a claim that production is ready. In the
-[2026-11-02 rc.7 production check](https://github.com/CurateLabs/graphforge/issues/1209#issuecomment-6587486441),
-both `opendata/openalex` clone forms fail with `hub.not_found`, creating no
-destination. The older advertised `openalex/openalex` forms fail with
-`hub.malformed_response`: their manifest lacks the producing Core version.
-Production clone, reopen/query, continuation, publish-back and rediscovery remain
-blocked; local consumer success does not qualify this journey.
-Use the [in-memory first graph](quickstart.md) now, or the
-[local save/reopen tutorial](tutorial.md) on supported storage.
+The public `opendata/openalex` fixture is reachable through production discovery.
+Both clone forms have reopened through the native engine and returned the useful
+authorship result below; [qualification results](https://github.com/CurateLabs/graphforge/issues/1209#issuecomment-6657797848)
+record actual packages and deployed revisions. The fixture is synthetic CC0-1.0
+content. It is a Project-only package: its default `main` ref is not a pre-existing
+research Branch or Version UUID.
+
+For local continuation and transfer, install the repaired packed candidate
+below. Production publishing is a separate operation after local evaluation;
+it requires an authorized destination and separately established machine login.
+The [in-memory first graph](quickstart.md) and
+[local save/reopen tutorial](tutorial.md) remain available without a Hub.
 
 ### Browse and choose the exact runtime
 
-Start at the [production Hub](https://graphforge.sh/hub). The intended fixture
-page is [opendata/openalex](https://graphforge.sh/opendata/openalex), pending
-production adoption. Before cloning, it must identify its question, license,
-producing Core version, default ref and immutable package or research Version.
+Start at the [GraphForge Data Hub](https://graphforge.sh/explore) and open
+[opendata/openalex](https://graphforge.sh/opendata/openalex). Its page supplies
+provenance, CC0-1.0 license, clone command and default ref; its linked protocol
+JSON supplies the producing Core version and immutable package identity.
 Do not treat a displayed date as a research Version UUID.
 
-The rc.7 source fixture is a **synthetic OpenAlex-themed GraphForge
+The public fixture is a **synthetic OpenAlex-themed GraphForge
 example**, dedicated under CC0-1.0 and maintained by GraphForge. It contains no
 real OpenAlex records and has no official OpenAlex or OurResearch affiliation.
 Its [source and native reopen tests](https://github.com/CurateLabs/graphforge/blob/v0.6.0-rc.7/tests/fixtures/hub/README.md)
 describe two invented authors, three works and four authorship relationships.
-Those are source-fixture expectations, not verified production counts.
+The production graph has five nodes and four edges. Its author-count query
+returns Ada Example: **2**, Basil Sample: **2**. It was produced by Core
+`0.6.0-rc.6`; rc.7 consumers retain the `GF_CORE_VERSION_MISMATCH` warning.
+Do not relabel the fixture as having been produced by the newer consumer.
 
 Use Node.js 20+, Python 3.10+ for the query, and the
 [supported native platform and durable filesystem](installation.md#status-and-limits).
-Prepare an isolated Python environment as described in
-[Installation](installation.md#python). The currently published candidate is
-`0.6.0-rc.7` (PyPI spelling `0.6.0rc7`):
-
-```bash
-npx --yes @curatelabs/graphforge-cli@0.6.0-rc.7 --version
-python -m pip install "graphforge==0.6.0rc7"
-```
-
-This installs/invokes those exact published packages. It does not select the final
-launch candidate. Later source builds carrying the same version label are
-different bytes; #1209 records the tested package and source identities. Match
-the fixture's producing Core version, and follow any
-[version warning](#data-from-another-core-version) before continuing.
+Install the [repaired packed candidate](installation.md#evaluate-the-repaired-packed-candidate)
+in its fresh evaluation directory and keep that Python environment active.
+The candidate source is `aaf044829`; its version label is still `0.6.0-rc.7`
+(PyPI spelling `0.6.0rc7`). Published registry rc.7 predates its retained-query
+and composition-reimport repairs. Use this evaluation's local CLI and wheel
+throughout, and compare the artifact identities in the qualification record.
+Follow the [version warning](#data-from-another-core-version) when reading a
+fixture produced by another Core version.
 
 ### Clone, reopen and ask a useful question
 
-Once the production fixture is available and qualified with the selected
-candidate, both accepted identity forms must produce the same selected state
-in separate new directories:
+From the evaluation directory, clone both accepted identity forms into
+separate new destinations:
 
 ```bash
-npx --yes @curatelabs/graphforge-cli@0.6.0-rc.7 --json clone opendata/openalex openalex
-npx --yes @curatelabs/graphforge-cli@0.6.0-rc.7 --json clone https://graphforge.sh/opendata/openalex openalex-copy
+./node_modules/.bin/gf --json clone opendata/openalex openalex
+./node_modules/.bin/gf --json clone https://graphforge.sh/opendata/openalex openalex-copy
 ```
 
 Stop if either clone fails; do not continue after a discovery failure.
@@ -95,7 +93,7 @@ from graphforge import GraphForge
 
 query = """
     MATCH (a:Author)-[:AUTHORED]->(w:Work)
-    RETURN a.name, count(w) AS works ORDER BY a.name
+    RETURN a.name AS author, count(w) AS works ORDER BY author
 """
 for path in ("openalex", "openalex-copy"):
     forge = GraphForge(path)
@@ -103,19 +101,122 @@ for path in ("openalex", "openalex-copy"):
     forge.close()
 ```
 
-The source test expects Ada Example: **2**, Basil Sample: **2**. Qualification
-must reproduce those rows in both production clones before publishing them as
-an observed launch result. The Python binding returns an Arrow table;
+Both lines must contain `[{'author': 'Ada Example', 'works': 2},
+{'author': 'Basil Sample', 'works': 2}]`. The Python binding returns an Arrow table;
 `to_pylist()` exposes its rows without manual IPC decoding. Closing the handle
 does not discard this durable project.
 
 ### Continue, publish back, discover and clone again
 
-Use the [git-style research workflow](research-journey.md#share-with-gf) to
-inspect state, choose a Branch, commit an intentional change and record its
-Version. A Project-only clone needs its first Branch before Branch commits;
-do not invent a pre-existing research history. Author/committer names are
-public credit, not login credentials.
+Continue locally before choosing whether to share. A Project-only clone needs
+its first research Branch; this example creates `main`, changes one invented
+title and exports that exact retained Version. Use a fresh clone when repeating
+it. Credit identifies the researcher; it is not a login credential.
+
+```python
+import json
+from pathlib import Path
+from graphforge import GraphForge, HubProject
+
+work = HubProject("openalex")
+work.branch("main", author="Example Analyst <analyst@example.invalid>")
+continued = work.commit(
+    "Annotate the example title",
+    "MATCH (w:Work {title:'A Synthetic Atlas of Ideas'}) "
+    "SET w.title='A Synthetic Atlas of Ideas (continued)'",
+    branch="main",
+    author="Example Analyst <analyst@example.invalid>",
+)
+Path("continued-version.json").write_text(json.dumps(continued))
+forge = GraphForge("openalex")
+print(forge.query_research_version(
+    continued["version_uuid"],
+    "MATCH (w:Work) RETURN w.title AS title ORDER BY title",
+).to_pylist())
+forge.export_research({
+    "version_uuid": continued["version_uuid"],
+    "output": str(Path("continued.gfpb").resolve()),
+    "bundled": True,
+})
+forge.close()
+```
+
+The retained result includes `A Synthetic Atlas of Ideas (continued)` and the
+other two original titles. Research export selects an immutable Version and
+its required closure. Generic `export --current --profile complete` refuses a
+workspace carrying operational research heads; it does not serialize live Branch
+state. Use the research export above for that workspace.
+
+In another Python process, fully verify the exported package, import it into a
+new destination and query the same Version. Keep the operation identity if an
+import must be retried; a changed request needs a new identity.
+
+```python
+import json
+from pathlib import Path
+from uuid import uuid4
+from graphforge import GraphForge
+
+continued = json.loads(Path("continued-version.json").read_text())
+verification = GraphForge.verify_portable("continued.gfpb", mode="full")
+assert verification["integrity"] == "verified"
+assert verification["compatibility"] == "supported"
+print(verification["integrity"], verification["package_digest"])
+operation_file = Path("continued-import-operation.txt")
+if not operation_file.exists():
+    operation_file.write_text(str(uuid4()))
+operation = operation_file.read_text()
+receipt = GraphForge.import_portable(
+    "continued-copy", input="continued.gfpb", operation_id=operation,
+)
+assert receipt["package_digest"] == verification["package_digest"]
+Path("continued-import-receipt.json").write_text(json.dumps(receipt))
+forge = GraphForge("continued-copy")
+print(forge.query_research_version(
+    continued["version_uuid"],
+    "MATCH (w:Work) RETURN w.title AS title ORDER BY title",
+).to_pylist())
+forge.close()
+```
+
+The imported query must return the same three titles. Imported lineage is
+historical; import does not create a live `main` Branch. Keep the verified bundle,
+its Version receipt and the source code outside your Git repository. Local
+first-use evaluation ends here. See the
+[git-style workflow](research-journey.md#share-with-gf) to continue working.
+
+#### Use the packaged editor with an agent
+
+The [qualification record](https://github.com/CurateLabs/graphforge/issues/1209#issuecomment-6657797848)
+identifies the tested VSIX bytes and installation command. Its historical CI
+download has expired; replay requires the retained archive with the recorded
+SHA256. This qualification does not imply current marketplace availability.
+In a separate VS Code profile, install that packaged extension, set `graphforge.runtime` to `node` and
+`graphforge.nativeModulePath` to the absolute path of this evaluation's
+`node_modules/@curatelabs/graphforge`, then use its
+[public agent commands](https://github.com/CurateLabs/graphforge-vscode/blob/HEAD/docs/published/agent-interop.md).
+`graphforge.agent.getContext` reports the selected engine and project;
+`graphforge.cloneFromHub`, `graphforge.runQuery` and `graphforge.openProject`
+provide the clone/query/reopen path. Applying a saved mutation requires explicit
+`confirm: true`; retained checkpoint views remain read-only.
+
+The qualified Linux VSIX uses **Cytoscape**, not XYG. Its Result Graph accepts
+flat endpoint columns; use this query before `graphforge.showResultGraph` with
+`renderer: "cytoscape"`:
+
+```cypher
+MATCH (a:Author)-[r:AUTHORED]->(w:Work)
+RETURN a.name AS source, w.title AS target, type(r) AS rel_type
+```
+
+The two author names and three work titles identify five nodes and four edges
+in this synthetic example. Nested `RETURN a,r,w` rows are not a supported graph
+projection in that older VSIX and select its visibly labeled demo instead.
+The recorded execution checks the actual renderer-ready acknowledgement, not
+just panel creation. This bounded candidate path does not qualify a different
+VSIX, renderer, platform or final companion release.
+
+#### Publish after local evaluation
 
 Publishing requires an existing **owner account and repository**, permission
 to write there, and the exact repository scope
@@ -127,9 +228,12 @@ does not establish successful authorization or publication.
 
 **Human browser/device approval requires the standalone native Rust CLI.** The
 npm launcher used above calls the captured binding interface; it cannot start
-device flow, even from a terminal. Install the exact native candidate into a
-new, dedicated directory and invoke its absolute path so an npm `gf` earlier
-in `PATH` cannot be selected accidentally.
+device flow, even from a terminal. The published native CLI below can establish
+machine authentication independently of uploads. It is the earlier registry
+rc.7 build, not the repaired packed candidate used for local research above.
+For publication, #1095 selects and verifies a native executable containing the
+retained-query and reimport repairs. Invoke that executable by its absolute path
+so an npm `gf` earlier in `PATH` cannot be selected accidentally.
 
 This step requires [Rust/Cargo setup](installation.md#build-from-source).
 The crates.io build also has the
@@ -143,19 +247,19 @@ absolute path.
 GF_NATIVE_CLI_ROOT="$PWD/graphforge-native-cli"
 cargo install --locked --root "$GF_NATIVE_CLI_ROOT" --version 0.6.0-rc.7 graphforge-cli
 "$GF_NATIVE_CLI_ROOT/bin/gf" --version
-"$GF_NATIVE_CLI_ROOT/bin/gf" --project openalex publish OWNER/REPOSITORY --ref main
-"$GF_NATIVE_CLI_ROOT/bin/gf" --json hub list OWNER/REPOSITORY
-"$GF_NATIVE_CLI_ROOT/bin/gf" --json clone OWNER/REPOSITORY continued-copy --ref main
+"$GF_NATIVE_CLI_ROOT/bin/gf" auth login --hub https://graphforge.sh
+"$GF_NATIVE_CLI_ROOT/bin/gf" --json auth status --hub https://graphforge.sh
 ```
 
-`OWNER/REPOSITORY` is the approved target, not an account created by these
-commands; `main` must name the intended local Branch. Replace the exact version
-when qualifying another selected candidate. Run the native publish command
-directly in a terminal, with stdin and stderr attached. With no explicit
-publish token or saved session, it uses the Hub's advertised device flow.
-Open its verification link and approve the displayed code for
-that repository scope before expiry. Core consumes the token in memory; never
-copy tokens into commands, notebooks, Project files or transcripts.
+At publication time, `OWNER/REPOSITORY` must be the approved existing target
+and `main` must name the intended local Branch. Use a new clone destination
+(such as `published-copy`) when verifying the uploaded result. Complete machine login separately
+before uploading; `auth status` checks the saved session in a later process.
+The native CLI stores it only in the supported OS credential vault. A saved
+session obtains the authorized repository-scoped token when publishing; login
+does not grant write permission to arbitrary destinations. Explicit scoped
+credentials remain available for automation. Never copy tokens into commands,
+notebooks, Project files or transcripts.
 The npm CLI can publish with an already-provisioned explicit scoped token; it
 cannot perform the human approval step. For an agent, use the installed
 `graphforge-hub` skill and the
@@ -164,9 +268,10 @@ An unattended agent cannot approve its own owner login.
 
 Compare the publish receipt, discovered head and new clone's Version and
 producing Core identity, then reopen and query the continued result. This
-publish-back → discovery → clone proof is a **required launch gate**, not a
-step waived by successful local export/import. The selected candidate, approved
-target and exact expected continued result still need #1209 qualification.
+publish-back → discovery → clone proof belongs to release execution in
+[#1095](https://github.com/CurateLabs/graphforge/issues/1095), after candidate
+first-use work in #1209 closes. Record actual write scope and deployed revisions;
+successful local export/import does not establish production publishing.
 Full hosted catalog/publishing interfaces, private-repository/browser-login
 qualification and later seed collections are separate scopes. Report failures
 through [support](../community/support.md).
