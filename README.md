@@ -94,16 +94,17 @@ or migration guarantee.
 
 ## Start with the public Hub
 
-The coordinated launch journey is browse the [production Hub](https://graphforge.sh/hub),
-install the exact candidate CLI, clone a project, reopen and query it, continue
-locally, publish back, then discover and clone the new Version.
-[Follow the Hub launch path](docs/guide/portable-projects.md#public-hub-launch-path).
+Browse the [GraphForge Data Hub](https://graphforge.sh/explore), install the
+selected candidate, clone a project, reopen it and ask a useful question.
+The public `opendata/openalex` example contains invented authors and works under
+CC0-1.0. Its authorship query returns Ada Example: **2**, Basil Sample: **2**.
+[Follow the Hub launch path](docs/guide/portable-projects.md#public-hub-launch-path)
+for the tested install route, version warning and local research/retention steps.
 
-**Qualification is blocked:** the intended `opendata/openalex` fixture is not yet
-available through production discovery. Production clone/query/publish-back and
-the selected candidate remain subject to
-[#1209](https://github.com/CurateLabs/graphforge/issues/1209#issuecomment-6460385114).
-The local example below is available independently.
+The repaired candidate uses different bytes from published rc.7; use the
+[packed-candidate instructions](docs/guide/installation.md#evaluate-the-repaired-packed-candidate)
+for retained research and reimport. Publishing to a Hub is a separate operation
+requiring an authorized destination and machine authentication.
 
 ## Quick Start: an in-memory graph
 

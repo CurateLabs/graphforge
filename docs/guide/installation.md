@@ -18,20 +18,66 @@ npm install @curatelabs/graphforge@0.6.0-rc.7 apache-arrow@21.2.0
 npx --yes @curatelabs/graphforge-cli@0.6.0-rc.7 --version
 ```
 
-Use the Python or Node setup below first. The [rc.7 consumer results](https://github.com/CurateLabs/graphforge/issues/1209#issuecomment-6587486441)
-establish Rust/Node queries and durable reopen, Python/Jupyter kernel execution,
-CLI retention and installed skills on Linux x86-64/ext4. These do not qualify
-other entry environments or the
-[production Hub journey](portable-projects.md#public-hub-launch-path), which
-still fails with rc.7. Publication is not full launch qualification.
-Later source builds with the same version label are distinct artifacts; record
-the source revision as well as the version. The selected launch candidate must
-be rechecked before announcement.
+The public `opendata/openalex` fixture is reachable through both clone forms;
+see the [Hub journey](portable-projects.md#public-hub-launch-path) for its useful
+question, expected output and producing-version warning. The
+[published rc.7 consumer results](https://github.com/CurateLabs/graphforge/issues/1209#issuecomment-6587486441)
+cover ordinary queries, durable reopen, local kernels and installed skills.
+
+Published rc.7 predates the fixes for ontology-composed retained-Version queries
+and reimport of previously imported composition. For that research lifecycle,
+use the repaired packed candidate below. Both carry the label `0.6.0-rc.7`;
+the source revision and artifact bytes distinguish them. The registry packages
+have not been replaced. #1095 owns final public-package substitution and recheck.
 
 The site maintains one current documentation set. Before v1.0.0, GraphForge
 does not guarantee backward compatibility, legacy APIs, or project migration.
 Use matching engine, bindings, CLI, and skills versions. Keep original source
 data and reproducible construction code when changing versions.
+
+## Evaluate the repaired packed candidate
+
+The selected source is
+[`aaf044829`](https://github.com/CurateLabs/graphforge/commit/aaf0448293915796cecf69bb8109c0b96c6a427d).
+Download its wheel and npm artifacts from the existing
+[Publish dry run](https://github.com/CurateLabs/graphforge/actions/runs/41960987276).
+The [first-use qualification record](https://github.com/CurateLabs/graphforge/issues/1209#issuecomment-6657797848)
+identifies the tested artifact hashes, platforms and results. Check those identities
+before installing; a version string alone does not distinguish this build from
+published rc.7.
+
+This prepublication route requires GitHub CLI access to Actions artifacts.
+Artifacts expire after seven days; if unavailable, use the later candidate
+recorded by [release execution](https://github.com/CurateLabs/graphforge/issues/1095).
+It is not a new registry release. The following commands use Linux x86-64 and
+a POSIX shell, with Node.js 20+, Python 3.10+ and an admitted durable volume:
+
+```bash
+mkdir graphforge-evaluation
+cd graphforge-evaluation
+python3 -m venv .venv
+. .venv/bin/activate
+gh run download 41960987276 --repo CurateLabs/graphforge --name npm-packages --dir packages
+gh run download 41960987276 --repo CurateLabs/graphforge --name wheel-linux-x86_64 --dir wheels
+npm init --yes
+npm install ./packages/curatelabs-graphforge-0.6.0-rc.7.tgz ./packages/curatelabs-graphforge-cli-0.6.0-rc.7.tgz ./packages/curatelabs-graphforge-linux-x64-gnu-0.6.0-rc.7.tgz apache-arrow@21.2.0
+python -m pip install wheels/*.whl
+./node_modules/.bin/gf --version
+```
+
+Invoke `./node_modules/.bin/gf` throughout the evaluation so an older `gf` in
+`PATH` cannot be selected. Use this environment's Python for the query examples.
+On macOS or Windows choose the matching wheel artifact and native npm tarball
+from the same run; retain the same source and package identities. The available
+platforms are listed below. These packages contain the native engine; no workspace
+checkout or local binding rebuild is needed.
+
+Rust evaluators can reproduce the external consumer from the qualification record:
+it assembles the ordinary publishable `.crate` archives at the same source, then
+builds a fresh consumer using only their pristine extracted contents for GraphForge
+dependencies. That is packed-candidate proof, not a registry release. Keep its
+recorded dependency overrides and stock DataFusion distinction; a workspace build
+or public rc.7 dependency does not substitute for that consumer.
 
 ## Status and limits
 
