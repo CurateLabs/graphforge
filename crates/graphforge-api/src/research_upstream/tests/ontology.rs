@@ -6,6 +6,8 @@ use graphforge_ontology::{
 
 fn module(id: &str, entity: &str, properties: &[&str]) -> AuthoredModule {
     let document = OntologyDoc {
+        label: None,
+        description: None,
         ontology_id: id.into(),
         version: "1.0.0".into(),
         entity_types: vec![EntityTypeDef {

@@ -24,6 +24,7 @@ mod item_id;
 mod item_resolution;
 mod item_source;
 mod lineage;
+mod module_metadata;
 mod rehome;
 mod repository;
 mod summary;
@@ -53,6 +54,10 @@ pub use lineage::{
     LineageBoundaryAnchor, LineageBranch, LineageForkOrigin, LineageProposal, LineageTag,
     LineageVersion, RESEARCH_LINEAGE_CAPABILITY, RESEARCH_LINEAGE_FORMAT,
     RESEARCH_LINEAGE_MEDIA_TYPE, ResearchLineage, ResearchLineageReference,
+};
+pub use module_metadata::{
+    MAX_ONTOLOGY_MODULE_DESCRIPTION_BYTES, MAX_ONTOLOGY_MODULE_LABEL_BYTES,
+    ONTOLOGY_MODULE_METADATA_CAPABILITY, validate_ontology_module_metadata,
 };
 pub use summary::{
     ProjectSummary, SummaryCorpusSize, SummaryFacts, SummaryGeographicCoverage, SummaryMetadata,
@@ -1342,7 +1347,16 @@ fn validate_semantics(
         } else {
             1
         };
-        if requirement.capability != accepted_capability || requirement.major != accepted_major {
+        let supported_major = if requirement.capability == accepted_capability {
+            Some(accepted_major)
+        } else if accepted_capability == PROJECT_SUMMARY_CAPABILITY
+            && requirement.capability == ONTOLOGY_MODULE_METADATA_CAPABILITY
+        {
+            Some(1)
+        } else {
+            None
+        };
+        if supported_major != Some(requirement.major) {
             return Err(DiscoveryError::new(
                 DiscoveryErrorCode::UnsupportedFuture,
                 Some("requirements"),
@@ -1350,8 +1364,7 @@ fn validate_semantics(
             )
             .with_version(DiscoveryVersionDetails {
                 subject: DiscoveryVersionSubject::Capability,
-                supported_major: (requirement.capability == accepted_capability)
-                    .then_some(accepted_major),
+                supported_major,
                 requested_major: requirement.major,
             }));
         }

@@ -16,6 +16,8 @@ fn relationship_acceptance_requires_reviewed_ontology_and_publishes_both_atomica
     let branch_uuid = branch(&mut graph);
     let before_composition = graph.persisted_workspace_ontology_composition().unwrap();
     let document = OntologyDoc {
+        label: None,
+        description: None,
         ontology_id: "proposal-relationships".into(),
         version: "1.0.0".into(),
         entity_types: vec![EntityTypeDef {
@@ -264,6 +266,8 @@ fn semantic_secondary_label_and_typed_list_survive_selected_acceptance_and_reope
     graph.execute("CREATE (:Existing)").unwrap();
     let branch_uuid = branch(&mut graph);
     let document = OntologyDoc {
+        label: None,
+        description: None,
         ontology_id: "proposal-labels".into(),
         version: "1.0.0".into(),
         entity_types: ["Existing", "Character", "Tagged", "Reviewed"]
@@ -647,6 +651,8 @@ fn route_fixture_composition(
     distinct_types: bool,
 ) -> graphforge_storage::WorkspaceOntologyComposition {
     let document = OntologyDoc {
+        label: None,
+        description: None,
         ontology_id: "route-regression".into(),
         version: "1".into(),
         entity_types: ["A", "B"]

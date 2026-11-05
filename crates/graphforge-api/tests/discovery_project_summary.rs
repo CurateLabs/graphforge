@@ -97,6 +97,10 @@ struct Exported {
 /// Create a real durable Project with rich research metadata and one adopted
 /// module, then export the complete Project as both a bundle and a directory.
 fn exported_project() -> Exported {
+    exported_project_with_document(module_document())
+}
+
+fn exported_project_with_document(document: OntologyDoc) -> Exported {
     let root = tempfile::tempdir().unwrap();
     let project = root.path().join("project");
     fs::create_dir(&project).unwrap();
@@ -111,7 +115,7 @@ fn exported_project() -> Exported {
         })
         .expect("write metadata");
     let candidate = graph
-        .create_ontology_module(module_document(), Vec::new(), None)
+        .create_ontology_module(document, Vec::new(), None)
         .expect("validate module");
     let state = graph.ontology_authority_state().expect("authority state");
     graph
@@ -130,6 +134,8 @@ fn exported_project() -> Exported {
             None,
         )
         .expect("adopt module");
+    drop(graph);
+    let graph = GraphForge::new(project.to_str()).expect("reopen durable Project");
     let bundle = root.path().join("project.gfpb");
     let expanded = root.path().join("project.gfproject");
     for (path, representation) in [
@@ -156,6 +162,74 @@ fn exported_project() -> Exported {
         bundle,
         expanded,
     }
+}
+
+#[test]
+fn module_text_survives_reopen_and_is_derived_from_authenticated_package_bytes() {
+    let mut document = module_document();
+    document.label = Some("Scholarly works 研究".into());
+    document.description = Some("Authors and their works.\nPublic research metadata.".into());
+    let exported = exported_project_with_document(document.clone());
+    for package in [&exported.bundle, &exported.expanded] {
+        let summary = summarize(package).unwrap();
+        let module = &summary.facts.ontology_composition.as_ref().unwrap().modules[0];
+        assert_eq!(module.label, document.label);
+        assert_eq!(module.description, document.description);
+        assert!(summary.requirements.iter().any(|requirement| {
+            requirement.capability == graphforge_discovery::ONTOLOGY_MODULE_METADATA_CAPABILITY
+                && requirement.major == 1
+        }));
+        let canonical = summary.to_canonical_json().unwrap();
+        assert_eq!(
+            ProjectSummary::from_json(&canonical, DiscoveryLimits::default()).unwrap(),
+            summary
+        );
+    }
+    assert_eq!(
+        summarize(&exported.bundle).unwrap(),
+        summarize(&exported.expanded).unwrap()
+    );
+}
+
+#[test]
+fn absent_module_text_keeps_the_original_summary_requirement_and_omits_fields() {
+    let exported = exported_project();
+    let summary = summarize(&exported.bundle).unwrap();
+    assert_eq!(
+        summary.requirements,
+        vec![ProtocolRequirement {
+            capability: graphforge_discovery::PROJECT_SUMMARY_CAPABILITY.into(),
+            major: 1,
+        }]
+    );
+    let module = &summary.facts.ontology_composition.as_ref().unwrap().modules[0];
+    let value = serde_json::to_value(module).unwrap();
+    assert!(value.get("label").is_none());
+    assert!(value.get("description").is_none());
+}
+
+#[test]
+fn resealed_transport_bytes_cannot_change_text_without_changing_module_identity() {
+    let exported = exported_project();
+    let verified = report(&exported.expanded);
+    let entry = verified
+        .ontology_composition_entries
+        .iter()
+        .find(|entry| entry.kind == "ontology")
+        .unwrap();
+    let mut forged = module_document();
+    forged.label = Some("Forged module label".into());
+    replace_package_file(
+        &exported.expanded,
+        &entry.path,
+        &graphforge_ontology::composition::canonical_json(&serde_json::to_value(&forged).unwrap())
+            .unwrap(),
+    );
+    let error = summarize(&exported.expanded).unwrap_err();
+    assert!(
+        matches!(error, DiscoveryPortableError::Portable(ref error) if error.code == graphforge_core::portable::PortableErrorCode::DigestMismatch),
+        "{error:?}"
+    );
 }
 
 fn summarize(package: &Path) -> Result<ProjectSummary, DiscoveryPortableError> {

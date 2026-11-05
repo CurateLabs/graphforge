@@ -26,6 +26,12 @@ pub struct OntologyDoc {
     pub ontology_id: String,
     /// Semver-style version string (e.g. `"2026.05"`).
     pub version: String,
+    /// Optional human-readable Unicode label, at most 256 UTF-8 bytes on one line.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// Optional plain-text Unicode description, at most 4096 UTF-8 bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     /// Node class definitions.
     #[serde(default)]
     pub entity_types: Vec<EntityTypeDef>,
@@ -42,6 +48,34 @@ pub struct OntologyDoc {
     /// planner uses it to break ties between equal-length routes.
     #[serde(default)]
     pub migrations: Vec<MigrationDef>,
+}
+
+impl OntologyDoc {
+    /// Compare the schema independently of authored version, migrations and text.
+    ///
+    /// These declaration fields still contribute to the content digest, but do
+    /// not require graph-data transforms. Identity and every schema field must
+    /// remain equal; a cross-ID rewrite is a separate explicitly authorized path.
+    #[must_use]
+    pub fn has_same_schema(&self, other: &Self) -> bool {
+        let mut document = self.clone();
+        document.version.clone_from(&other.version);
+        document.migrations.clone_from(&other.migrations);
+        document.label.clone_from(&other.label);
+        document.description.clone_from(&other.description);
+        document == *other
+    }
+
+    /// Validate the module's public text using the native/WASM protocol rules.
+    ///
+    /// The portable verifier checks this before accepting a module document;
+    /// the full ontology validator checks it together with semantic rules.
+    pub fn validate_metadata(&self) -> Result<(), graphforge_discovery::DiscoveryError> {
+        graphforge_discovery::validate_ontology_module_metadata(
+            self.label.as_deref(),
+            self.description.as_deref(),
+        )
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -225,6 +259,8 @@ mod tests {
 
     fn minimal_doc() -> OntologyDoc {
         OntologyDoc {
+            label: None,
+            description: None,
             ontology_id: "test".to_string(),
             version: "1.0".to_string(),
             entity_types: vec![EntityTypeDef {

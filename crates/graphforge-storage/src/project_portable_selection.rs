@@ -638,6 +638,8 @@ mod tests {
             canonical_ontology_sha256: Some("a".repeat(64)),
             canonical_ontology: Some(
                 serde_json::to_value(graphforge_ontology::OntologyDoc {
+                    label: None,
+                    description: None,
                     ontology_id: "https://graphforge.dev/ontology/selection-closure".into(),
                     version: "1".into(),
                     entity_types: Vec::new(),

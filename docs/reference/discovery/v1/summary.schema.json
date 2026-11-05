@@ -122,11 +122,17 @@
                       "content_digest": {
                         "$ref": "#/$defs/digest"
                       },
+                      "description": {
+                        "$ref": "#/$defs/module_description"
+                      },
                       "dialect": {
                         "$ref": "#/$defs/identity_text"
                       },
                       "id": {
                         "$ref": "#/$defs/identity_text"
+                      },
+                      "label": {
+                        "$ref": "#/$defs/module_label"
                       },
                       "profile": {
                         "$ref": "#/$defs/identity_text"
@@ -358,6 +364,32 @@
         "updated_at"
       ],
       "type": "object"
+    },
+    "module_description": {
+      "anyOf": [
+        {
+          "description": "At most 4096 UTF-8 bytes, nonblank plain text; LF and tab allowed, all other controls forbidden; enforced by Rust.",
+          "maxLength": 4096,
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "module_label": {
+      "anyOf": [
+        {
+          "description": "At most 256 UTF-8 bytes, nonblank, single line, no control characters or U+2028/U+2029; enforced by Rust.",
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
     },
     "optional_count": {
       "anyOf": [

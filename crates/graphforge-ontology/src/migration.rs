@@ -424,6 +424,8 @@ mod tests {
 
     fn base_doc() -> OntologyDoc {
         OntologyDoc {
+            label: None,
+            description: None,
             ontology_id: "test".to_owned(),
             version: "v1".to_owned(),
             entity_types: vec![EntityTypeDef {

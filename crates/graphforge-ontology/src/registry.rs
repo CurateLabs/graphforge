@@ -70,6 +70,8 @@ mod tests {
 
     fn make_handle(id: &str) -> OntologyHandle {
         let doc = OntologyDoc {
+            label: None,
+            description: None,
             ontology_id: id.to_string(),
             version: "1.0".to_string(),
             entity_types: vec![],
@@ -119,6 +121,8 @@ mod tests {
         reg.register(make_handle("core"));
         // Replace with a handle that has the same id but different content.
         let mut doc = OntologyDoc {
+            label: None,
+            description: None,
             ontology_id: "core".to_string(),
             version: "2.0".to_string(),
             entity_types: vec![],

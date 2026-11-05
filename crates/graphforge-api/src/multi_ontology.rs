@@ -1411,6 +1411,8 @@ mod tests {
 
     fn document(ontology_id: &str, entity: &str) -> OntologyDoc {
         OntologyDoc {
+            label: None,
+            description: None,
             ontology_id: ontology_id.into(),
             version: "1".into(),
             entity_types: vec![EntityTypeDef {

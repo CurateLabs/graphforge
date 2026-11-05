@@ -2526,6 +2526,8 @@ mod tests {
         let source = tempfile::tempdir().unwrap();
         let parent = crate::open_or_initialize_project(source.path()).unwrap();
         let document = graphforge_ontology::OntologyDoc {
+            label: None,
+            description: None,
             ontology_id: "https://graphforge.dev/ontology/portable-import".into(),
             version: "release-2026.08".into(),
             entity_types: (0..entity_types)

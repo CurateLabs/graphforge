@@ -14,6 +14,15 @@ const discovery = readJson(
   "v1",
   "conformance.json",
 );
+discovery.cases.push(
+  ...readJson(
+    "docs",
+    "reference",
+    "discovery",
+    "v1",
+    "module-metadata-conformance.json",
+  ).cases,
+);
 const moved = readJson(
   "docs",
   "reference",
@@ -56,7 +65,7 @@ function thrownFailure(error) {
 }
 
 test("discovery v1 corpus matches native Rust for every case", () => {
-  assert.equal(discovery.cases.length, 100);
+  assert.equal(discovery.cases.length, 113);
   for (const { name, document, json, limits, expected } of discovery.cases) {
     const outcome = attempt(() => VALIDATORS[document](json, limits));
     if (expected.result === "valid") {

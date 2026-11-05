@@ -108,14 +108,14 @@ impl SemanticStorageBindings {
                 .iter()
                 .find(|module| module.id == *new)
                 .ok_or_else(|| corrupt("identity-equivalent target is absent"))?;
-            let mut document = old_module.doc.clone();
-            if old.ontology_id == new.ontology_id {
-                document.version.clone_from(&new_module.doc.version);
-                document.migrations.clone_from(&new_module.doc.migrations);
+            let equivalent = if old.ontology_id == new.ontology_id {
+                old_module.doc.has_same_schema(&new_module.doc)
             } else {
+                let mut document = old_module.doc.clone();
                 document.ontology_id.clone_from(&new_module.doc.ontology_id);
-            }
-            if document != new_module.doc {
+                document == new_module.doc
+            };
+            if !equivalent {
                 return Err(corrupt(
                     "claimed identity-equivalent module changes its schema",
                 ));

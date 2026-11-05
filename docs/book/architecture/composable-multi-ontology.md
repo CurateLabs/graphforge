@@ -14,6 +14,25 @@ The exact `/1` sorted-JSON grammar and intentional separation from the core
 binary fingerprint envelope are specified in the
 [ontology document compatibility boundary](canonical-fingerprints-v1.md#ontology-document-compatibility-boundary).
 
+Module declarations may include optional `label` and `description` Unicode
+strings. A label is nonblank and single-line, at most 256 UTF-8 bytes, without
+control characters or U+2028/U+2029. A description is nonblank plain text, at most
+4096 UTF-8 bytes; LF and tab are allowed, other control characters are forbidden.
+Locale maps are not supported. Authored text is neither trimmed nor Unicode
+normalized. Omitted fields are not serialized, preserving old document digests;
+present fields contribute to the module content digest. The
+[Project summary contract](../../reference/discovery/v1/README.md#project-summary-and-ontology-descriptors-protocol-12)
+projects them from verified module bytes and requires
+`ontology-module-metadata@1` for consumers, including the protocol WASM.
+
+```yaml
+ontology_id: https://graphforge.sh/ont_drqf2xw8w33cxaxj
+version: "2026.02"
+label: Scholarly works
+description: |
+  Research works, authors, and their scholarly relationships.
+```
+
 `QualifiedSymbol` is `{ module, kind, local_id }`, where `kind` is exactly
 `entity`, `relation`, `property`, `constraint`, or `migration`, and `local_id`
 is NFC-normalized and unique for its kind within the exact module. A runtime

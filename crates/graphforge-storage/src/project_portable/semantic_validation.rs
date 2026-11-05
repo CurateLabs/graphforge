@@ -97,6 +97,13 @@ fn validate_materialized_ontology(
                 "ontology module schema",
             )
         })?;
+    document.validate_metadata().map_err(|_| {
+        PortableError::at(
+            PortableErrorCode::InvalidStructure,
+            &entry.path,
+            "ontology module metadata",
+        )
+    })?;
     let digest = graphforge_ontology::module_document_digest(&document).map_err(|_| {
         PortableError::at(
             PortableErrorCode::Incompatible,

@@ -18,6 +18,8 @@ fn source_package(root: &Path) -> (PathBuf, OntologyModuleId) {
     let candidate = graph
         .create_ontology_module(
             OntologyDoc {
+                label: None,
+                description: None,
                 ontology_id: "https://example.org/ontology/reproducible-import".into(),
                 version: "2026.1".into(),
                 entity_types: Vec::new(),

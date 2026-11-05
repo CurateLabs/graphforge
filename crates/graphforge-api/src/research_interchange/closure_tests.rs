@@ -608,6 +608,8 @@ pub(crate) fn generation(graph: &GraphForge) -> Uuid {
 }
 pub(crate) fn install_ontology(graph: &mut GraphForge, branch_uuid: Uuid) -> Uuid {
     let doc = OntologyDoc {
+        label: None,
+        description: None,
         ontology_id: "https://example.invalid/interchange-evidence".into(),
         version: "1.0.0".into(),
         entity_types: vec![EntityTypeDef {

@@ -1,0 +1,68 @@
+//! Module text is authenticated authored content, with a compatible absent form.
+
+use graphforge_ontology::{OntologyDoc, OntologyLoader, OntologyValidator, module_document_digest};
+use serde_json::json;
+
+fn document() -> OntologyDoc {
+    serde_json::from_value(json!({
+        "ontology_id":"https://example.org/ontology/text", "version":"1",
+        "entity_types":[], "relation_types":[], "properties":[], "constraints":[], "migrations":[]
+    }))
+    .unwrap()
+}
+
+#[test]
+fn absent_module_text_preserves_historical_serialization_and_digest() {
+    let document = document();
+    let value = serde_json::to_value(&document).unwrap();
+    assert!(value.get("label").is_none());
+    assert!(value.get("description").is_none());
+    assert_eq!(
+        module_document_digest(&document).unwrap(),
+        "8193bfdb30f20732936333c4664ad500660991854a65d6822d60fd414461fd06"
+    );
+}
+
+#[test]
+fn authored_text_round_trips_and_changes_module_identity_without_normalization() {
+    let mut document = document();
+    let absent = module_document_digest(&document).unwrap();
+    document.label = Some("研究 e\u{301}".into());
+    document.description = Some("Plain text, including <angle brackets>.\n\tSecond line.".into());
+    OntologyValidator::validate(&document).unwrap();
+    let bytes = serde_json::to_vec(&document).unwrap();
+    let parsed = OntologyLoader::load_json(bytes.as_slice()).unwrap();
+    assert_eq!(parsed, document);
+    assert_ne!(module_document_digest(&parsed).unwrap(), absent);
+    let labelled = module_document_digest(&document).unwrap();
+    document.label = Some("研究 é".into());
+    assert_ne!(
+        module_document_digest(&document).unwrap(),
+        labelled,
+        "authored Unicode is not normalized"
+    );
+    document.description = Some("Revised description".into());
+    assert_ne!(module_document_digest(&document).unwrap(), labelled);
+}
+
+#[test]
+fn loading_and_native_validation_share_bounded_text_rules() {
+    for (label, description) in [
+        (Some("\n".into()), None),
+        (Some("a".repeat(257)), None),
+        (Some("first\u{2028}second".into()), None),
+        (None, Some("a".repeat(4097))),
+        (None, Some("bad\rtext".into())),
+    ] {
+        let mut document = document();
+        document.label = label;
+        document.description = description;
+        assert!(OntologyValidator::validate(&document).is_err());
+        assert!(
+            OntologyLoader::load_json(serde_json::to_vec(&document).unwrap().as_slice()).is_err()
+        );
+    }
+    let mut localized = serde_json::to_value(document()).unwrap();
+    localized["label"] = json!({"en":"Works"});
+    assert!(serde_json::from_value::<OntologyDoc>(localized).is_err());
+}

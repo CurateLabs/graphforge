@@ -526,6 +526,8 @@ mod tests {
         let mut participants = empty_workspace_participants().unwrap();
         participants.insert(0, files);
         let document = graphforge_ontology::OntologyDoc {
+            label: None,
+            description: None,
             ontology_id: "https://graphforge.dev/ontology/subset".into(),
             version: "v1".into(),
             entity_types: vec![],
