@@ -13,12 +13,20 @@ pub(super) struct SnapshotHistory<'a> {
 }
 
 pub(super) fn bind_flags(identity: String, args: &PublishArgs) -> String {
-    if !args.rewrite && !args.prune {
-        return identity;
+    let identity = if args.rewrite || args.prune {
+        sha256_digest(&canonical_json(
+            &json!({"identity":identity,"rewrite":args.rewrite,"prune":args.prune}),
+        ))
+    } else {
+        identity
+    };
+    if args.visibility.public || args.visibility.private {
+        sha256_digest(&canonical_json(
+            &json!({"identity":identity,"visibility":if args.visibility.public {"public"} else {"private"}}),
+        ))
+    } else {
+        identity
     }
-    sha256_digest(&canonical_json(
-        &json!({"identity":identity,"rewrite":args.rewrite,"prune":args.prune}),
-    ))
 }
 
 pub(super) fn verify_established_fork(

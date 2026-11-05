@@ -10,6 +10,73 @@
   "$id": "https://graphforge.sh/schemas/hub-publish/v1/error.schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "reason": {
+            "enum": [
+              "private_requires_plan",
+              "visibility_required",
+              "storage_cap",
+              "session_cap"
+            ]
+          }
+        },
+        "required": [
+          "reason"
+        ]
+      },
+      "then": {
+        "properties": {
+          "code": {
+            "const": "entitlement_denied"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "reason": {
+            "enum": [
+              "repository_is_public",
+              "repository_is_private"
+            ]
+          }
+        },
+        "required": [
+          "reason"
+        ]
+      },
+      "then": {
+        "properties": {
+          "code": {
+            "const": "visibility_mismatch"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "reason": {
+            "const": "invalid_visibility"
+          }
+        },
+        "required": [
+          "reason"
+        ]
+      },
+      "then": {
+        "properties": {
+          "code": {
+            "const": "invalid_input"
+          }
+        }
+      }
+    }
+  ],
   "else": {
     "not": {
       "required": [
@@ -29,6 +96,7 @@
       "enum": [
         "auth_denied",
         "entitlement_denied",
+        "visibility_mismatch",
         "idempotency_conflict",
         "ref_conflict",
         "non_fast_forward",
@@ -96,6 +164,17 @@
     "message": {
       "maxLength": 512,
       "type": "string"
+    },
+    "reason": {
+      "enum": [
+        "private_requires_plan",
+        "visibility_required",
+        "repository_is_public",
+        "repository_is_private",
+        "invalid_visibility",
+        "storage_cap",
+        "session_cap"
+      ]
     }
   },
   "required": [

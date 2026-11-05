@@ -1891,6 +1891,7 @@ fn error_schema() -> Value {
             "properties": {
                 "code": {"enum": graphforge_hub_publish::HubPublishErrorCode::ALL.map(|code| code.as_str())},
                 "message": {"type": "string", "maxLength": 512},
+                "reason": {"enum": graphforge_hub_publish::PublishErrorReason::ALL},
                 "items": {
                     "type": "array", "minItems": 1, "maxItems": graphforge_hub_publish::MAX_ID_TAKEN_ITEMS,
                     "uniqueItems": true,
@@ -1913,6 +1914,11 @@ fn error_schema() -> Value {
             "if": {"properties": {"code": {"const": "id_taken"}}},
             "then": {"properties": {"message": {"const": graphforge_hub_publish::ID_TAKEN_MESSAGE}}},
             "else": {"not": {"required": ["items"]}},
+            "allOf": [
+                {"if": {"required": ["reason"], "properties": {"reason": {"enum": ["private_requires_plan", "visibility_required", "storage_cap", "session_cap"]}}}, "then": {"properties": {"code": {"const": "entitlement_denied"}}}},
+                {"if": {"required": ["reason"], "properties": {"reason": {"enum": ["repository_is_public", "repository_is_private"]}}}, "then": {"properties": {"code": {"const": "visibility_mismatch"}}}},
+                {"if": {"required": ["reason"], "properties": {"reason": {"const": "invalid_visibility"}}}, "then": {"properties": {"code": {"const": "invalid_input"}}}}
+            ],
             "$defs": {"slug": defs()["slug"]}
         }),
     )

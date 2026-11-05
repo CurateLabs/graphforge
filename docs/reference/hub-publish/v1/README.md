@@ -28,7 +28,7 @@ required-capability set) stay authoritative in Rust.
 gf --project <dir> publish <owner/repository | https://hub/owner/repository> \
     (--ref <branch-label> | --version-uuid <uuid>) \
     [--fork-of <owner/repository | URL>] [--operation-uuid <uuid>] \
-    [--protection-bypass-env <name>] [--json]
+    [--public | --private] [--protection-bypass-env <name>] [--json]
 ```
 
 `--ref` publishes the head of the local research Branch with that label under
@@ -38,6 +38,26 @@ Project and cites its origin, after checking that the origin repository
 publishes the cited Version with the same identity. The repository argument
 follows `gf clone`: `owner/repository` resolves against `https://graphforge.sh`,
 or pass the HTTPS repository URL.
+
+`--public` and `--private` express an explicit visibility choice. They require
+`{"capability":"publish-visibility","major":1}` in the Hub's offered
+capabilities. Without that capability, either flag fails locally with
+`hub.publish.unsupported_future` before credentials or uploads. The CLI sends
+`GraphForge-Visibility: public` or `GraphForge-Visibility: private` only on
+session open; with neither flag, it omits the header. Visibility is not a field
+of the signed session document. The choice is bound into the operation and
+intent digests, so changing it cannot replay a previously completed operation.
+
+Public repositories may be published by free accounts within the Hub's quota;
+private repositories require its plan. Publishing never changes an existing
+repository's visibility. A different choice returns HTTP 409
+`visibility_mismatch` with `repository_is_public` or `repository_is_private`;
+change visibility from the repository's Hub page instead. Typed refusal reasons
+also distinguish `private_requires_plan`, `visibility_required`, `storage_cap`,
+`session_cap`, and `invalid_visibility`. These reasons belong respectively to
+`entitlement_denied`, `visibility_mismatch`, or `invalid_input`; unknown reasons
+and mismatched code/reason pairs fail closed. CLI messages use fixed safe
+guidance selected by the validated code/reason, never untrusted server prose.
 
 Credentials come from `GRAPHFORGE_HUB_PUBLISH_TOKEN`, a saved `gf auth login`
 session for the selected Hub, or, in a terminal, the publish device flow
@@ -58,6 +78,7 @@ re-sending bytes the Hub already holds. `--json` prints the receipt.
 | --- | --- | --- |
 | Missing, refused, or denied credential | `hub.publish.auth_denied` | 2 |
 | Quota or entitlement refused | `hub.publish.entitlement_denied` | 2 |
+| Existing repository visibility differs from the requested choice | `hub.publish.visibility_mismatch` | 2 |
 | Operation reused for another publication | `GF_IDEMPOTENCY_CONFLICT` | 1 |
 | Permanent item ID belongs to another publisher | `hub.publish.id_taken` | 2 |
 | Repository moved since it was read; Fork target exists | `hub.publish.ref_conflict` | 2 |
