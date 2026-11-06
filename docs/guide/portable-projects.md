@@ -881,6 +881,129 @@ and `graphforge-portable-import/1` JSON receipts. Package and transport digests
 remain distinct; retired envelope digest/count fields are not compatibility aliases.
 The duplicate `portable export` and `portable import` verbs are removed.
 
+## Publish a standalone ontology
+
+A standalone ontology needs no nodes, edges, or sample corpus. Use a durable
+local Project as its publishing container, adopt the authored module, and
+capture it in a research Branch Version. The existing `gf publish` pipeline
+publishes the Project, research lineage, summary, and an independently verifiable
+package for each module. No separate ontology publishing format is needed.
+
+The following uses a current native `gf`, Python with the matching GraphForge
+binding (only to read the mutation precondition), and `jq`. Run on a supported
+durable filesystem. Choose a new working directory and keep the source documents
+outside the Project's storage:
+
+```bash
+mkdir standalone-ontology
+cd standalone-ontology
+cat > scholarly-source.json <<'JSON'
+{
+  "version": "1.0",
+  "label": "Scholarly works",
+  "description": "People author papers; this module contains schema, not a corpus.",
+  "entity_types": [{"name": "Person"}, {"name": "Paper"}],
+  "relation_types": [{"name": "AUTHORED", "src": "Person", "dst": "Paper"}]
+}
+JSON
+
+gf --project project --json ontology module create \
+  --input scholarly-source.json --output scholarly.json > candidate.json
+gf --project project --json ontology module import \
+  --input scholarly.json > imported.json
+```
+
+`create` assigns a permanent `ont_…` ID when the source omits one and saves the
+completed document to `scholarly.json`. `import` checks that completed document
+and returns the same exact candidate identity. Neither command adopts the module.
+Opening this new Project initializes its empty durable store; there is no
+`gf project new` step. Adopt against the observed generation:
+
+```bash
+GENERATION=$(python3 - <<'PY'
+from graphforge import GraphForge
+print(GraphForge("project").ontology_authority_state()["project_generation_uuid"])
+PY
+)
+OPERATION=$(python3 -c 'import uuid; print(uuid.uuid4())')
+gf --project project --json ontology module adopt --input scholarly.json \
+  --operation-uuid "$OPERATION" --expected-generation "$GENERATION"
+gf --project project --json ontology module list
+gf --project project --json branch main \
+  --author 'Ontology Author <author@example.org>' > branch.json
+gf --project project --json status
+```
+
+This precondition is for a fresh Project with no ontology composition. On an
+existing Project, also supply the observed `--expected-composition-fingerprint`;
+a stale generation or composition must be refreshed and reviewed before mutation.
+Keep an operation UUID when replaying the same adoption. The first `branch`
+command commits the adopted ontology in a retained research Version; its receipt
+contains `version_uuid`. `gf commit -m MESSAGE --query CYPHER` records a further
+Version by executing a query on that Branch. It requires a query or `--file` and
+is unnecessary for this initial ontology publication.
+
+Authenticate to a conforming publish-capable Hub and select a repository you own.
+Replace `OWNER/REPOSITORY` below. Login supplies authorization, while the Branch's
+author supplies credit. An already provisioned repository-scoped token in
+`GRAPHFORGE_HUB_PUBLISH_TOKEN` is also supported.
+
+```bash
+gf auth login
+gf --project project --json publish OWNER/REPOSITORY --ref main > publish.json
+gf hub list OWNER/REPOSITORY
+
+ONTOLOGY_ID=$(jq -r '.id.ontology_id' candidate.json)
+AUTHORED_VERSION=$(jq -r '.id.authored_version' candidate.json)
+CONTENT_DIGEST=$(jq -r '.id.canonical_digest' candidate.json)
+gf --json ontology module fetch OWNER/REPOSITORY \
+  --ontology-id "$ONTOLOGY_ID" --version "$AUTHORED_VERSION" \
+  --digest "$CONTENT_DIGEST" --output fetched-scholarly.json
+gf --json clone OWNER/REPOSITORY reader --ref main > clone.json
+gf --project reader --json ontology module list
+BRANCH_UUID=$(jq -r '.research_branch_uuid' clone.json)
+gf --project reader --json research branch query --branch-uuid "$BRANCH_UUID" \
+  --query 'MATCH (n) RETURN count(n)'
+gf --project reader --json research branch query --branch-uuid "$BRANCH_UUID" \
+  --query 'MATCH ()-[r]->() RETURN count(r)'
+```
+
+Fetch fully verifies the advertised module package and recomputes the exact
+module identity before writing the new output file. Clone independently verifies
+and imports the selected Version, preserving the ontology and its schema; both
+row counts above are zero. Use new output and destination paths: neither command
+overwrites an existing destination. An authored module version (`1.0` here), a
+research Version UUID, a module content digest, and a portable package digest
+identify different things.
+
+A graphless retained Version can omit the graph domain. Its historical
+`research version query` then refuses with `GF_RESULT_NOT_RETAINED`; the Branch
+queries above inspect the reopened empty graph without expanding that projection.
+
+For a Hub advertising `publish-visibility@1`, add `--public` to the first publish
+command to request a public repository (or require an existing public repository).
+Without that capability, the flag is refused before upload. Omitting the flag
+uses the Hub's existing visibility policy. Reference-Hub coverage proves native
+transport and negotiation, not production account entitlements or free-account
+availability.
+
+The discovery summary binds the module's ID, authored version, canonical digest,
+label, and description to the verified Project package. Its portable
+`package_class` is currently `component-selective`: that describes the selection
+profile, not the presence of graph rows. The Project package may contain empty
+graph structures and settings; the separate module package contains the exact
+ontology closure without `graph-data`. Do not classify this as a graph corpus
+merely because the Project has graph-capable storage. The explicit local export
+profile `ontology-only` is a different portable selection, not a publish flag.
+
+Permanent-ID resolution uses the existing `graphforge-item/1` descriptor and
+`application/vnd.graphforge.item+json` media type. A descriptor binds exact module
+identity to retained refs and manifest digests; consumers still verify the native
+package. Serving that descriptor on HTTP `Accept` negotiation, retaining its
+discovery snapshots, hosted ontology classification, and production publishing
+availability are Hub integration responsibilities. A local reference-Hub proof
+does not establish their deployment.
+
 ## Continue a published Branch
 
 Against a conforming publish-capable Hub, clone a named Branch, edit it through
