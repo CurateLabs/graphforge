@@ -110,7 +110,7 @@ pub fn summarize_verified_portable(
             composition
                 .modules
                 .iter()
-                .any(|module| module.label.is_some() || module.description.is_some())
+                .any(SummaryOntologyModule::has_metadata)
         })
     {
         requirements.insert(
@@ -262,6 +262,7 @@ fn composition_facts(
                     profile: module.profile.clone(),
                     label: document.label,
                     description: document.description,
+                    license: document.license,
                 })
             })
             .collect::<Result<_, DiscoveryPortableError>>()?,

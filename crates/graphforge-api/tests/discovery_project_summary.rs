@@ -101,6 +101,10 @@ fn exported_project() -> Exported {
 }
 
 fn exported_project_with_document(document: OntologyDoc) -> Exported {
+    exported_project_with_documents(vec![document])
+}
+
+fn exported_project_with_documents(documents: Vec<OntologyDoc>) -> Exported {
     let root = tempfile::tempdir().unwrap();
     let project = root.path().join("project");
     fs::create_dir(&project).unwrap();
@@ -114,26 +118,30 @@ fn exported_project_with_document(document: OntologyDoc) -> Exported {
             metadata: rich_metadata(),
         })
         .expect("write metadata");
-    let candidate = graph
-        .create_ontology_module(document, Vec::new(), None)
-        .expect("validate module");
-    let state = graph.ontology_authority_state().expect("authority state");
-    graph
-        .adopt_ontology_module(
-            &ModuleAdoptionRequest {
-                authority: OntologyAuthorityExpectation {
-                    context: WriteContext {
-                        operation_uuid: graphforge_api::OperationId(Uuid::from_u128(9_200)),
-                        actor_uuid: None,
+    for (index, document) in documents.into_iter().enumerate() {
+        let candidate = graph
+            .create_ontology_module(document, Vec::new(), None)
+            .expect("validate module");
+        let state = graph.ontology_authority_state().expect("authority state");
+        graph
+            .adopt_ontology_module(
+                &ModuleAdoptionRequest {
+                    authority: OntologyAuthorityExpectation {
+                        context: WriteContext {
+                            operation_uuid: graphforge_api::OperationId(Uuid::from_u128(
+                                9_200 + index as u128,
+                            )),
+                            actor_uuid: None,
+                        },
+                        expected_project_generation_uuid: state.project_generation_uuid,
+                        expected_composition_fingerprint: state.composition_fingerprint,
                     },
-                    expected_project_generation_uuid: state.project_generation_uuid,
-                    expected_composition_fingerprint: state.composition_fingerprint,
+                    candidate,
                 },
-                candidate,
-            },
-            None,
-        )
-        .expect("adopt module");
+                None,
+            )
+            .expect("adopt module");
+    }
     drop(graph);
     let graph = GraphForge::new(project.to_str()).expect("reopen durable Project");
     let bundle = root.path().join("project.gfpb");
@@ -192,6 +200,47 @@ fn module_text_survives_reopen_and_is_derived_from_authenticated_package_bytes()
 }
 
 #[test]
+fn two_modules_retain_their_own_license_independently_of_the_project() {
+    let mut first = module_document();
+    first.license = Some("MIT".into());
+    let mut second = module_document();
+    second.ontology_id = "https://example.org/ontology/other-module".into();
+    second.entity_types[0].name = "OtherPerson".into();
+    second.license = Some("Apache-2.0 WITH LLVM-exception".into());
+    let exported = exported_project_with_documents(vec![first.clone(), second.clone()]);
+    for path in [&exported.bundle, &exported.expanded] {
+        let summary = summarize(path).unwrap();
+        assert_eq!(summary.metadata.license.as_deref(), Some("CC0-1.0"));
+        let modules = &summary.facts.ontology_composition.as_ref().unwrap().modules;
+        assert_eq!(modules.len(), 2);
+        for document in [&first, &second] {
+            let module = modules
+                .iter()
+                .find(|module| module.id == document.ontology_id)
+                .unwrap();
+            assert_eq!(module.license, document.license);
+        }
+        assert!(
+            summary
+                .requirements
+                .iter()
+                .any(|requirement| requirement.capability
+                    == graphforge_discovery::ONTOLOGY_MODULE_METADATA_CAPABILITY
+                    && requirement.major == 1)
+        );
+        let canonical = summary.to_canonical_json().unwrap();
+        assert_eq!(
+            ProjectSummary::from_json(&canonical, DiscoveryLimits::default()).unwrap(),
+            summary
+        );
+    }
+    assert_eq!(
+        summarize(&exported.bundle).unwrap(),
+        summarize(&exported.expanded).unwrap()
+    );
+}
+
+#[test]
 fn absent_module_text_keeps_the_original_summary_requirement_and_omits_fields() {
     let exported = exported_project();
     let summary = summarize(&exported.bundle).unwrap();
@@ -206,10 +255,18 @@ fn absent_module_text_keeps_the_original_summary_requirement_and_omits_fields() 
     let value = serde_json::to_value(module).unwrap();
     assert!(value.get("label").is_none());
     assert!(value.get("description").is_none());
+    assert!(value.get("license").is_none());
+    assert_eq!(summary.metadata.license.as_deref(), Some("CC0-1.0"));
 }
 
 #[test]
-fn resealed_transport_bytes_cannot_change_text_without_changing_module_identity() {
+fn resealed_transport_bytes_cannot_change_metadata_without_changing_module_identity() {
+    for field in ["label", "license"] {
+        resealed_module_metadata_is_rejected(field);
+    }
+}
+
+fn resealed_module_metadata_is_rejected(field: &str) {
     let exported = exported_project();
     let verified = report(&exported.expanded);
     let entry = verified
@@ -217,8 +274,8 @@ fn resealed_transport_bytes_cannot_change_text_without_changing_module_identity(
         .iter()
         .find(|entry| entry.kind == "ontology")
         .unwrap();
-    let mut forged = module_document();
-    forged.label = Some("Forged module label".into());
+    let mut forged = serde_json::to_value(module_document()).unwrap();
+    forged[field] = Value::String("MIT".into());
     replace_package_file(
         &exported.expanded,
         &entry.path,
@@ -437,7 +494,9 @@ fn public_projection_excludes_extensions_discovery_facets_and_access_metadata() 
 
 #[test]
 fn summary_binds_to_a_manifest_built_with_discovery_types() {
-    let exported = exported_project();
+    let mut document = module_document();
+    document.license = Some("MIT".into());
+    let exported = exported_project_with_document(document);
     let summary = summarize(&exported.expanded).unwrap();
     let bytes = summary.to_canonical_json().unwrap();
     let object_digest = Sha256Digest(format!("sha256:{}", hex(Sha256::digest(&bytes))));
@@ -511,6 +570,15 @@ fn summary_binds_to_a_manifest_built_with_discovery_types() {
     );
     let parsed = ProjectSummary::from_json(&bytes, DiscoveryLimits::default()).unwrap();
     manifest.bind_summary(&parsed).unwrap();
+
+    let mut forged = parsed.clone();
+    forged.facts.ontology_composition.as_mut().unwrap().modules[0].license =
+        Some("Apache-2.0".into());
+    forged.validate(DiscoveryLimits::default()).unwrap();
+    assert_eq!(
+        manifest.bind_summary(&forged).unwrap_err().code,
+        DiscoveryErrorCode::IntegrityFailure
+    );
 
     // A different immutable version is a different summary.
     let mut other = parsed;

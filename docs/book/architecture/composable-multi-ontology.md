@@ -22,13 +22,23 @@ Locale maps are not supported. Authored text is neither trimmed nor Unicode
 normalized. Omitted fields are not serialized, preserving old document digests;
 present fields contribute to the module content digest. The
 [Project summary contract](../../reference/discovery/v1/README.md#project-summary-and-ontology-descriptors-protocol-12)
-projects them from verified module bytes and requires
+projects them and an optional module `license` from verified module bytes and requires
 `ontology-module-metadata@1` for consumers, including the protocol WASM.
+
+`license` is an SPDX expression of at most 4096 ASCII bytes without controls,
+validated by the shared Rust strict SPDX parser. Expressions, exceptions and
+license references are supported; see the summary contract for exact validation.
+Omission (or input `null`) means undeclared, with no inheritance from the Project
+license. Authored spacing is preserved and contributes to the content digest;
+absence preserves historical canonical bytes/digests. Modules can declare
+different licenses in the same Project. A license-only version upgrade changes
+module identity but requires no graph-data transform and retains data on reopen.
 
 ```yaml
 ontology_id: https://graphforge.sh/ont_drqf2xw8w33cxaxj
 version: "2026.02"
 label: Scholarly works
+license: CC0-1.0
 description: |
   Research works, authors, and their scholarly relationships.
 ```

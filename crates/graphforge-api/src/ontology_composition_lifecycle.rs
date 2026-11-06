@@ -1050,6 +1050,7 @@ mod tests {
         let document = OntologyDoc {
             label: None,
             description: None,
+            license: None,
             ontology_id: ontology_id.into(),
             version: version.into(),
             entity_types: entity_names
@@ -1106,6 +1107,7 @@ mod tests {
             let document = OntologyDoc {
                 label: None,
                 description: None,
+                license: None,
                 ontology_id: ontology_id.into(),
                 version: "1".into(),
                 entity_types: vec![EntityTypeDef {
@@ -1737,7 +1739,7 @@ mod tests {
         );
     }
 
-    fn publish_module_text_upgrade(structural: bool) {
+    fn publish_module_metadata_upgrade(structural: bool, license_only: bool) {
         let project = tempfile::tempdir().unwrap();
         let path = project.path().to_str().unwrap();
         let mut graph = GraphForge::new(Some(path)).unwrap();
@@ -1758,8 +1760,13 @@ mod tests {
         let previous = graph.workspace_ontology_composition().unwrap().unwrap();
         let mut document = previous.modules[0].document.clone();
         document.version = "2".into();
-        document.label = Some("People".into());
-        document.description = Some("People in the research graph.\nPublic module text.".into());
+        document.license = Some("Apache-2.0 OR MIT".into());
+        if !license_only {
+            document.label = Some("People".into());
+            document.description =
+                Some("People in the research graph.\nPublic module text.".into());
+        }
+        assert!(previous.modules[0].document.has_same_schema(&document));
         if structural {
             document.entity_types.push(EntityTypeDef {
                 name: "Company".into(),
@@ -1812,13 +1819,18 @@ mod tests {
     }
 
     #[test]
+    fn module_license_only_upgrade_preserves_graph_data_on_reopen() {
+        publish_module_metadata_upgrade(false, true);
+    }
+
+    #[test]
     fn module_text_upgrade_needs_no_schema_transform_and_preserves_rows_on_reopen() {
-        publish_module_text_upgrade(false);
+        publish_module_metadata_upgrade(false, false);
     }
 
     #[test]
     fn module_text_upgrade_alongside_a_schema_migration_preserves_rows_on_reopen() {
-        publish_module_text_upgrade(true);
+        publish_module_metadata_upgrade(true, false);
     }
 
     #[test]

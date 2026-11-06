@@ -794,6 +794,7 @@ fn local_composition_is_exact_and_does_not_change_parent_or_sibling() {
     let document = OntologyDoc {
         label: None,
         description: None,
+        license: None,
         ontology_id: "branch-local".into(),
         version: "1.0.0".into(),
         entity_types: vec![

@@ -1052,6 +1052,7 @@ mod tests {
         let document = OntologyDoc {
             label: None,
             description: None,
+            license: None,
             ontology_id: "https://graphforge.dev/ontology/legacy".into(),
             version: "1.0.0".into(),
             entity_types: vec![graphforge_ontology::EntityTypeDef {

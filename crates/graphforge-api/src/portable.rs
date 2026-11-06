@@ -1103,6 +1103,7 @@ mod tests {
                 OntologyDoc {
                     label: None,
                     description: None,
+                    license: None,
                     ontology_id: "urn:graphforge:portable-lifecycle".into(),
                     version: "1".into(),
                     entity_types: vec![EntityTypeDef {

@@ -17,7 +17,7 @@ python3 scripts/generate_third_party_notices.py
 
 ## License overview
 
-- Apache License 2.0 (394)
+- Apache License 2.0 (395)
 - MIT License (92)
 - Unicode License v3 (21)
 - BSD 3-Clause "New" or "Revised" License (13)
@@ -6441,6 +6441,7 @@ Used by:
 - lexical-write-float 1.0.6
 - lexical-write-integer 1.0.6
 - minimal-lexical 0.2.1
+- spdx 0.13.4
 
 ```
                               Apache License

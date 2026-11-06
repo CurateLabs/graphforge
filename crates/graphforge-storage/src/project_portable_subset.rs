@@ -528,6 +528,7 @@ mod tests {
         let document = graphforge_ontology::OntologyDoc {
             label: None,
             description: None,
+            license: None,
             ontology_id: "https://graphforge.dev/ontology/subset".into(),
             version: "v1".into(),
             entity_types: vec![],
