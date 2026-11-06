@@ -3,26 +3,40 @@ use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 
 mod discovery;
+mod origins;
 pub(crate) use discovery::unavailable_vault_transport;
 
 #[derive(Default)]
 struct MemoryStore {
     value: RefCell<Option<String>>,
+    last_login: RefCell<Option<String>>,
     writes: Cell<usize>,
 }
 impl Store for MemoryStore {
     fn lock(&self, _: &str) -> Result<Box<dyn StoreLock + '_>, GfError> {
         Ok(Box::new(()))
     }
-    fn read(&self, _: &str) -> Result<Option<String>, SavedCredentialError> {
-        Ok(self.value.borrow().clone())
+    fn read(&self, key: &str) -> Result<Option<String>, SavedCredentialError> {
+        Ok(if key == LAST_LOGIN_ORIGIN {
+            self.last_login.borrow().clone()
+        } else {
+            self.value.borrow().clone()
+        })
     }
-    fn write(&self, _: &str, value: &str) -> Result<(), GfError> {
+    fn write(&self, key: &str, value: &str) -> Result<(), GfError> {
+        if key == LAST_LOGIN_ORIGIN {
+            *self.last_login.borrow_mut() = Some(value.into());
+            return Ok(());
+        }
         self.writes.set(self.writes.get() + 1);
         *self.value.borrow_mut() = Some(value.into());
         Ok(())
     }
-    fn delete(&self, _: &str) -> Result<(), GfError> {
+    fn delete(&self, key: &str) -> Result<(), GfError> {
+        if key == LAST_LOGIN_ORIGIN {
+            *self.last_login.borrow_mut() = None;
+            return Ok(());
+        }
         *self.value.borrow_mut() = None;
         Ok(())
     }
@@ -101,6 +115,10 @@ fn login_polls_pending_slow_down_and_saves_one_atomic_pair() {
     .unwrap();
     assert_eq!(*waits.borrow(), [1, 1, 6]);
     assert_eq!(store.writes.get(), 1);
+    assert_eq!(
+        last_login_origin_from(&store).unwrap().unwrap().as_str(),
+        origin(DEFAULT_HUB).unwrap().as_str()
+    );
     assert_eq!(opened.borrow()[0].query(), Some("user_code=ABCD-EFGH"));
     let output = String::from_utf8(output).unwrap();
     for secret in ["device-secret", "access-secret", "refresh-secret"] {

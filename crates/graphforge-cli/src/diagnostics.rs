@@ -31,6 +31,14 @@ impl<'a> Diagnostics<'a> {
         }
     }
 
+    /// Human progress notices never alter the single-document JSON contract.
+    pub(crate) fn notice(&mut self, message: &str) {
+        if !self.json {
+            let _ = writeln!(self.sink, "{message}");
+            let _ = self.sink.flush();
+        }
+    }
+
     pub(crate) fn warn(&mut self, warnings: &[CoreVersionWarning]) {
         self.collected.borrow_mut().extend_from_slice(warnings);
         if !self.json {

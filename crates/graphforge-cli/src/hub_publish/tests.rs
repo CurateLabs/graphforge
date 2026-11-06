@@ -30,6 +30,7 @@ mod core_version_warning;
 mod credit;
 mod defaults;
 mod hub_listing;
+mod hub_selection;
 mod id_taken;
 mod porcelain;
 mod producing_version;

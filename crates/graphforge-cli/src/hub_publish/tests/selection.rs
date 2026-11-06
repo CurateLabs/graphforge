@@ -3,6 +3,7 @@ use super::*;
 
 pub(super) fn args(repository: &str) -> PublishArgs {
     PublishArgs {
+        hub: None,
         visibility: VisibilityArgs::default(),
         rewrite: false,
         prune: false,

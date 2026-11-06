@@ -69,7 +69,7 @@ fn publishing_a_project_from_another_core_warns_before_publishing() {
     assert_eq!(text.warnings[0].producing_core_version, CORE_X);
     assert!(
         text.diagnostics_stderr
-            .starts_with("warning GF_CORE_VERSION_MISMATCH:"),
+            .contains("warning GF_CORE_VERSION_MISMATCH:"),
         "{}",
         text.diagnostics_stderr
     );
@@ -125,5 +125,8 @@ fn publishing_a_project_from_the_running_core_does_not_warn() {
     let published = publish_project(&hub, &path, &on_ref(REPOSITORY, "main"), false);
     published.result.unwrap();
     assert!(published.warnings.is_empty());
-    assert_eq!(published.diagnostics_stderr, "");
+    assert_eq!(
+        published.diagnostics_stderr,
+        format!("Publish Hub: {HUB}\n")
+    );
 }

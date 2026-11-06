@@ -9,6 +9,7 @@ use std::sync::{
 struct SharedStore {
     parent: std::path::PathBuf,
     value: Mutex<Option<String>>,
+    last_login: Mutex<Option<String>>,
     attempts: mpsc::Sender<()>,
     reads: AtomicUsize,
 }
@@ -17,15 +18,26 @@ impl Store for SharedStore {
         self.attempts.send(()).unwrap();
         Ok(Box::new(lock_in(&self.parent, origin)?))
     }
-    fn read(&self, _: &str) -> Result<Option<String>, SavedCredentialError> {
+    fn read(&self, key: &str) -> Result<Option<String>, SavedCredentialError> {
+        if key == LAST_LOGIN_ORIGIN {
+            return Ok(self.last_login.lock().unwrap().clone());
+        }
         self.reads.fetch_add(1, Ordering::SeqCst);
         Ok(self.value.lock().unwrap().clone())
     }
-    fn write(&self, _: &str, value: &str) -> Result<(), GfError> {
+    fn write(&self, key: &str, value: &str) -> Result<(), GfError> {
+        if key == LAST_LOGIN_ORIGIN {
+            *self.last_login.lock().unwrap() = Some(value.into());
+            return Ok(());
+        }
         *self.value.lock().unwrap() = Some(value.into());
         Ok(())
     }
-    fn delete(&self, _: &str) -> Result<(), GfError> {
+    fn delete(&self, key: &str) -> Result<(), GfError> {
+        if key == LAST_LOGIN_ORIGIN {
+            *self.last_login.lock().unwrap() = None;
+            return Ok(());
+        }
         *self.value.lock().unwrap() = None;
         Ok(())
     }
@@ -97,6 +109,7 @@ impl Harness {
                 })
                 .unwrap(),
             )),
+            last_login: Mutex::new(None),
             attempts: attempts_tx,
             reads: AtomicUsize::new(0),
         });

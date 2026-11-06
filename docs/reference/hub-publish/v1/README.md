@@ -28,7 +28,7 @@ required-capability set) stay authoritative in Rust.
 gf --project <dir> publish [<owner/repository | https://hub/owner/repository>] \
     [--ref <branch-label> | --version-uuid <uuid>] \
     [--fork-of <owner/repository | URL>] [--operation-uuid <uuid>] \
-    [--public | --private] [--protection-bypass-env <name>] [--json]
+    [--hub <origin>] [--public | --private] [--protection-bypass-env <name>] [--json]
 ```
 
 `--ref` publishes the head of the local research Branch with that label under
@@ -36,8 +36,24 @@ the same discovery ref; `--version-uuid` publishes one exact retained Version
 into an existing repository. `--fork-of` creates a new repository for a Fork
 Project and cites its origin, after checking that the origin repository
 publishes the cited Version with the same identity. The repository argument
-follows `gf clone`: `owner/repository` resolves against `https://graphforge.sh`,
-or pass the HTTPS repository URL.
+follows `gf clone`: `owner/repository` resolves against `https://graphforge.sh`.
+Use `--hub https://hub.example` to select another Hub, or pass the full HTTPS
+repository URL. `--hub` accepts a bare HTTPS origin, with no user information,
+path prefix, query, or fragment. When a full repository URL (including a recorded
+upstream) and `--hub` are both present, their origins must match; a mismatch is
+refused before contacting either Hub. An explicit Hub never falls back to
+production. Text output names the target Hub before the first request. A new
+successful login also records its origin as advisory metadata in the OS vault;
+if it differs, publish names both origins and shows the target's login command
+before contacting the Hub. This notice does not deny other saved sessions or
+change credential selection. Legacy logins have no origin metadata until the
+next successful login. JSON output keeps its existing receipt/error contract
+and omits progress notices. Login and publication should select the same Hub:
+
+```bash
+gf auth login --hub https://hub.example
+gf --project <dir> publish OWNER/REPOSITORY --hub https://hub.example
+```
 
 Without either selector, publish uses the current research Branch, or the only
 Branch if none is selected. Its label is the discovery ref. A successful Branch
