@@ -40,7 +40,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::OnceLock;
 use std::time::Duration;
 use url::Url;
 use uuid::Uuid;
@@ -49,13 +49,13 @@ mod history;
 pub(crate) mod publication;
 mod refusals;
 
-/// Set once by the streaming `gf` process; captured invocations (bindings,
-/// tests) never prompt.
-static DEVICE_FLOW_ALLOWED: AtomicBool = AtomicBool::new(false);
+/// Registered only by the streaming `gf` process. Captured invocations never
+/// prompt or launch a browser; device-flow tests inject their own opener.
+static DEVICE_FLOW_OPENER: OnceLock<fn(&Url)> = OnceLock::new();
 
 /// Allow the device flow when this process is attached to a terminal.
 pub(crate) fn allow_device_flow() {
-    DEVICE_FLOW_ALLOWED.store(true, Ordering::Relaxed);
+    let _ = DEVICE_FLOW_OPENER.set(crate::auth::browser);
 }
 
 /// OAuth client identifier the CLI presents to device authorization.
@@ -446,7 +446,7 @@ pub(crate) fn publish_token(token_env: Option<&str>) -> Result<Option<PublishTok
         })?)),
         None => PublishToken::from_env(),
     };
-    if explicit.is_none() && !DEVICE_FLOW_ALLOWED.load(Ordering::Relaxed) {
+    if explicit.is_none() && DEVICE_FLOW_OPENER.get().is_none() {
         return Err(publish_error(
             HubPublishErrorCode::AuthDenied,
             "no publish credential: set GRAPHFORGE_HUB_PUBLISH_TOKEN or run gf publish in a terminal",
@@ -477,7 +477,7 @@ fn publish_with_resolution(
 ) -> Result<(), GfError> {
     use std::io::IsTerminal as _;
     let visibility = args.visibility()?;
-    let streaming = DEVICE_FLOW_ALLOWED.load(Ordering::Relaxed);
+    let streaming = DEVICE_FLOW_OPENER.get().is_some();
     let interactive =
         streaming && std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
     let (identity, base) = parse_input(args.repository()?)?;
@@ -1002,6 +1002,19 @@ fn obtain_token(
     capabilities: &PublishCapabilities,
     environment: &mut PublishEnvironment<'_>,
 ) -> Result<PublishToken, GfError> {
+    obtain_token_with_opener(hub, capabilities, environment, &|url| {
+        if let Some(open) = DEVICE_FLOW_OPENER.get() {
+            open(url);
+        }
+    })
+}
+
+fn obtain_token_with_opener(
+    hub: &Hub<'_>,
+    capabilities: &PublishCapabilities,
+    environment: &mut PublishEnvironment<'_>,
+    open: &dyn Fn(&Url),
+) -> Result<PublishToken, GfError> {
     if let Credential::Token(token) = &environment.credential {
         return Ok(token.clone());
     }
@@ -1029,25 +1042,35 @@ fn obtain_token(
                 "device authorization response is malformed",
             )
         })?;
-    let display_safe = |text: &str| {
-        !text.is_empty() && text.len() <= 512 && !text.bytes().any(|byte| byte.is_ascii_control())
-    };
+    let display_safe =
+        |text: &str| !text.is_empty() && text.len() <= 512 && !text.chars().any(char::is_control);
     if !display_safe(&device.user_code) || !display_safe(&device.verification_uri) {
         return Err(publish_error(
             HubPublishErrorCode::InvalidInput,
             "device authorization response is malformed",
         ));
     }
+    let link = crate::auth::verification_link(
+        &device.verification_uri,
+        device.verification_uri_complete.as_deref(),
+    )
+    .map_err(|_| {
+        publish_error(
+            HubPublishErrorCode::InvalidInput,
+            "device authorization response is malformed",
+        )
+    })?;
     let io = |error: std::io::Error| GfError::Storage(error.to_string());
     writeln!(
         environment.notices,
         "To publish {}, open {} and enter code {}",
         capabilities.repository.canonical_name(),
-        device.verification_uri,
+        link,
         device.user_code
     )
     .map_err(io)?;
     environment.notices.flush().map_err(io)?;
+    open(&link);
     // Hub-supplied timings are bounded: the interval to [1, 60] seconds and the
     // whole wait to fifteen minutes.
     let mut interval = device.interval.clamp(1, MAX_POLL_INTERVAL_SECONDS);
@@ -2714,3 +2737,6 @@ mod tests;
 
 #[cfg(test)]
 mod preview_tests;
+
+#[cfg(test)]
+mod device_tests;
