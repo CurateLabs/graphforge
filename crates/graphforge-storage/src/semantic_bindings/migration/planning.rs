@@ -90,8 +90,9 @@ impl SemanticStorageBindings {
         topology: Option<&crate::TopologyFiles>,
     ) -> Result<SemanticMigrationPlan, GfError> {
         previous.validate_against(previous_composition)?;
-        // Explicit cross-ID pairs are reserved for an ID-only rewrite. Validate
-        // even modules without storage bindings, before inspecting retained rows.
+        // Explicit cross-ID pairs permit an ID-only rewrite or its exact fork
+        // origin declaration. Validate even modules without storage bindings,
+        // before inspecting retained rows.
         let mut paired_old = BTreeSet::new();
         let mut paired_new = BTreeSet::new();
         for (old, new) in identity_equivalent {
@@ -113,6 +114,10 @@ impl SemanticStorageBindings {
             } else {
                 let mut document = old_module.doc.clone();
                 document.ontology_id.clone_from(&new_module.doc.ontology_id);
+                let origin = old.into();
+                if new_module.doc.forked_from.as_ref() == Some(&origin) {
+                    document.forked_from = Some(origin);
+                }
                 document == new_module.doc
             };
             if !equivalent {

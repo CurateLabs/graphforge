@@ -128,6 +128,9 @@
                       "dialect": {
                         "$ref": "#/$defs/identity_text"
                       },
+                      "forked_from": {
+                        "$ref": "#/$defs/forked_from"
+                      },
                       "id": {
                         "$ref": "#/$defs/identity_text"
                       },
@@ -194,6 +197,37 @@
         "ontology_composition"
       ],
       "type": "object"
+    },
+    "forked_from": {
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "digest": {
+              "$ref": "#/$defs/digest"
+            },
+            "id": {
+              "pattern": "^https://graphforge\\.sh/ont_[0123456789abcdefghjkmnpqrstvwxyz]{16}$",
+              "type": "string"
+            },
+            "version": {
+              "description": "Exact nonempty authored version, at most 4096 UTF-8 bytes without control characters; enforced by Rust.",
+              "maxLength": 4096,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "version",
+            "digest"
+          ],
+          "type": "object"
+        },
+        {
+          "type": "null"
+        }
+      ]
     },
     "identity": {
       "additionalProperties": false,
@@ -610,7 +644,10 @@
         "additionalProperties": false,
         "properties": {
           "capability": {
-            "const": "project-summary"
+            "enum": [
+              "ontology-module-metadata",
+              "project-summary"
+            ]
           },
           "major": {
             "const": 1
@@ -622,7 +659,7 @@
         ],
         "type": "object"
       },
-      "maxItems": 1,
+      "maxItems": 2,
       "type": "array"
     },
     "version": {

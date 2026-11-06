@@ -681,19 +681,8 @@ fn identity_equivalent_migration_requires_equal_documents() {
 }
 
 #[test]
-fn cross_id_equivalence_requires_an_id_only_authored_document() {
-    let old = compiled_with("1", false, true);
-    let bindings = SemanticStorageBindings::project(&old, None).unwrap();
-    let source = tempfile::tempdir().unwrap();
-    for changed in ["id", "version", "schema"] {
-        let mut doc = old.modules[0].doc.clone();
-        doc.ontology_id = "https://graphforge.sh/ont_aaaaaaaaaaaaaaaa".into();
-        if changed == "version" {
-            doc.version = "2".into();
-        }
-        if changed == "schema" {
-            doc.properties[0].nullable = !doc.properties[0].nullable;
-        }
+fn cross_id_equivalence_preserves_documents_except_id_and_exact_fork_origin() {
+    fn compile(doc: graphforge_ontology::OntologyDoc) -> CompiledComposition {
         let authored = AuthoredModule {
             id: OntologyModuleId {
                 ontology_id: doc.ontology_id.clone(),
@@ -704,15 +693,54 @@ fn cross_id_equivalence_requires_an_id_only_authored_document() {
             doc,
             allow_projected_identity: false,
         };
-        let next = compile_inventory(InventoryCompileRequest {
+        compile_inventory(InventoryCompileRequest {
             modules: &[authored],
             bridges: &[],
             activation: &[],
-            profile_default: old.profile_default,
+            profile_default: ActivationMode::Exploratory,
             limits: CompositionLimits::default(),
             cancelled: None,
         })
-        .unwrap();
+        .unwrap()
+    }
+    let mut source = compiled_with("1", false, true).modules.remove(0).doc;
+    source.ontology_id = "https://graphforge.sh/ont_bbbbbbbbbbbbbbbb".into();
+    let old = compile(source);
+    let bindings = SemanticStorageBindings::project(&old, None).unwrap();
+    let source = tempfile::tempdir().unwrap();
+    for changed in [
+        "id",
+        "fork",
+        "version",
+        "schema",
+        "label",
+        "license",
+        "origin-id",
+        "origin-version",
+        "origin-digest",
+    ] {
+        let mut doc = old.modules[0].doc.clone();
+        doc.ontology_id = "https://graphforge.sh/ont_aaaaaaaaaaaaaaaa".into();
+        if changed != "id" {
+            doc.forked_from = Some((&old.modules[0].id).into());
+        }
+        match changed {
+            "label" => doc.label = Some("rewritten".into()),
+            "license" => doc.license = Some("MIT".into()),
+            "origin-id" => doc.forked_from.as_mut().unwrap().id = doc.ontology_id.clone(),
+            "origin-version" => doc.forked_from.as_mut().unwrap().version = "forged".into(),
+            "origin-digest" => {
+                doc.forked_from.as_mut().unwrap().digest.0 = format!("sha256:{}", "0".repeat(64))
+            }
+            _ => {}
+        }
+        if changed == "version" {
+            doc.version = "2".into();
+        }
+        if changed == "schema" {
+            doc.properties[0].nullable = !doc.properties[0].nullable;
+        }
+        let next = compile(doc);
         let pairs = [(old.modules[0].id.clone(), next.modules[0].id.clone())];
         let plan = SemanticStorageBindings::plan_retained_data_migration_identity_equivalent(
             &old,
@@ -721,7 +749,7 @@ fn cross_id_equivalence_requires_an_id_only_authored_document() {
             source.path(),
             &pairs,
         );
-        if changed == "id" {
+        if matches!(changed, "id" | "fork") {
             let plan = plan.unwrap();
             assert_eq!(plan.bindings.bindings.len(), bindings.bindings.len());
             assert!(

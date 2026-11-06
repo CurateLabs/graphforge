@@ -18,6 +18,7 @@ fn absent_module_text_preserves_historical_serialization_and_digest() {
     assert!(value.get("label").is_none());
     assert!(value.get("description").is_none());
     assert!(value.get("license").is_none());
+    assert!(value.get("forked_from").is_none());
     assert_eq!(
         module_document_digest(&document).unwrap(),
         "8193bfdb30f20732936333c4664ad500660991854a65d6822d60fd414461fd06"
@@ -122,4 +123,50 @@ fn native_module_loading_refuses_invalid_or_unbounded_licenses() {
     let mut value = serde_json::to_value(document()).unwrap();
     value["license"] = json!(["MIT"]);
     assert!(serde_json::from_value::<OntologyDoc>(value).is_err());
+}
+
+#[test]
+fn fork_origin_is_exact_content_and_uses_shared_validation() {
+    let original = document();
+    let mut fork = original.clone();
+    let origin = json!({
+        "id":"https://graphforge.sh/ont_aaaaaaaaaaaaaaaa",
+        "version":"1",
+        "digest":format!("sha256:{}", "a".repeat(64))
+    });
+    fork.forked_from = Some(serde_json::from_value(origin.clone()).unwrap());
+    OntologyValidator::validate(&fork).unwrap();
+    assert!(original.has_same_schema(&fork));
+    assert_ne!(
+        module_document_digest(&original).unwrap(),
+        module_document_digest(&fork).unwrap()
+    );
+    assert_eq!(
+        OntologyLoader::load_json(serde_json::to_vec(&fork).unwrap().as_slice()).unwrap(),
+        fork
+    );
+    assert_eq!(
+        OntologyLoader::load_yaml(serde_yaml::to_string(&fork).unwrap().as_bytes()).unwrap(),
+        fork
+    );
+    for (field, value) in [
+        ("id", json!("ont_aaaaaaaaaaaaaaaa")),
+        ("id", json!("https://graphforge.sh/brg_aaaaaaaaaaaaaaaa")),
+        ("id", json!("https://graphforge.sh/ONT_AAAAAAAAAAAAAAAA")),
+        ("version", json!("")),
+        ("version", json!("a\nb")),
+        ("version", json!("a".repeat(4097))),
+        ("digest", json!("a".repeat(64))),
+        ("digest", json!(format!("sha256:{}", "A".repeat(64)))),
+        ("unexpected", json!(true)),
+    ] {
+        let mut invalid = origin.clone();
+        invalid[field] = value;
+        let mut value = serde_json::to_value(&fork).unwrap();
+        value["forked_from"] = invalid;
+        assert!(
+            OntologyLoader::load_json(serde_json::to_vec(&value).unwrap().as_slice()).is_err(),
+            "{field}: {value}"
+        );
+    }
 }

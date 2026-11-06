@@ -471,6 +471,7 @@ pub(super) fn module_migration_candidate(
             expected
                 .ontology_id
                 .clone_from(&request.document.ontology_id);
+            expected.forked_from = Some((&previous).into());
             if expected != request.document
                 || request.dependencies != candidate.modules[index].dependencies
             {

@@ -178,6 +178,20 @@ impl Project {
             before["base"]
         );
         let modules = graph.ontology_modules().unwrap();
+        let source: graphforge_api::OntologyModuleId =
+            serde_json::from_value(before["modules"][0]["id"].clone()).unwrap();
+        let fork = modules
+            .iter()
+            .find(|module| module.id.ontology_id == id.to_uri())
+            .unwrap();
+        assert_eq!(
+            graph
+                .inspect_ontology_module(&graphforge_api::ModuleSelector::Exact(fork.id.clone()))
+                .unwrap()
+                .doc
+                .forked_from,
+            Some((&source).into())
+        );
         assert!(
             modules
                 .iter()
