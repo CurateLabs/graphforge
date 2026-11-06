@@ -430,8 +430,8 @@ fn listing_fails_exactly_as_clone_on_a_tampered_or_future_lineage() {
             hub.fault.lock().unwrap().is_none(),
             "listing read every served document"
         );
-        assert_eq!(error_code(&cloned), expected, "{cloned}");
-        assert_eq!(error_code(&listed), expected, "{listed}");
+        assert_eq!(core_error_code(&cloned), expected, "{cloned}");
+        assert_eq!(core_error_code(&listed), expected, "{listed}");
         assert_eq!(listed.to_string(), cloned.to_string());
     }
 }

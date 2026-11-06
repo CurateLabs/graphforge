@@ -12,6 +12,7 @@ struct DeviceHub {
     hub: ReferenceHub,
     /// Replaces only the approval-page fields of the reference response.
     links: Option<(String, Option<String>)>,
+    lifetime: Option<u64>,
     device: RefCell<Option<DeviceAuthorizationResponse>>,
     requests: RefCell<Vec<HubRequest>>,
 }
@@ -24,6 +25,7 @@ impl DeviceHub {
             })
             .unwrap(),
             links,
+            lifetime: None,
             device: RefCell::new(None),
             requests: RefCell::new(Vec::new()),
         }
@@ -68,11 +70,39 @@ impl Transport for DeviceHub {
                 device.verification_uri = plain.clone();
                 device.verification_uri_complete = complete.clone();
             }
+            if let Some(lifetime) = self.lifetime {
+                device.expires_in = lifetime;
+            }
             response.body = serde_json::to_vec(&device).unwrap();
             *self.device.borrow_mut() = Some(device);
         }
         Ok(response)
     }
+}
+
+#[test]
+fn zero_lifetime_is_refused_before_display_open_or_poll() {
+    let mut transport = DeviceHub::new(None);
+    transport.lifetime = Some(0);
+    let mut notices = Vec::new();
+    let error = obtain_token_with_opener(
+        &transport.client(),
+        &transport.capabilities(),
+        &mut PublishEnvironment {
+            bypass: None,
+            credential: Credential::DeviceFlow,
+            wait: &|_| panic!("invalid grant must not poll"),
+            notices: &mut notices,
+            resolution: None,
+        },
+        &|_| panic!("invalid grant must not open"),
+    )
+    .unwrap_err();
+    assert!(matches!(error, CliRuntimeError::Core(_)));
+    assert_eq!(crate::error_exit_code(&error), 2);
+    assert!(error.to_string().contains("hub.publish.invalid_input"));
+    assert!(notices.is_empty());
+    assert_eq!(transport.requests.borrow().len(), 1);
 }
 
 #[test]
@@ -102,8 +132,8 @@ fn device_link_selection_opens_the_displayed_complete_link_or_plain_fallback() {
         assert_eq!(
             notices,
             format!(
-                "To publish curate/claims, open {selected} and enter code {}\n",
-                device.user_code
+                "To publish curate/claims, open {selected} and enter code {} (code lifetime: {} seconds)\n",
+                device.user_code, device.expires_in
             )
         );
         assert!(!notices.contains(&device.device_code));

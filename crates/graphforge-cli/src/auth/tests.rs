@@ -2,6 +2,7 @@ use super::*;
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 
+mod device_expiry;
 mod discovery;
 mod origins;
 pub(crate) use discovery::unavailable_vault_transport;
@@ -123,7 +124,7 @@ fn login_polls_pending_slow_down_and_saves_one_atomic_pair() {
     let output = String::from_utf8(output).unwrap();
     assert_eq!(
         output,
-        "Open https://api.workos.com/device?user_code=ABCD-EFGH and enter code ABCD-EFGH\n"
+        "Open https://api.workos.com/device?user_code=ABCD-EFGH and enter code ABCD-EFGH (code lifetime: 60 seconds)\n"
     );
     for secret in ["device-secret", "access-secret", "refresh-secret"] {
         assert!(!output.contains(secret));
@@ -163,7 +164,7 @@ fn login_without_complete_link_prints_and_opens_plain_link() {
     assert_eq!(*opened.borrow(), ["https://api.workos.com/device"]);
     assert_eq!(
         String::from_utf8(output).unwrap(),
-        "Open https://api.workos.com/device and enter code ABCD-EFGH\n"
+        "Open https://api.workos.com/device and enter code ABCD-EFGH (code lifetime: 60 seconds)\n"
     );
 }
 #[test]
@@ -261,17 +262,26 @@ fn timeout_and_malformed_tokens_leave_vault_unchanged() {
     let mut response = device();
     response["expires_in"] = serde_json::json!(1);
     let mock = Mock::new(vec![(200, response)]);
-    assert!(
-        login(
-            &store,
-            &mock,
-            &origin(DEFAULT_HUB).unwrap(),
-            &mut Vec::new(),
-            &|_| panic!("no wait after expiry"),
-            &|| 100,
-            &|_| {}
-        )
-        .is_err()
+    let clock = Cell::new(100);
+    let error = login(
+        &store,
+        &mock,
+        &origin(DEFAULT_HUB).unwrap(),
+        &mut Vec::new(),
+        &|delay| {
+            assert_eq!(delay, Duration::from_secs(1));
+            clock.set(clock.get() + delay.as_secs());
+        },
+        &|| clock.get(),
+        &|_| {},
+    )
+    .unwrap_err();
+    assert_eq!(clock.get(), 101);
+    assert_eq!(crate::error_exit_code(&error), 5);
+    assert_eq!(
+        mock.requests.borrow().len(),
+        1,
+        "no token poll after expiry"
     );
     let mut malformed = tokens("access\nsecret", "refresh");
     malformed["token_type"] = serde_json::json!("Basic");

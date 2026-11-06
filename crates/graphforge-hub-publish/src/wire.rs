@@ -922,13 +922,15 @@ pub enum DevicePoll {
     Pending,
     /// Keep polling, adding 5 seconds to the interval (RFC 8628 section 3.5).
     SlowDown,
+    /// The server ended this authorization because its device code expired.
+    Expired,
 }
 
 impl DevicePoll {
     /// Classify a token endpoint response.
     ///
-    /// `expired_token`, `access_denied`, and every other OAuth error end the
-    /// flow with `auth_denied`.
+    /// Expiry is a distinct terminal outcome; denial and other OAuth errors
+    /// remain `auth_denied`.
     pub fn from_response(status: u16, body: &[u8]) -> Result<Self, HubPublishError> {
         if status == 200 {
             let token: TokenResponse =
@@ -943,10 +945,7 @@ impl DevicePoll {
         match error.error.as_str() {
             "authorization_pending" => Ok(Self::Pending),
             "slow_down" => Ok(Self::SlowDown),
-            "expired_token" => Err(HubPublishError::new(
-                HubPublishErrorCode::AuthDenied,
-                "device authorization expired before approval",
-            )),
+            "expired_token" => Ok(Self::Expired),
             "access_denied" => Err(HubPublishError::new(
                 HubPublishErrorCode::AuthDenied,
                 "device authorization was denied",

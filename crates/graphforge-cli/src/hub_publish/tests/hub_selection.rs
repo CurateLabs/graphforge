@@ -17,7 +17,7 @@ fn command(
     project: &Path,
     arguments: &[&str],
     load_token: impl FnOnce() -> Result<Option<PublishToken>, GfError>,
-) -> Result<String, GfError> {
+) -> Result<String, CliRuntimeError> {
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
     run_command_with_transport(

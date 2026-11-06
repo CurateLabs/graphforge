@@ -7,7 +7,7 @@ fn publish_command(
     project: &Path,
     arguments: &[&str],
     load_token: impl FnOnce() -> Result<Option<PublishToken>, GfError>,
-) -> Result<String, GfError> {
+) -> Result<String, CliRuntimeError> {
     let mut argv = vec!["gf", "publish"];
     argv.extend_from_slice(arguments);
     let crate::Command::Publish(args) = crate::Cli::try_parse_from(argv).unwrap().command.unwrap()

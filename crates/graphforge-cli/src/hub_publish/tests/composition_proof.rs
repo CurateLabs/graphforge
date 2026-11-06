@@ -62,7 +62,7 @@ fn assert_mismatch(hub: &LoopbackHub, graph: &GraphForge, arguments: &PublishArg
         error_code(&error),
         "hub.publish.ontology_composition_mismatch"
     );
-    assert_eq!(crate::error_exit_code(&error.into()), 2);
+    assert_eq!(crate::error_exit_code(&error), 2);
     let document: serde_json::Value = serde_json::from_slice(&run.stderr).unwrap();
     let message = document["error"]["message"].as_str().unwrap();
     assert!(message.contains("check out"), "{message}");

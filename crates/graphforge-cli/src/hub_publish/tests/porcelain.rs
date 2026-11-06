@@ -17,7 +17,11 @@ const ALICE: &str = "Alice <alice@example.org>";
 const BOB: &str = "Bob <bob@example.org>";
 
 /// Run one `gf` invocation for the Project at `project` and parse its JSON.
-pub(super) fn gf(hub: &LoopbackHub, project: &Path, arguments: &[&str]) -> Result<Value, GfError> {
+pub(super) fn gf(
+    hub: &LoopbackHub,
+    project: &Path,
+    arguments: &[&str],
+) -> Result<Value, CliRuntimeError> {
     let project_text = project.to_str().unwrap();
     let mut argv = vec!["gf", "--project", project_text, "--json"];
     argv.extend_from_slice(arguments);
@@ -508,7 +512,7 @@ fn publish_records_the_upstream_a_later_push_uses() {
     assert_eq!(ok(&hub, &alice, &["status"])["ahead"], 0);
 }
 
-fn assert_conflict(result: Result<Value, GfError>) {
+fn assert_conflict(result: Result<Value, CliRuntimeError>) {
     let error = result.expect_err("a different request under a used identity must be refused");
     assert_eq!(error_code(&error), "GF_IDEMPOTENCY_CONFLICT", "{error}");
 }

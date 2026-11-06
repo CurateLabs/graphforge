@@ -106,7 +106,7 @@ fn refused(hub: &LoopbackHub, graph: &GraphForge, args: &PublishArgs) -> (String
     .unwrap_err();
     assert_eq!(error_code(&error), "hub.publish.id_taken", "{error}");
     let text = error.to_string();
-    assert_eq!(crate::error_exit_code(&error.into()), 2);
+    assert_eq!(crate::error_exit_code(&error), 2);
     assert!(!text.contains(SERVER_TEXT));
     assert!(!text.contains(&secret));
     (text, secret)
@@ -346,7 +346,10 @@ fn malformed_details_credential_echo_and_unrelated_ids_never_authorize_receipts(
         };
         capture.observe(&response, &token, None).unwrap();
         assert!(capture.take().is_none());
-        assert_ne!(error_code(&hub_failure(&response)), "hub.publish.id_taken");
+        assert_ne!(
+            core_error_code(&hub_failure(&response)),
+            "hub.publish.id_taken"
+        );
     }
     for (secret, bypass) in [
         (token.expose(), None),
@@ -376,6 +379,6 @@ fn malformed_details_credential_echo_and_unrelated_ids_never_authorize_receipts(
             publish_as_owner: None,
         }],
     );
-    assert_eq!(error_code(&error), "hub.publish.invalid_input");
+    assert_eq!(core_error_code(&error), "hub.publish.invalid_input");
     assert!(graph.id_taken_receipt(ID).unwrap().is_none());
 }

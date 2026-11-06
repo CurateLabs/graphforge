@@ -138,7 +138,7 @@ pub(crate) fn dispatch(
     output: &mut dyn Write,
     diagnostics: &mut crate::Diagnostics<'_>,
     allocation: Option<&graphforge_api::StorageAllocationDiagnostics>,
-) -> Result<ControlFlow<(), Command>, GfError> {
+) -> Result<ControlFlow<(), Command>, crate::CliRuntimeError> {
     let hub = FIXTURE.with(|fixture| fixture.borrow().clone());
     let Some(hub) = hub else {
         return Ok(ControlFlow::Continue(command));

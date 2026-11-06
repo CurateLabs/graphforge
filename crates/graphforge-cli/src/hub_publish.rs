@@ -7,6 +7,8 @@
 //! expected revision. The publish token is held in memory, sent only to the
 //! repository's control-plane origin, and never written, logged, or echoed.
 
+use crate::CliRuntimeError;
+use crate::auth::{DeviceAuthorizationEnd, MAX_DEVICE_WAIT_SECONDS, MAX_POLL_INTERVAL_SECONDS};
 use crate::hub_http::{
     MAX_METADATA_BYTES, MAX_REDIRECTS, Transport, endpoint, network, parse_input,
     validate_upload_url, validate_url, validation,
@@ -66,10 +68,6 @@ const CLIENT_ID: &str = "graphforge-cli";
 const MAX_CLIENT_CHUNK_BYTES: u64 = 1024 * 1024;
 /// Explicit uploader resource budget for its one owned chunk buffer.
 const MAX_NEGOTIATED_CHUNK_BYTES: u64 = 95 * 1024 * 1024;
-/// Longest the client waits for a device authorization, whatever the Hub allows.
-const MAX_DEVICE_WAIT_SECONDS: u64 = 15 * 60;
-/// Longest pause between device-flow polls, whatever the Hub asks for.
-const MAX_POLL_INTERVAL_SECONDS: u64 = 60;
 /// Largest control-plane response the client reads.
 const MAX_CONTROL_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 /// Format of the canonical intent whose digest identifies what an operation publishes.
@@ -354,9 +352,7 @@ fn run(
     output: &mut dyn Write,
     diagnostics: &mut crate::Diagnostics<'_>,
 ) -> Result<i32, crate::CliRuntimeError> {
-    run_command(args, project, project_dir, json, output, diagnostics)
-        .map(|()| 0)
-        .map_err(Into::into)
+    run_command(args, project, project_dir, json, output, diagnostics).map(|()| 0)
 }
 
 fn run_command(
@@ -366,7 +362,7 @@ fn run_command(
     json: bool,
     output: &mut dyn Write,
     diagnostics: &mut crate::Diagnostics<'_>,
-) -> Result<(), GfError> {
+) -> Result<(), CliRuntimeError> {
     run_command_with_sources(
         &crate::hub_http::HubTransport::new(),
         || publish_token(None),
@@ -398,7 +394,7 @@ fn run_command_with_transport(
     json: bool,
     output: &mut dyn Write,
     diagnostics: &mut crate::Diagnostics<'_>,
-) -> Result<(), GfError> {
+) -> Result<(), CliRuntimeError> {
     run_command_with_sources(
         transport,
         load_token,
@@ -425,7 +421,7 @@ fn run_command_with_sources(
     json: bool,
     output: &mut dyn Write,
     diagnostics: &mut crate::Diagnostics<'_>,
-) -> Result<(), GfError> {
+) -> Result<(), CliRuntimeError> {
     // Locations and arguments are validated before any credential or network use.
     // Immutable Versions cannot infer a Branch upstream. Refuse before opening
     // the Project, because an explicit absent path would otherwise create one.
@@ -572,8 +568,8 @@ pub(crate) fn publish_with_credentials(
     args: &PublishArgs,
     explicit: Option<PublishToken>,
     bypass: Option<&crate::hub_http::DiscoveryCredentials>,
-    publish_with: impl FnOnce(&mut PublishEnvironment<'_>) -> Result<(), GfError>,
-) -> Result<(), GfError> {
+    publish_with: impl FnOnce(&mut PublishEnvironment<'_>) -> Result<(), CliRuntimeError>,
+) -> Result<(), CliRuntimeError> {
     publish_with_resolution(transport, args, explicit, bypass, None, publish_with)
 }
 
@@ -583,8 +579,8 @@ fn publish_with_resolution(
     explicit: Option<PublishToken>,
     bypass: Option<&crate::hub_http::DiscoveryCredentials>,
     resolution: Option<PublicationResolution>,
-    publish_with: impl FnOnce(&mut PublishEnvironment<'_>) -> Result<(), GfError>,
-) -> Result<(), GfError> {
+    publish_with: impl FnOnce(&mut PublishEnvironment<'_>) -> Result<(), CliRuntimeError>,
+) -> Result<(), CliRuntimeError> {
     use std::io::IsTerminal as _;
     let visibility = args.visibility()?;
     let streaming = DEVICE_FLOW_OPENER.get().is_some();
@@ -630,7 +626,7 @@ pub(crate) fn publish_and_report(
     environment: &mut PublishEnvironment<'_>,
     json: bool,
     output: &mut dyn Write,
-) -> Result<(), GfError> {
+) -> Result<(), CliRuntimeError> {
     let outcome =
         publish_with_operation_report(transport, graph, args, environment, |operation| {
             if !json {
@@ -641,7 +637,7 @@ pub(crate) fn publish_and_report(
             Ok(())
         })?;
     record_upstream(graph, transport, args, &outcome)?;
-    write_outcome(&outcome, json, output)
+    Ok(write_outcome(&outcome, json, output)?)
 }
 
 /// A Branch whose publication the Hub confirmed tracks that repository and ref:
@@ -1111,7 +1107,7 @@ fn obtain_token(
     hub: &Hub<'_>,
     capabilities: &PublishCapabilities,
     environment: &mut PublishEnvironment<'_>,
-) -> Result<PublishToken, GfError> {
+) -> Result<PublishToken, CliRuntimeError> {
     obtain_token_with_opener(hub, capabilities, environment, &|url| {
         if let Some(open) = DEVICE_FLOW_OPENER.get() {
             open(url);
@@ -1124,7 +1120,7 @@ fn obtain_token_with_opener(
     capabilities: &PublishCapabilities,
     environment: &mut PublishEnvironment<'_>,
     open: &dyn Fn(&Url),
-) -> Result<PublishToken, GfError> {
+) -> Result<PublishToken, CliRuntimeError> {
     if let Credential::Token(token) = &environment.credential {
         return Ok(token.clone());
     }
@@ -1143,7 +1139,8 @@ fn obtain_token_with_opener(
         return Err(publish_error(
             HubPublishErrorCode::AuthDenied,
             "device authorization was refused",
-        ));
+        )
+        .into());
     }
     let device: DeviceAuthorizationResponse =
         serde_json::from_slice(&response.body).map_err(|_| {
@@ -1154,11 +1151,15 @@ fn obtain_token_with_opener(
         })?;
     let display_safe =
         |text: &str| !text.is_empty() && text.len() <= 512 && !text.chars().any(char::is_control);
-    if !display_safe(&device.user_code) || !display_safe(&device.verification_uri) {
+    if device.expires_in == 0
+        || !display_safe(&device.user_code)
+        || !display_safe(&device.verification_uri)
+    {
         return Err(publish_error(
             HubPublishErrorCode::InvalidInput,
             "device authorization response is malformed",
-        ));
+        )
+        .into());
     }
     let link = crate::auth::verification_link(
         &device.verification_uri,
@@ -1173,33 +1174,29 @@ fn obtain_token_with_opener(
     let io = |error: std::io::Error| GfError::Storage(error.to_string());
     writeln!(
         environment.notices,
-        "To publish {}, open {} and enter code {}",
+        "To publish {}, open {} and enter code {} (code lifetime: {} seconds)",
         capabilities.repository.canonical_name(),
         link,
-        device.user_code
+        device.user_code,
+        device.expires_in
     )
     .map_err(io)?;
     environment.notices.flush().map_err(io)?;
     open(&link);
-    // Hub-supplied timings are bounded: the interval to [1, 60] seconds and the
-    // whole wait to fifteen minutes.
+    // Bound client waiting independently of the server-advertised lifetime.
     let mut interval = device.interval.clamp(1, MAX_POLL_INTERVAL_SECONDS);
     let deadline = device.expires_in.min(MAX_DEVICE_WAIT_SECONDS);
     let mut elapsed = 0_u64;
     loop {
         if elapsed >= deadline {
-            return Err(publish_error(
-                HubPublishErrorCode::AuthDenied,
-                if deadline < device.expires_in {
-                    "device authorization did not complete within fifteen minutes"
-                } else {
-                    "device authorization expired before approval"
-                },
-            ));
+            return Err(DeviceAuthorizationEnd::deadline(device.expires_in));
         }
         let pause = interval.min(deadline - elapsed);
         (environment.wait)(Duration::from_secs(pause));
         elapsed = elapsed.saturating_add(pause);
+        if elapsed >= deadline {
+            return Err(DeviceAuthorizationEnd::deadline(device.expires_in));
+        }
         let response = hub.oauth(
             &authorization.token_endpoint,
             &[
@@ -1215,6 +1212,9 @@ fn obtain_token_with_opener(
             .map_err(|error| protocol(&error))?
         {
             DevicePoll::Granted(token) => return Ok(token),
+            DevicePoll::Expired => {
+                return Err(DeviceAuthorizationEnd::expired(device.expires_in));
+            }
             DevicePoll::Pending => {}
             DevicePoll::SlowDown => {
                 interval = interval.saturating_add(5).min(MAX_POLL_INTERVAL_SECONDS);
@@ -2369,7 +2369,7 @@ pub(crate) fn publish(
     graph: &GraphForge,
     args: &PublishArgs,
     environment: &mut PublishEnvironment<'_>,
-) -> Result<PublishOutcome, GfError> {
+) -> Result<PublishOutcome, CliRuntimeError> {
     publish_with_operation_report(transport, graph, args, environment, |_| Ok(()))
 }
 
@@ -2379,13 +2379,13 @@ fn publish_with_operation_report(
     args: &PublishArgs,
     environment: &mut PublishEnvironment<'_>,
     report: impl FnMut(Uuid) -> Result<(), GfError>,
-) -> Result<PublishOutcome, GfError> {
+) -> Result<PublishOutcome, CliRuntimeError> {
     let captured = refusals::Capture::default();
     let result = publish_inner(transport, graph, args, environment, &captured, report);
     if result.is_err()
         && let Some((version, items)) = captured.take()
     {
-        return Err(refusals::record(graph, version, &items));
+        return Err(refusals::record(graph, version, &items).into());
     }
     result
 }
@@ -2398,7 +2398,7 @@ fn publish_inner(
     environment: &mut PublishEnvironment<'_>,
     captured: &refusals::Capture,
     mut report: impl FnMut(Uuid) -> Result<(), GfError>,
-) -> Result<PublishOutcome, GfError> {
+) -> Result<PublishOutcome, CliRuntimeError> {
     let visibility = args.visibility()?;
     let (identity, base) = args.destination()?;
     let fork = args.fork_of.as_deref().map(parse_input).transpose()?;
@@ -2406,7 +2406,8 @@ fn publish_inner(
         return Err(publish_error(
             HubPublishErrorCode::InvalidInput,
             "a Fork must publish a repository other than its origin",
-        ));
+        )
+        .into());
     }
     let operation_uuid = args
         .operation_uuid
@@ -2441,7 +2442,8 @@ fn publish_inner(
                 return Err(validation(
                     "hub.integrity_failure",
                     "resolved publication does not match the request",
-                ));
+                )
+                .into());
             }
             resolution
         }
@@ -2506,7 +2508,8 @@ fn publish_inner(
         return Err(publish_error(
             HubPublishErrorCode::UnsupportedFuture,
             "Hub does not support the selected preview channel",
-        ));
+        )
+        .into());
     }
     let token = obtain_token(&hub, &capabilities, environment)?;
 
@@ -2531,13 +2534,15 @@ fn publish_inner(
                 return Err(publish_error(
                     HubPublishErrorCode::IntegrityFailure,
                     "operation status describes another operation",
-                ));
+                )
+                .into());
             }
             if status.intent_digest != intent_digest {
                 return Err(publish_error(
                     HubPublishErrorCode::IdempotencyConflict,
                     code_detail(HubPublishErrorCode::IdempotencyConflict),
-                ));
+                )
+                .into());
             }
             if let Some(receipt) = status.receipt {
                 check_receipt(&receipt, &identity, operation_uuid)?;
@@ -2561,7 +2566,7 @@ fn publish_inner(
             }
         }
         404 => {}
-        _ => return Err(hub_failure(&status)),
+        _ => return Err(hub_failure(&status).into()),
     }
 
     let published = read_current()?;
@@ -2570,7 +2575,8 @@ fn publish_inner(
             return Err(publish_error(
                 HubPublishErrorCode::RefConflict,
                 "a Fork publishes a new repository, and this repository already exists",
-            ));
+            )
+            .into());
         }
         (Some((origin, _)), None) => Some(origin.clone()),
         (None, Some(published)) => published
@@ -2639,7 +2645,8 @@ fn publish_inner(
         return Err(publish_error(
             HubPublishErrorCode::InvalidInput,
             "the Project changed while it was being published; publish again",
-        ));
+        )
+        .into());
     }
     if let Some((_, origin_base)) = &fork {
         let cited = lineage.fork.as_ref().ok_or_else(|| {
@@ -2744,7 +2751,8 @@ fn publish_inner(
             return Err(publish_error(
                 HubPublishErrorCode::InvalidInput,
                 "session open returned an unexpected pending state",
-            ));
+            )
+            .into());
         }
     };
     if uploads.len() != snapshot.objects.len()
@@ -2758,7 +2766,8 @@ fn publish_inner(
         return Err(publish_error(
             HubPublishErrorCode::InvalidInput,
             "upload locations do not match the declared inventory",
-        ));
+        )
+        .into());
     }
     let chunk_sizes = uploads
         .iter()
@@ -2821,7 +2830,8 @@ fn publish_inner(
             return Err(publish_error(
                 HubPublishErrorCode::InvalidInput,
                 "commit did not complete or accept this publication",
-            ));
+            )
+            .into());
         }
     };
     check_receipt(&receipt, &identity, operation_uuid)?;
@@ -2831,7 +2841,8 @@ fn publish_inner(
         return Err(publish_error(
             HubPublishErrorCode::IntegrityFailure,
             "the receipt does not bind the committed publication",
-        ));
+        )
+        .into());
     }
     let confirmed = confirmed.map(|head| head.confirmed_by(&receipt, &snapshot.manifest, &lineage));
     Ok(PublishOutcome {
