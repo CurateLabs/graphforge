@@ -173,6 +173,7 @@ impl GraphForge {
         let document = canonicalize_document(OntologyDoc {
             label: None,
             description: None,
+            license: None,
             ontology_id: options.ontology_id,
             version: options.version,
             entity_types,
@@ -539,6 +540,7 @@ mod tests {
         let ordered = OntologyDoc {
             label: None,
             description: None,
+            license: None,
             ontology_id: "draft".into(),
             version: "1".into(),
             entity_types: vec![
@@ -597,6 +599,7 @@ mod tests {
         let authored = OntologyDoc {
             label: None,
             description: None,
+            license: None,
             ontology_id: "migration-order".into(),
             version: "1".into(),
             entity_types: vec![],
@@ -667,6 +670,7 @@ mod tests {
         let invalid = OntologyDoc {
             label: None,
             description: None,
+            license: None,
             ontology_id: "bad".into(),
             version: "1".into(),
             entity_types: vec![

@@ -98,6 +98,7 @@ fn module(name: &str, entities: &[&str]) -> AuthoredModule {
     let doc = OntologyDoc {
         label: None,
         description: None,
+        license: None,
         ontology_id: format!("https://graphforge.dev/ontology/{name}"),
         version: "1.0.0".to_owned(),
         entity_types: entities

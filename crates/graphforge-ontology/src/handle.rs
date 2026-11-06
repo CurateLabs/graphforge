@@ -514,6 +514,7 @@ mod tests {
         OntologyDoc {
             label: None,
             description: None,
+            license: None,
             ontology_id: "test".to_string(),
             version: "1.0".to_string(),
             entity_types: vec![

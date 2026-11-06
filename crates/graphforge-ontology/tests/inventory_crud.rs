@@ -9,6 +9,7 @@ fn entity_doc(ontology_id: &str, version: &str, entities: &[&str]) -> OntologyDo
     OntologyDoc {
         label: None,
         description: None,
+        license: None,
         ontology_id: ontology_id.to_owned(),
         version: version.to_owned(),
         entity_types: entities
@@ -113,6 +114,7 @@ fn malformed_import_and_validate() {
     let bad = OntologyDoc {
         label: None,
         description: None,
+        license: None,
         ontology_id: "https://graphforge.dev/ontology/x".into(),
         version: "1".into(),
         entity_types: vec![
