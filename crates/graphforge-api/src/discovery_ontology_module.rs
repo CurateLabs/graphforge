@@ -70,6 +70,8 @@ pub struct ResolvedOntologyModule {
     module_sha256: String,
     /// Exact bytes of the module document as stored in the package.
     document: Vec<u8>,
+    /// Declaration read from the authenticated module document.
+    version_order: Option<u32>,
     /// Report produced by the storage-owned portable verifier.
     report: PortableReport,
     /// Complete authenticated module/dependency/bridge authority carried by the package.
@@ -101,6 +103,12 @@ impl ResolvedOntologyModule {
     #[must_use]
     pub fn document(&self) -> &[u8] {
         &self.document
+    }
+
+    /// Author-declared precedence from the verified immutable module document.
+    #[must_use]
+    pub fn version_order(&self) -> Option<u32> {
+        self.version_order
     }
 
     /// Full verification report for the carrying package.
@@ -199,7 +207,8 @@ pub fn resolve_discovered_ontology_module(
             DiscoveryPortableMismatch::ModuleIdentity,
         ))?;
 
-    let (document, recomputed, module_sha256) = read_and_prove_module(request, &report, entry)?;
+    let (document, recomputed, module_sha256, version_order) =
+        read_and_prove_module(request, &report, entry)?;
     let composition = read_composition(request, &report)?;
 
     Ok(ResolvedOntologyModule {
@@ -211,6 +220,7 @@ pub fn resolve_discovered_ontology_module(
         package_digest: report.package_digest.clone(),
         module_sha256,
         document,
+        version_order,
         composition,
         repository: request.expected_repository.clone(),
         report,
@@ -220,12 +230,12 @@ pub fn resolve_discovered_ontology_module(
 /// Read the module document through the authenticated reader and prove that its
 /// recomputed canonical digest is the requested identity.
 ///
-/// Returns `(document, canonical digest hex, file sha256 hex)`.
+/// Returns `(document, canonical digest hex, file sha256 hex, declared order)`.
 fn read_and_prove_module(
     request: &DiscoveryOntologyModuleRequest<'_>,
     report: &PortableReport,
     entry: &PortableCompositionEntry,
-) -> Result<(Vec<u8>, String, String), DiscoveryPortableError> {
+) -> Result<(Vec<u8>, String, String, Option<u32>), DiscoveryPortableError> {
     let module = request.module;
     let index = PortablePackageIndex::open(
         request.package,
@@ -270,7 +280,7 @@ fn read_and_prove_module(
             DiscoveryPortableMismatch::ModuleContentDigest,
         ));
     }
-    Ok((document, recomputed, file.sha256))
+    Ok((document, recomputed, file.sha256, parsed.version_order))
 }
 
 /// Retain the verifier's complete dependency graph, reading every document through

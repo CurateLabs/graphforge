@@ -272,6 +272,17 @@ pub fn item_resolution_limits(bytes: Option<&[u8]>) -> Outcome<DiscoveryLimits> 
     limits(bytes)
 }
 
+/// Compare declarations using the native bounded, duplicate-aware authority.
+pub fn compare_module_versions(
+    a: &[u8],
+    b: &[u8],
+    limits: DiscoveryLimits,
+) -> Outcome<graphforge_discovery::ModuleVersionOrdering> {
+    Ok(graphforge_discovery::compare_module_versions_json(
+        a, b, limits,
+    )?)
+}
+
 /// Resolve one exact identity from a complete eligible inventory; never a source.
 pub fn resolve_item_version(bytes: &[u8], limits: DiscoveryLimits) -> Outcome<ExactIdentity> {
     let inventory = ItemVersionInventory::from_json(bytes, limits)?;

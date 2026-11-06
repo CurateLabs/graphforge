@@ -269,7 +269,15 @@ pub(super) fn fetch(
         limits,
         &staging,
         retry,
-    );
+    )
+    .and_then(|resolved| {
+        if descriptor.version_order != resolved.version_order() {
+            return Err(mismatch(
+                "descriptor version order disagrees with verified module",
+            ));
+        }
+        Ok(resolved)
+    });
     release_staging(staging);
     result.map(|resolved| (resolved, None))
 }

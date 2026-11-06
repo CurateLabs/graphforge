@@ -35,10 +35,18 @@ fn local(project: &Path, arguments: &[&str]) -> Value {
     serde_json::from_slice(&result.stdout).unwrap()
 }
 
-fn author(project: &Path, root: &Path) -> (OntologyModuleId, OntologyDoc, Uuid) {
+fn author(
+    project: &Path,
+    root: &Path,
+    order: Option<u32>,
+) -> (OntologyModuleId, OntologyDoc, Uuid) {
     let source = root.join("scholarly-source.json");
     let document = root.join("scholarly.json");
-    std::fs::write(&source, SOURCE).unwrap();
+    let mut authored: Value = serde_json::from_str(SOURCE).unwrap();
+    if let Some(order) = order {
+        authored["version_order"] = json!(order);
+    }
+    std::fs::write(&source, serde_json::to_vec(&authored).unwrap()).unwrap();
     // Create fills the permanent ID, but neither create nor import adopts it.
     let candidate = local(
         project,
@@ -122,7 +130,7 @@ struct Snapshot {
     summary: ProjectSummary,
 }
 
-fn discover(hub: &LoopbackHub, id: &OntologyModuleId) -> Snapshot {
+fn discover(hub: &LoopbackHub, id: &OntologyModuleId, order: Option<u32>) -> Snapshot {
     let limits = DiscoveryLimits::default();
     let refs_bytes = get(hub, &format!("{}/.gf/refs", repository_url(REPOSITORY)));
     let manifest_bytes = get(hub, &format!("{}/.gf/manifest", repository_url(REPOSITORY)));
@@ -142,6 +150,13 @@ fn discover(hub: &LoopbackHub, id: &OntologyModuleId) -> Snapshot {
         modules[0].content_digest.0,
         format!("sha256:{}", id.canonical_digest)
     );
+    assert_eq!(modules[0].version_order, order);
+    assert!(
+        summary
+            .requirements
+            .iter()
+            .any(|r| r.capability == "ontology-module-metadata" && r.major == 1)
+    );
     assert_eq!(modules[0].label.as_deref(), Some("Scholarly works"));
     assert_eq!(
         modules[0].description.as_deref(),
@@ -160,6 +175,7 @@ fn discover(hub: &LoopbackHub, id: &OntologyModuleId) -> Snapshot {
         kind: item.kind(),
         repository: manifest.repository.clone(),
         module,
+        version_order: order,
         discovery: ItemDiscoverySnapshot {
             refs_revision: Sha256Digest(digest_bytes(&refs.to_canonical_json().unwrap())),
             manifest_validator: manifest.canonical_digest().unwrap(),
@@ -186,7 +202,7 @@ fn verify_downloads(hub: &LoopbackHub, root: &Path, id: &OntologyModuleId, docum
         manifest_bytes,
         manifest,
         summary,
-    } = discover(hub, id);
+    } = discover(hub, id, document.version_order);
     let project_package = root.join("project.gfpb");
     download(hub, manifest.package_object().unwrap(), &project_package);
     let report = verify_portable(
@@ -223,6 +239,7 @@ fn verify_downloads(hub: &LoopbackHub, root: &Path, id: &OntologyModuleId, docum
     })
     .unwrap();
     assert_eq!(resolved.module(), id);
+    assert_eq!(resolved.version_order(), document.version_order);
     assert_eq!(
         serde_json::from_slice::<OntologyDoc>(resolved.document()).unwrap(),
         *document
@@ -232,10 +249,10 @@ fn verify_downloads(hub: &LoopbackHub, root: &Path, id: &OntologyModuleId, docum
 
 #[test]
 fn standalone_ontology_publishes_without_graph_rows_and_clones_exact_schema() {
-    for public in [false, true] {
+    for (public, order) in [(false, None), (true, None), (true, Some(42))] {
         let root = tempfile::tempdir().unwrap();
         let project = root.path().join("author");
-        let (id, document, version) = author(&project, root.path());
+        let (id, document, version) = author(&project, root.path(), order);
         let hub = LoopbackHub::start();
         // Existing capability fixture proves the public session-header path,
         // not account entitlements or production visibility enforcement.

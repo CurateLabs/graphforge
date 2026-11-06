@@ -443,6 +443,7 @@ fn exact_zero_strict_property_owner_matrix_resolves_declared_properties() {
         label: None,
         description: None,
         license: None,
+        version_order: None,
         forked_from: None,
         ontology_id: "property-owner-test".into(),
         version: "1.0".into(),

@@ -7,7 +7,7 @@ This document is normative. **MUST**, **MUST NOT**, **REQUIRED**, **SHOULD**, an
 
 `OntologyModuleId` is `{ ontology_id, authored_version, canonical_digest }`.
 `ontology_id` is a globally unique, NFC-normalized URI; `authored_version` is an
-opaque NFC string interpreted only by that ontology's declared version scheme;
+opaque authored string preserved exactly, with no inferred ordering;
 `canonical_digest` is lowercase SHA-256 over the domain-separated canonical
 module document. Two modules are the same only when all three fields match.
 The exact `/1` sorted-JSON grammar and intentional separation from the core
@@ -22,7 +22,8 @@ Locale maps are not supported. Authored text is neither trimmed nor Unicode
 normalized. Omitted fields are not serialized, preserving old document digests;
 present fields contribute to the module content digest. The
 [Project summary contract](../../reference/discovery/v1/README.md#project-summary-and-ontology-descriptors-protocol-12)
-projects them, an optional module `license`, and exact `forked_from` provenance
+projects them, an optional module `license`, exact `forked_from` provenance, and
+optional `version_order`
 from verified module bytes and requires
 `ontology-module-metadata@1` for consumers, including the protocol WASM.
 
@@ -38,11 +39,22 @@ module identity but requires no graph-data transform and retains data on reopen.
 ```yaml
 ontology_id: https://graphforge.sh/ont_drqf2xw8w33cxaxj
 version: "2026.02"
+version_order: 2
 label: Scholarly works
 license: CC0-1.0
 description: |
   Research works, authors, and their scholarly relationships.
 ```
+
+`version_order` is an optional author-declared u32 ordinal (0–4294967295),
+authenticated by the module digest. Omitted or input `null` preserves historical
+bytes and means undeclared. Metadata-only changes are nonstructural. Authored
+versions are opaque, including admitted control characters: Core MUST NOT infer
+precedence from SemVer, dotted/natural text or time. Native discovery and WASM
+compare only within a canonical permanent ontology ID; missing declarations on
+distinct exact identities are unordered, and ordinal ties mean equal precedence
+without equal identity. See [ADR 0063](../../adr/0063-declared-ontology-version-order.md)
+and the [comparison contract](../../reference/discovery/v1/README.md#permanent-item-descriptors).
 
 `QualifiedSymbol` is `{ module, kind, local_id }`, where `kind` is exactly
 `entity`, `relation`, `property`, `constraint`, or `migration`, and `local_id`

@@ -79,6 +79,22 @@
           }
         }
       }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "bridge_set"
+          }
+        }
+      },
+      "then": {
+        "not": {
+          "required": [
+            "version_order"
+          ]
+        }
+      }
     }
   ],
   "properties": {
@@ -137,6 +153,11 @@
     },
     "repository": {
       "$ref": "#/$defs/repository"
+    },
+    "version_order": {
+      "maximum": 4294967295,
+      "minimum": 0,
+      "type": "integer"
     }
   },
   "required": [

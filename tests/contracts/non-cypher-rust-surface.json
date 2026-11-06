@@ -1,7 +1,7 @@
 {
   "contract_version": 1,
   "scope": "Rust non-Cypher public release surface",
-  "public_method_digest": "4cc4f74144e3ef1f33984082346844212d5f19990f7d9af3ab3a6bf024f2d80e",
+  "public_method_digest": "832505e3a50df864638d7d5a859272e14f49bb36c886373aa3a1546cf9de0bec",
   "method_policy": {
     "receiver_defaults": {
       "PortableImportResult": "release-tested",

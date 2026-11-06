@@ -71,7 +71,7 @@ test("an object and its JSON text get the identical verdict, corpus-wide", () =>
     }
     compared += 1;
   }
-  assert.equal(compared, 145);
+  assert.equal(compared, 154);
 });
 
 test("object and text input agree on surrogates, -0, exponents, duplicate and __proto__ keys", () => {

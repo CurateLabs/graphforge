@@ -214,3 +214,50 @@ fn fork_origin_preserves_admitted_native_versions() {
         assert_eq!(source_id.authored_version, fork_id.authored_version);
     }
 }
+
+#[test]
+fn declared_version_order_is_optional_authenticated_nonstructural_content() {
+    let original = document();
+    let mut value = serde_json::to_value(&original).unwrap();
+    assert!(value.get("version_order").is_none());
+    assert_eq!(
+        serde_json::to_string(&original).unwrap(),
+        r#"{"ontology_id":"https://example.org/ontology/text","version":"1","entity_types":[],"relation_types":[],"properties":[],"constraints":[],"migrations":[]}"#
+    );
+    value["version_order"] = json!(null);
+    assert_eq!(
+        serde_json::from_value::<OntologyDoc>(value).unwrap(),
+        original
+    );
+    for order in [0, u32::MAX] {
+        let mut ordered = original.clone();
+        ordered.version = "v\n1".into();
+        ordered.version_order = Some(order);
+        let json = serde_json::to_vec(&ordered).unwrap();
+        assert_eq!(OntologyLoader::load_json(json.as_slice()).unwrap(), ordered);
+        let yaml = serde_yaml::to_string(&ordered).unwrap();
+        assert_eq!(OntologyLoader::load_yaml(yaml.as_bytes()).unwrap(), ordered);
+        assert!(original.has_same_schema(&ordered));
+        let mut absent = ordered.clone();
+        absent.version_order = None;
+        assert_ne!(
+            module_document_digest(&ordered).unwrap(),
+            module_document_digest(&absent).unwrap()
+        );
+    }
+    for invalid in [
+        json!(-1),
+        json!(1.5),
+        json!(1.0),
+        json!("1"),
+        json!(4294967296u64),
+        json!(true),
+    ] {
+        let mut value = serde_json::to_value(&original).unwrap();
+        value["version_order"] = invalid;
+        assert!(OntologyLoader::load_json(serde_json::to_vec(&value).unwrap().as_slice()).is_err());
+        assert!(
+            OntologyLoader::load_yaml(serde_yaml::to_string(&value).unwrap().as_bytes()).is_err()
+        );
+    }
+}

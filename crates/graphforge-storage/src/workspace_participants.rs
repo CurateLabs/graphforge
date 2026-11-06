@@ -1081,6 +1081,7 @@ mod tests {
             label: None,
             description: None,
             license: None,
+            version_order: None,
             forked_from: None,
             ontology_id: "https://graphforge.dev/ontology/legacy".into(),
             version: "1.0.0".into(),

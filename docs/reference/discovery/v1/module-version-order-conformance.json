@@ -1,0 +1,290 @@
+{
+  "cases": [
+    {
+      "a": "{\"module\":{\"content_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"id\":\"https://graphforge.sh/ont_aaaaaaaaaaaaaaaa\",\"version\":\"999.0\"},\"version_order\":0}",
+      "b": "{\"module\":{\"content_digest\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"id\":\"https://graphforge.sh/ont_aaaaaaaaaaaaaaaa\",\"version\":\"arbitrary release 🦀\"},\"version_order\":4294967295}",
+      "expected": "less",
+      "name": "numeric-not-semver"
+    },
+    {
+      "a": "{\"module\":{\"content_digest\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"id\":\"https://graphforge.sh/ont_aaaaaaaaaaaaaaaa\",\"version\":\"arbitrary release 🦀\"},\"version_order\":4294967295}",
+      "b": "{\"module\":{\"content_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"id\":\"https://graphforge.sh/ont_aaaaaaaaaaaaaaaa\",\"version\":\"999.0\"},\"version_order\":0}",
+      "expected": "greater",
+      "name": "reverse"
+    },
+    {
+      "a": "{\"module\":{\"content_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"id\":\"https://graphforge.sh/ont_aaaaaaaaaaaaaaaa\",\"version\":\"999.0\"},\"version_order\":0}",
+      "b": "{\"module\":{\"content_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"id\":\"https://graphforge.sh/ont_aaaaaaaaaaaaaaaa\",\"version\":\"999.0\"},\"version_order\":0}",
+      "expected": "equal",
+      "name": "same-identity-declared"
+    },
+    {
+      "a": "{\"module\":{\"content_digest\":\"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"id\":\"https://graphforge.sh/ont_aaaaaaaaaaaaaaaa\",\"version\":\"v\\n1\"}}",
+      "b": "{\"module\":{\"content_digest\":\"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"id\":\"https://graphforge.sh/ont_aaaaaaaaaaaaaaaa\",\"version\":\"v\\n1\"}}",
+      "expected": "equal",
+      "name": "same-identity-undeclared"
+    },
+    {
+      "a": "{\"module\":{\"content_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"id\":\"https://graphforge.sh/ont_aaaaaaaaaaaaaaaa\",\"version\":\"999.0\"},\"version_order\":0}",
+      "b": "{\"module\":{\"content_digest\":\"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"id\":\"https://graphforge.sh/ont_aaaaaaaaaaaaaaaa\",\"version\":\"v\\n1\"}}",
+      "expected": "unordered",
+      "name": "one-undeclared"
+    },
+    {
+      "a": "{\"module\":{\"content_digest\":\"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"id\":\"https://graphforge.sh/ont_aaaaaaaaaaaaaaaa\",\"version\":\"v\\n1\"}}",
+      "b": "{\"module\":{\"content_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"id\":\"https://graphforge.sh/ont_aaaaaaaaaaaaaaaa\",\"version\":\"999.0\"},\"version_order\":0}",
+      "expected": "unordered",
+      "name": "other-undeclared"
+    },
+    {
+      "a": "{\"module\":{\"content_digest\":\"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"id\":\"https://graphforge.sh/ont_aaaaaaaaaaaaaaaa\",\"version\":\"v\\n1\"}}",
+      "b": "{\"module\":{\"content_digest\":\"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\",\"id\":\"https://graphforge.sh/ont_aaaaaaaaaaaaaaaa\",\"version\":\"1\"}}",
+      "expected": "unordered",
+      "name": "both-undeclared"
+    },
+    {
+      "a": "{\"module\":{\"content_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"id\":\"https://graphforge.sh/ont_aaaaaaaaaaaaaaaa\",\"version\":\"999.0\"},\"version_order\":0}",
+      "b": "{\"module\":{\"content_digest\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"id\":\"https://graphforge.sh/ont_aaaaaaaaaaaaaaaa\",\"version\":\"something else\"},\"version_order\":0}",
+      "expected": "equal",
+      "name": "ordinal-tie"
+    },
+    {
+      "a": "{\"module\":{\"content_digest\":\"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"id\":\"https://graphforge.sh/ont_aaaaaaaaaaaaaaaa\",\"version\":\"v\\n1\"},\"version_order\":1}",
+      "b": "{\"module\":{\"content_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"id\":\"https://graphforge.sh/ont_aaaaaaaaaaaaaaaa\",\"version\":\"999.0\"},\"version_order\":0}",
+      "expected": "greater",
+      "name": "control-label-declared"
+    },
+    {
+      "a": "{\"module\":{\"content_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"id\":\"https://graphforge.sh/ont_aaaaaaaaaaaaaaaa\",\"version\":\"999.0\"},\"version_order\":0}",
+      "b": "{\"module\":{\"content_digest\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"id\":\"https://graphforge.sh/ont_aaaaaaaaaaaaaaaa\",\"version\":\"999.0\"},\"version_order\":1}",
+      "expected": "less",
+      "name": "same-label-different-digest"
+    },
+    {
+      "a": "{\"module\":{\"content_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"id\":\"https://graphforge.sh/ont_aaaaaaaaaaaaaaaa\",\"version\":\"999.0\"},\"version_order\":0}",
+      "b": "{\"module\":{\"content_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"id\":\"https://graphforge.sh/ont_aaaaaaaaaaaaaaaa\",\"version\":\"999.0\"},\"version_order\":1}",
+      "expected": {
+        "code": "integrity_failure",
+        "field": "version_order"
+      },
+      "name": "contradictory-exact-identity"
+    },
+    {
+      "a": "{\"module\":{\"content_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"id\":\"https://graphforge.sh/ont_aaaaaaaaaaaaaaaa\",\"version\":\"999.0\"},\"version_order\":0}",
+      "b": "{\"module\":{\"content_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"id\":\"https://graphforge.sh/ont_aaaaaaaaaaaaaaaa\",\"version\":\"999.0\"}}",
+      "expected": {
+        "code": "integrity_failure",
+        "field": "version_order"
+      },
+      "name": "contradictory-absence"
+    },
+    {
+      "a": "{\"module\":{\"content_digest\":\"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"id\":\"https://graphforge.sh/ont_aaaaaaaaaaaaaaaa\",\"version\":\"v\\n1\"},\"version_order\":null}",
+      "b": "{\"module\":{\"content_digest\":\"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"id\":\"https://graphforge.sh/ont_aaaaaaaaaaaaaaaa\",\"version\":\"v\\n1\"}}",
+      "expected": "equal",
+      "name": "null-is-absent"
+    },
+    {
+      "a": "{\"module\":{\"content_digest\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"id\":\"https://graphforge.sh/ont_aaaaaaaaaaaaaaaa\",\"version\":\"éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé\"},\"version_order\":1}",
+      "b": "{\"module\":{\"content_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"id\":\"https://graphforge.sh/ont_aaaaaaaaaaaaaaaa\",\"version\":\"999.0\"},\"version_order\":0}",
+      "expected": "greater",
+      "name": "version-byte-boundary"
+    },
+    {
+      "a": "{\"module\":{\"content_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"id\":\"https://graphforge.sh/ont_aaaaaaaaaaaaaaaa\",\"version\":\"999.0\"},\"version_order\":-1}",
+      "b": "{\"module\":{\"content_digest\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"id\":\"https://graphforge.sh/ont_aaaaaaaaaaaaaaaa\",\"version\":\"arbitrary release 🦀\"},\"version_order\":4294967295}",
+      "expected": {
+        "code": "malformed_response",
+        "field": null
+      },
+      "name": "negative"
+    },
+    {
+      "a": "{\"module\":{\"content_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"id\":\"https://graphforge.sh/ont_aaaaaaaaaaaaaaaa\",\"version\":\"999.0\"},\"version_order\":1.5}",
+      "b": "{\"module\":{\"content_digest\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"id\":\"https://graphforge.sh/ont_aaaaaaaaaaaaaaaa\",\"version\":\"arbitrary release 🦀\"},\"version_order\":4294967295}",
+      "expected": {
+        "code": "malformed_response",
+        "field": null
+      },
+      "name": "fraction"
+    },
+    {
+      "a": "{\"module\":{\"content_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"id\":\"https://graphforge.sh/ont_aaaaaaaaaaaaaaaa\",\"version\":\"999.0\"},\"version_order\":1.0}",
+      "b": "{\"module\":{\"content_digest\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"id\":\"https://graphforge.sh/ont_aaaaaaaaaaaaaaaa\",\"version\":\"arbitrary release 🦀\"},\"version_order\":4294967295}",
+      "expected": {
+        "code": "malformed_response",
+        "field": null
+      },
+      "name": "float-integer"
+    },
+    {
+      "a": "{\"module\":{\"content_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"id\":\"https://graphforge.sh/ont_aaaaaaaaaaaaaaaa\",\"version\":\"999.0\"},\"version_order\":\"1\"}",
+      "b": "{\"module\":{\"content_digest\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"id\":\"https://graphforge.sh/ont_aaaaaaaaaaaaaaaa\",\"version\":\"arbitrary release 🦀\"},\"version_order\":4294967295}",
+      "expected": {
+        "code": "malformed_response",
+        "field": null
+      },
+      "name": "string"
+    },
+    {
+      "a": "{\"module\":{\"content_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"id\":\"https://graphforge.sh/ont_aaaaaaaaaaaaaaaa\",\"version\":\"999.0\"},\"version_order\":4294967296}",
+      "b": "{\"module\":{\"content_digest\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"id\":\"https://graphforge.sh/ont_aaaaaaaaaaaaaaaa\",\"version\":\"arbitrary release 🦀\"},\"version_order\":4294967295}",
+      "expected": {
+        "code": "malformed_response",
+        "field": null
+      },
+      "name": "overflow"
+    },
+    {
+      "a": "{\"module\":{\"content_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"id\":\"https://graphforge.sh/ont_aaaaaaaaaaaaaaaa\",\"version\":\"999.0\"},\"version_order\":true}",
+      "b": "{\"module\":{\"content_digest\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"id\":\"https://graphforge.sh/ont_aaaaaaaaaaaaaaaa\",\"version\":\"arbitrary release 🦀\"},\"version_order\":4294967295}",
+      "expected": {
+        "code": "malformed_response",
+        "field": null
+      },
+      "name": "bool"
+    },
+    {
+      "a": "{\"module\":{\"content_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"id\":\"https://graphforge.sh/ont_aaaaaaaaaaaaaaaa\",\"version\":\"999.0\"},\"unexpected\":1,\"version_order\":0}",
+      "b": "{\"module\":{\"content_digest\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"id\":\"https://graphforge.sh/ont_aaaaaaaaaaaaaaaa\",\"version\":\"arbitrary release 🦀\"},\"version_order\":4294967295}",
+      "expected": {
+        "code": "malformed_response",
+        "field": null
+      },
+      "name": "unknown-member"
+    },
+    {
+      "a": "{\"module\":{\"content_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"id\":\"https://graphforge.sh/ont_bbbbbbbbbbbbbbbb\",\"version\":\"999.0\"},\"version_order\":0}",
+      "b": "{\"module\":{\"content_digest\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"id\":\"https://graphforge.sh/ont_aaaaaaaaaaaaaaaa\",\"version\":\"arbitrary release 🦀\"},\"version_order\":4294967295}",
+      "expected": {
+        "code": "invalid_identity",
+        "field": "module.id"
+      },
+      "name": "cross-id"
+    },
+    {
+      "a": "{\"module\":{\"content_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"id\":\"https://graphforge.sh/brg_aaaaaaaaaaaaaaaa\",\"version\":\"999.0\"},\"version_order\":0}",
+      "b": "{\"module\":{\"content_digest\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"id\":\"https://graphforge.sh/ont_aaaaaaaaaaaaaaaa\",\"version\":\"arbitrary release 🦀\"},\"version_order\":4294967295}",
+      "expected": {
+        "code": "invalid_identity",
+        "field": "module.id"
+      },
+      "name": "bridge-id"
+    },
+    {
+      "a": "{\"module\":{\"content_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"id\":\"ont_aaaaaaaaaaaaaaaa\",\"version\":\"999.0\"},\"version_order\":0}",
+      "b": "{\"module\":{\"content_digest\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"id\":\"https://graphforge.sh/ont_aaaaaaaaaaaaaaaa\",\"version\":\"arbitrary release 🦀\"},\"version_order\":4294967295}",
+      "expected": {
+        "code": "invalid_identity",
+        "field": "module.id"
+      },
+      "name": "bare-id"
+    },
+    {
+      "a": "{\"module\":{\"content_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"id\":\"https://graphforge.sh/ONT_AAAAAAAAAAAAAAAA\",\"version\":\"999.0\"},\"version_order\":0}",
+      "b": "{\"module\":{\"content_digest\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"id\":\"https://graphforge.sh/ont_aaaaaaaaaaaaaaaa\",\"version\":\"arbitrary release 🦀\"},\"version_order\":4294967295}",
+      "expected": {
+        "code": "invalid_identity",
+        "field": "module.id"
+      },
+      "name": "uppercase-uri"
+    },
+    {
+      "a": "{\"module\":{\"content_digest\":\"sha256:bad\",\"id\":\"https://graphforge.sh/ont_aaaaaaaaaaaaaaaa\",\"version\":\"999.0\"},\"version_order\":0}",
+      "b": "{\"module\":{\"content_digest\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"id\":\"https://graphforge.sh/ont_aaaaaaaaaaaaaaaa\",\"version\":\"arbitrary release 🦀\"},\"version_order\":4294967295}",
+      "expected": {
+        "code": "integrity_failure",
+        "field": "digest"
+      },
+      "name": "bad-digest"
+    },
+    {
+      "a": "{\"module\":{\"content_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"id\":\"https://graphforge.sh/ont_aaaaaaaaaaaaaaaa\",\"version\":\"\"},\"version_order\":0}",
+      "b": "{\"module\":{\"content_digest\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"id\":\"https://graphforge.sh/ont_aaaaaaaaaaaaaaaa\",\"version\":\"arbitrary release 🦀\"},\"version_order\":4294967295}",
+      "expected": {
+        "code": "limit_exceeded",
+        "field": "module.version"
+      },
+      "name": "empty-version"
+    },
+    {
+      "a": "{\"module\":{\"content_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"id\":\"https://graphforge.sh/ont_aaaaaaaaaaaaaaaa\",\"version\":\"ééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééx\"},\"version_order\":0}",
+      "b": "{\"module\":{\"content_digest\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"id\":\"https://graphforge.sh/ont_aaaaaaaaaaaaaaaa\",\"version\":\"arbitrary release 🦀\"},\"version_order\":4294967295}",
+      "expected": {
+        "code": "limit_exceeded",
+        "field": "module.version"
+      },
+      "name": "version-byte-overflow"
+    },
+    {
+      "a": "{\"module\":{\"content_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"id\":\"https://graphforge.sh/ont_aaaaaaaaaaaaaaaa\",\"version\":\"999.0\"},\"version_order\":2,\"version_order\":0}",
+      "b": "{\"module\":{\"content_digest\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"id\":\"https://graphforge.sh/ont_aaaaaaaaaaaaaaaa\",\"version\":\"arbitrary release 🦀\"},\"version_order\":4294967295}",
+      "expected": {
+        "code": "malformed_response",
+        "field": null
+      },
+      "name": "duplicate-order"
+    },
+    {
+      "a": "{\"module\":{\"content_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"id\":\"https://graphforge.sh/ont_aaaaaaaaaaaaaaaa\",\"version\":\"ignored\",\"version\":\"999.0\"},\"version_order\":0}",
+      "b": "{\"module\":{\"content_digest\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"id\":\"https://graphforge.sh/ont_aaaaaaaaaaaaaaaa\",\"version\":\"arbitrary release 🦀\"},\"version_order\":4294967295}",
+      "expected": {
+        "code": "malformed_response",
+        "field": null
+      },
+      "name": "duplicate-nested"
+    },
+    {
+      "a": "{\"module\":{\"content_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"id\":\"https://graphforge.sh/ont_aaaaaaaaaaaaaaaa\",\"extra\":1,\"version\":\"999.0\"},\"version_order\":0}",
+      "b": "{\"module\":{\"content_digest\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"id\":\"https://graphforge.sh/ont_aaaaaaaaaaaaaaaa\",\"version\":\"arbitrary release 🦀\"},\"version_order\":4294967295}",
+      "expected": {
+        "code": "malformed_response",
+        "field": null
+      },
+      "name": "unknown-nested"
+    },
+    {
+      "a": "{\"module\":{\"content_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"id\":\"https://graphforge.sh/ont_aaaaaaaaaaaaaaaa\",\"version\":\"999.0\"},\"version_order\":0} null",
+      "b": "{\"module\":{\"content_digest\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"id\":\"https://graphforge.sh/ont_aaaaaaaaaaaaaaaa\",\"version\":\"arbitrary release 🦀\"},\"version_order\":4294967295}",
+      "expected": {
+        "code": "malformed_response",
+        "field": null
+      },
+      "name": "trailing-json"
+    },
+    {
+      "a": "{",
+      "b": "{\"module\":{\"content_digest\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"id\":\"https://graphforge.sh/ont_aaaaaaaaaaaaaaaa\",\"version\":\"arbitrary release 🦀\"},\"version_order\":4294967295}",
+      "expected": {
+        "code": "malformed_response",
+        "field": null
+      },
+      "name": "malformed-json"
+    },
+    {
+      "a": "{\"module\":{\"content_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"id\":\"https://graphforge.sh/ont_aaaaaaaaaaaaaaaa\",\"version\":\"999.0\"},\"version_order\":0}",
+      "b": "{\"module\":{\"content_digest\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"id\":\"https://graphforge.sh/ont_aaaaaaaaaaaaaaaa\",\"version\":\"arbitrary release 🦀\"},\"version_order\":4294967295}",
+      "expected": {
+        "code": "limit_exceeded",
+        "field": "module_versions"
+      },
+      "limits": {
+        "max_response_bytes": 189
+      },
+      "name": "aggregate-bound"
+    },
+    {
+      "a": "{\"module\":{\"content_digest\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"id\":\"https://graphforge.sh/ont_aaaaaaaaaaaaaaaa\",\"version\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"version_order\":1}",
+      "b": "{\"module\":{\"content_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"id\":\"https://graphforge.sh/ont_aaaaaaaaaaaaaaaa\",\"version\":\"999.0\"},\"version_order\":0}",
+      "expected": {
+        "code": "limit_exceeded",
+        "field": "module.version"
+      },
+      "limits": {
+        "max_string_bytes": 50
+      },
+      "name": "version-input-bound"
+    }
+  ],
+  "format": "graphforge-module-version-order-conformance/1"
+}
