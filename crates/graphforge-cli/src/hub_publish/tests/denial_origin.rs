@@ -242,15 +242,23 @@ fn upload_denial_names_the_capability_origin_without_its_path_or_query() {
             length: 1,
             received: 0,
             chunk_bytes: None,
-            upload_url: "https://objects.example:8443/capability-secret?token=query-secret".into(),
+            upload_url:
+                "https://objects.example:443/uploads/a/../capability-secret?token=query-secret"
+                    .into(),
         };
         let error = upload(&hub, &target, &Source::Bytes(b"a".to_vec()), 1, false).unwrap_err();
         let error = error.into();
         for json in [false, true] {
-            rendered(&error, json, "https://objects.example:8443");
+            rendered(&error, json, "https://objects.example");
         }
         let requests = transport.requests.borrow();
         assert_eq!(requests.len(), if put { 2 } else { 1 });
+        assert!(
+            requests
+                .iter()
+                .all(|request| request.url == target.upload_url),
+            "HEAD and PUT must preserve the issued capability URL: {requests:?}"
+        );
         assert!(
             requests
                 .iter()

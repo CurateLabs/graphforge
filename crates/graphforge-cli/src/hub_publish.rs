@@ -2122,7 +2122,7 @@ fn upload(
     }
     let url = Url::parse(&target.upload_url)
         .map_err(|_| validation("hub.unsafe_location", "upload URL is invalid"))?;
-    let head = hub.data(&HubRequest::new(HubMethod::Head, url.as_str()))?;
+    let head = hub.data(&HubRequest::new(HubMethod::Head, &target.upload_url))?;
     if head.status != 200 {
         return Err(hub_failure(&head, &url));
     }
