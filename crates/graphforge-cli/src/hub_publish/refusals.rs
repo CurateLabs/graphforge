@@ -1,4 +1,4 @@
-//! Typed refusal capture across immediate commit and asynchronous polling.
+//! Typed Hub refusals, safe diagnostics, and permanent-ID recovery.
 use super::{
     BTreeSet, GfError, GraphForge, HubErrorBody, HubPublishErrorCode, HubResponse, PublishToken,
     Uuid, network, publish_error,
@@ -6,6 +6,100 @@ use super::{
 use graphforge_discovery::{ItemId, ItemKind};
 use graphforge_hub_publish::IdTakenItem;
 use std::cell::{Cell, RefCell};
+
+// Refusal prose has its own display budget, inside the existing control-body limit.
+const MAX_MESSAGE_BYTES: usize = 4096;
+
+pub(super) fn body(response: &HubResponse) -> Result<HubErrorBody, GfError> {
+    if response.body.len() > super::MAX_CONTROL_RESPONSE_BYTES {
+        return Err(network("Hub returned an unsuccessful status"));
+    }
+    let value = super::parse_unique_json(&response.body)
+        .map_err(|_| network("Hub returned an unsuccessful status"))?;
+    let body: HubErrorBody = serde_json::from_value(value)
+        .map_err(|_| network("Hub returned an unsuccessful status"))?;
+    if (matches!(
+        body.code,
+        HubPublishErrorCode::IdTaken | HubPublishErrorCode::VisibilityMismatch
+    ) && response.status != 409)
+        || (body.reason.is_some() && response.status != body.code.http_status())
+    {
+        return Err(network("Hub refusal status is invalid"));
+    }
+    Ok(body)
+}
+
+/// Normalize untrusted prose to one bounded terminal-safe line. URLs are removed
+/// in full: even a path without a query can be an upload capability. Request
+/// credentials are redacted using only values already acquired for that request.
+pub(super) fn message(text: &str, secrets: &[&str]) -> String {
+    let mut text = text.to_owned();
+    for secret in secrets.iter().filter(|secret| !secret.is_empty()) {
+        text = text.replace(secret, "[redacted]");
+    }
+    let text: String = text
+        .chars()
+        .map(|ch| match ch {
+            '\u{200b}'..='\u{200f}'
+            | '\u{2028}'..='\u{202e}'
+            | '\u{2060}'..='\u{206f}'
+            | '\u{feff}' => ' ',
+            ch if ch.is_control() => ' ',
+            ch => ch,
+        })
+        .collect();
+    let mut bearer = false;
+    let mut output = String::new();
+    for word in text.split_whitespace() {
+        let lower = word.to_ascii_lowercase();
+        let is_bearer = lower
+            .trim_start_matches(|ch: char| ch.is_ascii_punctuation())
+            .starts_with("bearer");
+        let redacted = bearer
+            || is_bearer
+            || word.contains("//")
+            || word.contains('@')
+            || lower.contains("token=")
+            || lower.contains("secret=")
+            || lower.contains("signature=");
+        let word = if redacted { "[redacted]" } else { word };
+        let extra = usize::from(!output.is_empty());
+        if output.len() + extra + word.len() > MAX_MESSAGE_BYTES {
+            break;
+        }
+        if extra != 0 {
+            output.push(' ');
+        }
+        output.push_str(word);
+        bearer = is_bearer;
+    }
+    output
+}
+
+// Preserve malformed bodies for the existing failure classifier; only validated
+// refusal messages may cross into the diagnostic renderer.
+pub(super) fn sanitize_response(
+    mut response: HubResponse,
+    request: &super::HubRequest,
+) -> Result<HubResponse, GfError> {
+    if response.status >= 400
+        && let Ok(mut body) = body(&response)
+    {
+        let secrets: Vec<&str> = [
+            request
+                .header("authorization")
+                .and_then(|value| value.strip_prefix("Bearer ")),
+            request.header("x-vercel-protection-bypass"),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        body.message = message(&body.message, &secrets);
+        response.body =
+            serde_json::to_vec(&body).map_err(|_| network("Hub refusal could not be encoded"))?;
+    }
+    Ok(response)
+}
 
 #[derive(Default)]
 pub(super) struct Capture {
@@ -27,7 +121,7 @@ impl Capture {
         if response.status != 409 {
             return Ok(());
         }
-        let Ok(body) = serde_json::from_slice::<HubErrorBody>(&response.body) else {
+        let Ok(body) = body(response) else {
             return Ok(());
         };
         if body.code != HubPublishErrorCode::IdTaken {
