@@ -43,7 +43,7 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use url::Url;
 use uuid::Uuid;
 
@@ -241,6 +241,8 @@ pub(crate) struct PublishEnvironment<'a> {
     pub credential: Credential,
     /// Waits between device-flow polls.
     pub wait: &'a dyn Fn(Duration),
+    /// Monotonic time, injectable with the waiter for deadline tests.
+    pub clock: &'a dyn Fn() -> Instant,
     /// Human instructions (device flow); never receives secrets.
     pub notices: &'a mut dyn Write,
     resolution: Option<PublicationResolution>,
@@ -611,6 +613,7 @@ fn publish_with_resolution(
     let mut environment = PublishEnvironment {
         bypass,
         credential,
+        clock: &std::time::Instant::now,
         wait: &std::thread::sleep,
         notices: &mut notices,
         resolution: Some(resolution),
@@ -1171,6 +1174,8 @@ fn obtain_token_with_opener(
             "device authorization response is malformed",
         )
     })?;
+    let deadline =
+        (environment.clock)() + Duration::from_secs(device.expires_in.min(MAX_DEVICE_WAIT_SECONDS));
     let io = |error: std::io::Error| GfError::Storage(error.to_string());
     writeln!(
         environment.notices,
@@ -1185,16 +1190,13 @@ fn obtain_token_with_opener(
     open(&link);
     // Bound client waiting independently of the server-advertised lifetime.
     let mut interval = device.interval.clamp(1, MAX_POLL_INTERVAL_SECONDS);
-    let deadline = device.expires_in.min(MAX_DEVICE_WAIT_SECONDS);
-    let mut elapsed = 0_u64;
     loop {
-        if elapsed >= deadline {
+        let remaining = deadline.saturating_duration_since((environment.clock)());
+        if remaining.is_zero() {
             return Err(DeviceAuthorizationEnd::deadline(device.expires_in));
         }
-        let pause = interval.min(deadline - elapsed);
-        (environment.wait)(Duration::from_secs(pause));
-        elapsed = elapsed.saturating_add(pause);
-        if elapsed >= deadline {
+        (environment.wait)(Duration::from_secs(interval).min(remaining));
+        if (environment.clock)() >= deadline {
             return Err(DeviceAuthorizationEnd::deadline(device.expires_in));
         }
         let response = hub.oauth(

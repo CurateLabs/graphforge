@@ -58,6 +58,7 @@ fn run(
     let mut environment = PublishEnvironment {
         bypass: None,
         credential: Credential::Token(token(transport.hub, "curate/claims")),
+        clock: &std::time::Instant::now,
         wait: &|_| panic!("explicit token needs no device flow"),
         notices: &mut notices,
         resolution: None,

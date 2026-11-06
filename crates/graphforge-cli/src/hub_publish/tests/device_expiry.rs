@@ -29,6 +29,7 @@ fn parsed_publish_expiry_has_its_own_exit_and_never_mutates_local_or_remote_stat
             let Some(crate::Command::Publish(args)) = cli.command else {
                 panic!("expected publish");
             };
+            let started = std::time::Instant::now();
             let elapsed = std::cell::Cell::new(0);
             let mut notices = Vec::new();
             let mut stdout = Vec::new();
@@ -39,6 +40,7 @@ fn parsed_publish_expiry_has_its_own_exit_and_never_mutates_local_or_remote_stat
                 &mut PublishEnvironment {
                     bypass: None,
                     credential: Credential::DeviceFlow,
+                    clock: &|| started + Duration::from_secs(elapsed.get()),
                     wait: &|duration| {
                         elapsed.set(elapsed.get() + duration.as_secs());
                         hub.hub.advance_clock(if server_expiry {

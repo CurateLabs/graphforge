@@ -93,6 +93,7 @@ fn refused(hub: &LoopbackHub, graph: &GraphForge, args: &PublishArgs) -> (String
     let mut environment = PublishEnvironment {
         bypass: None,
         credential: Credential::Token(token),
+        clock: &std::time::Instant::now,
         wait: &|_| panic!("small fixture must finish within one verification poll"),
         notices: &mut notices,
         resolution: None,

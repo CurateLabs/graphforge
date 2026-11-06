@@ -574,6 +574,7 @@ fn run_publish_with_bypass(
         let mut environment = PublishEnvironment {
             bypass,
             credential,
+            clock: &std::time::Instant::now,
             wait: &|_| panic!("no device flow expected"),
             notices: &mut stderr,
             resolution: None,
@@ -1397,6 +1398,7 @@ fn a_slow_but_progressing_upload_succeeds_in_bounded_chunks() {
     let mut environment = PublishEnvironment {
         bypass: None,
         credential: Credential::Token(token(&hub, "curate/claims")),
+        clock: &std::time::Instant::now,
         wait: &|_| panic!("no device flow expected"),
         notices: &mut notices,
         resolution: None,
@@ -1507,6 +1509,7 @@ fn device_flow(
     String,
 ) {
     let notices = Shared::default();
+    let started = std::time::Instant::now();
     let waits = RefCell::new(Vec::new());
     let wait = |duration: Duration| {
         let index = waits.borrow().len();
@@ -1518,6 +1521,7 @@ fn device_flow(
         let mut environment = PublishEnvironment {
             bypass: None,
             credential: Credential::DeviceFlow,
+            clock: &|| started + waits.borrow().iter().sum::<Duration>(),
             wait: &wait,
             notices: &mut writer,
             resolution: None,
