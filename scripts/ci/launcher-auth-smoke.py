@@ -153,13 +153,13 @@ class Handler(BaseHTTPRequestHandler):
             )
             if self.path.endswith("/device_authorization"):
                 hub.device = json.loads(body)["user_code"]
-        self.send_response(status)
-        for name, value in headers:
-            if name.lower() not in {"content-length", "connection"}:
-                self.send_header(name, value)
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
         try:
+            self.send_response(status)
+            for name, value in headers:
+                if name.lower() not in {"content-length", "connection"}:
+                    self.send_header(name, value)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
             if self.command != "HEAD":
                 self.wfile.write(body)
         except ConnectionError:
