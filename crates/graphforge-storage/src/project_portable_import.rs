@@ -2529,6 +2529,7 @@ mod tests {
             label: None,
             description: None,
             license: None,
+            forked_from: None,
             ontology_id: "https://graphforge.dev/ontology/portable-import".into(),
             version: "release-2026.08".into(),
             entity_types: (0..entity_types)

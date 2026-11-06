@@ -1104,6 +1104,7 @@ mod tests {
                     label: None,
                     description: None,
                     license: None,
+                    forked_from: None,
                     ontology_id: "urn:graphforge:portable-lifecycle".into(),
                     version: "1".into(),
                     entity_types: vec![EntityTypeDef {

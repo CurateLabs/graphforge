@@ -272,7 +272,7 @@ fn summary_schema() -> Value {
             "format":{"const":"graphforge-project-summary/1"}, "version":{"$ref":"#/$defs/version"},
             "repository":{"$ref":"#/$defs/identity"}, "immutable_version":{"$ref":"#/$defs/digest"},
             "package":{"type":"object","additionalProperties":false,"required":["format","package_digest","producing_core_version","package_class"],"properties":{"format":{"const":"graphforge-project/2"},"package_digest":{"$ref":"#/$defs/digest"},"producing_core_version":{"$ref":"#/$defs/coreVersion"},"package_class":{"enum":["complete","ontology-only","component-selective","graph-data-subset"]}}},
-            "requirements":{"type":"array","maxItems":1,"items":{"type":"object","additionalProperties":false,"required":["capability","major"],"properties":{"capability":{"const":"project-summary"},"major":{"const":1}}}},
+            "requirements":{"type":"array","maxItems":2,"items":{"type":"object","additionalProperties":false,"required":["capability","major"],"properties":{"capability":{"enum":["ontology-module-metadata","project-summary"]},"major":{"const":1}}}},
             "capabilities":{"type":"array","maxItems":256,"items":{"$ref":"#/$defs/semantic"}},
             "metadata":{"$ref":"#/$defs/metadata"}, "facts":{"$ref":"#/$defs/facts"},
             "people":{"type":"array","maxItems":10000,"items":{"$ref":"#/$defs/person"}},
@@ -315,6 +315,13 @@ fn summary_schema() -> Value {
             map.insert("person".into(), json!({"type":"object","additionalProperties":false,"required":["name","roles"],"properties":{
                 "name":{"$ref":"#/$defs/credit_name"},"email":{"$ref":"#/$defs/credit_email"},"orcid":{"$ref":"#/$defs/credit_orcid"},
                 "roles":{"enum":[["author"],["committer"],["author","committer"]]}}}));
+            map.insert("forked_from".into(), json!({"anyOf":[{
+                "type":"object","additionalProperties":false,"required":["id","version","digest"],
+                "properties":{
+                    "id":{"type":"string","pattern":"^https://graphforge\\.sh/ont_[0123456789abcdefghjkmnpqrstvwxyz]{16}$"},
+                    "version":{"type":"string","minLength":1,"maxLength":4096,"description":"Exact nonempty opaque authored version, at most 4096 UTF-8 bytes; enforced by Rust."},
+                    "digest":{"$ref":"#/$defs/digest"}
+                }},{"type":"null"}]}));
             map.insert("module_label".into(), json!({"anyOf":[{"type":"string","minLength":1,"maxLength":256,"description":"At most 256 UTF-8 bytes, nonblank, single line, no control characters or U+2028/U+2029; enforced by Rust."},{"type":"null"}]}));
             map.insert("module_license".into(), json!({"anyOf":[{"type":"string","minLength":1,"maxLength":4096,"description":"SPDX expression, at most 4096 ASCII bytes without control characters; parsed by Rust spdx in strict mode. Absence means undeclared, never inherited from the Project."},{"type":"null"}]}));
             map.insert("module_description".into(), json!({"anyOf":[{"type":"string","minLength":1,"maxLength":4096,"description":"At most 4096 UTF-8 bytes, nonblank plain text; LF and tab allowed, all other controls forbidden; enforced by Rust."},{"type":"null"}]}));
@@ -328,7 +335,7 @@ fn summary_schema() -> Value {
                     "bytes_by_kind":{"type":"object","propertyNames":{"enum":byte_kinds},"additionalProperties":{"type":"integer","minimum":0}},
                     "ontology_composition":{"anyOf":[{"type":"object","additionalProperties":false,"required":["composition_digest","modules","bridge_sets"],"properties":{
                         "composition_digest":{"$ref":"#/$defs/digest"},
-                        "modules":{"type":"array","maxItems":4096,"items":{"type":"object","additionalProperties":false,"required":["id","version","content_digest","dialect","profile"],"properties":{"id":{"$ref":"#/$defs/identity_text"},"version":{"$ref":"#/$defs/identity_text"},"content_digest":{"$ref":"#/$defs/digest"},"dialect":{"$ref":"#/$defs/identity_text"},"profile":{"$ref":"#/$defs/identity_text"},"label":{"$ref":"#/$defs/module_label"},"description":{"$ref":"#/$defs/module_description"},"license":{"$ref":"#/$defs/module_license"}}}},
+                        "modules":{"type":"array","maxItems":4096,"items":{"type":"object","additionalProperties":false,"required":["id","version","content_digest","dialect","profile"],"properties":{"id":{"$ref":"#/$defs/identity_text"},"version":{"$ref":"#/$defs/identity_text"},"content_digest":{"$ref":"#/$defs/digest"},"dialect":{"$ref":"#/$defs/identity_text"},"profile":{"$ref":"#/$defs/identity_text"},"label":{"$ref":"#/$defs/module_label"},"description":{"$ref":"#/$defs/module_description"},"license":{"$ref":"#/$defs/module_license"},"forked_from":{"$ref":"#/$defs/forked_from"}}}},
                         "bridge_sets":{"type":"array","maxItems":4096,"items":{"$ref":"#/$defs/bridge_descriptor"}}}},{"type":"null"}]}
                 }}));
             defs
@@ -1057,6 +1064,108 @@ fn lineage_cases() -> Vec<Case> {
 
 fn module_metadata_cases() -> Vec<Case> {
     let mut cases = Vec::new();
+    let origin = json!({"id":"https://graphforge.sh/ont_aaaaaaaaaaaaaaaa","version":"source-1","digest":format!("sha256:{}", "a".repeat(64))});
+    let mut fork = base_summary();
+    fork["requirements"].as_array_mut().unwrap().insert(
+        0,
+        json!({"capability":"ontology-module-metadata","major":1}),
+    );
+    fork["facts"]["ontology_composition"]["modules"][0]["forked_from"] = origin.clone();
+    cases.push(valid(
+        "summary-module-fork-origin",
+        Document::Summary,
+        fork.clone(),
+    ));
+    for (name, field, replacement, error_field) in [
+        (
+            "bare-id",
+            "id",
+            json!("ont_aaaaaaaaaaaaaaaa"),
+            Some("forked_from"),
+        ),
+        (
+            "bridge-id",
+            "id",
+            json!("https://graphforge.sh/brg_aaaaaaaaaaaaaaaa"),
+            Some("forked_from"),
+        ),
+        (
+            "noncanonical-id",
+            "id",
+            json!("https://graphforge.sh/ONT_AAAAAAAAAAAAAAAA"),
+            Some("forked_from"),
+        ),
+        ("empty-version", "version", json!(""), Some("forked_from")),
+        (
+            "control-version",
+            "version",
+            json!("a\nb"),
+            Some("forked_from"),
+        ),
+        (
+            "oversized-version",
+            "version",
+            json!("a".repeat(4097)),
+            Some("forked_from"),
+        ),
+        (
+            "bare-digest",
+            "digest",
+            json!("a".repeat(64)),
+            Some("forked_from"),
+        ),
+        (
+            "uppercase-digest",
+            "digest",
+            json!(format!("sha256:{}", "A".repeat(64))),
+            Some("forked_from"),
+        ),
+        ("unknown-field", "unexpected", json!(true), None),
+    ] {
+        let mut value = fork.clone();
+        value["facts"]["ontology_composition"]["modules"][0]["forked_from"][field] = replacement;
+        let case_name = format!("summary-module-fork-{name}");
+        if name == "control-version" {
+            cases.push(valid(&case_name, Document::Summary, value));
+        } else {
+            let code = if matches!(name, "empty-version" | "oversized-version") {
+                "limit_exceeded"
+            } else {
+                "malformed_response"
+            };
+            cases.push(invalid(
+                &case_name,
+                Document::Summary,
+                value,
+                code,
+                error_field,
+            ));
+        }
+    }
+    let mut missing = fork.clone();
+    missing["facts"]["ontology_composition"]["modules"][0]["forked_from"]
+        .as_object_mut()
+        .unwrap()
+        .remove("digest");
+    cases.push(invalid(
+        "summary-module-fork-missing-digest",
+        Document::Summary,
+        missing,
+        "malformed_response",
+        None,
+    ));
+    let mut missing_capability = fork;
+    missing_capability["requirements"]
+        .as_array_mut()
+        .unwrap()
+        .remove(0);
+    cases.push(invalid(
+        "summary-module-fork-requires-capability",
+        Document::Summary,
+        missing_capability,
+        "malformed_response",
+        Some("requirements"),
+    ));
     for (name, license) in [
         ("summary-module-license-simple", json!("MIT")),
         (

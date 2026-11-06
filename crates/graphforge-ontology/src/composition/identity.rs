@@ -25,6 +25,19 @@ pub struct OntologyModuleId {
     pub canonical_digest: String,
 }
 
+impl From<&OntologyModuleId> for graphforge_discovery::OntologyForkOrigin {
+    fn from(source: &OntologyModuleId) -> Self {
+        Self {
+            id: source.ontology_id.clone(),
+            version: source.authored_version.clone(),
+            digest: graphforge_discovery::Sha256Digest(format!(
+                "sha256:{}",
+                source.canonical_digest
+            )),
+        }
+    }
+}
+
 impl OntologyModuleId {
     /// Lexicographic sort key: UTF-8 bytes of `(ontology_id, authored_version, canonical_digest)`.
     #[must_use]

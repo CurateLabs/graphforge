@@ -174,6 +174,7 @@ impl GraphForge {
             label: None,
             description: None,
             license: None,
+            forked_from: None,
             ontology_id: options.ontology_id,
             version: options.version,
             entity_types,
@@ -541,6 +542,7 @@ mod tests {
             label: None,
             description: None,
             license: None,
+            forked_from: None,
             ontology_id: "draft".into(),
             version: "1".into(),
             entity_types: vec![
@@ -600,6 +602,7 @@ mod tests {
             label: None,
             description: None,
             license: None,
+            forked_from: None,
             ontology_id: "migration-order".into(),
             version: "1".into(),
             entity_types: vec![],
@@ -671,6 +674,7 @@ mod tests {
             label: None,
             description: None,
             license: None,
+            forked_from: None,
             ontology_id: "bad".into(),
             version: "1".into(),
             entity_types: vec![

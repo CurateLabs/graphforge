@@ -641,6 +641,7 @@ mod tests {
                     label: None,
                     description: None,
                     license: None,
+                    forked_from: None,
                     ontology_id: "https://graphforge.dev/ontology/selection-closure".into(),
                     version: "1".into(),
                     entity_types: Vec::new(),

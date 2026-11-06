@@ -795,6 +795,7 @@ fn local_composition_is_exact_and_does_not_change_parent_or_sibling() {
         label: None,
         description: None,
         license: None,
+        forked_from: None,
         ontology_id: "branch-local".into(),
         version: "1.0.0".into(),
         entity_types: vec![

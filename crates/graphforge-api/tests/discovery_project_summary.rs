@@ -18,7 +18,7 @@ use graphforge_discovery::{
 };
 use graphforge_ontology::OntologyDoc;
 use graphforge_storage::{ResearchCorpusSize, ResearchDiscoveryFacets};
-use serde_json::Value;
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -177,12 +177,20 @@ fn module_text_survives_reopen_and_is_derived_from_authenticated_package_bytes()
     let mut document = module_document();
     document.label = Some("Scholarly works 研究".into());
     document.description = Some("Authors and their works.\nPublic research metadata.".into());
+    document.forked_from = Some(
+        serde_json::from_value(json!({
+            "id":"https://graphforge.sh/ont_aaaaaaaaaaaaaaaa", "version":"source-1",
+            "digest":format!("sha256:{}", "a".repeat(64))
+        }))
+        .unwrap(),
+    );
     let exported = exported_project_with_document(document.clone());
     for package in [&exported.bundle, &exported.expanded] {
         let summary = summarize(package).unwrap();
         let module = &summary.facts.ontology_composition.as_ref().unwrap().modules[0];
         assert_eq!(module.label, document.label);
         assert_eq!(module.description, document.description);
+        assert_eq!(module.forked_from, document.forked_from);
         assert!(summary.requirements.iter().any(|requirement| {
             requirement.capability == graphforge_discovery::ONTOLOGY_MODULE_METADATA_CAPABILITY
                 && requirement.major == 1
@@ -256,12 +264,13 @@ fn absent_module_text_keeps_the_original_summary_requirement_and_omits_fields() 
     assert!(value.get("label").is_none());
     assert!(value.get("description").is_none());
     assert!(value.get("license").is_none());
+    assert!(value.get("forked_from").is_none());
     assert_eq!(summary.metadata.license.as_deref(), Some("CC0-1.0"));
 }
 
 #[test]
 fn resealed_transport_bytes_cannot_change_metadata_without_changing_module_identity() {
-    for field in ["label", "license"] {
+    for field in ["label", "license", "forked_from"] {
         resealed_module_metadata_is_rejected(field);
     }
 }
@@ -275,7 +284,12 @@ fn resealed_module_metadata_is_rejected(field: &str) {
         .find(|entry| entry.kind == "ontology")
         .unwrap();
     let mut forged = serde_json::to_value(module_document()).unwrap();
-    forged[field] = Value::String("MIT".into());
+    forged[field] = if field == "forked_from" {
+        json!({"id":"https://graphforge.sh/ont_aaaaaaaaaaaaaaaa", "version":"source-1",
+            "digest":format!("sha256:{}", "a".repeat(64))})
+    } else {
+        Value::String("MIT".into())
+    };
     replace_package_file(
         &exported.expanded,
         &entry.path,
@@ -574,6 +588,20 @@ fn summary_binds_to_a_manifest_built_with_discovery_types() {
     let mut forged = parsed.clone();
     forged.facts.ontology_composition.as_mut().unwrap().modules[0].license =
         Some("Apache-2.0".into());
+    forged.validate(DiscoveryLimits::default()).unwrap();
+    assert_eq!(
+        manifest.bind_summary(&forged).unwrap_err().code,
+        DiscoveryErrorCode::IntegrityFailure
+    );
+
+    let mut forged = parsed.clone();
+    forged.facts.ontology_composition.as_mut().unwrap().modules[0].forked_from = Some(
+        serde_json::from_value(json!({
+            "id":"https://graphforge.sh/ont_aaaaaaaaaaaaaaaa", "version":"forged",
+            "digest":format!("sha256:{}", "a".repeat(64))
+        }))
+        .unwrap(),
+    );
     forged.validate(DiscoveryLimits::default()).unwrap();
     assert_eq!(
         manifest.bind_summary(&forged).unwrap_err().code,

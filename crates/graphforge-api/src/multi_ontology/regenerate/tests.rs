@@ -296,7 +296,7 @@ fn module_regeneration_rewrites_all_references_and_stored_routes_in_one_version(
         after.composition_fingerprint,
         before.composition_fingerprint
     );
-    assert!(!serde_json::to_string(&after).unwrap().contains(&uri(OLD)));
+    assert_no_old_references(&after);
     let old = before
         .modules
         .iter()
@@ -309,6 +309,7 @@ fn module_regeneration_rewrites_all_references_and_stored_routes_in_one_version(
         .unwrap();
     let mut expected = old.document.clone();
     expected.ontology_id = new_id.to_uri();
+    expected.forked_from = Some((&old.id).into());
     assert_eq!(new.document, expected);
     assert_ne!(new.id.canonical_digest, old.id.canonical_digest);
     assert_eq!(
@@ -701,11 +702,7 @@ fn regeneration_fault_helper() {
     if phase.contains("after_current") || phase == "private_ack_error" {
         assert_ne!(current(&graph), generation);
         data(&graph);
-        assert!(
-            !serde_json::to_string(&graph.workspace_ontology_composition().unwrap())
-                .unwrap()
-                .contains(&uri(OLD))
-        );
+        assert_no_old_references(&graph.workspace_ontology_composition().unwrap().unwrap());
         if phase.contains("after_current") {
             assert!(result.unwrap_err().to_string().contains("committed=true"));
         }
@@ -1203,4 +1200,126 @@ fn inconsistent_bound_intent_is_corruption_instead_of_a_foreign_uuid_consumer() 
             .code(),
         "GF_IDEMPOTENCY_CONFLICT"
     );
+}
+
+fn assert_no_old_references(composition: &WorkspaceOntologyComposition) {
+    let mut structural = composition.clone();
+    for module in &mut structural.modules {
+        module.document.forked_from = None;
+    }
+    assert!(
+        !serde_json::to_string(&structural)
+            .unwrap()
+            .contains(&uri(OLD))
+    );
+}
+
+#[test]
+fn repeated_forks_record_each_immediate_exact_source_and_reopen() {
+    let mut fixture = Fixture::new(true);
+    let mut id = OLD.to_owned();
+    for _ in 0..2 {
+        let before = fixture
+            .graph
+            .workspace_ontology_composition()
+            .unwrap()
+            .unwrap();
+        let source = before
+            .modules
+            .iter()
+            .find(|module| {
+                same_id(
+                    &module.id.ontology_id,
+                    &ItemId::parse_reference(&id).unwrap(),
+                )
+            })
+            .unwrap()
+            .id
+            .clone();
+        let result = fixture
+            .graph
+            .regenerate_item_id(&id, Uuid::now_v7(), None)
+            .unwrap();
+        let after = fixture
+            .graph
+            .workspace_ontology_composition()
+            .unwrap()
+            .unwrap();
+        let fork = after
+            .modules
+            .iter()
+            .find(|module| {
+                same_id(
+                    &module.id.ontology_id,
+                    &ItemId::parse_reference(&result.id).unwrap(),
+                )
+            })
+            .unwrap();
+        assert_eq!(fork.document.forked_from, Some((&source).into()));
+        data(&fixture.graph);
+        let path = fixture.graph.path().unwrap().to_owned();
+        drop(fixture.graph);
+        fixture.graph = GraphForge::new(path.to_str()).unwrap();
+        assert_eq!(
+            fixture
+                .graph
+                .workspace_ontology_composition()
+                .unwrap()
+                .unwrap(),
+            after
+        );
+        data(&fixture.graph);
+        refusal(&fixture.graph, &result.id, result.version_uuid, false);
+        id = result.id;
+    }
+}
+
+#[test]
+fn regeneration_candidate_guard_refuses_forged_provenance_and_metadata_rewrites() {
+    let fixture = Fixture::new(false);
+    let before = fixture
+        .graph
+        .workspace_ontology_composition()
+        .unwrap()
+        .unwrap();
+    let old = &before.modules[0];
+    let mut document = old.document.clone();
+    document.ontology_id = uri(OTHER);
+    document.forked_from = Some((&old.id).into());
+    let request = ModuleMigrationRequest {
+        authority: authority(&fixture.graph),
+        selector: ModuleSelector::Exact(old.id.clone()),
+        document,
+        dependencies: old.dependencies.clone(),
+        enforcement: Some(ActivationMode::Advisory),
+    };
+    super::super::candidate::module_migration_candidate(
+        before.clone(),
+        std::slice::from_ref(&request),
+        true,
+    )
+    .unwrap();
+    for field in [
+        "id", "version", "digest", "absent", "label", "license", "schema",
+    ] {
+        let mut forged = request.clone();
+        match field {
+            "id" => forged.document.forked_from.as_mut().unwrap().id = uri(OTHER),
+            "version" => forged.document.forked_from.as_mut().unwrap().version = "forged".into(),
+            "digest" => {
+                forged.document.forked_from.as_mut().unwrap().digest.0 =
+                    format!("sha256:{}", "0".repeat(64))
+            }
+            "absent" => forged.document.forked_from = None,
+            "label" => forged.document.label = Some("rewritten".into()),
+            "license" => forged.document.license = Some("MIT".into()),
+            "schema" => forged.document.entity_types.clear(),
+            _ => unreachable!(),
+        }
+        assert!(
+            super::super::candidate::module_migration_candidate(before.clone(), &[forged], true)
+                .is_err(),
+            "{field}"
+        );
+    }
 }

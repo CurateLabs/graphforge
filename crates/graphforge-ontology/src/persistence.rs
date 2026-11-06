@@ -388,6 +388,7 @@ mod tests {
             label: None,
             description: None,
             license: None,
+            forked_from: None,
             ontology_id: "test".to_string(),
             version: "1.0".to_string(),
             entity_types: vec![

@@ -22,7 +22,8 @@ Locale maps are not supported. Authored text is neither trimmed nor Unicode
 normalized. Omitted fields are not serialized, preserving old document digests;
 present fields contribute to the module content digest. The
 [Project summary contract](../../reference/discovery/v1/README.md#project-summary-and-ontology-descriptors-protocol-12)
-projects them and an optional module `license` from verified module bytes and requires
+projects them, an optional module `license`, and exact `forked_from` provenance
+from verified module bytes and requires
 `ontology-module-metadata@1` for consumers, including the protocol WASM.
 
 `license` is an SPDX expression of at most 4096 ASCII bytes without controls,
@@ -155,8 +156,8 @@ Prompts MUST go to stderr so JSON stdout remains the native
 Regeneration MUST require the local `id_taken` receipt stored by `gf publish`
 for that exact permanent GraphForge ID. A missing receipt MUST fail; an
 own-domain IRI MUST NOT be regenerated. If the receipt says `publish_as_owner`,
-Core MUST refuse and point to publication as that owner. Regenerating an owned
-item would create a fork, which this operation does not implement. Ownership
+Core MUST refuse and point to publication as that owner. Owned-ID refusals remain
+immutable in this operation. Ownership
 MUST NOT be inferred from the document, a caller-supplied owner, or a new Hub
 lookup in place of the receipt.
 
@@ -165,12 +166,19 @@ as a new Version and head. Every adopted version under the refused permanent
 ID MUST receive that same replacement ID in one operation, preserving each
 authored version and the exact digest-derived identity of every reference.
 A module rewrite MUST reuse the module-migration
-candidate path, permit only the `ontology_id` change, and preserve local symbol
-IDs through an identity symbol map. It MUST rewrite the module document and
+candidate path, permit only a new `ontology_id` and exact `forked_from` source
+triple, and preserve local symbol IDs through an identity symbol map. It MUST rewrite the module document and
 canonical digest, dependent modules, bridge source/target modules and assertion
 symbols, cascading bridge digests and dependent bridges' exact dependencies,
 activation subjects, stored semantic bindings and derived storage routes,
 workspace research metadata `ontologies`, and the composition fingerprint.
+For each rewritten module, `forked_from { id, version, digest }` MUST be derived
+from its verified pre-rewrite `OntologyModuleId`. The immediate source is recorded
+even when that source was itself a fork; its digest commits the earlier chain.
+The candidate guard MUST require this exact triple and equality of all remaining
+document fields and dependencies. Labels, descriptions, SPDX bytes, schema and
+migrations MUST remain unchanged. Active references MUST use the replacement
+identity; the exact source identity survives in fork provenance.
 A bridge rewrite MUST replace `bridge_id`, dependent bridges' exact
 dependencies, and activation subjects, recomputing affected bridge digests and
 the composition fingerprint.

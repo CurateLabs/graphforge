@@ -1054,6 +1054,7 @@ mod tests {
             label: None,
             description: None,
             license: None,
+            forked_from: None,
             ontology_id: ontology_id.into(),
             version: version.into(),
             entity_types: entity_names
@@ -1111,6 +1112,7 @@ mod tests {
                 label: None,
                 description: None,
                 license: None,
+                forked_from: None,
                 ontology_id: ontology_id.into(),
                 version: "1".into(),
                 entity_types: vec![EntityTypeDef {

@@ -74,6 +74,7 @@ pub(in crate::graph_construction) fn semantic_authority(
         label: None,
         description: None,
         license: None,
+        forked_from: None,
         ontology_id: "https://graphforge.dev/ontology/construction-test".into(),
         version: "1.0.0".into(),
         entity_types: vec![
@@ -152,6 +153,7 @@ fn colliding_module_authority() -> ConstructionSemanticAuthority {
         label: None,
         description: None,
         license: None,
+        forked_from: None,
         ontology_id: format!("https://graphforge.dev/ontology/{name}"),
         version: "1.0.0".into(),
         entity_types: vec![graphforge_ontology::EntityTypeDef {

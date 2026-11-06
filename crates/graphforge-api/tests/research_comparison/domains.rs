@@ -267,6 +267,7 @@ fn ontology_changes_have_native_semantic_identity_and_local_provenance() {
         label: None,
         description: None,
         license: None,
+        forked_from: None,
         ontology_id: "branch-local".into(),
         version: "1.0.0".into(),
         entity_types: vec![

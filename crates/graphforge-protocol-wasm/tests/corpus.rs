@@ -36,7 +36,7 @@ fn discovery_corpus_yields_the_recorded_native_outcome() {
         .iter()
         .chain(metadata["cases"].as_array().unwrap())
         .collect();
-    assert_eq!(cases.len(), 133);
+    assert_eq!(cases.len(), 145);
     for case in cases {
         let name = case["name"].as_str().unwrap();
         let bytes = case["json"].as_str().unwrap().as_bytes();

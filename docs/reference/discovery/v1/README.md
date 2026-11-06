@@ -322,17 +322,43 @@ Project license. There is no inheritance, default, or compatibility inference
 between the Project license and a module license. Modules in one Project can
 declare different licenses; consumers must retain each version's own declaration.
 
-A summary containing any of these three fields requires
+A summary containing module text, license, or fork provenance requires
 `ontology-module-metadata@1`, before `project-summary@1` in sorted requirements.
 A publisher with no module metadata omits the fields and added requirement,
 preserving historical canonical bytes. This capability is unreleased and covers
-all three fields as one closed contract. Older closed validators (including
-label/description-only builds) cannot consume licensed modules; deploy the matching
-protocol WASM/schema before publishing them. Unknown fields remain rejected.
+all four fields as one closed contract. Older closed validators cannot consume
+new fields they do not recognize; deploy the matching protocol WASM/schema before
+publishing them. Unknown fields remain rejected.
 Changing any declared metadata changes the module's canonical content digest and
 summary commitment; it never changes the opaque module ID or silently rewrites
 an immutable published version. A license-only version upgrade is nonstructural:
 it needs no graph-data migration and preserves graph data on reopen.
+
+A module declaration and its summary entry may carry optional `forked_from`:
+`{ "id": "https://graphforge.sh/ont_…", "version": "source-version", "digest": "sha256:…" }`.
+Native declarations preserve already-admitted source version bytes, including
+legacy control, empty or long versions. Summary publication applies the existing
+discovery version bounds (nonempty, at most 4096 UTF-8 bytes), as for any module
+identity. Versions are not normalized or interpreted as SemVer.
+
+The object has exactly these three required fields. `id` is a canonical lowercase
+permanent ontology URI (not a bridge ID or a bare ID), `version` is the exact
+opaque source version, and `digest` is the source module's domain-separated canonical digest
+(`sha256:` followed by 64 lowercase hexadecimal digits). Rust and protocol WASM
+validate the same shape and bounds; they never normalize the source identity.
+The summary schema describes this declaration shape as well as its projection.
+
+Provenance is authenticated authored content, not an ownership credential.
+The native receipt-authorized regeneration path derives it from each admitted
+source module identity, never from server claims. It preserves the authored
+version and all other declaration bytes, including SPDX spacing. Every adopted
+exact version receives its own source triple. Repeated forks name their immediate
+source (including its digest, which commits any earlier provenance), rather than
+copying or flattening an ancestor's triple. This field alone requires
+`ontology-module-metadata@1`; omitted or input `null` is serialized as absent and
+preserves historical module and summary digests. Present provenance contributes
+to both commitments. Publisher summaries project it only from fully verified
+module bytes, and summary binding rejects changes to that projection.
 
 `DiscoveryManifest::bind_summary` requires a summary to name the manifest's
 repository, `immutable_version`, and `package_digest`, to hash to

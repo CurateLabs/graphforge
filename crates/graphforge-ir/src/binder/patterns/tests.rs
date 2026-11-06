@@ -197,6 +197,7 @@ fn relationship_uniqueness_compares_resolved_type_ids_for_qualified_names() {
         label: None,
         description: None,
         license: None,
+        forked_from: None,
         ontology_id: "https://example.test/ex".into(),
         version: "1".into(),
         entity_types: vec![EntityTypeDef {
@@ -797,6 +798,7 @@ fn fixed_hop_with_known_relation_emits_expand() {
         label: None,
         description: None,
         license: None,
+        forked_from: None,
         ontology_id: "test".into(),
         version: "1.0".into(),
         entity_types: vec![
