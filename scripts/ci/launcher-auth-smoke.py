@@ -186,7 +186,7 @@ def run(command, arguments, env, expected=0, data=None):
 
 
 @contextmanager
-def console_process(command, arguments, env, *, terminal):
+def console_process(command, arguments, env, *, terminal, stdin_data=None):
     if terminal:
         master, slave = pty.openpty()
         reader, writer = slave, master
@@ -205,6 +205,11 @@ def console_process(command, arguments, env, *, terminal):
             *invocation,
         ]
     try:
+        if stdin_data is not None:
+            assert os.write(writer, stdin_data) == len(stdin_data)
+            # PTY line delivery is asynchronous. Prove input is queued before
+            # starting its reader, so a later empty buffer proves consumption.
+            assert select.select([reader], [], [], 10)[0], "stdin was never queued"
         with subprocess.Popen(
             invocation,
             env=env,
@@ -234,12 +239,14 @@ def interrupt_console(process, master):
 
 def interrupted_stdin(command, env, *, terminal):
     with console_process(
-        command, ["portable", "verify", "--input", "-", "--json"], env, terminal=terminal
-    ) as (process, master, (reader, writer)):
-        # A complete terminal line also reaches canonical-mode stdin. Observe
-        # its consumption through the read end, keeping the writer open so
-        # portable verify remains inside Rust waiting for EOF.
-        os.write(writer, b"input\n")
+        command,
+        ["portable", "verify", "--input", "-", "--json"],
+        env,
+        terminal=terminal,
+        stdin_data=b"input\n",
+    ) as (process, master, (reader, _writer)):
+        # The buffer was readable before process startup. Its consumption now
+        # proves Rust is reading stdin, with the writer still open to block EOF.
         pending = array.array("i", [0])
         deadline = time.monotonic() + 10
         while True:
