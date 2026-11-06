@@ -40,6 +40,7 @@ fn descriptor() -> ItemDescriptor {
         kind: id.kind(),
         repository: manifest.repository.clone(),
         module,
+        version_order: None,
         discovery: ItemDiscoverySnapshot {
             refs_revision: Sha256Digest(sha256_digest(&refs.to_canonical_json().unwrap())),
             manifest_validator: manifest.canonical_digest().unwrap(),
@@ -563,5 +564,152 @@ fn absent_gone_and_unavailable_resolution_stop_before_metadata_packages_or_outpu
             3,
             "no downstream fetch after {status}"
         );
+    }
+}
+
+/// Export an actual durable module without rewriting the historical Hub fixture.
+fn declared_package(
+    root: &Path,
+    order: Option<u32>,
+) -> (ItemDescriptor, Vec<u8>, Vec<u8>, Vec<u8>) {
+    use graphforge_api::PortableExactIdentity;
+    use graphforge_api::{
+        GraphForge, ModuleAdoptionRequest, OntologyAuthorityExpectation, OperationId,
+        PortableExportRequest, PortableLimits, PortableOutput, PortableSelection,
+        PortableSelectionProfile, WriteContext,
+    };
+    let path = root.join("author");
+    let mut graph = GraphForge::new(path.to_str()).unwrap();
+    let document = serde_json::from_value(serde_json::json!({
+        "ontology_id":"https://graphforge.sh/ont_aaaaaaaaaaaaaaaa",
+        "version":"authored-release", "version_order":order, "entity_types":[{"name":"Person"}]
+    }))
+    .unwrap();
+    let candidate = graph
+        .create_ontology_module(document, vec![], None)
+        .unwrap();
+    let id = candidate.id.clone();
+    let state = graph.ontology_authority_state().unwrap();
+    graph
+        .adopt_ontology_module(
+            &ModuleAdoptionRequest {
+                authority: OntologyAuthorityExpectation {
+                    context: WriteContext {
+                        operation_uuid: OperationId(uuid::Uuid::now_v7()),
+                        actor_uuid: None,
+                    },
+                    expected_project_generation_uuid: state.project_generation_uuid,
+                    expected_composition_fingerprint: state.composition_fingerprint,
+                },
+                candidate,
+            },
+            None,
+        )
+        .unwrap();
+    drop(graph);
+    let graph = GraphForge::new(path.to_str()).unwrap();
+    let bundle = root.join("module.gfpb");
+    let exported = graph
+        .export_portable(
+            &PortableExportRequest {
+                selection: PortableSelection::Current,
+                output_path: bundle.clone(),
+                representation: PortableOutput::Bundle,
+                profile: PortableSelectionProfile::OntologyComposition(vec![
+                    PortableExactIdentity {
+                        id: id.ontology_id.clone(),
+                        version: id.authored_version.clone(),
+                        content_digest: format!("sha256:{}", id.canonical_digest),
+                    },
+                ]),
+                subset: None,
+                limits: PortableLimits::default(),
+            },
+            None,
+            |_| {},
+        )
+        .unwrap();
+    let package = std::fs::read(bundle).unwrap();
+    let limits = DiscoveryLimits::default();
+    let mut manifest = DiscoveryManifest::from_json(FIXTURE_MANIFEST, limits).unwrap();
+    let module = &mut manifest.ontology.as_mut().unwrap().modules[0];
+    module.id = id.ontology_id;
+    module.version = id.authored_version;
+    module.content_digest = Sha256Digest(format!("sha256:{}", id.canonical_digest));
+    let advertised = module.package.as_mut().unwrap();
+    advertised.package_digest = Sha256Digest(exported.package_digest);
+    advertised.producing_core_version = graphforge_api::GRAPHFORGE_VERSION.into();
+    let object = manifest
+        .objects
+        .iter_mut()
+        .find(|o| o.digest == advertised.object_digest)
+        .unwrap();
+    object.digest = Sha256Digest(sha256_digest(&package));
+    object.length = package.len() as u64;
+    advertised.object_digest = object.digest.clone();
+    manifest.objects.sort_by(|a, b| a.digest.0.cmp(&b.digest.0));
+    let mut refs = RefSet::from_json(FIXTURE_REFS, limits).unwrap();
+    for reference in &mut refs.refs {
+        reference.validator = manifest.canonical_digest().unwrap();
+    }
+    let module = manifest.ontology.as_ref().unwrap().modules[0].identity();
+    let mut descriptor = descriptor();
+    descriptor.id = "ont_aaaaaaaaaaaaaaaa".into();
+    descriptor.module = module;
+    descriptor.version_order = order;
+    descriptor.discovery = ItemDiscoverySnapshot {
+        refs_revision: Sha256Digest(sha256_digest(&refs.to_canonical_json().unwrap())),
+        manifest_validator: manifest.canonical_digest().unwrap(),
+    };
+    (
+        descriptor,
+        refs.to_canonical_json().unwrap(),
+        manifest.to_canonical_json().unwrap(),
+        package,
+    )
+}
+
+#[test]
+fn declared_order_is_checked_after_real_http_download_and_releases_staging_on_mismatch() {
+    use crate::hub_clone::auth_tests::{Reply, server};
+    for order in [None, Some(0), Some(u32::MAX)] {
+        let author = tempfile::tempdir().unwrap();
+        let (descriptor, refs, manifest, package) = declared_package(author.path(), order);
+        for advertised in [
+            order,
+            Some(17),
+            if order.is_some() { None } else { Some(0) },
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let mut descriptor = descriptor.clone();
+            descriptor.version_order = advertised;
+            let (transport, server) = server(vec![
+                Reply::ok(&descriptor.to_canonical_json().unwrap()),
+                Reply::ok(&refs),
+                Reply::ok(&manifest),
+                Reply::ok(&package),
+            ]);
+            let mut args = item_args(&root.path().join("module.json"), &descriptor.id);
+            args.hub = Some("https://hub.example".into());
+            let result = fetch_module(&transport, &args);
+            let requests = server.join().unwrap();
+            assert_eq!(requests.len(), 4, "verification follows the HTTP download");
+            if advertised == order {
+                result.unwrap();
+                let document: graphforge_api::OntologyDoc =
+                    serde_json::from_slice(&std::fs::read(&args.output).unwrap()).unwrap();
+                assert_eq!(document.version_order, order);
+                assert_eq!(document.version, "authored-release");
+                assert_eq!(document.ontology_id, descriptor.module.id);
+                assert_eq!(directory_entries(root.path()), ["module.json"]);
+            } else {
+                let error = result.unwrap_err().to_string();
+                assert!(error.contains("hub.integrity_failure"), "{error}");
+                assert!(
+                    directory_entries(root.path()).is_empty(),
+                    "no staging or output survives refusal"
+                );
+            }
+        }
     }
 }

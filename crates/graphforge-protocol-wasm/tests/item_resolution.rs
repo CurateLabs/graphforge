@@ -97,6 +97,7 @@ fn binding_preserves_nested_missing_object_provenance() {
         kind: id.kind(),
         repository: manifest.document.repository.clone(),
         module,
+        version_order: None,
         discovery: ItemDiscoverySnapshot {
             refs_revision: graphforge_discovery::Sha256Digest(refs.revision),
             manifest_validator: graphforge_discovery::Sha256Digest(manifest.digest),

@@ -611,6 +611,7 @@ pub(crate) fn install_ontology(graph: &mut GraphForge, branch_uuid: Uuid) -> Uui
         label: None,
         description: None,
         license: None,
+        version_order: None,
         forked_from: None,
         ontology_id: "https://example.invalid/interchange-evidence".into(),
         version: "1.0.0".into(),

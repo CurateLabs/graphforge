@@ -1414,6 +1414,7 @@ mod tests {
             label: None,
             description: None,
             license: None,
+            version_order: None,
             forked_from: None,
             ontology_id: ontology_id.into(),
             version: "1".into(),

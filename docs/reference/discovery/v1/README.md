@@ -199,6 +199,19 @@ version, and its canonical content digest. The ID, kind, and URI must agree;
 case normalization belongs to client input, not to wire descriptors. The
 repository uses the existing canonical `owner/repository` rules.
 
+An ontology descriptor may also carry top-level `version_order`, an integer from
+0 through 4294967295, copied from the verified module declaration. It is forbidden
+on bridge descriptors. Omitted (or input `null`) means undeclared and is omitted
+canonically. No declaration is inferred from the opaque version label.
+
+This extends `graphforge-item/1` in place ([ADR 0063](../../../adr/0063-declared-ontology-version-order.md)).
+The contributor guide does not promise pre-v1 backward compatibility; this choice
+retains historical descriptor bytes and the existing closed-reader boundary.
+Older public validators reject the new member as `malformed_response`; they do
+not silently discard ordering. Unsupported format majors still return
+`unsupported_future`. Deploy matching schema/WASM/native readers before serving
+this field. No claim that every existing validator understands it is made.
+
 `discovery` identifies the retained refs snapshot and manifest by their canonical
 SHA-256 digests. `ItemDescriptor::bind_snapshot` recomputes both digests, binds the
 repository, resolved ref, manifest validator and immutable target, and requires
@@ -232,9 +245,42 @@ The schema describes structural constraints; equality of the bare ID and the
 URI's token remains a native validation rule. `item-conformance.json` exercises
 both kinds and the stable failure codes through Rust and WebAssembly.
 
+`compare_module_versions(a, b, limits)` and its duplicate-aware JSON boundary
+accept closed `DeclaredModuleVersion { module: ExactIdentity, version_order? }`
+records. The native and protocol-WASM result is `less`, `equal`, `greater`, or
+`unordered`. Only the same canonical permanent ontology URI can be compared;
+cross-ID or bridge comparison fails `invalid_identity`. Version strings retain
+the existing discovery bounds (nonempty, at most 4096 UTF-8 bytes), including
+historically admitted control characters. Digests are validated. Both documents
+share `max_response_bytes`; duplicate/unknown members and invalid u32 types fail
+closed. JSON `1.0`, negative, fractional, string and overflowing orders are refused.
+
+The same exact identity with contradictory declarations (including absent/present)
+fails `integrity_failure`. The same exact identity with matching declarations is
+`equal`, even when both are absent. Otherwise two declarations compare numerically;
+a tie is equal precedence, not equal identity. If either is missing, the result
+is `unordered`. There is no SemVer, dotted/natural text, timestamp or lexical
+fallback. Parsing/comparison validates structure, not authority: the caller must
+bind declarations to verified native module bytes. Eligible resolution candidates
+sharing a module digest must agree on the declaration or fail `integrity_failure`;
+source binding retains the complete nominated descriptor.
+
+Regenerate and replay the native comparison corpus with:
+
+```bash
+GRAPHFORGE_UPDATE_DISCOVERY_ARTIFACTS=1 \
+  cargo test -p graphforge-discovery --test module_version_order
+```
+
+The protocol-WASM package replays `module-version-order-conformance.json` through
+its actual export and generates `version_order?: number` (a u32, never bigint).
+
 The descriptor carries no package location or native package bytes. A client
 still binds repository refs to a manifest, selects the exact module package
 advertised there, and runs the existing package and module verification path.
+Fetch-by-ID then requires descriptor `version_order` to equal the resolved
+module's authenticated declaration, including absence, before output. Mismatches
+release staging and fail integrity validation.
 
 Regenerate these two artifacts with:
 
@@ -322,13 +368,19 @@ Project license. There is no inheritance, default, or compatibility inference
 between the Project license and a module license. Modules in one Project can
 declare different licenses; consumers must retain each version's own declaration.
 
-A summary containing module text, license, or fork provenance requires
+A summary containing module text, license, fork provenance, or `version_order` requires
 `ontology-module-metadata@1`, before `project-summary@1` in sorted requirements.
 A publisher with no module metadata omits the fields and added requirement,
 preserving historical canonical bytes. This capability is unreleased and covers
-all four fields as one closed contract. Older closed validators cannot consume
+all five fields as one closed contract. Older closed validators cannot consume
 new fields they do not recognize; deploy the matching protocol WASM/schema before
 publishing them. Unknown fields remain rejected.
+`version_order` is an optional u32 ordinal projected only from verified module
+bytes. Absent or input `null` is undeclared; integer values span 0–4294967295.
+An order-only module requires the same metadata capability. It changes neither
+the opaque version text nor the exact identity shape. Undeclared historical
+versions remain unordered against distinct versions.
+
 Changing any declared metadata changes the module's canonical content digest and
 summary commitment; it never changes the opaque module ID or silently rewrites
 an immutable published version. A license-only version upgrade is nonstructural:

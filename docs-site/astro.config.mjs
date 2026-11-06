@@ -561,6 +561,10 @@ export default defineConfig({
                   label: '0062 — Projects are named like repositories; ontologies and bridge sets have permanent IDs like gists',
                   slug: 'adr/0062-project-and-ontology-identity',
                 },
+                {
+                  label: '0063 — Author-declared ontology version precedence',
+                  slug: 'adr/0063-declared-ontology-version-order',
+                },
                 // END generated ADR records
               ],
             },

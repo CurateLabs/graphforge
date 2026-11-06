@@ -33,7 +33,7 @@ impl OntologyForkOrigin {
     }
 }
 
-/// Required summary capability when module text, license or fork provenance is present.
+/// Required summary capability when module text, license, fork provenance or order is present.
 pub const ONTOLOGY_MODULE_METADATA_CAPABILITY: &str = "ontology-module-metadata";
 /// Maximum UTF-8 bytes of a module's single-line label.
 pub const MAX_ONTOLOGY_MODULE_LABEL_BYTES: usize = 256;

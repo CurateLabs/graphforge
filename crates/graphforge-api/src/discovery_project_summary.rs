@@ -264,6 +264,7 @@ fn composition_facts(
                     description: document.description,
                     license: document.license,
                     forked_from: document.forked_from,
+                    version_order: document.version_order,
                 })
             })
             .collect::<Result<_, DiscoveryPortableError>>()?,

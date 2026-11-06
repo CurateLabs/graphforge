@@ -95,6 +95,7 @@ mod tests {
             label: None,
             description: None,
             license: None,
+            version_order: None,
             forked_from: None,
             ontology_id: "test".to_string(),
             version: "1.0".to_string(),

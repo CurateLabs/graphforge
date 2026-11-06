@@ -14,6 +14,7 @@ fn entity_doc(ontology_id: &str, version: &str, entities: &[&str]) -> OntologyDo
         label: None,
         description: None,
         license: None,
+        version_order: None,
         forked_from: None,
         ontology_id: ontology_id.to_owned(),
         version: version.to_owned(),

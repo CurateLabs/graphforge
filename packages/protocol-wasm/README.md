@@ -85,13 +85,28 @@ the canonical bare `id`, matching `kind`, publishing `repository`, and exact
 refs revision and manifest validator. The validator checks their consistency
 without fetching or interpreting native package bytes.
 
+`compare_module_versions(a, b, limits?)` compares closed
+`{ module: { id, version, content_digest }, version_order?: number }` records.
+The optional declaration is a u32 (0–4294967295), never a bigint. It returns
+`"less"`, `"equal"`, `"greater"`, or `"unordered"` without interpreting labels.
+Same exact identity requires the same declaration; contradictions fail
+`integrity_failure`. Distinct identities with missing declarations are unordered;
+tied ordinals have equal precedence only. Cross-ID comparison fails
+`invalid_identity`. Inputs share the response budget and preserve existing version
+bounds, including admitted control characters. The caller must bind declarations
+to verified module bytes; this package validates structure, not native packages.
+`ItemDescriptor` and `SummaryOntologyModule` expose the same optional field.
+Older closed descriptor validators refuse the addition; deploy matching readers
+before serving it. See [ADR 0063](../../docs/adr/0063-declared-ontology-version-order.md).
+
 `resolve_item_version({id, version, complete, state, repositories, candidates})`
 returns one `ExactIdentity` after validating all host facts. A permanent ID has
 one designated stable repository for every version. Stable repository keys are
 internal host identities, independent of display names, accounts and Project
 identity. The host filters current authorization and retention before providing
 its complete inventory and one correlated repository fact per candidate path.
-Identical triples are equivalent; distinct eligible digests throw
+Identical triples must agree on `version_order` or fail `integrity_failure`;
+distinct eligible digests throw
 `ambiguous_identity` even without an available designated source.
 `bind_item_version_source(inventory, nominated, refs, manifest)` accepts a full
 member only in the designated repository, then binds its actual retained metadata.
@@ -121,7 +136,7 @@ boundary before Rust, like other exports.
 
 Inventory is limited to 4096 candidates before deduplication, with the existing
 16 MiB aggregate/default string budgets. No truncated inventory, implicit source
-winner, version ordering/immutability rule or digest-query override is supported.
+winner, inferred version ordering or digest-query override is supported.
 Hosts must recheck current authorization and resolution before GET, HEAD or 304.
 See the [discovery resolution contract](../../docs/reference/discovery/v1/README.md#digest-free-exact-authored-version-resolution)
 for provenance, bounds, and native/actual-WASM conformance.

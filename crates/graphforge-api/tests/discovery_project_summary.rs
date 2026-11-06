@@ -608,6 +608,14 @@ fn summary_binds_to_a_manifest_built_with_discovery_types() {
         DiscoveryErrorCode::IntegrityFailure
     );
 
+    let mut forged = parsed.clone();
+    forged.facts.ontology_composition.as_mut().unwrap().modules[0].version_order = Some(7);
+    forged.validate(DiscoveryLimits::default()).unwrap();
+    assert_eq!(
+        manifest.bind_summary(&forged).unwrap_err().code,
+        DiscoveryErrorCode::IntegrityFailure
+    );
+
     // A different immutable version is a different summary.
     let mut other = parsed;
     other.immutable_version = marker('b');
@@ -993,4 +1001,53 @@ fn malformed_research_metadata_participant_is_a_participant_error() {
         ),
         "{error:?}"
     );
+}
+
+#[test]
+fn declared_order_only_is_projected_from_verified_bytes_and_requires_metadata_capability() {
+    for order in [None, Some(0), Some(u32::MAX)] {
+        let mut document = module_document();
+        document.version_order = order;
+        let exported = exported_project_with_document(document.clone());
+        let summary = summarize_verified_portable(&ProjectSummaryRequest {
+            repository: &repository(),
+            immutable_version: &marker('a'),
+            package: &exported.bundle,
+            discovery_limits: DiscoveryLimits::default(),
+            portable_limits: PortableLimits::default(),
+            cancelled: None,
+            lineage: None,
+        })
+        .unwrap();
+        let module = &summary.facts.ontology_composition.as_ref().unwrap().modules[0];
+        assert_eq!(module.version_order, order);
+        assert_eq!(module.version, document.version);
+        assert_eq!(
+            module.content_digest.0,
+            format!(
+                "sha256:{}",
+                graphforge_ontology::module_document_digest(&document).unwrap()
+            )
+        );
+        assert_eq!(
+            summary
+                .requirements
+                .iter()
+                .any(|r| r.capability == "ontology-module-metadata" && r.major == 1),
+            order.is_some()
+        );
+        let canonical = summary.to_canonical_json().unwrap();
+        assert_eq!(
+            ProjectSummary::from_json(&canonical, DiscoveryLimits::default()).unwrap(),
+            summary
+        );
+        if order.is_some() {
+            let mut forged = summary.clone();
+            forged.facts.ontology_composition.as_mut().unwrap().modules[0].version_order = Some(7);
+            assert_ne!(
+                forged.canonical_digest().unwrap(),
+                summary.canonical_digest().unwrap()
+            );
+        }
+    }
 }

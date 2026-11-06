@@ -24,8 +24,12 @@ pub struct OntologyDoc {
     /// which fills a permanent `https://graphforge.sh/ont_…` URI.
     #[serde(default)]
     pub ontology_id: String,
-    /// Semver-style version string (e.g. `"2026.05"`).
+    /// Opaque authored version string (e.g. `"2026.05"`); never implicitly ordered.
     pub version: String,
+    /// Optional author-declared precedence within this ontology ID.
+    /// Absent declarations preserve historical bytes and imply no ordering.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version_order: Option<u32>,
     /// Optional human-readable Unicode label, at most 256 UTF-8 bytes on one line.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
@@ -68,6 +72,7 @@ impl OntologyDoc {
     pub fn has_same_schema(&self, other: &Self) -> bool {
         let mut document = self.clone();
         document.version.clone_from(&other.version);
+        document.version_order = other.version_order;
         document.migrations.clone_from(&other.migrations);
         document.label.clone_from(&other.label);
         document.description.clone_from(&other.description);
@@ -277,6 +282,7 @@ mod tests {
             label: None,
             description: None,
             license: None,
+            version_order: None,
             forked_from: None,
             ontology_id: "test".to_string(),
             version: "1.0".to_string(),

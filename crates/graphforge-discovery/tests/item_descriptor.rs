@@ -31,6 +31,41 @@ fn corpus() -> Value {
         valid("ontology-module", base.clone()),
         valid("bridge-set", document("brg", "bridge_set")),
     ];
+    for order in [0, u32::MAX] {
+        let mut ordered = base.clone();
+        ordered["version_order"] = json!(order);
+        cases.push(valid(&format!("declared-order-{order}"), ordered));
+    }
+    let mut null = base.clone();
+    null["version_order"] = Value::Null;
+    cases.push(
+        json!({"name":"null-order-is-absent","json":serde_json::to_string(&null).unwrap(),
+        "expected":{"result":"valid","document":base}}),
+    );
+    for value in [
+        json!(-1),
+        json!(1.5),
+        json!(1.0),
+        json!("1"),
+        json!(4294967296u64),
+    ] {
+        let mut changed = base.clone();
+        changed["version_order"] = value.clone();
+        cases.push(invalid(
+            &format!("invalid-order-{value}"),
+            serde_json::to_string(&changed).unwrap(),
+            "malformed_response",
+            None,
+        ));
+    }
+    let mut bridge = document("brg", "bridge_set");
+    bridge["version_order"] = json!(0);
+    cases.push(invalid(
+        "bridge-order-refused",
+        serde_json::to_string(&bridge).unwrap(),
+        "malformed_response",
+        None,
+    ));
     for (name, pointer, value, code, field) in [
         (
             "future-format",
@@ -233,6 +268,7 @@ fn schema() -> Value {
             "id":{"type":"string","pattern":format!("^(ont|brg)_{alphabet}$")},
             "kind":{"enum":["ontology_module","bridge_set"]},
             "repository":{"$ref":"#/$defs/repository"},
+            "version_order":{"type":"integer","minimum":0,"maximum":4294967295u64},
             "discovery":{"type":"object","additionalProperties":false,"required":["refs_revision","manifest_validator"],"properties":{
                 "refs_revision":{"$ref":"#/$defs/digest"},"manifest_validator":{"$ref":"#/$defs/digest"}}},
             "module":{"type":"object","additionalProperties":false,
@@ -256,6 +292,10 @@ fn schema() -> Value {
             "id":{"pattern":format!("^{prefix}_{alphabet}$")},
             "module":{"properties":{"id":{"pattern":format!("^https://graphforge\\.sh/{prefix}_{alphabet}$")}}}}}
     })).collect());
+    schema["allOf"].as_array_mut().unwrap().push(json!({
+        "if":{"properties":{"kind":{"const":"bridge_set"}}},
+        "then":{"not":{"required":["version_order"]}}
+    }));
     schema
 }
 
@@ -295,6 +335,13 @@ fn item_artifacts_match_rust_authority_and_native_parser() {
         let expected = &case["expected"];
         if expected["result"] == "valid" {
             let descriptor = outcome.unwrap();
+            if case["name"] == "ontology-module" {
+                assert_eq!(
+                    descriptor.to_canonical_json().unwrap(),
+                    case["json"].as_str().unwrap().as_bytes(),
+                    "absent declarations preserve the historical descriptor bytes"
+                );
+            }
             assert_eq!(
                 serde_json::to_value(&descriptor).unwrap(),
                 expected["document"],

@@ -25,6 +25,7 @@ mod item_resolution;
 mod item_source;
 mod lineage;
 mod module_metadata;
+mod module_version_order;
 mod rehome;
 mod repository;
 mod summary;
@@ -59,6 +60,10 @@ pub use module_metadata::{
     MAX_ONTOLOGY_MODULE_DESCRIPTION_BYTES, MAX_ONTOLOGY_MODULE_LABEL_BYTES,
     MAX_ONTOLOGY_MODULE_LICENSE_BYTES, ONTOLOGY_MODULE_METADATA_CAPABILITY, OntologyForkOrigin,
     validate_ontology_module_metadata,
+};
+pub use module_version_order::{
+    DeclaredModuleVersion, ModuleVersionOrdering, compare_module_versions,
+    compare_module_versions_json,
 };
 pub use summary::{
     ProjectSummary, SummaryCorpusSize, SummaryFacts, SummaryGeographicCoverage, SummaryMetadata,

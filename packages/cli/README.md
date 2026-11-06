@@ -329,6 +329,14 @@ and the exact module identity must agree before any package is downloaded.
 An exact version remains verifiable after current refs advance. Missing or
 stale snapshots fail closed; the client never substitutes current metadata.
 
+Authored module JSON/YAML may include `version_order: 2` (u32, 0–4294967295).
+Version text stays opaque. Omission means undeclared; Core does not infer order
+from version labels. Publishing projects the declaration from verified bytes in
+the summary. `gf ontology module fetch ont_… --output module.json` verifies the
+retained discovery snapshots and downloaded module, then requires the descriptor's
+order to match the authenticated module, including absence. A mismatch fails
+without output. See the [native ordering contract](https://github.com/CurateLabs/graphforge/blob/main/docs/adr/0063-declared-ontology-version-order.md).
+
 The existing `OWNER/REPOSITORY --ontology-id ID --version VERSION` form uses
 the same three requests as before (`/.gf/refs`, `/.gf/manifest`, and the module's
 package object). `--ontology-id` accepts a bare permanent ID and normalizes it

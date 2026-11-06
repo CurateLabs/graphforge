@@ -32,6 +32,7 @@ fn fixture() -> (ItemDescriptor, RefSet, DiscoveryManifest) {
         kind: id.kind(),
         repository: manifest.repository.clone(),
         module,
+        version_order: None,
         discovery: ItemDiscoverySnapshot {
             refs_revision: revision(&refs),
             manifest_validator: manifest.canonical_digest().unwrap(),
@@ -398,6 +399,36 @@ fn corpus() -> Value {
     duplicate["json"] = json!(format!("{},\"complete\":true}}", &text[..text.len() - 1]));
     cases.push(duplicate);
     cases.push(json!({"name":"response-budget","json":serde_json::to_string(&base).unwrap(),"limits":{"max_response_bytes":1},"expected":refusal("limit_exceeded",Some("response"),503,"")}));
+    for (name, orders, expected) in [
+        (
+            "matching-declarations",
+            [Some(7), Some(7), Some(7)],
+            json!({"identity":identity}),
+        ),
+        (
+            "contradictory-declarations",
+            [Some(7), Some(8), Some(7)],
+            refusal("integrity_failure", Some("version_order"), 503, ""),
+        ),
+        (
+            "contradictory-absent-declaration",
+            [None, Some(7), None],
+            refusal("integrity_failure", Some("version_order"), 503, ""),
+        ),
+    ] {
+        let mut input = copies.clone();
+        for (candidate, order) in input["candidates"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .zip(orders)
+        {
+            if let Some(order) = order {
+                candidate["version_order"] = json!(order);
+            }
+        }
+        cases.push(case(name, &input, expected));
+    }
     json!({"format":"graphforge-item-resolution-conformance/1","cases":cases})
 }
 
@@ -956,5 +987,27 @@ fn malformed_supplied_binding_records_are_not_masked_by_ambiguity() {
         .item_resolution_http_response()
         .status,
         503
+    );
+}
+
+#[test]
+fn source_binding_refuses_order_contradictions_for_the_same_digest() {
+    let (mut a, refs, manifest) = fixture();
+    a.version_order = Some(7);
+    let mut b = a.clone();
+    b.version_order = Some(8);
+    let input = inventory(vec![a.clone(), b]);
+    for error in [
+        resolve_item_version(&input, DiscoveryLimits::default()).unwrap_err(),
+        bind_item_version_source(&input, &a, &refs, &manifest, DiscoveryLimits::default())
+            .unwrap_err(),
+    ] {
+        assert_eq!(error.code, DiscoveryErrorCode::IntegrityFailure);
+        assert_eq!(error.field, Some("version_order"));
+    }
+    let input = inventory(vec![a.clone(), a.clone()]);
+    assert_eq!(
+        bind_item_version_source(&input, &a, &refs, &manifest, DiscoveryLimits::default()).unwrap(),
+        a
     );
 }
