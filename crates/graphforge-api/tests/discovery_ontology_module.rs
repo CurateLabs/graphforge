@@ -287,20 +287,20 @@ fn two_projects_adopting_the_same_exact_module_resolve_to_the_same_module() {
                 cancelled: None,
             })
             .expect("resolve module");
-            assert_eq!(resolved.package_digest, published.package_digest);
+            assert_eq!(resolved.package_digest(), published.package_digest);
             resolved
         })
         .collect();
 
-    assert_eq!(resolved[0].module, resolved[1].module);
-    assert_eq!(resolved[0].module, first.exact);
-    assert_eq!(resolved[0].document, resolved[1].document);
-    assert_eq!(resolved[0].module_sha256, resolved[1].module_sha256);
+    assert_eq!(resolved[0].module(), resolved[1].module());
+    assert_eq!(resolved[0].module(), &first.exact);
+    assert_eq!(resolved[0].document(), resolved[1].document());
+    assert_eq!(resolved[0].module_sha256(), resolved[1].module_sha256());
     assert_eq!(
-        resolved[0].module_sha256,
-        hex(Sha256::digest(&resolved[0].document))
+        resolved[0].module_sha256(),
+        hex(Sha256::digest(resolved[0].document()))
     );
-    let parsed: OntologyDoc = serde_json::from_slice(&resolved[0].document).unwrap();
+    let parsed: OntologyDoc = serde_json::from_slice(resolved[0].document()).unwrap();
     assert_eq!(parsed.ontology_id, MODULE_ID);
     assert_eq!(parsed.version, MODULE_VERSION);
 
@@ -309,7 +309,7 @@ fn two_projects_adopting_the_same_exact_module_resolve_to_the_same_module() {
     // Projects committed different generations, so the semantic package digests
     // differ even though the module they carry is byte-for-byte the same.
     assert_ne!(first.package_digest, second.package_digest);
-    assert_ne!(resolved[0].package_digest, resolved[1].package_digest);
+    assert_ne!(resolved[0].package_digest(), resolved[1].package_digest());
 }
 
 #[test]
@@ -331,9 +331,12 @@ fn expanded_and_bundle_representations_resolve_identically() {
     let documents = discovery(&exact, &bundle, &bundled.package_digest, None);
     let from_bundle = resolve(&documents, &exact, &bundle).unwrap();
     let from_directory = resolve(&documents, &exact, &expanded).unwrap();
-    assert_eq!(from_bundle.document, from_directory.document);
-    assert_eq!(from_bundle.module_sha256, from_directory.module_sha256);
-    assert_eq!(from_bundle.package_digest, from_directory.package_digest);
+    assert_eq!(from_bundle.document(), from_directory.document());
+    assert_eq!(from_bundle.module_sha256(), from_directory.module_sha256());
+    assert_eq!(
+        from_bundle.package_digest(),
+        from_directory.package_digest()
+    );
 }
 
 #[test]
@@ -343,7 +346,8 @@ fn tampered_module_byte_fails_portable_verification() {
     let documents = discovery(&exact, &published.bundle, &published.package_digest, None);
     let authentic = resolve(&documents, &exact, &published.bundle)
         .unwrap()
-        .document;
+        .document()
+        .to_vec();
 
     let mut package = fs::read(&published.bundle).unwrap();
     let offset = package
@@ -446,4 +450,75 @@ fn package_digest_and_module_identity_must_match_the_advertisement() {
             DiscoveryPortableMismatch::ModuleIdentity
         ))
     ));
+}
+
+#[test]
+fn repeat_adoption_from_republished_package_preserves_first_source_and_generation() {
+    let first = publish(8_910, &module_document());
+    let second = publish(8_920, &module_document());
+    let exact = identity(&first.exact);
+    assert_ne!(first.package_digest, second.package_digest);
+    let resolve_package = |published: &Published| {
+        let documents = discovery(&exact, &published.bundle, &published.package_digest, None);
+        resolve(&documents, &exact, &published.bundle).unwrap()
+    };
+    let first_resolved = resolve_package(&first);
+    let second_resolved = resolve_package(&second);
+    let roots = tempfile::tempdir().unwrap();
+    let path = roots.path().join("consumer");
+    let mut graph = GraphForge::new(path.to_str()).unwrap();
+    graph.execute("CREATE (:Retained {value:42})").unwrap();
+    let first_receipt = graph
+        .adopt_resolved_ontology_module(
+            &first_resolved,
+            WriteContext {
+                operation_uuid: graphforge_api::OperationId(Uuid::from_u128(8_930)),
+                actor_uuid: None,
+            },
+            None,
+        )
+        .unwrap();
+    assert!(!first_receipt.already_adopted);
+    let generation = graph
+        .committed_generation_identity()
+        .unwrap()
+        .generation_uuid;
+    let metadata = graph.research_project_metadata().unwrap();
+    drop(graph);
+    let mut graph = GraphForge::new(path.to_str()).unwrap();
+    let retry = graph
+        .adopt_resolved_ontology_module(
+            &second_resolved,
+            WriteContext {
+                operation_uuid: graphforge_api::OperationId(Uuid::from_u128(8_940)),
+                actor_uuid: None,
+            },
+            None,
+        )
+        .unwrap();
+    assert!(retry.already_adopted);
+    assert_eq!(retry.module, first_receipt.module);
+    assert_eq!(retry.repository, first_receipt.repository);
+    assert_eq!(retry.package_digest, first_receipt.package_digest);
+    assert_eq!(
+        graph
+            .committed_generation_identity()
+            .unwrap()
+            .generation_uuid,
+        generation
+    );
+    assert_eq!(
+        serde_json::to_value(graph.research_project_metadata().unwrap()).unwrap(),
+        serde_json::to_value(metadata).unwrap()
+    );
+    assert_eq!(
+        graph
+            .execute("MATCH (n:Retained) RETURN n")
+            .unwrap()
+            .batches
+            .iter()
+            .map(|b| b.num_rows())
+            .sum::<usize>(),
+        1
+    );
 }

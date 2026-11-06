@@ -137,9 +137,10 @@ fn project_page_facts_come_from_the_checked_in_artifacts_alone() {
         cancelled: None,
     })
     .unwrap();
-    assert_eq!(resolved.module.ontology_id, module.id);
-    assert_eq!(resolved.module.authored_version, module.version);
-    let document: graphforge_api::OntologyDoc = serde_json::from_slice(&resolved.document).unwrap();
+    assert_eq!(resolved.module().ontology_id, module.id);
+    assert_eq!(resolved.module().authored_version, module.version);
+    let document: graphforge_api::OntologyDoc =
+        serde_json::from_slice(resolved.document()).unwrap();
     assert_eq!(
         document,
         serde_json::from_value::<graphforge_api::OntologyDoc>(serde_json::json!({

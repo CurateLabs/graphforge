@@ -48,25 +48,78 @@ pub struct DiscoveryOntologyModuleRequest<'a> {
 }
 
 /// An exact ontology module proven against its advertised identity.
+///
+/// Only the discovery verifier can construct this value. Its authenticated
+/// authority is immutable outside this module.
+///
+/// ```compile_fail
+/// fn forge(resolved: &mut graphforge_api::ResolvedOntologyModule) {
+///     resolved.package_digest = "sha256:forged".into();
+/// }
+/// ```
 #[derive(Debug)]
 pub struct ResolvedOntologyModule {
     /// Exact module identity; `canonical_digest` is lowercase hex without a prefix.
-    pub module: OntologyModuleId,
+    module: OntologyModuleId,
     /// Semantic digest (`sha256:...`) of the package that carried the module.
     ///
     /// This identifies the package, not the module, and differs between
     /// Projects that publish the same module.
-    pub package_digest: String,
+    package_digest: String,
     /// Lowercase hex SHA-256 of `document`, as listed by the package manifest.
-    pub module_sha256: String,
+    module_sha256: String,
     /// Exact bytes of the module document as stored in the package.
-    pub document: Vec<u8>,
+    document: Vec<u8>,
     /// Report produced by the storage-owned portable verifier.
-    pub report: PortableReport,
+    report: PortableReport,
     /// Complete authenticated module/dependency/bridge authority carried by the package.
-    pub composition: WorkspaceOntologyComposition,
+    composition: WorkspaceOntologyComposition,
     /// Repository whose discovery snapshot authenticated this package.
-    pub repository: RepositoryIdentity,
+    repository: RepositoryIdentity,
+}
+
+impl ResolvedOntologyModule {
+    /// Exact authenticated module identity.
+    #[must_use]
+    pub fn module(&self) -> &OntologyModuleId {
+        &self.module
+    }
+
+    /// Semantic digest of the verified carrying package.
+    #[must_use]
+    pub fn package_digest(&self) -> &str {
+        &self.package_digest
+    }
+
+    /// File SHA-256 of the authenticated module document.
+    #[must_use]
+    pub fn module_sha256(&self) -> &str {
+        &self.module_sha256
+    }
+
+    /// Exact authenticated module document bytes.
+    #[must_use]
+    pub fn document(&self) -> &[u8] {
+        &self.document
+    }
+
+    /// Full verification report for the carrying package.
+    #[must_use]
+    pub fn report(&self) -> &PortableReport {
+        &self.report
+    }
+
+    /// Complete authenticated module, dependency and bridge authority.
+    #[must_use]
+    pub fn composition(&self) -> &WorkspaceOntologyComposition {
+        &self.composition
+    }
+
+    /// Repository bound by the verified discovery snapshot.
+    #[must_use]
+    pub fn repository(&self) -> &RepositoryIdentity {
+        &self.repository
+    }
 }
 
 /// Validate and bind discovery documents, verify the module package, and prove
@@ -297,20 +350,8 @@ fn read_composition(
         }
     }
     let (activation, profile_default) = read_activation(&control.activation_profile)?;
-    let composition = WorkspaceOntologyComposition {
-        contract_version: 1,
-        modules,
-        bridges,
-        activation,
-        profile_default,
-        composition_fingerprint: String::new(),
-    };
-    let compiled =
-        crate::multi_ontology::candidate::compile_candidate(&composition).map_err(|_| invalid())?;
-    Ok(WorkspaceOntologyComposition::from_compiled(
-        &compiled,
-        composition.bridges,
-    ))
+    WorkspaceOntologyComposition::from_authored(modules, bridges, activation, profile_default)
+        .map_err(|_| invalid())
 }
 
 #[cfg(feature = "research")]

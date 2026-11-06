@@ -322,15 +322,15 @@ fn run_module_fetch_job(
         .filter(|path| !path.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
     let mut staged = tempfile::NamedTempFile::new_in(parent).map_err(storage)?;
-    staged.write_all(&resolved.document).map_err(storage)?;
+    staged.write_all(resolved.document()).map_err(storage)?;
     staged.as_file().sync_all().map_err(storage)?;
     publish_without_replacing(staged.path(), &args.output)?;
     Ok(ModuleFetchResult {
         contract: "graphforge-hub-module-fetch/1",
-        repository: canonical_name(&resolved.repository),
-        module: resolved.module,
-        package_digest: resolved.package_digest,
-        module_sha256: resolved.module_sha256,
+        repository: canonical_name(resolved.repository()),
+        module: resolved.module().clone(),
+        package_digest: resolved.package_digest().to_owned(),
+        module_sha256: resolved.module_sha256().to_owned(),
         output: args.output.display().to_string(),
         moved_from: moved.as_ref().map(|m| m.moved_from.canonical_name()),
         moved_to: moved.as_ref().map(|m| m.moved_to.canonical_name()),
@@ -620,7 +620,7 @@ mod tests {
         })
         .unwrap();
         let written = std::fs::read(&output).unwrap();
-        assert_eq!(written, expected.document);
+        assert_eq!(written, expected.document());
         assert!(!written.is_empty());
 
         let document_sha256 = hash_reader(&mut std::io::Cursor::new(&written)).unwrap();

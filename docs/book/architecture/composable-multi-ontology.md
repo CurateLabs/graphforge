@@ -338,7 +338,10 @@ exact identity `(id, version, content_digest)` defined here, and a Project
 summary reports the composition digest. A module may also reference a per-module
 portable package; that package's `package_digest` is source-dependent and is a
 different identity from the module's `content_digest` and from the composition
-digest, none of which substitutes for another. See
+digest, none of which substitutes for another. Resolved discovery values expose
+read-only authenticated authority. Re-adopting the same exact module from a new
+carrying package preserves the first verified source receipt and leaves the
+Project generation unchanged when its complete closure is already present. See
 [discovery v1](../../reference/discovery/v1/README.md).
 
 ## Worked composition and failures

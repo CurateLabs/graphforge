@@ -6,9 +6,17 @@ use crate::{
 };
 use graphforge_ontology::{ActivationRecord, ActivationScope};
 use graphforge_storage::WorkspaceOntologyComposition;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 const ADOPTIONS: &str = "graphforge.ontology_adoption:";
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct AdoptionSource {
+    module: graphforge_ontology::OntologyModuleId,
+    repository: String,
+    package_digest: String,
+}
 
 /// Durable outcome of adopting an exact discovered module and its full closure.
 #[derive(Debug, Serialize)]
@@ -34,7 +42,7 @@ impl GraphForge {
     /// generation. Existing graph data, modules, metadata and enforcement remain
     /// subject to the ordinary composition preflight and publication owner.
     ///
-    /// Exact repeat adoption is a no-op. Conflicting exact module content or
+    /// Exact repeat adoption is a no-op and retains the first verified source. Conflicting exact module content or
     /// dependencies fail before publication; no dependency is adopted alone.
     pub fn adopt_resolved_ontology_module(
         &mut self,
@@ -81,27 +89,31 @@ impl GraphForge {
         }
         let candidate = merge_closure(self.workspace_ontology_composition()?, resolved)?;
         let mut metadata = self.research_project_metadata()?;
-        let source = serde_json::json!({"module": resolved.module, "repository": resolved.repository.canonical_name(),
-            "package_digest": resolved.package_digest});
-        // The existing metadata extension contract admits scalar values only.
-        // Each source receipt is one bounded canonical JSON string, keyed by
-        // the module's content identity, rather than changing that contract.
-        let source =
-            serde_json::Value::String(serde_json::to_string(&source).map_err(|_| invalid())?);
         let key = format!("{ADOPTIONS}{}", resolved.module.canonical_digest);
-        let already_adopted = metadata.extensions.get(&key) == Some(&source)
+        let source = if let Some(prior) = metadata.extensions.get(&key) {
+            // Keep the first authenticated source. Carrying packages can change
+            // when the same exact module is exported from another generation.
+            let source: AdoptionSource =
+                serde_json::from_str(prior.as_str().ok_or_else(invalid)?).map_err(|_| invalid())?;
+            if source.module != resolved.module {
+                return Err(invalid());
+            }
+            source
+        } else {
+            AdoptionSource {
+                module: resolved.module.clone(),
+                repository: resolved.repository.canonical_name(),
+                package_digest: resolved.package_digest.clone(),
+            }
+        };
+        let already_adopted = metadata.extensions.contains_key(&key)
             && state.composition_fingerprint.as_ref() == Some(&candidate.composition_fingerprint);
         if !already_adopted {
-            if metadata
-                .extensions
-                .get(&key)
-                .is_some_and(|prior| prior != &source)
-            {
-                return Err(GfError::Validation(
-                    "exact ontology already has a different adoption source".into(),
-                ));
-            }
-            metadata.extensions.insert(key, source);
+            // The existing metadata extension contract admits scalar values only.
+            metadata.extensions.insert(
+                key,
+                serde_json::Value::String(serde_json::to_string(&source).map_err(|_| invalid())?),
+            );
             // Metadata validation bounds the durable record; its canonical bytes
             // bind provenance and retained unrelated metadata into exact replay.
             let metadata_bytes = metadata.to_canonical_json()?;
@@ -130,8 +142,8 @@ impl GraphForge {
             .map_err(|error| GfError::Validation(error.to_string()))?;
         Ok(OntologyAdoptionReceipt {
             module: resolved.module.clone(),
-            repository: resolved.repository.canonical_name(),
-            package_digest: resolved.package_digest.clone(),
+            repository: source.repository,
+            package_digest: source.package_digest,
             modules: resolved
                 .composition
                 .modules
@@ -213,10 +225,10 @@ fn merge_closure(
             });
         }
     }
-    let compiled = crate::multi_ontology::candidate::compile_candidate(&candidate)
-        .map_err(|error| GfError::Validation(error.to_string()))?;
-    Ok(WorkspaceOntologyComposition::from_compiled(
-        &compiled,
+    WorkspaceOntologyComposition::from_authored(
+        candidate.modules,
         candidate.bridges,
-    ))
+        candidate.activation,
+        candidate.profile_default,
+    )
 }
