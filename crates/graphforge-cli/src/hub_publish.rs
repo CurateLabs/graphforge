@@ -148,7 +148,7 @@ pub(crate) struct PublishArgs {
 
 impl PublishArgs {
     /// Complete CLI defaults from the same durable Branch citations as `gf push`.
-    fn resolve_defaults(
+    pub(crate) fn resolve_defaults(
         &mut self,
         registry: &graphforge_api::ResearchRegistry,
     ) -> Result<(), GfError> {

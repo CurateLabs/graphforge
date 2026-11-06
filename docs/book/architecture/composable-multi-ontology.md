@@ -79,6 +79,69 @@ to stdout, or writes a new `--output FILE`. It MUST NOT rewrite the input.
 `--id` supplies a permanent token/URI or own-domain IRI, canonicalizes permanent
 ID input, and MUST fail if it disagrees with the document.
 
+### Adopting an exact published ontology
+
+The Hub may render these command forms verbatim. Replace the uppercase values
+with the advertised repository and exact module identity:
+
+```bash
+gf ontology adopt OWNER/REPO --ontology-id ID --version VERSION --digest sha256:DIGEST --project PROJECT_DIR
+gf project new NEW_DIR --from-ontology OWNER/REPO --ontology-id ID --version VERSION --digest sha256:DIGEST
+```
+
+Both commands require all three identity pins. `--hub HTTPS_URL` selects a Hub;
+the default is `https://graphforge.sh`. Permanent module references are also
+accepted in place of `OWNER/REPO`, through the existing item descriptor and
+retained-snapshot verifier. Neither command sends publication credentials or
+reads private module packages.
+
+Core MUST use the advertised per-module transport, full portable verification,
+and manifest-authenticated reader. Resolution MUST retain the complete exact
+module dependency and bridge closure carried by the verified package. Adoption
+MUST preserve authored documents, IDs, versions, digests, dependencies and bridge
+provenance. Core MUST merge that closure with existing authority and preflight
+retained graph data through the native composition lifecycle. Dependencies,
+bridges, activation and adoption provenance MUST publish in one generation;
+validation failure or cancellation MUST NOT half-adopt the closure.
+
+The source receipt is a JSON string in the existing scalar metadata extension
+`graphforge.ontology_adoption:CANONICAL_DIGEST`. It contains `module` (the exact
+triple), `repository` (the verified canonical repository), and `package_digest`.
+The receipt and composition MUST share the same transaction. Unrelated metadata
+and graph data MUST survive adoption and reopen. An exact repeat adoption from
+the same source package MUST leave the authoritative generation unchanged.
+
+`ontology adopt` requires an existing durable Project. `project new` requires
+an absent destination, completes the Project in private staging, creates and
+selects a `main` research Branch, and publishes the destination with an atomic
+non-replacing rename. Existing destinations MUST NOT be overwritten. A failed
+attempt may be rerun at the still-absent destination. Once created, the ordinary
+publication flow is:
+
+```bash
+gf --project NEW_DIR publish YOUR_OWNER/YOUR_REPO --public
+```
+
+`--public` belongs to `publish`; adoption does not introduce a visibility flag.
+After changing an existing workspace ontology, retain a matching research
+Version before publishing that Version, as required by the existing publication
+composition check.
+
+With `--json`, adoption emits `graphforge-ontology-adopt/1`; creation emits
+`graphforge-project-from-ontology/1`. Both objects contain `project` and an
+`adoption` receipt with the exact `module`, `repository`, `package_digest`,
+complete `modules`, `project_generation_uuid`, `composition_fingerprint`, and
+`already_adopted`. Human output is one line: `Adopted ontology EXACT_REF from
+OWNER/REPO in PROJECT_DIR` or `Started Project with ontology EXACT_REF from
+OWNER/REPO in NEW_DIR`, where `EXACT_REF` is `ID@VERSION#DIGEST`.
+
+The executable command fixtures are
+[`ontology-adoption.json`](../../../tests/fixtures/hub/ontology-adoption.json).
+Native command-path tests substitute exact advertised candidates and verify
+transport, dependency/bridge closure, durable reopen, retained data, retry,
+publication, and failure isolation. Hub command rendering and its authored vs.
+adopted registry projection remain a separate integration acceptance gate.
+
 ### Regenerating a refused permanent ID
 
 `gf ontology regenerate-id <id> --operation-uuid UUID [--yes]` MUST invoke the
@@ -285,7 +348,12 @@ exact identity `(id, version, content_digest)` defined here, and a Project
 summary reports the composition digest. A module may also reference a per-module
 portable package; that package's `package_digest` is source-dependent and is a
 different identity from the module's `content_digest` and from the composition
-digest, none of which substitutes for another. See
+digest, none of which substitutes for another. Resolved discovery values expose
+read-only authenticated authority. Re-adopting the same exact module from a new
+carrying package preserves the first verified source receipt and leaves the
+Project generation unchanged when its complete closure is already present.
+The `graphforge.ontology_adoption:` metadata extension namespace is native-owned;
+general metadata updates must preserve those records. See
 [discovery v1](../../reference/discovery/v1/README.md).
 
 ## Worked composition and failures

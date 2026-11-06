@@ -302,6 +302,7 @@ impl GraphForge {
             cancellation,
             true,
             Some(operation_fingerprint),
+            None,
         );
         if publication.is_err() {
             let current = graphforge_storage::resolve_project_generation(
@@ -434,6 +435,7 @@ pub(crate) fn publish_workspace_records(
         cancellation,
         false,
         None,
+        None,
     )
 }
 
@@ -466,11 +468,12 @@ pub(crate) fn publish_workspace_records_with_graph_tree(
         cancellation,
         false,
         None,
+        None,
     )
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-fn publish_workspace_records_inner(
+pub(crate) fn publish_workspace_records_inner(
     graph: &mut GraphForge,
     operation_uuid: uuid::Uuid,
     actor_uuid: Option<uuid::Uuid>,
@@ -483,6 +486,7 @@ fn publish_workspace_records_inner(
     cancellation: Option<&crate::CancellationToken>,
     prepare_candidate_readers: bool,
     operation_fingerprint: Option<[u8; 32]>,
+    research_metadata: Option<&graphforge_storage::WorkspaceResearchMetadata>,
 ) -> Result<(), GfError> {
     let candidate_graph_root = candidate_graph.map(|(root, _)| root);
     let candidate_topology = candidate_graph.map(|(_, files)| files);
@@ -535,6 +539,10 @@ fn publish_workspace_records_inner(
                         | graphforge_storage::WORKSPACE_CONFIGURATION_FAMILY
                         | graphforge_storage::WORKSPACE_ONTOLOGY_COMPOSITION_FAMILY
                 )
+                || research_metadata.is_some()
+                    && snapshot.capability_id == graphforge_storage::WORKSPACE_CAPABILITY_ID
+                    && snapshot.record_family_id
+                        == graphforge_storage::WORKSPACE_RESEARCH_METADATA_FAMILY
                 || semantic_bindings.is_some()
                     && snapshot.capability_id == graphforge_storage::GRAPH_CAPABILITY_ID
                     && snapshot.record_family_id
@@ -549,6 +557,9 @@ fn publish_workspace_records_inner(
         graphforge_storage::WORKSPACE_ONTOLOGY_FAMILY,
         ontology.to_canonical_json()?,
     ));
+    if let Some(metadata) = research_metadata {
+        participants.push(metadata.to_project_participant()?);
+    }
     if let Some(composition) = composition {
         participants.push(composition.to_project_participant()?);
     }

@@ -153,7 +153,7 @@ fn bridge_references_module(bridge: &BridgeDocument, module: &OntologyModuleId) 
         })
 }
 
-pub(super) fn compile_candidate(
+pub(crate) fn compile_candidate(
     candidate: &WorkspaceOntologyComposition,
 ) -> Result<graphforge_ontology::CompiledComposition, GfError> {
     let modules = candidate
