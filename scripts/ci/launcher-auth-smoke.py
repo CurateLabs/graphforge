@@ -1,26 +1,35 @@
 #!/usr/bin/env python3
 """Exercise installed PyPI/npm consoles over loopback HTTP and ReferenceHub.
 
-Requires rebuilt hub-test-support bindings. The explicitly preloaded fixture
-routes only https://hub.test, stores synthetic sessions in the server's memory,
-and never reads the OS vault. No distribution build contains these hooks.
+Requires rebuilt, installed hub-test-support bindings (wheel or editable).
+The explicitly preloaded fixture routes only https://hub.test, stores synthetic
+sessions in server memory, and never reads the OS vault. No distribution build
+contains these hooks.
 """
 
 from __future__ import annotations
 
 import argparse
-from contextlib import closing
+import array
+from contextlib import closing, contextmanager
+import fcntl
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from importlib.metadata import distribution
 import json
 import os
 from pathlib import Path
 import pty
 import select
+import signal
 import subprocess
+import sys
 import sysconfig
 import tempfile
+import termios
 import threading
 import time
+from urllib.parse import urlsplit
+from urllib.request import url2pathname
 
 from graphforge import GraphForge
 from graphforge import _graphforge_rs as native
@@ -39,6 +48,9 @@ class Hub(HTTPServer):
         self.token = None
         self.device = None
         self.expire_login = False
+        self.login_waiting = threading.Event()
+        self.login_responded = threading.Event()
+        self.cancelled_login = False
 
     def serve(self):
         self.token = native._test_hub_start()
@@ -93,6 +105,7 @@ class Handler(BaseHTTPRequestHandler):
                 }
             ).encode()
         elif self.path == "/api/cli/token":
+            hub.login_waiting.set()
             assert hub.approved.wait(15), "notice must arrive before login completes"
             if hub.expire_login:
                 status = 400
@@ -146,8 +159,15 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header(name, value)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        if self.command != "HEAD":
-            self.wfile.write(body)
+        try:
+            if self.command != "HEAD":
+                self.wfile.write(body)
+        except ConnectionError:
+            if self.path != "/api/cli/token" or not hub.cancelled_login:
+                raise
+        finally:
+            if self.path == "/api/cli/token":
+                hub.login_responded.set()
 
 
 def run(command, arguments, env, expected=0, data=None):
@@ -165,6 +185,106 @@ def run(command, arguments, env, expected=0, data=None):
     return result
 
 
+@contextmanager
+def console_process(command, arguments, env, *, terminal):
+    if terminal:
+        master, slave = pty.openpty()
+        reader, writer = slave, master
+    else:
+        master = slave = None
+        reader, writer = os.pipe()
+    invocation = [*command, *arguments]
+    if terminal:
+        # Set up a controlling terminal after exec, avoiding Python preexec_fn
+        # callbacks in this multithreaded fixture. The real console keeps its PID.
+        invocation = [
+            sys.executable,
+            "-c",
+            "import fcntl,os,sys,termios; "
+            "fcntl.ioctl(0,termios.TIOCSCTTY,0); os.execv(sys.argv[1],sys.argv[1:])",
+            *invocation,
+        ]
+    try:
+        with subprocess.Popen(
+            invocation,
+            env=env,
+            stdin=reader,
+            stdout=subprocess.PIPE,
+            stderr=slave if terminal else subprocess.PIPE,
+            start_new_session=True,
+        ) as process:
+            try:
+                yield process, master, (reader, writer)
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                    process.wait()
+    finally:
+        os.close(reader)
+        os.close(writer)
+
+
+def interrupt_console(process, master):
+    if master is None:
+        process.send_signal(signal.SIGINT)
+    else:
+        os.write(master, b"\x03")
+    assert process.wait(timeout=10) == -signal.SIGINT, "console did not exit by SIGINT"
+
+
+def interrupted_stdin(command, env, *, terminal):
+    with console_process(
+        command, ["portable", "verify", "--input", "-", "--json"], env, terminal=terminal
+    ) as (process, master, (reader, writer)):
+        # A complete terminal line also reaches canonical-mode stdin. Observe
+        # its consumption through the read end, keeping the writer open so
+        # portable verify remains inside Rust waiting for EOF.
+        os.write(writer, b"input\n")
+        pending = array.array("i", [0])
+        deadline = time.monotonic() + 10
+        while True:
+            assert process.poll() is None, "console exited before the blocking stdin read"
+            fcntl.ioctl(reader, termios.FIONREAD, pending, True)
+            if pending[0] == 0:
+                break
+            assert time.monotonic() < deadline, "console never consumed stdin"
+            time.sleep(0.01)
+        interrupt_console(process, master)
+
+
+def read_login_notice(process, descriptor):
+    received = b""
+    deadline = time.monotonic() + 10
+    while b"enter code" not in received:
+        remaining = deadline - time.monotonic()
+        assert remaining > 0 and select.select([descriptor], [], [], remaining)[0], received
+        chunk = os.read(descriptor, 4096)
+        assert chunk, received
+        received += chunk
+    assert process.poll() is None, "notice was buffered until exit"
+    return received
+
+
+def interrupted_login(command, env, hub):
+    hub.approved.clear()
+    hub.login_waiting.clear()
+    hub.login_responded.clear()
+    hub.cancelled_login = True
+    try:
+        with console_process(
+            command, ["auth", "login", "--hub", HUB, "--no-browser"], env, terminal=True
+        ) as (process, master, _input):
+            read_login_notice(process, master)
+            assert hub.login_waiting.wait(5), "console never polled for its credential"
+            interrupt_console(process, master)
+        assert not hub.vault, "interrupted login saved a credential"
+    finally:
+        hub.approved.set()
+        if hub.login_waiting.is_set():
+            assert hub.login_responded.wait(5), "interrupted token request did not settle"
+        hub.cancelled_login = False
+
+
 def notice_before_approval(command, arguments, env, hub, *, terminal=False, expected=0):
     hub.approved.clear()
     master, slave = pty.openpty() if terminal else (None, None)
@@ -177,15 +297,7 @@ def notice_before_approval(command, arguments, env, hub, *, terminal=False, expe
     ) as process:
         try:
             descriptor = master if terminal else process.stderr.fileno()
-            received = b""
-            deadline = time.monotonic() + 10
-            while b"enter code" not in received:
-                remaining = deadline - time.monotonic()
-                assert remaining > 0 and select.select([descriptor], [], [], remaining)[0], received
-                chunk = os.read(descriptor, 4096)
-                assert chunk, received
-                received += chunk
-            assert process.poll() is None, "notice was buffered until exit"
+            received = read_login_notice(process, descriptor)
             hub.approved.set()
             stdout, stderr = process.communicate(timeout=60)
             assert process.returncode == expected, (received, stdout, stderr)
@@ -206,9 +318,17 @@ def main():
     parser.add_argument("--npm-root", required=True, type=Path)
     args = parser.parse_args()
     npm = args.npm_root.resolve()
-    # This script must use an installed wheel, never source-package shadowing.
-    source_package = ROOT / "crates/graphforge-bindings-py/python"
-    assert not Path(native.__file__).resolve().is_relative_to(source_package)
+    # Both wheel and documented maturin develop installs are valid. An
+    # out-of-tree extension must belong to the installed editable distribution,
+    # rather than an unrelated source package shadowing the wheel.
+    installed = distribution("graphforge")
+    extension = Path(native.__file__).resolve()
+    if not extension.is_relative_to(Path(installed.locate_file("")).resolve()):
+        origin = json.loads(installed.read_text("direct_url.json") or "{}")
+        assert origin.get("dir_info", {}).get("editable") is True
+        source = urlsplit(origin["url"])
+        assert source.scheme == "file" and source.netloc in {"", "localhost"}
+        assert extension.is_relative_to(Path(url2pathname(source.path)).resolve())
     with (
         tempfile.TemporaryDirectory(prefix="graphforge-launcher-auth-") as directory,
         Hub() as hub,
@@ -248,7 +368,10 @@ def main():
                 env,
             )
             for command in commands:
+                interrupted_stdin(command, env, terminal=False)
+                interrupted_stdin(command, env, terminal=True)
                 hub.vault.clear()
+                interrupted_login(command, env, hub)
                 notice_before_approval(
                     command, ["auth", "login", "--hub", HUB, "--no-browser"], env, hub
                 )
@@ -291,7 +414,7 @@ def main():
                 )
                 print(
                     f"PASS {command[0]}: live login, saved-session publish/push, "
-                    "terminal device flow"
+                    "terminal device flow, PID/TTY Ctrl-C and interrupted-login recovery"
                 )
             # Actual inherited stdin carries a portable package through Rust.
             package = ROOT / "tests/fixtures/hub/generated/v1/objects/opendata-openalex.gfpb"
@@ -307,6 +430,22 @@ def main():
             # subsequent captured calls still run normally.
             assert native._cli_execute_process(["gf", "--json", "--unknown-option"]) == 2
             assert native._cli_execute(["gf", "--version"])[0] == 0
+            seen = []
+
+            def host_interrupt(signum, _frame):
+                seen.append(signum)
+
+            previous = signal.signal(signal.SIGINT, host_interrupt)
+            try:
+                from graphforge import cli
+
+                assert cli.main(["gf", "--version"]) == 0
+                assert native._cli_execute_process(["gf", "--version"]) == 0
+                assert signal.getsignal(signal.SIGINT) is host_interrupt
+                signal.raise_signal(signal.SIGINT)
+                assert seen == [signal.SIGINT]
+            finally:
+                signal.signal(signal.SIGINT, previous)
             node = subprocess.run(
                 [
                     "node",

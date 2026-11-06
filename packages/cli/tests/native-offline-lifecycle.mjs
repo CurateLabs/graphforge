@@ -201,6 +201,13 @@ try {
     false,
   );
 
+  // Run the publication package smoke in the ordinary binding gate as well.
+  execFileSync(
+    process.execPath,
+    [join(checkoutRoot, "scripts/ci/multi-ontology-packaged-smoke.mjs")],
+    { cwd: installRoot, stdio: "inherit" },
+  );
+
   // The same packed install must support saved sign-in and live native stdio.
   execFileSync(
     "uv",
