@@ -20,6 +20,9 @@ use uuid::Uuid;
 
 use crate::{GraphForge, WriteContext};
 
+/// Native adoption receipts cannot be created, changed or removed by metadata editing.
+pub(crate) const ONTOLOGY_ADOPTION_EXTENSION_PREFIX: &str = "graphforge.ontology_adoption:";
+
 /// Replace the authoritative research metadata for the open Project.
 #[derive(Debug, Clone, PartialEq)]
 pub struct UpdateResearchMetadataRequest {
@@ -59,6 +62,7 @@ impl GraphForge {
     }
 
     /// Replace the authoritative research metadata record atomically.
+    /// Native ontology-adoption provenance extensions must remain unchanged.
     ///
     /// # Errors
     /// Returns validation, idempotency, or publication errors without partial mutation.
@@ -79,6 +83,21 @@ impl GraphForge {
         }
         let metadata = request.metadata;
         metadata.to_canonical_json()?;
+        let previous_metadata = read_workspace_research_metadata(&parent)?;
+        if previous_metadata
+            .extensions
+            .iter()
+            .filter(|(key, _)| key.starts_with(ONTOLOGY_ADOPTION_EXTENSION_PREFIX))
+            .ne(metadata
+                .extensions
+                .iter()
+                .filter(|(key, _)| key.starts_with(ONTOLOGY_ADOPTION_EXTENSION_PREFIX)))
+        {
+            return Err(GfError::Validation(
+                "ontology adoption provenance is native-owned; preserve its metadata extensions"
+                    .into(),
+            ));
+        }
         let mut participants = parent
             .participant_snapshots()?
             .into_iter()

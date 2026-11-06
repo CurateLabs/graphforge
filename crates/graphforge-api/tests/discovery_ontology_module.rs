@@ -522,3 +522,114 @@ fn repeat_adoption_from_republished_package_preserves_first_source_and_generatio
         1
     );
 }
+
+#[test]
+fn metadata_updates_cannot_forge_replace_or_remove_verified_adoption_provenance() {
+    use graphforge_api::{OperationId, UpdateResearchMetadataRequest};
+    let published = publish(8_950, &module_document());
+    let exact = identity(&published.exact);
+    let documents = discovery(&exact, &published.bundle, &published.package_digest, None);
+    let resolved = resolve(&documents, &exact, &published.bundle).unwrap();
+    let roots = tempfile::tempdir().unwrap();
+    let path = roots.path().join("consumer");
+    let mut graph = GraphForge::new(path.to_str()).unwrap();
+    let context = |operation| WriteContext {
+        operation_uuid: OperationId(Uuid::from_u128(operation)),
+        actor_uuid: None,
+    };
+    let key = format!(
+        "graphforge.ontology_adoption:{}",
+        resolved.module().canonical_digest
+    );
+    let forged = serde_json::Value::String(
+        serde_json::json!({
+            "module": resolved.module(), "repository": "forged/owner",
+            "package_digest": format!("sha256:{}", "b".repeat(64)),
+        })
+        .to_string(),
+    );
+    let mut metadata = graph.research_project_metadata().unwrap();
+    let before = graph
+        .committed_generation_identity()
+        .unwrap()
+        .generation_uuid;
+    metadata.extensions.insert(key.clone(), forged.clone());
+    assert!(
+        graph
+            .update_research_metadata(UpdateResearchMetadataRequest {
+                context: context(8_960),
+                metadata,
+            })
+            .is_err()
+    );
+    assert_eq!(
+        graph
+            .committed_generation_identity()
+            .unwrap()
+            .generation_uuid,
+        before
+    );
+    assert!(
+        !graph
+            .research_project_metadata()
+            .unwrap()
+            .extensions
+            .contains_key(&key)
+    );
+    let receipt = graph
+        .adopt_resolved_ontology_module(&resolved, context(8_961), None)
+        .unwrap();
+    assert_eq!(receipt.package_digest, published.package_digest);
+    let adopted = graph
+        .committed_generation_identity()
+        .unwrap()
+        .generation_uuid;
+    for (operation, remove) in [(8_962, false), (8_963, true)] {
+        let mut metadata = graph.research_project_metadata().unwrap();
+        if remove {
+            metadata.extensions.remove(&key);
+        } else {
+            metadata.extensions.insert(key.clone(), forged.clone());
+        }
+        assert!(
+            graph
+                .update_research_metadata(UpdateResearchMetadataRequest {
+                    context: context(operation),
+                    metadata,
+                })
+                .is_err()
+        );
+        assert_eq!(
+            graph
+                .committed_generation_identity()
+                .unwrap()
+                .generation_uuid,
+            adopted
+        );
+    }
+    let mut metadata = graph.research_project_metadata().unwrap();
+    let authentic_source = metadata.extensions[&key].clone();
+    metadata
+        .extensions
+        .insert("user.annotation".into(), serde_json::json!("retained"));
+    graph
+        .update_research_metadata(UpdateResearchMetadataRequest {
+            context: context(8_964),
+            metadata,
+        })
+        .unwrap();
+    drop(graph);
+    let mut graph = GraphForge::new(path.to_str()).unwrap();
+    let retry = graph
+        .adopt_resolved_ontology_module(&resolved, context(8_965), None)
+        .unwrap();
+    assert!(retry.already_adopted);
+    assert_eq!(retry.repository, receipt.repository);
+    assert_eq!(retry.package_digest, receipt.package_digest);
+    let metadata = graph.research_project_metadata().unwrap();
+    assert_eq!(metadata.extensions[&key], authentic_source);
+    assert_eq!(
+        metadata.extensions["user.annotation"],
+        serde_json::json!("retained")
+    );
+}

@@ -8,7 +8,7 @@ use graphforge_ontology::{ActivationRecord, ActivationScope};
 use graphforge_storage::WorkspaceOntologyComposition;
 use serde::{Deserialize, Serialize};
 
-const ADOPTIONS: &str = "graphforge.ontology_adoption:";
+use crate::research_project::ONTOLOGY_ADOPTION_EXTENSION_PREFIX as ADOPTIONS;
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]

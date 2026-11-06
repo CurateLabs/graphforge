@@ -341,7 +341,9 @@ different identity from the module's `content_digest` and from the composition
 digest, none of which substitutes for another. Resolved discovery values expose
 read-only authenticated authority. Re-adopting the same exact module from a new
 carrying package preserves the first verified source receipt and leaves the
-Project generation unchanged when its complete closure is already present. See
+Project generation unchanged when its complete closure is already present.
+The `graphforge.ontology_adoption:` metadata extension namespace is native-owned;
+general metadata updates must preserve those records. See
 [discovery v1](../../reference/discovery/v1/README.md).
 
 ## Worked composition and failures
