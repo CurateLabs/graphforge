@@ -354,6 +354,11 @@ fn run_command_with_transport(
     diagnostics: &mut crate::Diagnostics<'_>,
 ) -> Result<(), GfError> {
     // Locations and arguments are validated before any credential or network use.
+    // Immutable Versions cannot infer a Branch upstream. Refuse before opening
+    // the Project, because an explicit absent path would otherwise create one.
+    if args.version_uuid.is_some() {
+        args.repository()?;
+    }
     let location = args.repository.as_deref().map(parse_input).transpose()?;
     if let Some(origin) = &args.fork_of {
         parse_input(origin)?;

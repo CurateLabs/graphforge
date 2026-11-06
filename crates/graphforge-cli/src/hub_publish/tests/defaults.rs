@@ -314,6 +314,30 @@ fn immutable_version_publish_never_infers_a_branch_or_destination() {
 }
 
 #[test]
+fn missing_version_destination_never_creates_a_project() {
+    let root = tempfile::tempdir().unwrap();
+    let hub = LoopbackHub::start();
+    let version = Uuid::now_v7().to_string();
+    for (name, visibility) in [
+        ("omitted", None),
+        ("public", Some("--public")),
+        ("private", Some("--private")),
+    ] {
+        let project = root.path().join(name);
+        let mut arguments = vec!["--version-uuid", version.as_str()];
+        if let Some(flag) = visibility {
+            arguments.push(flag);
+        }
+        reject_before_credentials(&hub, &project, &arguments, "name the repository explicitly");
+        assert!(
+            !project.exists(),
+            "invalid publish created {}",
+            project.display()
+        );
+    }
+}
+
+#[test]
 fn inferred_destination_still_checks_visibility_before_loading_credentials() {
     let History { root, graph, .. } = history();
     let project = root.path().join("project");
