@@ -426,6 +426,7 @@ mod tests {
         OntologyDoc {
             label: None,
             description: None,
+            license: None,
             ontology_id: "test".to_owned(),
             version: "v1".to_owned(),
             entity_types: vec![EntityTypeDef {

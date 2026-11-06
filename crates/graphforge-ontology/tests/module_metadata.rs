@@ -17,6 +17,7 @@ fn absent_module_text_preserves_historical_serialization_and_digest() {
     let value = serde_json::to_value(&document).unwrap();
     assert!(value.get("label").is_none());
     assert!(value.get("description").is_none());
+    assert!(value.get("license").is_none());
     assert_eq!(
         module_document_digest(&document).unwrap(),
         "8193bfdb30f20732936333c4664ad500660991854a65d6822d60fd414461fd06"
@@ -65,4 +66,60 @@ fn loading_and_native_validation_share_bounded_text_rules() {
     let mut localized = serde_json::to_value(document()).unwrap();
     localized["label"] = json!({"en":"Works"});
     assert!(serde_json::from_value::<OntologyDoc>(localized).is_err());
+}
+
+#[test]
+fn module_license_is_exact_nonstructural_content_and_loads_as_json_or_yaml() {
+    let original = document();
+    let mut licensed = original.clone();
+    licensed.license = Some("MIT OR (Apache-2.0 AND BSD-3-Clause)".into());
+    OntologyValidator::validate(&licensed).unwrap();
+    let bytes = serde_json::to_vec(&licensed).unwrap();
+    assert_eq!(
+        OntologyLoader::load_json(bytes.as_slice()).unwrap(),
+        licensed
+    );
+    let yaml = serde_yaml::to_string(&licensed).unwrap();
+    assert_eq!(
+        OntologyLoader::load_yaml(yaml.as_bytes()).unwrap(),
+        licensed
+    );
+    assert!(original.has_same_schema(&licensed));
+    assert_ne!(
+        module_document_digest(&original).unwrap(),
+        module_document_digest(&licensed).unwrap()
+    );
+    let digest = module_document_digest(&licensed).unwrap();
+    licensed.license = Some("MIT OR  (Apache-2.0 AND BSD-3-Clause)".into());
+    OntologyValidator::validate(&licensed).unwrap();
+    assert_ne!(
+        module_document_digest(&licensed).unwrap(),
+        digest,
+        "SPDX expressions are never reformatted"
+    );
+}
+
+#[test]
+fn native_module_loading_refuses_invalid_or_unbounded_licenses() {
+    for license in [
+        "".into(),
+        "   ".into(),
+        "Not-A-License".into(),
+        "MIT OR".into(),
+        "MIT/Apache-2.0".into(),
+        "GPL-2.0".into(),
+        "MIT\nOR Apache-2.0".into(),
+        "MIT\u{a0}".into(),
+        "MIT".to_owned() + &" ".repeat(4094),
+    ] {
+        let mut document = document();
+        document.license = Some(license);
+        assert!(OntologyValidator::validate(&document).is_err());
+        assert!(
+            OntologyLoader::load_json(serde_json::to_vec(&document).unwrap().as_slice()).is_err()
+        );
+    }
+    let mut value = serde_json::to_value(document()).unwrap();
+    value["license"] = json!(["MIT"]);
+    assert!(serde_json::from_value::<OntologyDoc>(value).is_err());
 }

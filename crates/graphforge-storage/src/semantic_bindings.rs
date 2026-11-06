@@ -1323,6 +1323,7 @@ mod tests {
         let doc = OntologyDoc {
             label: None,
             description: None,
+            license: None,
             ontology_id: "https://example.test/core".into(),
             version: version.into(),
             entity_types: vec![EntityTypeDef {

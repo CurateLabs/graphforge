@@ -640,6 +640,7 @@ mod tests {
                 serde_json::to_value(graphforge_ontology::OntologyDoc {
                     label: None,
                     description: None,
+                    license: None,
                     ontology_id: "https://graphforge.dev/ontology/selection-closure".into(),
                     version: "1".into(),
                     entity_types: Vec::new(),

@@ -182,6 +182,18 @@ pub struct SummaryOntologyModule {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "typescript", tsify(optional))]
     pub description: Option<String>,
+    /// Authenticated SPDX expression; absent means undeclared, with no Project inheritance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "typescript", tsify(optional))]
+    pub license: Option<String>,
+}
+
+impl SummaryOntologyModule {
+    /// Whether this module requires the module metadata capability.
+    #[must_use]
+    pub fn has_metadata(&self) -> bool {
+        self.label.is_some() || self.description.is_some() || self.license.is_some()
+    }
 }
 
 /// Ontology composition verified in the described package.
@@ -240,7 +252,7 @@ pub struct ProjectSummary {
     pub immutable_version: Sha256Digest,
     /// Portable package the summary describes.
     pub package: SummaryPackageReference,
-    /// Required semantics: `project-summary@1` and, for module text,
+    /// Required semantics: `project-summary@1` and, for module metadata,
     /// `ontology-module-metadata@1`.
     pub requirements: Vec<ProtocolRequirement>,
     /// Optional advertised semantics.
@@ -350,17 +362,17 @@ impl ProjectSummary {
         self.repository.validate()?;
         self.immutable_version.validate()?;
         self.validate_package(limits)?;
-        let has_module_text = self
-            .facts
-            .ontology_composition
-            .as_ref()
-            .is_some_and(|composition| {
-                composition
-                    .modules
-                    .iter()
-                    .any(|module| module.label.is_some() || module.description.is_some())
-            });
-        if has_module_text
+        let has_module_metadata =
+            self.facts
+                .ontology_composition
+                .as_ref()
+                .is_some_and(|composition| {
+                    composition
+                        .modules
+                        .iter()
+                        .any(SummaryOntologyModule::has_metadata)
+                });
+        if has_module_metadata
             && !self.requirements.iter().any(|requirement| {
                 requirement.capability == ONTOLOGY_MODULE_METADATA_CAPABILITY
                     && requirement.major == 1
@@ -369,7 +381,7 @@ impl ProjectSummary {
             return Err(DiscoveryError::new(
                 DiscoveryErrorCode::MalformedResponse,
                 Some("requirements"),
-                "module text requires ontology-module-metadata@1",
+                "module metadata requires ontology-module-metadata@1",
             ));
         }
         validate_extensions(&self.extensions, limits)?;
@@ -612,10 +624,15 @@ fn validate_facts(facts: &SummaryFacts, limits: DiscoveryLimits) -> Result<(), D
         module.content_digest.validate()?;
         check_string(&module.dialect, FIELD, limits)?;
         check_string(&module.profile, FIELD, limits)?;
-        validate_ontology_module_metadata(module.label.as_deref(), module.description.as_deref())?;
+        validate_ontology_module_metadata(
+            module.label.as_deref(),
+            module.description.as_deref(),
+            module.license.as_deref(),
+        )?;
         for (field, value) in [
             ("label", module.label.as_deref()),
             ("description", module.description.as_deref()),
+            ("license", module.license.as_deref()),
         ] {
             if value.is_some_and(|value| value.len() > limits.max_string_bytes) {
                 return Err(limit(field));

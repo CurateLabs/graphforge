@@ -441,6 +441,7 @@ fn composition_package_with_bridge(justification_bytes: usize) -> (tempfile::Tem
         let document = OntologyDoc {
             label: None,
             description: None,
+            license: None,
             ontology_id: format!("https://graphforge.dev/ontology/{name}"),
             version: "v1".into(),
             entity_types: vec![EntityTypeDef {
