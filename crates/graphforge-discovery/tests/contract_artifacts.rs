@@ -322,6 +322,10 @@ fn summary_schema() -> Value {
                     "version":{"type":"string","minLength":1,"maxLength":4096,"description":"Exact nonempty opaque authored version, at most 4096 UTF-8 bytes; enforced by Rust."},
                     "digest":{"$ref":"#/$defs/digest"}
                 }},{"type":"null"}]}));
+            map.insert(
+                "module_version_order".into(),
+                json!({"type":"integer","minimum":0,"maximum":4294967295u64}),
+            );
             map.insert("module_label".into(), json!({"anyOf":[{"type":"string","minLength":1,"maxLength":256,"description":"At most 256 UTF-8 bytes, nonblank, single line, no control characters or U+2028/U+2029; enforced by Rust."},{"type":"null"}]}));
             map.insert("module_license".into(), json!({"anyOf":[{"type":"string","minLength":1,"maxLength":4096,"description":"SPDX expression, at most 4096 ASCII bytes without control characters; parsed by Rust spdx in strict mode. Absence means undeclared, never inherited from the Project."},{"type":"null"}]}));
             map.insert("module_description".into(), json!({"anyOf":[{"type":"string","minLength":1,"maxLength":4096,"description":"At most 4096 UTF-8 bytes, nonblank plain text; LF and tab allowed, all other controls forbidden; enforced by Rust."},{"type":"null"}]}));
@@ -335,7 +339,7 @@ fn summary_schema() -> Value {
                     "bytes_by_kind":{"type":"object","propertyNames":{"enum":byte_kinds},"additionalProperties":{"type":"integer","minimum":0}},
                     "ontology_composition":{"anyOf":[{"type":"object","additionalProperties":false,"required":["composition_digest","modules","bridge_sets"],"properties":{
                         "composition_digest":{"$ref":"#/$defs/digest"},
-                        "modules":{"type":"array","maxItems":4096,"items":{"type":"object","additionalProperties":false,"required":["id","version","content_digest","dialect","profile"],"properties":{"id":{"$ref":"#/$defs/identity_text"},"version":{"$ref":"#/$defs/identity_text"},"content_digest":{"$ref":"#/$defs/digest"},"dialect":{"$ref":"#/$defs/identity_text"},"profile":{"$ref":"#/$defs/identity_text"},"label":{"$ref":"#/$defs/module_label"},"description":{"$ref":"#/$defs/module_description"},"license":{"$ref":"#/$defs/module_license"},"forked_from":{"$ref":"#/$defs/forked_from"}}}},
+                        "modules":{"type":"array","maxItems":4096,"items":{"type":"object","additionalProperties":false,"required":["id","version","content_digest","dialect","profile"],"properties":{"id":{"$ref":"#/$defs/identity_text"},"version":{"$ref":"#/$defs/identity_text"},"content_digest":{"$ref":"#/$defs/digest"},"dialect":{"$ref":"#/$defs/identity_text"},"profile":{"$ref":"#/$defs/identity_text"},"label":{"$ref":"#/$defs/module_label"},"description":{"$ref":"#/$defs/module_description"},"license":{"$ref":"#/$defs/module_license"},"forked_from":{"$ref":"#/$defs/forked_from"},"version_order":{"$ref":"#/$defs/module_version_order"}}}},
                         "bridge_sets":{"type":"array","maxItems":4096,"items":{"$ref":"#/$defs/bridge_descriptor"}}}},{"type":"null"}]}
                 }}));
             defs
@@ -1064,6 +1068,45 @@ fn lineage_cases() -> Vec<Case> {
 
 fn module_metadata_cases() -> Vec<Case> {
     let mut cases = Vec::new();
+    for order in [json!(0), json!(4294967295u64), Value::Null] {
+        let mut value = base_summary();
+        value["requirements"].as_array_mut().unwrap().insert(
+            0,
+            json!({"capability":"ontology-module-metadata","major":1}),
+        );
+        value["facts"]["ontology_composition"]["modules"][0]["version_order"] = order.clone();
+        cases.push(valid(
+            &format!("summary-declared-order-{order}"),
+            Document::Summary,
+            value,
+        ));
+    }
+    for order in [
+        json!(-1),
+        json!(1.5),
+        json!(1.0),
+        json!("1"),
+        json!(4294967296u64),
+    ] {
+        let mut value = base_summary();
+        value["facts"]["ontology_composition"]["modules"][0]["version_order"] = order.clone();
+        cases.push(invalid(
+            &format!("summary-invalid-order-{order}"),
+            Document::Summary,
+            value,
+            "malformed_response",
+            None,
+        ));
+    }
+    let mut value = base_summary();
+    value["facts"]["ontology_composition"]["modules"][0]["version_order"] = json!(1);
+    cases.push(invalid(
+        "summary-order-requires-capability",
+        Document::Summary,
+        value,
+        "malformed_response",
+        Some("requirements"),
+    ));
     let origin = json!({"id":"https://graphforge.sh/ont_aaaaaaaaaaaaaaaa","version":"source-1","digest":format!("sha256:{}", "a".repeat(64))});
     let mut fork = base_summary();
     fork["requirements"].as_array_mut().unwrap().insert(

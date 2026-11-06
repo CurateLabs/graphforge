@@ -34,6 +34,7 @@ fn fixture() -> (ItemDescriptor, RefSet, DiscoveryManifest) {
         kind: id.kind(),
         repository: manifest.repository.clone(),
         module,
+        version_order: None,
         discovery: ItemDiscoverySnapshot {
             refs_revision: revision(&refs),
             manifest_validator: manifest.canonical_digest().unwrap(),
@@ -167,4 +168,22 @@ fn repository_moves_require_new_pins_for_the_actual_rehomed_documents() {
     descriptor
         .bind_snapshot(&rehomed_refs, &rehomed_manifest)
         .unwrap();
+}
+
+#[test]
+fn declared_order_does_not_replace_or_change_snapshot_binding() {
+    let (mut descriptor, refs, manifest) = fixture();
+    let old_bytes = descriptor.to_canonical_json().unwrap();
+    assert!(!String::from_utf8_lossy(&old_bytes).contains("version_order"));
+    let pins = descriptor.discovery.clone();
+    descriptor.version_order = Some(u32::MAX);
+    descriptor.bind_snapshot(&refs, &manifest).unwrap();
+    assert_eq!(descriptor.discovery, pins);
+    // The declaration still needs verification against native module bytes;
+    // snapshots prove the identity, without carrying a second declaration.
+    descriptor.module.version = "other".into();
+    assert_integrity(&descriptor, &refs, &manifest, "module");
+    descriptor.module = fixture().0.module;
+    descriptor.version_order = None;
+    assert_eq!(descriptor.to_canonical_json().unwrap(), old_bytes);
 }

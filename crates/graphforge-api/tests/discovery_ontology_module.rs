@@ -633,3 +633,27 @@ fn metadata_updates_cannot_forge_replace_or_remove_verified_adoption_provenance(
         serde_json::json!("retained")
     );
 }
+
+#[test]
+fn resolved_declaration_is_immutable_verified_module_content_across_publishers() {
+    for order in [None, Some(0), Some(u32::MAX)] {
+        let mut document = module_document();
+        document.version_order = order;
+        let first = publish(91_000, &document);
+        let second = publish(92_000, &document);
+        for published in [&first, &second] {
+            let exact = identity(&published.exact);
+            let documents = discovery(&exact, &published.bundle, &published.package_digest, None);
+            let resolved = resolve(&documents, &exact, &published.bundle).unwrap();
+            assert_eq!(resolved.version_order(), order);
+            assert_eq!(resolved.module(), &first.exact);
+            assert_eq!(resolved.repository(), &documents.repository);
+            assert_eq!(
+                serde_json::from_slice::<OntologyDoc>(resolved.document()).unwrap(),
+                document
+            );
+        }
+        assert_eq!(first.exact, second.exact);
+        assert_ne!(first.package_digest, second.package_digest);
+    }
+}

@@ -7,7 +7,7 @@ use crate::{
     check_string, limit, malformed, parse_unique_json,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Fixed bound on eligible publications, before deduplication.
 pub const MAX_ITEM_VERSION_CANDIDATES: usize = 4096;
@@ -85,8 +85,19 @@ impl ItemVersionInventory {
         let uri = id.to_uri();
         // Validate every record before deciding identity. Never let an earlier
         // pair of different digests mask a corrupt later record.
+        let mut orders = BTreeMap::new();
         for candidate in &self.candidates {
             candidate.validate(limits)?;
+            if let Some(order) =
+                orders.insert(&candidate.module.content_digest, candidate.version_order)
+                && order != candidate.version_order
+            {
+                return Err(DiscoveryError::new(
+                    DiscoveryErrorCode::IntegrityFailure,
+                    Some("version_order"),
+                    "same module digest has contradictory version order",
+                ));
+            }
             if candidate.id != self.id
                 || candidate.module.id != uri
                 || candidate.module.version != self.version

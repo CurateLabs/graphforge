@@ -201,6 +201,14 @@ export const EXPORTS = {
   plan_item_source_transition: { args: [sourceTransition], optional: [] },
   item_admission_requirements: { args: [admission.manifest], optional: [] },
   plan_item_admission: { args: [admission], optional: [] },
+  compare_module_versions: {
+    args: [
+      { module: itemDescriptor.module, version_order: 0 },
+      { module: itemDescriptor.module, version_order: 0 },
+      undefined,
+    ],
+    optional: [2],
+  },
   resolve_item_version: { args: [itemInventory, undefined], optional: [1] },
   bind_item_version_source: {
     args: [itemInventory, itemDescriptor, refs, manifest, undefined],

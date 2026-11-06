@@ -171,6 +171,23 @@ pub fn item_resolution_error_response(
     run(|| Ok(engine::item_resolution_error_response(error.as_bytes())))
 }
 
+/// Compare author-declared ontology precedence without interpreting version text.
+#[wasm_bindgen(unchecked_return_type = "ModuleVersionOrdering")]
+pub fn compare_module_versions(
+    #[wasm_bindgen(unchecked_param_type = "JsonInput<DeclaredModuleVersion>")] a: &str,
+    #[wasm_bindgen(unchecked_param_type = "JsonInput<DeclaredModuleVersion>")] b: &str,
+    #[wasm_bindgen(unchecked_optional_param_type = "DiscoveryLimitsOverride | null")]
+    limits: Option<String>,
+) -> Result<JsValue, JsValue> {
+    run(|| {
+        engine::compare_module_versions(
+            a.as_bytes(),
+            b.as_bytes(),
+            engine::item_resolution_limits(limits.as_deref().map(str::as_bytes))?,
+        )
+    })
+}
+
 /// Parse and validate a permanent item descriptor without fetching module bytes.
 #[wasm_bindgen(unchecked_return_type = "ValidatedItemDescriptor")]
 pub fn validate_item_descriptor(

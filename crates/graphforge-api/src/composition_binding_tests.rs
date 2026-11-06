@@ -99,6 +99,7 @@ fn module(name: &str, entities: &[&str]) -> AuthoredModule {
         label: None,
         description: None,
         license: None,
+        version_order: None,
         forked_from: None,
         ontology_id: format!("https://graphforge.dev/ontology/{name}"),
         version: "1.0.0".to_owned(),

@@ -9,6 +9,7 @@ fn module(id: &str, entity: &str, properties: &[&str]) -> AuthoredModule {
         label: None,
         description: None,
         license: None,
+        version_order: None,
         forked_from: None,
         ontology_id: id.into(),
         version: "1.0.0".into(),

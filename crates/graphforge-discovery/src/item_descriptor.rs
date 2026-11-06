@@ -43,6 +43,11 @@ pub struct ItemDescriptor {
     pub repository: RepositoryIdentity,
     /// Exact identity; `module.id` is the permanent ID's canonical URI.
     pub module: ExactIdentity,
+    /// Author-declared ontology precedence; must be bound to verified module bytes.
+    /// Bridge sets cannot declare an order.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "typescript", tsify(optional))]
+    pub version_order: Option<u32>,
     /// Immutable discovery snapshot; contains digests, never transport URLs.
     pub discovery: ItemDiscoverySnapshot,
 }
@@ -72,6 +77,9 @@ impl ItemDescriptor {
         }
         if id.kind() != self.kind {
             return Err(invalid_id("kind"));
+        }
+        if self.kind == ItemKind::BridgeSet && self.version_order.is_some() {
+            return Err(malformed());
         }
         self.repository.validate()?;
         check_string(&self.module.id, "module.id", limits)?;

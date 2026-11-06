@@ -185,6 +185,7 @@ const PAGES = [
   'adr/0060-query-memory-handoffs.md',
   'adr/0061-research-porcelain-and-ref-naming.md',
   'adr/0062-project-and-ontology-identity.md',
+  'adr/0063-declared-ontology-version-order.md',
   // END generated ADR records
   "releases/roadmap.md",
   "legal/licensing.md",

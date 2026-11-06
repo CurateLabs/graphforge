@@ -190,6 +190,10 @@ pub struct SummaryOntologyModule {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "typescript", tsify(optional))]
     pub forked_from: Option<crate::OntologyForkOrigin>,
+    /// Author-declared precedence, projected only from authenticated module bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "typescript", tsify(optional))]
+    pub version_order: Option<u32>,
 }
 
 impl SummaryOntologyModule {
@@ -200,6 +204,7 @@ impl SummaryOntologyModule {
             || self.description.is_some()
             || self.license.is_some()
             || self.forked_from.is_some()
+            || self.version_order.is_some()
     }
 }
 
