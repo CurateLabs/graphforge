@@ -295,6 +295,20 @@ impl PublishErrorReason {
         Self::SessionCap,
     ];
 
+    /// Stable snake-case reason token used in Hub refusal diagnostics.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::PrivateRequiresPlan => "private_requires_plan",
+            Self::VisibilityRequired => "visibility_required",
+            Self::RepositoryIsPublic => "repository_is_public",
+            Self::RepositoryIsPrivate => "repository_is_private",
+            Self::InvalidVisibility => "invalid_visibility",
+            Self::StorageCap => "storage_cap",
+            Self::SessionCap => "session_cap",
+        }
+    }
+
     /// Error code which owns this reason.
     #[must_use]
     pub const fn code(self) -> HubPublishErrorCode {
@@ -318,7 +332,7 @@ impl PublishErrorReason {
 pub struct HubErrorBody {
     /// Stable machine-readable code.
     pub code: HubPublishErrorCode,
-    /// Fixed server text. Clients render their own guidance and never echo it.
+    /// Untrusted server guidance. Clients must bound, sanitize and redact it before display.
     pub message: String,
     /// Typed refusal reason, present only for the negotiated extension.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -396,6 +410,13 @@ mod tests {
         let error = HubPublishError::new(HubPublishErrorCode::IdempotencyConflict, "conflict");
         assert_eq!(error.gf_code(), GF_IDEMPOTENCY_CONFLICT);
         assert_eq!(error.wire_code(), "hub.publish.idempotency_conflict");
+    }
+
+    #[test]
+    fn serialized_reason_equals_the_diagnostic_token() {
+        for reason in PublishErrorReason::ALL {
+            assert_eq!(serde_json::to_value(reason).unwrap(), reason.as_str());
+        }
     }
 
     #[test]

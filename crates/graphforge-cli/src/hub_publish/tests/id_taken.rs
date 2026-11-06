@@ -112,14 +112,29 @@ fn refused(hub: &LoopbackHub, graph: &GraphForge, args: &PublishArgs) -> (String
     .unwrap_err();
     assert_eq!(error_code(&error), "hub.publish.id_taken", "{error}");
     let text = error.to_string();
-    assert_eq!(crate::error_exit_code(&error.into()), 2);
-    assert!(!text.contains(SERVER_TEXT));
+    let error = crate::CliRuntimeError::Core(error);
+    assert_eq!(crate::error_exit_code(&error), 2);
+    for json in [false, true] {
+        let mut rendered = Vec::new();
+        crate::write_runtime_error(&error, json, &mut rendered, &[]).unwrap();
+        let rendered = String::from_utf8(rendered).unwrap();
+        assert!(rendered.contains(SERVER_TEXT));
+        assert!(!rendered.contains(&secret));
+        if json {
+            let value: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+            assert_eq!(
+                value["error"]["details"]["semantic_code"],
+                "hub.publish.id_taken"
+            );
+        }
+    }
+    assert!(text.contains(SERVER_TEXT));
     assert!(!text.contains(&secret));
     (text, secret)
 }
 
 #[test]
-fn sync_and_async_refusals_persist_filtered_metadata_and_client_owned_guidance() {
+fn sync_and_async_refusals_preserve_hub_and_client_guidance_with_verified_receipts() {
     for asynchronous in [false, true] {
         let mut config = ReferenceHubConfig {
             base_url: HUB.into(),
@@ -447,6 +462,7 @@ fn malformed_details_credential_echo_and_unrelated_ids_never_authorize_receipts(
             owner: None,
             publish_as_owner: None,
         }],
+        SERVER_TEXT,
     );
     assert_eq!(error_code(&error), "hub.publish.invalid_input");
     assert!(graph.id_taken_receipt(ID).unwrap().is_none());

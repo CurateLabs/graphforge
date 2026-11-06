@@ -16,7 +16,7 @@ use graphforge_api::{
     WriteContext,
 };
 use graphforge_discovery::ProjectSummary;
-use graphforge_hub_publish::{ReferenceHub, ReferenceHubConfig};
+use graphforge_hub_publish::{PublishErrorReason, ReferenceHub, ReferenceHubConfig};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{BufRead as _, BufReader};
@@ -34,6 +34,7 @@ mod hub_selection;
 mod id_taken;
 mod porcelain;
 mod producing_version;
+mod refusal_details;
 use hub_listing::serve_lineage;
 mod remote_fetch;
 mod rewrite_prune;
@@ -75,6 +76,8 @@ enum Fault {
     CorruptBeforeCommit,
     /// Answer the next `GET` of each listed path with these bytes instead.
     Serve(BTreeMap<String, Vec<u8>>),
+    /// Refuse the next session-open request over the real HTTP transport.
+    Refuse(HubResponse),
     /// Delay the response to the next `PUT`.
     SlowPut(Duration),
 }
@@ -273,6 +276,17 @@ fn serve(state: &ServerState, stream: TcpStream) {
         let digest = state.last_upload.lock().unwrap().clone().unwrap();
         assert!(hub.corrupt_object(&digest) > 0, "corrupted a retained copy");
     }
+    let refusal = if hub_method == HubMethod::Post
+        && path.ends_with("/.gf/publish/sessions")
+        && matches!(*injected, Some(Fault::Refuse(_)))
+    {
+        let Some(Fault::Refuse(response)) = injected.take() else {
+            unreachable!()
+        };
+        Some(response)
+    } else {
+        None
+    };
     let replayed_body = match injected.as_mut() {
         Some(Fault::Serve(documents)) if hub_method == HubMethod::Get => documents.remove(&path),
         _ => None,
@@ -293,16 +307,22 @@ fn serve(state: &ServerState, stream: TcpStream) {
         injected.take();
     }
     drop(injected);
-    let response = match replayed_body {
-        Some(body) => HubResponse {
-            status: 200,
-            headers: vec![("etag".into(), format!("\"{}\"", sha256_digest(&body)))],
-            body,
-        },
-        None if state.private_context != ContextMode::Legacy => {
-            private_context_response(hub, &request, state.private_context == ContextMode::Private)
+    let response = if let Some(refusal) = refusal {
+        refusal
+    } else {
+        match replayed_body {
+            Some(body) => HubResponse {
+                status: 200,
+                headers: vec![("etag".into(), format!("\"{}\"", sha256_digest(&body)))],
+                body,
+            },
+            None if state.private_context != ContextMode::Legacy => private_context_response(
+                hub,
+                &request,
+                state.private_context == ContextMode::Private,
+            ),
+            None => hub.handle(&request),
         }
-        None => hub.handle(&request),
     };
     if hub_method == HubMethod::Put && response.status == 200 {
         let status: UploadStatus = serde_json::from_slice(&response.body).unwrap();
