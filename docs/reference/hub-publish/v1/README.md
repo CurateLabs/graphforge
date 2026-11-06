@@ -84,7 +84,12 @@ binding invocations require an explicit environment token and never consult the
 vault or prompt. `gf auth login --no-browser` prints a verification link for
 approval on another device. With no saved session, an interactive native
 `gf publish` falls back to repository-scoped device approval (instructions on
-standard error). Automation can supply `GRAPHFORGE_HUB_PUBLISH_TOKEN`, which
+standard error). Both native sign-in paths print and open the code-prefilled
+`verification_uri_complete` when the authorization server supplies it, after
+validating that it shares the plain verification link's origin. Otherwise they
+use `verification_uri`. The plain user code is always printed as a fallback;
+`gf auth login --no-browser` prints the same selected link without opening it.
+Automation can supply `GRAPHFORGE_HUB_PUBLISH_TOKEN`, which
 takes precedence over a saved session. The publish token is never written to the Project,
 configuration, or output. The device flow waits at most fifteen minutes.
 `--protection-bypass-env` reads a preview bypass secret from the named environment
