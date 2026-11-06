@@ -29,6 +29,10 @@ Branch in this order:
 4. Exit code — a coarse fallback documented below.
 
 Never branch on `error.message`: it is diagnostic text, not a contract.
+Hub publish refusals include the fixed client code line followed by `Hub message:`
+and, when present, `Hub reason:` in this field, just as plain output does.
+Server prose is bounded and normalized to one terminal-safe line; credentials,
+bearer values and URLs are redacted.
 
 ## Envelope shapes
 
@@ -49,7 +53,7 @@ Core runtime and argument errors:
   absent).
 - `error.details.kind` — fault domain: `validation`, `parse`, `bind`, `plan`,
   `execution`, `provider`, `storage`, `project`, `api`, `lifecycle`,
-  `ontology`, `not_implemented`, or the lowering/algorithm fault domain.
+  `ontology`, `authentication`, `not_implemented`, or the lowering/algorithm fault domain.
 - `error.details.semantic_code` — optional; the stable dotted code this page
   tabulates.
 - `warnings` — optional, a sibling of `error`, present only when the command
@@ -84,6 +88,19 @@ Without `--json`, failures print `CODE: message` plain text. Agents must pass
 | `2` | Fix the input: argument refusals and every `GF_VALIDATION`, including all `hub.publish.*` codes except `internal` (exit 3) and `idempotency_conflict` (surfaced as `GF_IDEMPOTENCY_CONFLICT`, exit 1). |
 | `3` | Transport or storage: `GF_IO` (including `hub.network`), `GF_UNSUPPORTED_FILESYSTEM`, `hub.publish.internal`, and the transient Hub statuses (`hub.rate_limited`, `hub.unavailable`). |
 | `4` | `gf sync --check` found drift. Control-flow result, not an error; the JSON body is on standard output. |
+| `5` | Device authentication ended without approval: `GF_AUTHENTICATION`. Request a new code by running the command again. |
+
+Saved login (`gf auth login`) and terminal publish device approval report
+`hub.auth_expired` when the advertised deadline passes or the server returns
+`expired_token`. Both display the server's `expires_in` lifetime in seconds and
+tell the user to run the command again. If the server allows longer than the
+client's 900-second wait bound, `hub.auth_wait_limit` reports that bound and the
+advertised lifetime separately; it does not claim the server code has expired.
+These typed CLI outcomes use `error.code: "GF_AUTHENTICATION"` and
+`error.details.kind: "authentication"`, with exit 5 in both plain and JSON modes.
+Denial, invalid grants, revoked sessions, malformed responses, and network
+failures retain their existing classifications. Expiry saves no credentials and
+does not publish a repository or record a local upstream.
 
 ## Error classes
 
@@ -116,6 +133,13 @@ escalate to a human when the obvious fix does not clear the failure.
 | `lifecycle.cancelled` | retry | The operation was cancelled at a deterministic checkpoint | Rerun if the work is still wanted | 1 |
 | `inventory.generation_conflict` | retry | The selected generation moved under this run (stale generation or fingerprint) | Rerun; if it repeats, coordinate with other writers | 1 |
 | `hub.publish.ref_conflict` | retry | The repository ref moved during publication | Rerun; it lands on the newer revision without re-sending held bytes | 2 |
+
+### Device authentication outcomes (retry)
+
+| Code | Class | Meaning | Next action | Exit |
+| --- | --- | --- | --- | --- |
+| `hub.auth_expired` | retry | Device authorization expired locally or at the server | Run the command again to request a new code | 5 |
+| `hub.auth_wait_limit` | retry | Client wait bound reached before the advertised code lifetime | Run the command again to request a new code | 5 |
 
 ### Fix the input or local state
 

@@ -349,7 +349,7 @@ fn a_published_credit_that_contradicts_the_local_record_is_refused() {
                 .unwrap(),
         );
         let error = merge_lineage(Some(&published), local.clone(), false, false).unwrap_err();
-        assert_eq!(error_code(&error), "hub.publish.integrity_failure");
+        assert_eq!(core_error_code(&error), "hub.publish.integrity_failure");
     }
 }
 
@@ -422,7 +422,11 @@ fn a_fork_whose_published_origin_credit_differs_or_whose_origin_differs_is_refus
     ] {
         let local = forked(&history, head, proposed);
         let error = merge_lineage(Some(&published), local, false, false).expect_err(name);
-        assert_eq!(error_code(&error), "hub.publish.invalid_input", "{name}");
+        assert_eq!(
+            core_error_code(&error),
+            "hub.publish.invalid_input",
+            "{name}"
+        );
     }
     // Filling credit does not excuse a different origin identity either.
     let pre_credit = forked(&history, head, origin(None, None));

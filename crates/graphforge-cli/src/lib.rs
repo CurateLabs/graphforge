@@ -1112,9 +1112,31 @@ fn is_repository_command(command: &Command) -> bool {
 }
 
 #[allow(clippy::too_many_lines)] // CLI command dispatch table
+#[derive(Debug)]
 pub(crate) enum CliRuntimeError {
     Core(graphforge_api::GfError),
     MultiOntology(graphforge_api::MultiOntologyError),
+    Authentication(auth::DeviceAuthorizationEnd),
+}
+
+impl CliRuntimeError {
+    fn code(&self) -> &str {
+        match self {
+            Self::Core(error) => error.code(),
+            Self::MultiOntology(error) => &error.code,
+            Self::Authentication(_) => "GF_AUTHENTICATION",
+        }
+    }
+}
+
+impl std::fmt::Display for CliRuntimeError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Core(error) => error.fmt(formatter),
+            Self::MultiOntology(error) => formatter.write_str(&error.message),
+            Self::Authentication(outcome) => outcome.fmt(formatter),
+        }
+    }
 }
 
 impl From<graphforge_api::GfError> for CliRuntimeError {
@@ -1269,8 +1291,7 @@ fn run_with_allocation(
             output,
             &mut *diagnostics,
         )
-        .map(|()| 0)
-        .map_err(Into::into);
+        .map(|()| 0);
     }
     let command = match hub_clone::ontology_adoption::dispatch(
         command,
@@ -1587,6 +1608,20 @@ fn write_runtime_error(
 ) -> io::Result<()> {
     match error {
         CliRuntimeError::Core(error) => write_error(error, json, output, warnings),
+        CliRuntimeError::Authentication(outcome) if json => write_json_error(
+            output,
+            "GF_AUTHENTICATION",
+            &outcome.to_string(),
+            JsonErrorDetails {
+                source: "runtime",
+                kind: "authentication",
+                semantic_code: Some(outcome.semantic_code()),
+            },
+            warnings,
+        ),
+        CliRuntimeError::Authentication(outcome) => {
+            writeln!(output, "{}: {outcome}", error.code())
+        }
         CliRuntimeError::MultiOntology(error) if json => {
             #[derive(serde::Serialize)]
             struct Envelope<'a> {
@@ -1735,6 +1770,7 @@ const fn runtime_error_kind(error: &graphforge_api::GfError) -> &'static str {
 
 fn error_exit_code(error: &CliRuntimeError) -> i32 {
     match error {
+        CliRuntimeError::Authentication(_) => 5,
         CliRuntimeError::Core(error) if error.code() == "GF_VALIDATION" => 2,
         CliRuntimeError::Core(graphforge_api::GfError::Storage(_)) => 3,
         CliRuntimeError::MultiOntology(error) if error.code == "GF_VALIDATION" => 2,

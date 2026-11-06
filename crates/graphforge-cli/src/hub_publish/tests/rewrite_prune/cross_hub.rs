@@ -38,6 +38,7 @@ fn run(hubs: &Hubs, graph: &GraphForge, args: &PublishArgs, hub: &ReferenceHub) 
     let mut environment = PublishEnvironment {
         bypass: None,
         credential: Credential::Token(PublishToken::new(hub.issue_token(&publish_scope(&id), 900))),
+        clock: &std::time::Instant::now,
         wait: &|_| panic!("no device flow"),
         notices: &mut notices,
         resolution: None,
