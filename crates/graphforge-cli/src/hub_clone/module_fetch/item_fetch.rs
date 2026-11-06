@@ -2,8 +2,8 @@
 
 use super::{
     DiscoveryLimits, DiscoveryManifest, ItemId, MAX_METADATA_BYTES, MAX_MODULE_PACKAGE_BYTES,
-    ModuleFetchArgs, ModuleFetchResult, RefSet, RetryPolicy, Sha256Digest, Transport, Url,
-    acquire_staging, digest_pin, endpoint, ensure_output_available, fetch_and_publish_module,
+    ModuleFetchArgs, RefSet, ResolvedOntologyModule, RetryPolicy, Sha256Digest, Transport, Url,
+    acquire_staging, digest_pin, download_and_resolve_module, endpoint, ensure_output_available,
     fetch_document, normalized_id, parse_input_at, protocol_error, release_staging, validation,
 };
 use graphforge_discovery::{
@@ -174,7 +174,13 @@ pub(super) fn fetch(
     args: &ModuleFetchArgs,
     reference: &ItemReference,
     retry: &RetryPolicy,
-) -> Result<ModuleFetchResult, graphforge_api::GfError> {
+) -> Result<
+    (
+        ResolvedOntologyModule,
+        Option<graphforge_discovery::RepositoryMoved>,
+    ),
+    graphforge_api::GfError,
+> {
     if reference.id.kind() != ItemKind::OntologyModule {
         return Err(invalid(
             "ontology module fetch does not fetch bridge packages",
@@ -253,9 +259,8 @@ pub(super) fn fetch(
         .ontology_module_selection(&descriptor.module)
         .map_err(|error| protocol_error(&error))?;
     let staging = acquire_staging(&args.output)?;
-    let result = fetch_and_publish_module(
+    let result = download_and_resolve_module(
         transport,
-        args,
         &descriptor.repository,
         &descriptor.module,
         &manifest_bytes,
@@ -266,5 +271,5 @@ pub(super) fn fetch(
         retry,
     );
     release_staging(staging);
-    result
+    result.map(|resolved| (resolved, None))
 }

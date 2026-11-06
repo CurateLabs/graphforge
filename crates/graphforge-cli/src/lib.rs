@@ -356,6 +356,11 @@ enum Command {
         #[command(subcommand)]
         command: CheckpointCommand,
     },
+    /// Create a Project from an exact published ontology.
+    Project {
+        #[command(subcommand)]
+        command: hub_clone::ontology_adoption::ProjectCommand,
+    },
     /// Research Project metadata and bounded local discovery.
     Research {
         #[command(subcommand)]
@@ -1267,6 +1272,16 @@ fn run_with_allocation(
         .map(|()| 0)
         .map_err(Into::into);
     }
+    let command = match hub_clone::ontology_adoption::dispatch(
+        command,
+        cli.project.clone(),
+        cli.project_dir.clone(),
+        cli.json,
+        output,
+    )? {
+        std::ops::ControlFlow::Break(()) => return Ok(0),
+        std::ops::ControlFlow::Continue(command) => command,
+    };
     if let Command::Ontology { command } = &command
         && let Some(result) = ontology_cli::run_without_project(command, cli.json, output)
     {
