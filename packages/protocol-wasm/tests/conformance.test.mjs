@@ -65,7 +65,7 @@ function thrownFailure(error) {
 }
 
 test("discovery v1 corpus matches native Rust for every case", () => {
-  assert.equal(discovery.cases.length, 113);
+  assert.equal(discovery.cases.length, 133);
   for (const { name, document, json, limits, expected } of discovery.cases) {
     const outcome = attempt(() => VALIDATORS[document](json, limits));
     if (expected.result === "valid") {

@@ -442,6 +442,7 @@ fn exact_zero_strict_property_owner_matrix_resolves_declared_properties() {
     let doc = OntologyDoc {
         label: None,
         description: None,
+        license: None,
         ontology_id: "property-owner-test".into(),
         version: "1.0".into(),
         entity_types: vec![EntityTypeDef {

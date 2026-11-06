@@ -57,7 +57,8 @@ pub use lineage::{
 };
 pub use module_metadata::{
     MAX_ONTOLOGY_MODULE_DESCRIPTION_BYTES, MAX_ONTOLOGY_MODULE_LABEL_BYTES,
-    ONTOLOGY_MODULE_METADATA_CAPABILITY, validate_ontology_module_metadata,
+    MAX_ONTOLOGY_MODULE_LICENSE_BYTES, ONTOLOGY_MODULE_METADATA_CAPABILITY,
+    validate_ontology_module_metadata,
 };
 pub use summary::{
     ProjectSummary, SummaryCorpusSize, SummaryFacts, SummaryGeographicCoverage, SummaryMetadata,

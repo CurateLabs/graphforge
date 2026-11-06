@@ -20,6 +20,7 @@ fn source_package(root: &Path) -> (PathBuf, OntologyModuleId) {
             OntologyDoc {
                 label: None,
                 description: None,
+                license: None,
                 ontology_id: "https://example.org/ontology/reproducible-import".into(),
                 version: "2026.1".into(),
                 entity_types: Vec::new(),

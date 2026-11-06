@@ -134,6 +134,9 @@
                       "label": {
                         "$ref": "#/$defs/module_label"
                       },
+                      "license": {
+                        "$ref": "#/$defs/module_license"
+                      },
                       "profile": {
                         "$ref": "#/$defs/identity_text"
                       },
@@ -383,6 +386,19 @@
         {
           "description": "At most 256 UTF-8 bytes, nonblank, single line, no control characters or U+2028/U+2029; enforced by Rust.",
           "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "module_license": {
+      "anyOf": [
+        {
+          "description": "SPDX expression, at most 4096 ASCII bytes without control characters; parsed by Rust spdx in strict mode. Absence means undeclared, never inherited from the Project.",
+          "maxLength": 4096,
           "minLength": 1,
           "type": "string"
         },

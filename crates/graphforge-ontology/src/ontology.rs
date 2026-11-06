@@ -32,6 +32,10 @@ pub struct OntologyDoc {
     /// Optional plain-text Unicode description, at most 4096 UTF-8 bytes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// Optional SPDX license expression, at most 4096 ASCII bytes without controls.
+    /// Absence means undeclared; the Project's license is never inherited.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub license: Option<String>,
     /// Node class definitions.
     #[serde(default)]
     pub entity_types: Vec<EntityTypeDef>,
@@ -51,7 +55,7 @@ pub struct OntologyDoc {
 }
 
 impl OntologyDoc {
-    /// Compare the schema independently of authored version, migrations and text.
+    /// Compare the schema independently of authored version, migrations and metadata.
     ///
     /// These declaration fields still contribute to the content digest, but do
     /// not require graph-data transforms. Identity and every schema field must
@@ -63,10 +67,11 @@ impl OntologyDoc {
         document.migrations.clone_from(&other.migrations);
         document.label.clone_from(&other.label);
         document.description.clone_from(&other.description);
+        document.license.clone_from(&other.license);
         document == *other
     }
 
-    /// Validate the module's public text using the native/WASM protocol rules.
+    /// Validate the module's public metadata using the native/WASM protocol rules.
     ///
     /// The portable verifier checks this before accepting a module document;
     /// the full ontology validator checks it together with semantic rules.
@@ -74,6 +79,7 @@ impl OntologyDoc {
         graphforge_discovery::validate_ontology_module_metadata(
             self.label.as_deref(),
             self.description.as_deref(),
+            self.license.as_deref(),
         )
     }
 }
@@ -261,6 +267,7 @@ mod tests {
         OntologyDoc {
             label: None,
             description: None,
+            license: None,
             ontology_id: "test".to_string(),
             version: "1.0".to_string(),
             entity_types: vec![EntityTypeDef {

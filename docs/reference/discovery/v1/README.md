@@ -308,14 +308,31 @@ other control characters are forbidden. They are Unicode strings, not locale
 maps. Text is preserved exactly: no trimming, Unicode normalization, HTML or
 Markdown interpretation. Render it as plain text.
 
-A summary containing either field requires `ontology-module-metadata@1`, before
-`project-summary@1` in the sorted requirements. A publisher with no module text
-omits both fields and the added requirement, preserving historical canonical
-bytes. Older validators reject summaries using this capability; deploy the
-matching protocol WASM before publishing labelled modules. Unknown fields
-remain rejected. Changing either field changes the module's canonical content
-digest and the summary commitment; it never changes the opaque module ID or
-silently rewrites an immutable published version.
+A module may also declare `license`, an SPDX expression of 1–4096 ASCII bytes
+without control characters. Rust and protocol WASM use `spdx` 0.13.4's strict
+expression parser: SPDX license IDs, `AND`/`OR`, parentheses, `WITH` exceptions,
+and `LicenseRef`/`DocumentRef` references are supported. Unknown or deprecated
+IDs, incomplete expressions, and shorthand such as `MIT/Apache-2.0` are refused.
+Authored spacing is preserved exactly; parsing does not reformat the expression.
+The summary projects this field only from authenticated module bytes.
+
+Absent (or input `null`) module metadata is omitted canonically. An absent
+module license means **undeclared**, even when `metadata.license` declares a
+Project license. There is no inheritance, default, or compatibility inference
+between the Project license and a module license. Modules in one Project can
+declare different licenses; consumers must retain each version's own declaration.
+
+A summary containing any of these three fields requires
+`ontology-module-metadata@1`, before `project-summary@1` in sorted requirements.
+A publisher with no module metadata omits the fields and added requirement,
+preserving historical canonical bytes. This capability is unreleased and covers
+all three fields as one closed contract. Older closed validators (including
+label/description-only builds) cannot consume licensed modules; deploy the matching
+protocol WASM/schema before publishing them. Unknown fields remain rejected.
+Changing any declared metadata changes the module's canonical content digest and
+summary commitment; it never changes the opaque module ID or silently rewrites
+an immutable published version. A license-only version upgrade is nonstructural:
+it needs no graph-data migration and preserves graph data on reopen.
 
 `DiscoveryManifest::bind_summary` requires a summary to name the manifest's
 repository, `immutable_version`, and `package_digest`, to hash to

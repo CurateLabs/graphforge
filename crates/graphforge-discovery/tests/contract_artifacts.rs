@@ -316,6 +316,7 @@ fn summary_schema() -> Value {
                 "name":{"$ref":"#/$defs/credit_name"},"email":{"$ref":"#/$defs/credit_email"},"orcid":{"$ref":"#/$defs/credit_orcid"},
                 "roles":{"enum":[["author"],["committer"],["author","committer"]]}}}));
             map.insert("module_label".into(), json!({"anyOf":[{"type":"string","minLength":1,"maxLength":256,"description":"At most 256 UTF-8 bytes, nonblank, single line, no control characters or U+2028/U+2029; enforced by Rust."},{"type":"null"}]}));
+            map.insert("module_license".into(), json!({"anyOf":[{"type":"string","minLength":1,"maxLength":4096,"description":"SPDX expression, at most 4096 ASCII bytes without control characters; parsed by Rust spdx in strict mode. Absence means undeclared, never inherited from the Project."},{"type":"null"}]}));
             map.insert("module_description".into(), json!({"anyOf":[{"type":"string","minLength":1,"maxLength":4096,"description":"At most 4096 UTF-8 bytes, nonblank plain text; LF and tab allowed, all other controls forbidden; enforced by Rust."},{"type":"null"}]}));
             map.insert("facts".into(), json!({"type":"object","additionalProperties":false,
                 "required":["ontology_mode","components","research_present","evidence_present","payload_bytes","bytes_by_kind","ontology_composition"],
@@ -327,7 +328,7 @@ fn summary_schema() -> Value {
                     "bytes_by_kind":{"type":"object","propertyNames":{"enum":byte_kinds},"additionalProperties":{"type":"integer","minimum":0}},
                     "ontology_composition":{"anyOf":[{"type":"object","additionalProperties":false,"required":["composition_digest","modules","bridge_sets"],"properties":{
                         "composition_digest":{"$ref":"#/$defs/digest"},
-                        "modules":{"type":"array","maxItems":4096,"items":{"type":"object","additionalProperties":false,"required":["id","version","content_digest","dialect","profile"],"properties":{"id":{"$ref":"#/$defs/identity_text"},"version":{"$ref":"#/$defs/identity_text"},"content_digest":{"$ref":"#/$defs/digest"},"dialect":{"$ref":"#/$defs/identity_text"},"profile":{"$ref":"#/$defs/identity_text"},"label":{"$ref":"#/$defs/module_label"},"description":{"$ref":"#/$defs/module_description"}}}},
+                        "modules":{"type":"array","maxItems":4096,"items":{"type":"object","additionalProperties":false,"required":["id","version","content_digest","dialect","profile"],"properties":{"id":{"$ref":"#/$defs/identity_text"},"version":{"$ref":"#/$defs/identity_text"},"content_digest":{"$ref":"#/$defs/digest"},"dialect":{"$ref":"#/$defs/identity_text"},"profile":{"$ref":"#/$defs/identity_text"},"label":{"$ref":"#/$defs/module_label"},"description":{"$ref":"#/$defs/module_description"},"license":{"$ref":"#/$defs/module_license"}}}},
                         "bridge_sets":{"type":"array","maxItems":4096,"items":{"$ref":"#/$defs/bridge_descriptor"}}}},{"type":"null"}]}
                 }}));
             defs
@@ -1056,6 +1057,114 @@ fn lineage_cases() -> Vec<Case> {
 
 fn module_metadata_cases() -> Vec<Case> {
     let mut cases = Vec::new();
+    for (name, license) in [
+        ("summary-module-license-simple", json!("MIT")),
+        (
+            "summary-module-license-expression",
+            json!("MIT OR (Apache-2.0 AND BSD-3-Clause)"),
+        ),
+        (
+            "summary-module-license-exception",
+            json!("Apache-2.0 WITH LLVM-exception"),
+        ),
+        (
+            "summary-module-license-reference",
+            json!("LicenseRef-Custom"),
+        ),
+        (
+            "summary-module-license-byte-boundary",
+            json!("MIT".to_owned() + &" ".repeat(4093)),
+        ),
+        ("summary-module-license-null-is-absent", Value::Null),
+    ] {
+        let mut value = labelled_summary();
+        let module = &mut value["facts"]["ontology_composition"]["modules"][0];
+        module.as_object_mut().unwrap().remove("label");
+        module.as_object_mut().unwrap().remove("description");
+        module["license"] = license;
+        cases.push(valid(name, Document::Summary, value));
+    }
+    for (name, license, field) in [
+        ("summary-module-license-empty", json!(""), Some("license")),
+        (
+            "summary-module-license-blank",
+            json!("   "),
+            Some("license"),
+        ),
+        (
+            "summary-module-license-unknown",
+            json!("Not-A-License"),
+            Some("license"),
+        ),
+        (
+            "summary-module-license-case-sensitive-id",
+            json!("mit"),
+            Some("license"),
+        ),
+        (
+            "summary-module-license-deprecated",
+            json!("GPL-2.0"),
+            Some("license"),
+        ),
+        (
+            "summary-module-license-incomplete",
+            json!("MIT OR"),
+            Some("license"),
+        ),
+        (
+            "summary-module-license-unbalanced",
+            json!("(MIT OR Apache-2.0"),
+            Some("license"),
+        ),
+        (
+            "summary-module-license-slash",
+            json!("MIT/Apache-2.0"),
+            Some("license"),
+        ),
+        (
+            "summary-module-license-unknown-exception",
+            json!("MIT WITH Not-An-Exception"),
+            Some("license"),
+        ),
+        (
+            "summary-module-license-control",
+            json!("MIT\nOR Apache-2.0"),
+            Some("license"),
+        ),
+        (
+            "summary-module-license-non-ascii",
+            json!("MIT\u{a0}"),
+            Some("license"),
+        ),
+        (
+            "summary-module-license-oversized",
+            json!("MIT".to_owned() + &" ".repeat(4094)),
+            Some("license"),
+        ),
+        ("summary-module-license-not-a-string", json!(["MIT"]), None),
+    ] {
+        let mut value = labelled_summary();
+        value["facts"]["ontology_composition"]["modules"][0]["license"] = license;
+        cases.push(invalid(
+            name,
+            Document::Summary,
+            value,
+            "malformed_response",
+            field,
+        ));
+    }
+    cases.push(invalid(
+        "summary-module-license-requires-capability",
+        Document::Summary,
+        {
+            let mut value = base_summary();
+            value["facts"]["ontology_composition"]["modules"][0]["license"] = json!("MIT");
+            value
+        },
+        "malformed_response",
+        Some("requirements"),
+    ));
+
     cases.push(valid(
         "summary-labelled-module",
         Document::Summary,
