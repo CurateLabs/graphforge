@@ -410,6 +410,19 @@ impl GraphForge {
         preview: &CompositionChangePreview,
         cancellation: Option<&CancellationToken>,
     ) -> Result<CompositionChangeReceipt, GfError> {
+        self.publish_ontology_composition_with_metadata(request, preview, cancellation, None)
+    }
+
+    // Adoption provenance and semantic authority share this publication. The
+    // caller binds metadata into the operation identity before taking this path.
+    #[allow(clippy::too_many_lines)]
+    pub(crate) fn publish_ontology_composition_with_metadata(
+        &mut self,
+        request: &CompositionChangeRequest,
+        preview: &CompositionChangePreview,
+        cancellation: Option<&CancellationToken>,
+        metadata: Option<&graphforge_storage::WorkspaceResearchMetadata>,
+    ) -> Result<CompositionChangeReceipt, GfError> {
         self.graph_visibility.health.check()?;
         if let Some(receipt) = self.replay_ontology_composition_change(request)? {
             return Ok(receipt);
@@ -498,33 +511,23 @@ impl GraphForge {
                 .iter()
                 .map(|binding| (binding.symbol.clone(), binding.storage_id)),
         )?;
-        let publication = if let Some((_, topology)) = &migration {
-            crate::workspace_ontology::publish_workspace_records_with_graph_tree(
-                self,
-                request.context.operation_uuid.0,
-                request.context.actor_uuid,
-                &ontology,
-                &configuration,
-                &request.candidate,
-                &published_bindings,
-                expected_generation_uuid,
-                &candidate_graph,
-                topology,
-                cancellation,
-            )
-        } else {
-            crate::workspace_ontology::publish_workspace_records(
-                self,
-                request.context.operation_uuid.0,
-                request.context.actor_uuid,
-                &ontology,
-                &configuration,
-                Some(&request.candidate),
-                Some(&published_bindings),
-                Some(expected_generation_uuid),
-                cancellation,
-            )
-        };
+        let publication = crate::workspace_ontology::publish_workspace_records_inner(
+            self,
+            request.context.operation_uuid.0,
+            request.context.actor_uuid,
+            &ontology,
+            &configuration,
+            Some(&request.candidate),
+            Some(&published_bindings),
+            Some(expected_generation_uuid),
+            migration
+                .as_ref()
+                .map(|(_, topology)| (candidate_graph.as_path(), topology)),
+            cancellation,
+            false,
+            None,
+            metadata,
+        );
         if let Err(error) = publication {
             // CURRENT is authoritative even when publication reports an error.
             // An advanced or unreadable authority requires reopening; never let

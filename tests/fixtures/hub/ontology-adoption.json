@@ -1,0 +1,11 @@
+{
+  "contract": "graphforge-ontology-adoption-conformance/1",
+  "adopt": {
+    "argv": ["gf", "--json", "ontology", "adopt", "opendata/openalex", "--ontology-id", "{ontology_id}", "--version", "{version}", "--digest", "{digest}", "--project", "{project}"],
+    "output_contract": "graphforge-ontology-adopt/1"
+  },
+  "start_from": {
+    "argv": ["gf", "--json", "project", "new", "{project}", "--from-ontology", "opendata/openalex", "--ontology-id", "{ontology_id}", "--version", "{version}", "--digest", "{digest}"],
+    "output_contract": "graphforge-project-from-ontology/1"
+  }
+}

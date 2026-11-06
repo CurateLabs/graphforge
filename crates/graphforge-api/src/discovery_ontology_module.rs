@@ -17,8 +17,13 @@ use graphforge_core::portable::{
     PortableCompositionEntry, PortableLimits, PortableMode, PortableReport,
 };
 use graphforge_discovery::{DiscoveryLimits, ExactIdentity, RepositoryIdentity};
-use graphforge_ontology::{OntologyDoc, OntologyModuleId, module_document_digest};
+use graphforge_ontology::{
+    ActivationMode, ActivationRecord, ActivationScope, OntologyDoc, OntologyModuleId,
+    module_document_digest,
+};
 use graphforge_storage::{PortableFileRef, PortablePackageIndex};
+use graphforge_storage::{WorkspaceCompositionModule, WorkspaceOntologyComposition};
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 
@@ -58,6 +63,10 @@ pub struct ResolvedOntologyModule {
     pub document: Vec<u8>,
     /// Report produced by the storage-owned portable verifier.
     pub report: PortableReport,
+    /// Complete authenticated module/dependency/bridge authority carried by the package.
+    pub composition: WorkspaceOntologyComposition,
+    /// Repository whose discovery snapshot authenticated this package.
+    pub repository: RepositoryIdentity,
 }
 
 /// Validate and bind discovery documents, verify the module package, and prove
@@ -138,6 +147,7 @@ pub fn resolve_discovered_ontology_module(
         ))?;
 
     let (document, recomputed, module_sha256) = read_and_prove_module(request, &report, entry)?;
+    let composition = read_composition(request, &report)?;
 
     Ok(ResolvedOntologyModule {
         module: OntologyModuleId {
@@ -148,6 +158,8 @@ pub fn resolve_discovered_ontology_module(
         package_digest: report.package_digest.clone(),
         module_sha256,
         document,
+        composition,
+        repository: request.expected_repository.clone(),
         report,
     })
 }
@@ -206,4 +218,137 @@ fn read_and_prove_module(
         ));
     }
     Ok((document, recomputed, file.sha256))
+}
+
+/// Retain the verifier's complete dependency graph, reading every document through
+/// the same authenticated index as the selected root. Component IDs name exact
+/// content, never runtime catalog IDs.
+fn read_composition(
+    request: &DiscoveryOntologyModuleRequest<'_>,
+    report: &PortableReport,
+) -> Result<WorkspaceOntologyComposition, DiscoveryPortableError> {
+    let invalid =
+        || DiscoveryPortableError::ReferenceMismatch(DiscoveryPortableMismatch::ModuleIdentity);
+    let control = report.ontology_composition.as_ref().ok_or_else(invalid)?;
+    let index = PortablePackageIndex::open(
+        request.package,
+        &report.package_digest,
+        request.portable_limits,
+        request.cancelled,
+    )
+    .map_err(DiscoveryPortableError::Portable)?;
+    let ids = control
+        .modules
+        .iter()
+        .map(|module| {
+            let digest = module
+                .content_digest
+                .trim_start_matches("sha256:")
+                .to_owned();
+            (
+                format!("ontology-module-{digest}"),
+                OntologyModuleId {
+                    ontology_id: module.ontology_id.clone(),
+                    authored_version: module.version.clone(),
+                    canonical_digest: digest,
+                },
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut modules = Vec::new();
+    let mut bridges = Vec::new();
+    for entry in &report.ontology_composition_entries {
+        let bytes = index
+            .read(
+                &PortableFileRef {
+                    path: entry.path.clone(),
+                    length: entry.length,
+                    sha256: entry.sha256.clone(),
+                },
+                request.portable_limits.max_manifest_bytes,
+                request.cancelled,
+            )
+            .map_err(DiscoveryPortableError::Portable)?;
+        if entry.kind == "ontology" {
+            let id = ids
+                .get(&format!(
+                    "ontology-module-{}",
+                    entry.identity.content_digest.trim_start_matches("sha256:")
+                ))
+                .ok_or_else(invalid)?
+                .clone();
+            let dependencies = entry
+                .required_dependencies
+                .iter()
+                .map(|dependency| ids.get(dependency).cloned().ok_or_else(invalid))
+                .collect::<Result<Vec<_>, _>>()?;
+            let document: OntologyDoc = serde_json::from_slice(&bytes).map_err(|_| invalid())?;
+            if module_document_digest(&document).map_err(|_| invalid())? != id.canonical_digest {
+                return Err(invalid());
+            }
+            modules.push(WorkspaceCompositionModule {
+                allow_projected_identity: id.ontology_id.starts_with("legacy:"),
+                id,
+                document,
+                dependencies,
+            });
+        } else {
+            bridges.push(serde_json::from_slice(&bytes).map_err(|_| invalid())?);
+        }
+    }
+    let (activation, profile_default) = read_activation(&control.activation_profile)?;
+    let composition = WorkspaceOntologyComposition {
+        contract_version: 1,
+        modules,
+        bridges,
+        activation,
+        profile_default,
+        composition_fingerprint: String::new(),
+    };
+    let compiled =
+        crate::multi_ontology::candidate::compile_candidate(&composition).map_err(|_| invalid())?;
+    Ok(WorkspaceOntologyComposition::from_compiled(
+        &compiled,
+        composition.bridges,
+    ))
+}
+
+#[cfg(feature = "research")]
+mod adoption;
+#[cfg(feature = "research")]
+pub use adoption::OntologyAdoptionReceipt;
+
+fn read_activation(
+    profile: &graphforge_core::portable::PortableActivationProfile,
+) -> Result<(Vec<ActivationRecord>, ActivationMode), DiscoveryPortableError> {
+    let invalid =
+        || DiscoveryPortableError::ReferenceMismatch(DiscoveryPortableMismatch::ModuleIdentity);
+    let mode = |value: &str| match value {
+        "exploratory" => Ok(ActivationMode::Exploratory),
+        "advisory" => Ok(ActivationMode::Advisory),
+        "strict" => Ok(ActivationMode::Strict),
+        _ => Err(invalid()),
+    };
+    let activation = profile
+        .overrides
+        .iter()
+        .map(|entry| {
+            let scope = match entry.scope.as_str() {
+                "module" => ActivationScope::Module,
+                "bridge" => ActivationScope::Bridge,
+                _ => return Err(invalid()),
+            };
+            Ok(ActivationRecord {
+                scope,
+                subject: format!(
+                    "{}@{}#{}",
+                    entry.subject.id,
+                    entry.subject.version,
+                    entry.subject.content_digest.trim_start_matches("sha256:")
+                ),
+                mode: mode(&entry.mode)?,
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((activation, mode(&profile.profile_default)?))
 }

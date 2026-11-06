@@ -8,12 +8,12 @@
 use super::{
     CloneStaging, DownloadControl, DownloadReport, HttpTransport, MAX_METADATA_BYTES, RETRY_POLICY,
     RetryPolicy, Transport, acquire_staging, canonical_name, download_with_progress, endpoint,
-    ensure_destination_absent, fetch_with_attempts, open_partial_nofollow, parse_input_at,
-    portable_error, protocol_error, read_bounded, release_staging, storage, validation,
+    ensure_destination_absent, fetch_with_attempts, parse_input_at, portable_error, protocol_error,
+    read_bounded, release_staging, storage, validation,
 };
 use clap::Args;
 use graphforge_api::{
-    DiscoveryOntologyModuleRequest, OntologyModuleId, PortableLimits,
+    DiscoveryOntologyModuleRequest, OntologyModuleId, PortableLimits, ResolvedOntologyModule,
     resolve_discovered_ontology_module,
 };
 use graphforge_discovery::{
@@ -204,11 +204,17 @@ fn fetch_document(
     )
 }
 
-fn run_module_fetch_job(
+pub(super) fn resolve_module_with(
     transport: &dyn Transport,
     args: &ModuleFetchArgs,
     retry: &RetryPolicy,
-) -> Result<ModuleFetchResult, graphforge_api::GfError> {
+) -> Result<
+    (
+        ResolvedOntologyModule,
+        Option<graphforge_discovery::RepositoryMoved>,
+    ),
+    graphforge_api::GfError,
+> {
     if let Some(reference) = item_fetch::parse_reference(&args.repository)? {
         return item_fetch::fetch(transport, args, &reference, retry);
     }
@@ -252,9 +258,8 @@ fn run_module_fetch_job(
         .ontology_module_selection(&module)
         .map_err(|error| protocol_error(&error))?;
     let staging = acquire_staging(&args.output)?;
-    let result = fetch_and_publish_module(
+    let result = download_and_resolve_module(
         transport,
-        args,
         &identity,
         &module,
         &manifest_bytes,
@@ -265,11 +270,7 @@ fn run_module_fetch_job(
         retry,
     );
     release_staging(staging);
-    result.map(|mut result| {
-        result.moved_from = moved.as_ref().map(|m| m.moved_from.canonical_name());
-        result.moved_to = moved.as_ref().map(|m| m.moved_to.canonical_name());
-        result
-    })
+    result.map(|resolved| (resolved, moved))
 }
 
 // `release_staging` removes everything this fetch staged, on success and on
@@ -277,9 +278,8 @@ fn run_module_fetch_job(
 // to download again.
 
 #[allow(clippy::too_many_arguments)]
-fn fetch_and_publish_module(
+fn download_and_resolve_module(
     transport: &dyn Transport,
-    args: &ModuleFetchArgs,
     identity: &RepositoryIdentity,
     module: &ExactIdentity,
     manifest_bytes: &[u8],
@@ -288,7 +288,7 @@ fn fetch_and_publish_module(
     limits: DiscoveryLimits,
     staging: &CloneStaging,
     retry: &RetryPolicy,
-) -> Result<ModuleFetchResult, graphforge_api::GfError> {
+) -> Result<ResolvedOntologyModule, graphforge_api::GfError> {
     download_with_progress(
         transport,
         object,
@@ -307,21 +307,33 @@ fn fetch_and_publish_module(
         cancelled: None,
     })
     .map_err(portable_error)?;
-    let staged = staging.root.join("module.out");
-    let mut file = open_partial_nofollow(&staged, false).map_err(storage)?;
-    file.write_all(&resolved.document).map_err(storage)?;
-    file.sync_all().map_err(storage)?;
-    drop(file);
-    publish_without_replacing(&staged, &args.output)?;
+    Ok(resolved)
+}
+
+fn run_module_fetch_job(
+    transport: &dyn Transport,
+    args: &ModuleFetchArgs,
+    retry: &RetryPolicy,
+) -> Result<ModuleFetchResult, graphforge_api::GfError> {
+    let (resolved, moved) = resolve_module_with(transport, args, retry)?;
+    let parent = args
+        .output
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let mut staged = tempfile::NamedTempFile::new_in(parent).map_err(storage)?;
+    staged.write_all(&resolved.document).map_err(storage)?;
+    staged.as_file().sync_all().map_err(storage)?;
+    publish_without_replacing(staged.path(), &args.output)?;
     Ok(ModuleFetchResult {
         contract: "graphforge-hub-module-fetch/1",
-        repository: canonical_name(identity),
+        repository: canonical_name(&resolved.repository),
         module: resolved.module,
         package_digest: resolved.package_digest,
         module_sha256: resolved.module_sha256,
         output: args.output.display().to_string(),
-        moved_from: None,
-        moved_to: None,
+        moved_from: moved.as_ref().map(|m| m.moved_from.canonical_name()),
+        moved_to: moved.as_ref().map(|m| m.moved_to.canonical_name()),
     })
 }
 

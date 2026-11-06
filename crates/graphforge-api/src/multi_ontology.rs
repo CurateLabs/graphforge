@@ -3,7 +3,7 @@
 //! Bindings project these request and receipt types. They never rebuild
 //! inventory closure, identity, bridge, activation, or resolution semantics.
 
-mod candidate;
+pub(crate) mod candidate;
 mod diagnostics;
 mod regenerate;
 use candidate::{

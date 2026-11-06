@@ -196,6 +196,8 @@ mod discovery_research_lineage;
 mod discovery_research_version;
 mod paging;
 mod property_index;
+#[cfg(all(feature = "discovery", feature = "portable", feature = "research"))]
+pub use discovery_ontology_module::OntologyAdoptionReceipt;
 #[cfg(all(feature = "discovery", feature = "portable"))]
 pub use discovery_ontology_module::{
     DiscoveryOntologyModuleRequest, ResolvedOntologyModule, resolve_discovered_ontology_module,
