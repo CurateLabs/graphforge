@@ -670,7 +670,8 @@ fn declared_package(
 }
 
 #[test]
-fn declared_order_is_checked_after_actual_download_and_releases_staging_on_mismatch() {
+fn declared_order_is_checked_after_real_http_download_and_releases_staging_on_mismatch() {
+    use crate::hub_clone::auth_tests::{Reply, server};
     for order in [None, Some(0), Some(u32::MAX)] {
         let author = tempfile::tempdir().unwrap();
         let (descriptor, refs, manifest, package) = declared_package(author.path(), order);
@@ -682,22 +683,17 @@ fn declared_order_is_checked_after_actual_download_and_releases_staging_on_misma
             let root = tempfile::tempdir().unwrap();
             let mut descriptor = descriptor.clone();
             descriptor.version_order = advertised;
-            let transport = ItemTransport(RecordingTransport {
-                inner: Scripted::new(vec![
-                    response(200, None, &descriptor.to_canonical_json().unwrap()),
-                    response(200, None, &refs),
-                    response(200, None, &manifest),
-                    response(200, None, &package),
-                ]),
-                requested: Mutex::new(Vec::new()),
-            });
-            let args = item_args(&root.path().join("module.json"), &descriptor.id);
+            let (transport, server) = server(vec![
+                Reply::ok(&descriptor.to_canonical_json().unwrap()),
+                Reply::ok(&refs),
+                Reply::ok(&manifest),
+                Reply::ok(&package),
+            ]);
+            let mut args = item_args(&root.path().join("module.json"), &descriptor.id);
+            args.hub = Some("https://hub.example".into());
             let result = fetch_module(&transport, &args);
-            assert_eq!(
-                transport.0.inner.remaining(),
-                0,
-                "verification follows download"
-            );
+            let requests = server.join().unwrap();
+            assert_eq!(requests.len(), 4, "verification follows the HTTP download");
             if advertised == order {
                 result.unwrap();
                 let document: graphforge_api::OntologyDoc =

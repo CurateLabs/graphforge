@@ -75,16 +75,6 @@ Branch by its label. `gf pull` records a two-parent Version; it never moves a
 head without one. The `gf research` commands are the underlying native JSON
 verbs; each help text points at its plain-argument form.
 
-## Declared ontology precedence
-
-Authored module JSON/YAML may include `version_order: 2` (u32, 0–4294967295).
-Version text stays opaque. Omission means undeclared; Core does not infer order
-from version labels. Publishing projects the declaration from verified bytes in
-the summary. `gf ontology module fetch ont_… --output module.json` verifies the
-retained discovery snapshots and downloaded module, then requires the descriptor's
-order to match the authenticated module, including absence. A mismatch fails
-without output. See the [native ordering contract](../../docs/adr/0063-declared-ontology-version-order.md).
-
 ## Publish research history
 
 Authors and committers recorded on Versions are always published, in the lineage
