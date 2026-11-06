@@ -3,11 +3,11 @@ use super::*;
 use clap::Parser as _;
 use graphforge_hub_publish::{PUBLISH_VISIBILITY_CAPABILITY, PUBLISH_VISIBILITY_HEADER};
 
-struct VisibilityTransport<'a> {
-    hub: &'a LoopbackHub,
-    major: Option<u16>,
-    refusal: Option<(&'static str, &'static str)>,
-    requests: RefCell<Vec<HubRequest>>,
+pub(super) struct VisibilityTransport<'a> {
+    pub(super) hub: &'a LoopbackHub,
+    pub(super) major: Option<u16>,
+    pub(super) refusal: Option<(&'static str, &'static str)>,
+    pub(super) requests: RefCell<Vec<HubRequest>>,
 }
 
 impl Transport for VisibilityTransport<'_> {
@@ -143,6 +143,7 @@ fn actual_command_checks_visibility_before_loading_a_token_or_opening_a_project(
     let mut stderr = Vec::new();
     let error = run_command_with_transport(
         &transport,
+        || panic!("unsupported visibility must fail before credential loading"),
         &arguments,
         Some(absent.clone()),
         None,

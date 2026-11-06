@@ -18,10 +18,12 @@ pub(crate) struct AuthArgs {
 }
 #[derive(Subcommand)]
 enum AuthCommand {
-    /// Sign in using a browser or a verification link on another device.
+    /// Save a machine session for Hub access and publishing (primary sign-in path).
+    /// Uses the OS credential vault; requires the standalone native CLI.
     Login {
         #[arg(long, default_value = DEFAULT_HUB)]
         hub: String,
+        /// Print a verification link for approval on another device instead of opening a browser.
         #[arg(long)]
         no_browser: bool,
     },

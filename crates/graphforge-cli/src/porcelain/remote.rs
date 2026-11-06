@@ -83,12 +83,26 @@ fn branch_flag<'a>(
     }
 }
 
-fn repository_of(
+pub(crate) fn repository_of(
     registry: &ResearchRegistry,
     branch: Uuid,
     given: Option<&str>,
     hub: &HubFlags,
 ) -> Result<String, GfError> {
+    if given.is_none()
+        && registry
+            .remote_branches
+            .values()
+            .filter(|remote| remote.branch_uuid == branch)
+            .map(|remote| &remote.repository_url)
+            .collect::<BTreeSet<_>>()
+            .len()
+            > 1
+    {
+        return Err(GfError::Validation(
+            "GF_RESEARCH_UPSTREAM_AMBIGUOUS: the Branch has more than one upstream repository; name the destination explicitly".into(),
+        ));
+    }
     let repository = match given {
         Some(repository) => repository.to_owned(),
         None => upstream_of(registry, branch)
@@ -124,7 +138,12 @@ pub(super) fn push_args(
         rewrite: args.rewrite,
         prune: args.prune,
         check_fork_origin: None,
-        repository: repository_of(registry, branch, args.repository.as_deref(), &args.hub)?,
+        repository: Some(repository_of(
+            registry,
+            branch,
+            args.repository.as_deref(),
+            &args.hub,
+        )?),
         git_ref: Some(label),
         version_uuid: None,
         fork_of: None,
@@ -145,7 +164,7 @@ pub(crate) fn push(
     output: &mut dyn Write,
 ) -> Result<(), GfError> {
     let publish = push_args(&graph.research_version_retention()?, args)?;
-    let (_, base) = crate::hub_http::parse_input(&publish.repository)?;
+    let (_, base) = crate::hub_http::parse_input(publish.repository()?)?;
     let bypass = crate::hub_http::DiscoveryCredentials::load(
         &base,
         None,

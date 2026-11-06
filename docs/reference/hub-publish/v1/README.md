@@ -25,8 +25,8 @@ required-capability set) stay authoritative in Rust.
 ## `gf publish`
 
 ```bash
-gf --project <dir> publish <owner/repository | https://hub/owner/repository> \
-    (--ref <branch-label> | --version-uuid <uuid>) \
+gf --project <dir> publish [<owner/repository | https://hub/owner/repository>] \
+    [--ref <branch-label> | --version-uuid <uuid>] \
     [--fork-of <owner/repository | URL>] [--operation-uuid <uuid>] \
     [--public | --private] [--protection-bypass-env <name>] [--json]
 ```
@@ -38,6 +38,23 @@ Project and cites its origin, after checking that the origin repository
 publishes the cited Version with the same identity. The repository argument
 follows `gf clone`: `owner/repository` resolves against `https://graphforge.sh`,
 or pass the HTTPS repository URL.
+
+Without either selector, publish uses the current research Branch, or the only
+Branch if none is selected. Its label is the discovery ref. A successful Branch
+publish records the confirmed repository as that Branch's upstream in the local
+Project, using the same durable citation as `gf push`. After closing and reopening
+the Project, `gf --project <dir> publish` advances that destination and ref; its
+receipt reports where it published. Switching with `gf switch` changes which
+Branch and upstream the defaults use. An explicit `--ref` selects that Branch
+and its upstream instead. `--version-uuid` remains an exact immutable selection:
+it requires an explicit repository, does not select a Branch and does not record
+an upstream.
+
+No selected or sole Branch fails with `GF_RESEARCH_BRANCH_UNSELECTED`; use
+`gf switch <ref>` or `--ref`. No upstream fails with `GF_RESEARCH_UPSTREAM_UNSET`;
+name the repository on the first publish. If a Branch has upstream citations
+from multiple repositories, `GF_RESEARCH_UPSTREAM_AMBIGUOUS` requires an explicit
+destination rather than guessing. No separate remote configuration is stored.
 
 `--public` and `--private` express an explicit visibility choice. They require
 `{"capability":"publish-visibility","major":1}` in the Hub's offered
@@ -59,12 +76,16 @@ also distinguish `private_requires_plan`, `visibility_required`, `storage_cap`,
 and mismatched code/reason pairs fail closed. CLI messages use fixed safe
 guidance selected by the validated code/reason, never untrusted server prose.
 
-Credentials come from `GRAPHFORGE_HUB_PUBLISH_TOKEN`, a saved `gf auth login`
-session for the selected Hub, or, in a terminal, the publish device flow
-(instructions on standard error). Saved sessions use the operating system
+Use the standalone native CLI's `gf auth login` as the primary sign-in path,
+including before the first publication creates a repository. For a different
+Hub, use `gf auth login --hub https://hub.example`. Saved sessions use the operating system
 credential vault and exchange for a repository-scoped publish token. Captured
 binding invocations require an explicit environment token and never consult the
-vault or prompt. The publish token is never written to the Project,
+vault or prompt. `gf auth login --no-browser` prints a verification link for
+approval on another device. With no saved session, an interactive native
+`gf publish` falls back to repository-scoped device approval (instructions on
+standard error). Automation can supply `GRAPHFORGE_HUB_PUBLISH_TOKEN`, which
+takes precedence over a saved session. The publish token is never written to the Project,
 configuration, or output. The device flow waits at most fifteen minutes.
 `--protection-bypass-env` reads a preview bypass secret from the named environment
 variable for selected-Hub control and OAuth requests. Neither that secret nor

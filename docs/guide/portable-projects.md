@@ -266,6 +266,26 @@ cannot perform the human approval step. For an agent, use the installed
 [scoped credential provisioning path](work-with-an-agent.md#provision-scoped-credentials-for-an-agent-or-ci).
 An unattended agent cannot approve its own owner login.
 
+With a native executable containing publish defaults, the first publication can
+omit `--ref` when the intended research Branch is current (or is the only one):
+
+```bash
+"$GF_NATIVE_CLI_ROOT/bin/gf" --project <project-dir> publish OWNER/REPOSITORY --public
+# After a new Branch commit, even after closing and reopening the Project:
+"$GF_NATIVE_CLI_ROOT/bin/gf" --project <project-dir> publish
+```
+
+These defaults are a source-main feature; the registry rc.7 executable above
+still requires the explicit repository and `--ref main`. Build the standalone
+CLI from current source for the new syntax until a containing release is
+qualified. Successful Branch publishing remembers its confirmed upstream in the
+Project. `gf switch <ref>` selects the Branch whose upstream is used next;
+`gf publish --ref <label>` selects one explicitly. If no Branch can be selected,
+select one; if its destination is unset or ambiguous, name the repository.
+`--version-uuid <uuid>` always needs an explicit repository and publishes that
+immutable Version without changing Branch tracking. See the
+[publish CLI reference](../reference/hub-publish/v1/README.md#gf-publish).
+
 Compare the publish receipt, discovered head and new clone's Version and
 producing Core identity, then reopen and query the continued result. This
 publish-back → discovery → clone proof belongs to release execution in

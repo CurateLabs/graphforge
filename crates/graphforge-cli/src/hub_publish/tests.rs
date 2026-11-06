@@ -28,6 +28,7 @@ mod ancestor_publication;
 mod composition_proof;
 mod core_version_warning;
 mod credit;
+mod defaults;
 mod hub_listing;
 mod id_taken;
 mod porcelain;
@@ -589,7 +590,8 @@ fn run_publish_with_bypass(
 
 fn publish_ok(hub: &LoopbackHub, graph: &GraphForge, args: &PublishArgs) -> Run {
     let repository = args
-        .repository
+        .repository()
+        .unwrap()
         .trim_start_matches(&format!("{HUB}/"))
         .to_owned();
     let run = run_publish_with(hub, graph, args, Credential::Token(token(hub, &repository)));
@@ -2594,7 +2596,7 @@ fn selected_previews_preserve_native_data_and_moves(large_objects: bool) {
     .unwrap();
     assert_eq!(moved.receipt.repository, new);
     assert_eq!(moved.moved.as_ref().unwrap().moved_from, old);
-    args.repository = repository_url("research/renamed");
+    args.repository = Some(repository_url("research/renamed"));
     let before_replay = selected.log().len();
     let canonical = publish_ok(selected, &history.graph, &args).result.unwrap();
     assert!(canonical.replayed);
