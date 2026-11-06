@@ -114,6 +114,10 @@ pub(crate) struct PublishArgs {
     /// Canonical owner/repository name or HTTPS URL; defaults to the selected
     /// Branch's upstream. Required with --version-uuid.
     pub repository: Option<String>,
+    /// Hub HTTPS origin for owner/repository names (default: https://graphforge.sh).
+    /// A full repository URL must have the same origin.
+    #[arg(long)]
+    pub hub: Option<String>,
     /// Research Branch to publish, named by its label; its head becomes this
     /// discovery ref. Defaults to the current Branch, then the only Branch.
     #[arg(long = "ref")]
@@ -173,6 +177,40 @@ impl PublishArgs {
                 "name the repository explicitly with --version-uuid; an immutable Version has no Branch upstream",
             )
         })
+    }
+
+    /// Validate the explicit origin even when the Branch supplies the repository later.
+    fn hub_origin(&self) -> Result<Option<Url>, GfError> {
+        self.hub
+            .as_deref()
+            .map(|hub| {
+                let origin = crate::hub_http::hub_base(Some(hub))?;
+                if origin.path() != "/" {
+                    return Err(validation(
+                        "hub.invalid_identity",
+                        "--hub must be a bare HTTPS origin",
+                    ));
+                }
+                Ok(origin)
+            })
+            .transpose()
+    }
+
+    fn destination(&self) -> Result<(RepositoryIdentity, Url), GfError> {
+        let hub = self.hub_origin()?;
+        let repository = self.repository()?;
+        if repository.contains("://") {
+            let location = parse_input(repository)?;
+            if hub.is_some_and(|hub| hub.origin() != location.1.origin()) {
+                return Err(validation(
+                    "hub.invalid_identity",
+                    "repository URL and --hub must name the same Hub origin",
+                ));
+            }
+            Ok(location)
+        } else {
+            crate::hub_http::parse_input_at(repository, self.hub.as_deref())
+        }
     }
 
     fn visibility(&self) -> Result<Option<graphforge_hub_publish::PublishVisibility>, GfError> {
@@ -329,9 +367,16 @@ fn run_command(
     output: &mut dyn Write,
     diagnostics: &mut crate::Diagnostics<'_>,
 ) -> Result<(), GfError> {
-    run_command_with_transport(
+    run_command_with_sources(
         &crate::hub_http::HubTransport::new(),
         || publish_token(None),
+        || {
+            if DEVICE_FLOW_OPENER.get().is_some() {
+                crate::auth::last_login_origin()
+            } else {
+                Ok(None)
+            }
+        },
         args,
         project,
         project_dir,
@@ -342,10 +387,38 @@ fn run_command(
 }
 
 /// The actual command path with an injectable transport for native acceptance.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)] // CLI channels plus the transport and lazy credential source
 fn run_command_with_transport(
     transport: &dyn Transport,
     load_token: impl FnOnce() -> Result<Option<PublishToken>, GfError>,
+    args: &PublishArgs,
+    project: Option<PathBuf>,
+    project_dir: Option<PathBuf>,
+    json: bool,
+    output: &mut dyn Write,
+    diagnostics: &mut crate::Diagnostics<'_>,
+) -> Result<(), GfError> {
+    run_command_with_sources(
+        transport,
+        load_token,
+        || Ok(None),
+        args,
+        project,
+        project_dir,
+        json,
+        output,
+        diagnostics,
+    )
+}
+
+/// Origin metadata is separate from lazy publish-token acquisition: it may only
+/// provide a notice, never select the destination or deny a legitimate session.
+#[allow(clippy::too_many_arguments)]
+fn run_command_with_sources(
+    transport: &dyn Transport,
+    load_token: impl FnOnce() -> Result<Option<PublishToken>, GfError>,
+    last_login: impl FnOnce() -> Result<Option<Url>, GfError>,
     args: &PublishArgs,
     mut project: Option<PathBuf>,
     mut project_dir: Option<PathBuf>,
@@ -359,11 +432,26 @@ fn run_command_with_transport(
     if args.version_uuid.is_some() {
         args.repository()?;
     }
-    let location = args.repository.as_deref().map(parse_input).transpose()?;
+    let hub_origin = args.hub_origin()?;
+    let location = args
+        .repository
+        .as_ref()
+        .map(|_| args.destination())
+        .transpose()?;
     if let Some(origin) = &args.fork_of {
         parse_input(origin)?;
     }
     let visibility = args.visibility()?;
+    let pending_notice = if let Some(base) = location
+        .as_ref()
+        .map(|(_, base)| base)
+        .or(hub_origin.as_ref())
+    {
+        announce_publish_hub(base, last_login, diagnostics);
+        None
+    } else {
+        Some(last_login)
+    };
     let load_bypass = |base: &Url| {
         crate::hub_http::DiscoveryCredentials::load(
             base,
@@ -391,21 +479,24 @@ fn run_command_with_transport(
     } else {
         None
     };
-    let mut open_project = || {
+    let mut open_project = |diagnostics: &mut crate::Diagnostics<'_>| {
         let path = crate::resolve_project_path(project.take(), project_dir.take())?;
         crate::open_cli_graph_warning(&path, None, diagnostics)
     };
     let mut args = args.clone();
     let graph =
         if args.repository.is_none() || (args.git_ref.is_none() && args.version_uuid.is_none()) {
-            let graph = open_project()?;
+            let graph = open_project(diagnostics)?;
             args.resolve_defaults(&graph.research_version_retention()?)?;
             Some(graph)
         } else {
             None
         };
     if location.is_none() {
-        let (identity, base) = parse_input(args.repository()?)?;
+        let (identity, base) = args.destination()?;
+        if let Some(last_login) = pending_notice {
+            announce_publish_hub(&base, last_login, diagnostics);
+        }
         bypass = load_bypass(&base)?;
         if visibility.is_some() {
             let discovered = resolve_publication(transport, &identity, &base, bypass.as_ref())?;
@@ -427,11 +518,30 @@ fn run_command_with_transport(
         |environment| {
             let mut graph = match graph {
                 Some(graph) => graph,
-                None => open_project()?,
+                None => open_project(diagnostics)?,
             };
             publish_and_report(transport, &mut graph, &args, environment, json, output)
         },
     )
+}
+
+/// Advisory metadata cannot make a publication depend on vault availability.
+/// The target remains visible even when legacy logins have no origin metadata.
+fn announce_publish_hub(
+    base: &Url,
+    last_login: impl FnOnce() -> Result<Option<Url>, GfError>,
+    diagnostics: &mut crate::Diagnostics<'_>,
+) {
+    let target = base.origin().ascii_serialization();
+    diagnostics.notice(&format!("Publish Hub: {target}"));
+    if let Ok(Some(previous)) = last_login()
+        && previous.origin() != base.origin()
+    {
+        diagnostics.notice(&format!(
+            "Last successful login Hub: {}. Publishing to {target}; saved sessions are selected per origin. To sign in here, run gf auth login --hub {target}.",
+            previous.origin().ascii_serialization()
+        ));
+    }
 }
 
 /// The publish token the process supplies: the variable `token_env` names, else
@@ -480,7 +590,7 @@ fn publish_with_resolution(
     let streaming = DEVICE_FLOW_OPENER.get().is_some();
     let interactive =
         streaming && std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
-    let (identity, base) = parse_input(args.repository()?)?;
+    let (identity, base) = args.destination()?;
     let resolution = match resolution {
         Some(resolution) => resolution,
         None => resolve_publication(transport, &identity, &base, bypass)?,
@@ -2290,7 +2400,7 @@ fn publish_inner(
     mut report: impl FnMut(Uuid) -> Result<(), GfError>,
 ) -> Result<PublishOutcome, GfError> {
     let visibility = args.visibility()?;
-    let (identity, base) = parse_input(args.repository()?)?;
+    let (identity, base) = args.destination()?;
     let fork = args.fork_of.as_deref().map(parse_input).transpose()?;
     if fork.as_ref().is_some_and(|(origin, _)| *origin == identity) {
         return Err(publish_error(

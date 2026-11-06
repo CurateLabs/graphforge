@@ -74,6 +74,37 @@ trait Store {
     fn delete(&self, origin: &str) -> Result<(), GfError>;
 }
 struct Vault;
+/// Advisory metadata only; per-origin session records remain authoritative.
+const LAST_LOGIN_ORIGIN: &str = "last-successful-login-origin";
+
+/// Read only the advisory origin value, never a session or token record.
+pub(crate) fn last_login_origin() -> Result<Option<Url>, GfError> {
+    last_login_origin_from(&Vault)
+}
+fn last_login_origin_from(store: &dyn Store) -> Result<Option<Url>, GfError> {
+    let _guard = store.lock(LAST_LOGIN_ORIGIN)?;
+    store
+        .read(LAST_LOGIN_ORIGIN)?
+        .map(|value| {
+            if value.len() > 2048 {
+                return Err(denied("invalid saved login origin"));
+            }
+            origin(&value)
+        })
+        .transpose()
+}
+fn record_login_origin(store: &dyn Store, hub: &Url) -> Result<(), GfError> {
+    let _guard = store.lock(LAST_LOGIN_ORIGIN)?;
+    store.write(LAST_LOGIN_ORIGIN, &hub.origin().ascii_serialization())
+}
+fn clear_login_origin(store: &dyn Store, hub: &Url) -> Result<(), GfError> {
+    let _guard = store.lock(LAST_LOGIN_ORIGIN)?;
+    if store.read(LAST_LOGIN_ORIGIN)?.as_deref() == Some(&hub.origin().ascii_serialization()) {
+        store.delete(LAST_LOGIN_ORIGIN)?;
+    }
+    Ok(())
+}
+
 /// Only a failed read of an unavailable vault may defer to anonymous 404.
 /// Invalid stored data, lock failures and refresh failures remain strict.
 #[derive(Debug)]
@@ -276,7 +307,11 @@ fn validate_secret(value: &str) -> Result<(), GfError> {
 }
 fn save(store: &dyn Store, hub: &Url, response: HubResponse, now: u64) -> Result<Session, GfError> {
     let _guard = store.lock(&hub.origin().ascii_serialization())?;
-    save_unlocked(store, hub, response, now)
+    let session = save_unlocked(store, hub, response, now)?;
+    // The authoritative session is committed. A failed advisory hint must not
+    // turn that successful login into an authentication failure.
+    let _ = record_login_origin(store, hub);
+    Ok(session)
 }
 fn save_unlocked(
     store: &dyn Store,
@@ -508,6 +543,8 @@ fn logout(
         Err(error) => Err(error.into()),
     };
     store.delete(&hub.origin().ascii_serialization())?;
+    // Credentials are removed; an advisory hint cannot change that outcome.
+    let _ = clear_login_origin(store, hub);
     revoked
 }
 #[derive(Deserialize)]
