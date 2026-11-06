@@ -153,9 +153,6 @@ fn fork_origin_is_exact_content_and_uses_shared_validation() {
         ("id", json!("ont_aaaaaaaaaaaaaaaa")),
         ("id", json!("https://graphforge.sh/brg_aaaaaaaaaaaaaaaa")),
         ("id", json!("https://graphforge.sh/ONT_AAAAAAAAAAAAAAAA")),
-        ("version", json!("")),
-        ("version", json!("a\nb")),
-        ("version", json!("a".repeat(4097))),
         ("digest", json!("a".repeat(64))),
         ("digest", json!(format!("sha256:{}", "A".repeat(64)))),
         ("unexpected", json!(true)),
@@ -168,5 +165,52 @@ fn fork_origin_is_exact_content_and_uses_shared_validation() {
             OntologyLoader::load_json(serde_json::to_vec(&value).unwrap().as_slice()).is_err(),
             "{field}: {value}"
         );
+    }
+}
+
+#[test]
+fn fork_origin_preserves_admitted_native_versions() {
+    use graphforge_ontology::{
+        ActivationMode, AuthoredModule, CompositionLimits, InventoryCompileRequest,
+        OntologyModuleId, compile_inventory,
+    };
+    let compile = |doc: OntologyDoc| {
+        let module = AuthoredModule {
+            id: OntologyModuleId {
+                ontology_id: doc.ontology_id.clone(),
+                authored_version: doc.version.clone(),
+                canonical_digest: module_document_digest(&doc).unwrap(),
+            },
+            dependencies: Vec::new(),
+            doc,
+            allow_projected_identity: false,
+        };
+        let compiled = compile_inventory(InventoryCompileRequest {
+            modules: std::slice::from_ref(&module),
+            bridges: &[],
+            activation: &[],
+            profile_default: ActivationMode::Exploratory,
+            limits: CompositionLimits::default(),
+            cancelled: None,
+        })
+        .unwrap();
+        compiled.modules[0].id.clone()
+    };
+    for version in ["v\n1".to_owned(), String::new(), "a".repeat(4097)] {
+        let mut source = document();
+        source.ontology_id = "https://graphforge.sh/ont_aaaaaaaaaaaaaaaa".into();
+        source.version = version.clone();
+        let source =
+            OntologyLoader::load_json(serde_json::to_vec(&source).unwrap().as_slice()).unwrap();
+        let source_id = compile(source.clone());
+        let mut fork = source;
+        fork.ontology_id = "https://graphforge.sh/ont_bbbbbbbbbbbbbbbb".into();
+        fork.forked_from = Some((&source_id).into());
+        let fork =
+            OntologyLoader::load_json(serde_json::to_vec(&fork).unwrap().as_slice()).unwrap();
+        assert_eq!(fork.forked_from.as_ref().unwrap().version, version);
+        let fork_id = compile(fork);
+        assert_ne!(source_id.ontology_id, fork_id.ontology_id);
+        assert_eq!(source_id.authored_version, fork_id.authored_version);
     }
 }

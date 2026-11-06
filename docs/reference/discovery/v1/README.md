@@ -336,10 +336,14 @@ it needs no graph-data migration and preserves graph data on reopen.
 
 A module declaration and its summary entry may carry optional `forked_from`:
 `{ "id": "https://graphforge.sh/ont_…", "version": "source-version", "digest": "sha256:…" }`.
+Native declarations preserve already-admitted source version bytes, including
+legacy control, empty or long versions. Summary publication applies the existing
+discovery version bounds (nonempty, at most 4096 UTF-8 bytes), as for any module
+identity. Versions are not normalized or interpreted as SemVer.
+
 The object has exactly these three required fields. `id` is a canonical lowercase
 permanent ontology URI (not a bridge ID or a bare ID), `version` is the exact
-nonempty opaque source version, at most 4096 UTF-8 bytes without control
-characters, and `digest` is the source module's domain-separated canonical digest
+opaque source version, and `digest` is the source module's domain-separated canonical digest
 (`sha256:` followed by 64 lowercase hexadecimal digits). Rust and protocol WASM
 validate the same shape and bounds; they never normalize the source identity.
 The summary schema describes this declaration shape as well as its projection.

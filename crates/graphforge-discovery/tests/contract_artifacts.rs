@@ -319,7 +319,7 @@ fn summary_schema() -> Value {
                 "type":"object","additionalProperties":false,"required":["id","version","digest"],
                 "properties":{
                     "id":{"type":"string","pattern":"^https://graphforge\\.sh/ont_[0123456789abcdefghjkmnpqrstvwxyz]{16}$"},
-                    "version":{"type":"string","minLength":1,"maxLength":4096,"description":"Exact nonempty authored version, at most 4096 UTF-8 bytes without control characters; enforced by Rust."},
+                    "version":{"type":"string","minLength":1,"maxLength":4096,"description":"Exact nonempty opaque authored version, at most 4096 UTF-8 bytes; enforced by Rust."},
                     "digest":{"$ref":"#/$defs/digest"}
                 }},{"type":"null"}]}));
             map.insert("module_label".into(), json!({"anyOf":[{"type":"string","minLength":1,"maxLength":256,"description":"At most 256 UTF-8 bytes, nonblank, single line, no control characters or U+2028/U+2029; enforced by Rust."},{"type":"null"}]}));
@@ -1124,13 +1124,23 @@ fn module_metadata_cases() -> Vec<Case> {
     ] {
         let mut value = fork.clone();
         value["facts"]["ontology_composition"]["modules"][0]["forked_from"][field] = replacement;
-        cases.push(invalid(
-            &format!("summary-module-fork-{name}"),
-            Document::Summary,
-            value,
-            "malformed_response",
-            error_field,
-        ));
+        let case_name = format!("summary-module-fork-{name}");
+        if name == "control-version" {
+            cases.push(valid(&case_name, Document::Summary, value));
+        } else {
+            let code = if matches!(name, "empty-version" | "oversized-version") {
+                "limit_exceeded"
+            } else {
+                "malformed_response"
+            };
+            cases.push(invalid(
+                &case_name,
+                Document::Summary,
+                value,
+                code,
+                error_field,
+            ));
+        }
     }
     let mut missing = fork.clone();
     missing["facts"]["ontology_composition"]["modules"][0]["forked_from"]

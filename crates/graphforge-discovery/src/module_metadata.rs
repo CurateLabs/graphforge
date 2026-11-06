@@ -1,6 +1,6 @@
 //! Human-authored ontology module metadata shared by native and WASM validators.
 
-use crate::{DiscoveryError, DiscoveryErrorCode, DiscoveryLimits, ItemId, ItemKind, Sha256Digest};
+use crate::{DiscoveryError, DiscoveryErrorCode, ItemId, ItemKind, Sha256Digest};
 use serde::{Deserialize, Serialize};
 
 /// Exact immediate source of an authored ontology fork. This declaration is
@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 pub struct OntologyForkOrigin {
     /// Canonical permanent ontology URI (`https://graphforge.sh/ont_…`).
     pub id: String,
-    /// Exact opaque authored version, at most 4096 UTF-8 bytes.
+    /// Exact opaque authored version. Discovery applies its existing public string bounds.
     pub version: String,
     /// Domain-separated source module digest, `sha256:` plus 64 lowercase hex digits.
     pub digest: Sha256Digest,
@@ -22,16 +22,11 @@ impl OntologyForkOrigin {
     pub fn validate(&self) -> Result<(), DiscoveryError> {
         let valid_id = ItemId::parse_uri(&self.id)
             .is_ok_and(|id| id.kind() == ItemKind::OntologyModule && id.to_uri() == self.id);
-        if !valid_id
-            || self.version.is_empty()
-            || self.version.len() > DiscoveryLimits::default().max_string_bytes
-            || self.version.chars().any(char::is_control)
-            || self.digest.validate().is_err()
-        {
+        if !valid_id || self.digest.validate().is_err() {
             return Err(DiscoveryError::new(
                 DiscoveryErrorCode::MalformedResponse,
                 Some("forked_from"),
-                "fork origin requires a canonical ontology URI, bounded nonempty control-free version and SHA-256 digest",
+                "fork origin requires a canonical ontology URI and SHA-256 digest",
             ));
         }
         Ok(())

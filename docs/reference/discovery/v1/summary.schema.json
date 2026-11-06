@@ -211,7 +211,7 @@
               "type": "string"
             },
             "version": {
-              "description": "Exact nonempty authored version, at most 4096 UTF-8 bytes without control characters; enforced by Rust.",
+              "description": "Exact nonempty opaque authored version, at most 4096 UTF-8 bytes; enforced by Rust.",
               "maxLength": 4096,
               "minLength": 1,
               "type": "string"
