@@ -76,7 +76,7 @@ const MAX_CONTROL_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 const INTENT_FORMAT: &str = "graphforge-hub-publish-intent/1";
 
 /// Mutually exclusive optional visibility flags at the CLI boundary.
-#[derive(Args, Default)]
+#[derive(Args, Default, Clone)]
 #[group(multiple = false)]
 pub(crate) struct VisibilityArgs {
     /// Create a public repository, or require an existing public repository.
@@ -90,8 +90,15 @@ pub(crate) struct VisibilityArgs {
 }
 
 /// Publish a research Branch head or exact Version to a GraphForge Hub.
-#[derive(Args)]
-#[command(group(ArgGroup::new("selection").required(true).args(["git_ref", "version_uuid"])))]
+///
+/// Defaults to the current Branch (or the only Branch) and its recorded upstream
+/// repository. A successful Branch publish records that upstream in the Project,
+/// so later invocations can use `gf publish` with no arguments, even after reopen.
+/// Use `gf auth login` with the standalone native CLI to save a machine session;
+/// terminal device approval is the fallback when no saved session is available.
+/// Captured Python/Node launchers require GRAPHFORGE_HUB_PUBLISH_TOKEN instead.
+#[derive(Args, Clone)]
+#[command(group(ArgGroup::new("selection").args(["git_ref", "version_uuid"])))]
 pub(crate) struct PublishArgs {
     #[command(flatten)]
     pub visibility: VisibilityArgs,
@@ -104,10 +111,11 @@ pub(crate) struct PublishArgs {
     /// Explicitly check an established Fork's cited Version at this origin URL.
     #[arg(long)]
     pub check_fork_origin: Option<String>,
-    /// Canonical owner/repository name or an HTTPS Hub repository URL.
-    pub repository: String,
+    /// Canonical owner/repository name or HTTPS URL; defaults to the selected
+    /// Branch's upstream. Required with --version-uuid.
+    pub repository: Option<String>,
     /// Research Branch to publish, named by its label; its head becomes this
-    /// discovery ref.
+    /// discovery ref. Defaults to the current Branch, then the only Branch.
     #[arg(long = "ref")]
     pub git_ref: Option<String>,
     /// Exact immutable research Version UUID to publish into the repository.
@@ -135,6 +143,38 @@ pub(crate) struct PublishArgs {
 }
 
 impl PublishArgs {
+    /// Complete CLI defaults from the same durable Branch citations as `gf push`.
+    fn resolve_defaults(
+        &mut self,
+        registry: &graphforge_api::ResearchRegistry,
+    ) -> Result<(), GfError> {
+        if self.version_uuid.is_some() {
+            self.repository()?;
+            return Ok(());
+        }
+        if self.git_ref.is_some() && self.repository.is_some() {
+            return Ok(());
+        }
+        let branch = crate::porcelain::resolve_branch(registry, self.git_ref.as_deref())?;
+        self.repository = Some(crate::porcelain::remote::repository_of(
+            registry,
+            branch,
+            self.repository.as_deref(),
+            &crate::porcelain::HubFlags::default(),
+        )?);
+        self.git_ref = Some(registry.branches[&branch].label.clone());
+        Ok(())
+    }
+
+    pub(crate) fn repository(&self) -> Result<&str, GfError> {
+        self.repository.as_deref().ok_or_else(|| {
+            publish_error(
+                HubPublishErrorCode::InvalidInput,
+                "name the repository explicitly with --version-uuid; an immutable Version has no Branch upstream",
+            )
+        })
+    }
+
     fn visibility(&self) -> Result<Option<graphforge_hub_publish::PublishVisibility>, GfError> {
         use graphforge_hub_publish::PublishVisibility;
         match (self.visibility.public, self.visibility.private) {
@@ -291,6 +331,7 @@ fn run_command(
 ) -> Result<(), GfError> {
     run_command_with_transport(
         &crate::hub_http::HubTransport::new(),
+        || publish_token(None),
         args,
         project,
         project_dir,
@@ -301,28 +342,41 @@ fn run_command(
 }
 
 /// The actual command path with an injectable transport for native acceptance.
+#[allow(clippy::too_many_arguments)] // CLI channels plus the transport and lazy credential source
 fn run_command_with_transport(
     transport: &dyn Transport,
+    load_token: impl FnOnce() -> Result<Option<PublishToken>, GfError>,
     args: &PublishArgs,
-    project: Option<PathBuf>,
-    project_dir: Option<PathBuf>,
+    mut project: Option<PathBuf>,
+    mut project_dir: Option<PathBuf>,
     json: bool,
     output: &mut dyn Write,
     diagnostics: &mut crate::Diagnostics<'_>,
 ) -> Result<(), GfError> {
     // Locations and arguments are validated before any credential or network use.
-    let (identity, base) = parse_input(&args.repository)?;
+    let location = args.repository.as_deref().map(parse_input).transpose()?;
     if let Some(origin) = &args.fork_of {
         parse_input(origin)?;
     }
-    let bypass = crate::hub_http::DiscoveryCredentials::load(
-        &base,
-        None,
-        args.protection_bypass_env.as_deref(),
-        |name| std::env::var(name),
-    )?;
-    let resolution = if let Some(visibility) = args.visibility()? {
-        let resolution = resolve_publication(transport, &identity, &base, bypass.as_ref())?;
+    let visibility = args.visibility()?;
+    let load_bypass = |base: &Url| {
+        crate::hub_http::DiscoveryCredentials::load(
+            base,
+            None,
+            args.protection_bypass_env.as_deref(),
+            |name| std::env::var(name),
+        )
+    };
+    let mut bypass = location
+        .as_ref()
+        .map(|(_, base)| load_bypass(base))
+        .transpose()?
+        .flatten();
+    // Preserve explicit publish preflight: unsupported visibility is refused
+    // before loading publish credentials or even opening the Project.
+    let mut resolution = if let (Some(visibility), Some((identity, base))) = (visibility, &location)
+    {
+        let resolution = resolve_publication(transport, identity, base, bypass.as_ref())?;
         graphforge_hub_publish::require_visibility_capability(
             &resolution.capabilities,
             Some(visibility),
@@ -332,27 +386,45 @@ fn run_command_with_transport(
     } else {
         None
     };
-    let explicit = publish_token(None)?;
-    let path = crate::resolve_project_path(project, project_dir)?;
-    let path = path
-        .to_str()
-        .ok_or_else(|| GfError::Validation("--project must be valid UTF-8".into()))?;
+    let mut open_project = || {
+        let path = crate::resolve_project_path(project.take(), project_dir.take())?;
+        crate::open_cli_graph_warning(&path, None, diagnostics)
+    };
+    let mut args = args.clone();
+    let graph =
+        if args.repository.is_none() || (args.git_ref.is_none() && args.version_uuid.is_none()) {
+            let graph = open_project()?;
+            args.resolve_defaults(&graph.research_version_retention()?)?;
+            Some(graph)
+        } else {
+            None
+        };
+    if location.is_none() {
+        let (identity, base) = parse_input(args.repository()?)?;
+        bypass = load_bypass(&base)?;
+        if visibility.is_some() {
+            let discovered = resolve_publication(transport, &identity, &base, bypass.as_ref())?;
+            graphforge_hub_publish::require_visibility_capability(
+                &discovered.capabilities,
+                visibility,
+            )
+            .map_err(|error| protocol(&error))?;
+            resolution = Some(discovered);
+        }
+    }
+    let explicit = load_token()?;
     publish_with_resolution(
         transport,
-        args,
+        &args,
         explicit,
         bypass.as_ref(),
         resolution,
         |environment| {
-            open_and_publish(
-                transport,
-                path,
-                args,
-                environment,
-                json,
-                output,
-                diagnostics,
-            )
+            let mut graph = match graph {
+                Some(graph) => graph,
+                None => open_project()?,
+            };
+            publish_and_report(transport, &mut graph, &args, environment, json, output)
         },
     )
 }
@@ -403,7 +475,7 @@ fn publish_with_resolution(
     let streaming = DEVICE_FLOW_ALLOWED.load(Ordering::Relaxed);
     let interactive =
         streaming && std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
-    let (identity, base) = parse_input(&args.repository)?;
+    let (identity, base) = parse_input(args.repository()?)?;
     let resolution = match resolution {
         Some(resolution) => resolution,
         None => resolve_publication(transport, &identity, &base, bypass)?,
@@ -433,23 +505,6 @@ fn publish_with_resolution(
         resolution: Some(resolution),
     };
     publish_with(&mut environment)
-}
-
-/// Open the Project and publish it. A Core version warning from the open is
-/// raised before anything is published, so it is reported whether or not the
-/// publication then succeeds.
-fn open_and_publish(
-    transport: &dyn Transport,
-    path: &str,
-    args: &PublishArgs,
-    environment: &mut PublishEnvironment<'_>,
-    json: bool,
-    output: &mut dyn Write,
-    diagnostics: &mut crate::Diagnostics<'_>,
-) -> Result<(), GfError> {
-    let mut graph = GraphForge::new(Some(path))?;
-    diagnostics.warn(&graph.open_warnings());
-    publish_and_report(transport, &mut graph, args, environment, json, output)
 }
 
 /// Publish an open Project, record what the Hub confirmed, and report it.
@@ -2207,7 +2262,7 @@ fn publish_inner(
     mut report: impl FnMut(Uuid) -> Result<(), GfError>,
 ) -> Result<PublishOutcome, GfError> {
     let visibility = args.visibility()?;
-    let (identity, base) = parse_input(&args.repository)?;
+    let (identity, base) = parse_input(args.repository()?)?;
     let fork = args.fork_of.as_deref().map(parse_input).transpose()?;
     if fork.as_ref().is_some_and(|(origin, _)| *origin == identity) {
         return Err(publish_error(

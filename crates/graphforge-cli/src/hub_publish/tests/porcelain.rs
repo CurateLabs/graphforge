@@ -17,7 +17,7 @@ const ALICE: &str = "Alice <alice@example.org>";
 const BOB: &str = "Bob <bob@example.org>";
 
 /// Run one `gf` invocation for the Project at `project` and parse its JSON.
-fn gf(hub: &LoopbackHub, project: &Path, arguments: &[&str]) -> Result<Value, GfError> {
+pub(super) fn gf(hub: &LoopbackHub, project: &Path, arguments: &[&str]) -> Result<Value, GfError> {
     let project_text = project.to_str().unwrap();
     let mut argv = vec!["gf", "--project", project_text, "--json"];
     argv.extend_from_slice(arguments);
@@ -31,23 +31,15 @@ fn gf(hub: &LoopbackHub, project: &Path, arguments: &[&str]) -> Result<Value, Gf
             run_clone_with(&hub.transport(), args, true, &mut output)?;
         }
         Command::Publish(args) => {
-            let mut graph = GraphForge::new(Some(project_text))?;
-            let transport = hub.transport();
-            crate::hub_publish::publish_with_credentials(
-                &transport,
+            run_command_with_transport(
+                &hub.transport(),
+                || Ok(Some(token(hub, "curate/claims"))),
                 &args,
-                Some(token(hub, "curate/claims")),
+                Some(project.to_owned()),
                 None,
-                |environment| {
-                    crate::hub_publish::publish_and_report(
-                        &transport,
-                        &mut graph,
-                        &args,
-                        environment,
-                        true,
-                        &mut output,
-                    )
-                },
+                true,
+                &mut output,
+                &mut crate::Diagnostics::new(true, &mut Vec::new()),
             )?;
         }
         command @ (Command::Push(_) | Command::Pull(_)) => {
@@ -100,7 +92,7 @@ fn score(project: &Path) -> i64 {
         .unwrap())
 }
 
-fn sum(result: graphforge_api::ExecutionResult) -> i64 {
+pub(super) fn sum(result: graphforge_api::ExecutionResult) -> i64 {
     result.batches[0]
         .column(0)
         .as_any()

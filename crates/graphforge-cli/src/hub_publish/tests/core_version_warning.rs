@@ -36,21 +36,14 @@ struct Published {
 
 fn publish_project(hub: &LoopbackHub, path: &Path, args: &PublishArgs, json: bool) -> Published {
     let mut diagnostics_stderr = Vec::new();
-    let mut notices = Vec::new();
     let mut stdout = Vec::new();
     let mut diagnostics = Diagnostics::new(json, &mut diagnostics_stderr);
-    let mut environment = PublishEnvironment {
-        bypass: None,
-        credential: Credential::Token(token(hub, REPOSITORY)),
-        wait: &|_| panic!("no device flow expected"),
-        notices: &mut notices,
-        resolution: None,
-    };
-    let result = open_and_publish(
+    let result = run_command_with_transport(
         &hub.transport(),
-        path.to_str().unwrap(),
+        || Ok(Some(token(hub, REPOSITORY))),
         args,
-        &mut environment,
+        Some(path.to_owned()),
+        None,
         json,
         &mut stdout,
         &mut diagnostics,

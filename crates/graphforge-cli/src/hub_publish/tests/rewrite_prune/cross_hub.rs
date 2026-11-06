@@ -32,7 +32,7 @@ impl Transport for Hubs {
     }
 }
 fn run(hubs: &Hubs, graph: &GraphForge, args: &PublishArgs, hub: &ReferenceHub) -> PublishOutcome {
-    let (_, base) = parse_input(&args.repository).unwrap();
+    let (_, base) = parse_input(args.repository().unwrap()).unwrap();
     let id = RepositoryIdentity::parse(base.path().trim_start_matches('/')).unwrap();
     let mut notices = Vec::new();
     let mut environment = PublishEnvironment {
@@ -61,12 +61,12 @@ fn ordinary_established_cross_hub_fork_update_does_not_guess_or_probe_origin_hos
         calls: RefCell::new(Vec::new()),
     };
     let mut original = on_ref("curate/claims", "main");
-    original.repository = "https://origin.example/curate/claims".into();
+    original.repository = Some("https://origin.example/curate/claims".into());
     run(&hubs, &origin.graph, &original, &hubs.origin);
     let (mut fork, branch) = independent_fork(&origin, origin.head);
     let mut initial = on_ref("curate/fork", "main");
-    initial.repository = "https://destination.example/curate/fork".into();
-    initial.fork_of = Some(original.repository);
+    initial.repository = Some("https://destination.example/curate/fork".into());
+    initial.fork_of = original.repository;
     run(&hubs, &fork, &initial, &hubs.destination);
     edit_by(&mut fork, branch, 8, "Independent author");
     let mut update = initial;

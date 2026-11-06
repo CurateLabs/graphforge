@@ -185,7 +185,10 @@ fn push_defaults_repository_and_ref_from_the_remote_record() {
         panic!("not a push");
     };
     let publish = push_args(&registry, &args).unwrap();
-    assert_eq!(publish.repository, "https://hub.test/curate/claims");
+    assert_eq!(
+        publish.repository.as_deref(),
+        Some("https://hub.test/curate/claims")
+    );
     assert_eq!(publish.git_ref.as_deref(), Some("main"));
     assert!(publish.rewrite && !publish.prune);
     assert!(publish.version_uuid.is_none() && publish.fork_of.is_none());
@@ -201,7 +204,7 @@ fn push_defaults_repository_and_ref_from_the_remote_record() {
         panic!("not a push");
     };
     let publish = push_args(&bare, &named).unwrap();
-    assert_eq!(publish.repository, "curate/claims");
+    assert_eq!(publish.repository.as_deref(), Some("curate/claims"));
     assert_eq!(publish.git_ref.as_deref(), Some("main"));
 
     // `--ref` names a Branch by its label, so it cannot disagree with `--branch`.

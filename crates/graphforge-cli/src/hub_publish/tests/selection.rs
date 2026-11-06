@@ -7,7 +7,7 @@ pub(super) fn args(repository: &str) -> PublishArgs {
         rewrite: false,
         prune: false,
         check_fork_origin: None,
-        repository: repository_url(repository),
+        repository: Some(repository_url(repository)),
         git_ref: None,
         version_uuid: None,
         fork_of: None,
