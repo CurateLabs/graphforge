@@ -450,6 +450,25 @@ fn rewriting_legacy_research_metadata_makes_the_project_exportable_without_acces
     let mut graph = GraphForge::new(project.to_str()).unwrap();
     let mut metadata = WorkspaceResearchMetadata::empty();
     metadata.title = Some("Rewritten".into());
+    // Explicit legacy replacement cannot introduce native adoption provenance.
+    let before = current(&graph);
+    let mut forged = metadata.clone();
+    forged.extensions.insert(
+        "graphforge.ontology_adoption:forged".into(),
+        serde_json::json!("unverified source"),
+    );
+    assert!(matches!(
+        graph.update_research_metadata(UpdateResearchMetadataRequest {
+            context: WriteContext {
+                operation_uuid: OperationId(Uuid::now_v7()),
+                actor_uuid: None,
+            },
+            metadata: forged,
+        }),
+        Err(GfError::Validation(_))
+    ));
+    assert_eq!(current(&graph), before);
+    assert!(graph.research_project_metadata().is_err());
     graph
         .update_research_metadata(UpdateResearchMetadataRequest {
             context: WriteContext {

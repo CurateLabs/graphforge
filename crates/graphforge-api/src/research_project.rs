@@ -1,5 +1,6 @@
 //! Research Project metadata inspection, mutation, and bounded local discovery.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -83,9 +84,12 @@ impl GraphForge {
         }
         let metadata = request.metadata;
         metadata.to_canonical_json()?;
-        let previous_metadata = read_workspace_research_metadata(&parent)?;
-        if previous_metadata
-            .extensions
+        let previous_extensions = parent
+            .participant_snapshot(WORKSPACE_CAPABILITY_ID, WORKSPACE_RESEARCH_METADATA_FAMILY)?
+            .map(|snapshot| research_metadata_extensions_for_replacement(&snapshot.bytes))
+            .transpose()?
+            .unwrap_or_default();
+        if previous_extensions
             .iter()
             .filter(|(key, _)| key.starts_with(ONTOLOGY_ADOPTION_EXTENSION_PREFIX))
             .ne(metadata
@@ -177,6 +181,38 @@ impl GraphForge {
             discover_research_projects(&request.project_roots, &request.query, request.limits)?;
         summaries_to_arrow(&summaries)
     }
+}
+
+/// Inspect only the extensions that replacement must preserve. Retired version-1
+/// metadata may be explicitly replaced, but is never read as current metadata or
+/// migrated (in particular its removed `access` member must not be carried over).
+fn research_metadata_extensions_for_replacement(
+    bytes: &[u8],
+) -> Result<BTreeMap<String, serde_json::Value>, GfError> {
+    let error = match WorkspaceResearchMetadata::from_canonical_json(bytes) {
+        Ok(metadata) => return Ok(metadata.extensions),
+        Err(error) => error,
+    };
+    if matches!(
+        error,
+        GfError::Project {
+            code: graphforge_core::ProjectErrorCode::UnsupportedProjectFormat,
+            ..
+        }
+    ) && bytes.ends_with(b"\n")
+    {
+        #[derive(serde::Deserialize)]
+        struct RetiredMetadataExtensions {
+            contract_version: u32,
+            extensions: BTreeMap<String, serde_json::Value>,
+        }
+        if let Ok(retired) = serde_json::from_slice::<RetiredMetadataExtensions>(bytes)
+            && retired.contract_version == 1
+        {
+            return Ok(retired.extensions);
+        }
+    }
+    Err(error)
 }
 
 #[allow(clippy::too_many_lines)]
@@ -395,4 +431,50 @@ fn snapshot_to_participant(
         row_count: snapshot.row_count,
         bytes: snapshot.bytes,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn replacement_preserves_retired_extensions_without_relaxing_other_read_errors() {
+        let mut metadata = serde_json::to_value(WorkspaceResearchMetadata::empty()).unwrap();
+        metadata["contract_version"] = serde_json::json!(1);
+        metadata["access"] = serde_json::json!({"policy": "retired"});
+        metadata["extensions"] = serde_json::json!({
+            "graphforge.ontology_adoption:retained": "verified source",
+            "user.annotation": "retired annotation",
+        });
+        let encode = |value: &serde_json::Value| {
+            let mut bytes = serde_json::to_vec(value).unwrap();
+            bytes.push(b'\n');
+            bytes
+        };
+        let bytes = encode(&metadata);
+        assert!(WorkspaceResearchMetadata::from_canonical_json(&bytes).is_err());
+        let extensions = research_metadata_extensions_for_replacement(&bytes).unwrap();
+        assert_eq!(
+            extensions["graphforge.ontology_adoption:retained"],
+            serde_json::json!("verified source")
+        );
+        for version in [0, 2, 3] {
+            metadata["contract_version"] = serde_json::json!(version);
+            assert!(research_metadata_extensions_for_replacement(&encode(&metadata)).is_err());
+        }
+        metadata["contract_version"] = serde_json::json!(1);
+        for extensions in [serde_json::Value::Null, serde_json::json!([])] {
+            metadata["extensions"] = extensions;
+            assert!(research_metadata_extensions_for_replacement(&encode(&metadata)).is_err());
+        }
+        for bytes in [
+            b"{\"contract_version\":1,\"extensions\":{}}".as_slice(),
+            b"{\"contract_version\":1,\"extensions\":{},\"extensions\":{}}\n",
+            b"{\"contract_version\":1,\"extensions\":{},\"broken\":\n",
+        ] {
+            assert!(research_metadata_extensions_for_replacement(bytes).is_err());
+        }
+        let oversized = vec![b' '; graphforge_storage::MAX_WORKSPACE_RESEARCH_METADATA_BYTES + 1];
+        assert!(research_metadata_extensions_for_replacement(&oversized).is_err());
+    }
 }
