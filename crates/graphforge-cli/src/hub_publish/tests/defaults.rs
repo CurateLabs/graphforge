@@ -26,7 +26,11 @@ fn publish_command(
         &mut stdout,
         &mut crate::Diagnostics::new(false, &mut stderr),
     );
-    assert!(stderr.is_empty(), "{}", String::from_utf8_lossy(&stderr));
+    let diagnostics = String::from_utf8(stderr).unwrap();
+    assert!(
+        diagnostics.is_empty() || diagnostics == format!("Publish Hub: {HUB}\n"),
+        "{diagnostics}"
+    );
     result?;
     Ok(String::from_utf8(stdout).unwrap())
 }

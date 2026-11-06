@@ -260,7 +260,8 @@ These failures set `error.code` and `details.kind` only. The class follows the
 1. `GRAPHFORGE_HUB_PUBLISH_TOKEN` — an explicit publish bearer token. A CI job
    or agent sets it to a non-empty token scoped `publish:owner/repository` for
    the target repository. This is the supported non-interactive path; it never
-   prompts and never consults the local vault.
+   prompts and never loads saved session tokens. The native CLI may read only
+   the advisory last-login origin from the vault for a pre-request notice.
 2. A saved `gf auth login` session for the selected Hub (OS credential vault),
    exchanged for a repository-scoped publish token. Works without a terminal.
 3. The RFC 8628 device flow, only when standard input and standard error are

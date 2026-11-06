@@ -275,6 +275,17 @@ omit `--ref` when the intended research Branch is current (or is the only one):
 "$GF_NATIVE_CLI_ROOT/bin/gf" --project <project-dir> publish
 ```
 
+For a preview or self-hosted Hub, use the same origin for login and publish:
+
+```bash
+"$GF_NATIVE_CLI_ROOT/bin/gf" auth login --hub https://hub.example
+"$GF_NATIVE_CLI_ROOT/bin/gf" --project <project-dir> publish OWNER/REPOSITORY --hub https://hub.example --public
+```
+
+Without `--hub`, a short repository name selects `https://graphforge.sh`.
+A full HTTPS repository URL selects its own Hub; if combined with `--hub`,
+the origins must match. Saved credentials stay scoped to that origin.
+
 These defaults are a source-main feature; the registry rc.7 executable above
 still requires the explicit repository and `--ref main`. Build the standalone
 CLI from current source for the new syntax until a containing release is

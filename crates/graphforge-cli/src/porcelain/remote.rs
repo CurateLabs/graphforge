@@ -134,6 +134,7 @@ pub(super) fn push_args(
     // A Branch label is its ref: publish names the Branch by it.
     let label = registry.branches[&branch].label.clone();
     Ok(PublishArgs {
+        hub: None,
         visibility: crate::hub_publish::VisibilityArgs::default(),
         rewrite: args.rewrite,
         prune: args.prune,
