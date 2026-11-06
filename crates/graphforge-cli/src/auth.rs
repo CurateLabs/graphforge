@@ -302,6 +302,14 @@ fn lock_in(parent: &std::path::Path, origin: &str) -> Result<CredentialLock, GfE
 fn denied(message: &str) -> GfError {
     validation("hub.auth_denied", message)
 }
+/// A remote refusal names only the origin we contacted, never a response URL
+/// or credential. Formatting requires no credential-store access.
+fn denied_at(hub: &Url, message: &str) -> GfError {
+    denied(&format!(
+        "{message} (Hub origin: {})",
+        hub.origin().ascii_serialization()
+    ))
+}
 fn now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -372,7 +380,7 @@ fn save_unlocked(
 ) -> Result<Session, GfError> {
     let HubResponse { status, body, .. } = response;
     if status != 200 {
-        return Err(denied("sign-in was refused; run gf auth login"));
+        return Err(denied_at(hub, "sign-in was refused; run gf auth login"));
     }
     let tokens: Tokens =
         serde_json::from_slice(&body).map_err(|_| denied("invalid authentication response"))?;
@@ -498,7 +506,7 @@ fn login(
         None,
     )?;
     if response.status != 200 {
-        return Err(denied("device authorization was refused").into());
+        return Err(denied_at(hub, "device authorization was refused").into());
     }
     let device: DeviceAuthorization = serde_json::from_slice(&response.body)
         .map_err(|_| denied("invalid device authorization response"))?;
@@ -561,7 +569,7 @@ fn login(
             Some("expired_token") => {
                 return Err(DeviceAuthorizationEnd::expired(device.expires_in));
             }
-            _ => return Err(denied("device authorization was denied").into()),
+            _ => return Err(denied_at(hub, "device authorization was denied").into()),
         }
     }
 }
@@ -599,7 +607,8 @@ fn logout(
             if response.status == 200 || response.status == 204 || response.status == 401 {
                 Ok(())
             } else {
-                Err(denied(
+                Err(denied_at(
+                    hub,
                     "remote revocation failed; local credentials removed",
                 ))
             }
@@ -634,12 +643,18 @@ fn verify_status(
         None,
     )?;
     if response.status != 200 {
-        return Err(denied("session is no longer valid; run gf auth login"));
+        return Err(denied_at(
+            hub,
+            "session is no longer valid; run gf auth login",
+        ));
     }
     let status: SessionStatus =
         serde_json::from_slice(&response.body).map_err(|_| denied("invalid session response"))?;
     if !status.authenticated || status.expires_at <= now {
-        return Err(denied("session is expired or revoked; run gf auth login"));
+        return Err(denied_at(
+            hub,
+            "session is expired or revoked; run gf auth login",
+        ));
     }
     validate_secret(&status.principal_id)?;
     Ok(status)
@@ -808,7 +823,7 @@ fn exchange_repository_token(
         ),
     )?;
     if response.status != 200 {
-        return Err(denied("repository access denied"));
+        return Err(denied_at(hub, "repository access denied"));
     }
     let grant: Grant = serde_json::from_slice(&response.body)
         .map_err(|_| denied("invalid repository credential"))?;

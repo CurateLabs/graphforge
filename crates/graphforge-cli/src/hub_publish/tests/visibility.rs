@@ -308,14 +308,17 @@ fn malformed_reason_or_wrong_mismatch_status_never_becomes_a_typed_refusal() {
         (409, "made_up"),
         (403, "repository_is_public"),
     ] {
-        let error = hub_failure(&HubResponse {
-            status,
-            headers: Vec::new(),
-            body: serde_json::to_vec(
-                &json!({"code":"visibility_mismatch","reason":reason,"message":"SECRET"}),
-            )
-            .unwrap(),
-        });
+        let error = hub_failure(
+            &HubResponse {
+                status,
+                headers: Vec::new(),
+                body: serde_json::to_vec(
+                    &json!({"code":"visibility_mismatch","reason":reason,"message":"SECRET"}),
+                )
+                .unwrap(),
+            },
+            &Url::parse(HUB).unwrap(),
+        );
         assert_eq!(core_error_code(&error), "hub.network");
         assert!(!error.to_string().contains("SECRET"));
     }
@@ -325,22 +328,28 @@ fn malformed_reason_or_wrong_mismatch_status_never_becomes_a_typed_refusal() {
         (403, "invalid_input", "invalid_visibility"),
         (409, "invalid_input", "invalid_visibility"),
     ] {
-        let error = hub_failure(&HubResponse {
-            status,
-            headers: Vec::new(),
-            body: serde_json::to_vec(&json!({
-                "code":code, "reason":reason, "message":"SECRET",
-            }))
-            .unwrap(),
-        });
+        let error = hub_failure(
+            &HubResponse {
+                status,
+                headers: Vec::new(),
+                body: serde_json::to_vec(&json!({
+                    "code":code, "reason":reason, "message":"SECRET",
+                }))
+                .unwrap(),
+            },
+            &Url::parse(HUB).unwrap(),
+        );
         assert_eq!(core_error_code(&error), "hub.network");
         assert!(!error.to_string().contains("SECRET"));
     }
     // Preserve classification of legacy bodies without a negotiated reason.
-    let legacy = hub_failure(&HubResponse {
-        status: 500,
-        headers: Vec::new(),
-        body: br#"{"code":"entitlement_denied","message":"legacy"}"#.to_vec(),
-    });
+    let legacy = hub_failure(
+        &HubResponse {
+            status: 500,
+            headers: Vec::new(),
+            body: br#"{"code":"entitlement_denied","message":"legacy"}"#.to_vec(),
+        },
+        &Url::parse(HUB).unwrap(),
+    );
     assert_eq!(core_error_code(&legacy), "hub.publish.entitlement_denied");
 }

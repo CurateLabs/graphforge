@@ -29,6 +29,7 @@ mod composition_proof;
 mod core_version_warning;
 mod credit;
 mod defaults;
+mod denial_origin;
 mod device_expiry;
 mod explicit_fork;
 mod hub_listing;
@@ -1472,25 +1473,6 @@ fn device_flow_waits_are_bounded_whatever_the_hub_advertises() {
     );
     assert!(waits.iter().all(|wait| *wait <= Duration::from_mins(1)));
     assert_eq!(waits.iter().sum::<Duration>(), Duration::from_mins(15));
-}
-
-#[test]
-fn a_status_without_a_publish_error_body_is_a_hub_failure() {
-    for status in [401, 409, 412] {
-        let error = hub_failure(&HubResponse {
-            status,
-            headers: vec![("content-type".into(), "text/html".into())],
-            body: b"<html>proxy error</html>".to_vec(),
-        });
-        assert_ne!(error.code(), "GF_IDEMPOTENCY_CONFLICT");
-        assert!(error.to_string().contains("hub.network"), "{error}");
-    }
-    let conflict = hub_failure(&HubResponse {
-        status: 409,
-        headers: Vec::new(),
-        body: br#"{"code":"idempotency_conflict","message":"x"}"#.to_vec(),
-    });
-    assert_eq!(conflict.code(), "GF_IDEMPOTENCY_CONFLICT");
 }
 
 /// A `Write` the device-flow waiter can read while the publish holds it.
