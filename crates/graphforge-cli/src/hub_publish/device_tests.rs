@@ -237,6 +237,7 @@ fn native_publish_uses_the_prefilled_notice_through_the_real_device_grant() {
         prune: false,
         check_fork_origin: None,
         repository: Some(format!("{ORIGIN}/curate/claims")),
+        hub: None,
         git_ref: Some("main".into()),
         version_uuid: None,
         fork_of: None,

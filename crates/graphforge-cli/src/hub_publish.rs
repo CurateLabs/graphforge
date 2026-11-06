@@ -371,7 +371,7 @@ fn run_command(
         &crate::hub_http::HubTransport::new(),
         || publish_token(None),
         || {
-            if DEVICE_FLOW_ALLOWED.load(Ordering::Relaxed) {
+            if DEVICE_FLOW_OPENER.get().is_some() {
                 crate::auth::last_login_origin()
             } else {
                 Ok(None)
