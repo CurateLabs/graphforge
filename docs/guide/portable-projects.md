@@ -959,9 +959,9 @@ CONTENT_DIGEST=$(jq -r '.id.canonical_digest' candidate.json)
 gf --json ontology module fetch OWNER/REPOSITORY \
   --ontology-id "$ONTOLOGY_ID" --version "$AUTHORED_VERSION" \
   --digest "$CONTENT_DIGEST" --output fetched-scholarly.json
-gf --json clone OWNER/REPOSITORY reader --ref main
+gf --json clone OWNER/REPOSITORY reader --ref main > clone.json
 gf --project reader --json ontology module list
-BRANCH_UUID=$(jq -r '.branch_uuid' branch.json)
+BRANCH_UUID=$(jq -r '.research_branch_uuid' clone.json)
 gf --project reader --json research branch query --branch-uuid "$BRANCH_UUID" \
   --query 'MATCH (n) RETURN count(n)'
 gf --project reader --json research branch query --branch-uuid "$BRANCH_UUID" \
