@@ -21,6 +21,7 @@ fn source_package(root: &Path) -> (PathBuf, OntologyModuleId) {
                 label: None,
                 description: None,
                 license: None,
+                forked_from: None,
                 ontology_id: "https://example.org/ontology/reproducible-import".into(),
                 version: "2026.1".into(),
                 entity_types: Vec::new(),

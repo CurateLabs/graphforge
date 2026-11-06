@@ -142,8 +142,8 @@ fn rewritten_module_dependencies_use_target_digest_order_in_both_directions() {
     // random ID produced by the durable facade test. The second ID is the CI
     // case whose target digest ordering reverses the prior dependency order.
     for (next, order) in [
-        (OLD, std::cmp::Ordering::Greater),
-        ("ont_9pnk3pntnkskn0ja", std::cmp::Ordering::Less),
+        (OLD, std::cmp::Ordering::Less),
+        ("ont_9pnk3pntnkskn0ja", std::cmp::Ordering::Greater),
     ] {
         let rewritten = graph
             .regenerate_composition(
@@ -311,7 +311,7 @@ fn all_refused_module_identities_rewrite_exact_references_and_reopen_data() {
     let result = graph.regenerate_item_id(OLD, operation, None).unwrap();
     assert_history(&graph, &prior, selected, &result);
     let after = graph.workspace_ontology_composition().unwrap().unwrap();
-    assert!(!serde_json::to_string(&after).unwrap().contains(&uri(OLD)));
+    assert_no_old_references(&after);
     assert_ne!(
         before.composition_fingerprint,
         after.composition_fingerprint
@@ -325,6 +325,7 @@ fn all_refused_module_identities_rewrite_exact_references_and_reopen_data() {
         let mut expected = old.document.clone();
         if old.id.ontology_id == uri(OLD) {
             expected.ontology_id = replacement.to_uri();
+            expected.forked_from = Some((&old.id).into());
         }
         let new_id = crate::OntologyModuleId {
             ontology_id: expected.ontology_id.clone(),

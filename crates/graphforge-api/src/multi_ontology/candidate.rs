@@ -153,7 +153,7 @@ fn bridge_references_module(bridge: &BridgeDocument, module: &OntologyModuleId) 
         })
 }
 
-pub(super) fn compile_candidate(
+pub(crate) fn compile_candidate(
     candidate: &WorkspaceOntologyComposition,
 ) -> Result<graphforge_ontology::CompiledComposition, GfError> {
     let modules = candidate
@@ -471,6 +471,7 @@ pub(super) fn module_migration_candidate(
             expected
                 .ontology_id
                 .clone_from(&request.document.ontology_id);
+            expected.forked_from = Some((&previous).into());
             if expected != request.document
                 || request.dependencies != candidate.modules[index].dependencies
             {

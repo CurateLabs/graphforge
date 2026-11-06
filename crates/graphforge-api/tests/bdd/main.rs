@@ -116,7 +116,13 @@ async fn main() {
         // the process BenchExec measures. A no-op unless GF_TCK_PERF_FAULT_* is set.
         .before(|feature, _, scenario, _| {
             let key = corpus::scenario_key(&feature.name, scenario.position.line, &scenario.name);
-            async move { fault::inject(&key) }.boxed_local()
+            async move {
+                // Emit before execution so a process-fatal fault leaves its
+                // scenario identity even when the result collector cannot finish.
+                eprintln!("TCK scenario started: {key}");
+                fault::inject(&key);
+            }
+            .boxed_local()
         })
         .after(|_, _, _, _, world| {
             async move {

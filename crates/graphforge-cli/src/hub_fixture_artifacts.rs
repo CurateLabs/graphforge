@@ -719,10 +719,10 @@ fn validate_modules(
             cancelled: None,
         })
         .map_err(err)?;
-        if resolved.module.ontology_id != module.id
-            || resolved.module.authored_version != module.version
-            || format!("sha256:{}", resolved.module.canonical_digest) != module.content_digest.0
-            || resolved.package_digest != package.package_digest.0
+        if resolved.module().ontology_id != module.id
+            || resolved.module().authored_version != module.version
+            || format!("sha256:{}", resolved.module().canonical_digest) != module.content_digest.0
+            || resolved.package_digest() != package.package_digest.0
         {
             return Err("fixture module package does not resolve to the advertised module".into());
         }

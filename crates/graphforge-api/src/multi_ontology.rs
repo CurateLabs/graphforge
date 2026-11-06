@@ -3,7 +3,7 @@
 //! Bindings project these request and receipt types. They never rebuild
 //! inventory closure, identity, bridge, activation, or resolution semantics.
 
-mod candidate;
+pub(crate) mod candidate;
 mod diagnostics;
 mod regenerate;
 use candidate::{
@@ -1414,6 +1414,7 @@ mod tests {
             label: None,
             description: None,
             license: None,
+            forked_from: None,
             ontology_id: ontology_id.into(),
             version: "1".into(),
             entity_types: vec![EntityTypeDef {

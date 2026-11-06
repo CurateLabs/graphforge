@@ -19,6 +19,7 @@ fn relationship_acceptance_requires_reviewed_ontology_and_publishes_both_atomica
         label: None,
         description: None,
         license: None,
+        forked_from: None,
         ontology_id: "proposal-relationships".into(),
         version: "1.0.0".into(),
         entity_types: vec![EntityTypeDef {
@@ -270,6 +271,7 @@ fn semantic_secondary_label_and_typed_list_survive_selected_acceptance_and_reope
         label: None,
         description: None,
         license: None,
+        forked_from: None,
         ontology_id: "proposal-labels".into(),
         version: "1.0.0".into(),
         entity_types: ["Existing", "Character", "Tagged", "Reviewed"]
@@ -656,6 +658,7 @@ fn route_fixture_composition(
         label: None,
         description: None,
         license: None,
+        forked_from: None,
         ontology_id: "route-regression".into(),
         version: "1".into(),
         entity_types: ["A", "B"]

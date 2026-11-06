@@ -36,6 +36,10 @@ pub struct OntologyDoc {
     /// Absence means undeclared; the Project's license is never inherited.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub license: Option<String>,
+    /// Exact immediate source of a fork, including its canonical module digest.
+    /// Absence preserves historical serialization and content digests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forked_from: Option<graphforge_discovery::OntologyForkOrigin>,
     /// Node class definitions.
     #[serde(default)]
     pub entity_types: Vec<EntityTypeDef>,
@@ -68,6 +72,7 @@ impl OntologyDoc {
         document.label.clone_from(&other.label);
         document.description.clone_from(&other.description);
         document.license.clone_from(&other.license);
+        document.forked_from.clone_from(&other.forked_from);
         document == *other
     }
 
@@ -80,7 +85,11 @@ impl OntologyDoc {
             self.label.as_deref(),
             self.description.as_deref(),
             self.license.as_deref(),
-        )
+        )?;
+        if let Some(origin) = &self.forked_from {
+            origin.validate()?;
+        }
+        Ok(())
     }
 }
 
@@ -268,6 +277,7 @@ mod tests {
             label: None,
             description: None,
             license: None,
+            forked_from: None,
             ontology_id: "test".to_string(),
             version: "1.0".to_string(),
             entity_types: vec![EntityTypeDef {

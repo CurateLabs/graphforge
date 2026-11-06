@@ -1,8 +1,39 @@
 //! Human-authored ontology module metadata shared by native and WASM validators.
 
-use crate::{DiscoveryError, DiscoveryErrorCode};
+use crate::{DiscoveryError, DiscoveryErrorCode, ItemId, ItemKind, Sha256Digest};
+use serde::{Deserialize, Serialize};
 
-/// Required summary capability when module labels, descriptions or licenses are present.
+/// Exact immediate source of an authored ontology fork. This declaration is
+/// content, not proof of ownership or a substitute for the source module bytes.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(tsify::Tsify))]
+#[serde(deny_unknown_fields)]
+pub struct OntologyForkOrigin {
+    /// Canonical permanent ontology URI (`https://graphforge.sh/ont_…`).
+    pub id: String,
+    /// Exact opaque authored version. Discovery applies its existing public string bounds.
+    pub version: String,
+    /// Domain-separated source module digest, `sha256:` plus 64 lowercase hex digits.
+    pub digest: Sha256Digest,
+}
+
+impl OntologyForkOrigin {
+    /// Validate without rewriting any part of the source identity.
+    pub fn validate(&self) -> Result<(), DiscoveryError> {
+        let valid_id = ItemId::parse_uri(&self.id)
+            .is_ok_and(|id| id.kind() == ItemKind::OntologyModule && id.to_uri() == self.id);
+        if !valid_id || self.digest.validate().is_err() {
+            return Err(DiscoveryError::new(
+                DiscoveryErrorCode::MalformedResponse,
+                Some("forked_from"),
+                "fork origin requires a canonical ontology URI and SHA-256 digest",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Required summary capability when module text, license or fork provenance is present.
 pub const ONTOLOGY_MODULE_METADATA_CAPABILITY: &str = "ontology-module-metadata";
 /// Maximum UTF-8 bytes of a module's single-line label.
 pub const MAX_ONTOLOGY_MODULE_LABEL_BYTES: usize = 256;

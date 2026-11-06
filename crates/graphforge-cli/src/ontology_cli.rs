@@ -64,6 +64,8 @@ const CLI_SURFACE_PATHS: &[&str] = &[
 #[derive(Subcommand)]
 #[allow(clippy::large_enum_variant)]
 pub(crate) enum OntologyCommand {
+    /// Fetch, verify and atomically adopt an exact ontology and its dependencies into this Project.
+    Adopt(crate::hub_clone::ontology_adoption::OntologyAdoptArgs),
     /// Replace a refused permanent ID and its references in a new Version.
     // Like module fetch, this is outside the four-surface multi-ontology contract.
     RegenerateId(RegenerateIdArgs),
@@ -493,6 +495,9 @@ pub(crate) fn run_ontology(
     output: &mut dyn Write,
 ) -> Result<(), CliRuntimeError> {
     match command {
+        OntologyCommand::Adopt(_) => {
+            unreachable!("high-level adoption is dispatched before opening a Project")
+        }
         OntologyCommand::RegenerateId(args) => {
             let operation_uuid = canonical_uuid(&args.operation_uuid)?;
             if !args.yes {

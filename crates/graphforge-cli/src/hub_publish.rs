@@ -28,9 +28,9 @@ use graphforge_hub_publish::{
     CommitRequest, DEVICE_CODE_GRANT_TYPE, DeviceAuthorizationResponse, DevicePoll,
     HUB_PUBLISH_FORMAT, HubErrorBody, HubMethod, HubPublishErrorCode, HubRequest, HubResponse,
     ObjectDeclaration, OpenSessionRequest, OperationStatus, PUBLISH_NEGOTIATION_CAPABILITY,
-    PublishCapabilities, PublishErrorReason, PublishIntent, PublishReceipt, PublishToken,
-    SessionResponse, UPLOAD_OFFSET_HEADER, UploadStatus, UploadTarget, canonical_json,
-    content_range, parse_unique_json, publish_scope, sha256_digest,
+    PublishCapabilities, PublishIntent, PublishReceipt, PublishToken, SessionResponse,
+    UPLOAD_OFFSET_HEADER, UploadStatus, UploadTarget, canonical_json, content_range,
+    parse_unique_json, publish_scope, sha256_digest,
 };
 use publication::{
     ManifestInputs, PACKAGE_MEDIA_TYPE, SUMMARY_MEDIA_TYPE, VerifiedBundle, build_manifest,
@@ -146,7 +146,7 @@ pub(crate) struct PublishArgs {
 
 impl PublishArgs {
     /// Complete CLI defaults from the same durable Branch citations as `gf push`.
-    fn resolve_defaults(
+    pub(crate) fn resolve_defaults(
         &mut self,
         registry: &graphforge_api::ResearchRegistry,
     ) -> Result<(), GfError> {
@@ -821,7 +821,7 @@ fn resolve_publication(
 /// Idempotency conflicts use `GF_IDEMPOTENCY_CONFLICT`; transport and Hub
 /// internal failures are storage errors; everything else is a validation error
 /// whose message starts with the stable `hub.publish.*` code. Messages are
-/// fixed client text: Hub-supplied text, tokens, and upload URLs never appear.
+/// fixed client text, optionally followed by sanitized Hub refusal details.
 fn publish_error(code: HubPublishErrorCode, detail: &str) -> GfError {
     let wire = graphforge_hub_publish::HubPublishError::new(code, "").wire_code();
     match code {
@@ -831,33 +831,6 @@ fn publish_error(code: HubPublishErrorCode, detail: &str) -> GfError {
         },
         HubPublishErrorCode::Internal => GfError::Storage(format!("{wire}: {detail}")),
         _ => GfError::Validation(format!("{wire}: {detail}")),
-    }
-}
-
-/// Fixed CLI guidance selected only from a validated typed reason.
-const fn reason_detail(reason: PublishErrorReason) -> &'static str {
-    match reason {
-        PublishErrorReason::PrivateRequiresPlan => {
-            "Private repositories need a plan. Publish to a public repository with --public, or upgrade. Publishing never changes an existing repository's visibility; change it on the Hub."
-        }
-        PublishErrorReason::VisibilityRequired => {
-            "Choose --public or --private. Private repositories need a plan."
-        }
-        PublishErrorReason::RepositoryIsPublic => {
-            "This repository is public. Publish with --public, or change its visibility on the Hub. Publishing never changes visibility."
-        }
-        PublishErrorReason::RepositoryIsPrivate => {
-            "This repository is private. Publish with --private, or change its visibility on the Hub. Publishing never changes visibility."
-        }
-        PublishErrorReason::InvalidVisibility => {
-            "Publish visibility must be exactly public or private."
-        }
-        PublishErrorReason::StorageCap => {
-            "The account storage cap is reached. Free published or pending storage, or upgrade."
-        }
-        PublishErrorReason::SessionCap => {
-            "The account publish-session cap is reached. Finish an open session before publishing again."
-        }
     }
 }
 
@@ -896,22 +869,20 @@ const fn code_detail(code: HubPublishErrorCode) -> &'static str {
 /// A status without a publish error body (for example from a proxy) never
 /// implies a publish outcome such as an idempotency conflict.
 fn hub_failure(response: &HubResponse) -> GfError {
-    match serde_json::from_slice::<HubErrorBody>(&response.body) {
-        Ok(body)
-            if (matches!(
-                body.code,
-                HubPublishErrorCode::IdTaken | HubPublishErrorCode::VisibilityMismatch
-            ) && response.status != 409)
-                || (body.reason.is_some() && response.status != body.code.http_status()) =>
-        {
-            network("Hub refusal status is invalid")
+    match refusals::body(response) {
+        Ok(body) => {
+            let mut detail = format!(
+                "{}\nHub message: {}",
+                code_detail(body.code),
+                refusals::message(&body.message, &[]),
+            );
+            if let Some(reason) = body.reason {
+                detail.push_str("\nHub reason: ");
+                detail.push_str(reason.as_str());
+            }
+            publish_error(body.code, &detail)
         }
-        Ok(body) => publish_error(
-            body.code,
-            body.reason
-                .map_or_else(|| code_detail(body.code), reason_detail),
-        ),
-        Err(_) => network("Hub returned an unsuccessful status"),
+        Err(error) => error,
     }
 }
 
@@ -1019,7 +990,8 @@ impl Hub<'_> {
             } else {
                 request
             };
-            let response = self.transport.exchange(&request, limit)?;
+            let response =
+                refusals::sanitize_response(self.transport.exchange(&request, limit)?, &request)?;
             match response.status {
                 301 | 302 | 303 | 307 | 308 if hop < MAX_REDIRECTS => {
                     let location = response
@@ -1057,9 +1029,11 @@ impl Hub<'_> {
             request.with_header("authorization", token.authorization()),
             &url,
         )?;
-        let response = self
-            .transport
-            .exchange(&request, MAX_CONTROL_RESPONSE_BYTES)?;
+        let response = refusals::sanitize_response(
+            self.transport
+                .exchange(&request, MAX_CONTROL_RESPONSE_BYTES)?,
+            &request,
+        )?;
         if let Some(capture) = self.refusal {
             capture.observe(
                 &response,
@@ -2385,9 +2359,9 @@ fn publish_with_operation_report(
     let captured = refusals::Capture::default();
     let result = publish_inner(transport, graph, args, environment, &captured, report);
     if result.is_err()
-        && let Some((version, items)) = captured.take()
+        && let Some((version, items, message)) = captured.take()
     {
-        return Err(refusals::record(graph, version, &items).into());
+        return Err(refusals::record(graph, version, &items, &message).into());
     }
     result
 }

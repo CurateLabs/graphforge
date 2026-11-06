@@ -41,7 +41,8 @@ fn stale() -> GfError {
 
 impl GraphForge {
     /// Replace a GraphForge item ID only after a locally recorded `id_taken`.
-    /// Rust generates one same-kind ID for every adopted version of the item
+    /// Rust generates one same-kind ID for every adopted version of the item.
+    /// Each module records its immediate exact source in `forked_from`
     /// and atomically publishes all references,
     /// stored routes, a new Version and the selected Branch head. History is
     /// immutable. Reuse the operation UUID to replay the same ID and Version,
@@ -272,6 +273,10 @@ impl GraphForge {
                     .map(|module| {
                         let mut document = module.document.clone();
                         document.ontology_id = next.to_uri();
+                        // Each adopted exact identity supplies its own immediate
+                        // source, including when an earlier fork is forked again.
+                        // The admitted composition, never Hub prose, is authority.
+                        document.forked_from = Some((&module.id).into());
                         ModuleMigrationRequest {
                             authority: OntologyAuthorityExpectation {
                                 context: WriteContext {

@@ -353,6 +353,29 @@ impl WorkspaceOntologyComposition {
         }
     }
 
+    /// Compile authored modules, bridges and activation into canonical authority.
+    /// The fingerprint is computed by the ontology compiler, never supplied by a caller.
+    ///
+    /// # Errors
+    /// Returns corruption for inconsistent identities, dependencies or bridges.
+    pub fn from_authored(
+        modules: Vec<WorkspaceCompositionModule>,
+        bridges: Vec<BridgeDocument>,
+        activation: Vec<ActivationRecord>,
+        profile_default: ActivationMode,
+    ) -> Result<Self, GfError> {
+        let authored = Self {
+            contract_version: WORKSPACE_ONTOLOGY_COMPOSITION_VERSION,
+            modules,
+            bridges,
+            activation,
+            profile_default,
+            composition_fingerprint: String::new(),
+        };
+        let compiled = authored.compile_documents()?;
+        Ok(Self::from_compiled(&compiled, authored.bridges))
+    }
+
     /// Project an older single-ontology participant without publishing or rewriting it.
     ///
     /// # Errors
@@ -401,6 +424,14 @@ impl WorkspaceOntologyComposition {
     /// Returns corruption for malformed, incoherent, or noncanonical authority.
     pub fn compile(&self) -> Result<CompiledComposition, GfError> {
         validate_composition(self)?;
+        let compiled = self.compile_documents()?;
+        if compiled.fingerprint != self.composition_fingerprint {
+            return Err(corrupt("ontology composition fingerprint does not match"));
+        }
+        Ok(compiled)
+    }
+
+    fn compile_documents(&self) -> Result<CompiledComposition, GfError> {
         let authored = self
             .modules
             .iter()
@@ -490,9 +521,6 @@ impl WorkspaceOntologyComposition {
                 )
                 .map_err(|_| corrupt("ontology composition bridge lifecycle is invalid"))?;
             adopted.insert(id.display_ref());
-        }
-        if compiled.fingerprint != self.composition_fingerprint {
-            return Err(corrupt("ontology composition fingerprint does not match"));
         }
         Ok(compiled)
     }
@@ -1053,6 +1081,7 @@ mod tests {
             label: None,
             description: None,
             license: None,
+            forked_from: None,
             ontology_id: "https://graphforge.dev/ontology/legacy".into(),
             version: "1.0.0".into(),
             entity_types: vec![graphforge_ontology::EntityTypeDef {

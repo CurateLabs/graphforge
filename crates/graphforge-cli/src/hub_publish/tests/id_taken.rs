@@ -1,7 +1,7 @@
 use super::*;
 use graphforge_api::{
-    ItemIdRefusalReceipt, ModuleAdoptionRequest, ModuleDeleteRequest, ModuleSelector,
-    OntologyAuthorityExpectation,
+    ItemIdRefusalReceipt, ModuleAdoptionRequest, ModuleSelector, OntologyAuthorityExpectation,
+    PrepareResearchVersionRequest, ResearchMutation, ResearchOperation,
 };
 use graphforge_discovery::{ItemId, ItemKind};
 use graphforge_hub_publish::IdTakenItem;
@@ -23,7 +23,10 @@ fn authority(graph: &GraphForge) -> OntologyAuthorityExpectation {
 
 fn adopt(graph: &mut GraphForge, id: &str, version: &str) -> graphforge_api::OntologyModuleId {
     let document = serde_json::from_value(
-        json!({"ontology_id": id, "version": version, "entity_types": [{"name": "Thing"}]}),
+        json!({"ontology_id": id, "version": version,
+            "label":"Authored things", "description":"Exact source text.", "license":"MIT OR  Apache-2.0",
+            "entity_types": [{"name": "Thing"}],
+            "properties":[{"owner":"Thing","name":"value","type":"utf8"}]}),
     )
     .unwrap();
     let candidate = graph
@@ -46,6 +49,9 @@ fn project(version: &str) -> (tempfile::TempDir, GraphForge, Uuid) {
     let root = tempfile::tempdir().unwrap();
     let mut graph = GraphForge::new(root.path().join("project").to_str()).unwrap();
     adopt(&mut graph, ID, version);
+    graph
+        .execute("CREATE (:Thing {value:'retained fork value'})")
+        .unwrap();
     let (_, version) = create_branch(&mut graph, "main", current());
     (root, graph, version)
 }
@@ -108,13 +114,27 @@ fn refused(hub: &LoopbackHub, graph: &GraphForge, args: &PublishArgs) -> (String
     assert_eq!(error_code(&error), "hub.publish.id_taken", "{error}");
     let text = error.to_string();
     assert_eq!(crate::error_exit_code(&error), 2);
-    assert!(!text.contains(SERVER_TEXT));
+    for json in [false, true] {
+        let mut rendered = Vec::new();
+        crate::write_runtime_error(&error, json, &mut rendered, &[]).unwrap();
+        let rendered = String::from_utf8(rendered).unwrap();
+        assert!(rendered.contains(SERVER_TEXT));
+        assert!(!rendered.contains(&secret));
+        if json {
+            let value: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+            assert_eq!(
+                value["error"]["details"]["semantic_code"],
+                "hub.publish.id_taken"
+            );
+        }
+    }
+    assert!(text.contains(SERVER_TEXT));
     assert!(!text.contains(&secret));
     (text, secret)
 }
 
 #[test]
-fn sync_and_async_refusals_persist_filtered_metadata_and_client_owned_guidance() {
+fn sync_and_async_refusals_preserve_hub_and_client_guidance_with_verified_receipts() {
     for asynchronous in [false, true] {
         let mut config = ReferenceHubConfig {
             base_url: HUB.into(),
@@ -208,6 +228,25 @@ fn regenerated_head_publishes_without_its_colliding_ancestor_and_guides_old_vers
     assert_eq!(old_composition.modules.len(), 1);
     assert_eq!(old_composition.modules[0].ontology_id, ID);
     assert_eq!(old_composition.modules[0].version, "2");
+    // Retain the complete source for the later Project restore. A Branch
+    // restore intentionally preserves the active ontology composition.
+    let restore_source = Uuid::now_v7();
+    let capture = graph
+        .prepare_research_version(PrepareResearchVersionRequest {
+            operation_uuid: Uuid::now_v7(),
+            version_uuid: restore_source,
+            context_uuid: Uuid::now_v7(),
+            created_at: 2,
+            required_versions: BTreeSet::new(),
+            label: None,
+            description: None,
+            author: None,
+            committer: None,
+        })
+        .unwrap();
+    graph
+        .commit_research_version_operation(capture, &CancellationToken::new())
+        .unwrap();
     let id = ItemId::parse_reference(ID).unwrap();
     let (text, _) = refused(&hub, &graph, &arguments);
     assert!(text.contains(&format!("gf ontology regenerate-id {id}")));
@@ -235,6 +274,15 @@ fn regenerated_head_publishes_without_its_colliding_ancestor_and_guides_old_vers
     let modules = graph.ontology_modules().unwrap();
     assert_eq!(modules.len(), 1);
     let new = modules[0].id.clone();
+    let source = graphforge_discovery::OntologyForkOrigin::from(&old);
+    let document = graph
+        .inspect_ontology_module(&ModuleSelector::Exact(new.clone()))
+        .unwrap()
+        .doc;
+    assert_eq!(document.forked_from, Some(source.clone()));
+    assert_eq!(document.label.as_deref(), Some("Authored things"));
+    assert_eq!(document.description.as_deref(), Some("Exact source text."));
+    assert_eq!(document.license.as_deref(), Some("MIT OR  Apache-2.0"));
     assert_eq!(new.ontology_id, new_id.to_uri());
     assert_eq!(new.authored_version, old.authored_version);
     assert_ne!(new.canonical_digest, old.canonical_digest);
@@ -247,6 +295,36 @@ fn regenerated_head_publishes_without_its_colliding_ancestor_and_guides_old_vers
         outcome.published.unwrap().version_uuid,
         replacement.version_uuid
     );
+    let summary = super::credit::served_summary(&hub, "curate/refused");
+    assert_eq!(
+        summary.facts.ontology_composition.unwrap().modules[0].forked_from,
+        Some(source.clone())
+    );
+    let clone_root = tempfile::tempdir().unwrap();
+    let clone_path = clone_root.path().join("fork");
+    clone_into(&hub, "curate/refused", &clone_path, Some("main"), None);
+    for _ in 0..2 {
+        let reopened = GraphForge::new(clone_path.to_str()).unwrap();
+        assert_eq!(
+            reopened
+                .inspect_ontology_module(&ModuleSelector::Exact(new.clone()))
+                .unwrap()
+                .doc
+                .forked_from,
+            Some(source.clone())
+        );
+        let values = reopened.execute("MATCH (n:Thing) RETURN n.value").unwrap();
+        assert_eq!(values.batches[0].num_rows(), 1);
+        assert_eq!(
+            values.batches[0]
+                .column(0)
+                .as_any()
+                .downcast_ref::<arrow::array::StringArray>()
+                .unwrap()
+                .value(0),
+            "retained fork value"
+        );
+    }
     let (manifest, lineage) = served_lineage(&hub, "curate/refused");
     let published = &manifest.ontology.as_ref().unwrap().modules;
     assert_eq!(published.len(), 1);
@@ -274,16 +352,24 @@ fn regenerated_head_publishes_without_its_colliding_ancestor_and_guides_old_vers
 
     // Restore the authored composition through the native facade, preserving
     // private refusal metadata and retained research history.
+    let source = graph.research_version(restore_source).unwrap();
     graph
-        .delete_ontology_module(
-            &ModuleDeleteRequest {
-                authority: authority(&graph),
-                selector: ModuleSelector::Exact(new),
+        .commit_research_version_operation(
+            ResearchOperation {
+                operation_uuid: Uuid::now_v7(),
+                expected_generation_uuid: generation(&graph),
+                mutation: ResearchMutation::RestoreProject {
+                    context_uuid: source.context_uuid,
+                    source_version: source.version_uuid,
+                    version_uuid: Uuid::now_v7(),
+                    created_at: 3,
+                    author: None,
+                    committer: None,
+                },
             },
-            None,
+            &CancellationToken::new(),
         )
         .unwrap();
-    assert_eq!(adopt(&mut graph, ID, "2"), old);
     let path = graph.path().unwrap().to_owned();
     drop(graph);
     let graph = GraphForge::new(path.to_str()).unwrap();
@@ -379,6 +465,7 @@ fn malformed_details_credential_echo_and_unrelated_ids_never_authorize_receipts(
             owner: None,
             publish_as_owner: None,
         }],
+        SERVER_TEXT,
     );
     assert_eq!(core_error_code(&error), "hub.publish.invalid_input");
     assert!(graph.id_taken_receipt(ID).unwrap().is_none());

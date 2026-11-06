@@ -222,12 +222,12 @@ fn verify_downloads(hub: &LoopbackHub, root: &Path, id: &OntologyModuleId, docum
         cancelled: None,
     })
     .unwrap();
-    assert_eq!(&resolved.module, id);
+    assert_eq!(resolved.module(), id);
     assert_eq!(
-        serde_json::from_slice::<OntologyDoc>(&resolved.document).unwrap(),
+        serde_json::from_slice::<OntologyDoc>(resolved.document()).unwrap(),
         *document
     );
-    assert!(!resolved.report.bytes_by_kind.contains_key("graph-data"));
+    assert!(!resolved.report().bytes_by_kind.contains_key("graph-data"));
 }
 
 #[test]

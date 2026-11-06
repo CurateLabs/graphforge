@@ -186,13 +186,20 @@ pub struct SummaryOntologyModule {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "typescript", tsify(optional))]
     pub license: Option<String>,
+    /// Exact immediate fork source, projected from authenticated module bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "typescript", tsify(optional))]
+    pub forked_from: Option<crate::OntologyForkOrigin>,
 }
 
 impl SummaryOntologyModule {
     /// Whether this module requires the module metadata capability.
     #[must_use]
     pub fn has_metadata(&self) -> bool {
-        self.label.is_some() || self.description.is_some() || self.license.is_some()
+        self.label.is_some()
+            || self.description.is_some()
+            || self.license.is_some()
+            || self.forked_from.is_some()
     }
 }
 
@@ -629,6 +636,10 @@ fn validate_facts(facts: &SummaryFacts, limits: DiscoveryLimits) -> Result<(), D
             module.description.as_deref(),
             module.license.as_deref(),
         )?;
+        if let Some(origin) = &module.forked_from {
+            origin.validate()?;
+            check_identity_text(&origin.id, &origin.version, "forked_from", limits)?;
+        }
         for (field, value) in [
             ("label", module.label.as_deref()),
             ("description", module.description.as_deref()),

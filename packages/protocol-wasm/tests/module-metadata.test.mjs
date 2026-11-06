@@ -5,7 +5,7 @@ import { protocol, readJson } from "./support.mjs";
 
 const fixture = ["tests", "fixtures", "hub", "generated", "v1"];
 
-test("a declared module license is committed by WASM summary binding", () => {
+test("module license and fork provenance are committed by WASM summary binding", () => {
   const summary = readJson(
     ...fixture,
     "objects",
@@ -13,6 +13,11 @@ test("a declared module license is committed by WASM summary binding", () => {
   );
   const manifest = readJson(...fixture, "manifest.json");
   summary.facts.ontology_composition.modules[0].license = "MIT OR Apache-2.0";
+  summary.facts.ontology_composition.modules[0].forked_from = {
+    id: "https://graphforge.sh/ont_aaaaaaaaaaaaaaaa",
+    version: "source-1",
+    digest: `sha256:${"a".repeat(64)}`,
+  };
   summary.requirements.push({
     capability: "ontology-module-metadata",
     major: 1,
@@ -31,11 +36,23 @@ test("a declared module license is committed by WASM summary binding", () => {
   manifest.summary.summary_digest = validated.digest;
   protocol.bind_summary(manifest, bytes);
 
-  summary.facts.ontology_composition.modules[0].license = "BSD-3-Clause";
-  const forged = protocol.validate_summary(summary);
-  assert.notEqual(forged.digest, validated.digest);
-  assert.throws(
-    () => protocol.bind_summary(manifest, forged.canonical_json),
-    ({ code }) => code === "integrity_failure",
-  );
+  for (const [field, value] of [
+    ["license", "BSD-3-Clause"],
+    [
+      "forked_from",
+      {
+        ...summary.facts.ontology_composition.modules[0].forked_from,
+        version: "forged",
+      },
+    ],
+  ]) {
+    const tampered = structuredClone(summary);
+    tampered.facts.ontology_composition.modules[0][field] = value;
+    const forged = protocol.validate_summary(tampered);
+    assert.notEqual(forged.digest, validated.digest);
+    assert.throws(
+      () => protocol.bind_summary(manifest, forged.canonical_json),
+      ({ code }) => code === "integrity_failure",
+    );
+  }
 });

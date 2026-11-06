@@ -29,6 +29,10 @@ Branch in this order:
 4. Exit code — a coarse fallback documented below.
 
 Never branch on `error.message`: it is diagnostic text, not a contract.
+Hub publish refusals include the fixed client code line followed by `Hub message:`
+and, when present, `Hub reason:` in this field, just as plain output does.
+Server prose is bounded and normalized to one terminal-safe line; credentials,
+bearer values and URLs are redacted.
 
 ## Envelope shapes
 

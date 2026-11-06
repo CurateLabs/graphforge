@@ -293,6 +293,7 @@ jobs:
           cargo nextest run --locked --no-fail-fast -p graphforge-api --no-default-features -E 'not binary(bdd)'
           cargo test --locked -p graphforge-api --no-default-features --test bdd
           cargo test --locked -p graphforge-api --no-default-features --doc
+          cargo check --locked -p graphforge-api --no-default-features --features portable,discovery --lib
           cargo nextest run --locked --no-fail-fast -p graphforge-exec --no-default-features --features algorithms-core
           cargo test --locked -p graphforge-exec --no-default-features --features algorithms-core --doc
 

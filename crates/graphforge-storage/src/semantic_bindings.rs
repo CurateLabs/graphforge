@@ -1324,6 +1324,7 @@ mod tests {
             label: None,
             description: None,
             license: None,
+            forked_from: None,
             ontology_id: "https://example.test/core".into(),
             version: version.into(),
             entity_types: vec![EntityTypeDef {

@@ -237,13 +237,16 @@ repository.
 
 ### Errors
 
-Every non-OAuth error body is `{code, message}` with optional `items` only for
-`id_taken`. `message` is a fixed string
-chosen by the Hub; it never echoes request input, tokens, or upload URLs. `gf
-publish` classifies a failure only from a parsed `{code, message}` body and
-prints its own text, so a Hub message never reaches CLI output and a bare
-status (for example a proxy's `409`) is a transport failure, never a publish
-outcome. `GF_IDEMPOTENCY_CONFLICT` exits 1, `internal` and
+Every non-OAuth error body is `{code, message}` with optional typed `reason`
+and `items` only for `id_taken`. The Hub must never echo request input, tokens,
+or upload URLs in `message`. `gf publish` classifies a failure only from a
+strictly parsed, bounded body, validating code/reason consistency and the
+negotiated HTTP status contract.
+It prints its fixed code line followed by the bounded, terminal-safe Hub message
+and optional reason, in plain text and in JSON's `error.message`. Request
+credentials, bearer values and URLs are redacted before display. A bare status
+(for example a proxy's `409`) is a transport failure, never a publish outcome.
+`GF_IDEMPOTENCY_CONFLICT` exits 1, `internal` and
 transport failures (`hub.network`) exit 3, and every other code exits 2 with the
 `hub.publish.*` code as the JSON `semantic_code`; an unsafe Hub, OAuth, or upload
 URL is `hub.unsafe_location`.
