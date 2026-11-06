@@ -415,6 +415,19 @@ fn verification_url(value: &str) -> Result<Url, GfError> {
     crate::hub_http::validate_url(&checked)?;
     Ok(url)
 }
+/// Select a bounded, display-safe HTTPS approval link. A complete link must
+/// share the plain link's origin; authorization providers may differ from Hub.
+pub(crate) fn verification_link(plain: &str, complete: Option<&str>) -> Result<Url, GfError> {
+    let link = verification_url(plain)?;
+    let complete = complete.map(verification_url).transpose()?;
+    if complete
+        .as_ref()
+        .is_some_and(|complete| complete.origin() != link.origin())
+    {
+        return Err(denied("verification links must share an origin"));
+    }
+    Ok(complete.unwrap_or(link))
+}
 fn login(
     store: &dyn Store,
     transport: &dyn Transport,
@@ -445,24 +458,16 @@ fn login(
     {
         return Err(denied("invalid verification code"));
     }
-    let link = verification_url(&device.verification_uri)?;
-    let complete = device
-        .verification_uri_complete
-        .as_deref()
-        .map(verification_url)
-        .transpose()?;
-    if complete
-        .as_ref()
-        .is_some_and(|complete| complete.origin() != link.origin())
-    {
-        return Err(denied("verification links must share an origin"));
-    }
+    let link = verification_link(
+        &device.verification_uri,
+        device.verification_uri_complete.as_deref(),
+    )?;
     writeln!(output, "Open {link} and enter code {}", device.user_code)
         .map_err(|_| denied("cannot write verification instructions"))?;
     output
         .flush()
         .map_err(|_| denied("cannot write verification instructions"))?;
-    open(complete.as_ref().unwrap_or(&link));
+    open(&link);
     let deadline = clock().saturating_add(device.expires_in.min(900));
     let mut interval = device.interval.clamp(1, 60);
     loop {
@@ -495,7 +500,7 @@ fn login(
         }
     }
 }
-fn browser(url: &Url) {
+pub(crate) fn browser(url: &Url) {
     #[cfg(target_os = "macos")]
     let _ = std::process::Command::new("open").arg(url.as_str()).spawn();
     #[cfg(target_os = "windows")]

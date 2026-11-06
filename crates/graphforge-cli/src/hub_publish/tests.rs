@@ -38,6 +38,7 @@ use hub_listing::serve_lineage;
 mod remote_fetch;
 mod rewrite_prune;
 mod selection;
+mod standalone_ontology;
 mod tags;
 mod visibility;
 use credit::edit_by;

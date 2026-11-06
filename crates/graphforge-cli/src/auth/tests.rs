@@ -121,6 +121,10 @@ fn login_polls_pending_slow_down_and_saves_one_atomic_pair() {
     );
     assert_eq!(opened.borrow()[0].query(), Some("user_code=ABCD-EFGH"));
     let output = String::from_utf8(output).unwrap();
+    assert_eq!(
+        output,
+        "Open https://api.workos.com/device?user_code=ABCD-EFGH and enter code ABCD-EFGH\n"
+    );
     for secret in ["device-secret", "access-secret", "refresh-secret"] {
         assert!(!output.contains(secret));
     }
@@ -131,6 +135,35 @@ fn login_polls_pending_slow_down_and_saves_one_atomic_pair() {
             .borrow()
             .iter()
             .all(|r| Url::parse(&r.url).unwrap().origin() == origin(DEFAULT_HUB).unwrap().origin())
+    );
+}
+#[test]
+fn login_without_complete_link_prints_and_opens_plain_link() {
+    let mut response = device();
+    response
+        .as_object_mut()
+        .unwrap()
+        .remove("verification_uri_complete");
+    let mock = Mock::new(vec![
+        (200, response),
+        (200, tokens("access-secret", "refresh-secret")),
+    ]);
+    let mut output = Vec::new();
+    let opened = RefCell::new(Vec::new());
+    login(
+        &MemoryStore::default(),
+        &mock,
+        &origin(DEFAULT_HUB).unwrap(),
+        &mut output,
+        &|_| {},
+        &|| 100,
+        &|url| opened.borrow_mut().push(url.to_string()),
+    )
+    .unwrap();
+    assert_eq!(*opened.borrow(), ["https://api.workos.com/device"]);
+    assert_eq!(
+        String::from_utf8(output).unwrap(),
+        "Open https://api.workos.com/device and enter code ABCD-EFGH\n"
     );
 }
 #[test]
