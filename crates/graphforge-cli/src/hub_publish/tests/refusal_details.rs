@@ -191,6 +191,40 @@ fn parsed_refusal_prose_cannot_inject_lines_terminal_controls_or_credentials() {
 }
 
 #[test]
+fn redirect_refusals_redact_request_credentials_in_plain_and_json() {
+    let History { root, graph, .. } = history();
+    drop(graph);
+    let hub = LoopbackHub::start();
+    for json in [false, true] {
+        for status in [301, 302, 303, 307, 308] {
+            let credential = token(&hub, "curate/claims");
+            let secret = credential.expose().to_owned();
+            hub.inject(Fault::Refuse(response(
+                status,
+                "auth_denied",
+                None,
+                &secret,
+            )));
+            let run = invoke(&hub, &root.path().join("project"), json, credential);
+            assert_eq!(run.exit_code, 2);
+            let stderr = String::from_utf8(run.stderr).unwrap();
+            assert!(
+                !stderr.contains(&secret),
+                "status {status} leaked a credential"
+            );
+            assert!(stderr.contains("[redacted]"));
+            if json {
+                let value: serde_json::Value = serde_json::from_str(&stderr).unwrap();
+                assert_eq!(
+                    value["error"]["details"]["semantic_code"],
+                    "hub.publish.auth_denied"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn invalid_bodies_and_contradictory_statuses_preserve_network_failure_contract() {
     let History { root, graph, .. } = history();
     drop(graph);
@@ -236,6 +270,24 @@ fn invalid_bodies_and_contradictory_statuses_preserve_network_failure_contract()
                 );
             }
         }
+    }
+}
+
+#[test]
+fn unexpected_status_refusal_bodies_redact_publish_and_preview_credentials() {
+    let request = HubRequest::new(HubMethod::Post, "https://hub.test/control")
+        .with_header("authorization", "Bearer private-token")
+        .with_header("x-vercel-protection-bypass", "private-bypass");
+    for status in [200, 201, 202, 204, 301, 302, 303, 307, 308, 401, 500] {
+        let safe = refusals::sanitize_response(
+            response(status, "auth_denied", None, "private-token private-bypass"),
+            &request,
+        )
+        .unwrap();
+        let text = hub_failure(&safe).to_string();
+        assert!(!text.contains("private-token"), "status {status}");
+        assert!(!text.contains("private-bypass"), "status {status}");
+        assert!(text.contains("[redacted]"));
     }
 }
 

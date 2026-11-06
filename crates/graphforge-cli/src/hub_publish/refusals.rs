@@ -82,9 +82,7 @@ pub(super) fn sanitize_response(
     mut response: HubResponse,
     request: &super::HubRequest,
 ) -> Result<HubResponse, GfError> {
-    if response.status >= 400
-        && let Ok(mut body) = body(&response)
-    {
+    if let Ok(mut body) = body(&response) {
         let secrets: Vec<&str> = [
             request
                 .header("authorization")
@@ -104,7 +102,7 @@ pub(super) fn sanitize_response(
 #[derive(Default)]
 pub(super) struct Capture {
     version: Cell<Option<Uuid>>,
-    items: RefCell<Option<Vec<IdTakenItem>>>,
+    items: RefCell<Option<(Vec<IdTakenItem>, String)>>,
 }
 
 impl Capture {
@@ -144,17 +142,36 @@ impl Capture {
             {
                 return Err(network("Hub refusal metadata contains credential material"));
             }
-            self.items.replace(Some(items));
+            let message = message(&body.message, &[token.expose(), bypass.unwrap_or("")]);
+            self.items.replace(Some((items, message)));
         }
         Ok(())
     }
 
-    pub(super) fn take(&self) -> Option<(Uuid, Vec<IdTakenItem>)> {
-        Some((self.version.get()?, self.items.take()?))
+    pub(super) fn take(&self) -> Option<(Uuid, Vec<IdTakenItem>, String)> {
+        let version = self.version.get()?;
+        let (items, message) = self.items.take()?;
+        Some((version, items, message))
     }
 }
 
-pub(super) fn record(graph: &GraphForge, version: Uuid, items: &[IdTakenItem]) -> GfError {
+/// Add the already sanitized Hub guidance to the local recovery outcome. Server
+/// prose remains ephemeral; only verified refusal items are written to disk.
+pub(super) fn record(
+    graph: &GraphForge,
+    version: Uuid,
+    items: &[IdTakenItem],
+    message: &str,
+) -> GfError {
+    match record_items(graph, version, items) {
+        GfError::Validation(detail) => {
+            GfError::Validation(format!("{detail}\nHub message: {message}"))
+        }
+        error => error,
+    }
+}
+
+fn record_items(graph: &GraphForge, version: Uuid, items: &[IdTakenItem]) -> GfError {
     let inventory = || -> Result<BTreeSet<(ItemKind, String)>, GfError> {
         let mut ids = BTreeSet::new();
         for entry in graph

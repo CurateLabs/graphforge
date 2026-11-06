@@ -2357,9 +2357,9 @@ fn publish_with_operation_report(
     let captured = refusals::Capture::default();
     let result = publish_inner(transport, graph, args, environment, &captured, report);
     if result.is_err()
-        && let Some((version, items)) = captured.take()
+        && let Some((version, items, message)) = captured.take()
     {
-        return Err(refusals::record(graph, version, &items));
+        return Err(refusals::record(graph, version, &items, &message));
     }
     result
 }
