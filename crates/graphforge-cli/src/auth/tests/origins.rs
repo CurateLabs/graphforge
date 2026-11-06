@@ -2,24 +2,45 @@
 use super::*;
 use std::collections::BTreeMap;
 
+#[derive(Clone, Copy, PartialEq)]
+enum AdvisoryFailure {
+    Lock,
+    Read,
+    Write,
+    Delete,
+}
+
 #[derive(Default)]
 struct Origins {
     values: RefCell<BTreeMap<String, String>>,
     reads: RefCell<Vec<String>>,
+    failure: Cell<Option<AdvisoryFailure>>,
 }
 impl Store for Origins {
-    fn lock(&self, _: &str) -> Result<Box<dyn StoreLock + '_>, GfError> {
+    fn lock(&self, key: &str) -> Result<Box<dyn StoreLock + '_>, GfError> {
+        if key == LAST_LOGIN_ORIGIN && self.failure.get() == Some(AdvisoryFailure::Lock) {
+            return Err(denied("advisory metadata unavailable"));
+        }
         Ok(Box::new(()))
     }
     fn read(&self, key: &str) -> Result<Option<String>, SavedCredentialError> {
         self.reads.borrow_mut().push(key.into());
+        if key == LAST_LOGIN_ORIGIN && self.failure.get() == Some(AdvisoryFailure::Read) {
+            return Err(SavedCredentialError::Unavailable);
+        }
         Ok(self.values.borrow().get(key).cloned())
     }
     fn write(&self, key: &str, value: &str) -> Result<(), GfError> {
+        if key == LAST_LOGIN_ORIGIN && self.failure.get() == Some(AdvisoryFailure::Write) {
+            return Err(denied("advisory metadata unavailable"));
+        }
         self.values.borrow_mut().insert(key.into(), value.into());
         Ok(())
     }
     fn delete(&self, key: &str) -> Result<(), GfError> {
+        if key == LAST_LOGIN_ORIGIN && self.failure.get() == Some(AdvisoryFailure::Delete) {
+            return Err(denied("advisory metadata unavailable"));
+        }
         self.values.borrow_mut().remove(key);
         Ok(())
     }
@@ -126,4 +147,46 @@ fn unsafe_saved_metadata_is_not_printable_as_a_hub_origin() {
     }
     store.write(LAST_LOGIN_ORIGIN, &"x".repeat(2049)).unwrap();
     assert!(last_login_origin_from(&store).is_err());
+}
+
+#[test]
+fn advisory_metadata_failure_does_not_change_committed_login_or_logout() {
+    for failure in [
+        AdvisoryFailure::Lock,
+        AdvisoryFailure::Read,
+        AdvisoryFailure::Write,
+        AdvisoryFailure::Delete,
+    ] {
+        let store = Origins::default();
+        store.failure.set(Some(failure));
+        let hub = origin("https://hub.example").unwrap();
+        let provider = Mock::new(vec![
+            (200, device()),
+            (200, tokens("access-secret", "refresh-secret")),
+        ]);
+        let time = Cell::new(100);
+        let mut output = Vec::new();
+        login(
+            &store,
+            &provider,
+            &hub,
+            &mut output,
+            &|delay| time.set(time.get() + delay.as_secs()),
+            &|| time.get(),
+            &|_| {},
+        )
+        .unwrap();
+        let key = hub.origin().ascii_serialization();
+        let values = store.values.borrow();
+        let session = values.get(&key).expect("authoritative credentials saved");
+        assert!(session.contains("access-secret"));
+        assert!(session.contains("refresh-secret"));
+        drop(values);
+        let provider = Mock::new(vec![(204, serde_json::json!({}))]);
+        logout(&store, &provider, &hub, time.get()).unwrap();
+        assert!(!store.values.borrow().contains_key(&key));
+        let output = String::from_utf8(output).unwrap();
+        assert!(!output.contains("access-secret"));
+        assert!(!output.contains("refresh-secret"));
+    }
 }

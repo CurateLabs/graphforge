@@ -308,7 +308,9 @@ fn validate_secret(value: &str) -> Result<(), GfError> {
 fn save(store: &dyn Store, hub: &Url, response: HubResponse, now: u64) -> Result<Session, GfError> {
     let _guard = store.lock(&hub.origin().ascii_serialization())?;
     let session = save_unlocked(store, hub, response, now)?;
-    record_login_origin(store, hub)?;
+    // The authoritative session is committed. A failed advisory hint must not
+    // turn that successful login into an authentication failure.
+    let _ = record_login_origin(store, hub);
     Ok(session)
 }
 fn save_unlocked(
@@ -536,7 +538,8 @@ fn logout(
         Err(error) => Err(error.into()),
     };
     store.delete(&hub.origin().ascii_serialization())?;
-    clear_login_origin(store, hub)?;
+    // Credentials are removed; an advisory hint cannot change that outcome.
+    let _ = clear_login_origin(store, hub);
     revoked
 }
 #[derive(Deserialize)]
