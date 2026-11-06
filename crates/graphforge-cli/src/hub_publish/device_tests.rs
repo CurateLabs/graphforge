@@ -158,13 +158,15 @@ fn unsafe_device_links_are_refused_before_display_open_or_poll() {
 fn device_link_is_shown_before_open_and_denial_still_stops_polling() {
     let transport = DeviceHub::new(Some((PLAIN.into(), Some(COMPLETE.into()))));
     let notices = RefCell::new(Vec::new());
-    struct Writer<'a>(&'a RefCell<Vec<u8>>);
+    let pending = RefCell::new(Vec::new());
+    struct Writer<'a>(&'a RefCell<Vec<u8>>, &'a RefCell<Vec<u8>>);
     impl Write for Writer<'_> {
         fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            self.0.borrow_mut().extend_from_slice(bytes);
+            self.1.borrow_mut().extend_from_slice(bytes);
             Ok(bytes.len())
         }
         fn flush(&mut self) -> std::io::Result<()> {
+            self.0.borrow_mut().append(&mut self.1.borrow_mut());
             Ok(())
         }
     }
@@ -183,7 +185,7 @@ fn device_link_is_shown_before_open_and_denial_still_stops_polling() {
                 );
                 transport.hub.advance_clock(5);
             },
-            notices: &mut Writer(&notices),
+            notices: &mut Writer(&notices, &pending),
             resolution: None,
         },
         &|url| {
