@@ -1,7 +1,7 @@
 {
   "contract_version": 1,
   "scope": "Rust non-Cypher public release surface",
-  "public_method_digest": "5e8c91ec16bbc239ceee6d0a1569e6a2b4ff3e9d68b664a8a2b0a6239fe694f9",
+  "public_method_digest": "4cc4f74144e3ef1f33984082346844212d5f19990f7d9af3ab3a6bf024f2d80e",
   "method_policy": {
     "receiver_defaults": {
       "PortableImportResult": "release-tested",
@@ -1110,6 +1110,7 @@
         "GraphForge.record_item_id_regeneration",
         "GraphForge.record_publish_id_taken",
         "GraphForge.regenerate_item_id",
+        "GraphForge.fork_ontology_id",
         "GraphForge.adopt_resolved_ontology_module"
       ],
       "test_refs": [
@@ -1188,6 +1189,14 @@
         {
           "path": "crates/graphforge-api/tests/discovery_ontology_module.rs",
           "symbol": "repeat_adoption_from_republished_package_preserves_first_source_and_generation"
+        },
+        {
+          "path": "crates/graphforge-cli/tests/fork_ontology_id.rs",
+          "symbol": "parsed_cli_forks_without_receipt_preserving_project_and_replays_after_later_work"
+        },
+        {
+          "path": "crates/graphforge-cli/src/hub_publish/tests/explicit_fork.rs",
+          "symbol": "receipt_free_fork_publishes_authenticated_provenance_and_clones_real_values"
         }
       ]
     },

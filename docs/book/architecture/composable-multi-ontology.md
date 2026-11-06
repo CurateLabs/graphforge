@@ -161,8 +161,27 @@ immutable in this operation. Ownership
 MUST NOT be inferred from the document, a caller-supplied owner, or a new Hub
 lookup in place of the receipt.
 
+`gf ontology fork-id <ontology-id> --operation-uuid UUID [--yes]` invokes
+`GraphForge::fork_ontology_id` for explicit local fork intent. It accepts a bare
+permanent ontology ID or its canonical URI and uses the same confirmation and
+JSON result conventions. It requires an adopted module and a writable Project;
+no publish attempt or refusal receipt is needed. Bridge IDs, arbitrary IRIs,
+historical views, missing adopted modules and nil operation UUIDs are refused.
+This command neither creates a refusal receipt nor changes existing receipts,
+including owner publication hints. `regenerate-id` retains its exact receipt and
+owner-refusal requirements.
+
+Both entry points share the native private draft, materialization, field-history
+preservation and atomic ResearchOperation publication. The durable local intent
+binds the authorization mode, permanent source ID, source generation, selected
+Branch and source Version before publication. Explicit authority has a required
+`explicit_ontology_fork` marker; absent, null or malformed authority is invalid.
+Historical receipt bindings retain their original serialization and intent
+digest. Reusing a UUID across the two entry points MUST fail, including after
+reopen. Neither command can rebase a pending operation onto later work.
+
 Core MUST mint a fresh ID of the same kind and atomically publish the rewrite
-as a new Version and head. Every adopted version under the refused permanent
+as a new Version and head. Every adopted version under the source permanent
 ID MUST receive that same replacement ID in one operation, preserving each
 authored version and the exact digest-derived identity of every reference.
 A module rewrite MUST reuse the module-migration

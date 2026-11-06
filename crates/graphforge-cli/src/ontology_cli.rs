@@ -69,6 +69,8 @@ pub(crate) enum OntologyCommand {
     /// Replace a refused permanent ID and its references in a new Version.
     // Like module fetch, this is outside the four-surface multi-ontology contract.
     RegenerateId(RegenerateIdArgs),
+    /// Fork an adopted permanent ontology ID without a publication refusal.
+    ForkId(RegenerateIdArgs),
     /// Manage independently identified ontology modules.
     Module {
         #[command(subcommand)]
@@ -93,7 +95,7 @@ pub(crate) enum OntologyCommand {
 
 #[derive(Args)]
 pub(crate) struct RegenerateIdArgs {
-    /// Permanent module or bridge ID (bare token or GraphForge URI).
+    /// Permanent GraphForge ID (bare or URI); fork-id requires an ontology ID.
     id: String,
     /// Caller-owned operation identity; reuse it to replay the original result.
     #[arg(long)]
@@ -497,6 +499,17 @@ pub(crate) fn run_ontology(
     match command {
         OntologyCommand::Adopt(_) => {
             unreachable!("high-level adoption is dispatched before opening a Project")
+        }
+        OntologyCommand::ForkId(args) => {
+            let operation_uuid = canonical_uuid(&args.operation_uuid)?;
+            if !args.yes {
+                confirm_regeneration()?;
+            }
+            emit(
+                &graph.fork_ontology_id(&args.id, operation_uuid, None)?,
+                json_output,
+                output,
+            )
         }
         OntologyCommand::RegenerateId(args) => {
             let operation_uuid = canonical_uuid(&args.operation_uuid)?;

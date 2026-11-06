@@ -8,7 +8,10 @@ use sha2::Digest as _;
 pub(crate) struct RegenerationBinding {
     pub operation_uuid: Uuid,
     pub old_id: String,
-    pub refusal: ItemIdRefusalReceipt,
+    // Legacy receipt bytes stay identical. Explicit authority has a required
+    // distinct wire marker: missing, null or malformed authority fails closed.
+    #[serde(with = "authorization")]
+    pub refusal: Option<ItemIdRefusalReceipt>,
     pub replacement: ItemIdRegeneration,
     pub source_generation: Uuid,
     pub branch_uuid: Uuid,
@@ -17,6 +20,49 @@ pub(crate) struct RegenerationBinding {
     // Persist the exact prepared native request before attempting publication.
     // It may change after an aborted private preparation, never after a commit.
     pub request_sha256: Option<[u8; 32]>,
+}
+
+mod authorization {
+    use super::*;
+
+    #[derive(Serialize, Deserialize)]
+    #[serde(untagged)]
+    enum Wire {
+        Refusal(ItemIdRefusalReceipt),
+        Explicit(Explicit),
+    }
+    #[derive(Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Explicit {
+        mode: Mode,
+    }
+    #[derive(Serialize, Deserialize)]
+    enum Mode {
+        #[serde(rename = "explicit_ontology_fork")]
+        ExplicitOntologyFork,
+    }
+
+    #[allow(clippy::ref_option)] // serde field adapters receive a reference to the field
+    pub(super) fn serialize<S: serde::Serializer>(
+        value: &Option<ItemIdRefusalReceipt>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        match value {
+            Some(receipt) => receipt.serialize(serializer),
+            None => Explicit {
+                mode: Mode::ExplicitOntologyFork,
+            }
+            .serialize(serializer),
+        }
+    }
+    pub(super) fn deserialize<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<ItemIdRefusalReceipt>, D::Error> {
+        Ok(match Wire::deserialize(deserializer)? {
+            Wire::Refusal(receipt) => Some(receipt),
+            Wire::Explicit(_) => None,
+        })
+    }
 }
 impl RegenerationBinding {
     pub(crate) fn digest(&self) -> Result<[u8; 32], GfError> {
@@ -81,6 +127,11 @@ fn recover(graph: &GraphForge, store: &Store, document: &mut Document) -> Result
             continue;
         }
         authenticate(binding, native)?;
+        if binding.refusal.is_none() {
+            // Explicit forks acknowledge through the permanent native receipt;
+            // they never manufacture or alter publication refusal evidence.
+            continue;
+        }
         let receipt = document
             .receipts
             .get_mut(&binding.old_id)
@@ -108,19 +159,56 @@ impl Store {
     }
 }
 
+fn regeneration_refusal<'a>(
+    document: &'a Document,
+    id: &ItemId,
+    explicit_fork: bool,
+) -> Result<Option<&'a ItemIdRefusalReceipt>, GfError> {
+    if explicit_fork {
+        return Ok(None);
+    }
+    let receipt = document
+        .receipts
+        .get(id.as_str())
+        .ok_or_else(|| invalid("regeneration requires an id_taken receipt for that exact ID"))?;
+    if receipt.item.publish_as_owner == Some(true) {
+        return Err(invalid(
+            "publish as the owning organization instead of regenerating this ID",
+        ));
+    }
+    if receipt.regenerated.is_some() {
+        return Err(conflict());
+    }
+    Ok(Some(receipt))
+}
+
 impl RegenerationGuard {
     pub(crate) fn begin(
         graph: &GraphForge,
         id: &ItemId,
         operation_uuid: Uuid,
-        prepare: impl FnOnce(&ItemIdRefusalReceipt) -> Result<RegenerationBinding, GfError>,
+        explicit_fork: bool,
+        prepare: impl FnOnce(Option<&ItemIdRefusalReceipt>) -> Result<RegenerationBinding, GfError>,
     ) -> Result<Self, GfError> {
-        let store = Store::open(graph, false)?.ok_or_else(|| {
-            invalid("regeneration requires an id_taken receipt for that exact ID")
-        })?;
+        // Validate a first explicit fork before creating any private state.
+        // Existing bindings must replay before inspecting today's composition.
+        let mut prepare = Some(prepare);
+        let mut prepared = None;
+        let store = match Store::open(graph, false)? {
+            Some(store) => store,
+            None if explicit_fork => {
+                prepared = Some(prepare.take().expect("unused preparation")(None)?);
+                Store::open(graph, true)?.expect("created store")
+            }
+            None => {
+                return Err(invalid(
+                    "regeneration requires an id_taken receipt for that exact ID",
+                ));
+            }
+        };
         let mut document = store.read_recovered(graph)?;
         if let Some(binding) = document.regenerations.get(&operation_uuid) {
-            if binding.old_id != id.as_str() {
+            if binding.old_id != id.as_str() || binding.refusal.is_none() != explicit_fork {
                 return Err(conflict());
             }
             return Ok(Self {
@@ -181,24 +269,17 @@ impl RegenerationGuard {
                 }
             }
         }
-        let receipt = document.receipts.get(id.as_str()).ok_or_else(|| {
-            invalid("regeneration requires an id_taken receipt for that exact ID")
-        })?;
-        if receipt.item.publish_as_owner == Some(true) {
-            return Err(invalid(
-                "publish as the owning organization instead of regenerating this ID",
-            ));
-        }
-        if receipt.regenerated.is_some() {
-            return Err(conflict());
-        }
+        let receipt = regeneration_refusal(&document, id, explicit_fork)?;
         if document.regenerations.len() == MAX_ID_TAKEN_ITEMS {
             return Err(GfError::Api {
                 code: graphforge_core::ApiErrorCode::ResourceLimit,
                 message: "local ID regeneration binding capacity is full".into(),
             });
         }
-        let binding = prepare(receipt)?;
+        let binding = match prepared {
+            Some(binding) => binding,
+            None => prepare.take().expect("unused preparation")(receipt)?,
+        };
         document
             .regenerations
             .insert(operation_uuid, binding.clone());

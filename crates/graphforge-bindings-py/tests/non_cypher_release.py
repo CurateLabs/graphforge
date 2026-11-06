@@ -27,8 +27,8 @@ production_source = runpy.run_path(str(Path(__file__).with_name("native_sources.
     "production_source"
 ]
 PYO3_SOURCE = ROOT / "crates/graphforge-bindings-py/src/lib.rs"
-EXPECTED_RUST_DIGEST = "5e8c91ec16bbc239ceee6d0a1569e6a2b4ff3e9d68b664a8a2b0a6239fe694f9"
-EXPECTED_RELEASE_DIGEST = "12c857a98301a4ee261400842654924cdadddd9583c04ec1af06c33d63416773"
+EXPECTED_RUST_DIGEST = "4cc4f74144e3ef1f33984082346844212d5f19990f7d9af3ab3a6bf024f2d80e"
+EXPECTED_RELEASE_DIGEST = "d2f899a20fd8cb8c7663219232a2d89299e91220620d4baf87ef391ef0ce2f19"
 
 PYTHON_ONLY_METHODS = frozenset(
     {
@@ -290,7 +290,7 @@ def _classification_report() -> dict[str, object]:
         for group in manifest["method_evidence_groups"].values()
         for method_id in group["ids"]
     }
-    assert len(release_methods) == 369
+    assert len(release_methods) == 370
     assert _digest(release_methods) == EXPECTED_RELEASE_DIGEST
     assert set(EVIDENCE) == set(manifest["method_evidence_groups"])
 
@@ -407,6 +407,9 @@ def _classification_report() -> dict[str, object]:
             assert python_id not in python_methods
             classification = "not-exposed"
             reason = "private native receipt admission is owned by CLI publication and regeneration"
+        elif rust_id == "GraphForge.fork_ontology_id":
+            classification = "not-exposed"
+            reason = "explicit ontology identity forks are owned by the Rust facade and CLI"
         elif rust_id == "GraphForge.execute_saved_query_json":
             classification = "not-exposed"
             reason = (

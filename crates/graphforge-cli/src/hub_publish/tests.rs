@@ -30,6 +30,7 @@ mod core_version_warning;
 mod credit;
 mod defaults;
 mod device_expiry;
+mod explicit_fork;
 mod hub_listing;
 mod hub_selection;
 mod id_taken;
