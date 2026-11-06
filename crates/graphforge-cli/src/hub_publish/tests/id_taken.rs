@@ -434,7 +434,7 @@ fn malformed_details_credential_echo_and_unrelated_ids_never_authorize_receipts(
         capture.observe(&response, &token, None).unwrap();
         assert!(capture.take().is_none());
         assert_ne!(
-            core_error_code(&hub_failure(&response)),
+            core_error_code(&hub_failure(&response, &Url::parse(HUB).unwrap())),
             "hub.publish.id_taken"
         );
     }

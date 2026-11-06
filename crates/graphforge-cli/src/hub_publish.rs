@@ -834,6 +834,21 @@ fn publish_error(code: HubPublishErrorCode, detail: &str) -> GfError {
     }
 }
 
+/// Origin comes from the request, independently of untrusted refusal prose.
+fn publish_error_at(code: HubPublishErrorCode, detail: &str, url: &Url) -> GfError {
+    if code == HubPublishErrorCode::AuthDenied {
+        publish_error(
+            code,
+            &format!(
+                "{detail}\nRequest origin: {}",
+                url.origin().ascii_serialization()
+            ),
+        )
+    } else {
+        publish_error(code, detail)
+    }
+}
+
 const fn code_detail(code: HubPublishErrorCode) -> &'static str {
     match code {
         HubPublishErrorCode::AuthDenied => "the Hub refused the publish credential",
@@ -868,7 +883,7 @@ const fn code_detail(code: HubPublishErrorCode) -> &'static str {
 ///
 /// A status without a publish error body (for example from a proxy) never
 /// implies a publish outcome such as an idempotency conflict.
-fn hub_failure(response: &HubResponse) -> GfError {
+fn hub_failure(response: &HubResponse, url: &Url) -> GfError {
     match refusals::body(response) {
         Ok(body) => {
             let mut detail = format!(
@@ -880,7 +895,7 @@ fn hub_failure(response: &HubResponse) -> GfError {
                 detail.push_str("\nHub reason: ");
                 detail.push_str(reason.as_str());
             }
-            publish_error(body.code, &detail)
+            publish_error_at(body.code, &detail, url)
         }
         Err(error) => error,
     }
@@ -1007,7 +1022,7 @@ impl Hub<'_> {
                     let etag = response.header("etag").map(str::to_owned);
                     return Ok(Some((response.body, etag)));
                 }
-                _ => return Err(hub_failure(&response)),
+                _ => return Err(hub_failure(&response, &url)),
             }
         }
         unreachable!("the redirect loop returns on its last hop")
@@ -1102,8 +1117,12 @@ fn obtain_token_with_opener(
         return Ok(token.clone());
     }
     let authorization = &capabilities.authorization;
+    let device_url = Url::parse(&authorization.device_authorization_endpoint)
+        .map_err(|_| validation("hub.unsafe_location", "OAuth endpoint is invalid"))?;
+    let token_url = Url::parse(&authorization.token_endpoint)
+        .map_err(|_| validation("hub.unsafe_location", "OAuth endpoint is invalid"))?;
     let response = hub.oauth(
-        &authorization.device_authorization_endpoint,
+        device_url.as_str(),
         &[
             (
                 "client_id",
@@ -1113,41 +1132,34 @@ fn obtain_token_with_opener(
         ],
     )?;
     if response.status != 200 {
-        return Err(publish_error(
+        return Err(publish_error_at(
             HubPublishErrorCode::AuthDenied,
             "device authorization was refused",
+            &device_url,
         )
         .into());
     }
+    let invalid_device = || {
+        publish_error(
+            HubPublishErrorCode::InvalidInput,
+            "device authorization response is malformed",
+        )
+    };
     let device: DeviceAuthorizationResponse =
-        serde_json::from_slice(&response.body).map_err(|_| {
-            publish_error(
-                HubPublishErrorCode::InvalidInput,
-                "device authorization response is malformed",
-            )
-        })?;
+        serde_json::from_slice(&response.body).map_err(|_| invalid_device())?;
     let display_safe =
         |text: &str| !text.is_empty() && text.len() <= 512 && !text.chars().any(char::is_control);
     if device.expires_in == 0
         || !display_safe(&device.user_code)
         || !display_safe(&device.verification_uri)
     {
-        return Err(publish_error(
-            HubPublishErrorCode::InvalidInput,
-            "device authorization response is malformed",
-        )
-        .into());
+        return Err(invalid_device().into());
     }
     let link = crate::auth::verification_link(
         &device.verification_uri,
         device.verification_uri_complete.as_deref(),
     )
-    .map_err(|_| {
-        publish_error(
-            HubPublishErrorCode::InvalidInput,
-            "device authorization response is malformed",
-        )
-    })?;
+    .map_err(|_| invalid_device())?;
     let deadline =
         (environment.clock)() + Duration::from_secs(device.expires_in.min(MAX_DEVICE_WAIT_SECONDS));
     let io = |error: std::io::Error| GfError::Storage(error.to_string());
@@ -1174,7 +1186,7 @@ fn obtain_token_with_opener(
             return Err(DeviceAuthorizationEnd::deadline(device.expires_in));
         }
         let response = hub.oauth(
-            &authorization.token_endpoint,
+            token_url.as_str(),
             &[
                 ("grant_type", DEVICE_CODE_GRANT_TYPE),
                 ("device_code", &device.device_code),
@@ -1185,7 +1197,7 @@ fn obtain_token_with_opener(
             ],
         )?;
         match DevicePoll::from_response(response.status, &response.body)
-            .map_err(|error| protocol(&error))?
+            .map_err(|error| publish_error_at(error.code, error.detail(), &token_url))?
         {
             DevicePoll::Granted(token) => return Ok(token),
             DevicePoll::Expired => {
@@ -1438,7 +1450,7 @@ fn read_private_context(
     let url = endpoint(&hub.base, "publish/context");
     let response = hub.control(HubRequest::new(HubMethod::Get, url.as_str()), token)?;
     if response.status != 200 {
-        return Err(hub_failure(&response));
+        return Err(hub_failure(&response, &url));
     }
     if response.body.len() > MAX_CONTROL_RESPONSE_BYTES {
         return Err(network("publish context exceeds response limit"));
@@ -2108,9 +2120,11 @@ fn upload(
     if target.received >= target.length {
         return Ok(());
     }
-    let head = hub.data(&HubRequest::new(HubMethod::Head, &target.upload_url))?;
+    let url = Url::parse(&target.upload_url)
+        .map_err(|_| validation("hub.unsafe_location", "upload URL is invalid"))?;
+    let head = hub.data(&HubRequest::new(HubMethod::Head, url.as_str()))?;
     if head.status != 200 {
-        return Err(hub_failure(&head));
+        return Err(hub_failure(&head, &url));
     }
     let mut offset = upload_offset(&head, target.length)?;
     let mut resynchronized = false;
@@ -2154,7 +2168,7 @@ fn upload(
                 offset = upload_offset(&response, target.length)?;
                 resynchronized = true;
             }
-            _ => return Err(hub_failure(&response)),
+            _ => return Err(hub_failure(&response, &url)),
         }
     }
     Ok(())
@@ -2257,7 +2271,7 @@ fn poll_commit(
     while std::time::Instant::now() < deadline {
         let response = hub.control(HubRequest::new(HubMethod::Get, url.as_str()), token)?;
         if response.status != 200 {
-            return Err(hub_failure(&response));
+            return Err(hub_failure(&response, &url));
         }
         let status =
             OperationStatus::from_json(&response.body).map_err(|error| protocol(&error))?;
@@ -2283,9 +2297,9 @@ fn poll_commit(
 
 // ------------------------------------------------------------------ publish
 
-fn session_response(response: &HubResponse) -> Result<SessionResponse, GfError> {
+fn session_response(response: &HubResponse, url: &Url) -> Result<SessionResponse, GfError> {
     if !(200..300).contains(&response.status) {
-        return Err(hub_failure(response));
+        return Err(hub_failure(response, url));
     }
     serde_json::from_slice(&response.body).map_err(|_| {
         publish_error(
@@ -2542,7 +2556,7 @@ fn publish_inner(
             }
         }
         404 => {}
-        _ => return Err(hub_failure(&status).into()),
+        _ => return Err(hub_failure(&status, &status_url).into()),
     }
 
     let published = read_current()?;
@@ -2706,7 +2720,7 @@ fn publish_inner(
             visibility.as_str(),
         );
     }
-    let opened = session_response(&hub.control(open_request, &token)?)?;
+    let opened = session_response(&hub.control(open_request, &token)?, &sessions)?;
     let (session_id, uploads) = match opened {
         SessionResponse::Complete { receipt } => {
             check_receipt(&receipt, &identity, operation_uuid)?;
@@ -2772,16 +2786,19 @@ fn publish_inner(
     let commit_url = endpoint(&base, &format!("publish/sessions/{session_id}/commit"));
     let manifest_value = serde_json::to_value(&snapshot.manifest)
         .map_err(|error| GfError::Execution(error.to_string()))?;
-    let committed = session_response(&hub.control(
-        HubRequest::new(HubMethod::Post, commit_url.as_str()).with_json(&CommitRequest {
-            rewrite: args.rewrite,
-            prune: args.prune,
-            manifest: manifest_value,
-            refs: snapshot.refs.clone(),
-            expected_revision,
-        }),
-        &token,
-    )?)?;
+    let committed = session_response(
+        &hub.control(
+            HubRequest::new(HubMethod::Post, commit_url.as_str()).with_json(&CommitRequest {
+                rewrite: args.rewrite,
+                prune: args.prune,
+                manifest: manifest_value,
+                refs: snapshot.refs.clone(),
+                expected_revision,
+            }),
+            &token,
+        )?,
+        &commit_url,
+    )?;
     let receipt = match committed {
         SessionResponse::Complete { receipt } => receipt,
         SessionResponse::Pending {

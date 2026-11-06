@@ -2,6 +2,7 @@ use super::*;
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 
+mod denial_origin;
 mod device_expiry;
 mod discovery;
 mod origins;

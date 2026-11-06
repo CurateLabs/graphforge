@@ -244,7 +244,11 @@ strictly parsed, bounded body, validating code/reason consistency and the
 negotiated HTTP status contract.
 It prints its fixed code line followed by the bounded, terminal-safe Hub message
 and optional reason, in plain text and in JSON's `error.message`. Request
-credentials, bearer values and URLs are redacted before display. A bare status
+credentials, bearer values and URLs are redacted before display. Authentication
+refusals also name the actual request origin in text and JSON, including a
+redirected read or an upload capability's origin; paths, queries, fragments and
+userinfo are never included. Formatting uses only existing request context and
+does not acquire or refresh credentials. A bare status
 (for example a proxy's `409`) is a transport failure, never a publish outcome.
 `GF_IDEMPOTENCY_CONFLICT` exits 1, `internal` and
 transport failures (`hub.network`) exit 3, and every other code exits 2 with the

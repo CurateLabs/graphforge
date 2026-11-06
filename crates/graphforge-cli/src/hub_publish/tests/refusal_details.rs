@@ -283,7 +283,7 @@ fn unexpected_status_refusal_bodies_redact_publish_and_preview_credentials() {
             &request,
         )
         .unwrap();
-        let text = hub_failure(&safe).to_string();
+        let text = hub_failure(&safe, &Url::parse(HUB).unwrap()).to_string();
         assert!(!text.contains("private-token"), "status {status}");
         assert!(!text.contains("private-bypass"), "status {status}");
         assert!(text.contains("[redacted]"));
@@ -305,7 +305,7 @@ fn preview_secret_redaction_and_message_budget_use_only_existing_request_values(
         &request,
     )
     .unwrap();
-    let text = hub_failure(&safe).to_string();
+    let text = hub_failure(&safe, &Url::parse(HUB).unwrap()).to_string();
     assert!(text.contains("Create Public first"));
     assert!(!text.contains("private-token"));
     assert!(!text.contains("private-bypass"));
@@ -321,8 +321,33 @@ fn preview_secret_redaction_and_message_budget_use_only_existing_request_values(
     )
     .unwrap();
     assert!(refusals::body(&long).unwrap().message.len() <= 4096);
-    let error = hub_failure(&long);
+    let error = hub_failure(&long, &Url::parse(HUB).unwrap());
     assert_eq!(core_error_code(&error), "hub.publish.entitlement_denied");
     assert!(error.to_string().contains("Create Public first."));
     assert_eq!(crate::error_exit_code(&error.into()), 2);
+}
+
+#[test]
+fn a_status_without_a_publish_error_body_is_a_hub_failure() {
+    for status in [401, 409, 412] {
+        let error = hub_failure(
+            &HubResponse {
+                status,
+                headers: vec![("content-type".into(), "text/html".into())],
+                body: b"<html>proxy error</html>".to_vec(),
+            },
+            &Url::parse(HUB).unwrap(),
+        );
+        assert_ne!(error.code(), "GF_IDEMPOTENCY_CONFLICT");
+        assert!(error.to_string().contains("hub.network"), "{error}");
+    }
+    let conflict = hub_failure(
+        &HubResponse {
+            status: 409,
+            headers: Vec::new(),
+            body: br#"{"code":"idempotency_conflict","message":"x"}"#.to_vec(),
+        },
+        &Url::parse(HUB).unwrap(),
+    );
+    assert_eq!(conflict.code(), "GF_IDEMPOTENCY_CONFLICT");
 }
