@@ -29,7 +29,7 @@ mod tests;
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ItemIdRegeneration {
-    /// New canonical bare permanent ID, of the refused item's kind.
+    /// New canonical bare permanent ID, of the source item's kind.
     pub id: String,
     /// Retained Version containing the replacement identity.
     pub version_uuid: Uuid,
@@ -224,25 +224,32 @@ fn validate_document(document: &Document) -> Result<(), GfError> {
     }
     let mut bound_ids = BTreeSet::new();
     for (operation, binding) in &document.regenerations {
-        binding.refusal.item.validate().map_err(storage)?;
         let old = parse_id(&binding.old_id)?;
         let new = parse_id(&binding.replacement.id)?;
+        if let Some(refusal) = &binding.refusal {
+            refusal.item.validate().map_err(storage)?;
+            if refusal.refused_version_uuid.is_nil()
+                || refusal.item.id != binding.old_id
+                || refusal.item.kind != old.kind()
+                || refusal.item.publish_as_owner == Some(true)
+                || refusal.regenerated.is_some()
+                || !document.receipts.contains_key(old.as_str())
+            {
+                return Err(invalid("local ID regeneration refusal binding is invalid"));
+            }
+        } else if old.kind() != ItemKind::OntologyModule {
+            return Err(invalid("explicit forks require a permanent ontology ID"));
+        }
         if operation.is_nil()
             || *operation != binding.operation_uuid
             || binding.source_generation.is_nil()
             || binding.branch_uuid.is_nil()
             || binding.source_version.is_nil()
-            || binding.refusal.refused_version_uuid.is_nil()
-            || binding.refusal.item.id != binding.old_id
-            || binding.refusal.item.kind != old.kind()
-            || binding.refusal.item.publish_as_owner == Some(true)
-            || binding.refusal.regenerated.is_some()
             || binding.replacement.version_uuid.is_nil()
             || old.kind() != new.kind()
             || old == new
             || old.as_str() != binding.old_id
             || new.as_str() != binding.replacement.id
-            || !document.receipts.contains_key(old.as_str())
             || !bound_ids.insert((&binding.old_id, binding.source_generation))
         {
             return Err(invalid("local ID regeneration binding is invalid"));

@@ -1,4 +1,4 @@
-//! Receipt-authorized identity rewriting, prepared privately and published once.
+//! Authorized identity rewriting, prepared privately and published once.
 use super::candidate::{bridge_id, cascade_bridge_identities, compile_candidate};
 use crate::{
     CancellationToken, GfError, GraphForge, ItemIdRegeneration, ModuleMigrationRequest,
@@ -47,15 +47,43 @@ impl GraphForge {
     /// stored routes, a new Version and the selected Branch head. History is
     /// immutable. Reuse the operation UUID to replay the same ID and Version,
     /// including after reopen, later work or restoration of older content.
-    #[allow(clippy::too_many_lines)] // authorization, native publication and error reconciliation form one operation
     pub fn regenerate_item_id(
         &mut self,
         id: &str,
         operation_uuid: Uuid,
         cancellation: Option<&CancellationToken>,
     ) -> Result<ItemIdRegeneration, GfError> {
+        self.rewrite_item_id(id, operation_uuid, cancellation, false)
+    }
+
+    /// Explicitly fork every adopted version of a permanent ontology ID.
+    /// Native adopted authority supplies each immediate exact `forked_from`
+    /// triple. No publication refusal is required or created. The operation
+    /// atomically preserves Project data and history using the regeneration
+    /// engine; reuse its UUID to replay the original ID and Version after reopen.
+    /// A pending operation stays bound to its source generation and Branch.
+    pub fn fork_ontology_id(
+        &mut self,
+        id: &str,
+        operation_uuid: Uuid,
+        cancellation: Option<&CancellationToken>,
+    ) -> Result<ItemIdRegeneration, GfError> {
+        self.rewrite_item_id(id, operation_uuid, cancellation, true)
+    }
+
+    #[allow(clippy::too_many_lines)] // authorization, native publication and reconciliation form one operation
+    fn rewrite_item_id(
+        &mut self,
+        id: &str,
+        operation_uuid: Uuid,
+        cancellation: Option<&CancellationToken>,
+        explicit_fork: bool,
+    ) -> Result<ItemIdRegeneration, GfError> {
         let id = ItemId::parse_reference(id)
             .map_err(|_| invalid("a permanent GraphForge item ID is required"))?;
+        if explicit_fork && id.kind() != ItemKind::OntologyModule {
+            return Err(invalid("explicit forks require a permanent ontology ID"));
+        }
         if operation_uuid.is_nil() {
             return Err(invalid("ID regeneration operation UUID must be non-nil"));
         }
@@ -65,10 +93,11 @@ impl GraphForge {
                 message: "historical views cannot regenerate IDs".into(),
             });
         }
-        let mut guard = RegenerationGuard::begin(self, &id, operation_uuid, |receipt| {
-            cancellation.map_or(Ok(()), CancellationToken::checkpoint)?;
-            self.prepare_regeneration_binding(&id, operation_uuid, receipt)
-        })?;
+        let mut guard =
+            RegenerationGuard::begin(self, &id, operation_uuid, explicit_fork, |receipt| {
+                cancellation.map_or(Ok(()), CancellationToken::checkpoint)?;
+                self.prepare_regeneration_binding(&id, operation_uuid, receipt)
+            })?;
         // Replay before reading current composition, Branch selection or source.
         if let Some(result) = guard.replay(self)? {
             return Ok(result);
@@ -196,7 +225,7 @@ impl GraphForge {
         &self,
         id: &ItemId,
         operation: Uuid,
-        refusal: &crate::ItemIdRefusalReceipt,
+        refusal: Option<&crate::ItemIdRefusalReceipt>,
     ) -> Result<RegenerationBinding, GfError> {
         let source = graphforge_storage::resolve_project_generation(
             self.resolved_generation.container_root(),
@@ -235,7 +264,7 @@ impl GraphForge {
         Ok(RegenerationBinding {
             operation_uuid: operation,
             old_id: id.as_str().into(),
-            refusal: refusal.clone(),
+            refusal: refusal.cloned(),
             replacement: ItemIdRegeneration {
                 id: replacement.as_str().into(),
                 version_uuid: Uuid::now_v7(),
@@ -569,3 +598,6 @@ fn hex(digest: &[u8; 32]) -> String {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod explicit_fork_tests;
