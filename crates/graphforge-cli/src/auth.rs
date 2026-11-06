@@ -1,4 +1,5 @@
 //! Browser sign-in with secrets held exclusively in the operating system vault.
+use crate::CliRuntimeError;
 use crate::hub_http::{DEFAULT_HUB, HubTransport, Transport, validation};
 use clap::{Args, Subcommand};
 use graphforge_api::GfError;
@@ -7,6 +8,56 @@ use serde::{Deserialize, Serialize};
 use std::io::{Read as _, Write};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use url::Url;
+
+/// Longest client wait, independently of the server code lifetime.
+pub(crate) const MAX_DEVICE_WAIT_SECONDS: u64 = 900;
+/// Bound each pause even when the server advertises a larger interval.
+pub(crate) const MAX_POLL_INTERVAL_SECONDS: u64 = 60;
+
+/// A terminal device-flow outcome, separate from malformed inputs and denial.
+#[derive(Debug)]
+pub(crate) struct DeviceAuthorizationEnd {
+    expires_in: u64,
+    wait_limit: bool,
+}
+impl DeviceAuthorizationEnd {
+    pub(crate) fn expired(expires_in: u64) -> CliRuntimeError {
+        CliRuntimeError::Authentication(Self {
+            expires_in,
+            wait_limit: false,
+        })
+    }
+    pub(crate) fn deadline(expires_in: u64) -> CliRuntimeError {
+        CliRuntimeError::Authentication(Self {
+            expires_in,
+            wait_limit: expires_in > MAX_DEVICE_WAIT_SECONDS,
+        })
+    }
+    pub(crate) fn semantic_code(&self) -> &'static str {
+        if self.wait_limit {
+            "hub.auth_wait_limit"
+        } else {
+            "hub.auth_expired"
+        }
+    }
+}
+impl std::fmt::Display for DeviceAuthorizationEnd {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.wait_limit {
+            write!(
+                formatter,
+                "device authorization stopped at the client wait limit of {MAX_DEVICE_WAIT_SECONDS} seconds"
+            )?;
+        } else {
+            formatter.write_str("device authorization expired")?;
+        }
+        write!(
+            formatter,
+            " (server-advertised code lifetime: {} seconds); run the same command again to request a new code",
+            self.expires_in
+        )
+    }
+}
 
 #[derive(Args)]
 pub(crate) struct AuthArgs {
@@ -436,7 +487,7 @@ fn login(
     wait: &dyn Fn(Duration),
     clock: &dyn Fn() -> u64,
     open: &dyn Fn(&Url),
-) -> Result<(), GfError> {
+) -> Result<(), CliRuntimeError> {
     let response = request(
         transport,
         hub,
@@ -447,34 +498,43 @@ fn login(
         None,
     )?;
     if response.status != 200 {
-        return Err(denied("device authorization was refused"));
+        return Err(denied("device authorization was refused").into());
     }
     let device: DeviceAuthorization = serde_json::from_slice(&response.body)
         .map_err(|_| denied("invalid device authorization response"))?;
     validate_secret(&device.device_code)?;
-    if device.user_code.is_empty()
+    if device.expires_in == 0
+        || device.user_code.is_empty()
         || device.user_code.len() > 128
         || device.user_code.chars().any(char::is_control)
     {
-        return Err(denied("invalid verification code"));
+        return Err(denied("invalid device authorization response").into());
     }
     let link = verification_link(
         &device.verification_uri,
         device.verification_uri_complete.as_deref(),
     )?;
-    writeln!(output, "Open {link} and enter code {}", device.user_code)
-        .map_err(|_| denied("cannot write verification instructions"))?;
+    writeln!(
+        output,
+        "Open {link} and enter code {} (code lifetime: {} seconds)",
+        device.user_code, device.expires_in
+    )
+    .map_err(|_| denied("cannot write verification instructions"))?;
     output
         .flush()
         .map_err(|_| denied("cannot write verification instructions"))?;
     open(&link);
-    let deadline = clock().saturating_add(device.expires_in.min(900));
-    let mut interval = device.interval.clamp(1, 60);
+    let deadline = clock().saturating_add(device.expires_in.min(MAX_DEVICE_WAIT_SECONDS));
+    let mut interval = device.interval.clamp(1, MAX_POLL_INTERVAL_SECONDS);
     loop {
-        if clock().saturating_add(interval) >= deadline {
-            return Err(denied("device authorization expired"));
+        let remaining = deadline.saturating_sub(clock());
+        if remaining == 0 {
+            return Err(DeviceAuthorizationEnd::deadline(device.expires_in));
         }
-        wait(Duration::from_secs(interval));
+        wait(Duration::from_secs(interval.min(remaining)));
+        if clock() >= deadline {
+            return Err(DeviceAuthorizationEnd::deadline(device.expires_in));
+        }
         let response = request(
             transport,
             hub,
@@ -495,8 +555,13 @@ fn login(
         let error: serde_json::Value = serde_json::from_slice(&response.body).unwrap_or_default();
         match error.get("error").and_then(serde_json::Value::as_str) {
             Some("authorization_pending") => {}
-            Some("slow_down") => interval = interval.saturating_add(5).min(60),
-            _ => return Err(denied("device authorization was denied or expired")),
+            Some("slow_down") => {
+                interval = interval.saturating_add(5).min(MAX_POLL_INTERVAL_SECONDS);
+            }
+            Some("expired_token") => {
+                return Err(DeviceAuthorizationEnd::expired(device.expires_in));
+            }
+            _ => return Err(denied("device authorization was denied").into()),
         }
     }
 }
@@ -579,7 +644,7 @@ fn verify_status(
     validate_secret(&status.principal_id)?;
     Ok(status)
 }
-fn run_inner(args: AuthArgs, json: bool, output: &mut dyn Write) -> Result<i32, GfError> {
+fn run_inner(args: AuthArgs, json: bool, output: &mut dyn Write) -> Result<i32, CliRuntimeError> {
     match args.command {
         AuthCommand::Login { hub, no_browser } => {
             let hub = origin(&hub)?;
@@ -1099,7 +1164,7 @@ pub(crate) fn run(
     json: bool,
     output: &mut dyn Write,
 ) -> Result<i32, crate::CliRuntimeError> {
-    run_inner(args, json, output).map_err(Into::into)
+    run_inner(args, json, output)
 }
 
 #[cfg(test)]

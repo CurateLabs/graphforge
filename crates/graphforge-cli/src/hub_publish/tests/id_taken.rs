@@ -99,6 +99,7 @@ fn refused(hub: &LoopbackHub, graph: &GraphForge, args: &PublishArgs) -> (String
     let mut environment = PublishEnvironment {
         bypass: None,
         credential: Credential::Token(token),
+        clock: &std::time::Instant::now,
         wait: &|_| panic!("small fixture must finish within one verification poll"),
         notices: &mut notices,
         resolution: None,
@@ -112,7 +113,6 @@ fn refused(hub: &LoopbackHub, graph: &GraphForge, args: &PublishArgs) -> (String
     .unwrap_err();
     assert_eq!(error_code(&error), "hub.publish.id_taken", "{error}");
     let text = error.to_string();
-    let error = crate::CliRuntimeError::Core(error);
     assert_eq!(crate::error_exit_code(&error), 2);
     for json in [false, true] {
         let mut rendered = Vec::new();
@@ -433,7 +433,10 @@ fn malformed_details_credential_echo_and_unrelated_ids_never_authorize_receipts(
         };
         capture.observe(&response, &token, None).unwrap();
         assert!(capture.take().is_none());
-        assert_ne!(error_code(&hub_failure(&response)), "hub.publish.id_taken");
+        assert_ne!(
+            core_error_code(&hub_failure(&response)),
+            "hub.publish.id_taken"
+        );
     }
     for (secret, bypass) in [
         (token.expose(), None),
@@ -464,6 +467,6 @@ fn malformed_details_credential_echo_and_unrelated_ids_never_authorize_receipts(
         }],
         SERVER_TEXT,
     );
-    assert_eq!(error_code(&error), "hub.publish.invalid_input");
+    assert_eq!(core_error_code(&error), "hub.publish.invalid_input");
     assert!(graph.id_taken_receipt(ID).unwrap().is_none());
 }

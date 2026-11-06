@@ -6,6 +6,7 @@ use super::{
     emit, idempotency_conflict, intent_digest, receipt_json, report_operation, resolve_branch,
     short,
 };
+use crate::CliRuntimeError;
 use crate::hub_clone::remote_read::{RemoteHead, RemoteRepository, RemoteRequest, read_remote};
 use crate::hub_http::Transport;
 use crate::hub_publish::PublishArgs;
@@ -32,7 +33,7 @@ pub(crate) fn run_remote(
     json_output: bool,
     output: &mut dyn Write,
     diagnostics: &mut crate::Diagnostics<'_>,
-) -> Result<(), GfError> {
+) -> Result<(), CliRuntimeError> {
     let path = crate::resolve_project_path(project, project_dir)?;
     let path = path
         .to_str()
@@ -57,14 +58,14 @@ pub(crate) fn run_remote_with(
     command: crate::Command,
     json_output: bool,
     output: &mut dyn Write,
-) -> Result<(), GfError> {
+) -> Result<(), CliRuntimeError> {
     match command {
         crate::Command::Push(args) => {
             let token = publish_token(&args.hub)?;
             push(transport, graph, &args, token, json_output, output)
         }
-        crate::Command::Pull(args) => pull(transport, graph, &args, json_output, output),
-        crate::Command::Log(args) => log_remote(transport, graph, &args, json_output, output),
+        crate::Command::Pull(args) => Ok(pull(transport, graph, &args, json_output, output)?),
+        crate::Command::Log(args) => Ok(log_remote(transport, graph, &args, json_output, output)?),
         _ => unreachable!("only Hub porcelain verbs are dispatched here"),
     }
 }
@@ -163,7 +164,7 @@ pub(crate) fn push(
     token: Option<PublishToken>,
     json_output: bool,
     output: &mut dyn Write,
-) -> Result<(), GfError> {
+) -> Result<(), CliRuntimeError> {
     let publish = push_args(&graph.research_version_retention()?, args)?;
     let (_, base) = crate::hub_http::parse_input(publish.repository()?)?;
     let bypass = crate::hub_http::DiscoveryCredentials::load(

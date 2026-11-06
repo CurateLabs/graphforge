@@ -29,6 +29,7 @@ mod composition_proof;
 mod core_version_warning;
 mod credit;
 mod defaults;
+mod device_expiry;
 mod hub_listing;
 mod hub_selection;
 mod id_taken;
@@ -567,7 +568,7 @@ fn token(hub: &LoopbackHub, repository: &str) -> PublishToken {
 
 /// Captured stdout and stderr of one publish, rendered as the CLI renders them.
 struct Run {
-    result: Result<PublishOutcome, GfError>,
+    result: Result<PublishOutcome, CliRuntimeError>,
     stdout: Vec<u8>,
     stderr: Vec<u8>,
 }
@@ -593,6 +594,7 @@ fn run_publish_with_bypass(
         let mut environment = PublishEnvironment {
             bypass,
             credential,
+            clock: &std::time::Instant::now,
             wait: &|_| panic!("no device flow expected"),
             notices: &mut stderr,
             resolution: None,
@@ -601,7 +603,7 @@ fn run_publish_with_bypass(
     };
     match &result {
         Ok(outcome) => write_outcome(outcome, true, &mut stdout).unwrap(),
-        Err(error) => crate::write_error(error, true, &mut stderr, &[]).unwrap(),
+        Err(error) => crate::write_runtime_error(error, true, &mut stderr, &[]).unwrap(),
     }
     Run {
         result,
@@ -623,10 +625,20 @@ fn publish_ok(hub: &LoopbackHub, graph: &GraphForge, args: &PublishArgs) -> Run 
     run
 }
 
-fn error_code(error: &GfError) -> String {
+fn error_code(error: &CliRuntimeError) -> String {
+    let mut rendered = Vec::new();
+    crate::write_runtime_error(error, true, &mut rendered, &[]).unwrap();
+    rendered_error_code(&rendered)
+}
+
+fn core_error_code(error: &GfError) -> String {
     let mut rendered = Vec::new();
     crate::write_error(error, true, &mut rendered, &[]).unwrap();
-    let value: serde_json::Value = serde_json::from_slice(&rendered).unwrap();
+    rendered_error_code(&rendered)
+}
+
+fn rendered_error_code(rendered: &[u8]) -> String {
+    let value: serde_json::Value = serde_json::from_slice(rendered).unwrap();
     value["error"]["details"]["semantic_code"]
         .as_str()
         .map_or_else(
@@ -1406,6 +1418,7 @@ fn a_slow_but_progressing_upload_succeeds_in_bounded_chunks() {
     let mut environment = PublishEnvironment {
         bypass: None,
         credential: Credential::Token(token(&hub, "curate/claims")),
+        clock: &std::time::Instant::now,
         wait: &|_| panic!("no device flow expected"),
         notices: &mut notices,
         resolution: None,
@@ -1444,8 +1457,18 @@ fn device_flow_waits_are_bounded_whatever_the_hub_advertises() {
         hub.advance_clock(60);
     });
     let error = result.unwrap_err();
-    assert_eq!(error_code(&error), "hub.publish.auth_denied", "{error}");
-    assert!(error.to_string().contains("fifteen minutes"), "{error}");
+    assert_eq!(error_code(&error), "hub.auth_wait_limit", "{error}");
+    assert_eq!(crate::error_exit_code(&error), 5);
+    assert!(
+        error
+            .to_string()
+            .contains("client wait limit of 900 seconds"),
+        "{error}"
+    );
+    assert!(
+        error.to_string().contains("code lifetime: 1000000 seconds"),
+        "{error}"
+    );
     assert!(waits.iter().all(|wait| *wait <= Duration::from_mins(1)));
     assert_eq!(waits.iter().sum::<Duration>(), Duration::from_mins(15));
 }
@@ -1486,7 +1509,13 @@ impl Write for Shared {
 
 fn user_code(notices: &Shared) -> String {
     let text = String::from_utf8(notices.0.borrow().clone()).unwrap();
-    text.rsplit_once("enter code ").unwrap().1.trim().to_owned()
+    text.rsplit_once("enter code ")
+        .unwrap()
+        .1
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .to_owned()
 }
 
 /// Run the device flow; `decide(poll_index, hub, user_code)` acts before each poll.
@@ -1494,8 +1523,13 @@ fn device_flow(
     hub: &LoopbackHub,
     graph: &GraphForge,
     decide: impl Fn(usize, &ReferenceHub, &str),
-) -> (Result<PublishOutcome, GfError>, Vec<Duration>, String) {
+) -> (
+    Result<PublishOutcome, CliRuntimeError>,
+    Vec<Duration>,
+    String,
+) {
     let notices = Shared::default();
+    let started = std::time::Instant::now();
     let waits = RefCell::new(Vec::new());
     let wait = |duration: Duration| {
         let index = waits.borrow().len();
@@ -1507,6 +1541,7 @@ fn device_flow(
         let mut environment = PublishEnvironment {
             bypass: None,
             credential: Credential::DeviceFlow,
+            clock: &|| started + waits.borrow().iter().sum::<Duration>(),
             wait: &wait,
             notices: &mut writer,
             resolution: None,
@@ -2247,7 +2282,7 @@ fn negotiated_chunk_budget_refuses_hostile_preferences_without_clamping() {
     assert_eq!(negotiated_chunk_size(&limits).unwrap(), 8 * 1024 * 1024);
     limits.preferred_chunk_bytes = Some(u64::MAX);
     assert_eq!(
-        error_code(&negotiated_chunk_size(&limits).unwrap_err()),
+        core_error_code(&negotiated_chunk_size(&limits).unwrap_err()),
         "hub.publish.invalid_input"
     );
     assert!(crate::hub_http::chunk_send_timeout(Duration::from_secs(u64::MAX), u64::MAX).is_err());
@@ -2283,7 +2318,7 @@ fn per_object_chunk_selection_overrides_the_hub_preference_with_the_same_budget(
     );
     target.chunk_bytes = Some(95 * 1024 * 1024 + 1);
     assert_eq!(
-        error_code(&upload_chunk_size(&capabilities, &target).unwrap_err()),
+        core_error_code(&upload_chunk_size(&capabilities, &target).unwrap_err()),
         "hub.publish.invalid_input"
     );
 }

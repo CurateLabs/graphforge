@@ -1156,3 +1156,24 @@ fn repository_move_rehomes_control_documents_without_rewriting_native_objects() 
     }
     assert!(hub.move_repository(&old, &new).is_err());
 }
+
+#[test]
+fn device_poll_preserves_expiry_as_a_terminal_outcome_separate_from_denial() {
+    for (error, expected) in [
+        ("expired_token", Some(DevicePoll::Expired)),
+        ("authorization_pending", Some(DevicePoll::Pending)),
+        ("slow_down", Some(DevicePoll::SlowDown)),
+        ("access_denied", None),
+        ("invalid_grant", None),
+    ] {
+        let result = DevicePoll::from_response(
+            400,
+            &serde_json::to_vec(&serde_json::json!({"error":error})).unwrap(),
+        );
+        if let Some(expected) = expected {
+            assert_eq!(result.unwrap(), expected);
+        } else {
+            assert_eq!(result.unwrap_err().code, HubPublishErrorCode::AuthDenied);
+        }
+    }
+}

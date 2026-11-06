@@ -41,7 +41,6 @@ fn invoke(
     )
     .unwrap_err();
     drop(diagnostics);
-    let error = crate::CliRuntimeError::Core(error);
     crate::write_runtime_error(&error, cli.json, &mut stderr, &[]).unwrap();
     crate::CliExecution {
         exit_code: crate::error_exit_code(&error),
@@ -323,7 +322,7 @@ fn preview_secret_redaction_and_message_budget_use_only_existing_request_values(
     .unwrap();
     assert!(refusals::body(&long).unwrap().message.len() <= 4096);
     let error = hub_failure(&long);
-    assert_eq!(error_code(&error), "hub.publish.entitlement_denied");
+    assert_eq!(core_error_code(&error), "hub.publish.entitlement_denied");
     assert!(error.to_string().contains("Create Public first."));
     assert_eq!(crate::error_exit_code(&error.into()), 2);
 }

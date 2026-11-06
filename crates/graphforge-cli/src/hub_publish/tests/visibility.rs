@@ -53,11 +53,12 @@ fn run(
     transport: &VisibilityTransport<'_>,
     graph: &GraphForge,
     args: &PublishArgs,
-) -> Result<PublishOutcome, GfError> {
+) -> Result<PublishOutcome, CliRuntimeError> {
     let mut notices = Vec::new();
     let mut environment = PublishEnvironment {
         bypass: None,
         credential: Credential::Token(token(transport.hub, "curate/claims")),
+        clock: &std::time::Instant::now,
         wait: &|_| panic!("explicit token needs no device flow"),
         notices: &mut notices,
         resolution: None,
@@ -255,7 +256,7 @@ fn private_plan_and_visibility_mismatch_refusals_upload_nothing() {
         );
         assert!(!error.to_string().contains("SECRET"));
         assert_eq!(
-            crate::error_exit_code(&crate::CliRuntimeError::Core(error)),
+            crate::error_exit_code(&error),
             2,
             "typed visibility and entitlement refusals retain the documented exit class"
         );
@@ -315,7 +316,7 @@ fn malformed_reason_or_wrong_mismatch_status_never_becomes_a_typed_refusal() {
             )
             .unwrap(),
         });
-        assert_eq!(error_code(&error), "hub.network");
+        assert_eq!(core_error_code(&error), "hub.network");
         assert!(!error.to_string().contains("SECRET"));
     }
     for (status, code, reason) in [
@@ -332,7 +333,7 @@ fn malformed_reason_or_wrong_mismatch_status_never_becomes_a_typed_refusal() {
             }))
             .unwrap(),
         });
-        assert_eq!(error_code(&error), "hub.network");
+        assert_eq!(core_error_code(&error), "hub.network");
         assert!(!error.to_string().contains("SECRET"));
     }
     // Preserve classification of legacy bodies without a negotiated reason.
@@ -341,5 +342,5 @@ fn malformed_reason_or_wrong_mismatch_status_never_becomes_a_typed_refusal() {
         headers: Vec::new(),
         body: br#"{"code":"entitlement_denied","message":"legacy"}"#.to_vec(),
     });
-    assert_eq!(error_code(&legacy), "hub.publish.entitlement_denied");
+    assert_eq!(core_error_code(&legacy), "hub.publish.entitlement_denied");
 }
