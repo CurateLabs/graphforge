@@ -70,7 +70,7 @@ pub(crate) struct AuthArgs {
 #[derive(Subcommand)]
 enum AuthCommand {
     /// Save a machine session for Hub access and publishing (primary sign-in path).
-    /// Uses the OS credential vault; requires the standalone native CLI.
+    /// Uses the OS credential vault.
     Login {
         #[arg(long, default_value = DEFAULT_HUB)]
         hub: String,
@@ -190,6 +190,10 @@ fn vault_error() -> GfError {
 }
 impl Store for Vault {
     fn lock(&self, origin: &str) -> Result<Box<dyn StoreLock + '_>, GfError> {
+        #[cfg(feature = "hub-test-support")]
+        if crate::hub_test_support::launcher::active() {
+            return Ok(Box::new(()));
+        }
         #[cfg(windows)]
         let parent = std::env::var_os("LOCALAPPDATA");
         #[cfg(not(windows))]
@@ -199,6 +203,10 @@ impl Store for Vault {
     }
 
     fn read(&self, origin: &str) -> Result<Option<String>, SavedCredentialError> {
+        #[cfg(feature = "hub-test-support")]
+        if crate::hub_test_support::launcher::active() {
+            return crate::hub_test_support::launcher::vault(origin, None).map_err(Into::into);
+        }
         match keyring::Entry::new("graphforge-cli", origin)
             .map_err(|error| vault_read_error(&error))?
             .get_password()
@@ -209,12 +217,20 @@ impl Store for Vault {
         }
     }
     fn write(&self, origin: &str, value: &str) -> Result<(), GfError> {
+        #[cfg(feature = "hub-test-support")]
+        if crate::hub_test_support::launcher::active() {
+            return crate::hub_test_support::launcher::vault(origin, Some(value)).map(|_| ());
+        }
         keyring::Entry::new("graphforge-cli", origin)
             .map_err(|_| vault_error())?
             .set_password(value)
             .map_err(|_| vault_error())
     }
     fn delete(&self, origin: &str) -> Result<(), GfError> {
+        #[cfg(feature = "hub-test-support")]
+        if crate::hub_test_support::launcher::active() {
+            return crate::hub_test_support::launcher::vault(origin, Some("")).map(|_| ());
+        }
         match keyring::Entry::new("graphforge-cli", origin)
             .map_err(|_| vault_error())?
             .delete_credential()
@@ -574,6 +590,10 @@ fn login(
     }
 }
 pub(crate) fn browser(url: &Url) {
+    #[cfg(feature = "hub-test-support")]
+    if crate::hub_test_support::launcher::active() {
+        return;
+    }
     #[cfg(target_os = "macos")]
     let _ = std::process::Command::new("open").arg(url.as_str()).spawn();
     #[cfg(target_os = "windows")]

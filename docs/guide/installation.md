@@ -35,6 +35,26 @@ does not guarantee backward compatibility, legacy APIs, or project migration.
 Use matching engine, bindings, CLI, and skills versions. Keep original source
 data and reproducible construction code when changing versions.
 
+## Native CLI release assets
+
+The Publish workflow builds `gf` archives for macOS arm64/x86_64, Linux
+arm64/x86_64 (glibc 2.17+), and Windows x86_64, alongside the package artifacts.
+A release containing this support attaches `gf-<version>-<Rust target>.tar.gz`
+(or `.zip` for Windows) and a matching `.sha256` file to its GitHub Release.
+Check the archive against that checksum, extract it, and place `gf` (`gf.exe`
+on Windows) in your executable path. For example, on Linux x86_64:
+
+```bash
+sha256sum --check "gf-<version>-x86_64-unknown-linux-gnu.tar.gz.sha256"
+tar -xzf "gf-<version>-x86_64-unknown-linux-gnu.tar.gz"
+./gf --version
+./gf auth login
+```
+
+Replace `<version>` with the downloaded release version. Older releases,
+including rc.7, have no native assets. Until a containing release is published,
+use the source build or the qualified packed candidate below.
+
 ## Evaluate the repaired packed candidate
 
 The selected source is

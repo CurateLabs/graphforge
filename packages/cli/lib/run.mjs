@@ -49,3 +49,27 @@ function write(stream, value) {
   }
   if (value.length > 0) stream.write(value);
 }
+
+/** Run the console launcher on the actual OS streams, returning its status. */
+export async function runProcess(args, { native } = {}) {
+  if (!Array.isArray(args) || args.some((arg) => typeof arg !== "string")) {
+    throw new TypeError("GraphForge CLI arguments must be an array of strings");
+  }
+  const binding = native ?? (await import("@curatelabs/graphforge"));
+  if (typeof binding.runCliProcess !== "function") {
+    throw new TypeError(
+      "@curatelabs/graphforge does not expose the runCliProcess contract",
+    );
+  }
+  const exitCode = await binding.runCliProcess([
+    "--skills-bundle-dir",
+    packagedSkills,
+    ...args,
+  ]);
+  if (!Number.isInteger(exitCode) || exitCode < 0 || exitCode > 255) {
+    throw new TypeError(
+      "@curatelabs/graphforge returned an invalid CLI exit code",
+    );
+  }
+  return exitCode;
+}

@@ -620,11 +620,46 @@ fn _cli_execute(
     )
 }
 
+/// Run a console invocation with inherited OS streams without exiting Python.
+#[pyfunction]
+fn _cli_execute_process(py: Python<'_>, args: Vec<String>) -> i32 {
+    py.detach(move || graphforge_cli::execute_process(args))
+}
+
 /// Start the compile-time-only native acceptance fixture on this thread.
 #[cfg(feature = "hub-test-support")]
 #[pyfunction]
 fn _test_hub_start() -> String {
     graphforge_cli::hub_test_support::start()
+}
+
+/// Retarget launcher requests to the test server, without using the OS vault.
+#[cfg(feature = "hub-test-support")]
+#[pyfunction]
+fn _test_launcher_start(port: u16) {
+    graphforge_cli::hub_test_support::launcher::start(port);
+}
+
+/// Serve one request with the existing native ReferenceHub acceptance fixture.
+#[cfg(feature = "hub-test-support")]
+#[pyfunction]
+fn _test_hub_exchange<'py>(
+    py: Python<'py>,
+    method: &str,
+    url: &str,
+    headers: Vec<(String, String)>,
+    body: Vec<u8>,
+) -> (u16, Vec<(String, String)>, Bound<'py, PyBytes>) {
+    let (status, headers, body) =
+        graphforge_cli::hub_test_support::exchange(method, url, headers, body);
+    (status, headers, PyBytes::new(py, &body))
+}
+
+/// Approve a device in the active ReferenceHub acceptance fixture.
+#[cfg(feature = "hub-test-support")]
+#[pyfunction]
+fn _test_hub_approve(user_code: &str) {
+    graphforge_cli::hub_test_support::approve(user_code);
 }
 
 /// Release the compile-time-only acceptance fixture on this thread.
@@ -647,9 +682,13 @@ fn _graphforge_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(_test_acquire_writer_hold, m)?)?;
     m.add_function(wrap_pyfunction!(_test_release_writer_hold, m)?)?;
     m.add_function(wrap_pyfunction!(_cli_execute, m)?)?;
+    m.add_function(wrap_pyfunction!(_cli_execute_process, m)?)?;
     #[cfg(feature = "hub-test-support")]
     {
         m.add_function(wrap_pyfunction!(_test_hub_start, m)?)?;
+        m.add_function(wrap_pyfunction!(_test_launcher_start, m)?)?;
+        m.add_function(wrap_pyfunction!(_test_hub_exchange, m)?)?;
+        m.add_function(wrap_pyfunction!(_test_hub_approve, m)?)?;
         m.add_function(wrap_pyfunction!(_test_hub_stop, m)?)?;
     }
     m.add_class::<GraphForge>()?;

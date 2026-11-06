@@ -114,8 +114,11 @@ capability; an unsupported flag fails before credentials or uploads. Publishing
 never changes an existing repository's visibility; change it on the Hub first.
 Omitting both flags preserves the Hub's default behavior.
 
-`gf publish` uses `GRAPHFORGE_HUB_PUBLISH_TOKEN` when supplied; otherwise it
-exchanges the saved session for the selected repository's publish capability.
+`gf auth login` saves the session that `gf push` and `gf publish` exchange for
+the selected repository's publish capability. Both npm console names (`gf` and
+`graphforge`) inherit the process streams, so approval instructions appear
+immediately and terminal input remains available. CI can supply
+`GRAPHFORGE_HUB_PUBLISH_TOKEN` instead; explicit tokens take precedence.
 The existing interactive device-flow fallback remains available on compatible
 publish servers. For a protected preview, pass
 `gf publish https://preview.example/OWNER/REPOSITORY --ref main --protection-bypass-env PREVIEW_BYPASS_SECRET`.

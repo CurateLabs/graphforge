@@ -92,12 +92,13 @@ also distinguish `private_requires_plan`, `visibility_required`, `storage_cap`,
 and mismatched code/reason pairs fail closed. CLI messages use fixed safe
 guidance selected by the validated code/reason, never untrusted server prose.
 
-Use the standalone native CLI's `gf auth login` as the primary sign-in path,
+Use `gf auth login` as the primary sign-in path with the native, PyPI or npm CLI,
 including before the first publication creates a repository. For a different
 Hub, use `gf auth login --hub https://hub.example`. Saved sessions use the operating system
-credential vault and exchange for a repository-scoped publish token. Captured
-binding invocations require an explicit environment token and never consult the
-vault or prompt. `gf auth login --no-browser` prints a verification link for
+credential vault and exchange for a repository-scoped publish token. PyPI ships
+both `gf` and `graphforge`; both package launchers inherit OS streams and display
+approval notices immediately. Captured programmatic binding invocations require
+an explicit environment token and never consult the vault or prompt. `gf auth login --no-browser` prints a verification link for
 approval on another device. With no saved session, an interactive native
 `gf publish` falls back to repository-scoped device approval (instructions on
 standard error). Both native sign-in paths print and open the code-prefilled
