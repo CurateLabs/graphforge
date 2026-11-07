@@ -1017,7 +1017,7 @@ fn apply_mutation(
     mutation: &ResearchMutation,
     registry: &mut ResearchRegistry,
 ) -> Result<Option<Uuid>, GfError> {
-    let version_uuid = match mutation {
+    Ok(match mutation {
         ResearchMutation::FetchRemoteBranch { fetch } => {
             Some(remote_fetch::apply(registry, fetch)?)
         }
@@ -1065,17 +1065,8 @@ fn apply_mutation(
             creation.as_ref(),
             version,
         )?),
-        ResearchMutation::AdoptBranchOntology {
-            version, workspace, ..
-        } => {
-            if workspace.content.source_version.is_some() {
-                return Err(invalid(
-                    "ontology adoption workspace must be complete CURRENT content",
-                ));
-            }
-            Some(branches::publish_selected(root, registry, version)?)
-        }
-        ResearchMutation::RegenerateItemId { version, .. } => {
+        ResearchMutation::AdoptBranchOntology { version, .. }
+        | ResearchMutation::RegenerateItemId { version, .. } => {
             Some(branches::publish_selected(root, registry, version)?)
         }
         ResearchMutation::RegisterGraphProjection { spec, selection } => {
@@ -1125,8 +1116,7 @@ fn apply_mutation(
             delete_version(registry, *version_uuid)?;
             None
         }
-    };
-    Ok(version_uuid)
+    })
 }
 
 fn retain_root(

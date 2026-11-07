@@ -8,6 +8,7 @@ use graphforge_storage::research_versions::{
     RegisterResearchVersion, ResearchMutation, prepare_branch_content, prepare_project_draft,
     read_research_registry,
 };
+use std::collections::BTreeSet;
 use uuid::Uuid;
 
 impl GraphForge {
@@ -74,7 +75,7 @@ impl GraphForge {
             source_generation_uuid: source.generation_uuid(),
             selection: None,
             source_version: None,
-            required_versions: Default::default(),
+            required_versions: BTreeSet::new(),
             label: None,
             description: None,
             created_at: (self.clock.lock().expect("clock lock poisoned"))()?,
