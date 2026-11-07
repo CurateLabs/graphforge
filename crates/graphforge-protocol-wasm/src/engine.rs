@@ -247,6 +247,27 @@ pub fn item_admission_requirements(bytes: &[u8]) -> Outcome<Vec<ItemClaimRequire
     graphforge_hub_publish::item_admission_requirements(&manifest).map_err(Into::into)
 }
 
+/// Retained coverage result, bound to canonical bytes; never current admission.
+#[derive(Debug, Serialize, Tsify)]
+pub struct RetainedManifestInspection {
+    /// Native current-or-retired-no-claims classification.
+    pub assessment: graphforge_hub_publish::RetainedManifestAssessment,
+    /// Canonical original controls; no missing producer is synthesized.
+    pub canonical_json: String,
+    /// SHA-256 of `canonical_json`, for the host's stored validator check.
+    pub digest: String,
+}
+
+/// Assess retained controls without refs, origin or publisher fabrication.
+pub fn assess_retained_manifest(bytes: &[u8]) -> Outcome<RetainedManifestInspection> {
+    let (assessment, canonical) = graphforge_hub_publish::assess_retained_manifest(bytes)?;
+    Ok(RetainedManifestInspection {
+        assessment,
+        digest: graphforge_hub_publish::sha256_digest(&canonical),
+        canonical_json: canonical_text(canonical)?,
+    })
+}
+
 /// Stateless admission; host facts must come from the live commit transaction.
 pub fn plan_item_admission(bytes: &[u8]) -> Outcome<ItemAdmissionPlan> {
     let input = ItemAdmissionInput::from_json(bytes)?;

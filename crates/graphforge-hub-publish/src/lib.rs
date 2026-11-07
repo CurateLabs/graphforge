@@ -33,7 +33,8 @@ pub use history::{
 pub use item_admission::{
     ItemAdmissionInput, ItemAdmissionPlan, ItemClaimAction, ItemClaimDecision, ItemClaimFact,
     ItemClaimRequirement, ItemClaimState, ItemExactTuple, ItemTupleFact, MAX_ITEM_ADMISSION_BYTES,
-    StableAccountId, item_admission_requirements, plan_item_admission,
+    RetainedManifestAssessment, StableAccountId, assess_retained_manifest,
+    item_admission_requirements, plan_item_admission,
 };
 pub use item_source::{
     ItemSourceChange, ItemSourceLifecycle, ItemSourceMutationFact, ItemSourcePrecondition,
