@@ -18,6 +18,7 @@ pub(crate) mod import_semantic;
 pub(crate) mod merge_domains;
 mod model;
 mod ontology;
+mod ontology_adoption;
 pub(crate) mod private_view;
 pub(crate) mod publication;
 mod reference;

@@ -18,6 +18,10 @@ pub(super) fn prepare(
             .versions
             .get(source_version)
             .ok_or_else(|| invalid("Project restore source is unavailable"))?,
+        ResearchMutation::AdoptBranchOntology { workspace, .. } => {
+            let snapshots = super::retained_content::inspect(root, workspace, None)?;
+            return replace_snapshots(root, workspace, snapshots, publication, true);
+        }
         ResearchMutation::RegenerateItemId { version, .. } => {
             return replace_workspace(root, version, registry, publication);
         }
@@ -40,6 +44,16 @@ fn replace_workspace(
     publication: &mut ProjectGenerationRequest,
 ) -> Result<Option<tempfile::TempDir>, GfError> {
     let snapshots = super::inspect_with_registry(root, version, registry)?;
+    replace_snapshots(root, version, snapshots, publication, false)
+}
+
+fn replace_snapshots(
+    root: &Path,
+    version: &ResearchVersionRecord,
+    snapshots: Vec<crate::ProjectParticipantSnapshot>,
+    publication: &mut ProjectGenerationRequest,
+    prepared: bool,
+) -> Result<Option<tempfile::TempDir>, GfError> {
     publication.participants.retain(|p| {
         history(&ResearchParticipantKey {
             capability: p.capability_id.clone(),
@@ -58,6 +72,14 @@ fn replace_workspace(
                 crate::GraphFilesParticipant::V1(_)
             ))
         })?;
+    let prepared_graph = prepared
+        .then(|| {
+            snapshots
+                .iter()
+                .find(|p| p.capability_id == "graph" && p.record_family_id == "files")
+                .cloned()
+        })
+        .flatten();
     for p in snapshots {
         publication.participants.push(ProjectParticipant {
             capability_id: p.capability_id,
@@ -99,14 +121,20 @@ fn replace_workspace(
     }
     let graph =
         tempfile::tempdir().map_err(|_| invalid("cannot allocate historical graph workspace"))?;
-    materialize_research_graph(root, version, graph.path())?;
+    if let Some(snapshot) = prepared_graph {
+        super::retained_content::materialize_graph_snapshot(root, &snapshot, graph.path())?;
+    } else {
+        materialize_research_graph(root, version, graph.path())?;
+    }
     Ok(Some(graph))
 }
 
 pub(super) fn replaces_project(mutation: &ResearchMutation) -> bool {
     matches!(
         mutation,
-        ResearchMutation::RestoreProject { .. } | ResearchMutation::RegenerateItemId { .. }
+        ResearchMutation::RestoreProject { .. }
+            | ResearchMutation::RegenerateItemId { .. }
+            | ResearchMutation::AdoptBranchOntology { .. }
     ) || matches!(mutation, ResearchMutation::ReviewProposal { destination: Some(version), .. }
             if version.content.source_version.is_none())
 }

@@ -33,7 +33,8 @@ pub struct OntologyAdoptionReceipt {
     pub project_generation_uuid: uuid::Uuid,
     /// Resulting complete composition fingerprint.
     pub composition_fingerprint: String,
-    /// True when this source and closure were already adopted.
+    /// True when adoption was already complete, including the selected head
+    /// when called through the publication owner.
     pub already_adopted: bool,
 }
 

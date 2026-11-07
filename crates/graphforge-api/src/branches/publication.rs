@@ -158,7 +158,8 @@ impl Command {
         mutation: ResearchMutation,
         cancellation: &CancellationToken,
     ) -> Result<ResearchOperationReceipt, GfError> {
-        let metadata_only = !matches!(&mutation,
+        let metadata_only = !matches!(&mutation, ResearchMutation::AdoptBranchOntology { .. })
+            && !matches!(&mutation,
             ResearchMutation::ReviewProposal { destination: Some(version), .. }
                 if version.content.source_version.is_none());
         let operation = ResearchOperation {

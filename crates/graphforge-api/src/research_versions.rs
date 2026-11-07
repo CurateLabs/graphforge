@@ -237,6 +237,14 @@ impl GraphForge {
         }
         if matches!(
             &operation.mutation,
+            ResearchMutation::AdoptBranchOntology { .. }
+        ) {
+            return Err(GfError::Validation(
+                "ontology adoption requires its verified native owner".into(),
+            ));
+        }
+        if matches!(
+            &operation.mutation,
             ResearchMutation::FetchRemoteBranch { .. }
         ) {
             return Err(GfError::Validation(
