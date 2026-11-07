@@ -14,6 +14,7 @@ artifacts. Select the runtime for your task before installing.
 | ---------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
 | First graph, Basic mixed-methods project, inquiry records, local notebook, ordinary save/reopen            | Published Python `graphforge==0.6.0rc7`; [Python setup](#python)                                  | The activated environment's `python`; `graphforge` for CLI tasks                                        |
 | Public Hub browse → clone → reopen → query                                                                 | The same published Python package; [Hub lesson](portable-projects.md#public-hub-launch-path)      | The activated environment's `graphforge` and `python`                                                   |
+| Hosted notebook session storage | [Qualified hosted candidate](use-a-notebook.md#select-the-hosted-runtime) | The notebook kernel after installing the identified wheel |
 | Node application using ordinary graph queries                                                              | Published `@curatelabs/graphforge@0.6.0-rc.7`; [Node setup](#node-and-typescript)                 | Your Node process; the explicitly pinned npm CLI when needed                                            |
 | Retained research with composed ontologies, composition reimport, or the advanced Hub continuation example | [Pinned repaired source build](#build-from-source), separate from registry rc.7                   | Its activated Python environment and absolute `GF_EVALUATION_CLI` path                                  |
 | Human device approval or saved-session publishing                                                          | The same standalone source-built CLI, an authorized repository and a conforming write-capable Hub | `"$GF_EVALUATION_CLI"`; [publishing prerequisites](portable-projects.md#publish-after-local-evaluation) |
@@ -162,6 +163,11 @@ containing release. They are absent from registry rc.7 and the older pinned
 source used below, so keep using its standalone CLI in that walkthrough.
 
 ## Durable storage
+
+The warning-based policy below requires the
+[qualified hosted candidate](use-a-notebook.md#select-the-hosted-runtime) or a
+later build containing that feature. Published rc7 and this page's older pinned
+source revision retain refusal on unproven filesystems.
 
 Start with `GraphForge()` if you only need a temporary graph. It runs the full
 engine in memory and loses its state when closed or when the process exits.

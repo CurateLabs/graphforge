@@ -6,8 +6,9 @@ or [Basic](overview.md#basic) for a guided first graph.
 
 Use a local Jupyter notebook to build a graph, run queries, and inspect tables.
 The first task is the same [basic citation graph](quickstart.md) used by scripts
-and agents. This guide uses the published `0.6.0rc7` Python package selected in
-[Installation](installation.md#choose-a-runtime-for-your-task).
+and agents. The local lesson uses the published `0.6.0rc7` Python package selected in
+[Installation](installation.md#choose-a-runtime-for-your-task). The
+[hosted example](#hosted-notebooks) selects its own qualified candidate below.
 
 ## Start a local notebook
 
@@ -78,6 +79,40 @@ open the same path and run the query again. Keep the Python source and any
 original input files needed to reproduce your work.
 
 ## Hosted notebooks
+
+### Select the hosted runtime
+
+This example uses the `0.6.0rc8` Linux x86-64 wheel from commit
+`7f69f389767d583c464d4be1698377232d2191ad`, the candidate exercised by the
+[Colab qualification receipt](https://github.com/CurateLabs/graphforge/issues/2332#issuecomment-6711013172).
+Published rc7 and the older [pinned source build](installation.md#build-from-source)
+predate `FilesystemDurabilityWarning` and refuse Colab's overlay filesystem.
+
+Download `wheel-linux-x86_64` from the identified
+[Publish run](https://github.com/CurateLabs/graphforge/actions/runs/42386372101),
+extract the wheel, and upload it to `/content` in the notebook session. Run this
+cell to check its identity and install it into the notebook's Python environment:
+
+```python
+import hashlib
+from pathlib import Path
+
+wheel = Path("/content/graphforge-0.6.0rc8-cp310-abi3-manylinux2014_x86_64.manylinux_2_17_x86_64.whl")
+expected = "404a46e98ea255cef9544e00372c7b9f229ea3116425d76ec035f62677b1c384"
+if hashlib.sha256(wheel.read_bytes()).hexdigest() != expected:
+    raise ValueError("The wheel does not match the qualified candidate")
+%pip install /content/graphforge-0.6.0rc8-cp310-abi3-manylinux2014_x86_64.manylinux_2_17_x86_64.whl
+```
+
+Restart the kernel after installing the native package. Verify
+`graphforge.__version__` reports `0.6.0-rc.8` and that
+`from graphforge import FilesystemDurabilityWarning` succeeds before continuing.
+Keep the full wheel checksum with the source revision; the version alone does
+not identify a development build. This candidate is a CI artifact, not a
+published registry release. Its managed Colab lifecycle was qualified; Kaggle
+execution remains unqualified.
+
+### Open session storage
 
 Kaggle and Colab are supported with an unverified-durability warning when their
 native package and filesystem primitive checks succeed. For example, use
