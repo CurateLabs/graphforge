@@ -315,6 +315,13 @@ impl HttpTransport {
         limit: u64,
         headers: &[(&str, ureq::http::HeaderValue)],
     ) -> Result<HttpResponse, graphforge_api::GfError> {
+        #[cfg(feature = "hub-test-support")]
+        if let Some(response) =
+            crate::hub_test_support::launcher::read(url, range, if_range, limit, headers)
+        {
+            return response;
+        }
+
         let mut request = self.agent.get(url.as_str());
         if let Some(offset) = range {
             request = request.header("Range", format!("bytes={offset}-"));
@@ -542,6 +549,11 @@ impl Transport for HttpTransport {
         request: &HubRequest,
         limit: usize,
     ) -> Result<HubResponse, graphforge_api::GfError> {
+        #[cfg(feature = "hub-test-support")]
+        if let Some(response) = crate::hub_test_support::launcher::exchange(request, limit) {
+            return response;
+        }
+
         send_with_agent(&self.agent, request, limit)
     }
 }
@@ -635,6 +647,11 @@ impl Transport for HubTransport {
         request: &HubRequest,
         limit: usize,
     ) -> Result<HubResponse, graphforge_api::GfError> {
+        #[cfg(feature = "hub-test-support")]
+        if let Some(response) = crate::hub_test_support::launcher::exchange(request, limit) {
+            return response;
+        }
+
         match request.method {
             HubMethod::Post | HubMethod::Put => send_with_agent(&self.write, request, limit),
             HubMethod::Get | HubMethod::Head => self.read.exchange(request, limit),

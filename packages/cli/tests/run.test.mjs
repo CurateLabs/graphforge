@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { Writable } from "node:stream";
 import test from "node:test";
 
-import { run } from "../lib/run.mjs";
+import { run, runProcess } from "../lib/run.mjs";
 
 function sink() {
   let output = "";
@@ -72,6 +72,30 @@ test("rejects invalid adapter inputs and native results", async () => {
   );
   await assert.rejects(
     () => run([], { native: { runCli: () => ({ exitCode: -1 }) } }),
+    /invalid CLI exit code/,
+  );
+});
+
+test("process launcher forwards native status and does not require captured output", async () => {
+  const calls = [];
+  const status = await runProcess(["auth", "login"], {
+    native: {
+      runCliProcess(args) {
+        calls.push(args);
+        return 5;
+      },
+    },
+  });
+  assert.equal(status, 5);
+  assert.equal(calls[0][0], "--skills-bundle-dir");
+  assert.deepEqual(calls[0].slice(2), ["auth", "login"]);
+  await assert.rejects(() => runProcess([1]), /array of strings/);
+  await assert.rejects(
+    () => runProcess([], { native: {} }),
+    /runCliProcess contract/,
+  );
+  await assert.rejects(
+    () => runProcess([], { native: { runCliProcess: () => -1 } }),
     /invalid CLI exit code/,
   );
 });

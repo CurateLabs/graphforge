@@ -209,10 +209,10 @@ gf log                                 # history; add --all, -n 5, a tag, or --r
 
 Publishing requires a separately verified write-capable server implementing
 `graphforge-discovery/1` and `graphforge-hub-publish/1`, an existing owner account
-and repository, and an approved `publish:owner/repository` credential. See the
-[agent credential path](work-with-an-agent.md#provision-scoped-credentials-for-an-agent-or-ci) for
-provisioning and non-interactive use. Each collaborator needs their own approved
-credential; a recorded author name is credit, not authorization.
+and repository, and permission to publish there. Each collaborator signs in with
+`gf auth login`; the saved session obtains the repository-scoped publish credential.
+A recorded author name supplies credit, not authorization. For agents and CI, see
+the [scoped token path](work-with-an-agent.md#provision-scoped-credentials-for-an-agent-or-ci).
 
 The collaboration tests use the native reference Hub at `https://hub.test`;
 that address is not a public service. No public write target is qualified by
@@ -221,10 +221,11 @@ publishing prerequisites must be verified separately. In the examples below,
 replace `https://hub.example` with your verified target; it is a placeholder,
 not an endpoint to try.
 
-With the scoped token supplied securely in `GRAPHFORGE_HUB_PUBLISH_TOKEN`:
+Sign in once, then push with the saved session:
 
 ```sh
-gf push https://hub.example/owner/repository --ref main --token-env GRAPHFORGE_HUB_PUBLISH_TOKEN
+gf auth login --hub https://hub.example
+gf push https://hub.example/owner/repository --ref main
 ```
 
 A collaborator clones the published ref, then works inside the clone:

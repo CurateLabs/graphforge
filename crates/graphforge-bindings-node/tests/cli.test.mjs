@@ -15,7 +15,7 @@ const fixtures = JSON.parse(
 );
 
 test("runCli matches the shared Python and Node fixtures exactly", () => {
-  for (const fixture of fixtures.cases) {
+  for (const fixture of [...fixtures.cases, ...fixtures.capturedCases]) {
     const result = runCli(fixture.args);
     assert.equal(result.exitCode, fixture.exitCode, fixture.name);
     assert.equal(result.stdout.toString("utf8"), fixture.stdout, fixture.name);

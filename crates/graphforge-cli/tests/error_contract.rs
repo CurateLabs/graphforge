@@ -141,7 +141,8 @@ fn missing_publish_token_fails_fix_input_before_any_request() {
         Some("hub.publish.auth_denied")
     );
     let message = document["message"].as_str().unwrap();
-    assert!(message.contains(PUBLISH_TOKEN_ENV), "{message}");
+    assert!(message.contains("gf auth login"), "{message}");
+    assert!(message.contains("CI"), "{message}");
 }
 
 #[test]

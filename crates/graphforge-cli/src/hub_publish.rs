@@ -42,7 +42,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 use url::Url;
 use uuid::Uuid;
@@ -50,15 +49,6 @@ use uuid::Uuid;
 mod history;
 pub(crate) mod publication;
 mod refusals;
-
-/// Registered only by the streaming `gf` process. Captured invocations never
-/// prompt or launch a browser; device-flow tests inject their own opener.
-static DEVICE_FLOW_OPENER: OnceLock<fn(&Url)> = OnceLock::new();
-
-/// Allow the device flow when this process is attached to a terminal.
-pub(crate) fn allow_device_flow() {
-    let _ = DEVICE_FLOW_OPENER.set(crate::auth::browser);
-}
 
 /// OAuth client identifier the CLI presents to device authorization.
 const CLIENT_ID: &str = "graphforge-cli";
@@ -92,9 +82,9 @@ pub(crate) struct VisibilityArgs {
 /// Defaults to the current Branch (or the only Branch) and its recorded upstream
 /// repository. A successful Branch publish records that upstream in the Project,
 /// so later invocations can use `gf publish` with no arguments, even after reopen.
-/// Use `gf auth login` with the standalone native CLI to save a machine session;
+/// Use `gf auth login` to save a machine session;
 /// terminal device approval is the fallback when no saved session is available.
-/// Captured Python/Node launchers require GRAPHFORGE_HUB_PUBLISH_TOKEN instead.
+/// Publishing tokens remain available for CI through GRAPHFORGE_HUB_PUBLISH_TOKEN.
 #[derive(Args, Clone)]
 #[command(group(ArgGroup::new("selection").args(["git_ref", "version_uuid"])))]
 pub(crate) struct PublishArgs {
@@ -262,7 +252,7 @@ fn select_credential(
     if !streaming {
         return Err(publish_error(
             HubPublishErrorCode::AuthDenied,
-            "no publish credential: set GRAPHFORGE_HUB_PUBLISH_TOKEN or run gf publish in a terminal",
+            "no publish credential: run gf auth login in a CLI launcher; programmatic CI callers must supply a publish token",
         ));
     }
     if let Some(token) = saved()? {
@@ -273,7 +263,7 @@ fn select_credential(
     }
     Err(publish_error(
         HubPublishErrorCode::AuthDenied,
-        "no saved session: run gf auth login or set GRAPHFORGE_HUB_PUBLISH_TOKEN",
+        "no saved session: run gf auth login (CI can supply a publish token)",
     ))
 }
 
@@ -369,7 +359,7 @@ fn run_command(
         &crate::hub_http::HubTransport::new(),
         || publish_token(None),
         || {
-            if DEVICE_FLOW_OPENER.get().is_some() {
+            if crate::process_attached() {
                 crate::auth::last_login_origin()
             } else {
                 Ok(None)
@@ -543,7 +533,7 @@ fn announce_publish_hub(
 }
 
 /// The publish token the process supplies: the variable `token_env` names, else
-/// `GRAPHFORGE_HUB_PUBLISH_TOKEN`. Without one, only a terminal can authorize.
+/// `GRAPHFORGE_HUB_PUBLISH_TOKEN`. Console launchers can use a saved session.
 pub(crate) fn publish_token(token_env: Option<&str>) -> Result<Option<PublishToken>, GfError> {
     let explicit = match token_env {
         Some(name) => Some(PublishToken::new(std::env::var(name).map_err(|_| {
@@ -554,10 +544,10 @@ pub(crate) fn publish_token(token_env: Option<&str>) -> Result<Option<PublishTok
         })?)),
         None => PublishToken::from_env(),
     };
-    if explicit.is_none() && DEVICE_FLOW_OPENER.get().is_none() {
+    if explicit.is_none() && !crate::process_attached() {
         return Err(publish_error(
             HubPublishErrorCode::AuthDenied,
-            "no publish credential: set GRAPHFORGE_HUB_PUBLISH_TOKEN or run gf publish in a terminal",
+            "no publish credential: run gf auth login in a CLI launcher; programmatic CI callers must supply a publish token",
         ));
     }
     Ok(explicit)
@@ -585,7 +575,7 @@ fn publish_with_resolution(
 ) -> Result<(), CliRuntimeError> {
     use std::io::IsTerminal as _;
     let visibility = args.visibility()?;
-    let streaming = DEVICE_FLOW_OPENER.get().is_some();
+    let streaming = crate::process_attached();
     let interactive =
         streaming && std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
     let (identity, base) = args.destination()?;
@@ -1101,8 +1091,8 @@ fn obtain_token(
     environment: &mut PublishEnvironment<'_>,
 ) -> Result<PublishToken, CliRuntimeError> {
     obtain_token_with_opener(hub, capabilities, environment, &|url| {
-        if let Some(open) = DEVICE_FLOW_OPENER.get() {
-            open(url);
+        if crate::process_attached() {
+            crate::auth::browser(url);
         }
     })
 }

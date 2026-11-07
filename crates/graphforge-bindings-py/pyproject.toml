@@ -23,7 +23,8 @@ classifiers = [
 dependencies = ["pyarrow>=14"]
 
 [project.scripts]
-graphforge = "graphforge.cli:main"
+gf = "graphforge.cli:console"
+graphforge = "graphforge.cli:console"
 
 [project.urls]
 Homepage = "https://docs.graphforge.sh/"
