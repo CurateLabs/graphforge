@@ -17,13 +17,17 @@ and migration are not guaranteed.
 
 ## Start with the public Hub
 
-The coordinated launch path is [browse the production Hub](https://graphforge.sh/hub)
-→ install the exact candidate CLI → clone → reopen/query → continue locally →
-publish back → discover/clone the new Version.
-[The Hub guide](guide/portable-projects.md#public-hub-launch-path) explains the
-prerequisites and current qualification boundary. The intended production
-fixture is not yet available through discovery; this journey is **not yet
-qualified**. Local graph use below remains available.
+[Browse the public Hub](https://graphforge.sh/explore), install the pinned
+Python package, clone `opendata/openalex`, then reopen it and count works by
+author. The synthetic fixture is available through production discovery;
+[the Hub guide](guide/portable-projects.md#public-hub-launch-path) gives the
+commands, exact expected answer, and storage prerequisites.
+
+Stop after that useful result or continue locally with the separately selected
+research runtime. Production publish-back requires an authorized destination
+and remains a separate release-qualification step. Neither an account nor
+publishing is needed to complete public clone/query. If you prefer a local
+memory-only lesson, start with [Your first graph](guide/quickstart.md).
 
 ## Basic: understand and use a graph
 

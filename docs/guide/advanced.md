@@ -66,6 +66,9 @@ also require an **operation identity**, which lets the engine recognize an exact
 retry. Reuse the original request and identity for that retry; a changed action
 is a new operation. Follow the concrete example for the operation you need.
 
+For editor commands, repository skills, and credentialed Hub tasks, use
+[agent automation](agent-automation.md).
+
 Look up exact method signatures in the [API reference](../reference/api.md).
 Architecture documents, wire formats, and contributor requirements explain how
 the engine is built. They are separate specialist material and are not the next

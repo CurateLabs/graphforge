@@ -210,7 +210,7 @@ gf log                                 # history; add --all, -n 5, a tag, or --r
 Publishing requires a separately verified write-capable server implementing
 `graphforge-discovery/1` and `graphforge-hub-publish/1`, an existing owner account
 and repository, and an approved `publish:owner/repository` credential. See the
-[agent credential path](work-with-an-agent.md#provision-scoped-credentials-for-an-agent-or-ci) for
+[agent credential path](agent-automation.md#provision-scoped-credentials-for-an-agent-or-ci) for
 provisioning and non-interactive use. Each collaborator needs their own approved
 credential; a recorded author name is credit, not authorization.
 
