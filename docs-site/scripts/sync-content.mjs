@@ -58,6 +58,7 @@ const PAGES = [
   "guide/installation.md",
   "guide/quickstart.md",
   "guide/work-with-an-agent.md",
+  "guide/agent-automation.md",
   "guide/use-a-notebook.md",
   "guide/integrate-graphforge.md",
   "guide/record-an-inquiry.md",

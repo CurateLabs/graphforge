@@ -3972,10 +3972,39 @@ reasons, or unrestricted filesystem paths. Exit codes remain stable.
 
 ## Recipes
 
-::: graphforge.recipes
-options:
-show_root_heading: true
-show_source: false
+### `neighbourhood(forge, canonical, hops=2, *, label="Entity", canonical_prop="canonical")` → `pyarrow.Table`
+
+`graphforge.recipes.neighbourhood` composes native Cypher execution to return
+distinct neighbours reachable within `hops` undirected relationships. It selects
+seed and neighbour nodes with `label`, matches the seed's `canonical_prop` to
+`canonical`, and excludes neighbours with the same canonical value. Results
+contain the canonical property, `name`, and `labels` (one `name` column when
+`canonical_prop="name"`). Row order is unspecified.
+
+```python
+from graphforge import GraphForge
+from graphforge.recipes import neighbourhood
+
+forge = GraphForge()
+survey = forge.add_node("Entity", canonical="survey", name="Survey")
+methods = forge.add_node("Entity", canonical="methods", name="Methods")
+forge.add_edge(survey, "CITES", methods)
+print(neighbourhood(forge, "survey", hops=1).to_pylist())
+forge.close()
+```
+
+Expected output:
+
+```text
+[{'canonical': 'methods', 'name': 'Methods', 'labels': ['Entity']}]
+```
+
+`hops=0` returns a typed empty table. Negative, non-integer, and boolean hop
+values are rejected. Label/property identifiers must match
+`[A-Za-z_][A-Za-z0-9_]*`; the canonical value is a query parameter. There is no
+application-level authorization or interpretation implied by a match.
+See the [recipe source](../../crates/graphforge-bindings-py/python/graphforge/recipes/__init__.py)
+for the Python helper; graph traversal runs in Rust.
 
 ---
 
@@ -3989,18 +4018,19 @@ cargo doc --workspace --no-deps --open
 
 Key public types:
 
-| Type              | Crate                 | Description                          |
-| ----------------- | --------------------- | ------------------------------------ |
-| `GraphForge`      | `graphforge-core`     | Main engine facade — builder pattern |
-| `ExecutionResult` | `graphforge-core`     | `{ schema, batches, stats }`         |
-| `GraphPlan`       | `graphforge-ir`       | Versioned graph IR envelope          |
-| `OntologyHandle`  | `graphforge-ontology` | Loaded ontology reference            |
-| `GfError`         | `graphforge-core`     | Typed public error enum              |
+| Type              | Crate                 | Description                                                              |
+| ----------------- | --------------------- | ------------------------------------------------------------------------ |
+| `GraphForge`      | `graphforge-api`      | Public engine facade; `GraphForge::new` opens an instance                |
+| `ExecutionResult` | `graphforge-exec`     | Arrow schema/batches, execution statistics and optional mutation effects |
+| `GraphPlan`       | `graphforge-ir`       | Versioned graph IR envelope                                              |
+| `OntologyHandle`  | `graphforge-ontology` | Loaded ontology reference                                                |
+| `GfError`         | `graphforge-core`     | Typed public error enum                                                  |
 
 ---
 
-_Python documentation is automatically generated from source code docstrings._
-row order. Python and Node contain no separate closeness implementation or
+This page is a hand-maintained reference. Python docstrings and
+[Rust API source](../../crates/graphforge-api/src/lib.rs) provide implementation
+context; the site does not generate Python API entries from docstrings.
 
 ## Typed Hub workflow facades
 
@@ -4034,7 +4064,6 @@ collaborator pull examples require a separately verified write-capable Hub;
 production graphforge.sh supports public read/clone at launch.
 
 ### Python workflow example
-
 
 `HubProject` calls the same in-process Rust entry as `gf`. Each verb opens the
 project afresh; close other writable handles first. Graph reads remain Arrow

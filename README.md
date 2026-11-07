@@ -70,27 +70,20 @@ Details: [installation status and limits](docs/guide/installation.md#status-and-
 **Python 3.10+**
 
 ```bash
-python -m pip install --pre graphforge # latest pre-release
-```
-
-```bash
-python -m pip install graphforge # latest release
+python -m pip install "graphforge==0.6.0rc7"
 ```
 
 **Node.js 20+**
 
 ```bash
-npm install @curatelabs/graphforge@next apache-arrow # latest pre-release
+npm install @curatelabs/graphforge@0.6.0-rc.7 apache-arrow@21.2.0
 ```
 
-```bash
-npm install @curatelabs/graphforge apache-arrow # latest release
-```
-
-[Releases](https://github.com/CurateLabs/graphforge/releases) lists what is
-available, and the [installation guide](docs/guide/installation.md) covers
-candidates and source builds. Before v1.0.0 there is no backward-compatibility
-or migration guarantee.
+These first-use examples pin the published rc.7 candidate. The
+[installation guide](docs/guide/installation.md#choose-a-runtime-for-your-task)
+maps tasks to exact runtimes; [releases](https://github.com/CurateLabs/graphforge/releases)
+lists public artifacts. Before v1.0.0 there is no backward-compatibility or
+migration guarantee.
 
 ## Start with the public Hub
 
@@ -101,10 +94,11 @@ CC0-1.0. Its authorship query returns Ada Example: **2**, Basil Sample: **2**.
 [Follow the Hub launch path](docs/guide/portable-projects.md#public-hub-launch-path)
 for the tested install route, version warning and local research/retention steps.
 
-The repaired candidate uses different bytes from published rc.7; use the
-[packed-candidate instructions](docs/guide/installation.md#evaluate-the-repaired-packed-candidate)
-for retained research and reimport. Publishing to a Hub is a separate operation
-requiring an authorized destination and machine authentication.
+Retained research with composed ontologies, and composition reimport, require
+repairs absent from registry rc.7; use the separate
+[pinned source build](docs/guide/installation.md#build-from-source) for those
+tasks. Publishing to a Hub is a separate operation requiring an authorized
+destination and machine authentication.
 
 ## Quick Start: an in-memory graph
 
