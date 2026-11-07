@@ -115,6 +115,8 @@ export class HubProject {
     {
       ref,
       branch,
+      public: publicVisibility = false,
+      private: privateVisibility = false,
       rewrite = false,
       prune = false,
       operationUuid,
@@ -127,6 +129,8 @@ export class HubProject {
         ...options({
           ref,
           branch,
+          public: publicVisibility,
+          private: privateVisibility,
           rewrite,
           prune,
           operation_uuid: operationUuid,

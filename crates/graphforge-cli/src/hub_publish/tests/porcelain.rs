@@ -48,8 +48,14 @@ pub(super) fn gf(
         }
         command @ (Command::Push(_) | Command::Pull(_)) => {
             let mut graph = GraphForge::new(Some(project_text))?;
+            let transport = visibility::VisibilityTransport {
+                hub,
+                major: Some(1),
+                refusal: None,
+                requests: RefCell::new(Vec::new()),
+            };
             run_remote_with(
-                &hub.transport(),
+                &transport,
                 &|_| Ok(Some(token(hub, "curate/claims"))),
                 &mut graph,
                 command,
@@ -147,12 +153,14 @@ fn porcelain_walkthrough_clones_commits_tags_pushes_pulls_and_logs() {
     // Alice starts a Branch and publishes it; the ref is the Branch label. Until
     // it is published the Branch has no upstream and a push must name one.
     ok(&hub, &alice, &["branch", "main", "--author", ALICE]);
-    let unpublished = gf(&hub, &alice, &["push"]).unwrap_err().to_string();
+    let unpublished = gf(&hub, &alice, &["push", "--public"])
+        .unwrap_err()
+        .to_string();
     assert!(
         unpublished.contains("GF_RESEARCH_UPSTREAM_UNSET"),
         "{unpublished}"
     );
-    ok(&hub, &alice, &["push", REPOSITORY]);
+    ok(&hub, &alice, &["push", "--public", REPOSITORY]);
     // The confirmed publication is her upstream, and she is not ahead of it.
     let tracked = ok(&hub, &alice, &["status"]);
     assert_eq!(tracked["upstream"]["repository_url"], REPOSITORY);
@@ -185,7 +193,7 @@ fn porcelain_walkthrough_clones_commits_tags_pushes_pulls_and_logs() {
     assert_eq!(ok(&hub, &bob, &["status"])["ahead"], 2);
     ok(&hub, &bob, &["tag", "v1"]);
     assert_eq!(ok(&hub, &bob, &["tag"])[0]["name"], "v1");
-    ok(&hub, &bob, &["push"]);
+    ok(&hub, &bob, &["push", "--public"]);
     // The push moved Bob's recorded upstream head, so nothing is left unpublished.
     let pushed = ok(&hub, &bob, &["status"]);
     assert_eq!(pushed["ahead"], 0);
@@ -207,7 +215,7 @@ fn porcelain_walkthrough_clones_commits_tags_pushes_pulls_and_logs() {
 
     // Alice commits on top and pushes: a fast-forward of the Hub head.
     let alices = commit(&hub, &alice, ALICE, "alice's change", 3);
-    ok(&hub, &alice, &["push"]);
+    ok(&hub, &alice, &["push", "--public"]);
 
     // Bob pulls her change: his head (the second commit) is not her ancestor.
     let merged = ok(&hub, &bob, &["pull", "--author", BOB]);
@@ -320,7 +328,7 @@ fn porcelain_walkthrough_preserves_replay_and_fast_forward() {
     let root = tempfile::tempdir().unwrap();
     let alice = seeded(root.path(), "alice");
     ok(&hub, &alice, &["branch", "main", "--author", ALICE]);
-    ok(&hub, &alice, &["push", REPOSITORY]);
+    ok(&hub, &alice, &["push", "--public", REPOSITORY]);
     let bob = root.path().join("bob");
     ok(
         &hub,
@@ -363,7 +371,7 @@ fn porcelain_walkthrough_preserves_replay_and_fast_forward() {
     // Alice advances the Hub; Bob's push from a stale clone is refused exactly as
     // `gf publish` refuses it, and `--rewrite` replaces the head under the lease.
     commit(&hub, &alice, ALICE, "alice's change", 5);
-    ok(&hub, &alice, &["push"]);
+    ok(&hub, &alice, &["push", "--public"]);
     let recorded = |project: &Path| {
         GraphForge::new(project.to_str())
             .unwrap()
@@ -372,7 +380,7 @@ fn porcelain_walkthrough_preserves_replay_and_fast_forward() {
             .remote_branches
     };
     let before = recorded(&bob);
-    let refused = gf(&hub, &bob, &["push"]).unwrap_err();
+    let refused = gf(&hub, &bob, &["push", "--public"]).unwrap_err();
     assert_eq!(error_code(&refused), "hub.publish.non_fast_forward");
     assert_eq!(
         recorded(&bob),
@@ -380,7 +388,7 @@ fn porcelain_walkthrough_preserves_replay_and_fast_forward() {
         "a refused push leaves the upstream alone"
     );
     assert_eq!(ok(&hub, &bob, &["status"])["ahead"], 1);
-    ok(&hub, &bob, &["push", "--rewrite"]);
+    ok(&hub, &bob, &["push", "--public", "--rewrite"]);
     assert_eq!(ok(&hub, &bob, &["status"])["ahead"], 0);
     let (_, lineage) = served_lineage(&hub, "curate/claims");
     assert_eq!(
@@ -395,7 +403,7 @@ fn pull_refuses_before_update_when_the_preview_has_incompatible_changes() {
     let root = tempfile::tempdir().unwrap();
     let alice = seeded(root.path(), "alice");
     ok(&hub, &alice, &["branch", "main", "--author", ALICE]);
-    ok(&hub, &alice, &["push", REPOSITORY]);
+    ok(&hub, &alice, &["push", "--public", REPOSITORY]);
     let bob = root.path().join("bob");
     ok(
         &hub,
@@ -404,7 +412,7 @@ fn pull_refuses_before_update_when_the_preview_has_incompatible_changes() {
     );
     // Both sides change the same field from the same base.
     commit(&hub, &alice, ALICE, "alice", 1);
-    ok(&hub, &alice, &["push"]);
+    ok(&hub, &alice, &["push", "--public"]);
     commit(&hub, &bob, BOB, "bob", 2);
     let before = GraphForge::new(bob.to_str())
         .unwrap()
@@ -431,7 +439,7 @@ fn pull_is_a_no_op_when_the_remote_head_is_an_ancestor() {
     let root = tempfile::tempdir().unwrap();
     let alice = seeded(root.path(), "alice");
     ok(&hub, &alice, &["branch", "main", "--author", ALICE]);
-    ok(&hub, &alice, &["push", REPOSITORY]);
+    ok(&hub, &alice, &["push", "--public", REPOSITORY]);
     commit(&hub, &alice, ALICE, "ahead", 1);
     let before = GraphForge::new(alice.to_str())
         .unwrap()
@@ -453,7 +461,7 @@ fn served_tags_are_installed_with_the_fetch_even_when_the_update_is_refused() {
     let root = tempfile::tempdir().unwrap();
     let alice = seeded(root.path(), "alice");
     ok(&hub, &alice, &["branch", "main", "--author", ALICE]);
-    ok(&hub, &alice, &["push", REPOSITORY]);
+    ok(&hub, &alice, &["push", "--public", REPOSITORY]);
     let bob = root.path().join("bob");
     ok(
         &hub,
@@ -463,7 +471,7 @@ fn served_tags_are_installed_with_the_fetch_even_when_the_update_is_refused() {
     // Alice tags a new commit and pushes; Bob changes the same field.
     let theirs = commit(&hub, &alice, ALICE, "alice", 1)["version_uuid"].clone();
     ok(&hub, &alice, &["tag", "a1"]);
-    ok(&hub, &alice, &["push"]);
+    ok(&hub, &alice, &["push", "--public"]);
     commit(&hub, &bob, BOB, "bob", 2);
     assert!(ok(&hub, &bob, &["tag"]).as_array().unwrap().is_empty());
 
@@ -482,7 +490,7 @@ fn pull_refuses_a_served_tag_that_conflicts_with_a_local_tag() {
     let alice = seeded(root.path(), "alice");
     ok(&hub, &alice, &["branch", "main", "--author", ALICE]);
     ok(&hub, &alice, &["tag", "v1"]);
-    ok(&hub, &alice, &["push", REPOSITORY]);
+    ok(&hub, &alice, &["push", "--public", REPOSITORY]);
     let bob = root.path().join("bob");
     ok(
         &hub,
@@ -508,7 +516,7 @@ fn publish_records_the_upstream_a_later_push_uses() {
     assert_eq!(ok(&hub, &alice, &["status"])["upstream"]["ref"], "main");
     commit(&hub, &alice, ALICE, "more", 1);
     assert_eq!(ok(&hub, &alice, &["status"])["ahead"], 1);
-    ok(&hub, &alice, &["push"]);
+    ok(&hub, &alice, &["push", "--public"]);
     assert_eq!(ok(&hub, &alice, &["status"])["ahead"], 0);
 }
 
@@ -667,7 +675,7 @@ fn pull_replays_a_completed_receipt_without_the_network_and_refuses_another_requ
     let root = tempfile::tempdir().unwrap();
     let alice = seeded(root.path(), "alice");
     ok(&hub, &alice, &["branch", "main", "--author", ALICE]);
-    ok(&hub, &alice, &["push", REPOSITORY]);
+    ok(&hub, &alice, &["push", "--public", REPOSITORY]);
     let bob = root.path().join("bob");
     ok(
         &hub,
@@ -675,7 +683,7 @@ fn pull_replays_a_completed_receipt_without_the_network_and_refuses_another_requ
         &["clone", REPOSITORY, bob.to_str().unwrap(), "--ref", "main"],
     );
     commit(&hub, &alice, ALICE, "alice", 3);
-    ok(&hub, &alice, &["push"]);
+    ok(&hub, &alice, &["push", "--public"]);
 
     let o = Uuid::now_v7().to_string();
     let pull = ["pull", "--author", BOB, "--operation-uuid", o.as_str()];
@@ -717,7 +725,13 @@ fn push_replays_a_completed_publication_and_refuses_another_request() {
     let alice = seeded(root.path(), "alice");
     ok(&hub, &alice, &["branch", "main", "--author", ALICE]);
     let o = Uuid::now_v7().to_string();
-    let push = ["push", REPOSITORY, "--operation-uuid", o.as_str()];
+    let push = [
+        "push",
+        "--public",
+        REPOSITORY,
+        "--operation-uuid",
+        o.as_str(),
+    ];
     let first = ok(&hub, &alice, &push);
     // Recording the confirmed publication moved CURRENT; the rerun is a replay.
     let writes = || {
@@ -736,12 +750,15 @@ fn push_replays_a_completed_publication_and_refuses_another_request() {
             .len()
     };
     let recorded = receipts(&alice);
-    let again = ok(&hub, &alice, &["push", "--operation-uuid", &o]);
+    let again = ok(&hub, &alice, &["push", "--public", "--operation-uuid", &o]);
     assert_eq!(again, first);
     assert_eq!(writes(), before, "a replay uploads and commits nothing");
     // Replays are free: the permanent receipt ledger does not grow with them.
     for _ in 0..5 {
-        assert_eq!(ok(&hub, &alice, &["push", "--operation-uuid", &o]), first);
+        assert_eq!(
+            ok(&hub, &alice, &["push", "--public", "--operation-uuid", &o]),
+            first
+        );
     }
     assert_eq!(receipts(&alice), recorded);
     // The same identity for another ref or another flag is refused.
@@ -755,6 +772,7 @@ fn push_replays_a_completed_publication_and_refuses_another_request() {
         &alice,
         &[
             "push",
+            "--public",
             REPOSITORY,
             "--ref",
             "feature",
@@ -765,7 +783,15 @@ fn push_replays_a_completed_publication_and_refuses_another_request() {
     assert_conflict(gf(
         &hub,
         &alice,
-        &["push", "--ref", "main", "--rewrite", "--operation-uuid", &o],
+        &[
+            "push",
+            "--public",
+            "--ref",
+            "main",
+            "--rewrite",
+            "--operation-uuid",
+            &o,
+        ],
     ));
     assert_eq!(writes(), before);
 }
@@ -777,7 +803,7 @@ fn publication_record_is_bound_to_the_asserted_documents() {
     let alice = seeded(root.path(), "alice");
     ok(&hub, &alice, &["branch", "main", "--author", ALICE]);
     let receipt: graphforge_hub_publish::PublishReceipt =
-        serde_json::from_value(ok(&hub, &alice, &["push", REPOSITORY])).unwrap();
+        serde_json::from_value(ok(&hub, &alice, &["push", "--public", REPOSITORY])).unwrap();
     let published = ok(&hub, &alice, &["status"])["head_version_uuid"].clone();
     // An unpublished descendant: the Branch head moves past what the Hub holds.
     let unpublished = commit(&hub, &alice, ALICE, "not pushed", 9)["version_uuid"].clone();
@@ -850,6 +876,20 @@ fn publication_record_is_bound_to_the_asserted_documents() {
     record(other_refs, manifest, lineage).unwrap_err();
 }
 
+fn publish_without_recording(hub: &LoopbackHub, graph: &GraphForge, args: &PublishArgs) {
+    visibility::run(
+        &visibility::VisibilityTransport {
+            hub,
+            major: Some(1),
+            refusal: None,
+            requests: RefCell::new(Vec::new()),
+        },
+        graph,
+        args,
+    )
+    .unwrap();
+}
+
 #[test]
 fn an_interrupted_publication_is_recorded_when_it_is_replayed() {
     let hub = LoopbackHub::start();
@@ -858,9 +898,17 @@ fn an_interrupted_publication_is_recorded_when_it_is_replayed() {
     ok(&hub, &alice, &["branch", "main", "--author", ALICE]);
     // The Hub committed the publication, but the process died before recording it.
     let graph = GraphForge::new(alice.to_str()).unwrap();
-    publish_ok(&hub, &graph, &on_ref("curate/claims", "main"))
-        .result
-        .unwrap();
+    publish_without_recording(
+        &hub,
+        &graph,
+        &PublishArgs {
+            visibility: VisibilityArgs {
+                public: true,
+                private: false,
+            },
+            ..on_ref("curate/claims", "main")
+        },
+    );
     drop(graph);
     assert!(
         ok(&hub, &alice, &["status"])
@@ -868,7 +916,7 @@ fn an_interrupted_publication_is_recorded_when_it_is_replayed() {
             .is_none_or(Value::is_null)
     );
     // Rerunning the command replays the committed operation and records it.
-    ok(&hub, &alice, &["push", REPOSITORY]);
+    ok(&hub, &alice, &["push", "--public", REPOSITORY]);
     let status = ok(&hub, &alice, &["status"]);
     assert_eq!(status["upstream"]["ref"], "main");
     assert_eq!(status["ahead"], 0);
@@ -880,7 +928,7 @@ fn an_interrupted_republication_is_recorded_when_it_is_replayed() {
     let root = tempfile::tempdir().unwrap();
     let alice = seeded(root.path(), "alice");
     ok(&hub, &alice, &["branch", "main", "--author", ALICE]);
-    ok(&hub, &alice, &["push", REPOSITORY]);
+    ok(&hub, &alice, &["push", "--public", REPOSITORY]);
     let first = ok(&hub, &alice, &["status"])["head_version_uuid"].clone();
     let second = commit(&hub, &alice, ALICE, "second", 2)["version_uuid"].clone();
 
@@ -889,15 +937,16 @@ fn an_interrupted_republication_is_recorded_when_it_is_replayed() {
     let o = Uuid::now_v7().to_string();
     let mut interrupted = on_ref("curate/claims", "main");
     interrupted.operation_uuid = Some(o.clone());
+    interrupted.visibility.public = true;
     let graph = GraphForge::new(alice.to_str()).unwrap();
-    publish_ok(&hub, &graph, &interrupted).result.unwrap();
+    publish_without_recording(&hub, &graph, &interrupted);
     drop(graph);
     let stale = ok(&hub, &alice, &["status"]);
     assert_eq!(stale["upstream"]["head_version_uuid"], first);
     assert_eq!(stale["ahead"], 1);
 
     // Rerunning the operation replays it and records the head it committed.
-    ok(&hub, &alice, &["push", "--operation-uuid", &o]);
+    ok(&hub, &alice, &["push", "--public", "--operation-uuid", &o]);
     let recovered = ok(&hub, &alice, &["status"]);
     assert_eq!(recovered["upstream"]["head_version_uuid"], second);
     assert_eq!(recovered["ahead"], 0);
@@ -912,7 +961,7 @@ fn an_interrupted_republication_is_recorded_when_it_is_replayed() {
             .len()
     };
     let count = receipts(&alice);
-    ok(&hub, &alice, &["push", "--operation-uuid", &o]);
+    ok(&hub, &alice, &["push", "--public", "--operation-uuid", &o]);
     assert_eq!(receipts(&alice), count);
 }
 
@@ -923,7 +972,7 @@ fn an_interrupted_pull_resumes_from_its_recorded_fetch() {
     let root = tempfile::tempdir().unwrap();
     let alice = seeded(root.path(), "alice");
     ok(&hub, &alice, &["branch", "main", "--author", ALICE]);
-    ok(&hub, &alice, &["push", REPOSITORY]);
+    ok(&hub, &alice, &["push", "--public", REPOSITORY]);
     let bob = root.path().join("bob");
     ok(
         &hub,
@@ -931,7 +980,7 @@ fn an_interrupted_pull_resumes_from_its_recorded_fetch() {
         &["clone", REPOSITORY, bob.to_str().unwrap(), "--ref", "main"],
     );
     commit(&hub, &alice, ALICE, "alice", 3);
-    ok(&hub, &alice, &["push"]);
+    ok(&hub, &alice, &["push", "--public"]);
 
     // The fetch step commits under the pull's identity; the process dies before the
     // incorporation, leaving CURRENT one generation past the fetch's precondition.
@@ -992,7 +1041,7 @@ fn a_clone_selects_its_branch_for_the_verbs() {
     let root = tempfile::tempdir().unwrap();
     let alice = seeded(root.path(), "alice");
     ok(&hub, &alice, &["branch", "main", "--author", ALICE]);
-    ok(&hub, &alice, &["push", REPOSITORY]);
+    ok(&hub, &alice, &["push", "--public", REPOSITORY]);
     let bob = root.path().join("bob");
     ok(
         &hub,
@@ -1034,8 +1083,14 @@ fn human_push_and_pull_report_their_retry_identity_on_success_and_refusal() {
         let command = Cli::try_parse_from(argv).unwrap().command.unwrap();
         let mut graph = GraphForge::new(project.to_str()).unwrap();
         let mut output = Vec::new();
+        let transport = visibility::VisibilityTransport {
+            hub: &hub,
+            major: Some(1),
+            refusal: None,
+            requests: RefCell::new(Vec::new()),
+        };
         let result = run_remote_with(
-            &hub.transport(),
+            &transport,
             &|_| Ok(Some(token(&hub, "curate/claims"))),
             &mut graph,
             command,
@@ -1053,11 +1108,11 @@ fn human_push_and_pull_report_their_retry_identity_on_success_and_refusal() {
         .unwrap();
         (result, operation, text)
     };
-    let (result, pushed, text) = human(&alice, &["push", REPOSITORY]);
+    let (result, pushed, text) = human(&alice, &["push", "--public", REPOSITORY]);
     result.unwrap();
     assert!(text.contains("Published"), "{text}");
     assert_eq!(
-        ok(&hub, &alice, &["push"])["operation_uuid"],
+        ok(&hub, &alice, &["push", "--public"])["operation_uuid"],
         pushed.to_string()
     );
     let bob = root.path().join("bob");
@@ -1067,7 +1122,7 @@ fn human_push_and_pull_report_their_retry_identity_on_success_and_refusal() {
         &["clone", REPOSITORY, bob.to_str().unwrap(), "--ref", "main"],
     );
     commit(&hub, &alice, ALICE, "alice", 1);
-    ok(&hub, &alice, &["push"]);
+    ok(&hub, &alice, &["push", "--public"]);
     let (result, pulled, text) = human(&bob, &["pull", "--author", BOB]);
     result.unwrap();
     assert!(text.contains("Merged"), "{text}");
@@ -1089,7 +1144,7 @@ fn human_push_and_pull_report_their_retry_identity_on_success_and_refusal() {
     // Both sides advance the same field. The pull refuses after its durable fetch,
     // and the printed identity lets a human retry that fetch rather than minting one.
     commit(&hub, &alice, ALICE, "alice again", 2);
-    ok(&hub, &alice, &["push"]);
+    ok(&hub, &alice, &["push", "--public"]);
     commit(&hub, &bob, BOB, "bob", 3);
     let (result, operation, _) = human(&bob, &["pull", "--author", BOB]);
     assert!(result.unwrap_err().to_string().contains("property:score"));
@@ -1114,7 +1169,7 @@ fn human_push_and_pull_report_their_retry_identity_on_success_and_refusal() {
     );
     assert!(result.unwrap_err().to_string().contains("property:score"));
     assert_eq!(repeated, operation);
-    let (result, _, _) = human(&bob, &["push"]);
+    let (result, _, _) = human(&bob, &["push", "--public"]);
     assert_eq!(
         error_code(&result.unwrap_err()),
         "hub.publish.non_fast_forward"
@@ -1127,7 +1182,7 @@ fn remote_log_visits_the_other_merge_parent_after_a_project_boundary() {
     let root = tempfile::tempdir().unwrap();
     let alice = seeded(root.path(), "alice");
     ok(&hub, &alice, &["branch", "main", "--author", ALICE]);
-    ok(&hub, &alice, &["push", REPOSITORY]);
+    ok(&hub, &alice, &["push", "--public", REPOSITORY]);
     let base = ok(&hub, &alice, &["status"])["head_version_uuid"].clone();
     let bob = root.path().join("bob");
     ok(
@@ -1136,9 +1191,9 @@ fn remote_log_visits_the_other_merge_parent_after_a_project_boundary() {
         &["clone", REPOSITORY, bob.to_str().unwrap(), "--ref", "main"],
     );
     let changed = commit(&hub, &alice, ALICE, "alice", 1)["version_uuid"].clone();
-    ok(&hub, &alice, &["push"]);
+    ok(&hub, &alice, &["push", "--public"]);
     let merged = ok(&hub, &bob, &["pull", "--author", BOB])["version_uuid"].clone();
-    ok(&hub, &bob, &["push"]);
+    ok(&hub, &bob, &["push", "--public"]);
     let (_, lineage) = served_lineage(&hub, "curate/claims");
     let parent = &lineage.version(base.as_str().unwrap()).unwrap().parents[0];
     assert!(lineage.version(parent).is_none());

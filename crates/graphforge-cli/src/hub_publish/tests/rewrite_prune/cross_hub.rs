@@ -36,6 +36,7 @@ fn run(hubs: &Hubs, graph: &GraphForge, args: &PublishArgs, hub: &ReferenceHub) 
     let id = RepositoryIdentity::parse(base.path().trim_start_matches('/')).unwrap();
     let mut notices = Vec::new();
     let mut environment = PublishEnvironment {
+        terminal: None,
         bypass: None,
         credential: Credential::Token(PublishToken::new(hub.issue_token(&publish_scope(&id), 900))),
         clock: &std::time::Instant::now,

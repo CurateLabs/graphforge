@@ -38,6 +38,7 @@ fn parsed_publish_expiry_has_its_own_exit_and_never_mutates_local_or_remote_stat
                 &mut history.graph,
                 &args,
                 &mut PublishEnvironment {
+                    terminal: None,
                     bypass: None,
                     credential: Credential::DeviceFlow,
                     clock: &|| started + Duration::from_secs(elapsed.get()),
