@@ -2349,6 +2349,32 @@ fn check_receipt(
     Ok(())
 }
 
+/// Authenticated status is bound to the requested operation and repository before use.
+fn read_operation_status(
+    hub: &Hub<'_>,
+    token: &PublishToken,
+    identity: &RepositoryIdentity,
+    operation_uuid: Uuid,
+) -> Result<Option<OperationStatus>, GfError> {
+    let url = endpoint(&hub.base, &format!("publish/operations/{operation_uuid}"));
+    let response = hub.control(HubRequest::new(HubMethod::Get, url.as_str()), token)?;
+    match response.status {
+        404 => Ok(None),
+        200 => {
+            let status =
+                OperationStatus::from_json(&response.body).map_err(|error| protocol(&error))?;
+            if status.repository != *identity || status.operation_uuid != operation_uuid {
+                return Err(publish_error(
+                    HubPublishErrorCode::IntegrityFailure,
+                    "operation status describes another operation",
+                ));
+            }
+            Ok(Some(status))
+        }
+        _ => Err(hub_failure(&response, &url)),
+    }
+}
+
 /// Refuse to advertise current ontology controls for a different frozen Version.
 fn check_ontology_composition(graph: &GraphForge, selection: &Selection) -> Result<(), GfError> {
     let current = graph
@@ -2448,7 +2474,6 @@ fn publish_inner(
             &json!({"project_content":selection.publication_content,"previews":preview_metadata}),
         ))
     };
-    let operation_content = history::bind_flags(operation_content, args);
     let resolution = match environment.resolution.take() {
         Some(resolution) => {
             if resolution.requested != identity || resolution.requested_base != base {
@@ -2486,7 +2511,44 @@ fn publish_inner(
         })
         .filter(|_| selection.git_ref.is_some());
 
-    let operation_uuid = operation_uuid.unwrap_or_else(|| {
+    let hub = Hub {
+        refusal: Some(captured),
+        bypass: environment.bypass,
+        transport,
+        base: base.clone(),
+    };
+    let base_intent = intent_digest(&identity, &selection, fork.as_ref().map(|(id, _)| id));
+    let unbound_intent = if previews.is_empty() {
+        base_intent
+    } else {
+        sha256_digest(&canonical_json(
+            &json!({"intent":base_intent,"previews":preview_metadata}),
+        ))
+    };
+    let mut effective_args = args.clone();
+    let mut recovered_uuid = None;
+    let mut recovered_status = None;
+    let mut token = None;
+    if visibility.is_none() && matches!(context, PublicationContext::Published(_)) {
+        let credential = obtain_token(&hub, &capabilities, environment)?;
+        let (recovered, uuid, status) = push_visibility::recover_operation(
+            &hub,
+            &credential,
+            &identity,
+            &selection,
+            args,
+            &operation_content,
+            &unbound_intent,
+        )?;
+        effective_args = recovered;
+        recovered_uuid = Some(uuid);
+        recovered_status = Some(status);
+        token = Some(credential);
+    }
+    let args = &effective_args;
+    let visibility = args.visibility()?;
+    let operation_content = history::bind_flags(operation_content, args);
+    let operation_uuid = recovered_uuid.or(operation_uuid).unwrap_or_else(|| {
         graphforge_api::hub_publish_operation(
             &identity.canonical_name(),
             selection.git_ref.as_deref(),
@@ -2495,23 +2557,9 @@ fn publish_inner(
         )
     });
     report(operation_uuid)?;
-    let base_intent = intent_digest(&identity, &selection, fork.as_ref().map(|(id, _)| id));
-    let intent_digest = if previews.is_empty() {
-        base_intent
-    } else {
-        sha256_digest(&canonical_json(
-            &json!({"intent":base_intent,"previews":preview_metadata}),
-        ))
-    };
-    let intent_digest = history::bind_flags(intent_digest, args);
+    let intent_digest = history::bind_flags(unbound_intent, args);
     graphforge_hub_publish::require_history_capability(&capabilities, args.rewrite, args.prune)
         .map_err(|error| protocol(&error))?;
-    let hub = Hub {
-        refusal: Some(captured),
-        bypass: environment.bypass,
-        transport,
-        base: base.clone(),
-    };
 
     if !previews.is_empty()
         && !capabilities
@@ -2525,7 +2573,10 @@ fn publish_inner(
         )
         .into());
     }
-    let token = obtain_token(&hub, &capabilities, environment)?;
+    let token = match token {
+        Some(token) => token,
+        None => obtain_token(&hub, &capabilities, environment)?,
+    };
 
     let read_current = || {
         if capabilities.capabilities.iter().any(|capability| {
@@ -2538,49 +2589,38 @@ fn publish_inner(
     };
 
     // A retry is classified before any package is derived.
-    let status_url = endpoint(&base, &format!("publish/operations/{operation_uuid}"));
-    let status = hub.control(HubRequest::new(HubMethod::Get, status_url.as_str()), &token)?;
-    match status.status {
-        200 => {
-            let status =
-                OperationStatus::from_json(&status.body).map_err(|error| protocol(&error))?;
-            if status.repository != identity || status.operation_uuid != operation_uuid {
-                return Err(publish_error(
-                    HubPublishErrorCode::IntegrityFailure,
-                    "operation status describes another operation",
-                )
-                .into());
-            }
-            if status.intent_digest != intent_digest {
-                return Err(publish_error(
-                    HubPublishErrorCode::IdempotencyConflict,
-                    code_detail(HubPublishErrorCode::IdempotencyConflict),
-                )
-                .into());
-            }
-            if let Some(receipt) = status.receipt {
-                check_receipt(&receipt, &identity, operation_uuid)?;
-                if args.check_fork_origin.is_some() {
-                    let published = context.take_or_read(read_current)?;
-                    history::verify_established_fork(
-                        &hub,
-                        graph,
-                        published.as_ref(),
-                        selection.project_uuid,
-                        args.check_fork_origin.as_deref(),
-                        environment.notices,
-                    )?;
-                }
-                return Ok(PublishOutcome {
-                    receipt,
-                    replayed: true,
-                    moved,
-                    published: confirmed,
-                });
-            }
+    let status = match recovered_status {
+        Some(status) => status,
+        None => read_operation_status(&hub, &token, &identity, operation_uuid)?,
+    };
+    if let Some(status) = status {
+        if status.intent_digest != intent_digest {
+            return Err(publish_error(
+                HubPublishErrorCode::IdempotencyConflict,
+                code_detail(HubPublishErrorCode::IdempotencyConflict),
+            )
+            .into());
         }
-        404 => {}
-        _ => return Err(hub_failure(&status, &status_url).into()),
+        if let Some(receipt) = status.receipt {
+            check_receipt(&receipt, &identity, operation_uuid)?;
+            if args.check_fork_origin.is_some() {
+                let published = context.take_or_read(read_current)?;
+                history::verify_established_fork(
+                    &hub,
+                    graph,
+                    published.as_ref(),
+                    selection.project_uuid,
+                    args.check_fork_origin.as_deref(),
+                    environment.notices,
+                )?;
+            }
+            return Ok(PublishOutcome {
+                receipt,
+                replayed: true,
+                moved,
+                published: confirmed,
+            });
+        }
     }
 
     let published = context.take_or_read(read_current)?;

@@ -186,7 +186,7 @@ const credit = { author: "Alice <alice@example.org>" };
 const first = work.commit("First score", "MATCH (n:Item) SET n.score=1", credit);
 const second = work.commit("Second score", "MATCH (n:Item) SET n.score=2", credit);
 work.tag("v1");
-const receipt = work.push(public=True); // publish() is the same current-Branch operation
+const receipt = work.push(undefined, { public: true }); // publish() is the same current-Branch operation
 // After a collaborator pushes a compatible change:
 const pulled = work.pull(undefined, credit);
 console.log(work.log(undefined, { all: true }));

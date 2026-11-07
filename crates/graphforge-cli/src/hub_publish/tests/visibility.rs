@@ -584,6 +584,70 @@ fn push_choice_is_bound_before_identity_and_context_is_read_only_once() {
 }
 
 #[test]
+fn prompted_push_replays_with_fresh_arguments_before_local_receipt_recording() {
+    for explicit_operation in [false, true] {
+        for answer in [b"p\n".as_slice(), b"r\n"] {
+            let history = history();
+            let hub = LoopbackHub::private();
+            let transport = VisibilityTransport {
+                hub: &hub,
+                major: Some(1),
+                refusal: None,
+                requests: RefCell::new(Vec::new()),
+            };
+            let mut original = push_arguments("curate/claims", None);
+            if explicit_operation {
+                original.operation_uuid = Some(Uuid::new_v4().to_string());
+            }
+            let fresh = original.clone();
+            let mut operations = Vec::new();
+            let first = interactive_push(
+                &transport,
+                &history.graph,
+                &mut original,
+                &mut std::io::Cursor::new(answer),
+                &mut Vec::new(),
+                &mut operations,
+            )
+            .unwrap();
+            // This shared publication seam has committed remotely but has not
+            // recorded a receipt/upstream locally: recovery must use remote status.
+            assert!(
+                history
+                    .graph
+                    .research_version_retention()
+                    .unwrap()
+                    .remote_branches
+                    .is_empty()
+            );
+            transport.requests.borrow_mut().clear();
+            let mut fresh = fresh;
+            let mut notices = Vec::new();
+            let replay = interactive_push(
+                &transport,
+                &history.graph,
+                &mut fresh,
+                &mut std::io::Cursor::new(b""),
+                &mut notices,
+                &mut operations,
+            )
+            .unwrap();
+            assert!(replay.replayed);
+            assert_eq!(first.receipt, replay.receipt);
+            assert_eq!(operations, vec![first.receipt.operation_uuid; 2]);
+            assert!(notices.is_empty());
+            assert!(
+                transport
+                    .requests
+                    .borrow()
+                    .iter()
+                    .all(|request| request.method == HubMethod::Get)
+            );
+        }
+    }
+}
+
+#[test]
 fn cancelled_push_reads_context_but_never_derives_an_operation_or_opens_a_session() {
     let history = history();
     for answer in [b"\n".as_slice(), b"cancel\n", b"x\n", b""] {
