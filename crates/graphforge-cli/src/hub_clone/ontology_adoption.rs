@@ -151,7 +151,7 @@ fn dispatch_with(
         let mut graph = GraphForge::new(Some(path.to_str().ok_or_else(|| {
             validation("hub.destination_conflict", "Project path must be UTF-8")
         })?))?;
-        let mut receipt = graph.adopt_resolved_ontology_module(
+        let mut receipt = graph.adopt_resolved_ontology_module_for_publication(
             &resolved,
             WriteContext {
                 operation_uuid: OperationId(Uuid::now_v7()),

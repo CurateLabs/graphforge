@@ -1,3 +1,6 @@
+mod http_publication;
+mod selected_branch;
+
 use super::*;
 use crate::hub_clone::tests::{Scripted, response};
 use crate::hub_clone::{HttpResponse, TEST_RETRY_POLICY};
@@ -611,11 +614,27 @@ impl Transport for PublicationHub {
 }
 
 fn publish_public(hub: &PublicationHub, graph: &mut GraphForge, repository: &str) -> Value {
+    publish_public_with(hub, &hub.0, graph, repository)
+}
+
+fn publish_public_with(
+    transport: &dyn Transport,
+    hub: &graphforge_hub_publish::ReferenceHub,
+    graph: &mut GraphForge,
+    repository: &str,
+) -> Value {
     let credential = graphforge_hub_publish::PublishToken::new(
-        hub.0.issue_token(&format!("publish:{repository}"), 900),
+        hub.issue_token(&format!("publish:{repository}"), 900),
     );
     let url = format!("https://hub.test/{repository}");
-    let cli = crate::Cli::try_parse_from(["gf", "publish", &url, "--public"]).unwrap();
+    let contract: Value = serde_json::from_str(CONTRACT).unwrap();
+    let argv = contract["adopt"]["existing_selected_branch"]["publish_argv"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|arg| arg.as_str().unwrap().replace("{destination}", &url))
+        .collect::<Vec<_>>();
+    let cli = crate::Cli::try_parse_from(argv).unwrap();
     let crate::Command::Publish(mut args) = cli.command.unwrap() else {
         panic!("publish command")
     };
@@ -623,13 +642,13 @@ fn publish_public(hub: &PublicationHub, graph: &mut GraphForge, repository: &str
         .unwrap();
     let mut output = Vec::new();
     crate::hub_publish::publish_with_credentials(
-        hub,
+        transport,
         &args,
         Some(credential),
         None,
         |environment| {
             crate::hub_publish::publish_and_report(
-                hub,
+                transport,
                 graph,
                 &args,
                 environment,

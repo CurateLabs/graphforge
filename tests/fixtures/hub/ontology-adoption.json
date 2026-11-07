@@ -2,7 +2,12 @@
   "contract": "graphforge-ontology-adoption-conformance/1",
   "adopt": {
     "argv": ["gf", "--json", "ontology", "adopt", "opendata/openalex", "--ontology-id", "{ontology_id}", "--version", "{version}", "--digest", "{digest}", "--project", "{project}"],
-    "output_contract": "graphforge-ontology-adopt/1"
+    "output_contract": "graphforge-ontology-adopt/1",
+    "existing_selected_branch": {
+      "retains": "exact closure and first verified source in a fresh immutable head with workspace authority",
+      "retry": "complete a stale head after workspace-only adoption; completed repeats do not advance authority",
+      "publish_argv": ["gf", "publish", "{destination}", "--public"]
+    }
   },
   "start_from": {
     "argv": ["gf", "--json", "project", "new", "{project}", "--from-ontology", "opendata/openalex", "--ontology-id", "{ontology_id}", "--version", "{version}", "--digest", "{digest}"],

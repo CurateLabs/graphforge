@@ -198,7 +198,8 @@ pub(super) fn publication_fingerprint(request: &super::ResearchOperation) -> Opt
         | ResearchMutation::ReviewProposal { intent_sha256, .. }
         | ResearchMutation::ReleaseProposal { intent_sha256, .. }
         | ResearchMutation::UpdateBranch { intent_sha256, .. }
-        | ResearchMutation::RegenerateItemId { intent_sha256, .. } => {
+        | ResearchMutation::RegenerateItemId { intent_sha256, .. }
+        | ResearchMutation::AdoptBranchOntology { intent_sha256, .. } => {
             let mut digest = Sha256::new();
             digest.update(b"graphforge-branch-publication-intent/1");
             digest.update(request.operation_uuid.as_bytes());
@@ -210,8 +211,8 @@ pub(super) fn publication_fingerprint(request: &super::ResearchOperation) -> Opt
     }
 }
 
-/// Preserve the selected Branch and its origin when installing a native ID rewrite.
-pub(super) fn regenerate(
+/// Preserve the selected Branch and its origin when installing prepared workspace content.
+pub(super) fn publish_selected(
     root: &std::path::Path,
     registry: &mut ResearchRegistry,
     version: &super::ResearchVersionRecord,
@@ -224,18 +225,20 @@ pub(super) fn regenerate(
                 .then(|| *registry.branches.keys().next().expect("one Branch"))
         });
     if selected != Some(version.context_uuid) {
-        return Err(invalid("ID regeneration requires the selected Branch"));
+        return Err(invalid(
+            "workspace publication requires the selected Branch",
+        ));
     }
     let prior = registry
         .heads
         .get(&version.context_uuid)
         .and_then(|head| registry.versions.get(head))
-        .ok_or_else(|| invalid("ID regeneration Branch head is unavailable"))?;
+        .ok_or_else(|| invalid("workspace publication Branch head is unavailable"))?;
     if version.content.source_version != prior.content.source_version
         || version.content.graph_projection.is_some()
     {
         return Err(invalid(
-            "ID regeneration must preserve Branch origin lineage",
+            "workspace publication must preserve Branch origin lineage",
         ));
     }
     publish(root, registry, None, version, None)
