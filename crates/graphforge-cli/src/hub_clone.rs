@@ -1191,8 +1191,9 @@ pub(crate) fn run_clone(
         args.protection_bypass_env.as_deref(),
     )?;
     let runtime = clone_telemetry_runtime(args.telemetry_endpoint.as_deref());
-    let attached = PROCESS_ATTACHED.load(Ordering::Relaxed);
-    if attached {
+    let attached = crate::process_attached();
+    let owns_signals = attached && SIGNALS_OWNED.load(Ordering::Relaxed);
+    if owns_signals {
         install_interrupt_handler();
     }
     let mut stderr = std::io::stderr();
@@ -1200,7 +1201,7 @@ pub(crate) fn run_clone(
     let mut env = CloneEnv {
         retry: RETRY_POLICY,
         credential_lookup: |name| std::env::var(name),
-        cancelled: if attached {
+        cancelled: if owns_signals {
             &INTERRUPTED
         } else {
             &NEVER_CANCELLED
@@ -1222,17 +1223,16 @@ pub(crate) fn run_clone(
     result
 }
 
-/// Set by the native `gf` process only: an embedding host keeps its own
-/// signal handling and standard error.
-static PROCESS_ATTACHED: AtomicBool = AtomicBool::new(false);
+// The standalone binary owns signals; console calls embedded in Python/Node
+// retain their host's signal handlers, even after the invocation returns.
+static SIGNALS_OWNED: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn own_process_signals() {
+    SIGNALS_OWNED.store(true, Ordering::Relaxed);
+}
+
 /// Set by the first Ctrl-C during a clone.
 static INTERRUPTED: AtomicBool = AtomicBool::new(false);
-
-/// Let `gf clone` handle Ctrl-C and print byte progress on standard error.
-/// Only the native `gf` process calls this.
-pub(crate) fn attach_to_process() {
-    PROCESS_ATTACHED.store(true, Ordering::Relaxed);
-}
 
 /// The first Ctrl-C asks the running download, verification, or import to
 /// stop at its next cancellation check, which leaves a state a rerun resumes.

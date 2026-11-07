@@ -35,6 +35,9 @@ mod maintenance_cli;
 mod ontology_cli;
 mod porcelain;
 mod portable_cli;
+mod process;
+use process::process_attached;
+pub use process::{execute_process, run_process};
 mod research_cli;
 mod research_help;
 mod research_versions_cli;
@@ -1798,44 +1801,6 @@ where
 {
     use clap::FromArgMatches as _;
     Cli::from_arg_matches(&research_help::command().try_get_matches_from(args)?)
-}
-
-/// Stream process output directly and terminate with the native CLI exit status.
-pub fn run_process() {
-    let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
-    let cli = match parse_cli(&args) {
-        Ok(cli) => cli,
-        // Help and the version keep clap's own styled output; a refusal
-        // under `--json` is the one JSON error document `execute` gives.
-        Err(error) if !requests_json(&args) || !error.use_stderr() => error.exit(),
-        Err(error) => {
-            let refused = argument_error_execution(&error, true);
-            let _ = io::stderr().write_all(&refused.stderr);
-            std::process::exit(refused.exit_code);
-        }
-    };
-    let json = cli.json;
-    let mut output = io::stdout().lock();
-    hub_publish::allow_device_flow();
-    hub_clone::attach_to_process();
-    let mut stderr = io::stderr();
-    let mut diagnostics = Diagnostics::new(json, &mut stderr);
-    let result = run(cli, &mut output, &mut diagnostics);
-    let warnings = diagnostics.collected();
-    drop(diagnostics);
-    match result {
-        Ok(exit_code) if exit_code != 0 => {
-            let _ = output.flush();
-            std::process::exit(exit_code);
-        }
-        Ok(_) => {}
-        Err(error) => {
-            let _ = output.flush();
-            write_runtime_error(&error, json, &mut stderr.lock(), &warnings)
-                .expect("write CLI stderr");
-            std::process::exit(error_exit_code(&error));
-        }
-    }
 }
 
 #[cfg(test)]

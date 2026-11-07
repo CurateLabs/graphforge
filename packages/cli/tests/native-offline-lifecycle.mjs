@@ -201,6 +201,27 @@ try {
     false,
   );
 
+  // Run the publication package smoke in the ordinary binding gate as well.
+  execFileSync(
+    process.execPath,
+    [join(checkoutRoot, "scripts/ci/multi-ontology-packaged-smoke.mjs")],
+    { cwd: installRoot, stdio: "inherit" },
+  );
+
+  // The same packed install must support saved sign-in and live native stdio.
+  execFileSync(
+    "uv",
+    [
+      "run",
+      "--no-sync",
+      "python",
+      join(checkoutRoot, "scripts/ci/launcher-auth-smoke.py"),
+      "--npm-root",
+      installRoot,
+    ],
+    { cwd: checkoutRoot, stdio: "inherit" },
+  );
+
   execFileSync("git", ["init", "-q", repository]);
   execFileSync("git", ["init", "-q", destination]);
 

@@ -22,8 +22,10 @@ Published rc.7 predates the retained-query and composition-reimport repairs.
 The repaired source below still reports `0.6.0-rc.7`; **the source revision**
 distinguishes it from registry rc.7. A version string alone is insufficient.
 Keep these environments separate. The registry Python/npm launchers use a
-captured binding interface and cannot perform human device approval or reuse
-a saved CLI session. An explicitly provisioned scoped token is supported.
+captured publish interface. They can save a login session, but cannot reuse
+it for publishing or initiate publish device approval. An explicitly provisioned
+scoped token is supported. The pinned standalone source CLI supports both
+saved-session publishing and publish device approval.
 
 Use the exact versions below rather than `--pre`, `@next`, or an unversioned
 install: those can select different code. Instructions for newer development
@@ -132,6 +134,32 @@ npx --yes @curatelabs/graphforge-cli@0.6.0-rc.7 --help
 The Python package provides `graphforge`; the npm CLI provides both
 `graphforge` and `gf`. All launch the Rust CLI. Repository initialization and
 project skills are optional next steps in [repository integration](repository-integration.md).
+
+## Native CLI release assets
+
+The Publish workflow builds `gf` archives for macOS arm64/x86_64, Linux
+arm64/x86_64 (glibc 2.17+), and Windows x86_64, alongside the package artifacts.
+A release containing this support attaches `gf-<version>-<Rust target>.tar.gz`
+(or `.zip` for Windows) and a matching `.sha256` file to its GitHub Release.
+Check the archive against that checksum, extract it, and place `gf` (`gf.exe`
+on Windows) in your executable path. For example, on Linux x86_64:
+
+```bash
+sha256sum --check "gf-<version>-x86_64-unknown-linux-gnu.tar.gz.sha256"
+tar -xzf "gf-<version>-x86_64-unknown-linux-gnu.tar.gz"
+./gf --version
+./gf auth login
+```
+
+Replace `<version>` with the downloaded release version. Older releases,
+including rc.7, have no native assets. Until a containing release is published,
+use the [pinned standalone source CLI](#build-from-source) for the walkthrough.
+
+The [launcher repair on development source](https://github.com/CurateLabs/graphforge/commit/3f79e4c29a9e7d0c7003065b24a3675032344fee)
+also lets PyPI/npm console launchers inherit native streams and reuse saved
+sessions; PyPI adds `gf` alongside `graphforge`. These changes await a
+containing release. They are absent from registry rc.7 and the older pinned
+source used below, so keep using its standalone CLI in that walkthrough.
 
 ## Durable storage
 

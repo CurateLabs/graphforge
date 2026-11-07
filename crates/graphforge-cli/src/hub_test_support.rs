@@ -17,6 +17,46 @@ use std::path::Path;
 use std::sync::Arc;
 use url::Url;
 
+/// Process-launcher acceptance over the existing loopback/ReferenceHub model.
+pub mod launcher;
+
+/// Serve a wire request through the active ReferenceHub on this thread.
+pub fn exchange(
+    method: &str,
+    url: &str,
+    headers: Vec<(String, String)>,
+    body: Vec<u8>,
+) -> (u16, Vec<(String, String)>, Vec<u8>) {
+    let method = match method {
+        "GET" => HubMethod::Get,
+        "HEAD" => HubMethod::Head,
+        "POST" => HubMethod::Post,
+        "PUT" => HubMethod::Put,
+        _ => panic!("unsupported fixture method"),
+    };
+    FIXTURE.with(|fixture| {
+        let fixture = fixture.borrow();
+        let hub = fixture.as_ref().expect("fixture started");
+        let response = hub.handle(&HubRequest {
+            method,
+            url: url.into(),
+            headers,
+            body,
+        });
+        (response.status, response.headers, response.body)
+    })
+}
+
+/// Approve a device request in the active ReferenceHub on this thread.
+pub fn approve(user_code: &str) {
+    FIXTURE.with(|fixture| {
+        let fixture = fixture.borrow();
+        let hub = fixture.as_ref().expect("fixture started");
+        assert!(hub.approve_device(user_code));
+        hub.advance_clock(5);
+    });
+}
+
 thread_local! {
     static FIXTURE: RefCell<Option<Arc<ReferenceHub>>> = const { RefCell::new(None) };
 }

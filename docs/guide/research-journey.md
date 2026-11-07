@@ -192,27 +192,33 @@ Research history has a git-style command set that needs no JSON and no UUIDs. A
 Branch is named by its label, and that label is the ref on the Hub: `--ref` means
 the same thing in `gf clone`, `gf push` and `gf pull`.
 
+These shell examples select the standalone CLI from the
+[pinned source build](installation.md#build-from-source) through its absolute
+`GF_EVALUATION_CLI` path. Keep that source-build shell. Published rc.7 launchers
+can save a login session but cannot reuse it for publishing; newer console
+launchers require a build containing the [launcher repair](installation.md#native-cli-release-assets).
+
 Run these local commands from an existing durable Project. The sample queries
 assume it contains `Item` nodes; use the labels and properties in your graph.
 
 ```sh
-gf config user --name "Ada Lovelace" --email ada@example.org  # credited on every Version
-gf branch main                         # the first Branch of the Project
-gf commit -m "Raise scores" --query "MATCH (n:Item) SET n.score = 2"
-gf commit -m "Fix a typo" --query "MATCH (n:Item) SET n.name = 'Ada'"
-gf tag v1                              # a name for the head Version
-gf status                              # Branch, head, upstream, commits not yet published
-gf log                                 # history; add --all, -n 5, a tag, or --remote
+"$GF_EVALUATION_CLI" config user --name "Ada Lovelace" --email ada@example.org  # credited on every Version
+"$GF_EVALUATION_CLI" branch main                         # the first Branch of the Project
+"$GF_EVALUATION_CLI" commit -m "Raise scores" --query "MATCH (n:Item) SET n.score = 2"
+"$GF_EVALUATION_CLI" commit -m "Fix a typo" --query "MATCH (n:Item) SET n.name = 'Ada'"
+"$GF_EVALUATION_CLI" tag v1                              # a name for the head Version
+"$GF_EVALUATION_CLI" status                              # Branch, head, upstream, commits not yet published
+"$GF_EVALUATION_CLI" log                                 # history; add --all, -n 5, a tag, or --remote
 ```
 
 ### Choose a publishing target
 
 Publishing requires a separately verified write-capable server implementing
 `graphforge-discovery/1` and `graphforge-hub-publish/1`, an existing owner account
-and repository, and an approved `publish:owner/repository` credential. See the
-[agent credential path](agent-automation.md#provision-scoped-credentials-for-an-agent-or-ci) for
-provisioning and non-interactive use. Each collaborator needs their own approved
-credential; a recorded author name is credit, not authorization.
+and repository, and permission to publish there. Each collaborator signs in with
+`gf auth login`; the saved session obtains the repository-scoped publish credential.
+A recorded author name supplies credit, not authorization. For agents and CI, see
+the [scoped token path](agent-automation.md#provision-scoped-credentials-for-an-agent-or-ci).
 
 The collaboration tests use the native reference Hub at `https://hub.test`;
 that address is not a public service. No public write target is qualified by
@@ -221,27 +227,28 @@ publishing prerequisites must be verified separately. In the examples below,
 replace `https://hub.example` with your verified target; it is a placeholder,
 not an endpoint to try.
 
-With the scoped token supplied securely in `GRAPHFORGE_HUB_PUBLISH_TOKEN`:
+Sign in once, then push with the saved session:
 
 ```sh
-gf push https://hub.example/owner/repository --ref main --token-env GRAPHFORGE_HUB_PUBLISH_TOKEN
+"$GF_EVALUATION_CLI" auth login --hub https://hub.example
+"$GF_EVALUATION_CLI" push https://hub.example/owner/repository --ref main
 ```
 
 A collaborator clones the published ref, then works inside the clone:
 
 ```sh
-gf clone https://hub.example/owner/repository collaborator --ref main
+"$GF_EVALUATION_CLI" clone https://hub.example/owner/repository collaborator --ref main
 cd collaborator
-gf config user --name "Grace Hopper" --email grace@example.org
-gf commit -m "Revise scores" --query "MATCH (n:Item) SET n.score = 3"
-gf push                                # reuse the tracked repository and ref
+"$GF_EVALUATION_CLI" config user --name "Grace Hopper" --email grace@example.org
+"$GF_EVALUATION_CLI" commit -m "Revise scores" --query "MATCH (n:Item) SET n.score = 3"
+"$GF_EVALUATION_CLI" push                                # reuse the tracked repository and ref
 ```
 
 Back in the original Project, incorporate the collaborator's published change:
 
 ```sh
-gf pull
-gf log
+"$GF_EVALUATION_CLI" pull
+"$GF_EVALUATION_CLI" log
 ```
 
 Use `--tag v1` instead of `--ref main` to clone the tagged Version. Tags travel

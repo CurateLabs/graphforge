@@ -235,10 +235,16 @@ does not establish successful authorization or publication.
 This is an optional write workflow, after local evaluation. No production
 publish-back result is established by this guide. Use the **same pinned
 standalone source CLI** selected above; it supports human device approval and
-saved sessions. Registry rc.7 Python/npm launchers and captured binding calls
-cannot perform that approval or consult the saved-session vault. They can use
-an explicitly provisioned scoped token; see
+saved sessions. Registry rc.7 Python/npm launchers can save a login session,
+but publishing through them neither reuses it nor starts publish device flow.
+Captured binding calls require an explicitly provisioned scoped token; see
 [agent credential provisioning](agent-automation.md#provision-scoped-credentials-for-an-agent-or-ci).
+
+Newer development source fixes the PyPI/npm console launchers to stream device
+notices and reuse a saved session for `gf push` / `gf publish`; PyPI also installs
+`gf`. It also builds [native release archives](installation.md#native-cli-release-assets).
+Those changes need a containing release and are not part of registry rc.7 or
+the older pinned source. Keep the selected standalone CLI for this lesson.
 
 Only proceed after the target operator has supplied a verified write-capable
 Hub and approved your repository permission. The URL below is a **placeholder**,

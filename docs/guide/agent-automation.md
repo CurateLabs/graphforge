@@ -191,9 +191,10 @@ bearer and the following request body for this example:
 The response must include `access_token`, `token_type: Bearer`, positive
 `expires_in`, `repository_id` and `origin`. A publish grant for another origin
 is refused. Rust uses the scoped token in memory; it never exports the vault
-session. Captured/native binding invocations require an explicit token and do
-not consult the vault or prompt. Do not initiate interactive login from an
-unattended agent. Saved-session login and private reads require their separately
+session. Captured binding invocations require an explicit token and do not
+consult the vault or prompt. Newer PyPI/npm console launchers use native streams
+instead; that repair is separate from the pinned standalone CLI selected here.
+Do not initiate interactive login from an unattended agent. Saved-session login and private reads require their separately
 qualified Hub endpoints; the explicit-token path does not require either.
 
 ## Interpret actual tool results

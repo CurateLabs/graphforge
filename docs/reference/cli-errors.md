@@ -145,11 +145,11 @@ escalate to a human when the obvious fix does not clear the failure.
 
 | Code | Class | Meaning | Next action | Exit |
 | --- | --- | --- | --- | --- |
-| `hub.publish.auth_denied` | fix input | Publish credential missing, expired, or not scoped to this repository | With no token: set `GRAPHFORGE_HUB_PUBLISH_TOKEN` (see [Credentials](#credentials)). With a token still denied: a human must mint a `publish:owner/repository`-scoped token | 2 |
+| `hub.publish.auth_denied` | fix input | Publish credential missing, expired, or not scoped to this repository | Run `gf auth login`; CI can supply an explicit publish token (see [Credentials](#credentials)). With a token still denied: a human must mint a `publish:owner/repository`-scoped token | 2 |
 | `hub.invalid_identity` | fix input | Repository argument is not `owner/repository` or a valid HTTPS URL | Fix the repository (or `--hub`) argument | 2 |
 | `hub.invalid_input` | fix input | An outgoing request or header is invalid | Correct the request inputs or credential value; keep secret values out of logs | 2 |
 | `hub.unsafe_location` | fix input | URL must be credential-free HTTPS on a public host | Pass the documented Hub URL form | 2 |
-| `hub.auth_denied` | fix input | Credential missing, unreadable, empty, or not valid for this origin (clone `--token-env`; publish saved-session origin) | Set or correct the credential environment variable (see [Credentials](#credentials)); if a provided token is still denied, a human must mint a scoped token | 2 |
+| `hub.auth_denied` | fix input | Credential missing, unreadable, empty, or not valid for this origin (clone `--token-env`; publish saved-session origin) | Run `gf auth login` for the selected Hub; for CI, correct the scoped token environment variable (see [Credentials](#credentials)) | 2 |
 | `hub.not_found` | fix input | The repository or resource does not exist (404/410) | Check the owner/repository spelling and ref | 2 |
 | `hub.missing_ref` | fix input | The requested ref is absent | Check `--ref` against the repository's advertised refs | 2 |
 | `hub.ambiguous_identity` | fix input | The canonical item/version has multiple eligible content digests (409) | Ask the publisher to resolve the ambiguity; `--digest` is only a verification pin | 2 |
@@ -292,9 +292,10 @@ These failures set `error.code` and `details.kind` only. The class follows the
    terminals.
 
 With no credential available, `gf publish` fails `hub.publish.auth_denied`
-(exit 2) and names the environment variable in the message. A captured
-invocation (the Python and Node CLI shims) refuses before any request; an
-interactive `gf` process attempts the anonymous discovery read first and may
+(exit 2) and suggests `gf auth login`. Captured programmatic Python/Node
+invocations require explicit tokens and refuse before any request. The native,
+PyPI and npm console launchers all support saved sessions and terminal device
+approval. A console invocation attempts the anonymous discovery read first and may
 report a transport code instead when the Hub is unreachable.
 
 The token value is never accepted as a command-line argument, never logged,
