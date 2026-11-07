@@ -112,8 +112,9 @@ source inputs and export a complete portable package to persistent storage
 before the session ends; a result table is not a project backup. Network/FUSE
 mounts such as mounted cloud drives may still fail the primitive probe. Use
 session disk for the project and copy the completed portable package out.
-Actual Colab acceptance remains to be measured on a connected runtime; local
-tmpfs and split-device overlay proofs do not establish that runtime result.
+For the connected Colab write–close–reopen procedure and qualification receipts,
+see [#2332](https://github.com/CurateLabs/graphforge/issues/2332). Local tmpfs and
+split-device overlay proofs do not establish a hosted runtime result.
 
 ## Continue
 
