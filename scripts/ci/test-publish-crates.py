@@ -262,13 +262,33 @@ original_root = mod.ROOT
 original_environ = os.environ.copy()
 with tempfile.TemporaryDirectory(prefix="graphforge-package-target-") as directory:
     mod.ROOT = Path(directory)
+    (mod.ROOT / "src").mkdir()
+    (mod.ROOT / "src/lib.rs").write_text("", encoding="utf-8")
+    (mod.ROOT / "Cargo.toml").write_text(
+        '[package]\nname = "gf-package-target"\nversion = "0.0.0"\nedition = "2024"\n',
+        encoding="utf-8",
+    )
+    (mod.ROOT / ".cargo").mkdir()
+    os.environ["CARGO_HOME"] = str(mod.ROOT / "cargo-home")
+    os.environ.pop("CARGO_BUILD_TARGET_DIR", None)
+    subprocess.run(["cargo", "generate-lockfile", "--offline"], cwd=mod.ROOT, check=True)
     mod.run = record_package
     try:
-        for configured_target in (None, "relative-target", str(mod.ROOT / "absolute-target")):
-            if configured_target is None:
+        for config_target, env_target in (
+            (None, None),
+            ("config-relative-target", None),
+            (str(mod.ROOT / "config-absolute-target"), None),
+            ("config-target", "relative-target"),
+            ("config-target", str(mod.ROOT / "absolute-target")),
+        ):
+            config = "[build]\n"
+            if config_target is not None:
+                config += f"target-dir = {json.dumps(config_target)}\n"
+            (mod.ROOT / ".cargo/config.toml").write_text(config, encoding="utf-8")
+            if env_target is None:
                 os.environ.pop("CARGO_TARGET_DIR", None)
             else:
-                os.environ["CARGO_TARGET_DIR"] = configured_target
+                os.environ["CARGO_TARGET_DIR"] = env_target
             before = os.environ.copy()
             mod.package(["graphforge-core", "graphforge-io"])
             assert os.environ == before
@@ -286,9 +306,9 @@ with tempfile.TemporaryDirectory(prefix="graphforge-package-target-") as directo
                 "-p",
                 "graphforge-io",
             ], command
-            assert target.parent == (mod.ROOT / (configured_target or "target")).resolve()
+            assert target.parent == (mod.ROOT / (env_target or config_target or "target")).resolve()
             assert not target.exists()
-        assert len(commands) == 3
+        assert len(commands) == 5
     finally:
         mod.ROOT = original_root
         os.environ.clear()
@@ -362,6 +382,13 @@ with tempfile.TemporaryDirectory(prefix="graphforge-package-sources-") as direct
     sentinel = root / "target" / "caller-output"
     sentinel.write_text("keep", encoding="utf-8")
     target_entries = set((root / "target").iterdir())
+    # Use Cargo's file configuration for the production runs: the temporary
+    # verification builds must remain on that configured target volume.
+    (fixture / ".cargo").mkdir()
+    (fixture / ".cargo/config.toml").write_text(
+        f"[build]\ntarget-dir = {json.dumps(str(root / 'target'))}\n", encoding="utf-8"
+    )
+    del environment["CARGO_TARGET_DIR"]
     package_mod = load_module()
     package_mod.ROOT = fixture
     original_environ = os.environ.copy()

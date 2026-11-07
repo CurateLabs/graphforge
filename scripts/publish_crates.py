@@ -295,7 +295,15 @@ def package(order: list[str]) -> None:
     Cargo otherwise reuses cached dependency sources at unchanged versions.
     Dry-run artifacts are discarded; publishing packages its own artifacts.
     """
-    target = (ROOT / os.environ.get("CARGO_TARGET_DIR", "target")).resolve()
+    metadata = subprocess.run(
+        ["cargo", "metadata", "--format-version", "1", "--no-deps", "--offline", "--locked"],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    target = Path(json.loads(metadata.stdout)["target_directory"])
     target.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="publish-package-", dir=target) as directory:
         command = ["cargo", "package", "--locked", "--allow-dirty", "--target-dir", directory]
