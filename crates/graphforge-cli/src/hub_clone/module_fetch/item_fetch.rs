@@ -1,10 +1,11 @@
 //! Resolve permanent IDs to retained metadata, then use the existing verifier.
 
 use super::{
-    DiscoveryLimits, DiscoveryManifest, ItemId, MAX_METADATA_BYTES, MAX_MODULE_PACKAGE_BYTES,
-    ModuleFetchArgs, RefSet, ResolvedOntologyModule, RetryPolicy, Sha256Digest, Transport, Url,
-    acquire_staging, digest_pin, download_and_resolve_module, endpoint, ensure_output_available,
-    fetch_document, normalized_id, parse_input_at, protocol_error, release_staging, validation,
+    DiscoveryCredentials, DiscoveryLimits, DiscoveryManifest, ItemId, MAX_METADATA_BYTES,
+    MAX_MODULE_PACKAGE_BYTES, ModuleFetchArgs, RefSet, ResolvedOntologyModule, RetryPolicy,
+    Sha256Digest, Transport, Url, acquire_staging, digest_pin, download_and_resolve_module,
+    endpoint, ensure_output_available, fetch_document, normalized_id, parse_input_at,
+    protocol_error, release_staging, validation,
 };
 use graphforge_discovery::{
     ITEM_DESCRIPTOR_MEDIA_TYPE, ITEM_RESOLUTION_ERROR_MAX_BYTES, ItemDescriptor, ItemKind,
@@ -64,26 +65,19 @@ fn mismatch(message: &str) -> graphforge_api::GfError {
 /// existing credential-free transport path.
 struct DescriptorTransport<'a>(&'a dyn Transport);
 
-impl Transport for DescriptorTransport<'_> {
-    fn validate(&self, url: &Url) -> Result<(), graphforge_api::GfError> {
-        self.0.validate(url)
-    }
-
-    fn get(
+impl DescriptorTransport<'_> {
+    fn request(
         &self,
         url: &Url,
-        _range: Option<u64>,
-        _if_range: Option<&str>,
+        headers: &[(&str, ureq::http::HeaderValue)],
         limit: u64,
     ) -> Result<super::super::HttpResponse, graphforge_api::GfError> {
-        let mut response = self.0.get_discovery(
-            url,
-            &[(
-                "accept",
-                ureq::http::HeaderValue::from_static(ITEM_DESCRIPTOR_MEDIA_TYPE),
-            )],
-            limit,
-        )?;
+        let mut headers = headers.to_vec();
+        headers.push((
+            "accept",
+            ureq::http::HeaderValue::from_static(ITEM_DESCRIPTOR_MEDIA_TYPE),
+        ));
+        let mut response = self.0.get_discovery(url, &headers, limit)?;
         if response.status == 409 {
             let mut bytes = Vec::new();
             response
@@ -101,6 +95,31 @@ impl Transport for DescriptorTransport<'_> {
             return Err(protocol_error(&error));
         }
         Ok(response)
+    }
+}
+
+impl Transport for DescriptorTransport<'_> {
+    fn validate(&self, url: &Url) -> Result<(), graphforge_api::GfError> {
+        self.0.validate(url)
+    }
+
+    fn get(
+        &self,
+        url: &Url,
+        _range: Option<u64>,
+        _if_range: Option<&str>,
+        limit: u64,
+    ) -> Result<super::super::HttpResponse, graphforge_api::GfError> {
+        self.request(url, &[], limit)
+    }
+
+    fn get_discovery(
+        &self,
+        url: &Url,
+        headers: &[(&str, ureq::http::HeaderValue)],
+        limit: u64,
+    ) -> Result<super::super::HttpResponse, graphforge_api::GfError> {
+        self.request(url, headers, limit)
     }
 }
 
@@ -130,6 +149,15 @@ impl Transport for SnapshotTransport<'_> {
     ) -> Result<super::super::HttpResponse, graphforge_api::GfError> {
         self.inner.get(url, range, if_range, limit)
     }
+
+    fn get_discovery(
+        &self,
+        url: &Url,
+        headers: &[(&str, ureq::http::HeaderValue)],
+        limit: u64,
+    ) -> Result<super::super::HttpResponse, graphforge_api::GfError> {
+        self.inner.get_discovery(url, headers, limit)
+    }
 }
 
 fn snapshot_document(
@@ -138,6 +166,7 @@ fn snapshot_document(
     name: &str,
     selector: &str,
     digest: &Sha256Digest,
+    credentials: Option<&DiscoveryCredentials>,
     retry: &RetryPolicy,
 ) -> Result<Vec<u8>, graphforge_api::GfError> {
     let mut url = endpoint(base, name);
@@ -146,7 +175,7 @@ fn snapshot_document(
         inner: transport,
         expected: url.clone(),
     };
-    fetch_document(&scoped, &url, retry)
+    fetch_document(&scoped, &url, credentials, retry)
 }
 
 fn item_url(hub: &Url, id: &ItemId, version: Option<&str>) -> Result<Url, graphforge_api::GfError> {
@@ -169,11 +198,30 @@ fn item_url(hub: &Url, id: &ItemId, version: Option<&str>) -> Result<Url, graphf
     Ok(url)
 }
 
+fn validate_descriptor_selection(
+    descriptor: &ItemDescriptor,
+    reference: &ItemReference,
+    version: Option<&str>,
+    pin: Option<&Sha256Digest>,
+) -> Result<(), graphforge_api::GfError> {
+    if descriptor.id != reference.id.as_str() || descriptor.kind != ItemKind::OntologyModule {
+        return Err(mismatch("descriptor names a different item"));
+    }
+    if version.is_some_and(|version| descriptor.module.version != version) {
+        return Err(mismatch("descriptor names a different authored version"));
+    }
+    if pin.is_some_and(|pin| pin != &descriptor.module.content_digest) {
+        return Err(mismatch("descriptor disagrees with --digest pin"));
+    }
+    Ok(())
+}
+
 pub(super) fn fetch(
     transport: &dyn Transport,
     args: &ModuleFetchArgs,
     reference: &ItemReference,
     retry: &RetryPolicy,
+    credential_lookup: impl Fn(&str) -> Result<String, std::env::VarError>,
 ) -> Result<
     (
         ResolvedOntologyModule,
@@ -210,28 +258,22 @@ pub(super) fn fetch(
     let hub = crate::hub_http::hub_base(args.hub.as_deref())?;
     ensure_output_available(&args.output)?;
     let url = item_url(&hub, &reference.id, version)?;
+    let credentials = DiscoveryCredentials::load(
+        &hub,
+        None,
+        args.protection_bypass_env.as_deref(),
+        credential_lookup,
+    )?;
     let limits = DiscoveryLimits {
         max_response_bytes: MAX_METADATA_BYTES,
         max_module_package_bytes: MAX_MODULE_PACKAGE_BYTES,
         ..DiscoveryLimits::default()
     };
-    let descriptor = ItemDescriptor::from_json(
-        &fetch_document(&DescriptorTransport(transport), &url, retry)?,
-        limits,
-    )
-    .map_err(|error| protocol_error(&error))?;
-    if descriptor.id != reference.id.as_str() || descriptor.kind != ItemKind::OntologyModule {
-        return Err(mismatch("descriptor names a different item"));
-    }
-    if version.is_some_and(|version| descriptor.module.version != version) {
-        return Err(mismatch("descriptor names a different authored version"));
-    }
-    if pin
-        .as_ref()
-        .is_some_and(|pin| pin != &descriptor.module.content_digest)
-    {
-        return Err(mismatch("descriptor disagrees with --digest pin"));
-    }
+    let descriptor_transport = DescriptorTransport(transport);
+    let bytes = fetch_document(&descriptor_transport, &url, credentials.as_ref(), retry)?;
+    let descriptor =
+        ItemDescriptor::from_json(&bytes, limits).map_err(|error| protocol_error(&error))?;
+    validate_descriptor_selection(&descriptor, reference, version, pin.as_ref())?;
     let (_, base) = parse_input_at(&descriptor.repository.canonical_name(), Some(hub.as_str()))?;
     let refs_bytes = snapshot_document(
         transport,
@@ -239,6 +281,7 @@ pub(super) fn fetch(
         "refs",
         "revision",
         &descriptor.discovery.refs_revision,
+        credentials.as_ref(),
         retry,
     )?;
     let manifest_bytes = snapshot_document(
@@ -247,6 +290,7 @@ pub(super) fn fetch(
         "manifest",
         "validator",
         &descriptor.discovery.manifest_validator,
+        credentials.as_ref(),
         retry,
     )?;
     let refs = RefSet::from_json(&refs_bytes, limits).map_err(|error| protocol_error(&error))?;
