@@ -66,8 +66,8 @@ documentation for definitions and invocation descriptors.
 
 ## Typed Hub workflow
 
-`graphforge.HubProject` exposes typed clone, commit, tag, push/publish, pull and
-history results through the Rust CLI. `push` and `publish` require explicit
-`public=True` or `private=True`; captured calls never prompt. See the
-[facade reference and Python example](../../docs/reference/api.md#typed-hub-workflow-facades)
-for results, native errors, Arrow reads and write-capable Hub prerequisites.
+`graphforge.HubProject` provides typed clone, commit, tag, push/publish, pull and
+history through the Rust CLI. Captured `push`/`publish` calls never prompt: pass
+`public=True` or `private=True`. See the
+[Python facade reference](../../docs/reference/api.md#typed-hub-workflow-facades)
+for native errors, Arrow reads and Hub prerequisites.
