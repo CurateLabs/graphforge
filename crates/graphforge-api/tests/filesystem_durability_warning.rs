@@ -8,7 +8,89 @@ use graphforge_core::portable::{
     PortableLimits, PortableMode, PortableOutput, PortableSelectionProfile,
 };
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::{fs, path::Path};
+
+fn reseal_package(package: &Path, mut manifest: Value) {
+    let hex = |bytes: Vec<u8>| {
+        Sha256::digest(bytes)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    };
+    manifest.as_object_mut().unwrap().remove("package_digest");
+    let semantic = serde_json::to_vec(&manifest).unwrap();
+    manifest["package_digest"] = format!(
+        "sha256:{}",
+        hex([b"graphforge-project/2\0".as_slice(), semantic.as_slice()].concat())
+    )
+    .into();
+    fs::write(
+        package.join("data/graphforge-project.json"),
+        serde_json::to_vec(&manifest).unwrap(),
+    )
+    .unwrap();
+    for name in ["manifest-sha256.txt", "tagmanifest-sha256.txt"] {
+        let checksums: String = fs::read_to_string(package.join(name))
+            .unwrap()
+            .lines()
+            .map(|line| {
+                let (_, path) = line.split_once("  ").unwrap();
+                format!("{}  {path}\n", hex(fs::read(package.join(path)).unwrap()))
+            })
+            .collect();
+        fs::write(package.join(name), checksums).unwrap();
+    }
+}
+
+#[test]
+fn correctly_checksummed_packages_refuse_terminal_controls_in_durability_metadata() {
+    let root = tempfile::tempdir().unwrap();
+    let package = root.path().join("package");
+    GraphForge::new(None)
+        .unwrap()
+        .export_portable(
+            &PortableExportRequest {
+                selection: PortableSelection::Current,
+                output_path: package.clone(),
+                representation: PortableOutput::Expanded,
+                profile: PortableSelectionProfile::Complete,
+                subset: None,
+                limits: PortableLimits::default(),
+            },
+            None,
+            |_| {},
+        )
+        .unwrap();
+    let mut manifest: Value =
+        serde_json::from_slice(&fs::read(package.join("data/graphforge-project.json")).unwrap())
+            .unwrap();
+    manifest["source_unverified_durability"] = serde_json::json!({
+        "phase": "CLASSIFY",
+        "cause": "filesystem_class_unproven",
+        "filesystem_type": "tmpfs"
+    });
+    let request = PortableVerifyRequest {
+        input: package.clone(),
+        mode: PortableMode::Full,
+        limits: PortableLimits::default(),
+    };
+    reseal_package(&package, manifest.clone());
+    assert!(verify_portable(&request, None).is_ok());
+    for field in ["phase", "cause", "filesystem_type"] {
+        let mut poisoned = manifest.clone();
+        poisoned["source_unverified_durability"][field] =
+            "\u{1b}[2J\nverified package_digest=forged".into();
+        reseal_package(&package, poisoned);
+        let error = verify_portable(&request, None).unwrap_err();
+        assert_eq!(
+            error.code,
+            graphforge_core::portable::PortableErrorCode::InvalidStructure
+        );
+        assert!(!error.to_string().contains('\u{1b}'));
+        assert!(!error.to_string().contains("forged"));
+    }
+}
 
 fn current_manifest(project: &Path) -> (std::path::PathBuf, Value) {
     let current: Value =

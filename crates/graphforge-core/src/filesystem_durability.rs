@@ -9,11 +9,32 @@ pub const UNVERIFIED_FILESYSTEM_CODE: &str = "GF_UNVERIFIED_FILESYSTEM";
 #[serde(deny_unknown_fields)]
 pub struct UnverifiedDurability {
     /// Admission phase, currently `CLASSIFY`.
+    #[serde(deserialize_with = "diagnostic_token")]
     pub phase: String,
     /// Safe classification cause.
+    #[serde(deserialize_with = "diagnostic_token")]
     pub cause: String,
     /// Observed filesystem class, never a device or path.
+    #[serde(deserialize_with = "diagnostic_token")]
     pub filesystem_type: String,
+}
+
+// Generation and portable manifests are untrusted input. These machine tokens
+// reach text receipts, so accept bounded ASCII names, never terminal controls,
+// whitespace, path separators or Unicode display controls.
+fn diagnostic_token<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
+    let value = String::deserialize(deserializer)?;
+    if value.is_empty()
+        || value.len() > 128
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+    {
+        return Err(serde::de::Error::custom(
+            "invalid filesystem durability diagnostic token",
+        ));
+    }
+    Ok(value)
 }
 
 impl UnverifiedDurability {
@@ -89,6 +110,41 @@ impl From<FilesystemDurabilityWarning> for Warning {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn untrusted_diagnostic_fields_are_bounded_terminal_safe_tokens() {
+        let valid = serde_json::json!({
+            "phase": "CLASSIFY",
+            "cause": "filesystem_class_unproven",
+            "filesystem_type": "0x794c7630"
+        });
+        assert!(serde_json::from_value::<UnverifiedDurability>(valid.clone()).is_ok());
+        for field in ["phase", "cause", "filesystem_type"] {
+            for invalid in [
+                "",
+                "\u{1b}[2J",
+                "tmpfs\nforged receipt",
+                "tmpfs\rhidden",
+                "tmpfs\tvalue",
+                "tmpfs\u{009b}2J",
+                "tmpfs\u{202e}value",
+                "/private/project",
+                "C:\\private\\project",
+                &"a".repeat(129),
+            ] {
+                let mut poisoned = valid.clone();
+                poisoned[field] = invalid.into();
+                let error = serde_json::from_value::<UnverifiedDurability>(poisoned).unwrap_err();
+                assert!(
+                    error
+                        .to_string()
+                        .contains("invalid filesystem durability diagnostic token")
+                );
+                assert!(!error.to_string().contains(invalid) || invalid.is_empty());
+            }
+        }
+    }
+
     #[test]
     fn warning_union_preserves_existing_wire_json() {
         let old = crate::core_version::check_core_version(Some("0.0.1")).unwrap();
