@@ -35,6 +35,15 @@ by verification, export and publish receipts. Absent fields are omitted so
 qualified projects and packages keep their serialization. Older pre-v1 readers
 may refuse newly stamped metadata under existing format policy (ADR 0054).
 
+Discovery mirrors that Project package stamp in the optional
+`x-graphforge-source-durability` extension, with equality checked during package
+verification. Publish replay reads a manifest whose repository and canonical
+digest match its original receipt. It never uses the current writer's stamp.
+If the Hub no longer serves that manifest, qualification is unavailable
+(`source_unverified_durability: null` in JSON), distinct from a qualified source's
+omitted field. Replay may read metadata but derives and uploads no new packages.
+Python applies warning filters before import can mutate its destination.
+
 Colab and Kaggle session disks can run with this warning; tmpfs loses data at
 reboot and VM disks disappear when runtimes recycle. Export to persistent
 storage. Network/FUSE mounts may still fail primitive checks. Local tmpfs and

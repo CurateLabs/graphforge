@@ -5,9 +5,57 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import uuid
 import warnings
 
 import graphforge as gf
+
+
+def check_import_warning_policy(root: Path, package: str) -> None:
+    for existing in (False, True):
+        target = root / f"warning-policy-{existing}"
+        if existing:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", gf.FilesystemDurabilityWarning)
+                gf.GraphForge(str(target)).close()
+        before = {
+            str(path.relative_to(target)): path.read_bytes()
+            for path in target.rglob("*")
+            if path.is_file()
+        }
+        operation = str(uuid.uuid4())
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", gf.FilesystemDurabilityWarning)
+            try:
+                gf.GraphForge.import_portable(
+                    project_root=str(target), input=package, operation_id=operation
+                )
+            except gf.FilesystemDurabilityWarning as warning:
+                assert warning.code == "GF_UNVERIFIED_FILESYSTEM"
+            else:
+                raise AssertionError("expected warning promoted to error")
+        assert target.exists() == existing, "warning error created the destination"
+        after = {
+            str(path.relative_to(target)): path.read_bytes()
+            for path in target.rglob("*")
+            if path.is_file()
+        }
+        assert after == before, "warning error changed the existing destination"
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always", gf.FilesystemDurabilityWarning)
+            receipt = gf.GraphForge.import_portable(
+                project_root=str(target), input=package, operation_id=operation
+            )
+            assert len(caught) == 1
+            assert not receipt["idempotent_replay"], "refused attempt committed an import"
+            assert receipt["warnings"][0]["code"] == "GF_UNVERIFIED_FILESYSTEM"
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", gf.FilesystemDurabilityWarning)
+            forge = gf.GraphForge(str(target))
+            assert forge.execute("MATCH (n:Item) RETURN n.value AS value").to_pylist() == [
+                {"value": 42}
+            ]
+            forge.close()
 
 
 def main() -> None:
@@ -47,6 +95,7 @@ def main() -> None:
             memory = gf.GraphForge()
             memory.close()
             assert len(caught) == 2
+        check_import_warning_policy(Path(root), package)
         for policy, code in [("strict", "GF_UNSUPPORTED_FILESYSTEM"), ("invalid", "GF_VALIDATION")]:
             env = dict(os.environ, GRAPHFORGE_FILESYSTEM_DURABILITY=policy)
             child = subprocess.run(

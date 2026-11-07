@@ -66,6 +66,9 @@ pub use graphforge_storage::filesystem_admission::filesystem_durability_prefligh
 pub use graphforge_storage::lifecycle_io::CaptureScope as LifecycleIoCapture;
 /// Whether lifecycle I/O was explicitly requested on this thread.
 pub use graphforge_storage::lifecycle_io::is_active as lifecycle_io_is_active;
+/// Probe import warning policy before publication, preserving portable error details.
+#[cfg(feature = "portable")]
+pub use graphforge_storage::project_portable_import::portable_import_durability_preflight;
 pub use graphforge_storage::{
     CONSTRUCTION_EDGE_SCHEMA, CONSTRUCTION_NODE_SCHEMA, ConstructionChunkReceipt,
     GraphConstructionBudgets, GraphConstructionEvidence, GraphConstructionState,
@@ -205,7 +208,8 @@ pub use discovery_ontology_module::{
 #[cfg(all(feature = "discovery", feature = "portable"))]
 pub use discovery_portable::{
     DiscoveredPortable, DiscoveryPortableError, DiscoveryPortableMismatch,
-    DiscoveryPortableRequest, verify_discovered_portable,
+    DiscoveryPortableRequest, SOURCE_UNVERIFIED_DURABILITY_EXTENSION,
+    manifest_source_unverified_durability, verify_discovered_portable,
 };
 #[cfg(all(feature = "discovery", feature = "portable"))]
 pub use discovery_project_summary::{ProjectSummaryRequest, summarize_verified_portable};

@@ -335,3 +335,8 @@ stderr; JSON commands include structured `code`, `phase`, `outcome`, `cause`,
 `source_unverified_durability`. `GRAPHFORGE_FILESYSTEM_DURABILITY=warn` is the
 default; `strict` refuses unproven classes with `GF_UNSUPPORTED_FILESYSTEM`
 (exit 3). Invalid values return `GF_VALIDATION`. Broken operations always refuse.
+
+Publish replay obtains the source qualification from the receipt-bound manifest.
+When that manifest is no longer served, text reports `Source durability:
+unavailable` and JSON includes `"source_unverified_durability": null`.
+Qualified sources omit the field; an object records an unverified source.

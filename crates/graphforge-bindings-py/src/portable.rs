@@ -560,10 +560,18 @@ pub(crate) fn import_portable(
     };
     let cancelled = cancellation.map(|token| token.inner.flag());
     let root = PathBuf::from(project_root);
+    // Python warning filters may raise. Apply them before import can publish
+    // anything, using the same native probe as lifecycle admission. The import
+    // still performs its own admission and returns its actual warning receipt.
+    let evidence = py
+        .detach(|| graphforge_api::portable_import_durability_preflight(&root))
+        .map_err(|error| to_portable_pyerr(py, error))?;
+    if let Some(unverified) = evidence.unverified {
+        crate::emit_durability_warnings(py, &[unverified.warning().into()])?;
+    }
     let result = py
         .detach(|| graphforge_api::GraphForge::import_portable(&root, &request, cancelled))
         .map_err(|error| to_portable_pyerr(py, error))?;
-    crate::emit_durability_warnings(py, &result.warnings)?;
     json_value_to_python(py, &import_result_json(&result))
 }
 

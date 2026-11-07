@@ -51,6 +51,8 @@ mod push_visibility;
 pub(crate) use push_visibility::{push_with_credentials, require_push_visibility};
 pub(crate) mod publication;
 mod refusals;
+mod source_durability;
+use source_durability::{PublishedDurability, published_durability, receipt_binds_manifest};
 
 /// OAuth client identifier the CLI presents to device authorization.
 const CLIENT_ID: &str = "graphforge-cli";
@@ -274,7 +276,7 @@ fn select_credential(
 /// Published result written to stdout.
 #[derive(Debug, PartialEq)]
 pub(crate) struct PublishOutcome {
-    pub source_unverified_durability: Option<graphforge_api::UnverifiedDurability>,
+    pub source_unverified_durability: PublishedDurability,
     /// Original Hub receipt.
     pub receipt: PublishReceipt,
     /// Whether this run replayed a committed operation without any upload.
@@ -305,10 +307,8 @@ impl PublishedHead {
         manifest: &DiscoveryManifest,
         lineage: &ResearchLineage,
     ) -> Self {
-        self.documents = manifest
-            .canonical_digest()
-            .is_ok_and(|digest| digest.0 == receipt.manifest_validator)
-            .then(|| (manifest.clone(), lineage.clone()));
+        self.documents =
+            receipt_binds_manifest(receipt, manifest).then(|| (manifest.clone(), lineage.clone()));
         self
     }
 }
@@ -735,8 +735,14 @@ pub(crate) fn write_outcome(
     if json {
         let mut result = serde_json::to_value(&outcome.receipt)
             .map_err(|error| GfError::Execution(error.to_string()))?;
-        if let Some(stamp) = &outcome.source_unverified_durability {
-            result["source_unverified_durability"] = json!(stamp);
+        match &outcome.source_unverified_durability {
+            PublishedDurability::Qualified => {}
+            PublishedDurability::Unverified(stamp) => {
+                result["source_unverified_durability"] = json!(stamp);
+            }
+            PublishedDurability::Unavailable => {
+                result["source_unverified_durability"] = serde_json::Value::Null;
+            }
         }
         if let Some(moved) = &outcome.moved {
             result["moved_from"] = json!(moved.moved_from.canonical_name());
@@ -746,13 +752,20 @@ pub(crate) fn write_outcome(
             .map_err(|error| GfError::Execution(error.to_string()))?;
         writeln!(output).map_err(io)
     } else {
-        if let Some(stamp) = &outcome.source_unverified_durability {
-            writeln!(
-                output,
-                "Source durability: unverified ({}; {})",
-                stamp.filesystem_type, stamp.cause
-            )
-            .map_err(io)?;
+        match &outcome.source_unverified_durability {
+            PublishedDurability::Qualified => {}
+            PublishedDurability::Unverified(stamp) => {
+                writeln!(
+                    output,
+                    "Source durability: unverified ({}; {})",
+                    stamp.filesystem_type, stamp.cause
+                )
+                .map_err(io)?;
+            }
+            PublishedDurability::Unavailable => {
+                writeln!(output, "Source durability: unavailable (the publication's manifest is no longer served)")
+                    .map_err(io)?;
+            }
         }
         if let Some(moved) = &outcome.moved {
             writeln!(
@@ -1260,7 +1273,6 @@ struct Selection {
     /// generation (`source_generation`), so the Project package changes exactly
     /// when the generation does, and exports of one generation are identical.
     project_content: String,
-    source_unverified_durability: Option<graphforge_api::UnverifiedDurability>,
     /// What the publication is made of, without the tracking state a publication
     /// writes about itself. The intent binds this, so a rerun of a completed
     /// publication is a replay even though recording it moved CURRENT.
@@ -1323,7 +1335,6 @@ fn select(graph: &GraphForge, args: &PublishArgs) -> Result<Selection, GfError> 
         identity: hex_digest(identity),
         project_uuid: reference.project_uuid,
         project_content: project_content(graph)?,
-        source_unverified_durability: graph.committed_unverified_durability()?,
         publication_content: hex_digest(&graph.publication_content_identity()?).0,
     })
 }
@@ -2018,6 +2029,7 @@ fn build_snapshot(
         default_ref: default_ref.clone(),
         resolved_ref: resolved_ref.clone(),
         package: project.package_reference(),
+        source_unverified_durability: project.source_unverified_durability.clone(),
         summary: Some(summary_reference(&summary, &summary_object)),
         ontology,
         lineage: Some(ResearchLineageReference {
@@ -2617,8 +2629,8 @@ fn publish_inner(
         }
         if let Some(receipt) = status.receipt {
             check_receipt(&receipt, &identity, operation_uuid)?;
+            let published = context.take_or_read(read_current)?;
             if args.check_fork_origin.is_some() {
-                let published = context.take_or_read(read_current)?;
                 history::verify_established_fork(
                     &hub,
                     graph,
@@ -2628,8 +2640,20 @@ fn publish_inner(
                     environment.notices,
                 )?;
             }
+            let source_unverified_durability = published_durability(
+                &receipt,
+                &published
+                    .as_ref()
+                    .map(|value| &value.manifest)
+                    .into_iter()
+                    .collect::<Vec<_>>(),
+            )?;
+            let confirmed = confirmed.map(|head| match &published {
+                Some(value) => head.confirmed_by(&receipt, &value.manifest, &value.lineage),
+                None => head,
+            });
             return Ok(PublishOutcome {
-                source_unverified_durability: selection.source_unverified_durability.clone(),
+                source_unverified_durability,
                 receipt,
                 replayed: true,
                 moved,
@@ -2803,10 +2827,39 @@ fn publish_inner(
     let (session_id, uploads) = match opened {
         SessionResponse::Complete { receipt } => {
             check_receipt(&receipt, &identity, operation_uuid)?;
-            let confirmed =
-                confirmed.map(|head| head.confirmed_by(&receipt, &snapshot.manifest, &lineage));
+            let mut candidates = vec![(&snapshot.manifest, &lineage)];
+            if let Some(value) = &published {
+                candidates.push((&value.manifest, &value.lineage));
+            }
+            let fresh = if candidates
+                .iter()
+                .any(|(manifest, _)| receipt_binds_manifest(&receipt, manifest))
+            {
+                None
+            } else {
+                read_current()?
+            };
+            if let Some(value) = &fresh {
+                candidates.push((&value.manifest, &value.lineage));
+            }
+            let source_unverified_durability = published_durability(
+                &receipt,
+                &candidates
+                    .iter()
+                    .map(|(manifest, _)| *manifest)
+                    .collect::<Vec<_>>(),
+            )?;
+            let confirmed = confirmed.map(|head| {
+                match candidates
+                    .iter()
+                    .find(|(manifest, _)| receipt_binds_manifest(&receipt, manifest))
+                {
+                    Some((manifest, lineage)) => head.confirmed_by(&receipt, manifest, lineage),
+                    None => head,
+                }
+            });
             return Ok(PublishOutcome {
-                source_unverified_durability: selection.source_unverified_durability.clone(),
+                source_unverified_durability,
                 receipt,
                 replayed: true,
                 moved,
@@ -2919,7 +2972,7 @@ fn publish_inner(
     }
     let confirmed = confirmed.map(|head| head.confirmed_by(&receipt, &snapshot.manifest, &lineage));
     Ok(PublishOutcome {
-        source_unverified_durability: selection.source_unverified_durability.clone(),
+        source_unverified_durability: published_durability(&receipt, &[&snapshot.manifest])?,
         receipt,
         replayed: false,
         moved,

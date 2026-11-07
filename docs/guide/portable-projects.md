@@ -1053,3 +1053,16 @@ verify reports and publish receipts expose it; absent fields remain omitted
 for qualified generations. This is evidence about the writer's filesystem,
 not a statement that package checksums failed. Import stamps the target's
 current qualification; historical source generations are never rewritten.
+
+Hub discovery mirrors the Project package's qualification in the optional
+`x-graphforge-source-durability` manifest extension. Verification requires it
+to match the package. Publish replay reads only a manifest bound by the original
+receipt, so later local tracking writes cannot change its qualification. If that
+manifest is no longer served, the replay prints `Source durability: unavailable`
+and JSON includes `"source_unverified_durability": null`. Qualified sources omit
+the field; unverified sources include the qualification object.
+
+Python evaluates filesystem warning filters before import creates or changes
+the destination. Promoting `FilesystemDurabilityWarning` to an error therefore
+stops the import without saving a project; an allowed warning is emitted once
+and remains in the returned receipt.

@@ -39,7 +39,7 @@ mod outcome;
 pub use outcome::portable_import_pending;
 mod space;
 use outcome::{storage, storage_or_cancel};
-pub use space::portable_import_held_bytes;
+pub use space::{portable_import_durability_preflight, portable_import_held_bytes};
 
 use crate::project_publication::{
     ProjectCapability, ProjectFileParticipant, ProjectGenerationRequest, ProjectParticipant,
