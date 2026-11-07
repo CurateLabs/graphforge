@@ -249,20 +249,179 @@ finally:
 # The dry run packages every crate in order, in one cargo invocation, and
 # never publishes.
 commands: list[list[str]] = []
-mod.run = commands.append
-mod.package(["graphforge-core", "graphforge-io"])
-assert commands == [
-    [
-        "cargo",
-        "package",
-        "--locked",
-        "--allow-dirty",
-        "-p",
-        "graphforge-core",
-        "-p",
-        "graphforge-io",
-    ]
-], commands
+
+
+def record_package(command):
+    commands.append(command)
+    target = Path(command[command.index("--target-dir") + 1])
+    assert target.is_dir()
+    (target / "output").write_text("packaged", encoding="utf-8")
+
+
+original_root = mod.ROOT
+original_environ = os.environ.copy()
+with tempfile.TemporaryDirectory(prefix="graphforge-package-target-") as directory:
+    mod.ROOT = Path(directory)
+    (mod.ROOT / "src").mkdir()
+    (mod.ROOT / "src/lib.rs").write_text("", encoding="utf-8")
+    (mod.ROOT / "Cargo.toml").write_text(
+        '[package]\nname = "gf-package-target"\nversion = "0.0.0"\nedition = "2024"\n',
+        encoding="utf-8",
+    )
+    (mod.ROOT / ".cargo").mkdir()
+    os.environ["CARGO_HOME"] = str(mod.ROOT / "cargo-home")
+    os.environ.pop("CARGO_BUILD_TARGET_DIR", None)
+    subprocess.run(["cargo", "generate-lockfile", "--offline"], cwd=mod.ROOT, check=True)
+    mod.run = record_package
+    try:
+        for config_target, env_target in (
+            (None, None),
+            ("config-relative-target", None),
+            (str(mod.ROOT / "config-absolute-target"), None),
+            ("config-target", "relative-target"),
+            ("config-target", str(mod.ROOT / "absolute-target")),
+        ):
+            config = "[build]\n"
+            if config_target is not None:
+                config += f"target-dir = {json.dumps(config_target)}\n"
+            (mod.ROOT / ".cargo/config.toml").write_text(config, encoding="utf-8")
+            if env_target is None:
+                os.environ.pop("CARGO_TARGET_DIR", None)
+            else:
+                os.environ["CARGO_TARGET_DIR"] = env_target
+            before = os.environ.copy()
+            mod.package(["graphforge-core", "graphforge-io"])
+            assert os.environ == before
+            command = commands[-1]
+            target = Path(command[5])
+            assert command == [
+                "cargo",
+                "package",
+                "--locked",
+                "--allow-dirty",
+                "--target-dir",
+                str(target),
+                "-p",
+                "graphforge-core",
+                "-p",
+                "graphforge-io",
+            ], command
+            assert target.parent == (mod.ROOT / (env_target or config_target or "target")).resolve()
+            assert not target.exists()
+        assert len(commands) == 5
+    finally:
+        mod.ROOT = original_root
+        os.environ.clear()
+        os.environ.update(original_environ)
+
+# Cargo treats a registry's name/version sources as immutable. Reusing its
+# package/tmp-registry path must reproduce stale dependency source, while the
+# production helper must verify current tarballs at the same versions/home.
+with tempfile.TemporaryDirectory(prefix="graphforge-package-sources-") as directory:
+    root = Path(directory)
+    fixture = root / "source"
+    for name in ("producer", "consumer"):
+        (fixture / name / "src").mkdir(parents=True)
+        manifest = (
+            f'[package]\nname = "gf-package-{name}"\nversion = "0.0.0"\n'
+            'edition = "2024"\nlicense = "Apache-2.0"\n'
+        )
+        if name == "consumer":
+            manifest += (
+                '[dependencies]\ngf-package-producer = {version = "0.0.0", path = "../producer"}\n'
+            )
+        (fixture / name / "Cargo.toml").write_text(manifest, encoding="utf-8")
+    (fixture / "Cargo.toml").write_text(
+        '[workspace]\nmembers = ["producer", "consumer"]\nresolver = "3"\n', encoding="utf-8"
+    )
+
+    def write_sources(*, new_api):
+        producer = "pub fn old_api() -> u8 { 1 }\n"
+        if new_api:
+            producer += "pub fn new_api() -> u8 { 2 }\n"
+        (fixture / "producer/src/lib.rs").write_text(producer, encoding="utf-8")
+        api = "new_api" if new_api else "old_api"
+        (fixture / "consumer/src/lib.rs").write_text(
+            f"pub fn use_api() -> u8 {{ gf_package_producer::{api}() }}\n", encoding="utf-8"
+        )
+
+    environment = {
+        **os.environ,
+        "CARGO_HOME": str(root / "cargo-home"),
+        "CARGO_TARGET_DIR": str(root / "target"),
+        "CARGO_NET_OFFLINE": "true",
+    }
+    write_sources(new_api=False)
+    subprocess.run(
+        ["cargo", "generate-lockfile", "--offline"], cwd=fixture, env=environment, check=True
+    )
+    order = ["gf-package-producer", "gf-package-consumer"]
+    fixed_command = ["cargo", "package", "--locked", "--allow-dirty", "--offline"]
+    for name in order:
+        fixed_command += ["-p", name]
+    initial = subprocess.run(
+        fixed_command, cwd=fixture, env=environment, capture_output=True, text=True, check=False
+    )
+    assert initial.returncode == 0, initial.stderr
+    write_sources(new_api=True)
+    stale = subprocess.run(
+        fixed_command, cwd=fixture, env=environment, capture_output=True, text=True, check=False
+    )
+    assert stale.returncode == 101, stale.stderr
+    assert "error[E0425]" in stale.stderr, stale.stderr
+    assert "cannot find function `new_api`" in stale.stderr, stale.stderr
+    cached_sources = list(
+        (root / "cargo-home/registry/src").glob("*/gf-package-producer-0.0.0/src/lib.rs")
+    )
+    assert len(cached_sources) == 1, cached_sources
+    cached_source = cached_sources[0].read_bytes()
+    assert b"new_api" not in cached_source
+
+    # Keep the caller's target outputs and Cargo source cache intact, including
+    # the stale entry used above. Only each helper invocation's target is removed.
+    sentinel = root / "target" / "caller-output"
+    sentinel.write_text("keep", encoding="utf-8")
+    target_entries = set((root / "target").iterdir())
+    # Use Cargo's file configuration for the production runs: the temporary
+    # verification builds must remain on that configured target volume.
+    (fixture / ".cargo").mkdir()
+    (fixture / ".cargo/config.toml").write_text(
+        f"[build]\ntarget-dir = {json.dumps(str(root / 'target'))}\n", encoding="utf-8"
+    )
+    del environment["CARGO_TARGET_DIR"]
+    package_mod = load_module()
+    package_mod.ROOT = fixture
+    original_environ = os.environ.copy()
+    os.environ.clear()
+    os.environ.update(environment)
+    try:
+        for new_api in (False, True):
+            write_sources(new_api=new_api)
+            package_mod.package(order)
+            assert set((root / "target").iterdir()) == target_entries
+            assert cached_sources[0].read_bytes() == cached_source
+            assert sentinel.read_text(encoding="utf-8") == "keep"
+            assert os.environ == environment
+
+        # Real compiler failures propagate without retry and clean partial output.
+        (fixture / "consumer/src/lib.rs").write_text(
+            "pub fn use_api() -> u8 { gf_package_producer::missing_api() }\n", encoding="utf-8"
+        )
+        try:
+            package_mod.package(order)
+            raise AssertionError("expected package verification failure")
+        except subprocess.CalledProcessError as exc:
+            assert exc.returncode == 101
+            failed_target = Path(exc.cmd[exc.cmd.index("--target-dir") + 1])
+            assert failed_target.parent == root / "target"
+            assert not failed_target.exists()
+        assert set((root / "target").iterdir()) == target_entries
+        assert cached_sources[0].read_bytes() == cached_source
+        assert sentinel.read_text(encoding="utf-8") == "keep"
+        assert os.environ == environment
+    finally:
+        os.environ.clear()
+        os.environ.update(original_environ)
 
 # Exercise Cargo's pristine-package build with the real CLI build script and
 # its shipped inputs, outside the workspace. Restoring the original escaping
