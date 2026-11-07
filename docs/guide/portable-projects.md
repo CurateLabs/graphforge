@@ -209,6 +209,19 @@ identifies the tested Cytoscape-based VSIX and renderer limitations; its expired
 CI download is not an installation route for this lesson. It does not qualify
 a different marketplace release or XYG renderer.
 
+For that historical Cytoscape candidate, the Result Graph needs flat endpoint
+columns. Use this query with `graphforge.showResultGraph` and
+`renderer: "cytoscape"`:
+
+```cypher
+MATCH (a:Author)-[r:AUTHORED]->(w:Work)
+RETURN a.name AS source, w.title AS target, type(r) AS rel_type
+```
+
+The two author names and three work titles identify five nodes and four edges.
+Nested `RETURN a,r,w` rows do not feed that older renderer and select its
+visibly labeled demo instead.
+
 #### Publish after local evaluation
 
 Publishing requires an existing **owner account and repository**, permission
