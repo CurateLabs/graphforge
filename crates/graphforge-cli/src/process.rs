@@ -15,6 +15,12 @@ pub(crate) fn process_attached() -> bool {
     PROCESS_ATTACHED.get()
 }
 
+/// Prompts require an attached console with both input and diagnostics on terminals.
+pub(crate) fn interactive_process() -> bool {
+    use std::io::IsTerminal as _;
+    process_attached() && io::stdin().is_terminal() && io::stderr().is_terminal()
+}
+
 struct ProcessAttachment(bool);
 
 impl Drop for ProcessAttachment {

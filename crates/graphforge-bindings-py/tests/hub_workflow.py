@@ -45,7 +45,7 @@ class HubWorkflowTests(unittest.TestCase):
         with closing(GraphForge(source.path)) as graph:
             graph.execute("CREATE (:Item {score:0})")
         source.branch("main", author=AUTHOR)
-        receipt = source.publish(REPOSITORY, operation_uuid=operation())
+        receipt = source.publish(REPOSITORY, public=True, operation_uuid=operation())
         self.assertEqual(receipt["repository"], {"owner": "curate", "repository": "claims"})
         self.assertEqual(receipt["refs"], ["main"])
         return source
@@ -85,15 +85,15 @@ class HubWorkflowTests(unittest.TestCase):
         tagged = alice.tag("v1")
         self.assertEqual(tagged["version_uuid"], second["version_uuid"])
         publish_id = operation()
-        pushed = alice.push(operation_uuid=publish_id)
-        self.assertEqual(alice.push(operation_uuid=publish_id), pushed)
+        pushed = alice.push(public=True, operation_uuid=publish_id)
+        self.assertEqual(alice.push(public=True, operation_uuid=publish_id), pushed)
         self.assertEqual(pushed["operation_uuid"], publish_id)
         self.assertEqual(alice.log("v1")[0]["version_uuid"], second["version_uuid"])
 
         bob = self.project("bob")
         bob.clone(REPOSITORY)
         collaborator = bob.commit("Collaborator score", "MATCH (n:Item) SET n.score=3", author=BOB)
-        bob.push()
+        bob.push(public=True)
         pull_id = operation()
         pulled = alice.pull(author=AUTHOR, operation_uuid=pull_id)
         self.assertIn(collaborator["version_uuid"], pulled["parents"])
@@ -159,11 +159,24 @@ class HubWorkflowTests(unittest.TestCase):
                 elif verb == "pull":
                     work.pull(author=AUTHOR)
                 else:
-                    work.push()
+                    work.push(public=True)
                 self.assertEqual(len(work.warnings), 1)
                 self.assertEqual(work.warnings[0]["code"], "GF_CORE_VERSION_MISMATCH")
                 self.assertEqual(work.warnings[0]["producing_core_version"], "0.0.1")
                 self.assertEqual(work.warnings[0]["running_core_version"], native.__version__)
+
+    def test_captured_push_and_publish_require_explicit_mutually_exclusive_visibility(self):
+        source = self.seed()
+        for method in (source.push, source.publish):
+            with self.assertRaises(HubWorkflowError) as missing:
+                method()
+            self.assertEqual(missing.exception.exit_code, 2)
+            self.assertIn("create it with --public or --private", str(missing.exception))
+            with self.assertRaises(HubWorkflowError) as conflict:
+                method(public=True, private=True)
+            self.assertEqual(conflict.exception.exit_code, 2)
+            self.assertEqual(conflict.exception.details["source"], "argument_parser")
+        source.push(public=True, ref="main", branch="main")
 
     def test_errors_retain_authoritative_native_codes_and_original_envelope(self):
         source = self.seed()

@@ -313,17 +313,21 @@ class HubProject:
         *,
         ref: str | None = None,
         branch: str | None = None,
+        public: bool = False,
+        private: bool = False,
         rewrite: bool = False,
         prune: bool = False,
         operation_uuid: str | None = None,
         staging_directory: str | None = None,
     ) -> PublishResult:
-        """Publish the Branch; default to its recorded upstream, fast-forward only."""
+        """Publish the Branch with explicit public/private intent; never prompts."""
         return self._run(
             "push",
             _options(
                 ref=ref,
                 branch=branch,
+                public=public,
+                private=private,
                 rewrite=rewrite,
                 prune=prune,
                 operation_uuid=operation_uuid,
@@ -339,6 +343,8 @@ class HubProject:
         *,
         ref: str | None = None,
         branch: str | None = None,
+        public: bool = False,
+        private: bool = False,
         rewrite: bool = False,
         prune: bool = False,
         operation_uuid: str | None = None,
@@ -349,6 +355,8 @@ class HubProject:
             repository,
             ref=ref,
             branch=branch,
+            public=public,
+            private=private,
             rewrite=rewrite,
             prune=prune,
             operation_uuid=operation_uuid,

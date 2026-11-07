@@ -97,6 +97,7 @@ fn refused(hub: &LoopbackHub, graph: &GraphForge, args: &PublishArgs) -> (String
     let secret = token.expose().to_owned();
     let mut notices = Vec::new();
     let mut environment = PublishEnvironment {
+        terminal: None,
         bypass: None,
         credential: Credential::Token(token),
         clock: &std::time::Instant::now,

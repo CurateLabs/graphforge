@@ -77,9 +77,29 @@ destination rather than guessing. No separate remote configuration is stored.
 capabilities. Without that capability, either flag fails locally with
 `hub.publish.unsupported_future` before credentials or uploads. The CLI sends
 `GraphForge-Visibility: public` or `GraphForge-Visibility: private` only on
-session open; with neither flag, it omits the header. Visibility is not a field
+session open. `gf publish` with neither flag omits the header. Visibility is not a field
 of the signed session document. The choice is bound into the operation and
 intent digests, so changing it cannot replay a previously completed operation.
+
+`gf push` accepts the same mutually exclusive `--public` and `--private` flags
+for both `owner/repository` and HTTPS destinations. Without a flag, a push
+requires attached terminal stdin and stderr; otherwise it fails with exit 2 and
+`create it with --public or --private` before credential lookup, authentication,
+context reads, operation status, sessions or uploads, even for an existing target.
+A saved session or environment token does not replace this visibility choice.
+
+Interactive push without a flag requires `publish-visibility@1` and
+`publish-read-context@1`. It reads authenticated context once. All-null context
+means create-if-absent, including a repository created on the website but never
+published; it does not prove there is no repository record. The CLI prompts once
+with the public read/clone and private plan explanation. `p`/`public` or
+`r`/`private` chooses the corresponding intent before deriving operation identity.
+Blank, cancel, invalid input or EOF cancels with exit 2 before operation status,
+session open or upload. There is no default public choice. A published destination
+does not prompt and omits intent. For an unpublished website record, choose its
+existing visibility; a mismatch fails closed at session open. These rules also
+apply to installed PyPI and npm `gf`/`graphforge` consoles; captured host APIs
+never prompt.
 
 Public repositories may be published by free accounts within the Hub's quota;
 private repositories require its plan. Publishing never changes an existing

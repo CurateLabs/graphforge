@@ -89,6 +89,8 @@ export interface CreditOptions extends OperationOptions {
   committer?: string;
 }
 export interface PushOptions extends OperationOptions {
+  public?: boolean;
+  private?: boolean;
   ref?: string;
   rewrite?: boolean;
   prune?: boolean;

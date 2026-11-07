@@ -304,6 +304,7 @@ fn publish_device_refusal_names_the_actual_authorization_endpoint_origin() {
             &hub,
             &capabilities,
             &mut PublishEnvironment {
+                terminal: None,
                 bypass: None,
                 credential: Credential::DeviceFlow,
                 clock: &std::time::Instant::now,
