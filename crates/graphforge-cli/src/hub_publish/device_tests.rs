@@ -96,6 +96,7 @@ fn zero_lifetime_is_refused_before_display_open_or_poll() {
         &transport.client(),
         &transport.capabilities(),
         &mut PublishEnvironment {
+            terminal: None,
             bypass: None,
             credential: Credential::DeviceFlow,
             clock: &std::time::Instant::now,
@@ -123,6 +124,7 @@ fn device_link_selection_opens_the_displayed_complete_link_or_plain_fallback() {
             &transport.client(),
             &transport.capabilities(),
             &mut PublishEnvironment {
+                terminal: None,
                 bypass: None,
                 credential: Credential::DeviceFlow,
                 clock: &std::time::Instant::now,
@@ -174,6 +176,7 @@ fn unsafe_device_links_are_refused_before_display_open_or_poll() {
             &transport.client(),
             &transport.capabilities(),
             &mut PublishEnvironment {
+                terminal: None,
                 bypass: None,
                 credential: Credential::DeviceFlow,
                 clock: &std::time::Instant::now,
@@ -214,6 +217,7 @@ fn device_link_is_shown_before_open_and_denial_still_stops_polling() {
         &transport.client(),
         &transport.capabilities(),
         &mut PublishEnvironment {
+            terminal: None,
             bypass: None,
             credential: Credential::DeviceFlow,
             clock: &std::time::Instant::now,
@@ -293,6 +297,7 @@ fn native_publish_uses_the_prefilled_notice_through_the_real_device_grant() {
         &graph,
         &args,
         &mut PublishEnvironment {
+            terminal: None,
             bypass: None,
             credential: Credential::DeviceFlow,
             clock: &std::time::Instant::now,
@@ -329,6 +334,7 @@ fn delayed_device_polling_stops_at_actual_elapsed_deadline(delayed_wait: bool) {
         &transport.client(),
         &transport.capabilities(),
         &mut PublishEnvironment {
+            terminal: None,
             bypass: None,
             credential: Credential::DeviceFlow,
             clock: &|| started + transport.elapsed.get(),

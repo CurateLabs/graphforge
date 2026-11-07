@@ -159,6 +159,9 @@ algorithms and validates their semantics.
 
 ## Typed Hub and research workflow
 
+`push` and `publish` require an explicit `{ public: true }` or `{ private: true }`
+option; captured calls never prompt. Native clap rejects both options together.
+
 Import `HubProject` from `@curatelabs/graphforge/lib/hub.mjs`; its declarations
 ship in `lib/hub.d.mts`. It calls the same in-process Rust CLI as `gf`,
 synchronously. Each verb opens the project afresh; close other writable handles
@@ -183,7 +186,7 @@ const credit = { author: "Alice <alice@example.org>" };
 const first = work.commit("First score", "MATCH (n:Item) SET n.score=1", credit);
 const second = work.commit("Second score", "MATCH (n:Item) SET n.score=2", credit);
 work.tag("v1");
-const receipt = work.push(); // publish() is the same current-Branch operation
+const receipt = work.push(undefined, { public: true }); // publish() is the same current-Branch operation
 // After a collaborator pushes a compatible change:
 const pulled = work.pull(undefined, credit);
 console.log(work.log(undefined, { all: true }));

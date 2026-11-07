@@ -108,6 +108,16 @@ accepted in place of `OWNER/REPO`, through the existing item descriptor and
 retained-snapshot verifier. Neither command sends publication credentials or
 reads private module packages.
 
+For a protected preview Hub, these two commands and `ontology module fetch`
+also accept `--protection-bypass-env VARIABLE`. Core reads the separate Vercel
+protection secret from that variable and sends it only on initial discovery
+requests to the explicitly selected Hub origin, including permanent-item
+descriptors and retained refs/manifest snapshots. Generic redirects and module
+package downloads never receive it. This option does not supply Hub publication
+authorization or make a private ontology public. An absent or invalid explicitly
+requested secret fails before network access or Project mutation; errors never
+include its value.
+
 Core MUST use the advertised per-module transport, full portable verification,
 and manifest-authenticated reader. Resolution MUST retain the complete exact
 module dependency and bridge closure carried by the verified package. Adoption
@@ -136,9 +146,21 @@ gf --project NEW_DIR publish YOUR_OWNER/YOUR_REPO --public
 ```
 
 `--public` belongs to `publish`; adoption does not introduce a visibility flag.
-After changing an existing workspace ontology, retain a matching research
-Version before publishing that Version, as required by the existing publication
-composition check.
+For an existing selected Branch, `ontology adopt` atomically retains the exact
+closure and first verified adoption source in a fresh Version and advances that
+Branch's head alongside workspace authority. Its existing rows, unrelated
+metadata, modules, enforcement and sibling heads remain intact. Ordinary
+`gf --project PROJECT_DIR publish YOUR_OWNER/YOUR_REPO --public` can then publish
+the selected head. A repeat also completes a previously workspace-only adoption;
+further exact repeats leave the Version and generation unchanged. Conflicting
+independent Branch authority is refused before publication; select or reconcile
+the intended Branch first. Without Branches, adoption remains workspace-only;
+create the first Branch from that workspace before publishing.
+
+The programmatic `adopt_resolved_ontology_module` API remains workspace-only.
+The native `adopt_resolved_ontology_module_for_publication` owner implements the
+high-level command's atomic workspace/Branch path. Other workspace ontology edits
+still require a matching retained Version under the publication composition check.
 
 With `--json`, adoption emits `graphforge-ontology-adopt/1`; creation emits
 `graphforge-project-from-ontology/1`. Both objects contain `project` and an

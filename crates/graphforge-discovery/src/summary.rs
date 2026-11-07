@@ -194,10 +194,15 @@ pub struct SummaryOntologyModule {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "typescript", tsify(optional))]
     pub version_order: Option<u32>,
+    /// Verified definition array lengths; absent means unknown, never zero.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "typescript", tsify(optional))]
+    pub definition_counts: Option<SummaryModuleDefinitionCounts>,
 }
 
 impl SummaryOntologyModule {
     /// Whether this module requires the module metadata capability.
+    /// Definition counts are derived facts, not authored metadata.
     #[must_use]
     pub fn has_metadata(&self) -> bool {
         self.label.is_some()
@@ -206,6 +211,22 @@ impl SummaryOntologyModule {
             || self.forked_from.is_some()
             || self.version_order.is_some()
     }
+}
+
+/// Definition array lengths from one fully verified ontology module document.
+///
+/// These count declarations (including abstract types and each owner/name
+/// property), not graph rows, inherited vocabulary, or distinct Project labels.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(tsify::Tsify))]
+#[serde(deny_unknown_fields)]
+pub struct SummaryModuleDefinitionCounts {
+    /// Number of entries in `OntologyDoc.entity_types`.
+    pub entity_types: u32,
+    /// Number of entries in `OntologyDoc.properties`.
+    pub properties: u32,
+    /// Number of entries in `OntologyDoc.relation_types`.
+    pub relation_types: u32,
 }
 
 /// Ontology composition verified in the described package.

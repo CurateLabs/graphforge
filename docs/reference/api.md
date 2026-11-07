@@ -4045,7 +4045,13 @@ for Arrow graph reads afterward.
 Both expose `clone`, `branch`, `commit`, `tag`, `push`/`publish`, `pull`, and
 `log`. The native CLI owns ref resolution, identity, validation, credentials,
 fast-forward/rewrite/prune rules and retry behavior. `publish` aliases the
-current-Branch `push` workflow. Results use native field names: `CloneResult`,
+current-Branch `push` workflow. These captured methods never prompt: pass
+`public=True` or `private=True` in Python, or `{ public: true }` or
+`{ private: true }` in Node. Omitting both fails with exit 2 even for existing
+repositories and saved credentials; setting both fails native clap validation.
+The wrappers still forward Branch selection and credential-source options to
+native push. Direct `gf publish` retains its existing omitted-intent behavior.
+Results use native field names: `CloneResult`,
 `BranchResult`, `CommitResult`, `TagResult`, `PublishResult`,
 `PullResult | UpToDateResult`, and history entries with parent UUIDs and credited
 identities. Mutation options include a stable operation UUID for exact replay.
@@ -4080,7 +4086,7 @@ cloned = work.clone("https://your-write-capable-hub.example/owner/repository", r
 first = work.commit("First score", "MATCH (n:Item) SET n.score=1", author="Alice <alice@example.org>")
 second = work.commit("Second score", "MATCH (n:Item) SET n.score=2", author="Alice <alice@example.org>")
 work.tag("v1")
-receipt = work.push()  # publish() is the same current-Branch operation
+receipt = work.push(public=True)  # publish() is the same current-Branch operation
 # After a collaborator pushes a compatible change:
 pulled = work.pull(author="Alice <alice@example.org>")
 for entry in work.log(all=True):

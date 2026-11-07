@@ -28,6 +28,10 @@ pub(crate) struct ExactOntologyArgs {
     /// HTTPS Hub base URL; defaults to https://graphforge.sh.
     #[arg(long)]
     hub: Option<String>,
+    /// Read the separate x-vercel-protection-bypass secret from this environment variable.
+    /// It is sent only to the configured Hub's discovery endpoints, never package objects.
+    #[arg(long)]
+    protection_bypass_env: Option<String>,
     /// Request cancellation before network or project mutation.
     #[arg(long, hide = true)]
     cancel_before_start: bool,
@@ -73,6 +77,7 @@ pub(crate) fn dispatch(
         json,
         output,
         &RETRY_POLICY,
+        |name| std::env::var(name),
     )
 }
 
@@ -85,6 +90,7 @@ fn dispatch_with(
     json: bool,
     output: &mut dyn Write,
     retry: &RetryPolicy,
+    credential_lookup: impl Fn(&str) -> Result<String, std::env::VarError>,
 ) -> Result<ControlFlow<(), crate::Command>, GfError> {
     let (repository, exact, destination, new_project) = match command {
         crate::Command::Ontology {
@@ -131,9 +137,11 @@ fn dispatch_with(
             version: Some(exact.version),
             digest: Some(exact.digest),
             hub: exact.hub,
+            protection_bypass_env: exact.protection_bypass_env,
             output: staging.root.join("ontology"),
         };
-        let (resolved, _moved) = module_fetch::resolve_module_with(transport, &fetch, retry)?;
+        let (resolved, _moved) =
+            module_fetch::resolve_module_with_lookup(transport, &fetch, retry, credential_lookup)?;
         check_cancelled(&token)?;
         let path = if new_project {
             &staging.project
@@ -143,7 +151,7 @@ fn dispatch_with(
         let mut graph = GraphForge::new(Some(path.to_str().ok_or_else(|| {
             validation("hub.destination_conflict", "Project path must be UTF-8")
         })?))?;
-        let mut receipt = graph.adopt_resolved_ontology_module(
+        let mut receipt = graph.adopt_resolved_ontology_module_for_publication(
             &resolved,
             WriteContext {
                 operation_uuid: OperationId(Uuid::now_v7()),

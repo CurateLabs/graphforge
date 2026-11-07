@@ -6,10 +6,11 @@
 //! apart. Sub-issue of #1732.
 
 use super::{
-    CloneStaging, DownloadControl, DownloadReport, HttpTransport, MAX_METADATA_BYTES, RETRY_POLICY,
-    RetryPolicy, Transport, acquire_staging, canonical_name, download_with_progress, endpoint,
-    ensure_destination_absent, fetch_with_attempts, parse_input_at, portable_error, protocol_error,
-    read_bounded, release_staging, storage, validation,
+    CloneStaging, DiscoveryCredentials, DownloadControl, DownloadReport, HttpTransport,
+    MAX_METADATA_BYTES, RETRY_POLICY, RetryPolicy, Transport, acquire_staging, canonical_name,
+    download_with_progress, endpoint, ensure_destination_absent, fetch_discovery_with_attempts,
+    parse_input_at, portable_error, protocol_error, read_bounded, release_staging, storage,
+    validation,
 };
 use clap::Args;
 use graphforge_api::{
@@ -54,6 +55,10 @@ pub(crate) struct ModuleFetchArgs {
     /// HTTPS Hub base URL; defaults to https://graphforge.sh.
     #[arg(long)]
     pub hub: Option<String>,
+    /// Read the separate x-vercel-protection-bypass secret from this environment variable.
+    /// It is sent only to the configured Hub's discovery endpoints, never package objects.
+    #[arg(long)]
+    pub protection_bypass_env: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -187,15 +192,15 @@ fn ensure_output_available(output: &Path) -> Result<(), graphforge_api::GfError>
 fn fetch_document(
     transport: &dyn Transport,
     url: &Url,
+    credentials: Option<&DiscoveryCredentials>,
     retry: &RetryPolicy,
 ) -> Result<Vec<u8>, graphforge_api::GfError> {
     let mut attempts = 0;
     read_bounded(
-        fetch_with_attempts(
+        fetch_discovery_with_attempts(
             transport,
             url,
-            None,
-            None,
+            credentials,
             MAX_METADATA_BYTES as u64,
             &mut attempts,
             retry,
@@ -215,8 +220,23 @@ pub(super) fn resolve_module_with(
     ),
     graphforge_api::GfError,
 > {
+    resolve_module_with_lookup(transport, args, retry, |name| std::env::var(name))
+}
+
+pub(super) fn resolve_module_with_lookup(
+    transport: &dyn Transport,
+    args: &ModuleFetchArgs,
+    retry: &RetryPolicy,
+    credential_lookup: impl Fn(&str) -> Result<String, std::env::VarError>,
+) -> Result<
+    (
+        ResolvedOntologyModule,
+        Option<graphforge_discovery::RepositoryMoved>,
+    ),
+    graphforge_api::GfError,
+> {
     if let Some(reference) = item_fetch::parse_reference(&args.repository)? {
-        return item_fetch::fetch(transport, args, &reference, retry);
+        return item_fetch::fetch(transport, args, &reference, retry, credential_lookup);
     }
     let (identity, base) = parse_input_at(&args.repository, args.hub.as_deref())?;
     let (Some(ontology_id), Some(version)) = (args.ontology_id.as_deref(), args.version.as_deref())
@@ -234,11 +254,28 @@ pub(super) fn resolve_module_with(
     }
     let pin = digest_pin(args)?;
     ensure_output_available(&args.output)?;
-    let move_transport = crate::hub_http::RepositoryMoveTransport::new(transport, &identity, &base);
+    let credentials = DiscoveryCredentials::load(
+        &base,
+        None,
+        args.protection_bypass_env.as_deref(),
+        credential_lookup,
+    )?;
+    let move_transport = crate::hub_http::RepositoryMoveTransport::new(transport, &identity, &base)
+        .with_credentials(credentials.as_ref());
     let transport = &move_transport as &dyn Transport;
-    let refs_bytes = fetch_document(transport, &endpoint(&base, "refs"), retry)?;
+    let refs_bytes = fetch_document(
+        transport,
+        &endpoint(&base, "refs"),
+        credentials.as_ref(),
+        retry,
+    )?;
     let (_, current_base, _) = move_transport.resolved(false)?;
-    let manifest_bytes = fetch_document(transport, &endpoint(&current_base, "manifest"), retry)?;
+    let manifest_bytes = fetch_document(
+        transport,
+        &endpoint(&current_base, "manifest"),
+        credentials.as_ref(),
+        retry,
+    )?;
     let (identity, _, moved) = move_transport.resolved(false)?;
     let limits = DiscoveryLimits {
         max_response_bytes: MAX_METADATA_BYTES,
@@ -384,6 +421,7 @@ fn hard_link_error(error: std::io::Error) -> graphforge_api::GfError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    mod authentication;
     mod item_ids;
     use crate::hub_clone::tests::{RecordingTransport, Scripted, response};
     use crate::hub_clone::{HttpResponse, hash_reader};
@@ -419,6 +457,7 @@ mod tests {
             digest: Some(module.content_digest.0.clone()),
             output: output.to_path_buf(),
             hub: None,
+            protection_bypass_env: None,
         }
     }
 

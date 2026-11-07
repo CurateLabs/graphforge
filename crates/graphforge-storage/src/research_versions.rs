@@ -403,6 +403,17 @@ pub enum ResearchMutation {
         /// Complete effective Branch state, not a mutable upstream lookup.
         version: Box<ResearchVersionRecord>,
     },
+    /// Atomically retain verified adoption in independent workspace and Branch content.
+    /// Both preparations must already be authenticated in the owning Project CAS.
+    AdoptBranchOntology {
+        /// Canonical native authenticated adoption request.
+        intent_sha256: [u8; 32],
+        /// Fresh selected Branch Version, preserving its prior head lineage.
+        version: Box<ResearchVersionRecord>,
+        /// Complete current workspace with the same adopted authority.
+        /// This preparation is installed directly, never retained as a Version.
+        workspace: Box<ResearchVersionRecord>,
+    },
     /// Publish the native owner's ID-only rewrite of the complete workspace,
     /// its selected Branch head and replay receipt in one CURRENT transition.
     RegenerateItemId {
@@ -1006,7 +1017,7 @@ fn apply_mutation(
     mutation: &ResearchMutation,
     registry: &mut ResearchRegistry,
 ) -> Result<Option<Uuid>, GfError> {
-    let version_uuid = match mutation {
+    Ok(match mutation {
         ResearchMutation::FetchRemoteBranch { fetch } => {
             Some(remote_fetch::apply(registry, fetch)?)
         }
@@ -1054,8 +1065,9 @@ fn apply_mutation(
             creation.as_ref(),
             version,
         )?),
-        ResearchMutation::RegenerateItemId { version, .. } => {
-            Some(branches::regenerate(root, registry, version)?)
+        ResearchMutation::AdoptBranchOntology { version, .. }
+        | ResearchMutation::RegenerateItemId { version, .. } => {
+            Some(branches::publish_selected(root, registry, version)?)
         }
         ResearchMutation::RegisterGraphProjection { spec, selection } => {
             if registry.branches.contains_key(&spec.context_uuid) {
@@ -1104,8 +1116,7 @@ fn apply_mutation(
             delete_version(registry, *version_uuid)?;
             None
         }
-    };
-    Ok(version_uuid)
+    })
 }
 
 fn retain_root(
@@ -1310,6 +1321,7 @@ pub fn publish_research_operation_with_mode(
             | ResearchMutation::ReleaseProposal { intent_sha256, .. }
             | ResearchMutation::UpdateBranch { intent_sha256, .. }
             | ResearchMutation::RegenerateItemId { intent_sha256, .. }
+            | ResearchMutation::AdoptBranchOntology { intent_sha256, .. }
             | ResearchMutation::SetTag { intent_sha256, .. }
             | ResearchMutation::SelectBranch { intent_sha256, .. } => Some(*intent_sha256),
             _ => None,

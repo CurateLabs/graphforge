@@ -594,6 +594,7 @@ fn run_publish_with_bypass(
     let mut stdout = Vec::new();
     let result = {
         let mut environment = PublishEnvironment {
+            terminal: None,
             bypass,
             credential,
             clock: &std::time::Instant::now,
@@ -1418,6 +1419,7 @@ fn a_slow_but_progressing_upload_succeeds_in_bounded_chunks() {
     hub.inject(Fault::SlowPut(Duration::from_secs(2)));
     let mut notices = Vec::new();
     let mut environment = PublishEnvironment {
+        terminal: None,
         bypass: None,
         credential: Credential::Token(token(&hub, "curate/claims")),
         clock: &std::time::Instant::now,
@@ -1522,6 +1524,7 @@ fn device_flow(
     let mut writer = notices.clone();
     let result = {
         let mut environment = PublishEnvironment {
+            terminal: None,
             bypass: None,
             credential: Credential::DeviceFlow,
             clock: &|| started + waits.borrow().iter().sum::<Duration>(),

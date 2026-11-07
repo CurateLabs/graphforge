@@ -29,7 +29,8 @@ import termios
 import threading
 import time
 from urllib.parse import urlsplit
-from urllib.request import url2pathname
+from urllib.request import Request, url2pathname, urlopen
+import uuid
 
 from graphforge import GraphForge
 from graphforge import _graphforge_rs as native
@@ -42,6 +43,11 @@ class Hub(HTTPServer):
     def __init__(self):
         super().__init__(("127.0.0.1", 0), Handler)
         self.vault = {}
+        # Visibility/context policy is emulated here; ReferenceHub owns bytes,
+        # sessions and receipts, but does not implement hosted account policy.
+        self.visibility = None
+        self.pending_visibility = None
+        self.session_visibilities = []
         self.requests = []
         self.approved = threading.Event()
         self.ready = threading.Event()
@@ -82,7 +88,13 @@ class Handler(BaseHTTPRequestHandler):
         body = self.rfile.read(int(self.headers.get("content-length", 0)))
         hub.requests.append((self.command, self.path, self.headers.get("authorization")))
         status, headers = 200, []
-        if self.path == "/_fixture/vault":
+        if self.path == "/_fixture/reset":
+            native._test_hub_stop()
+            hub.token = native._test_hub_start()
+            hub.visibility = None
+            hub.pending_visibility = None
+            body = b"{}"
+        elif self.path == "/_fixture/vault":
             record = json.loads(body)
             key, value = record["origin"], record["value"]
             if value is None:
@@ -144,6 +156,68 @@ class Handler(BaseHTTPRequestHandler):
                     "repository_id": "fixture-repository",
                 }
             ).encode()
+        elif self.path.endswith("/.gf/publish/context"):
+            status, headers, _ = native._test_hub_exchange(
+                "GET",
+                HUB + "/curate/claims/.gf/publish/operations/" + str(uuid.UUID(int=0)),
+                list(self.headers.items()),
+                b"",
+            )
+            assert status == 404, "context requires the real repository token"
+
+            def read(suffix):
+                return native._test_hub_exchange(
+                    "GET", HUB + "/curate/claims/.gf/" + suffix, [], b""
+                )
+
+            status, _, refs = read("refs")
+            if status == 404:
+                context = {"refs_json": None, "manifest_json": None, "lineage_json": None}
+            else:
+                if hub.pending_visibility:
+                    hub.visibility = hub.pending_visibility
+                status, _, manifest = read("manifest")
+                assert status == 200
+                lineage_object = next(
+                    o
+                    for o in json.loads(manifest)["objects"]
+                    if o["media_type"] == "application/vnd.graphforge.research-lineage+json"
+                )
+                status, _, lineage = native._test_hub_exchange(
+                    "GET", lineage_object["locations"][0], [], b""
+                )
+                assert status == 200
+                context = {
+                    "refs_json": refs.decode(),
+                    "manifest_json": manifest.decode(),
+                    "lineage_json": lineage.decode(),
+                }
+            status, headers, body = 200, [], json.dumps(context).encode()
+        elif (
+            self.command == "POST"
+            and self.path.endswith("/.gf/publish/sessions")
+            and (
+                (self.headers.get("GraphForge-Visibility") == "private" and hub.visibility is None)
+                or (
+                    self.headers.get("GraphForge-Visibility")
+                    and hub.visibility
+                    and self.headers["GraphForge-Visibility"] != hub.visibility
+                )
+            )
+        ):
+            visibility = self.headers.get("GraphForge-Visibility")
+            hub.session_visibilities.append(visibility)
+            mismatch = hub.visibility is not None
+            status = 409 if mismatch else 403
+            body = json.dumps(
+                {
+                    "code": "visibility_mismatch" if mismatch else "entitlement_denied",
+                    "message": "Synthetic visibility policy refusal",
+                    "reason": "repository_is_" + hub.visibility
+                    if mismatch
+                    else "private_requires_plan",
+                }
+            ).encode()
         else:
             if self.path.endswith("/token") and hub.device and hub.approved.is_set():
                 native._test_hub_approve(hub.device)
@@ -151,6 +225,24 @@ class Handler(BaseHTTPRequestHandler):
             status, headers, body = native._test_hub_exchange(
                 self.command, HUB + self.path, list(self.headers.items()), body
             )
+            if self.path.endswith("/.gf/publish"):
+                document = json.loads(body)
+                document["capabilities"] += [
+                    {"capability": c, "major": 1}
+                    for c in ("publish-visibility", "publish-read-context")
+                ]
+                body = json.dumps(document).encode()
+            if self.command == "POST" and self.path.endswith("/.gf/publish/sessions"):
+                visibility = self.headers.get("GraphForge-Visibility")
+                hub.session_visibilities.append(visibility)
+                if status in (200, 201) and visibility:
+                    hub.pending_visibility = visibility
+            # A session is not a repository. Observe the committed refs before
+            # treating the modeled visibility as an existing published record.
+            if self.path.endswith("/.gf/refs") and status == 200 and hub.pending_visibility:
+                hub.visibility = hub.pending_visibility
+            if self.path.endswith("/commit") and status == 200 and hub.pending_visibility:
+                hub.visibility = hub.pending_visibility
             if self.path.endswith("/device_authorization"):
                 hub.device = json.loads(body)["user_code"]
         try:
@@ -320,6 +412,106 @@ def notice_before_approval(command, arguments, env, hub, *, terminal=False, expe
                 os.close(slave)
 
 
+def reset_publication(hub):
+    with urlopen(
+        Request(f"http://127.0.0.1:{hub.server_port}/_fixture/reset", data=b"")
+    ) as response:
+        assert response.status == 200
+
+
+def push_visibility(command, env, hub, project):
+    arguments = ["--project", str(project), "push", "curate/claims", "--hub", HUB]
+
+    def no_terminal():
+        before = len(hub.requests)
+        with console_process(
+            command,
+            arguments,
+            env | {"GRAPHFORGE_HUB_PUBLISH_TOKEN": hub.token},
+            terminal=False,
+            stdin_data=b"p\n",
+        ) as (process, _, (reader, _)):
+            stdout, stderr = process.communicate(timeout=10)
+            assert process.returncode == 2, (stdout, stderr)
+            assert b"create it with --public or --private" in stderr
+            pending = array.array("i", [0])
+            fcntl.ioctl(reader, termios.FIONREAD, pending, True)
+            assert pending[0] == 2, "rejected push consumed stdin"
+        assert not hub.requests[before:], "no terminal must precede credentials/context/session"
+
+    def choice(answer, expected, reason=None):
+        before = len(hub.requests)
+        before_sessions = len(hub.session_visibilities)
+        with console_process(
+            command, arguments, env | {"GRAPHFORGE_HUB_PUBLISH_TOKEN": hub.token}, terminal=True
+        ) as (process, master, _):
+            received = b""
+            deadline = time.monotonic() + 20
+            while b"[p/r/cancel]" not in received:
+                assert time.monotonic() < deadline, received
+                assert process.poll() is None, received
+                assert select.select([master], [], [], 10)[0], received
+                received += os.read(master, 65536)
+            assert b"anyone can read and clone it" in received and b"needs a plan" in received
+            assert len(hub.session_visibilities) == before_sessions, "session opened before answer"
+            assert not any("/operations/" in path for _, path, _ in hub.requests[before:])
+            os.write(master, answer)
+            # Drain diagnostics while the command is live (stdout remains piped).
+            while process.poll() is None:
+                if select.select([master], [], [], 0.1)[0]:
+                    received += os.read(master, 65536)
+                assert time.monotonic() < deadline, received
+            stdout, _ = process.communicate(timeout=5)
+            if select.select([master], [], [], 0)[0]:
+                received += os.read(master, 65536)
+            assert process.returncode == expected, (received, stdout)
+            assert received.count(b"[p/r/cancel]") == 1
+            if reason:
+                assert reason in received, received
+            requests = hub.requests[before:]
+            assert sum(path.endswith("/context") for _, path, _ in requests) == 1
+            if expected:
+                assert not any(
+                    method == "PUT" or path.endswith("/commit") for method, path, _ in requests
+                )
+            if expected and reason not in (b"private_requires_plan", b"visibility_mismatch"):
+                assert len(hub.session_visibilities) == before_sessions
+                assert not any("/operations/" in path for _, path, _ in requests)
+
+    reset_publication(hub)
+    no_terminal()  # absent, token and saved session present
+    for answer in (b"cancel\n", b"\n", b"invalid\n", b"\x04"):
+        choice(answer, 2, b"cancelled; nothing was created")
+        assert hub.visibility is None
+    choice(b"r\n", 2, b"private_requires_plan")
+    assert hub.visibility is None
+    choice(b"p\n", 0)
+    assert hub.session_visibilities[-1] == "public"
+    state = json.loads(run(command, ["--project", str(project), "--json", "status"], env).stdout)
+    assert state["upstream"]["repository_url"] == HUB + "/curate/claims"
+    no_terminal()  # existing published destination
+    # Existing published targets do not consume input or prompt.
+    with console_process(
+        command, arguments, env | {"GRAPHFORGE_HUB_PUBLISH_TOKEN": hub.token}, terminal=True
+    ) as (process, master, _):
+        stdout, _ = process.communicate(timeout=30)
+        received = os.read(master, 65536) if select.select([master], [], [], 0)[0] else b""
+        assert process.returncode == 0, (stdout, received)
+        assert b"[p/r/cancel]" not in received
+    mismatch = run(
+        command,
+        [*arguments, "--private"],
+        env | {"GRAPHFORGE_HUB_PUBLISH_TOKEN": hub.token},
+        expected=2,
+    )
+    assert b"visibility_mismatch" in mismatch.stderr, mismatch.stderr
+    # A website-created unpublished public record also has all-null context.
+    reset_publication(hub)
+    hub.visibility = "public"
+    choice(b"r\n", 2, b"visibility_mismatch")
+    choice(b"p\n", 0)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--npm-root", required=True, type=Path)
@@ -388,13 +580,33 @@ def main():
                 for verb in ("publish", "push"):
                     run(
                         command,
-                        ["--project", str(project), verb, "curate/claims", "--hub", HUB, "--json"],
+                        [
+                            "--project",
+                            str(project),
+                            verb,
+                            "curate/claims",
+                            "--hub",
+                            HUB,
+                            "--json",
+                            *(["--public"] if verb == "push" else []),
+                        ],
                         env,
                     )
                 assert (
                     sum(path == "/api/cli/repository-token" for _, path, _ in hub.requests[before:])
                     == 2
                 )
+                # Saved credentials and tokens still cannot supply create intent.
+                for credentials in (env, env | {"GRAPHFORGE_HUB_PUBLISH_TOKEN": hub.token}):
+                    before = len(hub.requests)
+                    refused = run(
+                        command,
+                        ["--project", str(project), "push", "curate/claims", "--hub", HUB],
+                        credentials,
+                        expected=2,
+                    )
+                    assert b"create it with --public or --private" in refused.stderr
+                    assert not hub.requests[before:]
                 # No saved session: only real terminal stdin AND stderr admit
                 # the native device fallback. This also proves live stderr.
                 hub.vault.clear()
@@ -416,11 +628,13 @@ def main():
                 hub.expire_login = False
                 run(
                     command,
-                    ["--project", str(project), "push", "curate/claims", "--hub", HUB],
+                    ["--project", str(project), "push", "curate/claims", "--hub", HUB, "--public"],
                     env | {"GRAPHFORGE_HUB_PUBLISH_TOKEN": hub.token},
                 )
+                push_visibility(command, env, hub, project)
                 print(
-                    f"PASS {command[0]}: live login, saved-session publish/push, "
+                    f"PASS {command[0]}: push visibility PTY choice/refusal/cancellation, "
+                    "live login, saved-session publish/push, "
                     "terminal device flow, PID/TTY Ctrl-C and interrupted-login recovery"
                 )
             # Actual inherited stdin carries a portable package through Rust.
