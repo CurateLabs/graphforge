@@ -30,6 +30,7 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import tempfile
 import time
 from typing import Any
 import urllib.error
@@ -290,11 +291,25 @@ def package(order: list[str]) -> None:
 
     Selecting the entire publish set lets Cargo resolve unpublished workspace
     dependencies from its temporary package registry during verification.
+    A unique target gives that registry a fresh source identity on every run;
+    Cargo otherwise reuses cached dependency sources at unchanged versions.
+    Dry-run artifacts are discarded; publishing packages its own artifacts.
     """
-    command = ["cargo", "package", "--locked", "--allow-dirty"]
-    for name in order:
-        command += ["-p", name]
-    run(command)
+    metadata = subprocess.run(
+        ["cargo", "metadata", "--format-version", "1", "--no-deps", "--offline", "--locked"],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    target = Path(json.loads(metadata.stdout)["target_directory"])
+    target.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="publish-package-", dir=target) as directory:
+        command = ["cargo", "package", "--locked", "--allow-dirty", "--target-dir", directory]
+        for name in order:
+            command += ["-p", name]
+        run(command)
 
 
 def publish(order: list[str]) -> None:
