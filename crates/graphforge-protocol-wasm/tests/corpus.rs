@@ -11,6 +11,8 @@ use serde_json::{Value, json};
 const DISCOVERY: &str = include_str!("../../../docs/reference/discovery/v1/conformance.json");
 const MODULE_METADATA: &str =
     include_str!("../../../docs/reference/discovery/v1/module-metadata-conformance.json");
+const MODULE_DEFINITION_COUNTS: &str =
+    include_str!("../../../docs/reference/discovery/v1/module-definition-counts-conformance.json");
 const MOVED: &str = include_str!("../../../docs/reference/discovery/v1/moved-conformance.json");
 const PREVIEWS: &str = include_str!("../../../docs/reference/hub-publish/v1/previews.json");
 const FIXTURE: &str = include_str!("../../../tests/fixtures/hub/generated/v1/fixture.json");
@@ -30,13 +32,15 @@ fn limits(case: &Value) -> DiscoveryLimits {
 fn discovery_corpus_yields_the_recorded_native_outcome() {
     let corpus: Value = serde_json::from_str(DISCOVERY).unwrap();
     let metadata: Value = serde_json::from_str(MODULE_METADATA).unwrap();
+    let counts: Value = serde_json::from_str(MODULE_DEFINITION_COUNTS).unwrap();
     let cases: Vec<_> = corpus["cases"]
         .as_array()
         .unwrap()
         .iter()
         .chain(metadata["cases"].as_array().unwrap())
+        .chain(counts["cases"].as_array().unwrap())
         .collect();
-    assert_eq!(cases.len(), 154);
+    assert_eq!(cases.len(), 188);
     for case in cases {
         let name = case["name"].as_str().unwrap();
         let bytes = case["json"].as_str().unwrap().as_bytes();

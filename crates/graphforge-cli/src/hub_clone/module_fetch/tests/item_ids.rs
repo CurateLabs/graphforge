@@ -28,7 +28,7 @@ impl Transport for ItemTransport {
     }
 }
 
-fn descriptor() -> ItemDescriptor {
+pub(super) fn descriptor() -> ItemDescriptor {
     let limits = DiscoveryLimits::default();
     let refs = RefSet::from_json(FIXTURE_REFS, limits).unwrap();
     let manifest = DiscoveryManifest::from_json(FIXTURE_MANIFEST, limits).unwrap();
@@ -48,7 +48,7 @@ fn descriptor() -> ItemDescriptor {
     }
 }
 
-fn item_args(output: &Path, reference: &str) -> ModuleFetchArgs {
+pub(super) fn item_args(output: &Path, reference: &str) -> ModuleFetchArgs {
     let mut args = fixture_module_args(output);
     args.repository = reference.into();
     args.ontology_id = None;
