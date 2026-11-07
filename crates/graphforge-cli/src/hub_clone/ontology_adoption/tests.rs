@@ -272,9 +272,82 @@ fn run(transport: &dyn Transport, argv: &[String]) -> Result<Value, GfError> {
         cli.json,
         &mut output,
         &TEST_RETRY_POLICY,
+        |name| std::env::var(name),
     )?;
     assert!(matches!(result, ControlFlow::Break(())));
     Ok(serde_json::from_slice(&output).unwrap())
+}
+
+#[test]
+fn protected_adopt_and_start_verify_http_packages_preserve_provenance_and_reopen() {
+    use crate::hub_clone::auth_tests::{Reply, server};
+    const BYPASS: &str = "ontology-adoption-preview-secret";
+    for new_project in [false, true] {
+        let published = Published::new();
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("project");
+        if !new_project {
+            let graph = GraphForge::new(path.to_str()).unwrap();
+            graph.execute("CREATE (:Retained {value:42})").unwrap();
+        }
+        let mut args = published.command(if new_project { "start_from" } else { "adopt" }, &path);
+        args.extend(
+            [
+                "--hub",
+                "https://hub.example",
+                "--protection-bypass-env",
+                "PREVIEW_SECRET",
+            ]
+            .map(String::from),
+        );
+        let cli = crate::Cli::try_parse_from(args).unwrap();
+        let (transport, server) = server(vec![
+            Reply::ok(REFS),
+            Reply::ok(&published.manifest),
+            Reply::ok(&published.package),
+        ]);
+        let mut output = Vec::new();
+        let result = dispatch_with(
+            &transport,
+            cli.command.unwrap(),
+            cli.project,
+            cli.project_dir,
+            true,
+            &mut output,
+            &TEST_RETRY_POLICY,
+            |name| {
+                assert_eq!(name, "PREVIEW_SECRET");
+                Ok(BYPASS.into())
+            },
+        );
+        let requests = server.join().unwrap();
+        assert!(matches!(result.unwrap(), ControlFlow::Break(())));
+        let receipt: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(receipt["adoption"]["module"], json!(published.module));
+        assert_eq!(receipt["adoption"]["already_adopted"], false);
+        assert_eq!(requests.len(), 3);
+        for (index, request) in requests.iter().enumerate() {
+            let request = request.to_ascii_lowercase();
+            assert!(!request.contains("\r\nauthorization:"));
+            assert_eq!(
+                request.contains("\r\nx-vercel-protection-bypass:"),
+                index < 2
+            );
+            assert_eq!(request.contains(BYPASS), index < 2);
+        }
+        let graph = published.assert_project(&path);
+        if !new_project {
+            assert_eq!(retained_row(&graph).1, 42);
+        } else {
+            assert!(
+                graph
+                    .research_version_retention()
+                    .unwrap()
+                    .current_branch
+                    .is_some()
+            );
+        }
+    }
 }
 
 fn retained_row(graph: &GraphForge) -> (Vec<u8>, i64) {

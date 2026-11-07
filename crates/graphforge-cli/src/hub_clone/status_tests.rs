@@ -241,6 +241,7 @@ fn each_hub_status_class_has_its_semantic_code_and_exit_class_over_real_http() {
             digest: Some("a".repeat(64)),
             output: root.path().join("module.json"),
             hub: Some("https://hub.test".into()),
+            protection_bypass_env: None,
         },
         true,
         &mut Vec::new(),

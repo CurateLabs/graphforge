@@ -73,6 +73,14 @@ pub(super) struct Reply {
 }
 
 impl Reply {
+    pub(super) fn redirect(status: u16, location: &str, body: &[u8]) -> Self {
+        Self {
+            status,
+            location: Some(location.into()),
+            body: body.into(),
+        }
+    }
+
     pub(super) fn ok(body: &[u8]) -> Self {
         Self {
             status: 200,

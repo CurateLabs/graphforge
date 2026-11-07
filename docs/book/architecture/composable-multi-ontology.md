@@ -108,6 +108,16 @@ accepted in place of `OWNER/REPO`, through the existing item descriptor and
 retained-snapshot verifier. Neither command sends publication credentials or
 reads private module packages.
 
+For a protected preview Hub, these two commands and `ontology module fetch`
+also accept `--protection-bypass-env VARIABLE`. Core reads the separate Vercel
+protection secret from that variable and sends it only on initial discovery
+requests to the explicitly selected Hub origin, including permanent-item
+descriptors and retained refs/manifest snapshots. Generic redirects and module
+package downloads never receive it. This option does not supply Hub publication
+authorization or make a private ontology public. An absent or invalid explicitly
+requested secret fails before network access or Project mutation; errors never
+include its value.
+
 Core MUST use the advertised per-module transport, full portable verification,
 and manifest-authenticated reader. Resolution MUST retain the complete exact
 module dependency and bridge closure carried by the verified package. Adoption
