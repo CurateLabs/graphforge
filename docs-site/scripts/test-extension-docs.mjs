@@ -47,6 +47,12 @@ assert.deepEqual(manifest.localPatches, [
       "Clarify agent access, audience prerequisites, and manual v0.6.0 runtime selection.",
     sources: ["agent-interop.md", "install.md", "overview.md"],
   },
+  {
+    issue: "#2319",
+    reason:
+      "Pin editor setup to the published rc.7 engine selected by the first-use runtime table.",
+    sources: ["install.md"],
+  },
 ]);
 assert.match(
   manifest.repository,

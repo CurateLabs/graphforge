@@ -59,11 +59,11 @@ workspace using the exact version selected in the
 [engine installation guide](https://docs.graphforge.sh/guide/installation/):
 
 ```bash
-npm install @curatelabs/graphforge@0.6.0
+npm install @curatelabs/graphforge@0.6.0-rc.7
 ```
 
-This final-version command requires v0.6.0 to be published; for a candidate use
-its exact npm version. Set `graphforge.runtime` to `node`. Run
+This is the published candidate selected by the engine installation guide.
+Set `graphforge.runtime` to `node`. Run
 **GraphForge: Setup Native Binding** and browse to the installed package folder,
 or set `graphforge.nativeModulePath` to its absolute path. Avoid the automatic
 registry-install choice until its configured version matches your selected engine.

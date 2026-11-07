@@ -113,8 +113,9 @@ source instructions and your saved directories. You can stop here. The
 
 This next task needs the repaired engine. In a **separate shell**, follow the
 [pinned source build](installation.md#build-from-source), activate its Python
-environment and keep its absolute `GF_EVALUATION_CLI` selection. From that shell,
-create a new working directory and clone with the same source-built engine:
+environment and keep its absolute `GF_EVALUATION_CLI` selection. Installation
+ends in the parent evaluation directory outside Git. From there, create
+`research-evaluation` beside `graphforge-source`, then clone with the same engine:
 
 ```bash
 mkdir research-evaluation

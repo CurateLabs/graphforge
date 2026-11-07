@@ -208,7 +208,9 @@ identifies tested package bytes and platforms at this source. A local source
 build is a different installation route; that record does not qualify your build.
 This route uses Git source and does not require temporary Actions artifacts.
 
-In a POSIX shell, from a new working directory:
+In a POSIX shell, start in a new evaluation directory **outside any Git
+checkout**. These commands build in its `graphforge-source` child, then return
+to the parent so research data can live beside the source checkout:
 
 ```bash
 git clone --no-checkout https://github.com/CurateLabs/graphforge.git graphforge-source
@@ -223,12 +225,15 @@ export GF_EVALUATION_CLI="$PWD/target/release/gf"
 git rev-parse HEAD
 python -c "import sys, graphforge; print(sys.executable); print(graphforge.__version__)"
 "$GF_EVALUATION_CLI" --version
+cd ..
 ```
 
 The revision must be the full hash above; both version commands report rc.7.
-Keep this shell and its environment when following the advanced examples. In a
-new shell, reactivate this checkout's `.venv` and set `GF_EVALUATION_CLI` to the
-same absolute executable path. On Windows use the equivalent environment
+The final `cd ..` leaves you in the evaluation directory outside Git. Keep this
+shell and its environment for the advanced examples; `research-evaluation` will
+be a sibling of `graphforge-source`, not a directory inside it. In a new shell,
+start in that same parent directory, activate `graphforge-source/.venv`, and set
+`GF_EVALUATION_CLI` to the same absolute executable path. On Windows use the equivalent environment
 activation, `$env:GF_EVALUATION_CLI`, and `target/release/gf.exe`.
 
 The source-built Python binding and standalone CLI use the same checkout and
