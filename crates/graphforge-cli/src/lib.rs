@@ -1583,7 +1583,7 @@ fn write_error(
     error: &graphforge_api::GfError,
     json: bool,
     output: &mut dyn Write,
-    warnings: &[graphforge_api::CoreVersionWarning],
+    warnings: &[graphforge_api::Warning],
 ) -> io::Result<()> {
     if json {
         write_json_error(
@@ -1607,7 +1607,7 @@ fn write_runtime_error(
     error: &CliRuntimeError,
     json: bool,
     output: &mut dyn Write,
-    warnings: &[graphforge_api::CoreVersionWarning],
+    warnings: &[graphforge_api::Warning],
 ) -> io::Result<()> {
     match error {
         CliRuntimeError::Core(error) => write_error(error, json, output, warnings),
@@ -1630,7 +1630,7 @@ fn write_runtime_error(
             struct Envelope<'a> {
                 error: &'a graphforge_api::MultiOntologyError,
                 #[serde(skip_serializing_if = "<[_]>::is_empty")]
-                warnings: &'a [graphforge_api::CoreVersionWarning],
+                warnings: &'a [graphforge_api::Warning],
             }
             serde_json::to_writer(&mut *output, &Envelope { error, warnings })
                 .map_err(io::Error::other)?;
@@ -1654,7 +1654,7 @@ fn write_json_error(
     code: &'static str,
     message: &str,
     details: JsonErrorDetails<'_>,
-    warnings: &[graphforge_api::CoreVersionWarning],
+    warnings: &[graphforge_api::Warning],
 ) -> io::Result<()> {
     let warnings = if warnings.is_empty() {
         String::new()
@@ -1775,6 +1775,7 @@ fn error_exit_code(error: &CliRuntimeError) -> i32 {
     match error {
         CliRuntimeError::Authentication(_) => 5,
         CliRuntimeError::Core(error) if error.code() == "GF_VALIDATION" => 2,
+        CliRuntimeError::Core(error) if error.code() == "GF_UNSUPPORTED_FILESYSTEM" => 3,
         CliRuntimeError::Core(graphforge_api::GfError::Storage(_)) => 3,
         CliRuntimeError::MultiOntology(error) if error.code == "GF_VALIDATION" => 2,
         // Portable I/O, unsupported filesystems, and insufficient target

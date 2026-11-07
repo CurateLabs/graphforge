@@ -34,15 +34,18 @@ is limited to fixed writable local NTFS whose storage honestly honors
 write-through completion: GraphForge flushes a `FILE_FLAG_WRITE_THROUGH`
 staging handle and renames through that same handle with
 `SetFileInformationByHandle`. Directory `FlushFileBuffers` is not claimed as a
-durability barrier, and ReFS remains unsupported/unproven. See
+durability barrier, and ReFS remains unproven and warns after successful primitive checks by default. See
 [ADR 0020](../../adr/0020-ntfs-write-through-namespace-durability.md).
 
 A persistent project filesystem may be mounted beneath a different container or
 VM root filesystem. GraphForge admits the project parent as its storage
 boundary and requires the project root and durable contents to remain on that
-filesystem. Network, userspace, removable, symlink-mediated, ReFS, and unknown
-project filesystems return `GF_UNSUPPORTED_FILESYSTEM` before the project root
-or `CURRENT` changes. There is no best-effort durability mode.
+filesystem. Unproven classes warn with `GF_UNVERIFIED_FILESYSTEM` after the full
+primitive probe passes. `GRAPHFORGE_FILESYSTEM_DURABILITY=strict` refuses those
+classes. Broken primitives, links, namespace changes and lock takeover always
+refuse before mutation. Each generation authenticates its last writer's optional
+`unverified_durability` stamp; qualification is not a persistence guarantee.
+See [ADR 0064](../../adr/0064-unverified-filesystem-admission.md).
 
 Every durable lifecycle enters one Rust-owned parent-scoped admission before
 project mutation. A deterministic sibling lock file persists across unlock and

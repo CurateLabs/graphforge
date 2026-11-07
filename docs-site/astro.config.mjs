@@ -565,6 +565,10 @@ export default defineConfig({
                   label: '0063 — Author-declared ontology version precedence',
                   slug: 'adr/0063-declared-ontology-version-order',
                 },
+                {
+                  label: '0064 — Unverified filesystem admission',
+                  slug: 'adr/0064-unverified-filesystem-admission',
+                },
                 // END generated ADR records
               ],
             },

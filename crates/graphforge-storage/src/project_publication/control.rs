@@ -90,6 +90,10 @@ pub(super) struct GenerationManifestRecord {
     pub(super) participants: Vec<StagedParticipant>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) producing_core_version: Option<String>,
+    /// Last writer filesystem qualification, absent on admitted volumes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) unverified_durability:
+        Option<graphforge_core::filesystem_durability::UnverifiedDurability>,
 }
 
 #[derive(Debug, Serialize)]

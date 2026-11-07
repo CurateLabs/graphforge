@@ -35,7 +35,7 @@ Rust owns behavior. Python and Node are thin bindings, never fallback engines.
 - Runtime catalog IDs and ontology IDs are distinct. Never substitute one for the other.
 - Logical plans and wrapper tests are not end-to-end proof.
 - Name code by its subject. Files, identifiers, tests, env vars, CI jobs and steps, Make and bench targets, fixtures, and contract IDs never carry a milestone (`M6`) or issue number; cite issues in comments, commits, and PRs.
-- Durable projects require an `ext4`/`xfs`/`btrfs` volume at the process root; other filesystems fail with `GF_UNSUPPORTED_FILESYSTEM` by design. In-memory projects (`GraphForge()` with no path) run the full engine. See `docs/development/agent-environment.md`.
+- Durable projects probe the project parent. Unproven filesystem classes warn with `GF_UNVERIFIED_FILESYSTEM` by default; `GRAPHFORGE_FILESYSTEM_DURABILITY=strict` refuses them. Broken primitives, links, namespace changes and lock takeover still refuse. In-memory projects never warn. See `docs/development/agent-environment.md`.
 
 See `docs/book/architecture/`.
 

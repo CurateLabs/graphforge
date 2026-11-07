@@ -732,8 +732,10 @@ cargo mutants --file <path/to/module.rs> --package <crate> -- --tests
 Always scope it to the module a change touches. A workspace-wide run rebuilds
 and retests once per mutant and does not finish at this size; one module is
 minutes. Tests that write project directories need `TMPDIR` on a filesystem the
-admission policy accepts, the same as CI test runs, because the
-default temporary directory is refused as `filesystem_class_unproven`.
+admission policy qualifies, the same as CI test runs, to keep ordinary warning
+assertions independent of the host. Explicit tmpfs fixtures cover default
+`filesystem_class_unproven` warnings and strict refusal; see
+[filesystem admission](../development/agent-environment.md#filesystem-admission).
 
 Report the score and every surviving mutant. A survivor is either killed by a
 further test or justified individually; "mutation testing was impractical" is

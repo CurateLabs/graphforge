@@ -13,12 +13,19 @@ from typing import Any, Literal, TypedDict, overload
 from graphforge._graphforge_rs import GraphForgeError, _cli_execute
 
 
-class CoreVersionWarning(TypedDict):
-    """Native warning for data produced by a different Core version."""
-
-    code: str
+class _OptionalWarningFields(TypedDict, total=False):
     producing_core_version: str
     running_core_version: str
+    phase: str
+    outcome: str
+    cause: str
+    filesystem_type: str
+
+
+class CoreVersionWarning(_OptionalWarningFields):
+    """Native open warning; optional fields depend on the diagnostic code."""
+
+    code: str
     message: str
 
 
@@ -63,9 +70,18 @@ class _PublishRequired(TypedDict):
     revision: str
 
 
-class PublishResult(_PublishRequired, total=False):
-    """The Hub's confirmed publication receipt."""
+class UnverifiedDurability(TypedDict):
+    """Authenticated qualification of a generation writer's filesystem."""
 
+    phase: str
+    cause: str
+    filesystem_type: str
+
+
+class PublishResult(_PublishRequired, total=False):
+    """The Hub's confirmed publication receipt and local source qualification."""
+
+    source_unverified_durability: UnverifiedDurability
     moved_from: str
     moved_to: str
     warnings: list[CoreVersionWarning]

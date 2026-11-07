@@ -7,7 +7,9 @@ description: Clone a Hub project, inspect research history, commit changes, and 
 
 Use the installed `gf` CLI (the Python/npm launcher also accepts `graphforge`).
 Run commands with `--json`; retain stdout results and stderr errors separately.
-Use supported durable storage (`ext4`, `xfs`, or `btrfs`). Ask the researcher to
+Prefer qualified durable storage (`ext4`, `xfs`, or `btrfs` on Linux). Unproven
+classes warn with `GF_UNVERIFIED_FILESYSTEM`;
+`GRAPHFORGE_FILESYSTEM_DURABILITY=strict` refuses them. Ask the researcher to
 choose the repository, ref, credited identity and intended mutation.
 
 ## Clone and inspect

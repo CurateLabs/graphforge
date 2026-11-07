@@ -517,6 +517,7 @@ pub struct StagedProjectGeneration {
     root: PathBuf,
     publication_lock: PublicationLock,
     admission: StagedAdmission,
+    unverified_durability: Option<graphforge_core::filesystem_durability::UnverifiedDurability>,
     parent: ResolvedProjectGeneration,
     transaction_uuid: Uuid,
     generation_uuid: Uuid,
@@ -543,6 +544,17 @@ enum StagedAdmission {
 }
 
 impl StagedAdmission {
+    fn unverified_durability(
+        &self,
+    ) -> Option<&graphforge_core::filesystem_durability::UnverifiedDurability> {
+        match self {
+            Self::Exclusive(identity) | Self::Optimistic(Some(identity)) => {
+                identity.unverified_durability()
+            }
+            Self::Optimistic(None) => None,
+        }
+    }
+
     fn revalidate_identity(&self) -> Result<(), GfError> {
         match self {
             Self::Exclusive(identity) | Self::Optimistic(Some(identity)) => {
@@ -1023,6 +1035,16 @@ fn after_preparing_journal(request: &ProjectGenerationRequest) -> Result<(), GfE
     )
 }
 
+fn after_staged_journal(request: &ProjectGenerationRequest) -> Result<(), GfError> {
+    project_failpoint::hit(
+        "project.after_journal_staged",
+        Some(request.transaction_uuid),
+        Some(request.generation_uuid),
+        "STAGED",
+        false,
+    )
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "the shared staging kernel keeps admission, lock, parent, request, revert, optimistic identity, and graph-tree authority explicit"
@@ -1119,17 +1141,12 @@ fn stage_project_generation_inner_with_locks(
         ),
         allocation,
     )?;
-    project_failpoint::hit(
-        "project.after_journal_staged",
-        Some(request.transaction_uuid),
-        Some(request.generation_uuid),
-        "STAGED",
-        false,
-    )?;
+    after_staged_journal(request)?;
 
     Ok(ProjectStageOutcome::Staged(Box::new(
         StagedProjectGeneration {
             allocation: allocation.cloned(),
+            unverified_durability: admission.unverified_durability().cloned(),
             admission,
             root,
             publication_lock,
@@ -1948,6 +1965,7 @@ fn make_generation_durable(staged: &StagedProjectGeneration) -> Result<[u8; 32],
             .collect(),
         participants: staged.participants.clone(),
         producing_core_version: Some(graphforge_core::manifest::GRAPHFORGE_VERSION.to_owned()),
+        unverified_durability: staged.unverified_durability.clone(),
     };
     let manifest_bytes = canonical_line(&manifest)?;
     let manifest_path = staged.generation_root.join(MANIFEST_FILE);

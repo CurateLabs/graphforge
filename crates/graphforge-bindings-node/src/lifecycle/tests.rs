@@ -9,7 +9,7 @@ use crate::ipc_to_record_batch;
 
 #[test]
 fn capability_tasks_return_rust_owned_arrow_ipc() {
-    let graph = GraphForge::new(None, None).unwrap();
+    let graph = GraphForge::open_native(None, None).unwrap();
     let mut inspect = ProjectCapabilitiesTask {
         engine: Arc::clone(&graph.inner),
     };

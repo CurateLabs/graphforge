@@ -45,6 +45,7 @@ fn durable_hydration_ignores_cross_volume_tmpdir() {
             "workspace_hydration::tests::placement::durable_hydration_ignores_cross_volume_tmpdir",
             "--nocapture",
         ])
+        .env("GRAPHFORGE_FILESYSTEM_DURABILITY", "strict")
         .env(CHILD_PROJECT, project.path())
         .env("TMPDIR", ambient.path())
         .env("TMP", ambient.path())

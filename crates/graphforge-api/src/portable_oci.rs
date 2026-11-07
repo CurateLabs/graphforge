@@ -274,6 +274,7 @@ pub(crate) fn publish_portable_oci_with_progress(
     }
 
     Ok(PortableOciReference {
+        source_unverified_durability: report.source_unverified_durability.clone(),
         registry: request.registry.to_owned(),
         repository: request.repository.to_owned(),
         oci_manifest_digest: digest_ref,
@@ -494,6 +495,7 @@ pub(crate) fn pull_portable_oci_with_progress(
     };
     Ok(PortableOciPullReceipt {
         reference: PortableOciReference {
+            source_unverified_durability: report.source_unverified_durability.clone(),
             registry: request.registry.to_owned(),
             repository: request.repository.to_owned(),
             oci_manifest_digest,

@@ -1239,9 +1239,27 @@ fn an_import_the_disk_cannot_hold_is_refused_as_a_storage_error_before_extractio
 #[cfg(target_os = "linux")]
 #[test]
 fn an_import_onto_an_unsupported_filesystem_keeps_its_code_and_exit_class() {
+    if std::env::var("GRAPHFORGE_FILESYSTEM_DURABILITY").as_deref() != Ok("strict") {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "an_import_onto_an_unsupported_filesystem_keeps_its_code_and_exit_class",
+                "--nocapture",
+            ])
+            .env("GRAPHFORGE_FILESYSTEM_DURABILITY", "strict")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+
     let root = TempDir::new().unwrap();
     let package = package_too_large_for_any_disk(root.path());
-    // `/dev/shm` is tmpfs, which the durable-publication contract does not admit.
+    // `/dev/shm` is tmpfs, which explicit strict policy does not admit.
     let shm = TempDir::new_in("/dev/shm").unwrap();
     let destination = shm.path().join("destination");
     let (code, error) = refused_import(&destination, &package);

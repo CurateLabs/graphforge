@@ -68,6 +68,7 @@ Roadmap-only ADRs are not retained in this tree.
 | 0061 | [Research porcelain and one meaning for a ref](0061-research-porcelain-and-ref-naming.md) | `0061-research-porcelain-and-ref-naming.md` |
 | 0062 | [Projects are named like repositories; ontologies and bridge sets have permanent IDs like gists](0062-project-and-ontology-identity.md) | `0062-project-and-ontology-identity.md` |
 | 0063 | [Author-declared ontology version precedence](0063-declared-ontology-version-order.md) | `0063-declared-ontology-version-order.md` |
+| 0064 | [Unverified filesystem admission](0064-unverified-filesystem-admission.md) | `0064-unverified-filesystem-admission.md` |
 
 ## Superseded records
 

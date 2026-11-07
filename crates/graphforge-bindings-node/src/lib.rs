@@ -360,11 +360,8 @@ impl GraphForge {
     }
 }
 
-#[napi]
 impl GraphForge {
-    /// Open an in-memory (`path` omitted) or Parquet-backed (`path` = dir) instance.
-    #[napi(constructor)]
-    pub fn new(path: Option<String>, options: Option<GraphForgeOptionsInput>) -> Result<Self> {
+    fn open_native(path: Option<String>, options: Option<GraphForgeOptionsInput>) -> Result<Self> {
         let defaults = GraphForgeOptions::default();
         let options = options.unwrap_or(GraphForgeOptionsInput {
             write_mode: None,
@@ -408,6 +405,22 @@ impl GraphForge {
             provider: None,
             closed: Arc::new(AtomicBool::new(false)),
         })
+    }
+}
+
+#[napi]
+impl GraphForge {
+    /// Open an in-memory (`path` omitted) or Parquet-backed (`path` = dir) instance.
+    #[napi(constructor)]
+    pub fn new(
+        env: Env,
+        path: Option<String>,
+        options: Option<GraphForgeOptionsInput>,
+    ) -> Result<Self> {
+        let graph = Self::open_native(path, options)?;
+        let warnings = graph.open_guard()?.open_warnings();
+        emit_open_warnings(env, &warnings)?;
+        Ok(graph)
     }
 
     // ----- Analyst verbs.
@@ -519,7 +532,7 @@ impl GraphForge {
     /// Warnings raised when this project opened: one when it was written by a
     /// different Core version. Empty otherwise.
     #[napi(getter)]
-    pub fn open_warnings(&self) -> Result<Vec<portable::CoreVersionWarningOutput>> {
+    pub fn open_warnings(&self) -> Result<Vec<portable::WarningOutput>> {
         let g = self.open_guard()?;
         Ok(g.open_warnings().into_iter().map(Into::into).collect())
     }
@@ -553,7 +566,7 @@ mod tests {
 
     #[test]
     fn node_engine_lock_allows_shared_reads_and_blocks_exclusive_replacement() {
-        let graph = Arc::new(GraphForge::new(None, None).unwrap());
+        let graph = Arc::new(GraphForge::open_native(None, None).unwrap());
 
         let read_guard = graph.open_guard().unwrap();
         let reader = Arc::clone(&graph);
@@ -740,3 +753,36 @@ pub use recorded::ResolvedRecordedAlgorithmInput;
 pub use recorded::ResolvedRecordedAlgorithmOutput;
 pub use recorded::ResolvedRecordedAlgorithmTask;
 pub use recorded::ResolvedRecordedOutputData;
+
+fn emit_open_warnings(env: Env, warnings: &[graphforge_api::Warning]) -> Result<()> {
+    let runtime_error = |error: napi::Error| to_napi_err(&GfError::Execution(error.to_string()));
+    for warning in warnings {
+        if let graphforge_api::Warning::FilesystemDurability(value) = warning {
+            let mut options = Object::new(&env).map_err(runtime_error)?;
+            options
+                .set_named_property("type", "FilesystemDurabilityWarning")
+                .map_err(runtime_error)?;
+            options
+                .set_named_property("code", value.code.clone())
+                .map_err(runtime_error)?;
+            options
+                .set_named_property(
+                    "detail",
+                    serde_json::to_string(value)
+                        .map_err(|e| to_napi_err(&GfError::Execution(e.to_string())))?,
+                )
+                .map_err(runtime_error)?;
+            let process: Object = env
+                .get_global()
+                .map_err(runtime_error)?
+                .get_named_property("process")
+                .map_err(runtime_error)?;
+            let emit: Function<napi::bindgen_prelude::FnArgs<(String, Object)>, ()> = process
+                .get_named_property("emitWarning")
+                .map_err(runtime_error)?;
+            emit.apply(process, (value.message.clone(), options).into())
+                .map_err(runtime_error)?;
+        }
+    }
+    Ok(())
+}

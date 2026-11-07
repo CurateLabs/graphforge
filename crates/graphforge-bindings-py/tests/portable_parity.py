@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 import sys
 import tempfile
@@ -180,10 +181,18 @@ def check_import_refusals_keep_their_identity() -> None:
         assert "bytes available beside the target" in error.diagnostics[0]["message"]
         assert not target.exists()
         if sys.platform.startswith("linux"):
-            # `/dev/shm` is tmpfs, which the durable-publication contract does not admit.
+            # `/dev/shm` is tmpfs, which explicit strict policy does not admit.
             with tempfile.TemporaryDirectory(dir="/dev/shm") as shm:
                 target = Path(shm) / "destination"
-                error = refused_import(target, package)
+                previous = os.environ.get("GRAPHFORGE_FILESYSTEM_DURABILITY")
+                try:
+                    os.environ["GRAPHFORGE_FILESYSTEM_DURABILITY"] = "strict"
+                    error = refused_import(target, package)
+                finally:
+                    if previous is None:
+                        os.environ.pop("GRAPHFORGE_FILESYSTEM_DURABILITY", None)
+                    else:
+                        os.environ["GRAPHFORGE_FILESYSTEM_DURABILITY"] = previous
                 assert getattr(error, "code", None) == "GF_UNSUPPORTED_FILESYSTEM", error
                 assert error.diagnostics[0]["code"] == "storage.unsupported_filesystem"
                 assert "GF_UNSUPPORTED_FILESYSTEM" in error.diagnostics[0]["message"]

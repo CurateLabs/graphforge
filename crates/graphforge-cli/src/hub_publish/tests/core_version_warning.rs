@@ -29,9 +29,10 @@ fn project(root: &Path, relabelled: Option<&str>) -> PathBuf {
 struct Published {
     result: Result<(), CliRuntimeError>,
     /// What the command raised, as the CLI collects it.
-    warnings: Vec<graphforge_api::CoreVersionWarning>,
+    warnings: Vec<graphforge_api::Warning>,
     /// The standard-error channel the warnings were printed on.
     diagnostics_stderr: String,
+    stdout: String,
 }
 
 fn publish_project(hub: &LoopbackHub, path: &Path, args: &PublishArgs, json: bool) -> Published {
@@ -54,6 +55,7 @@ fn publish_project(hub: &LoopbackHub, path: &Path, args: &PublishArgs, json: boo
         result,
         warnings,
         diagnostics_stderr: String::from_utf8(diagnostics_stderr).unwrap(),
+        stdout: String::from_utf8(stdout).unwrap(),
     }
 }
 
@@ -66,7 +68,10 @@ fn publishing_a_project_from_another_core_warns_before_publishing() {
     let text = publish_project(&hub, &path, &on_ref(REPOSITORY, "main"), false);
     text.result.unwrap();
     assert_eq!(text.warnings.len(), 1);
-    assert_eq!(text.warnings[0].producing_core_version, CORE_X);
+    assert_eq!(
+        serde_json::to_value(&text.warnings[0]).unwrap()["producing_core_version"],
+        CORE_X
+    );
     assert!(
         text.diagnostics_stderr
             .contains("warning GF_CORE_VERSION_MISMATCH:"),
@@ -128,5 +133,27 @@ fn publishing_a_project_from_the_running_core_does_not_warn() {
     assert_eq!(
         published.diagnostics_stderr,
         format!("Publish Hub: {HUB}\n")
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn publishing_from_tmpfs_records_source_qualification_without_changing_hub_receipt() {
+    let root = tempfile::tempdir_in("/dev/shm").unwrap();
+    let path = project(root.path(), None);
+    let hub = LoopbackHub::start();
+    let published = publish_project(&hub, &path, &on_ref(REPOSITORY, "main"), true);
+    published.result.unwrap();
+    assert_eq!(published.warnings.len(), 1);
+    assert_eq!(published.warnings[0].code(), "GF_UNVERIFIED_FILESYSTEM");
+    let document: serde_json::Value = serde_json::from_str(&published.stdout).unwrap();
+    assert_eq!(
+        document["source_unverified_durability"]["filesystem_type"],
+        "tmpfs"
+    );
+    assert!(document.get("request_commitment").is_some());
+    assert_eq!(
+        GraphForge::new(path.to_str()).unwrap().open_warnings()[0].code(),
+        "GF_UNVERIFIED_FILESYSTEM"
     );
 }

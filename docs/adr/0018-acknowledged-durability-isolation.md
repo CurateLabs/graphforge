@@ -93,8 +93,9 @@ The project parent may be a persistent filesystem mounted beneath a different
 container or VM root filesystem. The project root and all durable publication
 paths must remain on that admitted filesystem. Network, userspace, removable,
 symlink-mediated, or unknown project filesystems are rejected with
-`GF_UNSUPPORTED_FILESYSTEM` before the project root or `CURRENT` changes. There
-is no best-effort durability mode.
+`GF_UNSUPPORTED_FILESYSTEM` before the project root or `CURRENT` changes. As amended by [ADR 0064](0064-unverified-filesystem-admission.md), unproven
+classification warns by default after primitive checks pass; strict mode
+retains refusal. Broken primitives and integrity failures always refuse.
 
 ### Recovery authority
 

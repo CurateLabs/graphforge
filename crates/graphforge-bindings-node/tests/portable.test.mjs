@@ -270,11 +270,19 @@ test("import refusals before extraction keep their code and diagnostic", async (
     );
     assert.equal(existsSync(target), false);
     if (process.platform === "linux") {
-      // `/dev/shm` is tmpfs, which the durable-publication contract does not admit.
+      // `/dev/shm` is tmpfs, which explicit strict policy does not admit.
       const shm = mkdtempSync("/dev/shm/gf-refused-import-");
       try {
         const shmTarget = join(shm, "destination");
-        error = await refusedImport(shmTarget, input);
+        const previous = process.env.GRAPHFORGE_FILESYSTEM_DURABILITY;
+        try {
+          process.env.GRAPHFORGE_FILESYSTEM_DURABILITY = "strict";
+          error = await refusedImport(shmTarget, input);
+        } finally {
+          if (previous === undefined)
+            delete process.env.GRAPHFORGE_FILESYSTEM_DURABILITY;
+          else process.env.GRAPHFORGE_FILESYSTEM_DURABILITY = previous;
+        }
         assert.equal(error.code, "GF_UNSUPPORTED_FILESYSTEM");
         envelope = JSON.parse(error.message);
         assert.equal(
