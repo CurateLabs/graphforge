@@ -12,6 +12,11 @@
       "issue": "#1208",
       "reason": "Clarify agent access, audience prerequisites, and manual v0.6.0 runtime selection.",
       "sources": ["agent-interop.md", "install.md", "overview.md"]
+    },
+    {
+      "issue": "#2319",
+      "reason": "Pin editor setup to the published rc.7 engine selected by the first-use runtime table.",
+      "sources": ["install.md"]
     }
   ],
   "pages": [
@@ -23,7 +28,7 @@
     {
       "source": "install.md",
       "destination": "guide/vscode-extension/install.md",
-      "sha256": "8b1ae2eb2651dccced542cfb1a5930c6944c37db1d11901d3b0d6ea12c9f1063"
+      "sha256": "d76e7c7f022bc3b0ba3a4174a01c92f2193b454f9e00947473de74938760698a"
     },
     {
       "source": "commands.md",
