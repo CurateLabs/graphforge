@@ -43,7 +43,7 @@ export default defineConfig({
             { label: "Choose your learning path", slug: "guide/overview" },
             { label: "Who it is for", slug: "guide/audience-and-fit" },
             {
-              label: "Public Hub launch path (qualification pending)",
+              label: "Clone and query a public project",
               link: "/guide/portable-projects/#public-hub-launch-path",
             },
             { label: "Your first graph", slug: "guide/quickstart" },
@@ -63,6 +63,7 @@ export default defineConfig({
               slug: "guide/advanced",
             },
             { label: "Installation", slug: "guide/installation" },
+            { label: "Automate with an agent", slug: "guide/agent-automation" },
             { label: "Use a notebook", slug: "guide/use-a-notebook" },
             { label: "Query, analyze, and save", slug: "guide/tutorial" },
             { label: "Write Cypher queries", slug: "guide/cypher-guide" },

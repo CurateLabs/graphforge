@@ -22,8 +22,10 @@ through a coding agent. They want to build or load a graph, ask relationship
 questions, and keep the result without operating a database.
 
 The [public Hub launch path](portable-projects.md#public-hub-launch-path) connects
-browse, clone, query and local continuation with the selected candidate.
-Publishing requires a separately authorized destination and machine session.
+browse, clone and query with the pinned published Python package. Local
+research continuation uses the separately selected source runtime.
+Production publish-back qualification is separate and requires an authorized
+destination and machine session.
 The local jobs below also work without a Hub.
 
 ## Two jobs you can complete today

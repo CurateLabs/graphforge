@@ -169,7 +169,7 @@ fn hub_namespace_symlinks_are_rejected_before_publication() {
 
 #[test]
 fn agent_guide_examples_match_public_results() {
-    let guide = include_str!("../../../docs/guide/work-with-an-agent.md");
+    let guide = include_str!("../../../docs/guide/agent-automation.md");
     let root = tempdir().unwrap();
     let receipt = skills(root.path(), "install");
     assert!(guide.contains(&serde_json::to_string(&receipt).unwrap()));
