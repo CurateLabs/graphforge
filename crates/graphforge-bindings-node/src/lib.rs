@@ -188,6 +188,13 @@ pub fn test_hub_start() -> String {
     graphforge_cli::hub_test_support::start()
 }
 
+/// Retarget launcher requests to the test server, without using the OS vault.
+#[cfg(feature = "hub-test-support")]
+#[napi(js_name = "_testLauncherStart")]
+pub fn test_launcher_start(port: u16) {
+    graphforge_cli::hub_test_support::launcher::start(port);
+}
+
 /// Release the compile-time-only acceptance fixture on this thread.
 #[cfg(feature = "hub-test-support")]
 #[napi(js_name = "_testHubStop")]
@@ -216,6 +223,13 @@ pub fn run_cli(args: Vec<String>) -> CliExecutionOutput {
         stdout: execution.stdout.into(),
         stderr: execution.stderr.into(),
     }
+}
+
+/// Run a console invocation with inherited OS streams without exiting Node.js.
+#[napi(js_name = "runCliProcess")]
+#[must_use]
+pub fn run_cli_process(args: Vec<String>) -> i32 {
+    graphforge_cli::execute_process(std::iter::once("gf".to_owned()).chain(args))
 }
 
 static WRITER_HOLD_PROBE: LazyLock<

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
 
-import { run } from "../lib/run.mjs";
+import { runProcess } from "../lib/run.mjs";
 
-process.exitCode = await run(process.argv.slice(2));
+process.exitCode = await runProcess(process.argv.slice(2));

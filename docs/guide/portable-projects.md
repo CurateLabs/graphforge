@@ -226,9 +226,10 @@ scope is `publish:opendata/openalex`; browsing or cloning it does not grant
 permission to publish there. The capability endpoint's availability alone
 does not establish successful authorization or publication.
 
-**Human browser/device approval requires the standalone native Rust CLI.** The
-npm launcher used above calls the captured binding interface; it cannot start
-device flow, even from a terminal. The published native CLI below can establish
+**Use the standalone native Rust CLI for saved-session publishing or publish
+device approval with rc.7.** The rc.7 package launchers can save a login session,
+but their captured publish path neither reuses it nor starts publish device flow,
+even from a terminal. Current source fixes this package-launcher path as described below. The published native CLI below can establish
 machine authentication independently of uploads. It is the earlier registry
 rc.7 build, not the repaired packed candidate used for local research above.
 For publication, #1095 selects and verifies a native executable containing the
@@ -260,8 +261,11 @@ session obtains the authorized repository-scoped token when publishing; login
 does not grant write permission to arbitrary destinations. Explicit scoped
 credentials remain available for automation. Never copy tokens into commands,
 notebooks, Project files or transcripts.
-The npm CLI can publish with an already-provisioned explicit scoped token; it
-cannot perform the human approval step. For an agent, use the installed
+Published rc.7 package launchers require an already-provisioned scoped token.
+Current source fixes both PyPI and npm launchers: use `gf auth login`, then
+`gf push` or `gf publish`; device notices stream immediately. PyPI also installs
+`gf` alongside `graphforge`. Use a release containing this fix or build current
+source; the rc.7 workaround above remains necessary for older packages. For an agent, use the installed
 `graphforge-hub` skill and the
 [scoped credential provisioning path](work-with-an-agent.md#provision-scoped-credentials-for-an-agent-or-ci).
 An unattended agent cannot approve its own owner login.

@@ -38,12 +38,10 @@ try {
   );
   writeFileSync(
     join(nativeRoot, "index.js"),
-    `export function runCli(args) {
-    return {
-      exitCode: args.includes("--fail") ? 3 : 0,
-      stdout: JSON.stringify({ args, cwd: process.cwd() }) + "\\n",
-      stderr: args.includes("--fail") ? "native failure\\n" : "",
-    };
+    `export function runCliProcess(args) {
+    process.stdout.write(JSON.stringify({ args, cwd: process.cwd() }) + "\\n");
+    if (args.includes("--fail")) process.stderr.write("native failure\\n");
+    return args.includes("--fail") ? 3 : 0;
   }\n`,
   );
 

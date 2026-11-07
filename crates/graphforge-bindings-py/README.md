@@ -44,9 +44,10 @@ table = forge.execute("""
 print(table.to_pandas())
 ```
 
-`execute()` returns an Apache Arrow `Table`. The `graphforge` console entry
-point launches the same Rust-owned repository CLI used by `gf` and
-`npx @curatelabs/graphforge-cli`.
+`execute()` returns an Apache Arrow `Table`. The `gf` and `graphforge` console
+commands use inherited stdio and show device notices immediately. Run
+`gf auth login`, then `gf push` or `gf publish`. Publishing tokens are for CI;
+captured Python Hub calls still require explicit tokens.
 
 ## Documentation
 
