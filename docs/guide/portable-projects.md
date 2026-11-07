@@ -998,7 +998,11 @@ queries above inspect the reopened empty graph without expanding that projection
 For a Hub advertising `publish-visibility@1`, add `--public` to the first publish
 command to request a public repository (or require an existing public repository).
 Without that capability, the flag is refused before upload. Omitting the flag
-uses the Hub's existing visibility policy. Reference-Hub coverage proves native
+uses the Hub's existing visibility policy for `gf publish`. For `gf push`, pass
+`--public` or `--private` in scripts; without a flag, terminal stdin and stderr
+are required. Interactive push prompts once for all-null authenticated context
+(including website-created repositories that have never been published), with
+blank, cancel, invalid input or EOF cancelling before any upload. Reference-Hub coverage proves native
 transport and negotiation, not production account entitlements or free-account
 availability.
 

@@ -47,6 +47,8 @@ use url::Url;
 use uuid::Uuid;
 
 mod history;
+mod push_visibility;
+pub(crate) use push_visibility::{push_with_credentials, require_push_visibility};
 pub(crate) mod publication;
 mod refusals;
 
@@ -235,6 +237,8 @@ pub(crate) struct PublishEnvironment<'a> {
     pub clock: &'a dyn Fn() -> Instant,
     /// Human instructions (device flow); never receives secrets.
     pub notices: &'a mut dyn Write,
+    /// A console input is supplied only under the attached stdin/stderr terminal policy.
+    terminal: Option<&'a mut dyn std::io::BufRead>,
     resolution: Option<PublicationResolution>,
 }
 
@@ -555,6 +559,7 @@ pub(crate) fn publish_token(token_env: Option<&str>) -> Result<Option<PublishTok
 
 /// The publish flow behind `gf publish` and `gf push` over one transport: resolve
 /// the repository, obtain a credential, publish and report.
+#[cfg(test)]
 pub(crate) fn publish_with_credentials(
     transport: &dyn Transport,
     args: &PublishArgs,
@@ -573,11 +578,9 @@ fn publish_with_resolution(
     resolution: Option<PublicationResolution>,
     publish_with: impl FnOnce(&mut PublishEnvironment<'_>) -> Result<(), CliRuntimeError>,
 ) -> Result<(), CliRuntimeError> {
-    use std::io::IsTerminal as _;
     let visibility = args.visibility()?;
     let streaming = crate::process_attached();
-    let interactive =
-        streaming && std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
+    let interactive = crate::process::interactive_process();
     let (identity, base) = args.destination()?;
     let resolution = match resolution {
         Some(resolution) => resolution,
@@ -600,7 +603,12 @@ fn publish_with_resolution(
     })?;
     let stderr = std::io::stderr();
     let mut notices = stderr.lock();
+    let stdin = std::io::stdin();
+    let mut terminal = interactive.then(|| stdin.lock());
     let mut environment = PublishEnvironment {
+        terminal: terminal
+            .as_mut()
+            .map(|input| input as &mut dyn std::io::BufRead),
         bypass,
         credential,
         clock: &std::time::Instant::now,
@@ -754,7 +762,31 @@ pub(crate) fn write_outcome(
     }
 }
 
+/// Whether push has already read the authenticated publication context.
+#[derive(Default)]
+enum PublicationContext {
+    #[default]
+    Unread,
+    Unpublished,
+    Published(Box<Published>),
+}
+
+impl PublicationContext {
+    fn take_or_read(
+        &mut self,
+        read: impl FnOnce() -> Result<Option<Published>, GfError>,
+    ) -> Result<Option<Published>, GfError> {
+        match std::mem::take(self) {
+            Self::Unread => read(),
+            Self::Unpublished => Ok(None),
+            Self::Published(published) => Ok(Some(*published)),
+        }
+    }
+}
+
 struct PublicationResolution {
+    // A push create decision reads authenticated context before deriving identity.
+    context: PublicationContext,
     requested: RepositoryIdentity,
     requested_base: Url,
     identity: RepositoryIdentity,
@@ -795,6 +827,7 @@ fn resolve_publication(
         ));
     }
     Ok(PublicationResolution {
+        context: PublicationContext::Unread,
         requested: identity.clone(),
         requested_base: base.clone(),
         identity: current,
@@ -2434,6 +2467,7 @@ fn publish_inner(
         base,
         moved,
         capabilities,
+        mut context,
         ..
     } = resolution;
     graphforge_hub_publish::require_visibility_capability(&capabilities, visibility)
@@ -2527,7 +2561,7 @@ fn publish_inner(
             if let Some(receipt) = status.receipt {
                 check_receipt(&receipt, &identity, operation_uuid)?;
                 if args.check_fork_origin.is_some() {
-                    let published = read_current()?;
+                    let published = context.take_or_read(read_current)?;
                     history::verify_established_fork(
                         &hub,
                         graph,
@@ -2549,7 +2583,7 @@ fn publish_inner(
         _ => return Err(hub_failure(&status, &status_url).into()),
     }
 
-    let published = read_current()?;
+    let published = context.take_or_read(read_current)?;
     let fork_origin_repository = match (&fork, &published) {
         (Some(_), Some(_)) => {
             return Err(publish_error(

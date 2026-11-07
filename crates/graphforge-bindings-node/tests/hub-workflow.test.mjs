@@ -41,7 +41,7 @@ function seed(project) {
     graph.close();
   }
   source.branch("main", { author: AUTHOR });
-  const receipt = source.publish(REPOSITORY);
+  const receipt = source.publish(REPOSITORY, { public: true });
   assert.deepEqual(receipt.repository, {
     owner: "curate",
     repository: "claims",
@@ -83,8 +83,14 @@ test("typed Hub verbs clone, commit twice, tag, push, pull, log, and reopen Arro
   assert.deepEqual(second.parents, [first.version_uuid]);
   assert.equal(alice.tag("v1").version_uuid, second.version_uuid);
   const publishId = operation();
-  const pushed = alice.push(undefined, { operationUuid: publishId });
-  assert.deepEqual(alice.push(undefined, { operationUuid: publishId }), pushed);
+  const pushed = alice.push(undefined, {
+    public: true,
+    operationUuid: publishId,
+  });
+  assert.deepEqual(
+    alice.push(undefined, { public: true, operationUuid: publishId }),
+    pushed,
+  );
   assert.equal(pushed.operation_uuid, publishId);
   assert.equal(alice.log("v1")[0].version_uuid, second.version_uuid);
   const bob = project("bob");
@@ -94,7 +100,7 @@ test("typed Hub verbs clone, commit twice, tag, push, pull, log, and reopen Arro
     "MATCH (n:Item) SET n.score=3",
     { author: "Bob <bob@example.org>" },
   );
-  bob.push();
+  bob.push(undefined, { public: true });
   const pullId = operation();
   const pulled = alice.pull(undefined, {
     author: AUTHOR,
@@ -252,7 +258,7 @@ for (const verb of ["log", "pull", "push"]) {
     } else if (verb === "pull") {
       work.pull(undefined, { author: AUTHOR });
     } else {
-      work.push();
+      work.push(undefined, { public: true });
     }
     assert.equal(work.warnings.length, 1);
     assert.equal(work.warnings[0].code, "GF_CORE_VERSION_MISMATCH");
@@ -260,3 +266,22 @@ for (const verb of ["log", "pull", "push"]) {
     assert.equal(work.warnings[0].running_core_version, version());
   });
 }
+
+test("captured push and publish require explicit mutually exclusive visibility", (t) => {
+  const project = fixture(t);
+  const source = seed(project);
+  for (const method of ["push", "publish"]) {
+    assert.throws(
+      () => source[method](),
+      (error) =>
+        error.exitCode === 2 &&
+        error.message.includes("create it with --public or --private"),
+    );
+    assert.throws(
+      () => source[method](undefined, { public: true, private: true }),
+      (error) =>
+        error.exitCode === 2 && error.details.source === "argument_parser",
+    );
+  }
+  source.push(undefined, { public: true, ref: "main", branch: "main" });
+});

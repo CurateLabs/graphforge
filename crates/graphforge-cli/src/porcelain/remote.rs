@@ -34,6 +34,9 @@ pub(crate) fn run_remote(
     output: &mut dyn Write,
     diagnostics: &mut crate::Diagnostics<'_>,
 ) -> Result<(), CliRuntimeError> {
+    if let crate::Command::Push(args) = &command {
+        crate::hub_publish::require_push_visibility(&args.visibility)?;
+    }
     let path = crate::resolve_project_path(project, project_dir)?;
     let path = path
         .to_str()
@@ -61,8 +64,15 @@ pub(crate) fn run_remote_with(
 ) -> Result<(), CliRuntimeError> {
     match command {
         crate::Command::Push(args) => {
-            let token = publish_token(&args.hub)?;
-            push(transport, graph, &args, token, json_output, output)
+            crate::hub_publish::require_push_visibility(&args.visibility)?;
+            push(
+                transport,
+                graph,
+                &args,
+                || publish_token(&args.hub),
+                json_output,
+                output,
+            )
         }
         crate::Command::Pull(args) => Ok(pull(transport, graph, &args, json_output, output)?),
         crate::Command::Log(args) => Ok(log_remote(transport, graph, &args, json_output, output)?),
@@ -124,7 +134,7 @@ pub(crate) fn repository_of(
 }
 
 /// The arguments `gf publish` would take for this push.
-pub(super) fn push_args(
+pub(crate) fn push_args(
     registry: &ResearchRegistry,
     args: &PushArgs,
 ) -> Result<PublishArgs, GfError> {
@@ -136,7 +146,7 @@ pub(super) fn push_args(
     let label = registry.branches[&branch].label.clone();
     Ok(PublishArgs {
         hub: None,
-        visibility: crate::hub_publish::VisibilityArgs::default(),
+        visibility: args.visibility.clone(),
         rewrite: args.rewrite,
         prune: args.prune,
         check_fork_origin: None,
@@ -161,7 +171,7 @@ pub(crate) fn push(
     transport: &dyn Transport,
     graph: &mut GraphForge,
     args: &PushArgs,
-    token: Option<PublishToken>,
+    token: impl FnOnce() -> Result<Option<PublishToken>, GfError>,
     json_output: bool,
     output: &mut dyn Write,
 ) -> Result<(), CliRuntimeError> {
@@ -173,16 +183,16 @@ pub(crate) fn push(
         publish.protection_bypass_env.as_deref(),
         |name| std::env::var(name),
     )?;
-    crate::hub_publish::publish_with_credentials(
+    crate::hub_publish::push_with_credentials(
         transport,
         &publish,
         token,
         bypass.as_ref(),
-        |environment| {
+        |publish, environment| {
             crate::hub_publish::publish_and_report(
                 transport,
                 graph,
-                &publish,
+                publish,
                 environment,
                 json_output,
                 output,

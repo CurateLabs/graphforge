@@ -92,7 +92,18 @@ impl ReferenceTransport {
         if url.origin().ascii_serialization() != "https://hub.test" {
             return Err(network("the native fixture accepts only https://hub.test"));
         }
-        let response = self.0.handle(request);
+        let mut response = self.0.handle(request);
+        if request.method == HubMethod::Get && request.url.ends_with("/.gf/publish") {
+            // ReferenceHub does not implement visibility policy. This opt-in
+            // binding seam advertises header support for thin argv projection.
+            let mut document: serde_json::Value = serde_json::from_slice(&response.body)
+                .map_err(|_| network("invalid fixture capabilities"))?;
+            document["capabilities"]
+                .as_array_mut()
+                .expect("capabilities array")
+                .push(serde_json::json!({"capability":"publish-visibility", "major":1}));
+            response.body = serde_json::to_vec(&document).expect("fixture capabilities serialize");
+        }
         if response.body.len() > limit {
             return Err(network("reference Hub response exceeds byte limit"));
         }

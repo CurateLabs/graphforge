@@ -154,6 +154,8 @@ pub(crate) struct TagArgs {
 /// Example: `gf push`, `gf push curate/claims --ref main`
 #[derive(Args)]
 pub(crate) struct PushArgs {
+    #[command(flatten)]
+    pub visibility: crate::hub_publish::VisibilityArgs,
     /// Repository (owner/repository or HTTPS URL); defaults to the Branch's upstream.
     pub repository: Option<String>,
     /// Ref to publish; defaults to the upstream ref, then the Branch label.
