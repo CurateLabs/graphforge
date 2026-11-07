@@ -1,8 +1,8 @@
 {
   "contractVersion": 1,
   "rustManifest": "../../../tests/contracts/non-cypher-rust-surface.json",
-  "releaseSurfaceCount": 370,
-  "releaseSurfaceDigest": "d2f899a20fd8cb8c7663219232a2d89299e91220620d4baf87ef391ef0ce2f19",
+  "releaseSurfaceCount": 371,
+  "releaseSurfaceDigest": "112a29a5ab6d1418919425ecc1f3a8d68601fabc1d84897e97a474aa81af5d9a",
   "requiredEquivalent": [
     "GraphForge.adopt_ontology",
     "GraphForge.clear_ontology",
@@ -444,6 +444,7 @@
     "notExposed": {
       "GraphForge.fork_ontology_id": "Explicit ontology identity forks are owned by the Rust facade and CLI.",
       "GraphForge.adopt_resolved_ontology_module": "Authenticated discovery closure adoption is owned by the native CLI boundary.",
+      "GraphForge.adopt_resolved_ontology_module_for_publication": "Authenticated selected-Branch adoption publication is owned by the Rust facade and installed CLI.",
       "GraphForge.id_taken_receipt": "Private native receipt admission is owned by CLI publication and regeneration.",
       "GraphForge.record_item_id_regeneration": "Private native receipt admission is owned by CLI publication and regeneration.",
       "GraphForge.regenerate_item_id": "Native receipt-authorized identity regeneration is owned by the Rust facade and CLI.",

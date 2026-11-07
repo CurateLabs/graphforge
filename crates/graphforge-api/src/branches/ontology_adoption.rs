@@ -17,7 +17,6 @@ impl GraphForge {
     /// authority. Their independent graph rows and unrelated metadata are preserved.
     /// Without Branches this keeps workspace-only adoption semantics. Exact completed
     /// repeats do not advance CURRENT; a workspace-only adoption is completed on retry.
-    #[allow(clippy::too_many_lines)] // two private preparations share one guarded publication
     pub fn adopt_resolved_ontology_module_for_publication(
         &mut self,
         resolved: &ResolvedOntologyModule,
@@ -45,6 +44,20 @@ impl GraphForge {
         let branch = registry.current_branch.or_else(|| {
             (registry.branches.len() == 1).then(|| *registry.branches.keys().next().expect("one Branch"))
         }).ok_or_else(|| GfError::Validation("GF_RESEARCH_BRANCH_UNSELECTED: select a Branch with `gf switch <ref>` before adoption".into()))?;
+        self.adopt_verified_ontology_with_branch(resolved, &context, &token, &source, branch)
+    }
+
+    // Continue from the captured workspace authority. Keeping capture separate
+    // from publication makes an intervening writer's receipt explicit.
+    #[allow(clippy::too_many_lines)] // two private preparations share one guarded publication
+    fn adopt_verified_ontology_with_branch(
+        &mut self,
+        resolved: &ResolvedOntologyModule,
+        context: &WriteContext,
+        token: &CancellationToken,
+        source: &graphforge_storage::ResolvedProjectGeneration,
+        branch: Uuid,
+    ) -> Result<OntologyAdoptionReceipt, GfError> {
         // Bind the authenticated source, not random private preparation identities.
         let command = publication::begin(
             self,
@@ -58,7 +71,7 @@ impl GraphForge {
                 resolved.repository().canonical_name(),
                 resolved.package_digest(),
             ),
-            &token,
+            token,
         )?;
         // Native recovery distinguishes an abandoned physical preparation from a
         // live writer before the same logical operation prepares fresh bytes.
@@ -68,10 +81,19 @@ impl GraphForge {
         )?;
         token.checkpoint()?;
         let replay = command.replay(self)?.is_some();
+        // A matching concurrent receipt can refresh this facade to a newer
+        // complete authority. Never prepare against the earlier captured source.
+        if self.generation_for_read()?.generation_uuid() != source.generation_uuid() {
+            return Err(GfError::Project {
+                code: crate::ProjectErrorCode::WriteConflict,
+                message: "Project changed during ontology adoption; retry from current authority"
+                    .into(),
+            });
+        }
         let (mut head, mut version) = edit::prepare(self, &command, branch)?;
         let spec = RegisterResearchVersion {
             version_uuid: Uuid::now_v7(),
-            context_uuid: crate::research_claims::authority::project_uuid(&source)?,
+            context_uuid: crate::research_claims::authority::project_uuid(source)?,
             source_generation_uuid: source.generation_uuid(),
             selection: None,
             source_version: None,
@@ -79,7 +101,7 @@ impl GraphForge {
             label: None,
             description: None,
             created_at: (self.clock.lock().expect("clock lock poisoned"))()?,
-            evidence: crate::research_versions::complete_evidence(&source)?,
+            evidence: crate::research_versions::complete_evidence(source)?,
             author: None,
             committer: None,
         };
@@ -104,7 +126,7 @@ impl GraphForge {
                 operation_uuid: crate::OperationId(Uuid::now_v7()),
                 actor_uuid: context.actor_uuid,
             },
-            Some(&token),
+            Some(token),
         )?;
         let candidate = workspace
             .workspace_ontology_composition()?
@@ -176,11 +198,11 @@ impl GraphForge {
                 ),
             },
         };
-        let preview = head.preview_ontology_composition_change(&change, Some(&token))?;
+        let preview = head.preview_ontology_composition_change(&change, Some(token))?;
         head.publish_ontology_composition_with_metadata(
             &change,
             &preview,
-            Some(&token),
+            Some(token),
             Some(&metadata),
         )?;
         version.version_uuid = Uuid::now_v7();
@@ -195,7 +217,7 @@ impl GraphForge {
             &head,
             &mut prepared_head,
             context.operation_uuid.0,
-            &token,
+            token,
         )?;
         let prepared_workspace = draft.finish(
             crate::research_versions::complete_evidence(&workspace.generation_for_read()?)?,
@@ -206,7 +228,7 @@ impl GraphForge {
             version: Box::new(prepared_head.version.clone()),
             workspace: Box::new(prepared_workspace.version.clone()),
         };
-        let published = command.publish(self, mutation, &token)?;
+        let published = command.publish(self, mutation, token)?;
         receipt.project_generation_uuid = published.generation_uuid;
         receipt.already_adopted = false;
         Ok(receipt)
@@ -261,3 +283,6 @@ fn retains_authority(
         )
     }))
 }
+
+#[cfg(test)]
+mod tests;

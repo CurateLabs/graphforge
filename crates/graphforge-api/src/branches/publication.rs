@@ -128,24 +128,12 @@ impl Command {
             return Ok(None);
         };
         let outcome = Ok(receipt.clone());
-        let metadata_only =
-            !self
-                .registry
-                .proposals
-                .reviews
-                .get(&receipt.operation_uuid)
-                .and_then(|review| self.registry.proposals.proposals.get(&review.proposal_uuid))
-                .is_some_and(|proposal| {
-                    matches!(proposal.destination,
-                graphforge_storage::research_versions::ResearchProposalDestination::Project { .. })
-                });
-        if let Err(error) = owner.refresh_research_authority(
-            &self.root,
-            &outcome,
-            None,
-            self.expected,
-            metadata_only,
-        ) {
+        // A receipt identifies the published generation, not which workspace
+        // capabilities changed. Rebind stale facades completely on replay;
+        // already-current facades still take refresh's no-op path.
+        if let Err(error) =
+            owner.refresh_research_authority(&self.root, &outcome, None, self.expected, false)
+        {
             owner.graph_visibility.health.fail(&error);
             return Err(error);
         }
