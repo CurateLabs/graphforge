@@ -1,7 +1,7 @@
 {
   "contract_version": 1,
   "scope": "Rust non-Cypher public release surface",
-  "public_method_digest": "7430d343e3fb1d534f85718d15ba2e77a081abb6ebcf23e79951be5fb047e35d",
+  "public_method_digest": "e3a533057bb64462505f3755e562c0b513bfda8c753eb6c9ba227e7b5bb1b97d",
   "method_policy": {
     "receiver_defaults": {
       "PortableImportResult": "release-tested",
@@ -1608,6 +1608,17 @@
         {
           "path": "crates/graphforge-api/tests/core_version_warning.rs",
           "symbol": "opening_a_generation_written_by_another_core_warns_naming_both_versions"
+        }
+      ]
+    },
+    "filesystem-durability": {
+      "ids": [
+        "GraphForge.committed_unverified_durability"
+      ],
+      "test_refs": [
+        {
+          "path": "crates/graphforge-api/tests/filesystem_durability_warning.rs",
+          "symbol": "unverified_open_write_close_reopen_and_authenticated_receipts"
         }
       ]
     }

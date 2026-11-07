@@ -45,7 +45,7 @@ fn traversal_is_typed_in_text_and_json_without_project_mutation() {
     let parent_before = names(&parent);
 
     let text = gf(&traversal, &["checkpoint", "list"]);
-    assert_eq!(text.status.code(), Some(1));
+    assert_eq!(text.status.code(), Some(3));
     assert!(
         String::from_utf8_lossy(&text.stderr).starts_with("GF_UNSUPPORTED_FILESYSTEM:"),
         "unexpected text error: {}",
@@ -53,7 +53,7 @@ fn traversal_is_typed_in_text_and_json_without_project_mutation() {
     );
 
     let json = gf(&traversal, &["--json", "checkpoint", "list"]);
-    assert_eq!(json.status.code(), Some(1));
+    assert_eq!(json.status.code(), Some(3));
     let error: Value = serde_json::from_slice(&json.stderr).expect("JSON error payload");
     assert_eq!(error["error"]["code"], "GF_UNSUPPORTED_FILESYSTEM");
     assert_eq!(error["error"]["details"]["kind"], "project");
