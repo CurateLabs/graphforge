@@ -1,8 +1,8 @@
 {
   "contractVersion": 1,
   "rustManifest": "../../../tests/contracts/non-cypher-rust-surface.json",
-  "releaseSurfaceCount": 371,
-  "releaseSurfaceDigest": "112a29a5ab6d1418919425ecc1f3a8d68601fabc1d84897e97a474aa81af5d9a",
+  "releaseSurfaceCount": 372,
+  "releaseSurfaceDigest": "16372f2695ac3e2885cb7d4816907382f78d76d0276ba6f4f754e6d54b8df468",
   "requiredEquivalent": [
     "GraphForge.adopt_ontology",
     "GraphForge.clear_ontology",
@@ -49,7 +49,8 @@
     "research-interchange": "researchInterchange",
     "external-decision-results": "decisionResults",
     "saved-queries": "savedQueries",
-    "core-version-warning": "coreVersionWarning"
+    "core-version-warning": "coreVersionWarning",
+    "filesystem-durability": "filesystemDurability"
   },
   "classification": {
     "equivalent": [
@@ -442,6 +443,7 @@
       "GraphForge.researchBranchReferences": "Explicit Branch UUID adapter for the native immutable Branch view."
     },
     "notExposed": {
+      "GraphForge.committed_unverified_durability": "Committed durability is exposed through portable receipts; the getter is Rust/CLI-only.",
       "GraphForge.fork_ontology_id": "Explicit ontology identity forks are owned by the Rust facade and CLI.",
       "GraphForge.adopt_resolved_ontology_module": "Authenticated discovery closure adoption is owned by the native CLI boundary.",
       "GraphForge.adopt_resolved_ontology_module_for_publication": "Authenticated selected-Branch adoption publication is owned by the Rust facade and installed CLI.",
@@ -708,6 +710,11 @@
       "saved-queries.test.mjs": [
         "saved query CRUD, parameter validation and historical aggregates survive reopen",
         "JSON numbers follow the pinned saved parameter declaration"
+      ]
+    },
+    "filesystemDurability": {
+      "filesystem-durability-warning.test.mjs": [
+        "tmpfs emits one structured warning per actual open and none per write"
       ]
     },
     "coreVersionWarning": {
