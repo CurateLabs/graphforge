@@ -1642,7 +1642,10 @@ fn repository_cli_parity_cases_match_the_rust_cli() {
             .iter()
             .any(|arg| arg == "publish")
     }));
-    for case in cases {
+    for case in cases
+        .iter()
+        .chain(fixtures["capturedCases"].as_array().unwrap())
+    {
         let args: Vec<String> = case["args"]
             .as_array()
             .unwrap()
@@ -1741,7 +1744,7 @@ fn captured_publish_credentials_never_consult_the_vault_or_network() {
     .unwrap();
     assert_eq!(
         error.to_string(),
-        "validation error: hub.publish.auth_denied: no publish credential: set GRAPHFORGE_HUB_PUBLISH_TOKEN or run gf publish in a terminal"
+        "validation error: hub.publish.auth_denied: no publish credential: run gf auth login in a CLI launcher; programmatic CI callers must supply a publish token"
     );
     let credential = select_credential(
         Some(PublishToken::new("explicit-token".into())),

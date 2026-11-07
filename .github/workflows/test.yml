@@ -401,7 +401,7 @@ jobs:
       - name: Mount sticky target/ disk
         uses: useblacksmith/stickydisk@3f6be1451e3cad893b778bc93495c80452a5da26 # v1.7.2
         with:
-          key: ${{ github.repository }}-bindings-rust-1.96.0-target-v1
+          key: ${{ github.repository }}-bindings-rust-1.96.0-target-v2
           path: target
 
       - name: Install uv

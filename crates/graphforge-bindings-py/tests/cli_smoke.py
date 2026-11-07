@@ -10,6 +10,8 @@ import subprocess
 import sysconfig
 import tempfile
 
+from graphforge._graphforge_rs import _cli_execute
+
 
 def console_script() -> Path:
     scripts = Path(sysconfig.get_path("scripts"))
@@ -31,6 +33,13 @@ def main() -> None:
         assert completed.returncode == case["exitCode"], case["name"]
         assert completed.stdout == case["stdout"], case["name"]
         assert completed.stderr == case["stderr"], case["name"]
+
+    # Programmatic capture intentionally never consults saved human credentials.
+    for case in fixtures["capturedCases"]:
+        status, stdout, stderr = _cli_execute(["gf", *case["args"]])
+        assert status == case["exitCode"], case["name"]
+        assert stdout.decode() == case["stdout"], case["name"]
+        assert stderr.decode() == case["stderr"], case["name"]
 
     invalid = subprocess.run(
         [script, "--json", "--project-dir", "/definitely/missing", "config", "validate"],

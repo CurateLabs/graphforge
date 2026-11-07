@@ -14,7 +14,7 @@ use graphforge_discovery::{
     ObjectDescriptor, OntologyInventory, OntologyModuleDescriptor, PORTABLE_FORMAT,
     PORTABLE_MEDIA_TYPE, PROJECT_SUMMARY_FORMAT, PROJECT_SUMMARY_MEDIA_TYPE,
     PortablePackageReference, ProjectSummary, ProjectSummaryReference, ProtocolRequirement,
-    ProtocolVersion, RepositoryIdentity, Sha256Digest,
+    ProtocolVersion, RepositoryIdentity, Sha256Digest, SummaryModuleDefinitionCounts,
 };
 use graphforge_ontology::OntologyDoc;
 use graphforge_storage::{ResearchCorpusSize, ResearchDiscoveryFacets};
@@ -249,6 +249,101 @@ fn two_modules_retain_their_own_license_independently_of_the_project() {
 }
 
 #[test]
+fn definition_counts_are_per_module_lengths_of_each_verified_document() {
+    let first = module_document();
+    let second: OntologyDoc = serde_json::from_value(json!({
+        "ontology_id":"https://example.org/ontology/other-module", "version":"1",
+        "entity_types":[
+            {"name":"Thing","abstract":true},
+            {"name":"Person","parent":"Thing"},
+            {"name":"Paper","parent":"Thing"}
+        ],
+        "properties":[
+            {"owner":"Person","name":"name","type":"utf8"},
+            {"owner":"Paper","name":"name","type":"utf8"}
+        ],
+        "relation_types":[{"name":"AUTHORED","src":"Person","dst":"Paper"}],
+        "constraints":[], "migrations":[]
+    }))
+    .unwrap();
+    let exported = exported_project_with_documents(vec![first.clone(), second.clone()]);
+    for path in [&exported.bundle, &exported.expanded] {
+        let summary = summarize(path).unwrap();
+        let composition = summary.facts.ontology_composition.as_ref().unwrap();
+        assert_eq!(composition.modules.len(), 2);
+        for (document, expected) in [
+            (
+                &first,
+                SummaryModuleDefinitionCounts {
+                    entity_types: 1,
+                    properties: 0,
+                    relation_types: 0,
+                },
+            ),
+            (
+                &second,
+                SummaryModuleDefinitionCounts {
+                    entity_types: 3,
+                    properties: 2,
+                    relation_types: 1,
+                },
+            ),
+        ] {
+            let module = composition
+                .modules
+                .iter()
+                .find(|module| module.id == document.ontology_id)
+                .unwrap();
+            assert_eq!(module.definition_counts, Some(expected));
+            assert_eq!(
+                module.content_digest.0,
+                format!(
+                    "sha256:{}",
+                    graphforge_ontology::module_document_digest(document).unwrap()
+                )
+            );
+            assert!(!module.has_metadata());
+        }
+        assert!(
+            serde_json::to_value(composition)
+                .unwrap()
+                .get("definition_counts")
+                .is_none()
+        );
+    }
+    assert_eq!(
+        summarize(&exported.bundle)
+            .unwrap()
+            .to_canonical_json()
+            .unwrap(),
+        summarize(&exported.expanded)
+            .unwrap()
+            .to_canonical_json()
+            .unwrap()
+    );
+}
+
+#[test]
+fn empty_verified_module_reports_all_three_zero_counts() {
+    let mut document = module_document();
+    document.entity_types.clear();
+    let exported = exported_project_with_document(document);
+    for path in [&exported.bundle, &exported.expanded] {
+        let summary = summarize(path).unwrap();
+        let module = &summary.facts.ontology_composition.as_ref().unwrap().modules[0];
+        assert_eq!(
+            module.definition_counts,
+            Some(SummaryModuleDefinitionCounts {
+                entity_types: 0,
+                properties: 0,
+                relation_types: 0
+            })
+        );
+        assert!(!module.has_metadata());
+    }
+}
+
+#[test]
 fn absent_module_text_keeps_the_original_summary_requirement_and_omits_fields() {
     let exported = exported_project();
     let summary = summarize(&exported.bundle).unwrap();
@@ -260,7 +355,20 @@ fn absent_module_text_keeps_the_original_summary_requirement_and_omits_fields() 
         }]
     );
     let module = &summary.facts.ontology_composition.as_ref().unwrap().modules[0];
+    assert_eq!(
+        module.definition_counts,
+        Some(SummaryModuleDefinitionCounts {
+            entity_types: 1,
+            properties: 0,
+            relation_types: 0
+        })
+    );
+    assert!(!module.has_metadata());
     let value = serde_json::to_value(module).unwrap();
+    assert_eq!(
+        value["definition_counts"],
+        json!({"entity_types":1,"properties":0,"relation_types":0})
+    );
     assert!(value.get("label").is_none());
     assert!(value.get("description").is_none());
     assert!(value.get("license").is_none());
@@ -270,12 +378,28 @@ fn absent_module_text_keeps_the_original_summary_requirement_and_omits_fields() 
 
 #[test]
 fn resealed_transport_bytes_cannot_change_metadata_without_changing_module_identity() {
-    for field in ["label", "license", "forked_from"] {
-        resealed_module_metadata_is_rejected(field);
+    for (field, value) in [
+        ("label", json!("forged")),
+        ("license", json!("MIT")),
+        (
+            "forked_from",
+            json!({"id":"https://graphforge.sh/ont_aaaaaaaaaaaaaaaa", "version":"source-1", "digest":format!("sha256:{}", "a".repeat(64))}),
+        ),
+        ("entity_types", json!([{"name":"Person"},{"name":"Paper"}])),
+        (
+            "properties",
+            json!([{"owner":"Person","name":"name","type":"utf8"}]),
+        ),
+        (
+            "relation_types",
+            json!([{"name":"KNOWS","src":"Person","dst":"Person"}]),
+        ),
+    ] {
+        resealed_module_document_is_rejected(field, value);
     }
 }
 
-fn resealed_module_metadata_is_rejected(field: &str) {
+fn resealed_module_document_is_rejected(field: &str, value: Value) {
     let exported = exported_project();
     let verified = report(&exported.expanded);
     let entry = verified
@@ -284,12 +408,7 @@ fn resealed_module_metadata_is_rejected(field: &str) {
         .find(|entry| entry.kind == "ontology")
         .unwrap();
     let mut forged = serde_json::to_value(module_document()).unwrap();
-    forged[field] = if field == "forked_from" {
-        json!({"id":"https://graphforge.sh/ont_aaaaaaaaaaaaaaaa", "version":"source-1",
-            "digest":format!("sha256:{}", "a".repeat(64))})
-    } else {
-        Value::String("MIT".into())
-    };
+    forged[field] = value;
     replace_package_file(
         &exported.expanded,
         &entry.path,
@@ -439,6 +558,14 @@ fn summary_bytes_are_identical_for_bundle_and_expanded_and_facts_are_verified() 
         assert!(summary.content_digest.0.starts_with("sha256:"));
         assert_eq!(summary.dialect, verified.dialect);
         assert_eq!(summary.profile, verified.profile);
+        assert_eq!(
+            summary.definition_counts,
+            Some(SummaryModuleDefinitionCounts {
+                entity_types: 1,
+                properties: 0,
+                relation_types: 0
+            })
+        );
     }
     let bridges: Vec<_> = composition
         .bridge_sets
@@ -611,6 +738,22 @@ fn summary_binds_to_a_manifest_built_with_discovery_types() {
     let mut forged = parsed.clone();
     forged.facts.ontology_composition.as_mut().unwrap().modules[0].version_order = Some(7);
     forged.validate(DiscoveryLimits::default()).unwrap();
+    assert_eq!(
+        manifest.bind_summary(&forged).unwrap_err().code,
+        DiscoveryErrorCode::IntegrityFailure
+    );
+
+    let mut forged = parsed.clone();
+    forged.facts.ontology_composition.as_mut().unwrap().modules[0]
+        .definition_counts
+        .as_mut()
+        .unwrap()
+        .properties += 1;
+    forged.validate(DiscoveryLimits::default()).unwrap();
+    assert_ne!(
+        forged.canonical_digest().unwrap(),
+        parsed.canonical_digest().unwrap()
+    );
     assert_eq!(
         manifest.bind_summary(&forged).unwrap_err().code,
         DiscoveryErrorCode::IntegrityFailure

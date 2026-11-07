@@ -151,6 +151,14 @@ fn discover(hub: &LoopbackHub, id: &OntologyModuleId, order: Option<u32>) -> Sna
         format!("sha256:{}", id.canonical_digest)
     );
     assert_eq!(modules[0].version_order, order);
+    assert_eq!(
+        modules[0].definition_counts,
+        Some(graphforge_discovery::SummaryModuleDefinitionCounts {
+            entity_types: 2,
+            properties: 0,
+            relation_types: 1,
+        })
+    );
     assert!(
         summary
             .requirements
@@ -240,9 +248,22 @@ fn verify_downloads(hub: &LoopbackHub, root: &Path, id: &OntologyModuleId, docum
     .unwrap();
     assert_eq!(resolved.module(), id);
     assert_eq!(resolved.version_order(), document.version_order);
+    let downloaded: OntologyDoc = serde_json::from_slice(resolved.document()).unwrap();
+    assert_eq!(downloaded, *document);
+    let counts = summary.facts.ontology_composition.as_ref().unwrap().modules[0]
+        .definition_counts
+        .unwrap();
     assert_eq!(
-        serde_json::from_slice::<OntologyDoc>(resolved.document()).unwrap(),
-        *document
+        usize::try_from(counts.entity_types).unwrap(),
+        downloaded.entity_types.len()
+    );
+    assert_eq!(
+        usize::try_from(counts.properties).unwrap(),
+        downloaded.properties.len()
+    );
+    assert_eq!(
+        usize::try_from(counts.relation_types).unwrap(),
+        downloaded.relation_types.len()
     );
     assert!(!resolved.report().bytes_by_kind.contains_key("graph-data"));
 }
