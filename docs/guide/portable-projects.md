@@ -570,12 +570,14 @@ name a file called `-`, write `./-`.
 For an HTTPS object URL (including a Hub or R2 presigned URL), use:
 
 ```text
-gf portable verify --url "$OBJECT_URL" --json
+graphforge portable verify --url "$OBJECT_URL" --json
 ```
 
-The URL must use HTTPS and resolve to public addresses. The report identifies
-the source as `stream`. If the connection drops, verification resumes with a
-ranged request bound to the original ETag; an object change is rejected.
+The URL must use HTTPS and resolve to public addresses. Its initial response
+must include `Content-Length`; resuming requires a strong ETag and matching
+range metadata. The report identifies the source as `stream`. If the connection
+drops, verification resumes with a ranged request bound to the original ETag;
+an object change is rejected.
 
 The manual container build is `docker build -f containers/portable-verify/Dockerfile -t graphforge-portable-verify .`.
 Run it with `docker run --rm -e GF_VERIFY_URL="$OBJECT_URL" --memory=1g --storage-opt size=2g graphforge-portable-verify`.

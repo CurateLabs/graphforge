@@ -200,15 +200,21 @@ launchers require a build containing the [launcher repair](installation.md#nativ
 
 Run these local commands from an existing durable Project. The sample queries
 assume it contains `Item` nodes; use the labels and properties in your graph.
+`--project "$PWD"` selects that Project by its absolute path: changing
+directories alone does not select it, because commands without `--project`
+discover repository-managed state. From another directory, pass the Project's
+absolute path instead of `"$PWD"`.
+These examples use the `main` Branch. If continuing the earlier Hub research
+example, `main` is already selected: skip the `branch main` command.
 
 ```sh
 "$GF_EVALUATION_CLI" config user --name "Ada Lovelace" --email ada@example.org  # credited on every Version
-"$GF_EVALUATION_CLI" branch main                         # the first Branch of the Project
-"$GF_EVALUATION_CLI" commit -m "Raise scores" --query "MATCH (n:Item) SET n.score = 2"
-"$GF_EVALUATION_CLI" commit -m "Fix a typo" --query "MATCH (n:Item) SET n.name = 'Ada'"
-"$GF_EVALUATION_CLI" tag v1                              # a name for the head Version
-"$GF_EVALUATION_CLI" status                              # Branch, head, upstream, commits not yet published
-"$GF_EVALUATION_CLI" log                                 # history; add --all, -n 5, a tag, or --remote
+"$GF_EVALUATION_CLI" --project "$PWD" branch main                         # the first Branch of the Project
+"$GF_EVALUATION_CLI" --project "$PWD" commit -m "Raise scores" --query "MATCH (n:Item) SET n.score = 2"
+"$GF_EVALUATION_CLI" --project "$PWD" commit -m "Fix a typo" --query "MATCH (n:Item) SET n.name = 'Ada'"
+"$GF_EVALUATION_CLI" --project "$PWD" tag v1                              # a name for the head Version
+"$GF_EVALUATION_CLI" --project "$PWD" status                              # Branch, head, upstream, commits not yet published
+"$GF_EVALUATION_CLI" --project "$PWD" log                                 # history; add --all, -n 5, a tag, or --remote
 ```
 
 ### Choose a publishing target
@@ -231,24 +237,25 @@ Sign in once, then push with the saved session:
 
 ```sh
 "$GF_EVALUATION_CLI" auth login --hub https://hub.example
-"$GF_EVALUATION_CLI" push https://hub.example/owner/repository --ref main
+"$GF_EVALUATION_CLI" --project "$PWD" push https://hub.example/owner/repository --ref main
 ```
 
-A collaborator clones the published ref, then works inside the clone:
+In a separate collaborator shell, select the same CLI and start outside the
+original Project. Clone the published ref, then work inside the clone:
 
 ```sh
 "$GF_EVALUATION_CLI" clone https://hub.example/owner/repository collaborator --ref main
 cd collaborator
 "$GF_EVALUATION_CLI" config user --name "Grace Hopper" --email grace@example.org
-"$GF_EVALUATION_CLI" commit -m "Revise scores" --query "MATCH (n:Item) SET n.score = 3"
-"$GF_EVALUATION_CLI" push                                # reuse the tracked repository and ref
+"$GF_EVALUATION_CLI" --project "$PWD" commit -m "Revise scores" --query "MATCH (n:Item) SET n.score = 3"
+"$GF_EVALUATION_CLI" --project "$PWD" push                                # reuse the tracked repository and ref
 ```
 
 Back in the original Project, incorporate the collaborator's published change:
 
 ```sh
-"$GF_EVALUATION_CLI" pull
-"$GF_EVALUATION_CLI" log
+"$GF_EVALUATION_CLI" --project "$PWD" pull
+"$GF_EVALUATION_CLI" --project "$PWD" log
 ```
 
 Use `--tag v1` instead of `--ref main` to clone the tagged Version. Tags travel
