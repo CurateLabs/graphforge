@@ -194,6 +194,9 @@ pub struct PortableReport {
     /// Exact GraphForge Core version that produced the package, as declared by
     /// its authenticated manifest.
     pub producing_core_version: String,
+    /// Source generation writer qualification, authenticated by the package manifest.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_unverified_durability: Option<crate::filesystem_durability::UnverifiedDurability>,
     pub component_count: u64,
     pub entry_count: u64,
     pub payload_bytes: u64,
@@ -498,6 +501,8 @@ pub enum PortableErrorCode {
     /// The target's filesystem cannot provide the durable publication
     /// contract (`GF_UNSUPPORTED_FILESYSTEM`).
     UnsupportedFilesystem,
+    /// Invalid filesystem durability policy (`GF_VALIDATION`).
+    InvalidConfiguration,
     /// The volume beside the target cannot hold the import's peak.
     InsufficientSpace,
 }
@@ -621,6 +626,9 @@ use std::path::PathBuf;
 /// Digest-pinned OCI reference returned after a successful publish.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct PortableOciReference {
+    /// Authenticated source generation writer qualification.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_unverified_durability: Option<crate::filesystem_durability::UnverifiedDurability>,
     /// Registry host (no credentials).
     pub registry: String,
     /// Repository path inside the registry.

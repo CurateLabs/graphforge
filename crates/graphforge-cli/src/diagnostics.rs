@@ -1,4 +1,4 @@
-//! Core version warnings raised while a command runs (#1936).
+//! Structured warnings raised while a command runs.
 //!
 //! Text mode prints `warning <code>: <message>` on standard error as soon as a
 //! command raises it. `--json` keeps the one-document contract: nothing extra
@@ -10,10 +10,10 @@ use std::cell::RefCell;
 use std::io::{self, Write};
 use std::rc::Rc;
 
-use graphforge_api::CoreVersionWarning;
+use graphforge_api::Warning;
 use serde_json::Value;
 
-type Collected = Rc<RefCell<Vec<CoreVersionWarning>>>;
+type Collected = Rc<RefCell<Vec<Warning>>>;
 
 /// Warnings a command has raised so far, shared by every project-opening path.
 pub(crate) struct Diagnostics<'a> {
@@ -39,18 +39,25 @@ impl<'a> Diagnostics<'a> {
         }
     }
 
-    pub(crate) fn warn(&mut self, warnings: &[CoreVersionWarning]) {
-        self.collected.borrow_mut().extend_from_slice(warnings);
-        if !self.json {
-            for warning in warnings {
-                // Best effort: a closed standard error never fails the command.
-                let _ = writeln!(self.sink, "warning {}: {}", warning.code, warning.message);
+    pub(crate) fn warn(&mut self, warnings: &[Warning]) {
+        for warning in warnings {
+            if self.collected.borrow().contains(warning) {
+                continue;
+            }
+            self.collected.borrow_mut().push(warning.clone());
+            if !self.json {
+                let _ = writeln!(
+                    self.sink,
+                    "warning {}: {}",
+                    warning.code(),
+                    warning.message()
+                );
             }
         }
     }
 
     /// Everything raised so far, for the error document of a failed command.
-    pub(crate) fn collected(&self) -> Vec<CoreVersionWarning> {
+    pub(crate) fn collected(&self) -> Vec<Warning> {
         self.collected.borrow().clone()
     }
 
@@ -107,7 +114,8 @@ impl<'a> WarningOutput<'a> {
                     let _ = writeln!(
                         diagnostics.sink,
                         "warning {}: {}",
-                        warning.code, warning.message
+                        warning.code(),
+                        warning.message()
                     );
                 }
             }
@@ -136,9 +144,9 @@ impl Write for WarningOutput<'_> {
 }
 
 /// Add `warnings` to the command's document. One object (or a stream of lines
-/// whose first is an object) gets the key unless it already has one, as import
-/// and clone results do; another single JSON value is wrapped as `result`.
-fn stamp_warnings(held: &[u8], warnings: &[CoreVersionWarning]) -> Option<Vec<u8>> {
+/// whose first is an object) merges warnings without duplicates, preserving
+/// command-specific entries. Another JSON value is wrapped as `result`.
+fn stamp_warnings(held: &[u8], warnings: &[Warning]) -> Option<Vec<u8>> {
     let list = serde_json::to_value(warnings).ok()?;
     if let Ok(document) = serde_json::from_slice::<Value>(held) {
         return encode(&stamped(document, &list));
@@ -157,7 +165,16 @@ fn stamp_warnings(held: &[u8], warnings: &[CoreVersionWarning]) -> Option<Vec<u8
 fn stamped(document: Value, list: &Value) -> Value {
     match document {
         Value::Object(mut object) => {
-            object.entry("warnings").or_insert_with(|| list.clone());
+            let existing = object
+                .entry("warnings")
+                .or_insert_with(|| Value::Array(Vec::new()));
+            if let (Some(existing), Some(incoming)) = (existing.as_array_mut(), list.as_array()) {
+                for warning in incoming {
+                    if !existing.contains(warning) {
+                        existing.push(warning.clone());
+                    }
+                }
+            }
             Value::Object(object)
         }
         other => serde_json::json!({ "result": other, "warnings": list }),
@@ -174,8 +191,10 @@ fn encode(document: &Value) -> Option<Vec<u8>> {
 mod tests {
     use super::*;
 
-    fn warning() -> CoreVersionWarning {
-        graphforge_api::check_core_version(Some("0.0.1")).unwrap()
+    fn warning() -> Warning {
+        graphforge_api::check_core_version(Some("0.0.1"))
+            .unwrap()
+            .into()
     }
 
     fn stamped_text(held: &str) -> Option<String> {
@@ -189,7 +208,10 @@ mod tests {
         assert_eq!(value["a"], 1);
         assert_eq!(value["warnings"][0]["code"], "GF_CORE_VERSION_MISMATCH");
         let kept = stamped_text("{\"warnings\":[]}\n").unwrap();
-        assert_eq!(kept.trim_end(), "{\"warnings\":[]}");
+        assert_eq!(
+            serde_json::from_str::<Value>(&kept).unwrap()["warnings"][0]["code"],
+            "GF_CORE_VERSION_MISMATCH"
+        );
     }
 
     #[test]

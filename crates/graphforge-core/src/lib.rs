@@ -22,6 +22,7 @@ pub mod algorithms;
 pub mod canonical;
 pub mod core_version;
 pub mod embedding_options;
+pub mod filesystem_durability;
 pub mod identifier;
 pub mod manifest;
 pub mod uuid;

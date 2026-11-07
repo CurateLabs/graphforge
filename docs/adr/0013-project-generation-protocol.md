@@ -76,7 +76,9 @@ contents must remain on that one admitted filesystem. Network, userspace,
 removable, or unknown project filesystems are rejected unless explicitly added
 to the tested allowlist. Missing semantics return
 `GF_UNSUPPORTED_FILESYSTEM` before the project root or `CURRENT` is changed.
-There is no best-effort mode.
+As amended by [ADR 0064](0064-unverified-filesystem-admission.md), unproven
+classification warns by default after primitive checks pass; strict mode
+retains refusal. Broken primitives and integrity failures always refuse.
 
 ### On-disk layout
 

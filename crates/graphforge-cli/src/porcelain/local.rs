@@ -121,11 +121,21 @@ fn status(
         "tags": tags,
         "warnings": warnings,
     });
+    let stamp = graph.committed_unverified_durability()?;
+    if let Some(stamp) = &stamp {
+        value["unverified_durability"] = json!(stamp);
+    }
     let mut lines = vec![format!(
         "On branch {} (head {})",
         record.label,
         short(&head)
     )];
+    if let Some(stamp) = stamp {
+        lines.push(format!(
+            "Durability: unverified ({}; {})",
+            stamp.filesystem_type, stamp.cause
+        ));
+    }
     if let Some(remote) = upstream {
         value["upstream"] = json!({
             "repository_url": remote.repository_url,

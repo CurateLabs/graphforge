@@ -35,35 +35,48 @@ transport and public-address policy without this feature.
 
 ## Filesystem admission
 
-Durable, disk-backed projects require an `ext4`, `xfs`, or `btrfs` volume at
-the process root. On hosts that do not satisfy this, `GraphForge(path)`,
-`gf --project <dir> ...`, and any durable write fail with
-`GF_UNSUPPORTED_FILESYSTEM`. This is an environment limitation, not a code bug.
-Observed causes:
+Disk-backed projects probe the project parent, independently of the process
+root's filesystem. Qualified classes are Linux ext4/xfs/btrfs, macOS local APFS
+and Windows fixed writable local NTFS. Unproven classes warn by default with
+`GF_UNVERIFIED_FILESYSTEM`; `GRAPHFORGE_FILESYSTEM_DURABILITY=strict` preserves
+`GF_UNSUPPORTED_FILESYSTEM` refusal. Invalid policy values return `GF_VALIDATION`.
+Every mode retains primitive, link, namespace and takeover checks. In-memory
+projects do not warn. See [ADR 0064](../adr/0064-unverified-filesystem-admission.md).
 
-| Host layout                                       | Reported cause                                           |
-| ------------------------------------------------- | -------------------------------------------------------- |
-| Root on `overlay` (typical cloud agent VM)        | `filesystem_class_unproven`                              |
-| Loopback `ext4` mounted below an unsupported root | `ancestor_cross_volume`                                  |
-| `chroot` onto a loopback `ext4`                   | `device_identity_unknown` (device probe)                 |
-| Supported root but `TMPDIR` on `tmpfs`            | tests that create projects under `TMPDIR` fail admission |
+| Layout | Default outcome after successful primitive checks |
+| --- | --- |
+| Project parent on overlayfs | `filesystem_class_unproven` warning; Linux file/directory mount IDs may agree despite different devices |
+| Project parent on tmpfs | `filesystem_class_unproven` warning; contents are lost at reboot |
+| Qualified project volume below an overlay process root | Qualified when its own parent and namespace pass |
+| Device qualification unavailable | `device_identity_unknown` warning |
+| Broken locking/flush/replace or substituted namespace | Refusal, including in warning mode |
 
-Consequences:
+Run ordinary durable tests through the shared environment launcher. It selects
+`../.<checkout-name>-test-tmp` beside the checkout and checks its filesystem and
+write/link permissions; `GF_TEST_TMPDIR` overrides that location. Ambient
+`TMPDIR` does not. Keeping ordinary tests on a qualified volume also isolates
+tests of warning counts; explicit tmpfs fixtures test unverified admission.
 
-- **In-memory works everywhere.** `GraphForge()` with no path runs the real
-  engine (Cypher parse → IR → plan → rel → exec → Arrow) entirely in memory.
-- **Run durable tests through the shared environment launcher.** It selects
-  `../.<checkout-name>-test-tmp` beside the checkout, checks Linux filesystem class
-  and ancestor volume identity, and exercises write/link permissions before
-  launching the command. `GF_TEST_TMPDIR` explicitly overrides this location;
-  ambient `TMPDIR` does not. Rust still performs the authoritative admission.
-- **Durable-project tests fail on unsupported roots.** The Python unit suite
-  and the Node binding suite each contain tests that open a durable project.
-  On an overlay root those tests fail, and `node --test` over the full binding
-  suite can hang because a failed durable test in `provider-workflow.test.mjs`
-  leaves its in-process mock-server `Worker` open. Run that file in isolation
-  with `--test-timeout` when diagnosing. Counts change as suites grow; do not
-  treat a remembered pass/fail number as a contract.
+### Split-device overlay reproduction
+
+Docker's same-device overlay does not prove file/directory identity on Colab.
+In a throwaway `unshare -rm` namespace, mount separate tmpfs lower and upper
+volumes, create `upper` and `work` in the upper volume, then mount:
+
+```bash
+mount -t overlay overlay -o lowerdir="$lower",upperdir="$upper/upper",workdir="$upper/work",xino=off,userxattr "$merged"
+GF_FILESYSTEM_TEST_ROOT="$merged" GF_FILESYSTEM_TEST_CLASS=overlayfs \
+  cargo nextest run -p graphforge-api --test filesystem_durability_warning \
+  -E 'test(unverified_open_write_close_reopen_and_authenticated_receipts)'
+```
+
+Create a regular file under the merged directory and compare its `stat -c %d`
+with the directory's: they must differ for this proof. Run from the original
+checkout with fixtures on the explicit overlay, keeping compilation outside
+it. The test writes, closes, reopens and verifies package receipts. This requires
+unprivileged namespaces and overlayfs support; it is a local reproduction
+method, not a skipped CI lane. A real connected Colab run remains separate
+acceptance evidence.
 
 `make cargo-test`, `make test`, `make test-unit`, `make test-tck`,
 `make test-rust`, `make test-python`, `make test-node`, and `make check`

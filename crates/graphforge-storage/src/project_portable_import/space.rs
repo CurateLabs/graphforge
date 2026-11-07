@@ -137,6 +137,12 @@ impl StageCredit {
 }
 
 fn filesystem_refusal(error: &crate::GfError, target: &Path) -> PortableError {
+    if error.code() == "GF_VALIDATION" {
+        return PortableError::new(
+            PortableErrorCode::InvalidConfiguration,
+            "GRAPHFORGE_FILESYSTEM_DURABILITY must be warn or strict",
+        );
+    }
     if error.code() == "GF_UNSUPPORTED_FILESYSTEM" {
         return PortableError::new(
             PortableErrorCode::UnsupportedFilesystem,

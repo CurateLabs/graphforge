@@ -274,6 +274,7 @@ fn select_credential(
 /// Published result written to stdout.
 #[derive(Debug, PartialEq)]
 pub(crate) struct PublishOutcome {
+    pub source_unverified_durability: Option<graphforge_api::UnverifiedDurability>,
     /// Original Hub receipt.
     pub receipt: PublishReceipt,
     /// Whether this run replayed a committed operation without any upload.
@@ -734,6 +735,9 @@ pub(crate) fn write_outcome(
     if json {
         let mut result = serde_json::to_value(&outcome.receipt)
             .map_err(|error| GfError::Execution(error.to_string()))?;
+        if let Some(stamp) = &outcome.source_unverified_durability {
+            result["source_unverified_durability"] = json!(stamp);
+        }
         if let Some(moved) = &outcome.moved {
             result["moved_from"] = json!(moved.moved_from.canonical_name());
             result["moved_to"] = json!(moved.moved_to.canonical_name());
@@ -742,6 +746,14 @@ pub(crate) fn write_outcome(
             .map_err(|error| GfError::Execution(error.to_string()))?;
         writeln!(output).map_err(io)
     } else {
+        if let Some(stamp) = &outcome.source_unverified_durability {
+            writeln!(
+                output,
+                "Source durability: unverified ({}; {})",
+                stamp.filesystem_type, stamp.cause
+            )
+            .map_err(io)?;
+        }
         if let Some(moved) = &outcome.moved {
             writeln!(
                 output,
@@ -1248,6 +1260,7 @@ struct Selection {
     /// generation (`source_generation`), so the Project package changes exactly
     /// when the generation does, and exports of one generation are identical.
     project_content: String,
+    source_unverified_durability: Option<graphforge_api::UnverifiedDurability>,
     /// What the publication is made of, without the tracking state a publication
     /// writes about itself. The intent binds this, so a rerun of a completed
     /// publication is a replay even though recording it moved CURRENT.
@@ -1310,6 +1323,7 @@ fn select(graph: &GraphForge, args: &PublishArgs) -> Result<Selection, GfError> 
         identity: hex_digest(identity),
         project_uuid: reference.project_uuid,
         project_content: project_content(graph)?,
+        source_unverified_durability: graph.committed_unverified_durability()?,
         publication_content: hex_digest(&graph.publication_content_identity()?).0,
     })
 }
@@ -2615,6 +2629,7 @@ fn publish_inner(
                 )?;
             }
             return Ok(PublishOutcome {
+                source_unverified_durability: selection.source_unverified_durability.clone(),
                 receipt,
                 replayed: true,
                 moved,
@@ -2791,6 +2806,7 @@ fn publish_inner(
             let confirmed =
                 confirmed.map(|head| head.confirmed_by(&receipt, &snapshot.manifest, &lineage));
             return Ok(PublishOutcome {
+                source_unverified_durability: selection.source_unverified_durability.clone(),
                 receipt,
                 replayed: true,
                 moved,
@@ -2903,6 +2919,7 @@ fn publish_inner(
     }
     let confirmed = confirmed.map(|head| head.confirmed_by(&receipt, &snapshot.manifest, &lineage));
     Ok(PublishOutcome {
+        source_unverified_durability: selection.source_unverified_durability.clone(),
         receipt,
         replayed: false,
         moved,

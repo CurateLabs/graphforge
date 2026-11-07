@@ -15,6 +15,9 @@ pub(super) struct Manifest {
     /// verification refuses those as `Incompatible`, never as malformed.
     #[serde(default)]
     pub(super) producing_core_version: Option<String>,
+    #[serde(default)]
+    pub(super) source_unverified_durability:
+        Option<graphforge_core::filesystem_durability::UnverifiedDurability>,
     pub(super) source_generation: SourceGeneration,
     pub(super) selection: Selection,
     pub(super) components: Vec<ManifestComponent>,

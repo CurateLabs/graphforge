@@ -69,6 +69,33 @@ use providers::embedding_options_from_kwargs;
 use providers::embedding_validation;
 use providers::py_to_node_selector;
 use pyo3::create_exception;
+create_exception!(
+    graphforge,
+    FilesystemDurabilityWarning,
+    pyo3::exceptions::PyUserWarning,
+    "Filesystem primitives passed but durability is unverified."
+);
+
+fn emit_durability_warnings(py: Python<'_>, warnings: &[graphforge_api::Warning]) -> PyResult<()> {
+    for warning in warnings {
+        if let graphforge_api::Warning::FilesystemDurability(warning) = warning {
+            let instance = py
+                .get_type::<FilesystemDurabilityWarning>()
+                .call1((&warning.message,))?;
+            for (name, value) in [
+                ("code", &warning.code),
+                ("phase", &warning.phase),
+                ("outcome", &warning.outcome),
+                ("cause", &warning.cause),
+                ("filesystem_type", &warning.filesystem_type),
+            ] {
+                instance.setattr(name, value)?;
+            }
+            py.import("warnings")?.call_method1("warn", (instance,))?;
+        }
+    }
+    Ok(())
+}
 use pyo3::exceptions::PyException;
 use pyo3::exceptions::PyNotImplementedError;
 use pyo3::prelude::*;
@@ -358,6 +385,7 @@ impl GraphForge {
         let inner = py
             .detach(|| graphforge_api::GraphForge::new_with_options(path.as_deref(), options))
             .map_err(|e| to_pyerr(py, &e))?;
+        emit_durability_warnings(py, &inner.open_warnings())?;
         Ok(Self {
             released_path: inner.path().map(|path| path.display().to_string()),
             released_ontology_mode: ontology_mode_name(&inner),
@@ -674,6 +702,10 @@ fn _test_hub_stop() {
 fn _graphforge_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     let py = m.py();
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
+    m.add(
+        "FilesystemDurabilityWarning",
+        py.get_type::<FilesystemDurabilityWarning>(),
+    )?;
     m.add_function(wrap_pyfunction!(version, m)?)?;
     m.add_function(wrap_pyfunction!(composite::composite_provenance_uuid, m)?)?;
     m.add_function(wrap_pyfunction!(_test_gil_release_probe, m)?)?;

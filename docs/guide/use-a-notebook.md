@@ -80,19 +80,40 @@ original input files needed to reproduce your work.
 
 ## Hosted notebooks
 
-Kaggle and Colab remain runtime-unqualified. In the
-[recorded access check](https://github.com/CurateLabs/graphforge/issues/1209#issuecomment-6639323044),
-each available session was signed out and no authorized kernel was available.
-That records an access limitation, not an unsupported-platform result. Native
-installation, execution, filesystem admission, session reset and retention/export
-were not tested there. A successful local Jupyter kernel does not establish any
-of those hosted outcomes. Use the local notebook path above for the qualified
-workflow; assess each hosted environment separately before relying on it.
+Kaggle and Colab are supported with an unverified-durability warning when their
+native package and filesystem primitive checks succeed. For example, use
+`GraphForge("/content/project")` on Colab. The overlayfs or tmpfs classification
+emits one `graphforge.FilesystemDurabilityWarning` per open, with
+`code="GF_UNVERIFIED_FILESYSTEM"`. Closing and reopening emits a new warning;
+writes emit none. `forge.open_warnings` retains its structured fields.
 
-If a hosted environment supports the native package, memory-only work remains
-ephemeral. Do not bypass a `GF_UNSUPPORTED_FILESYSTEM` error to claim durable
-support. Retain source inputs and explicitly export the results you need before
-the session ends; a result table is not a complete project backup.
+```python
+import warnings
+from graphforge import FilesystemDurabilityWarning, GraphForge
+
+with warnings.catch_warnings(record=True) as observed:
+    warnings.simplefilter("always", FilesystemDurabilityWarning)
+    forge = GraphForge("/content/project")
+    forge.execute("CREATE (:NotebookRun)")
+    receipt = {"open_warnings": forge.open_warnings}
+    forge.close()
+```
+
+The generation records the last writer's unverified qualification. Portable
+export receipts and verification reports include `source_unverified_durability`
+when that source generation is stamped. Keep that receipt alongside benchmark
+results. Set `GRAPHFORGE_FILESYSTEM_DURABILITY=strict` before opening to retain
+refusal of unproven classes; broken primitives and integrity checks still fail
+in default warning mode.
+
+This is session storage, not a persistence guarantee: tmpfs loses data on
+reboot, and Colab/Kaggle VM disks lose data when a runtime is recycled. Retain
+source inputs and export a complete portable package to persistent storage
+before the session ends; a result table is not a project backup. Network/FUSE
+mounts such as mounted cloud drives may still fail the primitive probe. Use
+session disk for the project and copy the completed portable package out.
+Actual Colab acceptance remains to be measured on a connected runtime; local
+tmpfs and split-device overlay proofs do not establish that runtime result.
 
 ## Continue
 

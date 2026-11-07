@@ -177,6 +177,17 @@ impl ProjectOpenRecoveryEvidence {
     }
 }
 
+/// One actual open's pinned generation, recovery result and current mount qualification.
+#[derive(Debug)]
+pub struct ProjectOpenResult {
+    /// Authenticated committed generation.
+    pub generation: ResolvedProjectGeneration,
+    /// Recovery evidence for this open.
+    pub recovery: ProjectOpenRecoveryEvidence,
+    /// Open-time qualification; distinct from the selected generation's writer stamp.
+    pub unverified_durability: Option<graphforge_core::filesystem_durability::UnverifiedDurability>,
+}
+
 /// Open or initialize a project, then run recovery-on-open when applicable.
 ///
 /// First initialization and resumed uninitialized layouts skip cleanup and
@@ -189,7 +200,7 @@ impl ProjectOpenRecoveryEvidence {
 /// reported as deferred instead of `GF_WRITER_BUSY`.
 pub fn open_or_initialize_project_with_recovery(
     container_root: impl AsRef<Path>,
-) -> Result<(ResolvedProjectGeneration, ProjectOpenRecoveryEvidence), GfError> {
+) -> Result<ProjectOpenResult, GfError> {
     open_or_initialize_project_with_recovery_for_mode(
         container_root.as_ref(),
         crate::filesystem_admission::ProjectLifecycleMode::Durable,
@@ -205,7 +216,7 @@ pub fn open_or_initialize_project_with_recovery(
 /// [`open_or_initialize_project_with_recovery`].
 pub fn open_or_initialize_ephemeral_project_with_recovery(
     container_root: impl AsRef<Path>,
-) -> Result<(ResolvedProjectGeneration, ProjectOpenRecoveryEvidence), GfError> {
+) -> Result<ProjectOpenResult, GfError> {
     open_or_initialize_project_with_recovery_for_mode(
         container_root.as_ref(),
         crate::filesystem_admission::ProjectLifecycleMode::Ephemeral,
@@ -218,7 +229,7 @@ pub fn open_or_initialize_ephemeral_project_with_recovery(
 pub fn open_or_initialize_project_with_allocation(
     root: &Path,
     allocation: &crate::StorageAllocationOperation,
-) -> Result<(ResolvedProjectGeneration, ProjectOpenRecoveryEvidence), GfError> {
+) -> Result<ProjectOpenResult, GfError> {
     open_or_initialize_project_with_recovery_for_mode(
         root,
         crate::filesystem_admission::ProjectLifecycleMode::Durable,
@@ -230,7 +241,7 @@ fn open_or_initialize_project_with_recovery_for_mode(
     root: &Path,
     mode: crate::filesystem_admission::ProjectLifecycleMode,
     allocation: Option<&crate::StorageAllocationOperation>,
-) -> Result<(ResolvedProjectGeneration, ProjectOpenRecoveryEvidence), GfError> {
+) -> Result<ProjectOpenResult, GfError> {
     let admission = crate::filesystem_admission::admit_project_lifecycle(
         root,
         mode,
@@ -239,15 +250,22 @@ fn open_or_initialize_project_with_recovery_for_mode(
     admission.revalidate_identity()?;
     let root = admission.root();
     if root.join(CURRENT_FILE).exists() {
-        return recover_project_on_open_admitted_with_allocation(root, allocation);
+        let (generation, recovery) =
+            recover_project_on_open_admitted_with_allocation(root, allocation)?;
+        return Ok(ProjectOpenResult {
+            generation,
+            recovery,
+            unverified_durability: admission.unverified_durability().cloned(),
+        });
     }
     let resolved = crate::project_generation::open_or_initialize_project_admitted_with_allocation(
-        root, allocation,
+        &admission, allocation,
     )?;
-    Ok((
-        resolved.clone(),
-        ProjectOpenRecoveryEvidence::initialization(resolved.generation_uuid()),
-    ))
+    Ok(ProjectOpenResult {
+        recovery: ProjectOpenRecoveryEvidence::initialization(resolved.generation_uuid()),
+        generation: resolved,
+        unverified_durability: admission.unverified_durability().cloned(),
+    })
 }
 
 /// Resolve `CURRENT`, then recover interrupted transactions as part of open.
@@ -1355,8 +1373,11 @@ mod tests {
             let allocation = crate::StorageAllocationOperation::default();
             let before = recovery_allocation_inventory(root.path(), Some(&allocation));
             assert_eq!(allocation.totals().unwrap(), (before, before));
-            let (_, report) =
-                open_or_initialize_project_with_allocation(root.path(), &allocation).unwrap();
+            let ProjectOpenResult {
+                generation: _,
+                recovery: report,
+                ..
+            } = open_or_initialize_project_with_allocation(root.path(), &allocation).unwrap();
             let after = recovery_allocation_inventory(root.path(), None);
             let journal_bytes = journal_path.metadata().unwrap().blocks() * 512;
             assert_eq!(
@@ -2411,7 +2432,11 @@ mod tests {
         );
         assert_eq!(status.code(), Some(crate::project_failpoint::exit_code()));
 
-        let (first, evidence) = open_or_initialize_project_with_recovery(root.path()).unwrap();
+        let ProjectOpenResult {
+            generation: first,
+            recovery: evidence,
+            ..
+        } = open_or_initialize_project_with_recovery(root.path()).unwrap();
         assert_eq!(first.generation_uuid(), parent);
         assert_eq!(
             evidence.selected_generation_class,
@@ -2429,7 +2454,11 @@ mod tests {
                 .exists()
         );
 
-        let (second, again) = open_or_initialize_project_with_recovery(root.path()).unwrap();
+        let ProjectOpenResult {
+            generation: second,
+            recovery: again,
+            ..
+        } = open_or_initialize_project_with_recovery(root.path()).unwrap();
         assert_eq!(second.generation_uuid(), parent);
         assert_eq!(again.selected_generation_uuid, parent);
         assert!(!again.work_detected);
@@ -2451,7 +2480,11 @@ mod tests {
         );
         assert_eq!(status.code(), Some(crate::project_failpoint::exit_code()));
 
-        let (opened, evidence) = open_or_initialize_project_with_recovery(root.path()).unwrap();
+        let ProjectOpenResult {
+            generation: opened,
+            recovery: evidence,
+            ..
+        } = open_or_initialize_project_with_recovery(root.path()).unwrap();
         assert_eq!(opened.generation_uuid(), child);
         assert_eq!(
             evidence.selected_generation_class.as_str(),
@@ -2461,7 +2494,11 @@ mod tests {
         assert!(evidence.repaired_journals >= 1);
         assert!(evidence.deferred.is_none());
 
-        let (again, second) = open_or_initialize_project_with_recovery(root.path()).unwrap();
+        let ProjectOpenResult {
+            generation: again,
+            recovery: second,
+            ..
+        } = open_or_initialize_project_with_recovery(root.path()).unwrap();
         assert_eq!(again.generation_uuid(), child);
         assert!(!second.work_detected);
         assert_eq!(second.repaired_journals, 0);
@@ -2486,7 +2523,11 @@ mod tests {
         let lock = open_regular_lock(&lock_dir.join(WRITER_LOCK_FILE)).unwrap();
         crate::file_lock::lock_exclusive(&lock).unwrap();
 
-        let (opened, evidence) = open_or_initialize_project_with_recovery(root.path()).unwrap();
+        let ProjectOpenResult {
+            generation: opened,
+            recovery: evidence,
+            ..
+        } = open_or_initialize_project_with_recovery(root.path()).unwrap();
         assert_eq!(opened.generation_uuid(), selected);
         assert!(evidence.work_detected);
         assert_eq!(
@@ -2524,7 +2565,11 @@ mod tests {
     #[test]
     fn initialization_open_reports_distinct_recovery_kind() {
         let root = tempfile::tempdir().unwrap();
-        let (opened, evidence) = open_or_initialize_project_with_recovery(root.path()).unwrap();
+        let ProjectOpenResult {
+            generation: opened,
+            recovery: evidence,
+            ..
+        } = open_or_initialize_project_with_recovery(root.path()).unwrap();
         assert_eq!(evidence.kind, ProjectOpenRecoveryKind::Initialization);
         assert_eq!(evidence.selected_generation_uuid, opened.generation_uuid());
         assert!(!evidence.work_detected);

@@ -227,6 +227,7 @@ fn export_result_output(
     result: graphforge_api::PortableExportFacadeResult,
 ) -> PortableExportOutput {
     PortableExportOutput {
+        source_unverified_durability: result.source_unverified_durability.map(Into::into),
         contract: result.contract.to_owned(),
         source: result.source.to_owned(),
         checkpoint: result.checkpoint,
@@ -299,6 +300,7 @@ fn verify_report_output(report: graphforge_api::PortableVerifyResult) -> Portabl
         },
         package_digest: report.package_digest,
         producing_core_version: report.producing_core_version,
+        source_unverified_durability: report.source_unverified_durability.map(Into::into),
         package_class: match report.package_class {
             graphforge_api::PortablePackageClass::Complete => "complete".into(),
             graphforge_api::PortablePackageClass::OntologyOnly => "ontology_only".into(),
@@ -511,6 +513,7 @@ pub struct PortableOciPullInput {
 
 #[napi(object)]
 pub struct PortableExportOutput {
+    pub source_unverified_durability: Option<UnverifiedDurabilityOutput>,
     pub contract: String,
     pub source: String,
     pub checkpoint: Option<String>,
@@ -526,6 +529,7 @@ pub struct PortableExportOutput {
 
 #[napi(object)]
 pub struct PortableVerifyOutput {
+    pub source_unverified_durability: Option<UnverifiedDurabilityOutput>,
     /// Whether the registered native research interchange component was found.
     pub research_interchange: bool,
     /// Manifest-authenticated research files, preserving exact integer lengths.
@@ -586,23 +590,57 @@ pub struct PortableResearchEntryOutput {
     pub sha256: String,
 }
 
-/// Data written by another Core version: stable `code`, both versions, and
-/// how to get a matching runtime.
+/// Structured open/import warning, preserving Core-version wire fields.
 #[napi(object)]
-pub struct CoreVersionWarningOutput {
+pub struct WarningOutput {
     pub code: String,
-    pub producing_core_version: String,
-    pub running_core_version: String,
+    pub producing_core_version: Option<String>,
+    pub running_core_version: Option<String>,
     pub message: String,
+    pub phase: Option<String>,
+    pub outcome: Option<String>,
+    pub cause: Option<String>,
+    pub filesystem_type: Option<String>,
+}
+impl From<graphforge_api::Warning> for WarningOutput {
+    fn from(warning: graphforge_api::Warning) -> Self {
+        match warning {
+            graphforge_api::Warning::CoreVersion(w) => Self {
+                code: w.code,
+                message: w.message,
+                producing_core_version: Some(w.producing_core_version),
+                running_core_version: Some(w.running_core_version),
+                phase: None,
+                outcome: None,
+                cause: None,
+                filesystem_type: None,
+            },
+            graphforge_api::Warning::FilesystemDurability(w) => Self {
+                code: w.code,
+                message: w.message,
+                producing_core_version: None,
+                running_core_version: None,
+                phase: Some(w.phase),
+                outcome: Some(w.outcome),
+                cause: Some(w.cause),
+                filesystem_type: Some(w.filesystem_type),
+            },
+        }
+    }
 }
 
-impl From<graphforge_api::CoreVersionWarning> for CoreVersionWarningOutput {
-    fn from(warning: graphforge_api::CoreVersionWarning) -> Self {
+#[napi(object)]
+pub struct UnverifiedDurabilityOutput {
+    pub phase: String,
+    pub cause: String,
+    pub filesystem_type: String,
+}
+impl From<graphforge_api::UnverifiedDurability> for UnverifiedDurabilityOutput {
+    fn from(v: graphforge_api::UnverifiedDurability) -> Self {
         Self {
-            code: warning.code,
-            producing_core_version: warning.producing_core_version,
-            running_core_version: warning.running_core_version,
-            message: warning.message,
+            phase: v.phase,
+            cause: v.cause,
+            filesystem_type: v.filesystem_type,
         }
     }
 }
@@ -613,11 +651,12 @@ pub struct PortableImportOutput {
     pub transport_digest: Option<String>,
     pub generation_uuid: String,
     pub idempotent_replay: bool,
-    pub warnings: Vec<CoreVersionWarningOutput>,
+    pub warnings: Vec<WarningOutput>,
 }
 
 #[napi(object)]
 pub struct PortableOciReferenceOutput {
+    pub source_unverified_durability: Option<UnverifiedDurabilityOutput>,
     pub registry: String,
     pub repository: String,
     pub oci_manifest_digest: String,
@@ -762,15 +801,16 @@ impl Task for ImportPortableTask {
     }
 
     fn resolve(&mut self, env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
-        output
-            .map(|result| PortableImportOutput {
-                package_digest: result.package_digest,
-                transport_digest: result.transport_digest,
-                generation_uuid: result.generation_uuid.to_string(),
-                idempotent_replay: result.idempotent_replay,
-                warnings: result.warnings.into_iter().map(Into::into).collect(),
-            })
-            .map_err(|error| to_portable_deferred_err(env, error))
+        let result = output.map_err(|error| to_portable_deferred_err(env, error))?;
+        crate::emit_open_warnings(env, &result.warnings)
+            .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+        Ok(PortableImportOutput {
+            package_digest: result.package_digest,
+            transport_digest: result.transport_digest,
+            generation_uuid: result.generation_uuid.to_string(),
+            idempotent_replay: result.idempotent_replay,
+            warnings: result.warnings.into_iter().map(Into::into).collect(),
+        })
     }
 }
 
@@ -800,6 +840,7 @@ fn oci_reference_output(
     reference: graphforge_api::PortableOciReference,
 ) -> PortableOciReferenceOutput {
     PortableOciReferenceOutput {
+        source_unverified_durability: reference.source_unverified_durability.map(Into::into),
         registry: reference.registry,
         repository: reference.repository,
         oci_manifest_digest: reference.oci_manifest_digest,

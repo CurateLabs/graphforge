@@ -1229,6 +1229,7 @@ fn validate_package(
         package_digest: manifest.package_digest.clone(),
         package_class: package_class(&manifest.package_class)?,
         producing_core_version: manifest.producing_core_version()?.to_owned(),
+        source_unverified_durability: manifest.source_unverified_durability.clone(),
         component_count: manifest.components.len() as u64,
         entry_count: entries.len() as u64,
         payload_bytes,

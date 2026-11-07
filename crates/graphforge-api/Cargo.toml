@@ -279,6 +279,10 @@ name = "core_version_warning"
 required-features = ["portable"]
 
 [[test]]
+name = "filesystem_durability_warning"
+required-features = ["portable"]
+
+[[test]]
 name = "portable_payload_identity"
 required-features = ["portable"]
 

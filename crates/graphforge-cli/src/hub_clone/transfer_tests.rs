@@ -367,6 +367,24 @@ fn an_inadmissible_destination_fails_before_any_request_with_its_real_code() {
 #[cfg(target_os = "linux")]
 #[test]
 fn a_tmpfs_destination_fails_before_any_request_with_its_real_code() {
+    if std::env::var("GRAPHFORGE_FILESYSTEM_DURABILITY").as_deref() != Ok("strict") {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "a_tmpfs_destination_fails_before_any_request_with_its_real_code",
+                "--nocapture",
+            ])
+            .env("GRAPHFORGE_FILESYSTEM_DURABILITY", "strict")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+
     let Ok(root) = tempfile::tempdir_in("/dev/shm") else {
         panic!("Linux provides /dev/shm");
     };

@@ -213,6 +213,10 @@ impl PortableExportPlan {
             package_digest: String::new(),
             package_class: "graph-data-subset",
             producing_core_version: GRAPHFORGE_VERSION,
+            source_unverified_durability: serde_json::from_value(
+                existing["source_unverified_durability"].clone(),
+            )
+            .map_err(storage)?,
             source_generation: Source {
                 generation_uuid: generation_uuid.clone(),
                 manifest_sha256: source_manifest.clone(),
@@ -246,6 +250,10 @@ impl PortableExportPlan {
             package_digest: format!("sha256:{}", hex(self.package_digest)),
             package_class: "graph-data-subset",
             producing_core_version: GRAPHFORGE_VERSION,
+            source_unverified_durability: serde_json::from_value(
+                existing["source_unverified_durability"].clone(),
+            )
+            .map_err(storage)?,
             source_generation: Source {
                 generation_uuid,
                 manifest_sha256: source_manifest,
@@ -288,6 +296,9 @@ struct Manifest<'a> {
     package_digest: String,
     package_class: &'a str,
     producing_core_version: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_unverified_durability:
+        Option<graphforge_core::filesystem_durability::UnverifiedDurability>,
     source_generation: Source,
     selection: Selection<'a>,
     components: &'a [Component],
@@ -1075,6 +1086,7 @@ pub fn plan_selected_portable(
         package_digest: String::new(),
         package_class: &selection.package_class,
         producing_core_version: GRAPHFORGE_VERSION,
+        source_unverified_durability: g.unverified_durability().cloned(),
         source_generation: source(),
         selection: Selection {
             roots: &roots,
@@ -1114,6 +1126,7 @@ pub fn plan_selected_portable(
         package_digest: format!("sha256:{}", hex(package_digest)),
         package_class: &selection.package_class,
         producing_core_version: GRAPHFORGE_VERSION,
+        source_unverified_durability: g.unverified_durability().cloned(),
         source_generation: source(),
         selection: Selection {
             roots: &roots,

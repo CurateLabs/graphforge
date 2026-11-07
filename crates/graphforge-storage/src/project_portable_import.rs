@@ -1237,7 +1237,7 @@ fn import_materialized(
         // parent's identities to this import so repeated fresh-root imports
         // also retain identical manifest bytes, without changing existing roots.
         None => crate::project_generation::open_or_initialize_project_admitted_with_bootstrap(
-            admission.root(),
+            &admission,
             Some((
                 graphforge_core::uuid::portable_bootstrap_generation(&transaction_uuid),
                 graphforge_core::uuid::portable_bootstrap_transaction(&transaction_uuid),

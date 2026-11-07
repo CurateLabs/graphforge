@@ -75,8 +75,9 @@ Its numbers describe that workload on that host, not your graph.
   operational database against that workload.
 - A requirement for a published universal size or latency guarantee.
   GraphForge makes none; see [Scale and workload limits](../reference/scale-limits.md).
-- Durable storage on a network filesystem, a container overlay root, or any
-  filesystem outside the [admitted list](installation.md#durable-storage).
+- Guaranteed persistence on unproven filesystems. Overlayfs and tmpfs may run
+  with an unverified-durability warning; network/FUSE mounts may still fail
+  primitive checks. See [durable storage](installation.md#durable-storage).
   In-memory graphs still run the full engine.
 - A need for an audited benchmark result, or for backward compatibility and
   migration of data between versions before v1.0.0.
@@ -88,10 +89,10 @@ Its numbers describe that workload on that host, not your graph.
 | Implemented in Core; candidate qualification is separate                                    | Not part of this release, or not yet qualified                                                                                                                                                                                                                                                       |
 | ------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Python and Node bindings, `gf` CLI, openCypher queries, analyst verbs                       | A client-server database mode                                                                                                                                                                                                                                                                        |
-| In-memory graphs; durable projects on ext4, xfs, btrfs (Linux), APFS, NTFS                  | Durable projects on unadmitted filesystems                                                                                                                                                                                                                                                           |
+| In-memory graphs; durable projects on ext4, xfs, btrfs (Linux), APFS, NTFS                  | Guaranteed persistence on unproven filesystems                                                                                                                                                                                                                                                           |
 | Arrow results, Parquet graph storage, JSON metadata                                         | Backward compatibility and migration for earlier project formats (pre-v1)                                                                                                                                                                                                                            |
 | Portable project export, verify, import; `gf clone` and `gf publish` commands               | Production reads are qualified under [#1209](https://github.com/CurateLabs/graphforge/issues/1209); production publish-back follows under [#1095](https://github.com/CurateLabs/graphforge/issues/1095). Full hosted catalog/publishing interfaces and private-repository qualification are separate |
-| Optional inquiry records, research history, and decision-workflow building blocks           | Hosted notebooks (Kaggle, Colab) as qualified durable environments                                                                                                                                                                                                                                   |
+| Optional inquiry records, research history, and decision-workflow building blocks           | Guaranteed survival of hosted notebook runtime recycling                                                                                                                                                                                                                                   |
 | Measured scale evidence listed in [Scale and workload limits](../reference/scale-limits.md) | A 1,000,000 edges/s ingest rate; strong multicore ingest scaling; audited benchmark results                                                                                                                                                                                                          |
 
 The [roadmap](../releases/roadmap.md) has delivery detail. A capability in

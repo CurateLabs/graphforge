@@ -21,7 +21,32 @@ use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+use graphforge_core::filesystem_durability::UnverifiedDurability;
 use graphforge_core::{GfError, ProjectErrorCode};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DurabilityPolicy {
+    Warn,
+    Strict,
+}
+impl DurabilityPolicy {
+    fn from_env() -> Result<Self, GfError> {
+        match std::env::var("GRAPHFORGE_FILESYSTEM_DURABILITY") {
+            Err(std::env::VarError::NotPresent) => Ok(Self::Warn),
+            Ok(value) if value == "warn" => Ok(Self::Warn),
+            Ok(value) if value == "strict" => Ok(Self::Strict),
+            _ => Err(GfError::Validation(
+                "GRAPHFORGE_FILESYSTEM_DURABILITY must be warn or strict".into(),
+            )),
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct VolumeClassification {
+    filesystem_type: String,
+    unproven_cause: Option<&'static str>,
+}
 use graphforge_filesystem::is_link_or_reparse;
 
 use graphforge_core::hash_observation::ContractSha256 as Sha256;
@@ -39,6 +64,8 @@ const MAX_PROBE_BYTES: u64 = (PROBE_BYTES_A.len() * 2 + PROBE_BYTES_B.len()) as 
 pub struct FilesystemAdmissionEvidence {
     /// Stable, non-device-specific filesystem class (`apfs`, `ext4`, ...).
     pub filesystem_class: String,
+    /// Qualification not established, although every required primitive passed.
+    pub unverified: Option<UnverifiedDurability>,
     /// Number of private regular files created by the probe.
     pub files_created: u64,
     /// Maximum fixed payload bytes written by the probe.
@@ -54,7 +81,7 @@ pub struct FilesystemAdmissionEvidence {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProjectLifecycleMode {
-    /// Probe and retain the supported durable-filesystem identity.
+    /// Probe publication primitives and retain filesystem qualification and identity.
     Durable,
     /// Skip durability probing while retaining link and identity checks.
     Ephemeral,
@@ -93,6 +120,7 @@ pub struct ProjectLifecycleAdmission {
 /// lifecycle lock and prove the namespace still names the retained root.
 #[derive(Debug)]
 pub struct ProjectRootIdentity {
+    unverified_durability: Option<UnverifiedDurability>,
     mode: ProjectLifecycleMode,
     root: PathBuf,
     parent: LifecycleDirectory,
@@ -110,6 +138,12 @@ impl ProjectLifecycleAdmission {
     #[must_use]
     pub const fn mode(&self) -> ProjectLifecycleMode {
         self.mode
+    }
+
+    /// Qualification stamp for this admission.
+    #[must_use]
+    pub fn unverified_durability(&self) -> Option<&UnverifiedDurability> {
+        self.evidence.as_ref().and_then(|e| e.unverified.as_ref())
     }
 
     /// Native durability evidence, present only for durable admission.
@@ -150,6 +184,7 @@ impl ProjectLifecycleAdmission {
     /// before the lock-release transition.
     pub fn into_identity(self) -> Result<ProjectRootIdentity, GfError> {
         self.revalidate_identity()?;
+        let unverified_durability = self.unverified_durability().cloned();
         let Self {
             mode,
             root,
@@ -160,6 +195,7 @@ impl ProjectLifecycleAdmission {
         } = self;
         drop(lifecycle_lock);
         let identity = ProjectRootIdentity {
+            unverified_durability,
             mode,
             root,
             parent,
@@ -218,6 +254,12 @@ impl ProjectLifecycleAdmission {
 }
 
 impl ProjectRootIdentity {
+    /// Qualification of the filesystem where this writer was staged.
+    #[must_use]
+    pub fn unverified_durability(&self) -> Option<&UnverifiedDurability> {
+        self.unverified_durability.as_ref()
+    }
+
     /// Canonical project-root path retained by this token.
     #[must_use]
     pub fn root(&self) -> &Path {
@@ -273,9 +315,9 @@ impl ProjectRootIdentity {
 /// always rendezvous on the same inode.
 ///
 /// # Errors
-/// Returns `GF_UNSUPPORTED_FILESYSTEM` before final-root creation when the
-/// durable contract, link policy, namespace identity, or target shape cannot
-/// be proven.
+/// Returns `GF_UNSUPPORTED_FILESYSTEM` before final-root creation for broken
+/// primitives, link/identity failures or strict qualification refusal. Invalid
+/// durability policy returns `GF_VALIDATION`. Unproven classes warn by default.
 pub fn admit_project_lifecycle(
     proposed_project_root: impl AsRef<Path>,
     mode: ProjectLifecycleMode,
@@ -286,6 +328,11 @@ pub fn admit_project_lifecycle(
         mode,
         requirement,
         ProbeFault::None,
+        if mode == ProjectLifecycleMode::Durable {
+            DurabilityPolicy::from_env()?
+        } else {
+            DurabilityPolicy::Warn
+        },
     )
 }
 
@@ -294,6 +341,7 @@ fn admit_project_lifecycle_inner(
     mode: ProjectLifecycleMode,
     requirement: ProjectRootRequirement,
     fault: ProbeFault,
+    policy: DurabilityPolicy,
 ) -> Result<ProjectLifecycleAdmission, GfError> {
     let ResolvedProjectPath {
         parent,
@@ -318,6 +366,7 @@ fn admit_project_lifecycle_inner(
             &parent,
             &target_name,
             fault,
+            policy,
         )?),
         ProjectLifecycleMode::Ephemeral => None,
     };
@@ -546,7 +595,7 @@ struct LifecycleLock {
     path: PathBuf,
     file: File,
     identity: graphforge_filesystem::FileIdentity,
-    parent_identity: graphforge_filesystem::FileIdentity,
+    parent: File,
 }
 
 impl LifecycleLock {
@@ -573,7 +622,10 @@ impl LifecycleLock {
             path,
             file,
             identity,
-            parent_identity: parent.identity(),
+            parent: parent
+                .handle()
+                .try_clone()
+                .map_err(|_| unsupported("LOCK", "parent_identity_unavailable"))?,
         };
         lock.revalidate()?;
         Ok(lock)
@@ -601,7 +653,8 @@ impl LifecycleLock {
             || graphforge_filesystem::file_identity(&self.file)
                 .map_err(|_| unsupported("LOCK", "lifecycle_lock_identity_unavailable"))?
                 != self.identity
-            || self.identity.volume_serial != self.parent_identity.volume_serial
+            || !graphforge_filesystem::same_mount(&self.file, &self.parent)
+                .map_err(|_| unsupported("LOCK", "lifecycle_lock_mount_unavailable"))?
         {
             return Err(unsupported("LOCK", "lifecycle_lock_identity_changed"));
         }
@@ -714,31 +767,37 @@ fn open_lifecycle_lock_file(_parent: &LifecycleDirectory, _name: &str) -> std::i
 /// `/private/tmp` first.
 ///
 /// # Errors
-/// Every inability to prove the contract returns
-/// `GF_UNSUPPORTED_FILESYSTEM`. The diagnostic contains only a phase and safe
-/// cause class, never the supplied path.
+/// Broken primitives and integrity failures return `GF_UNSUPPORTED_FILESYSTEM`,
+/// as does unproven classification under strict policy. Invalid policy returns
+/// `GF_VALIDATION`. Diagnostics contain only safe classes, never supplied paths.
 pub fn filesystem_durability_preflight(
     proposed_project_root: impl AsRef<Path>,
 ) -> Result<FilesystemAdmissionEvidence, GfError> {
-    filesystem_durability_preflight_inner(proposed_project_root.as_ref(), ProbeFault::None)
+    filesystem_durability_preflight_inner(
+        proposed_project_root.as_ref(),
+        ProbeFault::None,
+        DurabilityPolicy::from_env()?,
+    )
 }
 
 fn filesystem_durability_preflight_inner(
     proposed_project_root: &Path,
     fault: ProbeFault,
+    policy: DurabilityPolicy,
 ) -> Result<FilesystemAdmissionEvidence, GfError> {
     let ResolvedProjectPath {
         parent,
         target_name,
         ..
     } = resolve_project_path(proposed_project_root)?;
-    filesystem_durability_preflight_resolved(&parent, &target_name, fault)
+    filesystem_durability_preflight_resolved(&parent, &target_name, fault, policy)
 }
 
 fn filesystem_durability_preflight_resolved(
     parent: &LifecycleDirectory,
     target_name: &std::ffi::OsStr,
     fault: ProbeFault,
+    policy: DurabilityPolicy,
 ) -> Result<FilesystemAdmissionEvidence, GfError> {
     let started = Instant::now();
     let _probe_lock = lock_probe_parent(parent, target_name)?;
@@ -765,7 +824,19 @@ fn filesystem_durability_preflight_resolved(
         }
     }
     hit(fault, ProbeFault::Classify, "CLASSIFY")?;
-    let filesystem_class = classify_supported_local_volume(parent)?;
+    let classification = classify_supported_local_volume(parent)?;
+    let unverified = classification
+        .unproven_cause
+        .map(|cause| UnverifiedDurability {
+            phase: "CLASSIFY".into(),
+            cause: cause.into(),
+            filesystem_type: classification.filesystem_type.clone(),
+        });
+    if policy == DurabilityPolicy::Strict
+        && let Some(cause) = classification.unproven_cause
+    {
+        return Err(unsupported("CLASSIFY", cause));
+    }
 
     let probe_name = stable_probe_name(parent.path(), target_name);
     let probe_root = parent.path().join(&probe_name);
@@ -790,7 +861,8 @@ fn filesystem_durability_preflight_resolved(
     cleanup_result?;
 
     Ok(FilesystemAdmissionEvidence {
-        filesystem_class,
+        filesystem_class: classification.filesystem_type,
+        unverified,
         files_created: MAX_PROBE_FILES,
         bytes_written: MAX_PROBE_BYTES,
         elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
@@ -955,70 +1027,74 @@ fn normalize_trusted_system_alias(path: &Path) -> Result<PathBuf, GfError> {
     Ok(replacement.join(path.strip_prefix(alias).expect("prefix was checked")))
 }
 
-fn classify_supported_local_volume(parent: &LifecycleDirectory) -> Result<String, GfError> {
+fn classify_supported_local_volume(
+    parent: &LifecycleDirectory,
+) -> Result<VolumeClassification, GfError> {
     classify_supported_local_volume_platform(parent)
 }
 
 #[cfg(target_os = "macos")]
 fn classify_supported_local_volume_platform(
     parent: &LifecycleDirectory,
-) -> Result<String, GfError> {
+) -> Result<VolumeClassification, GfError> {
     let stat = rustix::fs::fstatfs(parent.handle())
         .map_err(|_| unsupported("CLASSIFY", "native_volume_query_failed"))?;
     let class = stat
         .f_fstypename
         .iter()
         .copied()
-        .take_while(|byte| *byte != 0)
-        .map(|byte| u8::try_from(byte).unwrap_or_default())
+        .take_while(|b| *b != 0)
+        .map(|b| u8::try_from(b).unwrap_or_default())
         .collect::<Vec<_>>();
     let class = std::str::from_utf8(&class)
         .map_err(|_| unsupported("CLASSIFY", "filesystem_class_invalid"))?
         .to_ascii_lowercase();
-    if class != "apfs" {
-        return Err(unsupported("CLASSIFY", "filesystem_class_unproven"));
-    }
-    let flags = stat.f_flags;
-    if (flags & u32::try_from(libc::MNT_LOCAL).unwrap_or(u32::MAX)) == 0 {
-        return Err(unsupported("CLASSIFY", "volume_not_local"));
-    }
-    if (flags & u32::try_from(libc::MNT_RDONLY).unwrap_or(u32::MAX)) != 0 {
+    if (stat.f_flags & u32::try_from(libc::MNT_RDONLY).unwrap_or(u32::MAX)) != 0 {
         return Err(unsupported("CLASSIFY", "volume_read_only"));
     }
-    reject_removable_volume(parent.path())?;
-    Ok(class)
+    let unproven_cause = if class != "apfs" {
+        Some("filesystem_class_unproven")
+    } else if (stat.f_flags & u32::try_from(libc::MNT_LOCAL).unwrap_or(u32::MAX)) == 0 {
+        Some("volume_not_local")
+    } else {
+        removable_volume_cause(parent.path())
+    };
+    Ok(VolumeClassification {
+        filesystem_type: class,
+        unproven_cause,
+    })
 }
 
 #[cfg(target_os = "linux")]
 fn classify_supported_local_volume_platform(
     parent: &LifecycleDirectory,
-) -> Result<String, GfError> {
+) -> Result<VolumeClassification, GfError> {
     let stat = rustix::fs::fstatfs(parent.handle())
         .map_err(|_| unsupported("CLASSIFY", "native_volume_query_failed"))?;
-    let class = graphforge_filesystem::admitted_filesystem_class(
-        u64::try_from(stat.f_type).unwrap_or_default(),
-    )
-    .ok_or_else(|| unsupported("CLASSIFY", "filesystem_class_unproven"))?;
+    let kind = u64::try_from(stat.f_type).unwrap_or_default();
     let vfs = rustix::fs::fstatvfs(parent.handle())
         .map_err(|_| unsupported("CLASSIFY", "native_volume_query_failed"))?;
     if vfs.f_flag.contains(rustix::fs::StatVfsMountFlags::RDONLY) {
         return Err(unsupported("CLASSIFY", "volume_read_only"));
     }
-    reject_removable_volume(parent.path())?;
-    Ok(class.into())
+    let unproven_cause = if graphforge_filesystem::admitted_filesystem_class(kind).is_none() {
+        Some("filesystem_class_unproven")
+    } else {
+        removable_volume_cause(parent.path())
+    };
+    Ok(VolumeClassification {
+        filesystem_type: graphforge_filesystem::filesystem_type_name(kind),
+        unproven_cause,
+    })
 }
 
 #[cfg(target_os = "windows")]
 fn classify_supported_local_volume_platform(
     parent: &LifecycleDirectory,
-) -> Result<String, GfError> {
-    let information = graphforge_filesystem::windows_volume_information(parent.path())
+) -> Result<VolumeClassification, GfError> {
+    let info = graphforge_filesystem::windows_volume_information(parent.path())
         .map_err(|_| unsupported("CLASSIFY", "native_volume_query_failed"))?;
-    classify_windows_volume(
-        &information.filesystem_name,
-        information.read_only,
-        information.fixed,
-    )
+    classify_windows_volume(&info.filesystem_name, info.read_only, info.fixed)
 }
 
 #[cfg(any(test, target_os = "windows"))]
@@ -1026,40 +1102,43 @@ fn classify_windows_volume(
     filesystem_name: &str,
     read_only: bool,
     fixed: bool,
-) -> Result<String, GfError> {
+) -> Result<VolumeClassification, GfError> {
     if read_only {
         return Err(unsupported("CLASSIFY", "volume_read_only"));
     }
-    if !fixed {
-        return Err(unsupported("CLASSIFY", "volume_not_fixed_local"));
-    }
     let class = filesystem_name.to_ascii_lowercase();
-    if class != "ntfs" {
-        return Err(unsupported("CLASSIFY", "filesystem_class_unproven"));
-    }
-    Ok(class)
+    let unproven_cause = if !fixed {
+        Some("volume_not_fixed_local")
+    } else if class != "ntfs" {
+        Some("filesystem_class_unproven")
+    } else {
+        None
+    };
+    Ok(VolumeClassification {
+        filesystem_type: class,
+        unproven_cause,
+    })
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 fn classify_supported_local_volume_platform(
     _parent: &LifecycleDirectory,
-) -> Result<String, GfError> {
+) -> Result<VolumeClassification, GfError> {
     Err(unsupported("CLASSIFY", "platform_unsupported"))
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-fn reject_removable_volume(parent: &Path) -> Result<(), GfError> {
+fn removable_volume_cause(parent: &Path) -> Option<&'static str> {
     let disks = Disks::new_with_refreshed_list();
-    let disk = disks
+    let Some(disk) = disks
         .list()
         .iter()
-        .filter(|disk| parent.starts_with(disk.mount_point()))
-        .max_by_key(|disk| disk.mount_point().components().count())
-        .ok_or_else(|| unsupported("CLASSIFY", "device_identity_unknown"))?;
-    if disk.is_removable() {
-        return Err(unsupported("CLASSIFY", "volume_removable"));
-    }
-    Ok(())
+        .filter(|d| parent.starts_with(d.mount_point()))
+        .max_by_key(|d| d.mount_point().components().count())
+    else {
+        return Some("device_identity_unknown");
+    };
+    disk.is_removable().then_some("volume_removable")
 }
 
 struct ProbeDirectory {
@@ -1249,7 +1328,7 @@ fn run_probe(
     lock.observed_sync_all()
         .map_err(|_| unsupported("FILE_FLUSH", "lock_file_flush_failed"))?;
     hit(fault, ProbeFault::FileFlush, "FILE_FLUSH")?;
-    verify_stable_identity(&lock, &lock_path, parent.path())?;
+    verify_stable_identity(&lock, &lock_path, parent)?;
 
     crate::file_lock::lock_exclusive(&lock)
         .map_err(|_| unsupported("LOCK", "exclusive_lock_failed"))?;
@@ -1260,7 +1339,7 @@ fn run_probe(
         let _ = crate::file_lock::unlock(&contender);
         return Err(unsupported("LOCK", "exclusive_lock_not_enforced"));
     }
-    verify_stable_identity(&lock, &lock_path, parent.path())?;
+    verify_stable_identity(&lock, &lock_path, parent)?;
     crate::file_lock::unlock(&lock).map_err(|_| unsupported("LOCK", "exclusive_unlock_failed"))?;
 
     crate::file_lock::lock_shared(&lock).map_err(|_| unsupported("LOCK", "shared_lock_failed"))?;
@@ -1307,7 +1386,7 @@ fn run_probe(
     if bytes != PROBE_BYTES_B {
         return Err(unsupported("IDENTITY", "replacement_bytes_mismatch"));
     }
-    verify_stable_identity(&published, &target_path, parent.path())?;
+    verify_stable_identity(&published, &target_path, parent)?;
     drop(target);
     complete_namespace_barrier_handle(parent)
         .map_err(|_| unsupported("NAMESPACE_DURABILITY", "parent_namespace_barrier_failed"))
@@ -1456,7 +1535,11 @@ fn open_probe_file(_probe: &ProbeDirectory, _name: &str, _create: bool) -> std::
     ))
 }
 
-fn verify_stable_identity(file: &File, path: &Path, parent: &Path) -> Result<(), GfError> {
+fn verify_stable_identity(
+    file: &File,
+    path: &Path,
+    parent: &LifecycleDirectory,
+) -> Result<(), GfError> {
     let named = std::fs::symlink_metadata(path)
         .map_err(|_| unsupported("IDENTITY", "named_metadata_failed"))?;
     if is_link_or_reparse(&named)
@@ -1470,7 +1553,8 @@ fn verify_stable_identity(file: &File, path: &Path, parent: &Path) -> Result<(),
         || file_identity(file)?
             != graphforge_filesystem::path_identity(path)
                 .map_err(|_| unsupported("IDENTITY", "path_identity_unavailable"))?
-        || !same_volume_paths(parent, path)?
+        || !graphforge_filesystem::same_mount(parent.handle(), file)
+            .map_err(|_| unsupported("IDENTITY", "mount_identity_unavailable"))?
     {
         return Err(unsupported("IDENTITY", "stable_identity_unproven"));
     }
@@ -1575,14 +1659,6 @@ fn file_identity(file: &File) -> Result<graphforge_filesystem::FileIdentity, GfE
         .map_err(|_| unsupported("IDENTITY", "opened_identity_unavailable"))
 }
 
-fn same_volume_paths(left: &Path, right: &Path) -> Result<bool, GfError> {
-    let left = graphforge_filesystem::path_identity(left)
-        .map_err(|_| unsupported("IDENTITY", "left_volume_identity_unavailable"))?;
-    let right = graphforge_filesystem::path_identity(right)
-        .map_err(|_| unsupported("IDENTITY", "right_volume_identity_unavailable"))?;
-    Ok(left.volume_serial == right.volume_serial)
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProbeFault {
     None,
@@ -1654,6 +1730,7 @@ mod tests {
             ProjectLifecycleMode::Durable,
             ProjectRootRequirement::CreateIfMissing,
             ProbeFault::Classify,
+            DurabilityPolicy::Warn,
         )
         .unwrap_err();
         assert_eq!(error.code(), "GF_UNSUPPORTED_FILESYSTEM");
@@ -1783,6 +1860,7 @@ mod tests {
             ProjectLifecycleMode::Ephemeral,
             ProjectRootRequirement::CreateIfMissing,
             ProbeFault::Classify,
+            DurabilityPolicy::Warn,
         )
         .unwrap();
         assert_eq!(admission.mode(), ProjectLifecycleMode::Ephemeral);
@@ -1983,22 +2061,85 @@ mod tests {
         assert!(moved.is_dir());
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
-    fn windows_classifier_accepts_only_fixed_writable_ntfs() {
-        assert_eq!(
-            classify_windows_volume("NTFS", false, true).unwrap(),
-            "ntfs"
+    fn tmpfs_warns_after_full_probe_but_strict_and_broken_primitives_refuse() {
+        let parent = tempfile::tempdir_in("/dev/shm").unwrap();
+        let target = parent.path().join("project");
+        let evidence = filesystem_durability_preflight_inner(
+            &target,
+            ProbeFault::None,
+            DurabilityPolicy::Warn,
+        )
+        .unwrap();
+        assert_eq!(evidence.filesystem_class, "tmpfs");
+        let stamp = evidence.unverified.unwrap();
+        assert_eq!(stamp.phase, "CLASSIFY");
+        assert_eq!(stamp.cause, "filesystem_class_unproven");
+        assert_eq!(stamp.filesystem_type, "tmpfs");
+        assert_eq!(std::fs::read_dir(parent.path()).unwrap().count(), 0);
+        let strict = filesystem_durability_preflight_inner(
+            &target,
+            ProbeFault::None,
+            DurabilityPolicy::Strict,
+        )
+        .unwrap_err();
+        assert_eq!(strict.code(), "GF_UNSUPPORTED_FILESYSTEM");
+        assert!(
+            strict
+                .to_string()
+                .contains("phase=CLASSIFY outcome=rejected cause=filesystem_class_unproven")
         );
-        for (class, read_only, fixed, cause) in [
-            ("ReFS", false, true, "filesystem_class_unproven"),
-            ("FAT32", false, true, "filesystem_class_unproven"),
-            ("NTFS", true, true, "volume_read_only"),
-            ("NTFS", false, false, "volume_not_fixed_local"),
+        assert!(!target.exists());
+        assert_eq!(std::fs::read_dir(parent.path()).unwrap().count(), 0);
+        for fault in [
+            ProbeFault::Lock,
+            ProbeFault::Write,
+            ProbeFault::FileFlush,
+            ProbeFault::Replace,
+            ProbeFault::NamespaceDurability,
+            ProbeFault::Identity,
+            ProbeFault::Cleanup,
         ] {
-            let error = classify_windows_volume(class, read_only, fixed).unwrap_err();
-            assert_eq!(error.code(), "GF_UNSUPPORTED_FILESYSTEM");
-            assert!(error.to_string().contains(cause), "{error}");
+            let fixture = tempfile::tempdir_in("/dev/shm").unwrap();
+            let result = filesystem_durability_preflight_inner(
+                &fixture.path().join("project"),
+                fault,
+                DurabilityPolicy::Warn,
+            )
+            .unwrap_err();
+            assert_eq!(result.code(), "GF_UNSUPPORTED_FILESYSTEM");
+            assert!(
+                result.to_string().contains("injected_failure"),
+                "{fault:?}: {result}"
+            );
+            assert!(!fixture.path().join("project").exists());
         }
+    }
+
+    #[test]
+    fn windows_classifier_preserves_read_only_refusal_and_reports_qualification() {
+        assert_eq!(
+            classify_windows_volume("NTFS", false, true)
+                .unwrap()
+                .unproven_cause,
+            None
+        );
+        for (class, fixed, cause) in [
+            ("ReFS", true, "filesystem_class_unproven"),
+            ("FAT32", true, "filesystem_class_unproven"),
+            ("NTFS", false, "volume_not_fixed_local"),
+        ] {
+            assert_eq!(
+                classify_windows_volume(class, false, fixed)
+                    .unwrap()
+                    .unproven_cause,
+                Some(cause)
+            );
+        }
+        let error = classify_windows_volume("NTFS", true, true).unwrap_err();
+        assert_eq!(error.code(), "GF_UNSUPPORTED_FILESYSTEM");
+        assert!(error.to_string().contains("volume_read_only"));
     }
 
     #[test]
@@ -2016,7 +2157,9 @@ mod tests {
         ] {
             let parent = canonical_tempdir();
             let target = parent.path().join("project");
-            let error = filesystem_durability_preflight_inner(&target, fault).unwrap_err();
+            let error =
+                filesystem_durability_preflight_inner(&target, fault, DurabilityPolicy::Warn)
+                    .unwrap_err();
             assert_eq!(error.code(), "GF_UNSUPPORTED_FILESYSTEM", "{fault:?}");
             assert!(!target.exists(), "{fault:?}");
             let entries = std::fs::read_dir(parent.path()).unwrap().count();
@@ -2177,8 +2320,12 @@ mod tests {
     fn ambiguous_replacement_state_is_typed_and_reconciled_by_cleanup() {
         let parent = canonical_tempdir();
         let target = parent.path().join("project");
-        let error =
-            filesystem_durability_preflight_inner(&target, ProbeFault::ReplaceUnknown).unwrap_err();
+        let error = filesystem_durability_preflight_inner(
+            &target,
+            ProbeFault::ReplaceUnknown,
+            DurabilityPolicy::Warn,
+        )
+        .unwrap_err();
         assert_eq!(error.code(), "GF_UNSUPPORTED_FILESYSTEM");
         assert!(error.to_string().contains("atomic_replace_state_unknown"));
         assert_eq!(std::fs::read_dir(parent.path()).unwrap().count(), 0);

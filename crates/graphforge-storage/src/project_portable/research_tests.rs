@@ -154,6 +154,7 @@ fn report(package: &Package) -> PortableReport {
         package_digest: String::new(),
         package_class: PortablePackageClass::Complete,
         producing_core_version: env!("CARGO_PKG_VERSION").into(),
+        source_unverified_durability: None,
         component_count: 2,
         entry_count: 2,
         payload_bytes: (package.registry_bytes.len() + package.object_bytes.len()) as u64,
