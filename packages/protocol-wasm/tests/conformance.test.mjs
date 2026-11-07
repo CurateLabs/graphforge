@@ -23,6 +23,15 @@ discovery.cases.push(
     "module-metadata-conformance.json",
   ).cases,
 );
+discovery.cases.push(
+  ...readJson(
+    "docs",
+    "reference",
+    "discovery",
+    "v1",
+    "module-definition-counts-conformance.json",
+  ).cases,
+);
 const moved = readJson(
   "docs",
   "reference",
@@ -65,7 +74,7 @@ function thrownFailure(error) {
 }
 
 test("discovery v1 corpus matches native Rust for every case", () => {
-  assert.equal(discovery.cases.length, 154);
+  assert.equal(discovery.cases.length, 188);
   for (const { name, document, json, limits, expected } of discovery.cases) {
     const outcome = attempt(() => VALIDATORS[document](json, limits));
     if (expected.result === "valid") {

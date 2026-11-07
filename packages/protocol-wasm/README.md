@@ -96,6 +96,9 @@ tied ordinals have equal precedence only. Cross-ID comparison fails
 bounds, including admitted control characters. The caller must bind declarations
 to verified module bytes; this package validates structure, not native packages.
 `ItemDescriptor` and `SummaryOntologyModule` expose the same optional field.
+`SummaryOntologyModule.definition_counts?: SummaryModuleDefinitionCounts` holds
+three u32 `number` fields (`entity_types`, `properties`, `relation_types`); absent
+means unknown, while three zeros mean verified zero definitions.
 Older closed descriptor validators refuse the addition; deploy matching readers
 before serving it. See [ADR 0063](../../docs/adr/0063-declared-ontology-version-order.md).
 

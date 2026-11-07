@@ -345,6 +345,46 @@ component (the research-interchange registry), and `evidence_present` an
 `evidence`-kind component. Research _metadata_ presence shows up as non-null
 `metadata` fields, not as `research_present`.
 
+Every newly derived `facts.ontology_composition.modules[]` entry includes
+`definition_counts: { entity_types, properties, relation_types }`: the exact
+lengths of those three arrays in the same fully verified `OntologyDoc` that
+supplies its metadata. Each value is a u32 (0–4294967295); the object is closed
+and requires all three keys. Abstract entity types and each `(owner, name)`
+property declaration count. Inheritance, de-duplication, constraints, migrations
+and bridge sets do not contribute. These are **definitions, not graph rows**;
+they are independent of `metadata.corpus_size` and package byte/component facts.
+
+Counts describe each exact module only; there is no composition or Project
+total. Two modules may both define `Person`, so a sum is not distinct Project
+vocabulary. If any module's counts are absent, even a declaration total is
+unknown. Absent (or input `null`, canonically omitted) means **unknown**, never
+zero; `{entity_types:0,properties:0,relation_types:0}` is verified zero. Historical
+summaries retain their canonical bytes, and readers never infer counts from
+`producing_core_version`.
+
+Definition counts are derived facts added in place at protocol 1.2 under
+`project-summary@1`, with no new capability. They do not trigger
+`ontology-module-metadata@1`; its authored metadata rule is unchanged. Full
+native package verification proves the source bytes and module digest; changing
+counts in a summary changes its summary commitment and fails binding. Protocol
+WASM validates structure and binding, without reading module packages. A Hub
+must trust the publisher's native derivation as it does for module labels.
+For the same exact module triple, present counts must agree across publications;
+an absent value never replaces a present one.
+
+Older closed validators refuse **every new ontology-bearing summary** containing
+these counts, including modules with no authored metadata, as
+`malformed_response`. Deploy matching native/protocol WASM readers and schemas
+before publishing such summaries. Updated readers still accept older summaries
+and display their absent counts as unknown.
+
+The generated [definition-count corpus](module-definition-counts-conformance.json)
+records legacy, zero, boundary and invalid-shape cases separately so each
+contract artifact stays bounded. `contract_artifacts` and protocol native/WASM
+replays consume it alongside the existing corpora. Regenerate it with the same
+`GRAPHFORGE_UPDATE_DISCOVERY_ARTIFACTS=1 cargo test -p graphforge-discovery --test contract_artifacts`
+command as the summary schema.
+
 Each `facts.ontology_composition.modules[]` entry may carry a human-readable
 `label` and plain-text `description`, read from that exact module declaration
 through the authenticated package reader. A label is nonblank, at most 256
@@ -370,9 +410,9 @@ declare different licenses; consumers must retain each version's own declaration
 
 A summary containing module text, license, fork provenance, or `version_order` requires
 `ontology-module-metadata@1`, before `project-summary@1` in sorted requirements.
-A publisher with no module metadata omits the fields and added requirement,
-preserving historical canonical bytes. This capability is unreleased and covers
-all five fields as one closed contract. Older closed validators cannot consume
+A publisher with no authored module metadata omits those five fields and the
+added requirement; definition counts remain independent derived facts. This
+capability is unreleased and covers all five fields as one closed contract. Older closed validators cannot consume
 new fields they do not recognize; deploy the matching protocol WASM/schema before
 publishing them. Unknown fields remain rejected.
 `version_order` is an optional u32 ordinal projected only from verified module
