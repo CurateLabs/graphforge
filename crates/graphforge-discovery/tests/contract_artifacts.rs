@@ -26,6 +26,8 @@ const LINEAGE_SCHEMA: &str =
 const FIXTURES: &str = include_str!("../../../docs/reference/discovery/v1/conformance.json");
 const MODULE_METADATA_FIXTURES: &str =
     include_str!("../../../docs/reference/discovery/v1/module-metadata-conformance.json");
+const MODULE_DEFINITION_COUNT_FIXTURES: &str =
+    include_str!("../../../docs/reference/discovery/v1/module-definition-counts-conformance.json");
 
 #[derive(Debug, Deserialize, Serialize)]
 struct Corpus {
@@ -326,6 +328,17 @@ fn summary_schema() -> Value {
                 "module_version_order".into(),
                 json!({"type":"integer","minimum":0,"maximum":4294967295u64}),
             );
+            map.insert(
+                "module_definition_counts".into(),
+                json!({"anyOf":[{
+                "type":"object","additionalProperties":false,
+                "required":["entity_types","properties","relation_types"],
+                "properties":{
+                    "entity_types":{"type":"integer","minimum":0,"maximum":4294967295u64},
+                    "properties":{"type":"integer","minimum":0,"maximum":4294967295u64},
+                    "relation_types":{"type":"integer","minimum":0,"maximum":4294967295u64}
+                }},{"type":"null"}]}),
+            );
             map.insert("module_label".into(), json!({"anyOf":[{"type":"string","minLength":1,"maxLength":256,"description":"At most 256 UTF-8 bytes, nonblank, single line, no control characters or U+2028/U+2029; enforced by Rust."},{"type":"null"}]}));
             map.insert("module_license".into(), json!({"anyOf":[{"type":"string","minLength":1,"maxLength":4096,"description":"SPDX expression, at most 4096 ASCII bytes without control characters; parsed by Rust spdx in strict mode. Absence means undeclared, never inherited from the Project."},{"type":"null"}]}));
             map.insert("module_description".into(), json!({"anyOf":[{"type":"string","minLength":1,"maxLength":4096,"description":"At most 4096 UTF-8 bytes, nonblank plain text; LF and tab allowed, all other controls forbidden; enforced by Rust."},{"type":"null"}]}));
@@ -339,7 +352,7 @@ fn summary_schema() -> Value {
                     "bytes_by_kind":{"type":"object","propertyNames":{"enum":byte_kinds},"additionalProperties":{"type":"integer","minimum":0}},
                     "ontology_composition":{"anyOf":[{"type":"object","additionalProperties":false,"required":["composition_digest","modules","bridge_sets"],"properties":{
                         "composition_digest":{"$ref":"#/$defs/digest"},
-                        "modules":{"type":"array","maxItems":4096,"items":{"type":"object","additionalProperties":false,"required":["id","version","content_digest","dialect","profile"],"properties":{"id":{"$ref":"#/$defs/identity_text"},"version":{"$ref":"#/$defs/identity_text"},"content_digest":{"$ref":"#/$defs/digest"},"dialect":{"$ref":"#/$defs/identity_text"},"profile":{"$ref":"#/$defs/identity_text"},"label":{"$ref":"#/$defs/module_label"},"description":{"$ref":"#/$defs/module_description"},"license":{"$ref":"#/$defs/module_license"},"forked_from":{"$ref":"#/$defs/forked_from"},"version_order":{"$ref":"#/$defs/module_version_order"}}}},
+                        "modules":{"type":"array","maxItems":4096,"items":{"type":"object","additionalProperties":false,"required":["id","version","content_digest","dialect","profile"],"properties":{"id":{"$ref":"#/$defs/identity_text"},"version":{"$ref":"#/$defs/identity_text"},"content_digest":{"$ref":"#/$defs/digest"},"dialect":{"$ref":"#/$defs/identity_text"},"profile":{"$ref":"#/$defs/identity_text"},"label":{"$ref":"#/$defs/module_label"},"description":{"$ref":"#/$defs/module_description"},"license":{"$ref":"#/$defs/module_license"},"forked_from":{"$ref":"#/$defs/forked_from"},"version_order":{"$ref":"#/$defs/module_version_order"},"definition_counts":{"$ref":"#/$defs/module_definition_counts"}}}},
                         "bridge_sets":{"type":"array","maxItems":4096,"items":{"$ref":"#/$defs/bridge_descriptor"}}}},{"type":"null"}]}
                 }}));
             defs
@@ -1443,6 +1456,129 @@ fn module_metadata_cases() -> Vec<Case> {
     cases
 }
 
+#[test]
+fn legacy_summary_definition_counts_remain_unknown_without_metadata() {
+    let canonical = ProjectSummary::from_json(
+        compact(&base_summary()).as_bytes(),
+        DiscoveryLimits::default(),
+    )
+    .unwrap()
+    .to_canonical_json()
+    .unwrap();
+    let summary = ProjectSummary::from_json(&canonical, DiscoveryLimits::default()).unwrap();
+    let module = &summary.facts.ontology_composition.as_ref().unwrap().modules[0];
+    assert!(module.definition_counts.is_none());
+    assert!(!module.has_metadata());
+    assert_eq!(summary.to_canonical_json().unwrap(), canonical);
+}
+
+/// Definition counts have a separate corpus to keep each contract artifact bounded.
+fn module_definition_count_cases() -> Vec<Case> {
+    let mut cases = Vec::new();
+    cases.push(valid(
+        "summary-module-without-definition-counts",
+        Document::Summary,
+        base_summary(),
+    ));
+    for (name, counts) in [
+        (
+            "summary-module-definition-counts",
+            json!({"entity_types":2,"properties":0,"relation_types":1}),
+        ),
+        (
+            "summary-module-definition-counts-zero",
+            json!({"entity_types":0,"properties":0,"relation_types":0}),
+        ),
+        (
+            "summary-module-definition-counts-max",
+            json!({"entity_types":4294967295u64,"properties":4294967295u64,"relation_types":4294967295u64}),
+        ),
+        ("summary-module-definition-counts-null", Value::Null),
+    ] {
+        let mut value = base_summary();
+        value["facts"]["ontology_composition"]["modules"][0]["definition_counts"] = counts;
+        cases.push(valid(name, Document::Summary, value));
+    }
+    for mixed in [false, true] {
+        let mut value = base_summary();
+        let modules = value["facts"]["ontology_composition"]["modules"]
+            .as_array_mut()
+            .unwrap();
+        let mut second = modules[0].clone();
+        second["id"] = json!("https://example.org/ontology/second");
+        modules[0]["definition_counts"] =
+            json!({"entity_types":1,"properties":0,"relation_types":0});
+        if !mixed {
+            second["definition_counts"] =
+                json!({"entity_types":3,"properties":2,"relation_types":1});
+        }
+        modules.push(second);
+        modules.sort_by_key(|module| module["id"].as_str().unwrap().to_owned());
+        cases.push(valid(
+            if mixed {
+                "summary-module-definition-counts-mixed"
+            } else {
+                "summary-module-definition-counts-two-modules"
+            },
+            Document::Summary,
+            value,
+        ));
+    }
+    for field in ["entity_types", "properties", "relation_types"] {
+        for (name, count) in [
+            ("negative", json!(-1)),
+            ("fraction", json!(1.5)),
+            ("float", json!(1.0)),
+            ("string", json!("1")),
+            ("overflow", json!(4294967296u64)),
+            ("null", Value::Null),
+            ("boolean", json!(true)),
+        ] {
+            let mut value = base_summary();
+            let mut counts = json!({"entity_types":1,"properties":0,"relation_types":0});
+            counts[field] = count;
+            value["facts"]["ontology_composition"]["modules"][0]["definition_counts"] = counts;
+            cases.push(invalid(
+                &format!("summary-module-definition-counts-{field}-{name}"),
+                Document::Summary,
+                value,
+                "malformed_response",
+                None,
+            ));
+        }
+        let mut value = base_summary();
+        let mut counts = json!({"entity_types":1,"properties":0,"relation_types":0});
+        counts.as_object_mut().unwrap().remove(field);
+        value["facts"]["ontology_composition"]["modules"][0]["definition_counts"] = counts;
+        cases.push(invalid(
+            &format!("summary-module-definition-counts-missing-{field}"),
+            Document::Summary,
+            value,
+            "malformed_response",
+            None,
+        ));
+    }
+    for (name, counts) in [
+        (
+            "unknown-key",
+            json!({"entity_types":1,"properties":0,"relation_types":0,"extra":0}),
+        ),
+        ("non-object", json!(1)),
+        ("array", json!([])),
+    ] {
+        let mut value = base_summary();
+        value["facts"]["ontology_composition"]["modules"][0]["definition_counts"] = counts;
+        cases.push(invalid(
+            &format!("summary-module-definition-counts-{name}"),
+            Document::Summary,
+            value,
+            "malformed_response",
+            None,
+        ));
+    }
+    cases
+}
+
 /// Cases for the Project summary document and the optional manifest fields.
 /// Appended after the clone-oriented cases, which stay unchanged.
 fn summary_cases() -> Vec<Case> {
@@ -2000,6 +2136,13 @@ fn checked_in_contract_artifacts_match_rust_authority() {
                 cases: module_metadata_cases(),
             }),
         ),
+        (
+            "module-definition-counts-conformance.json",
+            pretty(&Corpus {
+                format: "graphforge-discovery-conformance/1".into(),
+                cases: module_definition_count_cases(),
+            }),
+        ),
     ];
     if std::env::var_os("GRAPHFORGE_UPDATE_DISCOVERY_ARTIFACTS").is_some() {
         let dir = root().join("docs/reference/discovery/v1");
@@ -2016,6 +2159,7 @@ fn checked_in_contract_artifacts_match_rust_authority() {
         LINEAGE_SCHEMA,
         FIXTURES,
         MODULE_METADATA_FIXTURES,
+        MODULE_DEFINITION_COUNT_FIXTURES,
     ]) {
         assert_eq!(
             actual.as_bytes(),
@@ -2023,9 +2167,13 @@ fn checked_in_contract_artifacts_match_rust_authority() {
             "{name} is stale; regenerate with GRAPHFORGE_UPDATE_DISCOVERY_ARTIFACTS=1 cargo test -p graphforge-discovery --test contract_artifacts"
         );
     }
-    let cases = [FIXTURES, MODULE_METADATA_FIXTURES]
-        .into_iter()
-        .flat_map(|fixture| serde_json::from_str::<Corpus>(fixture).unwrap().cases);
+    let cases = [
+        FIXTURES,
+        MODULE_METADATA_FIXTURES,
+        MODULE_DEFINITION_COUNT_FIXTURES,
+    ]
+    .into_iter()
+    .flat_map(|fixture| serde_json::from_str::<Corpus>(fixture).unwrap().cases);
     for case in cases {
         let result = match case.document {
             Document::Manifest => {

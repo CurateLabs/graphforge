@@ -122,6 +122,9 @@
                       "content_digest": {
                         "$ref": "#/$defs/digest"
                       },
+                      "definition_counts": {
+                        "$ref": "#/$defs/module_definition_counts"
+                      },
                       "description": {
                         "$ref": "#/$defs/module_description"
                       },
@@ -404,6 +407,39 @@
         "updated_at"
       ],
       "type": "object"
+    },
+    "module_definition_counts": {
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "entity_types": {
+              "maximum": 4294967295,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "properties": {
+              "maximum": 4294967295,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "relation_types": {
+              "maximum": 4294967295,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "entity_types",
+            "properties",
+            "relation_types"
+          ],
+          "type": "object"
+        },
+        {
+          "type": "null"
+        }
+      ]
     },
     "module_description": {
       "anyOf": [

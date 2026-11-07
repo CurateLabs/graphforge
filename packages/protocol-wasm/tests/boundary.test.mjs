@@ -23,6 +23,15 @@ discovery.cases.push(
     "module-metadata-conformance.json",
   ).cases,
 );
+discovery.cases.push(
+  ...readJson(
+    "docs",
+    "reference",
+    "discovery",
+    "v1",
+    "module-definition-counts-conformance.json",
+  ).cases,
+);
 const manifestCase = discovery.cases.find(
   ({ name }) => name === "manifest-minor-compatible-and-canonical",
 );
@@ -71,7 +80,7 @@ test("an object and its JSON text get the identical verdict, corpus-wide", () =>
     }
     compared += 1;
   }
-  assert.equal(compared, 154);
+  assert.equal(compared, 188);
 });
 
 test("object and text input agree on surrogates, -0, exponents, duplicate and __proto__ keys", () => {

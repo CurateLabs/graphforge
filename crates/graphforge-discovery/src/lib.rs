@@ -67,8 +67,8 @@ pub use module_version_order::{
 };
 pub use summary::{
     ProjectSummary, SummaryCorpusSize, SummaryFacts, SummaryGeographicCoverage, SummaryMetadata,
-    SummaryOntologyComposition, SummaryOntologyModule, SummaryPackageReference,
-    SummaryTemporalCoverage,
+    SummaryModuleDefinitionCounts, SummaryOntologyComposition, SummaryOntologyModule,
+    SummaryPackageReference, SummaryTemporalCoverage,
 };
 
 use serde::de::{self, MapAccess, SeqAccess, Visitor};

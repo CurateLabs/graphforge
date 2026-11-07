@@ -19,8 +19,9 @@ use graphforge_discovery::{
     BridgeSetDescriptor, DiscoveryLimits, ONTOLOGY_MODULE_METADATA_CAPABILITY, PORTABLE_FORMAT,
     PROJECT_SUMMARY_CAPABILITY, PROJECT_SUMMARY_FORMAT, ProjectSummary, ProtocolRequirement,
     ProtocolVersion, RepositoryIdentity, ResearchLineage, Sha256Digest, SummaryCorpusSize,
-    SummaryFacts, SummaryGeographicCoverage, SummaryMetadata, SummaryOntologyComposition,
-    SummaryOntologyModule, SummaryPackageReference, SummaryTemporalCoverage,
+    SummaryFacts, SummaryGeographicCoverage, SummaryMetadata, SummaryModuleDefinitionCounts,
+    SummaryOntologyComposition, SummaryOntologyModule, SummaryPackageReference,
+    SummaryTemporalCoverage,
 };
 use graphforge_storage::{
     MAX_WORKSPACE_RESEARCH_METADATA_BYTES, PortableFileRef, PortablePackageIndex,
@@ -55,9 +56,9 @@ pub struct ProjectSummaryRequest<'a> {
 /// Fully verify a portable package, then derive its validated [`ProjectSummary`].
 ///
 /// Absent `workspace/research_metadata` yields empty metadata and absent
-/// `workspace/configuration` yields ontology mode `none`. Counts are the
-/// metadata's declared `corpus_size` plus facts read from the authenticated
-/// manifest; no graph payload is read.
+/// `workspace/configuration` yields ontology mode `none`. Row counts are the metadata's declared `corpus_size`;
+/// definition counts are array lengths from each verified module document.
+/// Other facts come from the authenticated manifest; no graph payload is read.
 ///
 /// # Errors
 /// Returns the portable verifier's error for any package defect,
@@ -254,6 +255,19 @@ fn composition_facts(
                 // Full verification proved this document's canonical module
                 // identity. The index binds these exact bytes to that same
                 // package digest, never to a mutable local inventory.
+                let definition_count = |length| {
+                    u32::try_from(length).map_err(|error: std::num::TryFromIntError| {
+                        DiscoveryPortableError::Participant {
+                            participant: "ontology module document",
+                            message: error.to_string(),
+                        }
+                    })
+                };
+                let definition_counts = SummaryModuleDefinitionCounts {
+                    entity_types: definition_count(document.entity_types.len())?,
+                    properties: definition_count(document.properties.len())?,
+                    relation_types: definition_count(document.relation_types.len())?,
+                };
                 Ok(SummaryOntologyModule {
                     id: module.ontology_id.clone(),
                     version: module.version.clone(),
@@ -265,6 +279,7 @@ fn composition_facts(
                     license: document.license,
                     forked_from: document.forked_from,
                     version_order: document.version_order,
+                    definition_counts: Some(definition_counts),
                 })
             })
             .collect::<Result<_, DiscoveryPortableError>>()?,
