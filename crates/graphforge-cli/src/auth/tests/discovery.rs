@@ -23,6 +23,7 @@ pub(crate) fn unavailable_vault_transport<T: Transport>(inner: T) -> CloneTransp
         inner,
         hub: template.hub,
         metadata: template.metadata,
+        descriptor: template.descriptor,
         identity: template.identity,
         discovery_acquire: Box::new(|| {
             session_lookup(

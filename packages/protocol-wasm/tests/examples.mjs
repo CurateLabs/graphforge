@@ -197,7 +197,23 @@ const sourceTransition = JSON.parse(
     "item-source-conformance.json",
   ).cases.find((c) => c.expected.plan).json,
 );
+const control = readJson(
+  "docs",
+  "contracts",
+  "hub-control",
+  "v1",
+  "conformance.json",
+);
 export const EXPORTS = {
+  validate_hub_control_request: {
+    args: [control.cases[0].request],
+    optional: [],
+  },
+  validate_hub_control_response: {
+    args: [control.cases[0].request, control.cases[0].response],
+    optional: [],
+  },
+  prepare_hub_management_plan: { args: [control.plan_input], optional: [] },
   assess_retained_manifest: {
     args: [JSON.stringify(admission.manifest)],
     optional: [],

@@ -14,8 +14,8 @@ use graphforge_discovery::{
 use std::io::Read;
 
 pub(super) struct ItemReference {
-    id: ItemId,
-    version: Option<String>,
+    pub(super) id: ItemId,
+    pub(super) version: Option<String>,
 }
 
 pub(super) fn parse_reference(
@@ -178,7 +178,11 @@ fn snapshot_document(
     fetch_document(&scoped, &url, credentials, retry)
 }
 
-fn item_url(hub: &Url, id: &ItemId, version: Option<&str>) -> Result<Url, graphforge_api::GfError> {
+pub(super) fn item_url(
+    hub: &Url,
+    id: &ItemId,
+    version: Option<&str>,
+) -> Result<Url, graphforge_api::GfError> {
     let mut url = hub.clone();
     url.path_segments_mut()
         .map_err(|()| invalid("invalid Hub URL"))?
@@ -274,6 +278,7 @@ pub(super) fn fetch(
     let descriptor =
         ItemDescriptor::from_json(&bytes, limits).map_err(|error| protocol_error(&error))?;
     validate_descriptor_selection(&descriptor, reference, version, pin.as_ref())?;
+    transport.item_descriptor_verified(&url, &descriptor)?;
     let (_, base) = parse_input_at(&descriptor.repository.canonical_name(), Some(hub.as_str()))?;
     let refs_bytes = snapshot_document(
         transport,

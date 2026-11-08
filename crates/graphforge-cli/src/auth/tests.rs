@@ -2,6 +2,7 @@ use super::*;
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 
+mod control;
 mod denial_origin;
 mod device_expiry;
 mod discovery;
@@ -397,13 +398,14 @@ fn download_transport(
             calls: RefCell::new(Vec::new()),
         },
         hub: origin(DEFAULT_HUB).unwrap(),
-        metadata: RefCell::new([
+        metadata: RefCell::new(vec![
             Url::parse("https://graphforge.sh/owner/repo/.gf/refs").unwrap(),
             Url::parse("https://graphforge.sh/owner/repo/.gf/manifest").unwrap(),
         ]),
-        identity: std::rc::Rc::new(RefCell::new(
+        descriptor: None,
+        identity: std::rc::Rc::new(RefCell::new(Some(
             graphforge_discovery::RepositoryIdentity::parse("owner/repo").unwrap(),
-        )),
+        ))),
         discovery_acquire: Box::new(|| panic!("unexpected discovery vault access")),
         discovery_token: RefCell::new(None),
         acquire,
@@ -948,13 +950,14 @@ fn private_clone_authenticates_metadata_and_objects_then_imports_and_reopens_fix
             object,
         },
         hub: origin(DEFAULT_HUB).unwrap(),
-        metadata: RefCell::new([
+        metadata: RefCell::new(vec![
             Url::parse("https://graphforge.sh/opendata/openalex/.gf/refs").unwrap(),
             Url::parse("https://graphforge.sh/opendata/openalex/.gf/manifest").unwrap(),
         ]),
-        identity: std::rc::Rc::new(RefCell::new(
+        descriptor: None,
+        identity: std::rc::Rc::new(RefCell::new(Some(
             graphforge_discovery::RepositoryIdentity::parse("opendata/openalex").unwrap(),
-        )),
+        ))),
         discovery_acquire: Box::new(|| Ok(Some("workos-secret".into()))),
         discovery_token: RefCell::new(None),
         acquire: Box::new(move || {
@@ -1213,9 +1216,9 @@ fn moved_private_transport(
     for reference in &mut refs.refs {
         reference.validator = manifest.canonical_digest().unwrap();
     }
-    let identity = std::rc::Rc::new(RefCell::new(
+    let identity = std::rc::Rc::new(RefCell::new(Some(
         graphforge_discovery::RepositoryIdentity::parse("opendata/openalex").unwrap(),
-    ));
+    )));
     let current = identity.clone();
     let grants = std::rc::Rc::new(RefCell::new(Vec::new()));
     let acquired = grants.clone();
@@ -1239,18 +1242,22 @@ fn moved_private_transport(
             calls: RefCell::new(Vec::new()),
         },
         hub: origin(DEFAULT_HUB).unwrap(),
-        metadata: RefCell::new([
+        metadata: RefCell::new(vec![
             Url::parse("https://graphforge.sh/opendata/openalex/.gf/refs").unwrap(),
             Url::parse("https://graphforge.sh/opendata/openalex/.gf/manifest").unwrap(),
         ]),
+        descriptor: None,
         identity,
         discovery_acquire: Box::new(|| Ok(Some("workos-secret".into()))),
         discovery_token: RefCell::new(Some("workos-secret".into())),
         acquire: Box::new(move || {
             acquired
                 .borrow_mut()
-                .push(current.borrow().canonical_name());
-            assert_eq!(current.borrow().canonical_name(), "research/renamed");
+                .push(current.borrow().as_ref().unwrap().canonical_name());
+            assert_eq!(
+                current.borrow().as_ref().unwrap().canonical_name(),
+                "research/renamed"
+            );
             Ok(Some(RepositoryToken {
                 token: "new-repository-secret".into(),
                 origin: object_origin.clone(),

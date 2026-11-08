@@ -32,7 +32,7 @@ release operators. They are not prerequisites for a student research project.
   conformance authority is identified in [TCK compliance](tck-compliance.md).
 - [Graph Scale Index](graph-scale-index.md) and
   [scale evaluation](scale-evaluation.md) define profiling and benchmark methods.
-- `discovery/` and `hub-publish/` contain protocol contracts for integration
+- [`hub-control/v1/`](hub-control/v1/README.md), `discovery/` and `hub-publish/` contain protocol contracts for integration
   developers.
 - The JSON schema inventories describe exact machine-readable contracts.
 

@@ -329,9 +329,7 @@ pub(crate) fn run_hub_command(
         crate::Command::Publish(args) => {
             run(&args, project, project_dir, json, output, diagnostics)
         }
-        crate::Command::Hub(args) => {
-            Ok(crate::hub_clone::run_hub(&args, json, output).map(|()| 0)?)
-        }
+        crate::Command::Hub(args) => Ok(crate::hub_clone::run_hub(&args, json, output)?),
         _ => unreachable!("only Hub commands are dispatched here"),
     }
 }

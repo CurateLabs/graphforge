@@ -1,0 +1,123 @@
+{
+  "format": "graphforge-hub-control-conformance/1",
+  "plan_input": {
+    "hub_origin": "https://graphforge.sh",
+    "operation_uuid": "00000000-0000-4000-8000-000000000002",
+    "mutation": {
+      "kind": "rename",
+      "repository_id": "repository-key",
+      "name": "renamed"
+    },
+    "precondition": {
+      "authority_revision": "lease-1",
+      "object_revision": "revision-1"
+    },
+    "expires_at_ms": 2000000000000
+  },
+  "plan": {
+    "hub_origin": "https://graphforge.sh",
+    "operation_uuid": "00000000-0000-4000-8000-000000000002",
+    "mutation": {
+      "kind": "rename",
+      "repository_id": "repository-key",
+      "name": "renamed"
+    },
+    "precondition": {
+      "authority_revision": "lease-1",
+      "object_revision": "revision-1"
+    },
+    "expires_at_ms": 2000000000000,
+    "intent_digest": "sha256:70025e6d5690879bd0e6daa189e7ad8190e41b478bd9c4dc8287fc2ff0519ba4"
+  },
+  "cases": [
+    {
+      "name": "public-capabilities",
+      "request": "{\"format\":\"graphforge-hub-control/1\",\"request_uuid\":\"00000000-0000-4000-8000-000000000001\",\"operation\":{\"kind\":\"capabilities\"}}",
+      "response": "{\"format\":\"graphforge-hub-control/1\",\"request_uuid\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"kind\":\"capabilities\",\"capabilities\":[\"public_search\",\"inspect\"]}}",
+      "accept": true
+    },
+    {
+      "name": "public-page-unknown-count",
+      "request": "{\"format\":\"graphforge-hub-control/1\",\"request_uuid\":\"00000000-0000-4000-8000-000000000001\",\"operation\":{\"kind\":\"search\",\"query\":{\"scope\":{\"kind\":\"public\"},\"text\":\"\",\"object_kind\":null,\"tags\":[],\"visibility\":null},\"page\":{\"limit\":2,\"cursor\":null}}}",
+      "response": "{\"format\":\"graphforge-hub-control/1\",\"request_uuid\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"kind\":\"search\",\"records\":[{\"target\":{\"kind\":\"project\",\"repository_id\":\"repository-key\"},\"repository\":{\"repository_id\":\"repository-key\",\"repository\":{\"owner\":\"publisher\",\"repository\":\"project\"},\"revision\":\"revision-1\"},\"account_id\":null,\"title\":\"Literal title\",\"description\":null,\"license\":null,\"tags\":[],\"publisher_kind\":\"personal\",\"visibility\":\"public\",\"actions\":[\"inspect\"],\"ontology\":null,\"producing_core_version\":\"0.6.0-rc.8\",\"starred\":false}],\"page\":{\"next_cursor\":null,\"coverage\":\"partial\",\"total\":{\"kind\":\"unknown\"}}}}",
+      "accept": true
+    },
+    {
+      "name": "public-rejects-private",
+      "request": "{\"format\":\"graphforge-hub-control/1\",\"request_uuid\":\"00000000-0000-4000-8000-000000000001\",\"operation\":{\"kind\":\"search\",\"query\":{\"scope\":{\"kind\":\"public\"},\"text\":\"\",\"object_kind\":null,\"tags\":[],\"visibility\":null},\"page\":{\"limit\":2,\"cursor\":null}}}",
+      "response": "{\"format\":\"graphforge-hub-control/1\",\"request_uuid\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"kind\":\"search\",\"records\":[{\"target\":{\"kind\":\"project\",\"repository_id\":\"repository-key\"},\"repository\":{\"repository_id\":\"repository-key\",\"repository\":{\"owner\":\"publisher\",\"repository\":\"project\"},\"revision\":\"revision-1\"},\"account_id\":null,\"title\":\"Literal title\",\"description\":null,\"license\":null,\"tags\":[],\"publisher_kind\":\"personal\",\"visibility\":\"private\",\"actions\":[\"inspect\"],\"ontology\":null,\"producing_core_version\":\"0.6.0-rc.8\",\"starred\":false}],\"page\":{\"next_cursor\":null,\"coverage\":\"partial\",\"total\":{\"kind\":\"unknown\"}}}}",
+      "accept": false
+    },
+    {
+      "name": "duplicate-record",
+      "request": "{\"format\":\"graphforge-hub-control/1\",\"request_uuid\":\"00000000-0000-4000-8000-000000000001\",\"operation\":{\"kind\":\"search\",\"query\":{\"scope\":{\"kind\":\"public\"},\"text\":\"\",\"object_kind\":null,\"tags\":[],\"visibility\":null},\"page\":{\"limit\":2,\"cursor\":null}}}",
+      "response": "{\"format\":\"graphforge-hub-control/1\",\"request_uuid\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"kind\":\"search\",\"records\":[{\"target\":{\"kind\":\"project\",\"repository_id\":\"repository-key\"},\"repository\":{\"repository_id\":\"repository-key\",\"repository\":{\"owner\":\"publisher\",\"repository\":\"project\"},\"revision\":\"revision-1\"},\"account_id\":null,\"title\":\"Literal title\",\"description\":null,\"license\":null,\"tags\":[],\"publisher_kind\":\"personal\",\"visibility\":\"public\",\"actions\":[\"inspect\"],\"ontology\":null,\"producing_core_version\":\"0.6.0-rc.8\",\"starred\":false},{\"target\":{\"kind\":\"project\",\"repository_id\":\"repository-key\"},\"repository\":{\"repository_id\":\"repository-key\",\"repository\":{\"owner\":\"publisher\",\"repository\":\"project\"},\"revision\":\"revision-1\"},\"account_id\":null,\"title\":\"Literal title\",\"description\":null,\"license\":null,\"tags\":[],\"publisher_kind\":\"personal\",\"visibility\":\"public\",\"actions\":[\"inspect\"],\"ontology\":null,\"producing_core_version\":\"0.6.0-rc.8\",\"starred\":false}],\"page\":{\"next_cursor\":null,\"coverage\":\"partial\",\"total\":{\"kind\":\"unknown\"}}}}",
+      "accept": false
+    },
+    {
+      "name": "unsupported-capability",
+      "request": "{\"format\":\"graphforge-hub-control/1\",\"request_uuid\":\"00000000-0000-4000-8000-000000000001\",\"operation\":{\"kind\":\"capabilities\"}}",
+      "response": "{\"format\":\"graphforge-hub-control/1\",\"request_uuid\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"kind\":\"capabilities\",\"capabilities\":[\"execute_shell\"]}}",
+      "accept": false
+    },
+    {
+      "name": "unknown-operation",
+      "request": "{\"format\":\"graphforge-hub-control/1\",\"request_uuid\":\"00000000-0000-4000-8000-000000000001\",\"operation\":{\"kind\":\"execute_shell\"}}",
+      "accept": false
+    },
+    {
+      "name": "unsupported-operation-refusal",
+      "request": "{\"format\":\"graphforge-hub-control/1\",\"request_uuid\":\"00000000-0000-4000-8000-000000000001\",\"operation\":{\"kind\":\"capabilities\"}}",
+      "response": "{\"format\":\"graphforge-hub-control/1\",\"request_uuid\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"kind\":\"failure\",\"code\":\"unsupported_operation\",\"retry_after_ms\":null}}",
+      "accept": true
+    },
+    {
+      "name": "prepared",
+      "request": "{\"format\":\"graphforge-hub-control/1\",\"request_uuid\":\"00000000-0000-4000-8000-000000000001\",\"operation\":{\"kind\":\"prepare\",\"operation_uuid\":\"00000000-0000-4000-8000-000000000002\",\"mutation\":{\"kind\":\"rename\",\"repository_id\":\"repository-key\",\"name\":\"renamed\"}}}",
+      "response": "{\"format\":\"graphforge-hub-control/1\",\"request_uuid\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"kind\":\"prepared\",\"plan\":{\"hub_origin\":\"https://graphforge.sh\",\"operation_uuid\":\"00000000-0000-4000-8000-000000000002\",\"mutation\":{\"kind\":\"rename\",\"repository_id\":\"repository-key\",\"name\":\"renamed\"},\"precondition\":{\"authority_revision\":\"lease-1\",\"object_revision\":\"revision-1\"},\"expires_at_ms\":2000000000000,\"intent_digest\":\"sha256:70025e6d5690879bd0e6daa189e7ad8190e41b478bd9c4dc8287fc2ff0519ba4\"}}}",
+      "accept": true
+    },
+    {
+      "name": "apply-prepared",
+      "request": "{\"format\":\"graphforge-hub-control/1\",\"request_uuid\":\"00000000-0000-4000-8000-000000000001\",\"operation\":{\"kind\":\"apply\",\"plan\":{\"hub_origin\":\"https://graphforge.sh\",\"operation_uuid\":\"00000000-0000-4000-8000-000000000002\",\"mutation\":{\"kind\":\"rename\",\"repository_id\":\"repository-key\",\"name\":\"renamed\"},\"precondition\":{\"authority_revision\":\"lease-1\",\"object_revision\":\"revision-1\"},\"expires_at_ms\":2000000000000,\"intent_digest\":\"sha256:70025e6d5690879bd0e6daa189e7ad8190e41b478bd9c4dc8287fc2ff0519ba4\"}}}",
+      "response": "{\"format\":\"graphforge-hub-control/1\",\"request_uuid\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"kind\":\"receipt\",\"receipt\":{\"operation_uuid\":\"00000000-0000-4000-8000-000000000002\",\"intent_digest\":\"sha256:70025e6d5690879bd0e6daa189e7ad8190e41b478bd9c4dc8287fc2ff0519ba4\",\"state\":\"prepared\",\"refusal\":null,\"record\":null}}}",
+      "accept": true
+    },
+    {
+      "name": "apply-pending",
+      "request": "{\"format\":\"graphforge-hub-control/1\",\"request_uuid\":\"00000000-0000-4000-8000-000000000001\",\"operation\":{\"kind\":\"apply\",\"plan\":{\"hub_origin\":\"https://graphforge.sh\",\"operation_uuid\":\"00000000-0000-4000-8000-000000000002\",\"mutation\":{\"kind\":\"rename\",\"repository_id\":\"repository-key\",\"name\":\"renamed\"},\"precondition\":{\"authority_revision\":\"lease-1\",\"object_revision\":\"revision-1\"},\"expires_at_ms\":2000000000000,\"intent_digest\":\"sha256:70025e6d5690879bd0e6daa189e7ad8190e41b478bd9c4dc8287fc2ff0519ba4\"}}}",
+      "response": "{\"format\":\"graphforge-hub-control/1\",\"request_uuid\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"kind\":\"receipt\",\"receipt\":{\"operation_uuid\":\"00000000-0000-4000-8000-000000000002\",\"intent_digest\":\"sha256:70025e6d5690879bd0e6daa189e7ad8190e41b478bd9c4dc8287fc2ff0519ba4\",\"state\":\"pending\",\"refusal\":null,\"record\":null}}}",
+      "accept": true
+    },
+    {
+      "name": "apply-applied",
+      "request": "{\"format\":\"graphforge-hub-control/1\",\"request_uuid\":\"00000000-0000-4000-8000-000000000001\",\"operation\":{\"kind\":\"apply\",\"plan\":{\"hub_origin\":\"https://graphforge.sh\",\"operation_uuid\":\"00000000-0000-4000-8000-000000000002\",\"mutation\":{\"kind\":\"rename\",\"repository_id\":\"repository-key\",\"name\":\"renamed\"},\"precondition\":{\"authority_revision\":\"lease-1\",\"object_revision\":\"revision-1\"},\"expires_at_ms\":2000000000000,\"intent_digest\":\"sha256:70025e6d5690879bd0e6daa189e7ad8190e41b478bd9c4dc8287fc2ff0519ba4\"}}}",
+      "response": "{\"format\":\"graphforge-hub-control/1\",\"request_uuid\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"kind\":\"receipt\",\"receipt\":{\"operation_uuid\":\"00000000-0000-4000-8000-000000000002\",\"intent_digest\":\"sha256:70025e6d5690879bd0e6daa189e7ad8190e41b478bd9c4dc8287fc2ff0519ba4\",\"state\":\"applied\",\"refusal\":null,\"record\":null}}}",
+      "accept": true
+    },
+    {
+      "name": "apply-refused",
+      "request": "{\"format\":\"graphforge-hub-control/1\",\"request_uuid\":\"00000000-0000-4000-8000-000000000001\",\"operation\":{\"kind\":\"apply\",\"plan\":{\"hub_origin\":\"https://graphforge.sh\",\"operation_uuid\":\"00000000-0000-4000-8000-000000000002\",\"mutation\":{\"kind\":\"rename\",\"repository_id\":\"repository-key\",\"name\":\"renamed\"},\"precondition\":{\"authority_revision\":\"lease-1\",\"object_revision\":\"revision-1\"},\"expires_at_ms\":2000000000000,\"intent_digest\":\"sha256:70025e6d5690879bd0e6daa189e7ad8190e41b478bd9c4dc8287fc2ff0519ba4\"}}}",
+      "response": "{\"format\":\"graphforge-hub-control/1\",\"request_uuid\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"kind\":\"receipt\",\"receipt\":{\"operation_uuid\":\"00000000-0000-4000-8000-000000000002\",\"intent_digest\":\"sha256:70025e6d5690879bd0e6daa189e7ad8190e41b478bd9c4dc8287fc2ff0519ba4\",\"state\":\"refused\",\"refusal\":\"stale_plan\",\"record\":null}}}",
+      "accept": true
+    },
+    {
+      "name": "idempotency-conflict",
+      "request": "{\"format\":\"graphforge-hub-control/1\",\"request_uuid\":\"00000000-0000-4000-8000-000000000001\",\"operation\":{\"kind\":\"apply\",\"plan\":{\"hub_origin\":\"https://graphforge.sh\",\"operation_uuid\":\"00000000-0000-4000-8000-000000000002\",\"mutation\":{\"kind\":\"rename\",\"repository_id\":\"repository-key\",\"name\":\"renamed\"},\"precondition\":{\"authority_revision\":\"lease-1\",\"object_revision\":\"revision-1\"},\"expires_at_ms\":2000000000000,\"intent_digest\":\"sha256:70025e6d5690879bd0e6daa189e7ad8190e41b478bd9c4dc8287fc2ff0519ba4\"}}}",
+      "response": "{\"format\":\"graphforge-hub-control/1\",\"request_uuid\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"kind\":\"failure\",\"code\":\"idempotency_conflict\",\"retry_after_ms\":null}}",
+      "accept": true
+    },
+    {
+      "name": "status-pending",
+      "request": "{\"format\":\"graphforge-hub-control/1\",\"request_uuid\":\"00000000-0000-4000-8000-000000000001\",\"operation\":{\"kind\":\"status\",\"operation_uuid\":\"00000000-0000-4000-8000-000000000002\",\"intent_digest\":\"sha256:70025e6d5690879bd0e6daa189e7ad8190e41b478bd9c4dc8287fc2ff0519ba4\"}}",
+      "response": "{\"format\":\"graphforge-hub-control/1\",\"request_uuid\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"kind\":\"receipt\",\"receipt\":{\"operation_uuid\":\"00000000-0000-4000-8000-000000000002\",\"intent_digest\":\"sha256:70025e6d5690879bd0e6daa189e7ad8190e41b478bd9c4dc8287fc2ff0519ba4\",\"state\":\"pending\",\"refusal\":null,\"record\":null}}}",
+      "accept": true
+    },
+    {
+      "name": "wrong-receipt-target",
+      "request": "{\"format\":\"graphforge-hub-control/1\",\"request_uuid\":\"00000000-0000-4000-8000-000000000001\",\"operation\":{\"kind\":\"apply\",\"plan\":{\"hub_origin\":\"https://graphforge.sh\",\"operation_uuid\":\"00000000-0000-4000-8000-000000000002\",\"mutation\":{\"kind\":\"rename\",\"repository_id\":\"repository-key\",\"name\":\"renamed\"},\"precondition\":{\"authority_revision\":\"lease-1\",\"object_revision\":\"revision-1\"},\"expires_at_ms\":2000000000000,\"intent_digest\":\"sha256:70025e6d5690879bd0e6daa189e7ad8190e41b478bd9c4dc8287fc2ff0519ba4\"}}}",
+      "response": "{\"format\":\"graphforge-hub-control/1\",\"request_uuid\":\"00000000-0000-4000-8000-000000000001\",\"result\":{\"kind\":\"receipt\",\"receipt\":{\"operation_uuid\":\"00000000-0000-4000-8000-000000000002\",\"intent_digest\":\"sha256:70025e6d5690879bd0e6daa189e7ad8190e41b478bd9c4dc8287fc2ff0519ba4\",\"state\":\"applied\",\"refusal\":null,\"record\":{\"target\":{\"kind\":\"project\",\"repository_id\":\"other\"},\"repository\":{\"repository_id\":\"other\",\"repository\":{\"owner\":\"publisher\",\"repository\":\"project\"},\"revision\":\"revision-1\"},\"account_id\":null,\"title\":\"Literal title\",\"description\":null,\"license\":null,\"tags\":[],\"publisher_kind\":\"personal\",\"visibility\":\"public\",\"actions\":[\"inspect\"],\"ontology\":null,\"producing_core_version\":\"0.6.0-rc.8\",\"starred\":false}}}}",
+      "accept": false
+    }
+  ]
+}

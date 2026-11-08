@@ -17,6 +17,9 @@
 /// Closed, bounded images independent of native Project packages.
 pub mod preview;
 
+/// Shared catalog/account metadata and reviewed hosted-management control.
+pub mod hub;
+
 mod credit;
 mod input_budget;
 mod item_descriptor;

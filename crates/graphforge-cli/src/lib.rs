@@ -25,6 +25,7 @@ include!(concat!(env!("OUT_DIR"), "/project_skills.rs"));
 mod auth;
 mod diagnostics;
 mod hub_clone;
+mod hub_control;
 pub mod hub_fixture_artifacts;
 mod hub_http;
 mod hub_publish;
