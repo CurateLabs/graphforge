@@ -200,6 +200,12 @@ pub fn validate_item_descriptor(
     })
 }
 
+/// Assess retained coverage without admitting retired controls for current use.
+#[wasm_bindgen(unchecked_return_type = "RetainedManifestInspection")]
+pub fn assess_retained_manifest(manifest: &str) -> Result<JsValue, JsValue> {
+    run(|| engine::assess_retained_manifest(manifest.as_bytes()))
+}
+
 /// Parse and validate a discovery manifest; returns its canonical form and digest.
 #[wasm_bindgen(unchecked_return_type = "ValidatedManifest")]
 pub fn validate_manifest(

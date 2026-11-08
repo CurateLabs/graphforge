@@ -198,6 +198,10 @@ const sourceTransition = JSON.parse(
   ).cases.find((c) => c.expected.plan).json,
 );
 export const EXPORTS = {
+  assess_retained_manifest: {
+    args: [JSON.stringify(admission.manifest)],
+    optional: [],
+  },
   plan_item_source_transition: { args: [sourceTransition], optional: [] },
   item_admission_requirements: { args: [admission.manifest], optional: [] },
   plan_item_admission: { args: [admission], optional: [] },

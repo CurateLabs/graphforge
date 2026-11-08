@@ -28,10 +28,12 @@ mod module_metadata;
 mod module_version_order;
 mod rehome;
 mod repository;
+mod retired;
 mod summary;
 
 pub use rehome::{RehomedRepository, RepositorySnapshot, rehome_repository};
 pub use repository::{ObjectLocationTemplate, RepositoryMoved};
+pub use retired::RetiredManifest;
 
 pub use credit::{CreditSignature, ROLE_AUTHOR, ROLE_COMMITTER, SummaryPerson};
 pub use item_descriptor::{

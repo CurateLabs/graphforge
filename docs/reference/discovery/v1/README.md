@@ -291,11 +291,38 @@ GRAPHFORGE_UPDATE_DISCOVERY_ARTIFACTS=1 \
 
 ## Project summary and ontology descriptors (protocol 1.2)
 
-`ProtocolVersion::CURRENT` is 1.2. Versions 1.0 and 1.1 were never released and
-are retired: the manifest gained two optional fields (1.1) and every package
-reference gained the required `producing_core_version` (1.2), and readers reject
+`ProtocolVersion::CURRENT` is 1.2. The 0.6.0-rc.1 through rc.5 releases
+emitted protocol 1.1. Protocols 1.0 and 1.1 are retired: the manifest gained two
+optional fields (1.1) and every package reference gained the required `producing_core_version` (1.2), and readers reject
 unknown fields and missing required fields. A manifest that carries neither
 optional field is still valid, and clone consumers need neither.
+
+For retained-history coverage only, `assess_retained_manifest` returns `current`
+for strict current controls (the host still needs all current publication proof),
+or `retired_no_claims` for the historical family admitted by Core
+`9cbb410719d1d463bdb9c9f3b6d67b39bd27e391`: producer version absent,
+`portable-v2@1` as the only supported required capability, and lineage
+`graphforge-research-lineage/1` when advertised. Optional unknown capabilities
+remain optional; protocol minors remain forward compatible. Every module or
+bridge-set entry causes refusal, including opaque IDs and entries without a
+package. An empty ontology still requires a valid composition digest.
+
+The assessment preserves the canonical controls, their SHA-256, repository and
+immutable version. Hosts must compare those with the original stored bytes,
+validator, immutable identity and receipt. The producing Core version remains
+unknown; it is never inferred from the historical family's source revision.
+No publisher authority, origin, retained refs, descriptor eligibility, lineage
+object validity or package import compatibility is proved. This result cannot
+serve, clone, admit, rehome or resolve retired controls. Unknown forms,
+duplicate members, unsupported requirements and bounded-input violations fail
+closed; strict current discovery remains unchanged.
+
+[Retired manifest conformance](retired-manifest-conformance.json) records
+verbatim historical inputs, source commit/path/file SHA-256, per-input SHA-256
+and canonical expectations, followed by explicitly synthetic negative cases.
+To reproduce the historical source, run
+`git show 9cbb410719d1d463bdb9c9f3b6d67b39bd27e391:docs/reference/discovery/v1/conformance.json`.
+Rust and packaged-WASM tests replay this corpus through the native assessment.
 
 - `summary { format, summary_digest, object_digest }` selects a Project summary
   object from `objects` by `object_digest`, the same way `package` selects the

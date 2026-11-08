@@ -189,6 +189,19 @@ with the code Rust returns: `malformed_response`, `unsupported_future`,
 was not the JSON value or string the export needs, or was an invalid permanent
 item reference.
 
+For retained-history coverage, `assess_retained_manifest(manifestText)` returns
+`{ assessment, canonical_json, digest }`. `assessment.revision` is `current` or
+`retired_no_claims`. The latter carries the original `repository` and
+`immutable_version` and proves only that a recognized retired manifest advertises
+zero ontology modules and bridge sets. It requires no refs or origin, invents
+none, and leaves the producing Core version unknown. Any retired inventory
+entry, unknown family, malformed input, duplicate member or exceeded bound is
+refused. Hosts must compare the returned canonical bytes, digest and immutable
+identity with their retained record and receipt; `current` still requires all
+existing publication proof. The assessment grants no serving, cloning,
+admission, rehome, resolution or descriptor eligibility. See the
+[historical contract and corpus](../../docs/reference/discovery/v1/README.md#project-summary-and-ontology-descriptors-protocol-12).
+
 For a host publication mutation, `item_admission_requirements(manifest)` derives
 canonical query keys before database reads, then
 `plan_item_admission({manifest, publisher_account_id, facts})` evaluates complete

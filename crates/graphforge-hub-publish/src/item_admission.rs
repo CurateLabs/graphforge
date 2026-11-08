@@ -202,6 +202,71 @@ fn text(value: &str) -> Result<(), HubPublishError> {
     Ok(())
 }
 
+/// Coverage classification only; never authority to serve, clone, admit,
+/// rehome or resolve a publication or its advertised items.
+#[derive(Debug, Serialize)]
+#[cfg_attr(feature = "typescript", derive(tsify::Tsify))]
+#[serde(tag = "revision", rename_all = "snake_case")]
+pub enum RetainedManifestAssessment {
+    /// Strict current discovery accepted the manifest. The host must still
+    /// obtain its complete current receipt, refs, publisher and item proof.
+    Current,
+    /// Recognized retired controls advertise no module or bridge-set entries.
+    /// No producer, publisher, origin, refs or descriptor eligibility is proved.
+    RetiredNoClaims {
+        /// Repository named by the original controls.
+        repository: RepositoryIdentity,
+        /// Immutable version named by the original controls.
+        immutable_version: Sha256Digest,
+    },
+}
+
+/// Assess retained controls and return their original canonical representation.
+/// Hosts must bind these bytes and their digest to their stored immutable row
+/// and receipt. Retired inventory is refused even for non-permanent IDs.
+pub fn assess_retained_manifest(
+    bytes: &[u8],
+) -> Result<(RetainedManifestAssessment, Vec<u8>), HubPublishError> {
+    let limits = DiscoveryLimits::default();
+    if bytes.len() > limits.max_response_bytes {
+        return Err(invalid("item admission manifest exceeds its byte bound"));
+    }
+    let current_error = match DiscoveryManifest::from_json(bytes, limits) {
+        Ok(manifest) => {
+            let canonical = manifest
+                .to_canonical_json()
+                .map_err(|_| invalid("item admission manifest is invalid"))?;
+            return Ok((RetainedManifestAssessment::Current, canonical));
+        }
+        Err(error) => error,
+    };
+    if let Ok(retired) = graphforge_discovery::RetiredManifest::from_json(bytes, limits) {
+        if retired.advertises_inventory() {
+            return Err(invalid(
+                "retired manifest inventory cannot be proved claim-free",
+            ));
+        }
+        let canonical = retired
+            .to_canonical_json()
+            .map_err(|_| invalid("item admission manifest is invalid"))?;
+        return Ok((
+            RetainedManifestAssessment::RetiredNoClaims {
+                repository: retired.repository().clone(),
+                immutable_version: retired.immutable_version().clone(),
+            },
+            canonical,
+        ));
+    }
+    Err(HubPublishError::new(
+        if current_error.code == DiscoveryErrorCode::UnsupportedFuture {
+            crate::HubPublishErrorCode::UnsupportedFuture
+        } else {
+            crate::HubPublishErrorCode::InvalidInput
+        },
+        "item admission manifest is invalid",
+    ))
+}
+
 /// Derive complete query keys without host-language alias or legacy rules.
 pub fn item_admission_requirements(
     manifest: &DiscoveryManifest,
