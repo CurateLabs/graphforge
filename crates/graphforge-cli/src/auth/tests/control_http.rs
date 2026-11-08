@@ -365,12 +365,23 @@ fn module_transport(
     wire: NativeControl,
     descriptor: &graphforge_discovery::ItemDescriptor,
 ) -> CloneTransport<NativeControl> {
+    module_transport_at(wire, descriptor, DEFAULT_HUB)
+}
+fn module_transport_at(
+    wire: NativeControl,
+    descriptor: &graphforge_discovery::ItemDescriptor,
+    hub: &str,
+) -> CloneTransport<NativeControl> {
     let url = Url::parse(&format!(
-        "{DEFAULT_HUB}/{}/{}",
-        descriptor.id, descriptor.module.version
+        "{}/{}/{}",
+        hub.trim_end_matches('/'),
+        descriptor.id,
+        descriptor.module.version
     ))
     .unwrap();
-    let template = CloneTransport::for_item(url.clone(), None).unwrap();
+    let template =
+        CloneTransport::for_item(&hub_http::hub_base(Some(hub)).unwrap(), url.clone(), None)
+            .unwrap();
     let grant_selection = template.identity.clone();
     let grant_wire = wire.clone();
     CloneTransport {
@@ -378,6 +389,7 @@ fn module_transport(
         hub: template.hub,
         metadata: template.metadata,
         descriptor: template.descriptor,
+        item_base: template.item_base,
         identity: template.identity,
         discovery_acquire: Box::new(|| {
             session_lookup(
@@ -411,6 +423,99 @@ fn module_transport(
             .map(Some)
         }),
         token: RefCell::new(None),
+    }
+}
+#[test]
+fn native_prefixed_item_snapshots_preserve_selected_base_and_credential_allowlist() {
+    let (descriptor, refs, manifest, _) = module_fixture();
+    let base = "https://graphforge.sh/deployment/prefix/";
+    let (wire, task) = server(vec![
+        Reply {
+            status: 404,
+            body: vec![],
+            location: None,
+        },
+        Reply {
+            status: 200,
+            body: serde_json::to_vec(&descriptor).unwrap(),
+            location: None,
+        },
+        Reply {
+            status: 200,
+            body: refs,
+            location: None,
+        },
+        Reply {
+            status: 200,
+            body: manifest,
+            location: None,
+        },
+    ]);
+    let transport = module_transport_at(wire, &descriptor, base);
+    let selected = transport.descriptor.as_ref().unwrap().clone();
+    let accept = (
+        "accept",
+        ureq::http::HeaderValue::from_static(graphforge_discovery::ITEM_DESCRIPTOR_MEDIA_TYPE),
+    );
+    let bypass = (
+        "x-vercel-protection-bypass",
+        ureq::http::HeaderValue::from_static("preview-secret"),
+    );
+    let response = transport
+        .get_discovery(&selected, &[accept, bypass.clone()], 64 * 1024)
+        .unwrap();
+    assert_eq!(response.status, 200);
+    transport
+        .item_descriptor_verified(&selected, &descriptor)
+        .unwrap();
+    let (_, repository) = hub_http::parse_input_at("opendata/openalex", Some(base)).unwrap();
+    let mut refs = hub_http::endpoint(&repository, "refs");
+    refs.query_pairs_mut()
+        .append_pair("revision", &descriptor.discovery.refs_revision.0);
+    let mut manifest = hub_http::endpoint(&repository, "manifest");
+    manifest
+        .query_pairs_mut()
+        .append_pair("validator", &descriptor.discovery.manifest_validator.0);
+    for url in [&refs, &manifest] {
+        assert_eq!(
+            transport
+                .get_discovery(url, std::slice::from_ref(&bypass), 64 * 1024)
+                .unwrap()
+                .status,
+            200
+        );
+    }
+    // Neither another prefix nor another retained snapshot is an identity endpoint.
+    let mut outside = refs.clone();
+    outside.set_path("/opendata/openalex/.gf/refs");
+    assert!(
+        transport
+            .get_discovery(&outside, std::slice::from_ref(&bypass), 1024)
+            .is_err()
+    );
+    let mut other = refs.clone();
+    other.set_query(Some(
+        "revision=sha256%3Affffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    ));
+    assert!(
+        transport
+            .get_discovery(&other, std::slice::from_ref(&bypass), 1024)
+            .is_err()
+    );
+    let requests = task.join().unwrap();
+    assert_eq!(requests.len(), 4);
+    for (index, (head, _)) in requests.iter().enumerate() {
+        assert!(head.starts_with("GET /deployment/prefix/"));
+        assert_eq!(
+            head.to_ascii_lowercase()
+                .contains("authorization: bearer human-session-secret"),
+            index > 0
+        );
+        assert!(
+            head.to_ascii_lowercase()
+                .contains("x-vercel-protection-bypass: preview-secret")
+        );
+        assert!(!head.contains("refresh-secret"));
     }
 }
 #[test]

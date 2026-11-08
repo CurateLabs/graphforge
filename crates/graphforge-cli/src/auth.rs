@@ -870,6 +870,9 @@ pub(crate) struct CloneTransport<T = crate::hub_http::HttpTransport> {
     hub: Url,
     metadata: std::cell::RefCell<Vec<Url>>,
     descriptor: Option<Url>,
+    // Item discovery may live below a deployment prefix. Vault/grant identity
+    // stays on `hub`'s bare origin; retained metadata uses this selected base.
+    item_base: Option<Url>,
     identity: std::rc::Rc<std::cell::RefCell<Option<graphforge_discovery::RepositoryIdentity>>>,
     discovery_acquire: Box<dyn Fn() -> Result<Option<String>, SavedCredentialError>>,
     discovery_token: std::cell::RefCell<Option<String>>,
@@ -951,9 +954,20 @@ impl CloneTransport<crate::hub_http::HttpTransport> {
         let (identity, base) = crate::hub_http::parse_input_at(repository, hub)?;
         Self::for_selection(Some(identity), &base, None, token_env, bypass_env)
     }
-    pub(crate) fn for_item(descriptor: Url, bypass_env: Option<&str>) -> Result<Self, GfError> {
-        let hub = origin(&descriptor.origin().ascii_serialization())?;
-        Self::for_selection(None, &hub, Some(descriptor), None, bypass_env)
+    pub(crate) fn for_item(
+        hub: &Url,
+        descriptor: Url,
+        bypass_env: Option<&str>,
+    ) -> Result<Self, GfError> {
+        crate::hub_http::validate_url(hub)?;
+        if descriptor.origin() != hub.origin()
+            || !descriptor
+                .path()
+                .starts_with(&format!("{}/", hub.path().trim_end_matches('/')))
+        {
+            return Err(denied("item descriptor selection mismatch"));
+        }
+        Self::for_selection(None, hub, Some(descriptor), None, bypass_env)
     }
     fn for_selection(
         selected: Option<graphforge_discovery::RepositoryIdentity>,
@@ -983,11 +997,13 @@ impl CloneTransport<crate::hub_http::HttpTransport> {
         let metadata_env = token_env.clone();
         let bypass_env = bypass_env.map(str::to_owned);
         let metadata_bypass = bypass_env.clone();
+        let item_base = descriptor.as_ref().map(|_| base.clone());
         Ok(Self {
             inner: crate::hub_http::HttpTransport::new(),
             hub,
             metadata: std::cell::RefCell::new(metadata),
             descriptor,
+            item_base,
             identity,
             discovery_acquire: Box::new(move || {
                 saved_bearer(
@@ -1159,7 +1175,12 @@ impl<T: Transport> Transport for CloneTransport<T> {
             .map_err(|_| denied("invalid item descriptor"))?;
         let (_, base) = crate::hub_http::parse_input_at(
             &descriptor.repository.canonical_name(),
-            Some(self.hub.as_str()),
+            Some(
+                self.item_base
+                    .as_ref()
+                    .ok_or_else(|| denied("missing item selection"))?
+                    .as_str(),
+            ),
         )?;
         let mut refs = crate::hub_http::endpoint(&base, "refs");
         refs.query_pairs_mut()

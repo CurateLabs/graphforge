@@ -403,6 +403,7 @@ fn download_transport(
             Url::parse("https://graphforge.sh/owner/repo/.gf/manifest").unwrap(),
         ]),
         descriptor: None,
+        item_base: None,
         identity: std::rc::Rc::new(RefCell::new(Some(
             graphforge_discovery::RepositoryIdentity::parse("owner/repo").unwrap(),
         ))),
@@ -955,6 +956,7 @@ fn private_clone_authenticates_metadata_and_objects_then_imports_and_reopens_fix
             Url::parse("https://graphforge.sh/opendata/openalex/.gf/manifest").unwrap(),
         ]),
         descriptor: None,
+        item_base: None,
         identity: std::rc::Rc::new(RefCell::new(Some(
             graphforge_discovery::RepositoryIdentity::parse("opendata/openalex").unwrap(),
         ))),
@@ -1247,6 +1249,7 @@ fn moved_private_transport(
             Url::parse("https://graphforge.sh/opendata/openalex/.gf/manifest").unwrap(),
         ]),
         descriptor: None,
+        item_base: None,
         identity,
         discovery_acquire: Box::new(|| Ok(Some("workos-secret".into()))),
         discovery_token: RefCell::new(Some("workos-secret".into())),

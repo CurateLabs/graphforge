@@ -82,6 +82,7 @@ pub(crate) fn run_module_fetch(
     let transport = if let Some(reference) = item_fetch::parse_reference(&args.repository)? {
         let hub = crate::hub_http::hub_base(args.hub.as_deref())?;
         crate::auth::CloneTransport::for_item(
+            &hub,
             item_fetch::item_url(
                 &hub,
                 &reference.id,
