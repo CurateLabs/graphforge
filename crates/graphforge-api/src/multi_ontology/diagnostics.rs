@@ -131,6 +131,11 @@ pub(super) fn portable_error(error: graphforge_storage::PortableError) -> GfErro
             "storage.unsupported_filesystem",
             "import onto a local ext4, xfs, btrfs, APFS, or NTFS volume",
         ),
+        PortableErrorCode::InvalidConfiguration => (
+            "GF_VALIDATION",
+            "storage.filesystem_durability_policy",
+            "set GRAPHFORGE_FILESYSTEM_DURABILITY to warn or strict",
+        ),
         PortableErrorCode::InsufficientSpace => (
             "GF_STORAGE",
             "storage.insufficient_space",

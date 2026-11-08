@@ -327,8 +327,15 @@ impl ResolvedProjectGeneration {
         self.generation_uuid
     }
 
-    /// Exact Core version recorded by the commit that wrote this generation, or
-    /// `None` for a generation written before the stamp existed.
+    /// Filesystem qualification authenticated by this immutable generation.
+    #[must_use]
+    pub fn unverified_durability(
+        &self,
+    ) -> Option<&graphforge_core::filesystem_durability::UnverifiedDurability> {
+        self.manifest.unverified_durability.as_ref()
+    }
+
+    /// Exact Core version recorded by this generation's writer.
     #[must_use]
     pub fn producing_core_version(&self) -> Option<&str> {
         self.manifest.producing_core_version.as_deref()
@@ -890,6 +897,9 @@ struct GenerationManifest {
     /// stamp existed; the manifest version is unchanged and those still open.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     producing_core_version: Option<String>,
+    /// Last writer filesystem qualification, absent on admitted volumes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    unverified_durability: Option<graphforge_core::filesystem_durability::UnverifiedDurability>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1112,29 +1122,30 @@ pub(crate) fn open_or_initialize_project_for_mode(
         crate::filesystem_admission::ProjectRootRequirement::CreateIfMissing,
     )?;
     admission.revalidate_identity()?;
-    open_or_initialize_project_admitted(admission.root())
+    open_or_initialize_project_admitted(&admission)
 }
 
 pub(crate) fn open_or_initialize_project_admitted(
-    root: &Path,
+    admission: &crate::filesystem_admission::ProjectLifecycleAdmission,
 ) -> Result<ResolvedProjectGeneration, GfError> {
-    open_or_initialize_project_admitted_with_allocation(root, None)
+    open_or_initialize_project_admitted_with_allocation(admission, None)
 }
 
 pub(crate) fn open_or_initialize_project_admitted_with_allocation(
-    root: &Path,
+    admission: &crate::filesystem_admission::ProjectLifecycleAdmission,
     allocation: Option<&crate::StorageAllocationOperation>,
 ) -> Result<ResolvedProjectGeneration, GfError> {
-    open_or_initialize_project_admitted_with_bootstrap(root, None, allocation)
+    open_or_initialize_project_admitted_with_bootstrap(admission, None, allocation)
 }
 
 /// Use explicit (generation, transaction) identities only when bootstrapping.
 /// Existing selected generations and resumable generation identities are retained.
 pub(crate) fn open_or_initialize_project_admitted_with_bootstrap(
-    root: &Path,
+    admission: &crate::filesystem_admission::ProjectLifecycleAdmission,
     bootstrap: Option<(Uuid, Uuid)>,
     allocation: Option<&crate::StorageAllocationOperation>,
 ) -> Result<ResolvedProjectGeneration, GfError> {
+    let root = admission.root();
     reject_root_link(root)?;
     let _root_lock = lock_project_root(root)?;
     let mut entries = std::fs::read_dir(root).map_err(|error| {
@@ -1155,13 +1166,21 @@ pub(crate) fn open_or_initialize_project_admitted_with_bootstrap(
                     Some(generation_uuid),
                     bootstrap.map(|(_, transaction)| transaction),
                     allocation,
+                    admission.unverified_durability().cloned(),
                 )
             }
             result => result,
         };
     }
     let (generation, transaction) = bootstrap.unzip();
-    initialize_empty_generation(root, true, generation, transaction, allocation)
+    initialize_empty_generation(
+        root,
+        true,
+        generation,
+        transaction,
+        allocation,
+        admission.unverified_durability().cloned(),
+    )
 }
 
 fn validate_resumable_uninitialized_layout(root: &Path) -> Result<Uuid, GfError> {
@@ -1390,6 +1409,7 @@ fn initialize_empty_generation(
     generation_uuid: Option<Uuid>,
     transaction_uuid: Option<Uuid>,
     allocation: Option<&crate::StorageAllocationOperation>,
+    unverified_durability: Option<graphforge_core::filesystem_durability::UnverifiedDurability>,
 ) -> Result<ResolvedProjectGeneration, GfError> {
     let generation_uuid = generation_uuid.unwrap_or_else(Uuid::now_v7);
     let transaction_uuid = transaction_uuid.unwrap_or_else(Uuid::now_v7);
@@ -1454,6 +1474,7 @@ fn initialize_empty_generation(
         ],
         participants: participant_descriptors,
         producing_core_version: Some(graphforge_core::manifest::GRAPHFORGE_VERSION.to_owned()),
+        unverified_durability,
     };
     let mut manifest_bytes = serde_json::to_vec(&manifest)
         .map_err(|error| GfError::Storage(format!("failed to encode generation: {error}")))?;
@@ -2176,6 +2197,7 @@ mod tests {
         fs::write(generation_root.join(LEASE_FILE), []).unwrap();
         let manifest = GenerationManifest {
             producing_core_version: None,
+            unverified_durability: None,
             format: "graphforge-generation".into(),
             format_version: GENERATION_MANIFEST_VERSION,
             generation_uuid: generation_uuid.hyphenated().to_string(),
@@ -2437,6 +2459,7 @@ mod tests {
         };
         let manifest = GenerationManifest {
             producing_core_version: None,
+            unverified_durability: None,
             format: "graphforge-generation".into(),
             format_version: GENERATION_MANIFEST_VERSION,
             generation_uuid: generation_uuid.hyphenated().to_string(),
@@ -3200,6 +3223,7 @@ mod tests {
             .join(generation.hyphenated().to_string());
         let manifest = GenerationManifest {
             producing_core_version: None,
+            unverified_durability: None,
             format: "graphforge-generation".into(),
             format_version: GENERATION_MANIFEST_VERSION,
             generation_uuid: generation.hyphenated().to_string(),
@@ -3241,6 +3265,7 @@ mod tests {
             .join(generation.hyphenated().to_string());
         let manifest = GenerationManifest {
             producing_core_version: None,
+            unverified_durability: None,
             format: "graphforge-generation".into(),
             format_version: GENERATION_MANIFEST_VERSION,
             generation_uuid: generation.hyphenated().to_string(),
@@ -3335,6 +3360,7 @@ mod tests {
 
         let base = GenerationManifest {
             producing_core_version: None,
+            unverified_durability: None,
             format: "graphforge-generation".into(),
             format_version: GENERATION_MANIFEST_VERSION,
             generation_uuid: expected.hyphenated().to_string(),

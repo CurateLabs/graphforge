@@ -31,6 +31,8 @@ pub use cache_io::cache_release_window_for_streams;
 pub use cache_io::release_file_cache;
 pub use cache_io::validate_cache_release_operation_windows;
 pub use inode_generation::{admitted_filesystem_class, inode_generation};
+mod mount_identity;
+pub use mount_identity::{filesystem_type_name, same_mount};
 use platform::create_private_directory_platform;
 use platform::file_identity_platform;
 use platform::file_link_count_platform;

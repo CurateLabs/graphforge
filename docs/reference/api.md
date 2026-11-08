@@ -96,7 +96,8 @@ project means the write is acknowledged-durable only after participant/manifest
 flushes, `CURRENT` replacement, and the project-root
 platform-native namespace durability barrier. POSIX uses directory `fsync(2)`;
 fixed writable local NTFS uses a flushed write-through staging handle and
-same-handle rename. ReFS is unsupported/unproven. See
+same-handle rename. ReFS is unproven: it warns after successful primitive checks by default;
+`GRAPHFORGE_FILESYSTEM_DURABILITY=strict` refuses it. See
 [ADR 0020](../adr/0020-ntfs-write-through-namespace-durability.md).
 
 ---

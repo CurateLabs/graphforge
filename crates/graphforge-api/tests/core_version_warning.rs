@@ -152,7 +152,10 @@ fn import(package: &Path, into: &Path, key: u128) -> graphforge_api::PortableImp
     .unwrap()
 }
 
-fn assert_names_both(warning: &graphforge_api::CoreVersionWarning) {
+fn assert_names_both(warning: &graphforge_api::Warning) {
+    let graphforge_api::Warning::CoreVersion(warning) = warning else {
+        panic!("expected Core version warning")
+    };
     assert_eq!(warning.code, CORE_VERSION_MISMATCH_CODE);
     assert_eq!(warning.code, "GF_CORE_VERSION_MISMATCH");
     assert_eq!(warning.producing_core_version, CORE_X);

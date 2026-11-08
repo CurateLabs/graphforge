@@ -1903,7 +1903,7 @@ fn private_context_first_publish_republish_and_replay_use_only_authorized_hub_me
         .iter()
         .filter(|r| r.path.ends_with("/publish/context"))
         .collect();
-    assert_eq!(contexts.len(), 2);
+    assert_eq!(contexts.len(), 3);
     assert!(
         contexts
             .iter()

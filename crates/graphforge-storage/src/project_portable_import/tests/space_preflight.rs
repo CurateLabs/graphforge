@@ -118,9 +118,27 @@ fn an_import_that_cannot_fit_is_refused_before_anything_is_extracted() {
 #[cfg(target_os = "linux")]
 #[test]
 fn an_unsupported_filesystem_is_refused_before_anything_is_extracted() {
+    if std::env::var("GRAPHFORGE_FILESYSTEM_DURABILITY").as_deref() != Ok("strict") {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "an_unsupported_filesystem_is_refused_before_anything_is_extracted",
+                "--nocapture",
+            ])
+            .env("GRAPHFORGE_FILESYSTEM_DURABILITY", "strict")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+
     let source = construction_published_project_sized(8, 24);
     let (_package_owner, package) = export_complete(source.path());
-    // `/dev/shm` is tmpfs, which the durable-publication contract does not admit.
+    // `/dev/shm` is tmpfs, which explicit strict policy does not admit.
     let parent = tempfile::tempdir_in("/dev/shm").unwrap();
     let (result, phases) =
         import_with_space(&package, parent.path(), Uuid::new_v4(), |_| Ok(u64::MAX));

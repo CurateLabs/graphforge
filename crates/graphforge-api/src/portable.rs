@@ -44,7 +44,7 @@ pub struct PortableImportResult {
     pub idempotent_replay: bool,
     /// Warnings raised before the import mutated the target: the package was
     /// produced by a different Core version. The import still completed.
-    pub warnings: Vec<graphforge_core::core_version::CoreVersionWarning>,
+    pub warnings: Vec<crate::Warning>,
     /// Exact private-materialization identity allocation for lifecycle qualification.
     #[doc(hidden)]
     pub materialized_identity_allocated_bytes: std::collections::BTreeMap<String, u64>,
@@ -166,6 +166,9 @@ pub struct PortableExportRequest {
 /// Stable portable export receipt for bindings and CLI JSON.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct PortableExportFacadeResult {
+    /// Writer qualification of the pinned source generation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_unverified_durability: Option<crate::UnverifiedDurability>,
     /// Contract name.
     pub contract: &'static str,
     /// Source selector kind.
@@ -546,6 +549,7 @@ impl GraphForge {
             self.allocation_operation.as_ref(),
         )?;
         Ok(PortableExportFacadeResult {
+            source_unverified_durability: generation.unverified_durability().cloned(),
             contract: "graphforge-portable-export/1",
             source,
             checkpoint,
@@ -644,7 +648,17 @@ impl GraphForge {
             transport_digest: receipt.transport_digest,
             generation_uuid: receipt.publication.generation_uuid,
             idempotent_replay: receipt.publication.idempotent_replay,
-            warnings: receipt.core_version_warning.into_iter().collect(),
+            warnings: receipt
+                .core_version_warning
+                .into_iter()
+                .map(crate::Warning::from)
+                .chain(
+                    reopened
+                        .open_durability
+                        .as_ref()
+                        .map(|value| crate::Warning::from(value.warning())),
+                )
+                .collect(),
             materialized_identity_allocated_bytes: receipt.materialized_identity_allocated_bytes,
             published_identity_allocated_bytes: receipt.published_identity_allocated_bytes,
             materialized_cleanup_removed_identity_allocated_bytes: receipt
@@ -1895,6 +1909,9 @@ impl PortableImportResult {
 /// The facade's own result serialization retains its existing output-path field.
 #[derive(Debug, Serialize)]
 pub struct PortableExportReceiptView<'a> {
+    /// Writer qualification of the pinned source generation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_unverified_durability: &'a Option<crate::UnverifiedDurability>,
     /// Contract name.
     pub contract: &'a str,
     /// Source selector kind.
@@ -1928,6 +1945,7 @@ impl PortableExportFacadeResult {
     #[must_use]
     pub fn receipt(&self) -> PortableExportReceiptView<'_> {
         PortableExportReceiptView {
+            source_unverified_durability: &self.source_unverified_durability,
             contract: self.contract,
             source: self.source,
             checkpoint: &self.checkpoint,

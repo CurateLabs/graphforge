@@ -268,7 +268,7 @@ These failures set `error.code` and `details.kind` only. The class follows the
 | `GF_WRITER_BUSY` | retry | Another process holds the project writer lock; wait for it and rerun | 1 |
 | `GF_REBASE_EXHAUSTED` | retry | Contention exceeded the bounded rebase attempts; rerun when the other writer finishes | 1 |
 | `GF_IO` | retry | Transport or local storage failed; for `hub.network` rerun, otherwise check disk and permissions | 3 |
-| `GF_UNSUPPORTED_FILESYSTEM` | fix input | Durable projects need an `ext4`/`xfs`/`btrfs` volume; provision one (see `docs/development/agent-environment.md`) | 3 |
+| `GF_UNSUPPORTED_FILESYSTEM` | fix input | A primitive/identity check failed, or strict mode refused an unproven class; use a qualified volume (see `docs/development/agent-environment.md`) | 3 |
 | `GF_PROJECT_CORRUPT`, `GF_CHECKPOINT_REGISTRY_CORRUPT`, `GF_PUBLICATION_FAILED` | ask a human | Project state is unsafe; restore from a backup before any retry | 1 |
 | `GF_RESOURCE_LIMIT` | fix input | Reduce the request size or raise the documented limit | 1 |
 | `GF_CANCELLED` | retry | The run was cancelled; rerun if the work is still wanted | 1 |
@@ -326,3 +326,17 @@ list. The full `hub.*` clone vocabulary is raised as dotted message prefixes
 across the clone modules and is not enumerable as a single constant; its rows
 are covered by the failure classifier it is derived from
 (`classify_failure` in `crates/graphforge-cli/src/hub_clone.rs`).
+
+`GF_UNVERIFIED_FILESYSTEM` is a warning, not an exit failure: unproven filesystem
+classes passed the publication primitive probe. Text commands print it once on
+stderr; JSON commands include structured `code`, `phase`, `outcome`, `cause`,
+`filesystem_type` and `message`. `status` also reports the committed generation's
+`unverified_durability`; verify/export/publish expose
+`source_unverified_durability`. `GRAPHFORGE_FILESYSTEM_DURABILITY=warn` is the
+default; `strict` refuses unproven classes with `GF_UNSUPPORTED_FILESYSTEM`
+(exit 3). Invalid values return `GF_VALIDATION`. Broken operations always refuse.
+
+Publish replay obtains the source qualification from the receipt-bound manifest.
+When that manifest is no longer served, text reports `Source durability:
+unavailable` and JSON includes `"source_unverified_durability": null`.
+Qualified sources omit the field; an object records an unverified source.

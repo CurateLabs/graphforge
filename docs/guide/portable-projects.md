@@ -742,10 +742,11 @@ stage and again into the project. A package without an adjacency index spills ad
 the import derives one, which this estimate does not cover. Less is needed for
 whatever a previous run already downloaded or staged for the import; a rerun
 after the import committed needs only about one more package length. Clone
-checks this, and that the filesystem is admissible (`ext4`, `xfs`, `btrfs`,
-APFS, or NTFS), before it
-downloads anything. An import of a package you already hold makes the same two
-checks before it extracts a byte. It refuses with `GF_UNSUPPORTED_FILESYSTEM`
+checks this and probes the destination filesystem before it downloads anything.
+Unproven filesystem classes warn with `GF_UNVERIFIED_FILESYSTEM` by default;
+`GRAPHFORGE_FILESYSTEM_DURABILITY=strict` refuses them. An import of a package you already hold makes the same two
+checks before it extracts a byte. Broken primitives and strict qualification
+refuse with `GF_UNSUPPORTED_FILESYSTEM`
 (diagnostic `storage.unsupported_filesystem`), or with `GF_STORAGE` (diagnostic
 `storage.insufficient_space`, whose message gives the free and needed bytes);
 the CLI exits with status 3 for both. When the import finishes,
@@ -1021,3 +1022,26 @@ replaces a divergent head under the expected-revision lease, and
 `gf publish --rewrite --prune` also drops now-unreferenced Versions.
 [Research journey](research-journey.md) walks the full cycle. Production hosted
 write availability is independent of this native protocol behavior.
+
+### Source filesystem qualification
+
+An optional `source_unverified_durability` in authenticated
+`data/graphforge-project.json` records the pinned source generation's last
+writer qualification (`phase`, `cause`, `filesystem_type`). Export receipts,
+verify reports and publish receipts expose it; absent fields remain omitted
+for qualified generations. This is evidence about the writer's filesystem,
+not a statement that package checksums failed. Import stamps the target's
+current qualification; historical source generations are never rewritten.
+
+Hub discovery mirrors the Project package's qualification in the optional
+`x-graphforge-source-durability` manifest extension. Verification requires it
+to match the package. Publish replay reads only a manifest bound by the original
+receipt, so later local tracking writes cannot change its qualification. If that
+manifest is no longer served, the replay prints `Source durability: unavailable`
+and JSON includes `"source_unverified_durability": null`. Qualified sources omit
+the field; unverified sources include the qualification object.
+
+Python evaluates filesystem warning filters before import creates or changes
+the destination. Promoting `FilesystemDurabilityWarning` to an error therefore
+stops the import without saving a project; an allowed warning is emitted once
+and remains in the returned receipt.

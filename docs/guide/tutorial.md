@@ -11,7 +11,9 @@ Research Branches and Versions are not needed for ordinary persistence.
 ## Create a durable project
 
 Read the [durable-storage requirements](installation.md#durable-storage) first.
-The directory must be on an admitted local filesystem and must already exist.
+The parent directory must already exist. Unproven filesystems emit
+`GF_UNVERIFIED_FILESYSTEM` after passing primitive checks; see
+[durable storage](installation.md#durable-storage).
 Use a new empty directory for this example. Before v1.0.0 there is no promise
 that a project from an earlier GraphForge version can be opened or migrated.
 

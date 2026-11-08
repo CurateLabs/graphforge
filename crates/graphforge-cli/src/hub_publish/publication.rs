@@ -83,6 +83,8 @@ pub struct VerifiedBundle {
     pub package_digest: String,
     /// Exact Core version the verified manifest declares as producer.
     pub producing_core_version: String,
+    /// Writer qualification from the fully verified package, never the current mount.
+    pub source_unverified_durability: Option<graphforge_api::UnverifiedDurability>,
     /// Transport object digest: SHA-256 of the bundle bytes.
     pub object_digest: String,
     /// Bundle length in bytes.
@@ -128,6 +130,7 @@ pub fn verify_exported_bundle(
         path: path.to_path_buf(),
         package_digest: package_digest.to_owned(),
         producing_core_version: report.producing_core_version,
+        source_unverified_durability: report.source_unverified_durability,
         object_digest,
         length,
     })
@@ -253,6 +256,8 @@ pub struct ManifestInputs {
     pub resolved_ref: String,
     /// Project package; its package digest is the immutable version.
     pub package: PortablePackageReference,
+    /// Qualification of that exact Project package.
+    pub source_unverified_durability: Option<graphforge_api::UnverifiedDurability>,
     /// Project summary reference.
     pub summary: Option<ProjectSummaryReference>,
     /// Ontology module inventory.
@@ -291,6 +296,13 @@ pub fn build_manifest(inputs: ManifestInputs) -> Result<DiscoveryManifest, Deriv
             }
         }
     }
+    let mut extensions = BTreeMap::new();
+    if let Some(stamp) = inputs.source_unverified_durability {
+        extensions.insert(
+            graphforge_api::SOURCE_UNVERIFIED_DURABILITY_EXTENSION.into(),
+            serde_json::to_value(stamp).map_err(err)?,
+        );
+    }
     let manifest = DiscoveryManifest {
         format: DISCOVERY_FORMAT.into(),
         version: ProtocolVersion::CURRENT,
@@ -308,7 +320,7 @@ pub fn build_manifest(inputs: ManifestInputs) -> Result<DiscoveryManifest, Deriv
         }],
         capabilities: vec![],
         objects: objects.into_values().collect(),
-        extensions: BTreeMap::new(),
+        extensions,
     };
     manifest.validate(DiscoveryLimits::default()).map_err(err)?;
     Ok(manifest)

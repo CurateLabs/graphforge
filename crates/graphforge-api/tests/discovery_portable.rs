@@ -30,11 +30,18 @@ fn hex(bytes: impl AsRef<[u8]>) -> String {
 }
 
 fn package() -> (tempfile::TempDir, String) {
+    package_with_durability(None)
+}
+
+fn package_with_durability(stamp: Option<Value>) -> (tempfile::TempDir, String) {
     let root = tempfile::tempdir().unwrap();
     let mut value: Value = serde_json::from_str(include_str!(
         "../../../tests/fixtures/portable/ontology-only.manifest.json"
     ))
     .unwrap();
+    if let Some(stamp) = stamp {
+        value["source_unverified_durability"] = stamp;
+    }
     value.as_object_mut().unwrap().remove("package_digest");
     let semantic = serde_json::to_vec(&value).unwrap();
     let package_digest = format!(
@@ -70,6 +77,62 @@ fn package() -> (tempfile::TempDir, String) {
     );
     fs::write(root.path().join("tagmanifest-sha256.txt"), tag_manifest).unwrap();
     (root, package_digest)
+}
+
+#[test]
+fn manifest_source_durability_matches_the_verified_package() {
+    use graphforge_api::{
+        SOURCE_UNVERIFIED_DURABILITY_EXTENSION, manifest_source_unverified_durability,
+    };
+    let stamp = serde_json::json!({
+        "phase": "CLASSIFY",
+        "cause": "filesystem_class_unproven",
+        "filesystem_type": "tmpfs"
+    });
+    for (package_stamp, manifest_stamp, matches) in [
+        (Some(stamp.clone()), Some(stamp.clone()), true),
+        (Some(stamp.clone()), None, false),
+        (None, Some(stamp.clone()), false),
+    ] {
+        let (package, digest) = package_with_durability(package_stamp);
+        let (mut manifest, refs, repository) = discovery(digest);
+        if let Some(value) = manifest_stamp {
+            manifest
+                .extensions
+                .insert(SOURCE_UNVERIFIED_DURABILITY_EXTENSION.into(), value);
+        }
+        assert!(manifest_source_unverified_durability(&manifest).is_ok());
+        let result = verify(&manifest, &refs, &repository, &package);
+        if matches {
+            assert_eq!(
+                result
+                    .unwrap()
+                    .report
+                    .source_unverified_durability
+                    .unwrap()
+                    .filesystem_type,
+                "tmpfs"
+            );
+        } else {
+            assert!(matches!(
+                result,
+                Err(DiscoveryPortableError::ReferenceMismatch(
+                    DiscoveryPortableMismatch::SourceDurability
+                ))
+            ));
+        }
+    }
+    let (_, digest) = package();
+    let (mut manifest, _, _) = discovery(digest);
+    manifest.extensions.insert(SOURCE_UNVERIFIED_DURABILITY_EXTENSION.into(), serde_json::json!({
+        "phase": "CLASSIFY", "cause": "filesystem_class_unproven", "filesystem_type": "tmpfs\nforged"
+    }));
+    assert!(matches!(
+        manifest_source_unverified_durability(&manifest),
+        Err(DiscoveryPortableError::ReferenceMismatch(
+            DiscoveryPortableMismatch::SourceDurability
+        ))
+    ));
 }
 
 fn digest(marker: char) -> Sha256Digest {

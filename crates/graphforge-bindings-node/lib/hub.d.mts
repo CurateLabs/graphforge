@@ -1,8 +1,12 @@
 /** Control metadata retains the field names of the native CLI contract. */
 export interface CoreVersionWarning {
   code: string;
-  producing_core_version: string;
-  running_core_version: string;
+  producing_core_version?: string;
+  running_core_version?: string;
+  phase?: string;
+  outcome?: string;
+  cause?: string;
+  filesystem_type?: string;
   message: string;
 }
 export interface CloneResult {
@@ -22,7 +26,13 @@ export interface CloneResult {
   moved_to?: string;
   warnings?: CoreVersionWarning[];
 }
+export interface UnverifiedDurability {
+  phase: string;
+  cause: string;
+  filesystem_type: string;
+}
 export interface PublishResult {
+  source_unverified_durability?: UnverifiedDurability;
   format: string;
   operation_uuid: string;
   request_commitment: string;

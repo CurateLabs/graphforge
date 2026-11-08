@@ -349,7 +349,7 @@ struct CloneResult {
     /// Raised before any graph object was downloaded: the Version was
     /// produced by a different Core version. The clone still completed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    warnings: Vec<graphforge_api::CoreVersionWarning>,
+    warnings: Vec<graphforge_api::Warning>,
 }
 
 struct CloneImported {
@@ -1197,7 +1197,7 @@ pub(crate) fn run_clone(
         install_interrupt_handler();
     }
     let mut stderr = std::io::stderr();
-    let mut warn = |warnings: &[graphforge_api::CoreVersionWarning]| diagnostics.warn(warnings);
+    let mut warn = |warnings: &[graphforge_api::Warning]| diagnostics.warn(warnings);
     let mut env = CloneEnv {
         retry: RETRY_POLICY,
         credential_lookup: |name| std::env::var(name),
@@ -1258,8 +1258,8 @@ fn available_space(path: &Path) -> std::io::Result<u64> {
     fs4::available_space(path)
 }
 
-/// Receives Core version warnings as the clone raises them.
-type WarningSink<'a> = &'a mut dyn FnMut(&[graphforge_api::CoreVersionWarning]);
+/// Receives structured filesystem and Core version warnings as clone raises them.
+type WarningSink<'a> = &'a mut dyn FnMut(&[graphforge_api::Warning]);
 
 /// Process-level effects of one clone: retry bound, cancellation, the free
 /// space probe, and progress output. Tests inject each of them.
@@ -1787,6 +1787,7 @@ fn portable_code(code: PortableErrorCode) -> &'static str {
         PortableErrorCode::DigestMismatch => "hub.package.digest_mismatch",
         PortableErrorCode::ConcurrentMutation => "hub.package.concurrent_mutation",
         PortableErrorCode::UnsupportedFilesystem => "GF_UNSUPPORTED_FILESYSTEM",
+        PortableErrorCode::InvalidConfiguration => "GF_VALIDATION",
         PortableErrorCode::InsufficientSpace => "hub.insufficient_space",
     }
 }
@@ -1919,9 +1920,14 @@ fn run_clone_job(
                 return Ok(((identity, base, destination, Some(finished)), None, None));
             }
             ensure_destination_absent(&destination)?;
-            // Refuse an inadmissible destination filesystem with its real
-            // code before any network request or download.
-            graphforge_api::filesystem_durability_preflight(&destination)?;
+            // Probe the destination and report qualification before any
+            // network request or download. Broken primitives still refuse.
+            let evidence = graphforge_api::filesystem_durability_preflight(&destination)?;
+            if let Some(stamp) = evidence.unverified
+                && let Some(warn) = env.warn.as_mut()
+            {
+                warn(&[stamp.warning().into()]);
+            }
             Ok(((identity, base, destination, None), None, None))
         },
     )?;
@@ -2148,6 +2154,7 @@ fn clone_into_staging(
         |context| context.producing_core_version.as_str(),
     );
     let warnings: Vec<_> = graphforge_api::check_core_version(Some(producing_core_version))
+        .map(graphforge_api::Warning::from)
         .into_iter()
         .collect();
     if !warnings.is_empty()
@@ -2603,6 +2610,9 @@ fn research_version_error(error: DiscoveryResearchVersionError) -> graphforge_ap
                 DiscoveryPortableMismatch::ProducingCoreVersion => {
                     "hub.package.producing_core_version_mismatch"
                 }
+                DiscoveryPortableMismatch::SourceDurability => {
+                    "hub.package.source_durability_mismatch"
+                }
                 DiscoveryPortableMismatch::ModuleIdentity => "hub.module.identity_mismatch",
                 DiscoveryPortableMismatch::ModuleContentDigest => {
                     "hub.module.content_digest_mismatch"
@@ -2632,6 +2642,9 @@ fn portable_error(error: DiscoveryPortableError) -> graphforge_api::GfError {
                 DiscoveryPortableMismatch::PackageDigest => "hub.package.package_digest_mismatch",
                 DiscoveryPortableMismatch::ProducingCoreVersion => {
                     "hub.package.producing_core_version_mismatch"
+                }
+                DiscoveryPortableMismatch::SourceDurability => {
+                    "hub.package.source_durability_mismatch"
                 }
                 DiscoveryPortableMismatch::ModuleIdentity => "hub.module.identity_mismatch",
                 DiscoveryPortableMismatch::ModuleContentDigest => {

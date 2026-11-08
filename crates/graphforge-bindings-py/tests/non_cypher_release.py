@@ -27,8 +27,8 @@ production_source = runpy.run_path(str(Path(__file__).with_name("native_sources.
     "production_source"
 ]
 PYO3_SOURCE = ROOT / "crates/graphforge-bindings-py/src/lib.rs"
-EXPECTED_RUST_DIGEST = "7430d343e3fb1d534f85718d15ba2e77a081abb6ebcf23e79951be5fb047e35d"
-EXPECTED_RELEASE_DIGEST = "112a29a5ab6d1418919425ecc1f3a8d68601fabc1d84897e97a474aa81af5d9a"
+EXPECTED_RUST_DIGEST = "739fc00a2e60350ebfbae5b48ee9fd5d94e15f41d7ebe224444f522c047c5920"
+EXPECTED_RELEASE_DIGEST = "b192ad57a77ab3672c0a76b4a17b64009cd4bdc83c2eeca70dc87b0873fed828"
 
 PYTHON_ONLY_METHODS = frozenset(
     {
@@ -69,6 +69,7 @@ PYTHON_ONLY_METHODS = frozenset(
 
 EVIDENCE = {
     "core-version-warning": {"core_version_warning.py": ["main"]},
+    "filesystem-durability": {"filesystem_durability_warning.py": ["main"]},
     "saved-queries": {"saved_queries.py": ["check_saved_queries"]},
     "research-interchange": {"research_journey.py": ["main"], "research_interchange.py": ["main"]},
     "research-proposals": {"research_journey.py": ["main"], "research_proposals.py": ["main"]},
@@ -290,7 +291,7 @@ def _classification_report() -> dict[str, object]:
         for group in manifest["method_evidence_groups"].values()
         for method_id in group["ids"]
     }
-    assert len(release_methods) == 371
+    assert len(release_methods) == 373
     assert _digest(release_methods) == EXPECTED_RELEASE_DIGEST
     assert set(EVIDENCE) == set(manifest["method_evidence_groups"])
 
@@ -437,6 +438,12 @@ def _classification_report() -> dict[str, object]:
         elif rust_id == "GraphForge.publication_payload_bytes":
             classification = "not-exposed"
             reason = "native filesystem sizing is a Rust/CLI publication preflight diagnostic"
+        elif rust_id == "GraphForge.committed_unverified_durability":
+            classification = "not-exposed"
+            reason = (
+                "committed durability is exposed through portable receipts; "
+                "the getter is Rust/CLI-only"
+            )
         elif rust_id in {
             "GraphForge.portable_ontology_composition",
             "GraphForge.research_version_portable_ontology_composition",

@@ -457,6 +457,7 @@ pub fn generate(source: &Path, destination: &Path, location_base: &str) -> Resul
     let mut objects = vec![project_object.clone(), summary_object.clone()];
     objects.extend(module_objects);
     let manifest = build_manifest(ManifestInputs {
+        source_unverified_durability: verified.source_unverified_durability,
         repository: repository.clone(),
         default_ref: "main".into(),
         resolved_ref: "main".into(),

@@ -346,6 +346,16 @@ equality and never order or parse. A Hub reads it from the manifest, or from the
 summary, without downloading the package; the verifier requires the package's
 own manifest to declare the same value.
 
+The optional manifest extension `x-graphforge-source-durability` mirrors the
+Project package's `source_unverified_durability` object (`phase`, `cause`,
+`filesystem_type`). Fields are bounded ASCII diagnostic tokens. The native
+discovery-to-portable verifier requires exact equality, including absence for a
+qualified source. This extension adds no Hub receipt field or protocol major;
+the manifest's canonical digest binds it to the publication receipt.
+Publish replay reads that receipt-bound manifest. If it is no longer served,
+the client reports source qualification as unavailable instead of using the
+current generation's writer stamp.
+
 The summary document embeds `repository`, `immutable_version`, and the package
 reference (`format`, `package_digest`, `producing_core_version`, `package_class`). It carries its own
 closed `requirements`: `project-summary@1` and `ontology-module-metadata@1` are understood. An unknown

@@ -14,6 +14,23 @@ use std::fmt;
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 
+/// Receipt-bound qualification of the Project package named by discovery.
+pub const SOURCE_UNVERIFIED_DURABILITY_EXTENSION: &str = "x-graphforge-source-durability";
+
+/// Read the Project package's qualification, validating all untrusted diagnostic tokens.
+pub fn manifest_source_unverified_durability(
+    manifest: &DiscoveryManifest,
+) -> Result<Option<crate::UnverifiedDurability>, DiscoveryPortableError> {
+    manifest
+        .extensions
+        .get(SOURCE_UNVERIFIED_DURABILITY_EXTENSION)
+        .map(|value| serde_json::from_value(value.clone()))
+        .transpose()
+        .map_err(|_| {
+            DiscoveryPortableError::ReferenceMismatch(DiscoveryPortableMismatch::SourceDurability)
+        })
+}
+
 /// Stable cross-contract mismatch classification.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DiscoveryPortableMismatch {
@@ -26,6 +43,8 @@ pub enum DiscoveryPortableMismatch {
     /// The verified package declares a different producing Core version than the
     /// discovery reference advertises.
     ProducingCoreVersion,
+    /// The discovery writer qualification differs from the verified Project package.
+    SourceDurability,
     /// The verified package does not carry the requested exact ontology module.
     ModuleIdentity,
     /// The module document's recomputed canonical digest differs from its identity.
@@ -162,6 +181,11 @@ pub fn verify_discovered_portable(
     if report.producing_core_version != manifest.package.producing_core_version {
         return Err(DiscoveryPortableError::ReferenceMismatch(
             DiscoveryPortableMismatch::ProducingCoreVersion,
+        ));
+    }
+    if manifest_source_unverified_durability(&manifest)? != report.source_unverified_durability {
+        return Err(DiscoveryPortableError::ReferenceMismatch(
+            DiscoveryPortableMismatch::SourceDurability,
         ));
     }
     Ok(DiscoveredPortable {

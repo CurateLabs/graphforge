@@ -26,7 +26,8 @@ A report that a maintainer can run in a few minutes is fixed sooner. Include:
    architecture, and Python or Node.js version.
 2. **Storage mode:** in-memory (`GraphForge()`), or a durable project and its
    filesystem. For a storage error, include the error code, such as
-   `GF_UNSUPPORTED_FILESYSTEM`.
+   `GF_UNSUPPORTED_FILESYSTEM`, or structured `GF_UNVERIFIED_FILESYSTEM` warning
+   fields and the `GRAPHFORGE_FILESYSTEM_DURABILITY` setting.
 3. **The smallest graph and query that show the problem.** Build the graph in a
    few lines with invented data. Do not attach a real dataset, a live
    `.graphforge/` directory, or personal or confidential content.

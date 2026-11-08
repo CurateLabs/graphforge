@@ -35,7 +35,7 @@ fn steiner_terminals_are_checked_and_preserve_input_order() {
 
 #[test]
 fn source_free_minimum_steiner_reaches_active_rust_handler() {
-    let graph = GraphForge::new(None, None).unwrap();
+    let graph = GraphForge::open_native(None, None).unwrap();
     // Construction methods require a napi Env for TypeError coercion; unit
     // tests seed fixtures through the Rust facade instead.
     let (first, second) = {

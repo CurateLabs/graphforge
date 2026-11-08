@@ -115,6 +115,7 @@ the CI Lint job (#1390).
 | 0061 | Research porcelain and one meaning for a ref | Accepted | A porcelain verb needs behavior no native operation provides, a Hub advertises tag refs in its refs document, or a Branch needs more than one name | [`../../adr/0061-research-porcelain-and-ref-naming.md`](../../adr/0061-research-porcelain-and-ref-naming.md) |
 | 0062 | Projects are named like repositories; ontologies and bridge sets have permanent IDs like gists | Accepted | A second kind of item needs a permanent ID, a published ID must change, or squatting on unpublished IDs becomes a real problem | [`../../adr/0062-project-and-ontology-identity.md`](../../adr/0062-project-and-ontology-identity.md) |
 | 0063 | Author-declared ontology version precedence | Accepted | Authors need precedence beyond a u32 ordinal, or a released descriptor contract requires negotiated ordering semantics | [`../../adr/0063-declared-ontology-version-order.md`](../../adr/0063-declared-ontology-version-order.md) |
+| 0064 | Unverified filesystem admission | Accepted | Filesystem qualification gains crash/power-loss evidence, or a platform cannot retain stable mount and lock identities | [`../../adr/0064-unverified-filesystem-admission.md`](../../adr/0064-unverified-filesystem-admission.md) |
 
 ### Superseded
 

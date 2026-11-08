@@ -269,7 +269,7 @@ fn subset_plan_json(plan: &PortableSubsetPlan) -> serde_json::Value {
 }
 
 fn export_result_json(result: &graphforge_api::PortableExportFacadeResult) -> serde_json::Value {
-    serde_json::json!({
+    let mut value = serde_json::json!({
         "contract": result.contract,
         "source": result.source,
         "checkpoint": result.checkpoint,
@@ -281,7 +281,11 @@ fn export_result_json(result: &graphforge_api::PortableExportFacadeResult) -> se
         "representation": result.representation,
         "selection_fingerprint": result.selection_fingerprint,
         "output": result.output.display().to_string(),
-    })
+    });
+    if let Some(stamp) = &result.source_unverified_durability {
+        value["source_unverified_durability"] = serde_json::json!(stamp);
+    }
+    value
 }
 
 fn verify_result_json(
@@ -556,6 +560,15 @@ pub(crate) fn import_portable(
     };
     let cancelled = cancellation.map(|token| token.inner.flag());
     let root = PathBuf::from(project_root);
+    // Python warning filters may raise. Apply them before import can publish
+    // anything, using the same native probe as lifecycle admission. The import
+    // still performs its own admission and returns its actual warning receipt.
+    let evidence = py
+        .detach(|| graphforge_api::portable_import_durability_preflight(&root))
+        .map_err(|error| to_portable_pyerr(py, error))?;
+    if let Some(unverified) = evidence.unverified {
+        crate::emit_durability_warnings(py, &[unverified.warning().into()])?;
+    }
     let result = py
         .detach(|| graphforge_api::GraphForge::import_portable(&root, &request, cancelled))
         .map_err(|error| to_portable_pyerr(py, error))?;

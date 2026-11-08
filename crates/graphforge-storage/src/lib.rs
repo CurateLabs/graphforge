@@ -265,10 +265,10 @@ pub use project_publication::{
 pub mod project_recovery;
 pub use project_recovery::{
     DEFAULT_RETAINED_ANCESTORS, MAX_RETAINED_ANCESTORS, ProjectOpenRecoveryEvidence,
-    ProjectOpenRecoveryKind, ProjectRecoveryDeferral, ProjectRecoveryGenerationClass,
-    ProjectRecoveryReport, open_or_initialize_ephemeral_project_with_recovery,
-    open_or_initialize_project_with_recovery, recover_project_on_open,
-    recover_project_transactions, recover_project_transactions_with_mode,
+    ProjectOpenRecoveryKind, ProjectOpenResult, ProjectRecoveryDeferral,
+    ProjectRecoveryGenerationClass, ProjectRecoveryReport,
+    open_or_initialize_ephemeral_project_with_recovery, open_or_initialize_project_with_recovery,
+    recover_project_on_open, recover_project_transactions, recover_project_transactions_with_mode,
     remove_durable_project_root,
 };
 

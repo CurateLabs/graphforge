@@ -66,6 +66,9 @@ pub use graphforge_storage::filesystem_admission::filesystem_durability_prefligh
 pub use graphforge_storage::lifecycle_io::CaptureScope as LifecycleIoCapture;
 /// Whether lifecycle I/O was explicitly requested on this thread.
 pub use graphforge_storage::lifecycle_io::is_active as lifecycle_io_is_active;
+/// Probe import warning policy before publication, preserving portable error details.
+#[cfg(feature = "portable")]
+pub use graphforge_storage::project_portable_import::portable_import_durability_preflight;
 pub use graphforge_storage::{
     CONSTRUCTION_EDGE_SCHEMA, CONSTRUCTION_NODE_SCHEMA, ConstructionChunkReceipt,
     GraphConstructionBudgets, GraphConstructionEvidence, GraphConstructionState,
@@ -205,7 +208,8 @@ pub use discovery_ontology_module::{
 #[cfg(all(feature = "discovery", feature = "portable"))]
 pub use discovery_portable::{
     DiscoveredPortable, DiscoveryPortableError, DiscoveryPortableMismatch,
-    DiscoveryPortableRequest, verify_discovered_portable,
+    DiscoveryPortableRequest, SOURCE_UNVERIFIED_DURABILITY_EXTENSION,
+    manifest_source_unverified_durability, verify_discovered_portable,
 };
 #[cfg(all(feature = "discovery", feature = "portable"))]
 pub use discovery_project_summary::{ProjectSummaryRequest, summarize_verified_portable};
@@ -407,6 +411,9 @@ pub use graphforge_core::core_version::{
 pub use graphforge_core::embedding_options::{
     EmbeddingAnalyzeOptions, EmbeddingOptions, FastRpOptions, GraphSageAggregator,
     GraphSageOptions, HashGnnOptions, Node2VecOptions,
+};
+pub use graphforge_core::filesystem_durability::{
+    FilesystemDurabilityWarning, UNVERIFIED_FILESYSTEM_CODE, UnverifiedDurability, Warning,
 };
 pub use graphforge_core::manifest::{
     GRAPHFORGE_VERSION, MANIFEST_FILE, ONTOLOGY_FILE, ProjectManifest,
@@ -687,6 +694,7 @@ pub struct GraphForge {
     path: Option<PathBuf>,
     /// Filesystem lifecycle contract selected when this facade opened.
     lifecycle_mode: graphforge_storage::filesystem_admission::ProjectLifecycleMode,
+    open_durability: Option<UnverifiedDurability>,
     /// One immutable committed generation selected exactly once at open.
     resolved_generation: ResolvedProjectGeneration,
     /// Canonical property generation identity and authenticated inventory,
@@ -846,15 +854,27 @@ impl GraphForge {
         graphforge_storage::storage_attribution_receipt_from_snapshot(&self.storage_attribution()?)
     }
 
-    /// Warnings raised by opening this project: one when the generation it
-    /// opened was written by a different Core version.
-    ///
-    /// The facade pins one generation at open, so this is the open-time result.
-    /// A generation written before the stamp existed, and one written by the
-    /// running Core, give none. Opening never refuses on a mismatch alone.
+    /// Warnings captured by this open: Core-version mismatch for its pinned
+    /// generation and unverified durability for its current filesystem.
+    /// In-memory projects have no filesystem warning. Writes never add warnings;
+    /// the authenticated writer stamp is available separately through
+    /// [`Self::committed_unverified_durability`].
     #[must_use]
-    pub fn open_warnings(&self) -> Vec<CoreVersionWarning> {
+    pub fn open_warnings(&self) -> Vec<Warning> {
         core_version_warnings(&self.resolved_generation)
+            .into_iter()
+            .map(Warning::from)
+            .chain(
+                self.open_durability
+                    .as_ref()
+                    .map(|value| Warning::from(value.warning())),
+            )
+            .collect()
+    }
+
+    /// Qualification stamped by the writer of the generation currently selected for reads.
+    pub fn committed_unverified_durability(&self) -> Result<Option<UnverifiedDurability>, GfError> {
+        Ok(self.generation_for_read()?.unverified_durability().cloned())
     }
 
     /// Create a new in-memory (`None`) or Parquet-backed (`Some(path)`) instance.
@@ -894,8 +914,11 @@ impl GraphForge {
     ) -> Result<Self, GfError> {
         let path = graphforge_storage::StorageAllocationOperation::resolve_project_path(path)?;
         let (options, policy) = GraphForgeOptions::default().validate()?;
-        let (resolved, recovery) =
-            graphforge_storage::open_or_initialize_project_with_allocation(&path, &allocation)?;
+        let graphforge_storage::ProjectOpenResult {
+            generation: resolved,
+            recovery,
+            unverified_durability,
+        } = graphforge_storage::open_or_initialize_project_with_allocation(&path, &allocation)?;
         let mut graph = Self::open_resolved_with_options(
             path.clone(),
             resolved,
@@ -904,6 +927,7 @@ impl GraphForge {
             policy,
             recovery,
         )?;
+        graph.open_durability = unverified_durability;
         graph.allocation_operation = Some(allocation);
         Ok(graph)
     }
@@ -921,13 +945,23 @@ impl GraphForge {
         if let Some(p) = path {
             return Self::open_dir_with_options(PathBuf::from(p), options, resource_policy);
         }
+        Self::open_in_memory_with_options(options, resource_policy)
+    }
+
+    fn open_in_memory_with_options(
+        options: GraphForgeOptions,
+        resource_policy: resource_policy::NormalizedResourcePolicy,
+    ) -> Result<Self, GfError> {
         // In-memory: exploratory, backed by a temp directory kept alive for the
         // engine's lifetime.
         let open_io_before = graphforge_storage::lifecycle_io_snapshot();
         let tmp = tempfile::TempDir::new()
             .map_err(|e| GfError::Storage(format!("failed to create temp dir: {e}")))?;
-        let (resolved_generation, project_open_recovery) =
-            graphforge_storage::open_or_initialize_ephemeral_project_with_recovery(tmp.path())?;
+        let graphforge_storage::ProjectOpenResult {
+            generation: resolved_generation,
+            recovery: project_open_recovery,
+            ..
+        } = graphforge_storage::open_or_initialize_ephemeral_project_with_recovery(tmp.path())?;
         let generation_uuid = resolved_generation.generation_uuid();
         let (ontology_mode, ontology, ontology_document) =
             load_workspace_ontology(&resolved_generation)?;
@@ -946,6 +980,7 @@ impl GraphForge {
         Ok(Self {
             identity: GraphIdentity::new(),
             path: None,
+            open_durability: None,
             lifecycle_mode:
                 graphforge_storage::filesystem_admission::ProjectLifecycleMode::Ephemeral,
             resolved_generation,
@@ -1085,8 +1120,11 @@ impl GraphForge {
         }
 
         let open_io_before = graphforge_storage::lifecycle_io_snapshot();
-        let (resolved_generation, project_open_recovery) =
-            graphforge_storage::open_or_initialize_project_with_recovery(&dir)?;
+        let graphforge_storage::ProjectOpenResult {
+            generation: resolved_generation,
+            recovery: project_open_recovery,
+            unverified_durability,
+        } = graphforge_storage::open_or_initialize_project_with_recovery(&dir)?;
         let mut graph = Self::open_resolved_with_options(
             dir,
             resolved_generation,
@@ -1095,6 +1133,7 @@ impl GraphForge {
             resource_policy,
             project_open_recovery,
         )?;
+        graph.open_durability = unverified_durability;
         // Report resolution and recovery-on-open alongside hydration: they are
         // all work an open pays before the first query can run.
         graph.open_io_attribution =
@@ -1282,6 +1321,7 @@ impl GraphForge {
         let graph = Self {
             identity: GraphIdentity::new(),
             path: Some(container_dir),
+            open_durability: None,
             lifecycle_mode: graphforge_storage::filesystem_admission::ProjectLifecycleMode::Durable,
             resolved_generation,
             property_authority: Arc::new(Mutex::new(GenerationPropertyAuthority {
@@ -1499,6 +1539,7 @@ impl GraphForge {
             last_mutation_outcome: std::sync::Mutex::new(None),
             identity: self.identity.clone(),
             path: self.path.clone(),
+            open_durability: None,
             lifecycle_mode: self.lifecycle_mode,
             resolved_generation: self.resolved_generation.clone(),
             property_authority: Arc::clone(&self.property_authority),

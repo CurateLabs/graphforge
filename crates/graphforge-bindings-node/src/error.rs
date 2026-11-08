@@ -38,7 +38,8 @@ fn error_code(err: &GfError) -> &'static str {
             if is_uuid_parameter_validation(message)
                 || is_bulk_validation(message)
                 || is_ontology_lifecycle_validation(message)
-                || is_spatial_validation(message) =>
+                || is_spatial_validation(message)
+                || message == "GRAPHFORGE_FILESYSTEM_DURABILITY must be warn or strict" =>
         {
             "GF_VALIDATION"
         }

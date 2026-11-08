@@ -16,6 +16,14 @@ pub(super) fn filesystem_available_space(path: &Path) -> std::io::Result<u64> {
     fs4::available_space(path)
 }
 
+/// Probe an import destination without creating it, preserving portable diagnostics.
+pub fn portable_import_durability_preflight(
+    target: &Path,
+) -> Result<crate::filesystem_admission::FilesystemAdmissionEvidence, PortableError> {
+    crate::filesystem_admission::filesystem_durability_preflight(target)
+        .map_err(|error| filesystem_refusal(&error, target))
+}
+
 /// The private stage and ownership marker an import of `target` uses.
 pub(super) fn stage_paths(
     target: &Path,
@@ -57,8 +65,7 @@ pub(super) fn admit(
     available: AvailableSpace,
 ) -> Result<StageCredit, PortableError> {
     let footprint = crate::project_portable::preflight(source, limits, cancelled)?;
-    crate::filesystem_admission::filesystem_durability_preflight(target)
-        .map_err(|error| filesystem_refusal(&error, target))?;
+    portable_import_durability_preflight(target)?;
     let peak = if committed(target, transaction_uuid) {
         footprint.replay_peak_bytes()
     } else {
@@ -137,6 +144,12 @@ impl StageCredit {
 }
 
 fn filesystem_refusal(error: &crate::GfError, target: &Path) -> PortableError {
+    if error.code() == "GF_VALIDATION" {
+        return PortableError::new(
+            PortableErrorCode::InvalidConfiguration,
+            "GRAPHFORGE_FILESYSTEM_DURABILITY must be warn or strict",
+        );
+    }
     if error.code() == "GF_UNSUPPORTED_FILESYSTEM" {
         return PortableError::new(
             PortableErrorCode::UnsupportedFilesystem,

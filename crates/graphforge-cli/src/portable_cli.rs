@@ -360,6 +360,14 @@ pub(crate) fn run_portable_without_graph(
                     report.compatibility
                 )
                 .map_err(|error| graphforge_api::GfError::Execution(error.to_string()))?;
+                if let Some(stamp) = &report.source_unverified_durability {
+                    writeln!(
+                        output,
+                        "source durability: unverified ({}; {})",
+                        stamp.filesystem_type, stamp.cause
+                    )
+                    .map_err(|error| graphforge_api::GfError::Execution(error.to_string()))?;
+                }
             }
             Ok(())
         }
@@ -817,6 +825,7 @@ mod lifecycle_storage_tests {
     #[test]
     fn portable_export_receipt_exposes_closed_writer_allocation() {
         let result = graphforge_api::PortableExportFacadeResult {
+            source_unverified_durability: None,
             contract: "graphforge-portable-export/1",
             source: "current",
             checkpoint: None,

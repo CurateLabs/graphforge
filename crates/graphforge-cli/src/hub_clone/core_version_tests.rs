@@ -111,7 +111,7 @@ fn clone_version(
 ) -> (
     serde_json::Value,
     StatusServer,
-    Vec<(usize, graphforge_api::CoreVersionWarning)>,
+    Vec<(usize, graphforge_api::Warning)>,
 ) {
     let (bundle, package_digest) = bundle_from(producing);
     let (refs, manifest) = documents(&bundle, &package_digest, producing);
@@ -171,6 +171,9 @@ fn a_version_from_another_core_warns_before_the_first_graph_object_request() {
         *served_at_warning, 2,
         "the graph object was already requested"
     );
+    let graphforge_api::Warning::CoreVersion(warning) = warning else {
+        panic!("expected Core warning")
+    };
     assert_eq!(warning.code, "GF_CORE_VERSION_MISMATCH");
     assert_eq!(warning.producing_core_version, CORE_X);
     assert_eq!(

@@ -94,7 +94,7 @@ pub struct RevertCheckpointPreview {
     pub current_generation_uuid: Uuid,
     /// Raised when the current generation was written by another Core version,
     /// as opening the project would raise it.
-    pub warnings: Vec<graphforge_core::core_version::CoreVersionWarning>,
+    pub warnings: Vec<crate::Warning>,
 }
 
 /// Named checkpoint or the current committed generation.
@@ -231,7 +231,10 @@ impl GraphForge {
             source_generation_uuid: checkpoint.generation_uuid,
             source_manifest_sha256: checkpoint.generation_manifest_sha256,
             current_generation_uuid: current.generation_uuid(),
-            warnings: crate::core_version_warnings(&current),
+            warnings: crate::core_version_warnings(&current)
+                .into_iter()
+                .map(crate::Warning::from)
+                .collect(),
         })
     }
 

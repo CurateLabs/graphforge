@@ -39,7 +39,7 @@ mod outcome;
 pub use outcome::portable_import_pending;
 mod space;
 use outcome::{storage, storage_or_cancel};
-pub use space::portable_import_held_bytes;
+pub use space::{portable_import_durability_preflight, portable_import_held_bytes};
 
 use crate::project_publication::{
     ProjectCapability, ProjectFileParticipant, ProjectGenerationRequest, ProjectParticipant,
@@ -1237,7 +1237,7 @@ fn import_materialized(
         // parent's identities to this import so repeated fresh-root imports
         // also retain identical manifest bytes, without changing existing roots.
         None => crate::project_generation::open_or_initialize_project_admitted_with_bootstrap(
-            admission.root(),
+            &admission,
             Some((
                 graphforge_core::uuid::portable_bootstrap_generation(&transaction_uuid),
                 graphforge_core::uuid::portable_bootstrap_transaction(&transaction_uuid),

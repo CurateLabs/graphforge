@@ -207,7 +207,8 @@ acknowledges only after the project-root platform-native namespace durability
 barrier so reopen recovers the published generation. POSIX uses directory
 `fsync(2)`; fixed writable local NTFS uses the write-through same-handle rename
 contract in [ADR 0020](../adr/0020-ntfs-write-through-namespace-durability.md),
-while ReFS is unsupported/unproven. Import does not merge into or overwrite an
+while ReFS is unproven: it warns after successful primitive checks by default;
+`GRAPHFORGE_FILESYSTEM_DURABILITY=strict` refuses it. Import does not merge into or overwrite an
 existing project. These stage / validate / durable generation / linearize /
 acknowledge / publish / abort / recover terms are the shared publication
 vocabulary frozen by

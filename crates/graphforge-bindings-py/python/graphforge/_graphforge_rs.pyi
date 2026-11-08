@@ -208,6 +208,13 @@ class ResolvedBeliefProjection:
         via: str | None = None,
     ) -> InvocationDescriptor: ...
 
+class FilesystemDurabilityWarning(UserWarning):
+    code: str
+    phase: str
+    outcome: str
+    cause: str
+    filesystem_type: str
+
 class GraphForge:
     def validate_decision_batch(self, request: DecisionBatchV1) -> pyarrow.Table: ...
     def __init__(

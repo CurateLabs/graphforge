@@ -14,6 +14,7 @@ artifacts. Select the runtime for your task before installing.
 | ---------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
 | First graph, Basic mixed-methods project, inquiry records, local notebook, ordinary save/reopen            | Published Python `graphforge==0.6.0rc7`; [Python setup](#python)                                  | The activated environment's `python`; `graphforge` for CLI tasks                                        |
 | Public Hub browse → clone → reopen → query                                                                 | The same published Python package; [Hub lesson](portable-projects.md#public-hub-launch-path)      | The activated environment's `graphforge` and `python`                                                   |
+| Hosted notebook session storage | [Qualified hosted candidate](use-a-notebook.md#select-the-hosted-runtime) | The notebook kernel after installing the identified wheel |
 | Node application using ordinary graph queries                                                              | Published `@curatelabs/graphforge@0.6.0-rc.7`; [Node setup](#node-and-typescript)                 | Your Node process; the explicitly pinned npm CLI when needed                                            |
 | Retained research with composed ontologies, composition reimport, or the advanced Hub continuation example | [Pinned repaired source build](#build-from-source), separate from registry rc.7                   | Its activated Python environment and absolute `GF_EVALUATION_CLI` path                                  |
 | Human device approval or saved-session publishing                                                          | The same standalone source-built CLI, an authorized repository and a conforming write-capable Hub | `"$GF_EVALUATION_CLI"`; [publishing prerequisites](portable-projects.md#publish-after-local-evaluation) |
@@ -59,10 +60,10 @@ Read this before you choose durable storage or build an integration. See also
   x86-64. It builds Node packages for macOS (x86-64 and arm64), Linux
   (x86-64 and arm64, glibc), and Windows x86-64. Other platforms need a
   [source build](#build-from-source).
-- **Durable storage** needs an [admitted local filesystem](#durable-storage)
-  (Linux: ext4, xfs, or btrfs). Otherwise it fails with
-  `GF_UNSUPPORTED_FILESYSTEM`. In-memory projects (`GraphForge()`) run the full
-  engine on any platform with a native package.
+- **Durable storage** probes the [project filesystem](#durable-storage).
+  Unproven filesystem classes open with `GF_UNVERIFIED_FILESYSTEM` by default;
+  durability is not guaranteed. Strict mode retains refusal. In-memory projects
+  (`GraphForge()`) run the full engine without a filesystem warning.
 - **Prerequisites.** Python 3.10+ or Node.js 20+; a Rust toolchain only for a
   source build or `cargo install`.
 - **Crates.io builds lack two DataFusion fixes.** `cargo install graphforge-cli`
@@ -163,32 +164,46 @@ source used below, so keep using its standalone CLI in that walkthrough.
 
 ## Durable storage
 
+The warning-based policy below requires the
+[qualified hosted candidate](use-a-notebook.md#select-the-hosted-runtime) or a
+later build containing that feature. Published rc7 and this page's older pinned
+source revision retain refusal on unproven filesystems.
+
 Start with `GraphForge()` if you only need a temporary graph. It runs the full
 engine in memory and loses its state when closed or when the process exits.
 
-`GraphForge(path)` opens a durable project in an existing directory. Native
-filesystem admission must succeed before writing:
+`GraphForge(path)` opens a project, creating the final directory if its parent
+exists. The qualified filesystem classes are Linux ext4/xfs/btrfs, macOS local
+APFS, and Windows fixed writable local NTFS. A project volume may be mounted
+beneath a different process root.
 
-| Platform | Durable storage                                                                      |
-| -------- | ------------------------------------------------------------------------------------ |
-| Linux    | Local ext4, xfs, or btrfs; the project and process-root ancestry must pass admission |
-| macOS    | An admitted local APFS volume                                                        |
-| Windows  | An admitted fixed local writable NTFS volume                                         |
+Unproven classes, including overlayfs and tmpfs, open with one structured
+`GF_UNVERIFIED_FILESYSTEM` warning per open after the publication primitive
+probe passes. Writes do not emit additional warnings. Durability is **unverified**:
+successful probing does not prove survival of power loss. Set
+`GRAPHFORGE_FILESYSTEM_DURABILITY=strict` to refuse unproven filesystems with
+`GF_UNSUPPORTED_FILESYSTEM`; `warn` is the default. Other values return
+`GF_VALIDATION`. Broken locks, flushes or replacement operations, read-only
+volumes, links, namespace changes and lock takeover still refuse in both modes.
+Network and FUSE mounts may fail those primitive checks; this policy does not
+promise they work.
 
-Network filesystems, container overlay roots, and other unproven filesystems
-are not a durable-storage workaround. On Linux, mounting ext4 below an
-unsupported root does not necessarily satisfy admission. A refusal reports
-`GF_UNSUPPORTED_FILESYSTEM`; move to a supported environment rather than
-bypassing the check. Native-package availability and filesystem admission are
-separate requirements.
+Python emits `graphforge.FilesystemDurabilityWarning` (a `UserWarning`), Node
+emits a `FilesystemDurabilityWarning` event with the code and JSON `detail`,
+and CLI text commands warn on stderr (`--json` includes structured warnings).
+The last writer's qualification is authenticated in each generation; `status`,
+package verification, export and publish receipts report it. Older unstamped
+generations remain unchanged. See [ADR 0064](../adr/0064-unverified-filesystem-admission.md).
 
 Use [the persistence tutorial](tutorial.md) to create, close, and reopen a
 project. Use [portable export/import](portable-projects.md) for movement;
 do not copy live project storage or add it to Git. Package verification does
 not provide a migration path from unsupported older versions.
 
-[Kaggle and Colab](use-a-notebook.md#hosted-notebooks) require their own
-qualification. A local notebook example does not establish hosted persistence.
+[Kaggle and Colab](use-a-notebook.md#hosted-notebooks) are supported with this
+warning when the native package and primitive checks work. Their VM disks and
+tmpfs are session storage: tmpfs loses data on reboot and hosted runtimes lose
+data when recycled. Export to persistent storage before the session ends.
 For detailed diagnostics, see [concurrency and recovery](../book/architecture/concurrency-recovery.md)
 and [agent environment notes](../development/agent-environment.md).
 
