@@ -7,8 +7,8 @@
 //! clone refuses is refused here with the same code. No package object is read.
 
 use super::{
-    HttpTransport, RETRY_POLICY, RetryPolicy, Transport, canonical_name, discovery_limits,
-    endpoint, parse_input_at, read_bounded, read_lineage, storage, verify_discovery,
+    RETRY_POLICY, RetryPolicy, Transport, canonical_name, discovery_limits, endpoint,
+    parse_input_at, read_bounded, read_lineage, storage, verify_discovery,
 };
 use crate::hub_http::{MAX_METADATA_BYTES, RepositoryMoveTransport, fetch_with_attempts};
 use clap::{Args, Subcommand};
@@ -31,6 +31,8 @@ pub(crate) enum HubCommand {
     /// List a repository's refs, Branches, Versions, Fork origin, and Proposals.
     #[command(visible_alias = "ls")]
     List(ListArgs),
+    /// Execute a bounded native catalog/account/management control request.
+    Control(crate::hub_control::ControlArgs),
 }
 
 #[derive(Args)]
@@ -120,11 +122,18 @@ pub(crate) fn run_hub(
     args: &HubArgs,
     json: bool,
     output: &mut dyn Write,
-) -> Result<(), graphforge_api::GfError> {
+) -> Result<i32, graphforge_api::GfError> {
     match &args.command {
         HubCommand::List(list) => {
-            run_list_with(&HttpTransport::new(), list, json, output, &RETRY_POLICY)
+            let transport = crate::auth::CloneTransport::new(
+                &list.repository,
+                list.hub.as_deref(),
+                None,
+                None,
+            )?;
+            run_list_with(&transport, list, json, output, &RETRY_POLICY).map(|()| 0)
         }
+        HubCommand::Control(args) => crate::hub_control::run(args, output),
     }
 }
 

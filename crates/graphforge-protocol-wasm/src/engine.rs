@@ -23,6 +23,35 @@ use graphforge_hub_publish::{
 use serde::{Deserialize, Serialize};
 use tsify::Tsify;
 
+/// Validate the shared native Hub control request without host-language rules.
+pub fn validate_hub_control_request(
+    input: &[u8],
+) -> Outcome<graphforge_discovery::hub::HubControlRequest> {
+    Ok(graphforge_discovery::hub::HubControlRequest::from_json(
+        input,
+    )?)
+}
+
+/// Bind a hosted control response to the exact initiating request.
+pub fn validate_hub_control_response(
+    request: &[u8],
+    response: &[u8],
+) -> Outcome<graphforge_discovery::hub::HubControlResponse> {
+    let request = graphforge_discovery::hub::HubControlRequest::from_json(request)?;
+    Ok(graphforge_discovery::hub::HubControlResponse::from_json(
+        response, &request,
+    )?)
+}
+
+/// Commit fresh authorized management facts using Rust canonicalization.
+pub fn prepare_hub_management_plan(
+    input: &[u8],
+) -> Outcome<graphforge_discovery::hub::HubManagementPlan> {
+    Ok(graphforge_discovery::hub::HubManagementPlan::prepare_json(
+        input,
+    )?)
+}
+
 /// Structured failure with the same code the Rust validators return.
 ///
 /// `code` is the snake-case discovery or publish code (`integrity_failure`,

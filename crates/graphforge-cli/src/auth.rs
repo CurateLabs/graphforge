@@ -9,6 +9,9 @@ use std::io::{Read as _, Write};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use url::Url;
 
+mod control;
+pub(crate) use control::exchange_control;
+
 /// Longest client wait, independently of the server code lifetime.
 pub(crate) const MAX_DEVICE_WAIT_SECONDS: u64 = 900;
 /// Bound each pause even when the server advertises a larger interval.
@@ -865,8 +868,12 @@ fn exchange_repository_token(
 pub(crate) struct CloneTransport<T = crate::hub_http::HttpTransport> {
     inner: T,
     hub: Url,
-    metadata: std::cell::RefCell<[Url; 2]>,
-    identity: std::rc::Rc<std::cell::RefCell<graphforge_discovery::RepositoryIdentity>>,
+    metadata: std::cell::RefCell<Vec<Url>>,
+    descriptor: Option<Url>,
+    // Item discovery may live below a deployment prefix. Vault/grant identity
+    // stays on `hub`'s bare origin; retained metadata uses this selected base.
+    item_base: Option<Url>,
+    identity: std::rc::Rc<std::cell::RefCell<Option<graphforge_discovery::RepositoryIdentity>>>,
     discovery_acquire: Box<dyn Fn() -> Result<Option<String>, SavedCredentialError>>,
     discovery_token: std::cell::RefCell<Option<String>>,
     acquire: Box<dyn Fn() -> Result<Option<RepositoryToken>, GfError>>,
@@ -945,7 +952,43 @@ impl CloneTransport<crate::hub_http::HttpTransport> {
         bypass_env: Option<&str>,
     ) -> Result<Self, GfError> {
         let (identity, base) = crate::hub_http::parse_input_at(repository, hub)?;
-        let identity = std::rc::Rc::new(std::cell::RefCell::new(identity));
+        Self::for_selection(Some(identity), &base, None, token_env, bypass_env)
+    }
+    pub(crate) fn for_item(
+        hub: &Url,
+        descriptor: Url,
+        bypass_env: Option<&str>,
+    ) -> Result<Self, GfError> {
+        crate::hub_http::validate_url(hub)?;
+        if descriptor.origin() != hub.origin()
+            || !descriptor
+                .path()
+                .starts_with(&format!("{}/", hub.path().trim_end_matches('/')))
+        {
+            return Err(denied("item descriptor selection mismatch"));
+        }
+        Self::for_selection(None, hub, Some(descriptor), None, bypass_env)
+    }
+    fn for_selection(
+        selected: Option<graphforge_discovery::RepositoryIdentity>,
+        base: &Url,
+        descriptor: Option<Url>,
+        token_env: Option<&str>,
+        bypass_env: Option<&str>,
+    ) -> Result<Self, GfError> {
+        let metadata = if selected.is_some() {
+            vec![
+                crate::hub_http::endpoint(base, "refs"),
+                crate::hub_http::endpoint(base, "manifest"),
+            ]
+        } else {
+            vec![
+                descriptor
+                    .clone()
+                    .ok_or_else(|| denied("missing item selection"))?,
+            ]
+        };
+        let identity = std::rc::Rc::new(std::cell::RefCell::new(selected));
         let grant_identity = identity.clone();
         let hub = origin(&base.origin().ascii_serialization())?;
         let auth_hub = hub.clone();
@@ -954,13 +997,13 @@ impl CloneTransport<crate::hub_http::HttpTransport> {
         let metadata_env = token_env.clone();
         let bypass_env = bypass_env.map(str::to_owned);
         let metadata_bypass = bypass_env.clone();
+        let item_base = descriptor.as_ref().map(|_| base.clone());
         Ok(Self {
             inner: crate::hub_http::HttpTransport::new(),
             hub,
-            metadata: std::cell::RefCell::new([
-                crate::hub_http::endpoint(&base, "refs"),
-                crate::hub_http::endpoint(&base, "manifest"),
-            ]),
+            metadata: std::cell::RefCell::new(metadata),
+            descriptor,
+            item_base,
             identity,
             discovery_acquire: Box::new(move || {
                 saved_bearer(
@@ -976,12 +1019,16 @@ impl CloneTransport<crate::hub_http::HttpTransport> {
                 else {
                     return Ok(None);
                 };
+                let selected = grant_identity.borrow();
+                let selected = selected.as_ref().ok_or_else(|| {
+                    denied("item descriptor must be verified before object access")
+                })?;
                 exchange_repository_token(
                     &PreviewTransport::new(&auth_hub, bypass_env.as_deref())?,
                     &auth_hub,
                     &bearer,
-                    &grant_identity.borrow().owner,
-                    &grant_identity.borrow().repository,
+                    &selected.owner,
+                    &selected.repository,
                     "read",
                 )
                 .map(Some)
@@ -1012,7 +1059,7 @@ impl<T: Transport> CloneTransport<T> {
         mut response: crate::hub_http::HttpResponse,
     ) -> Result<crate::hub_http::HttpResponse, GfError> {
         if matches!(response.status, 301 | 302 | 303 | 307 | 308) {
-            if response.status != 308 {
+            if self.descriptor.as_ref() == Some(url) || response.status != 308 {
                 return Err(denied("authenticated discovery cannot redirect"));
             }
             let mut bytes = Vec::new();
@@ -1032,7 +1079,7 @@ impl<T: Transport> CloneTransport<T> {
                 },
             )
             .map_err(|_| denied("authenticated discovery move is invalid"))?;
-            if moved.moved_from != *self.identity.borrow() {
+            if Some(&moved.moved_from) != self.identity.borrow().as_ref() {
                 return Err(denied("authenticated discovery move identity mismatch"));
             }
             moved
@@ -1115,6 +1162,38 @@ impl<T: Transport> CloneTransport<T> {
     }
 }
 impl<T: Transport> Transport for CloneTransport<T> {
+    fn item_descriptor_verified(
+        &self,
+        url: &Url,
+        descriptor: &graphforge_discovery::ItemDescriptor,
+    ) -> Result<(), GfError> {
+        if self.descriptor.as_ref() != Some(url) || url.origin() != self.hub.origin() {
+            return Err(denied("item descriptor selection mismatch"));
+        }
+        descriptor
+            .validate(graphforge_discovery::DiscoveryLimits::default())
+            .map_err(|_| denied("invalid item descriptor"))?;
+        let (_, base) = crate::hub_http::parse_input_at(
+            &descriptor.repository.canonical_name(),
+            Some(
+                self.item_base
+                    .as_ref()
+                    .ok_or_else(|| denied("missing item selection"))?
+                    .as_str(),
+            ),
+        )?;
+        let mut refs = crate::hub_http::endpoint(&base, "refs");
+        refs.query_pairs_mut()
+            .append_pair("revision", &descriptor.discovery.refs_revision.0);
+        let mut manifest = crate::hub_http::endpoint(&base, "manifest");
+        manifest
+            .query_pairs_mut()
+            .append_pair("validator", &descriptor.discovery.manifest_validator.0);
+        self.metadata.replace(vec![refs, manifest]);
+        self.identity.replace(Some(descriptor.repository.clone()));
+        self.token.replace(None);
+        Ok(())
+    }
     fn repository_moved(
         &self,
         moved: &graphforge_discovery::RepositoryMoved,
@@ -1125,14 +1204,14 @@ impl<T: Transport> Transport for CloneTransport<T> {
             .map_err(|_| denied("repository move identity is invalid"))?;
         let mut expected = self.hub.clone();
         expected.set_path(&format!("/{}", moved.moved_to.canonical_name()));
-        if moved.moved_from != *self.identity.borrow() || current != &expected {
+        if Some(&moved.moved_from) != self.identity.borrow().as_ref() || current != &expected {
             return Err(denied("repository authentication rebind is invalid"));
         }
-        self.metadata.replace([
+        self.metadata.replace(vec![
             crate::hub_http::endpoint(current, "refs"),
             crate::hub_http::endpoint(current, "manifest"),
         ]);
-        self.identity.replace(moved.moved_to.clone());
+        self.identity.replace(Some(moved.moved_to.clone()));
         self.token.replace(None);
         // The cached WorkOS bearer remains bound to exactly the same Hub
         // origin. A new repository grant must be acquired under the new name.
@@ -1174,7 +1253,19 @@ impl<T: Transport> Transport for CloneTransport<T> {
         // can be combined with the saved identity after anonymous denial.
         let has_bearer = headers.iter().any(|(name, _)| *name == "authorization");
         let anonymous = !has_bearer && self.discovery_token.borrow().is_none();
-        let response = self.inner.get_discovery(url, headers, limit)?;
+        let mut combined = headers.to_vec();
+        if !has_bearer && let Some(bearer) = self.discovery_token.borrow().as_ref() {
+            let mut value = ureq::http::HeaderValue::from_str(&format!("Bearer {bearer}"))
+                .map_err(|_| denied("invalid discovery credential"))?;
+            value.set_sensitive(true);
+            combined.push(("authorization", value));
+        }
+        let response = self.inner.get_discovery(url, &combined, limit)?;
+        let response = if combined.iter().any(|(name, _)| *name == "authorization") {
+            self.discovery_response(url, response)?
+        } else {
+            response
+        };
         if !has_bearer
             && matches!(response.status, 401 | 403 | 404)
             && let Some(bearer) = self.acquire_discovery(response.status, anonymous)?
@@ -1183,7 +1274,7 @@ impl<T: Transport> Transport for CloneTransport<T> {
             let mut authorization = ureq::http::HeaderValue::from_str(&format!("Bearer {bearer}"))
                 .map_err(|_| denied("invalid discovery credential"))?;
             authorization.set_sensitive(true);
-            let mut combined = headers.to_vec();
+            combined.retain(|(name, _)| *name != "authorization");
             combined.push(("authorization", authorization));
             let response =
                 self.discovery_response(url, self.inner.get_discovery(url, &combined, limit)?)?;

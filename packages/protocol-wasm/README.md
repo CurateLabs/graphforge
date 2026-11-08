@@ -315,3 +315,19 @@ validates the openalex fixture and computes the request commitment and re-homed
 revision the native Rust tests pin. It needs no account and no network, runs on
 Linux, macOS and Windows (workerd ships for all three) and on Node 20 or newer
 (Miniflare 3). A deployed Worker on Cloudflare's network remains a manual check.
+
+## Native Hub catalog and management control
+
+The package also exports `validate_hub_control_request(request)`,
+`validate_hub_control_response(request, response)`, and
+`prepare_hub_management_plan(input)`. They are thin adapters over
+`graphforge-discovery::hub`; generated TypeScript types come from its Rust DTOs.
+Call the native plan constructor only with fresh server-authorized facts, then
+validate every reply against its initiating request. The constructor computes a
+review commitment, not an authorization grant or hosted mutation.
+
+See the [full HTTP/process contract and recovery rules](../../docs/reference/hub-control/v1/README.md)
+and [shared conformance examples](../../docs/contracts/hub-control/v1/conformance.json).
+Public catalog reads, authorized private inventory, exact native content reads,
+and durable management reconciliation retain distinct authority boundaries.
+Actual WASM/native conformance tests do not establish hosted service behavior.

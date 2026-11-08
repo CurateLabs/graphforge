@@ -91,6 +91,9 @@ Browse the [GraphForge Data Hub](https://graphforge.sh/explore), install the
 selected candidate, clone a project, reopen it and ask a useful question.
 The public `opendata/openalex` example contains invented authors and works under
 CC0-1.0. Its authorship query returns Ada Example: **2**, Basil Sample: **2**.
+CLI and integration clients use the
+[native catalog/account/control contract](docs/reference/hub-control/v1/README.md).
+
 [Follow the Hub launch path](docs/guide/portable-projects.md#public-hub-launch-path)
 for the tested install route, version warning and local research/retention steps.
 

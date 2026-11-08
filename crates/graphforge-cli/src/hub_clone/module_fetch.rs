@@ -6,11 +6,10 @@
 //! apart. Sub-issue of #1732.
 
 use super::{
-    CloneStaging, DiscoveryCredentials, DownloadControl, DownloadReport, HttpTransport,
-    MAX_METADATA_BYTES, RETRY_POLICY, RetryPolicy, Transport, acquire_staging, canonical_name,
-    download_with_progress, endpoint, ensure_destination_absent, fetch_discovery_with_attempts,
-    parse_input_at, portable_error, protocol_error, read_bounded, release_staging, storage,
-    validation,
+    CloneStaging, DiscoveryCredentials, DownloadControl, DownloadReport, MAX_METADATA_BYTES,
+    RETRY_POLICY, RetryPolicy, Transport, acquire_staging, canonical_name, download_with_progress,
+    endpoint, ensure_destination_absent, fetch_discovery_with_attempts, parse_input_at,
+    portable_error, protocol_error, read_bounded, release_staging, storage, validation,
 };
 use clap::Args;
 use graphforge_api::{
@@ -80,10 +79,29 @@ pub(crate) fn run_module_fetch(
     json: bool,
     output: &mut dyn Write,
 ) -> Result<(), graphforge_api::GfError> {
-    run_module_fetch_with(&HttpTransport::new(), args, json, output, &RETRY_POLICY)
+    let transport = if let Some(reference) = item_fetch::parse_reference(&args.repository)? {
+        let hub = crate::hub_http::hub_base(args.hub.as_deref())?;
+        crate::auth::CloneTransport::for_item(
+            &hub,
+            item_fetch::item_url(
+                &hub,
+                &reference.id,
+                reference.version.as_deref().or(args.version.as_deref()),
+            )?,
+            args.protection_bypass_env.as_deref(),
+        )?
+    } else {
+        crate::auth::CloneTransport::new(
+            &args.repository,
+            args.hub.as_deref(),
+            None,
+            args.protection_bypass_env.as_deref(),
+        )?
+    };
+    run_module_fetch_with(&transport, args, json, output, &RETRY_POLICY)
 }
 
-pub(super) fn run_module_fetch_with(
+pub(crate) fn run_module_fetch_with(
     transport: &dyn Transport,
     args: &ModuleFetchArgs,
     json: bool,

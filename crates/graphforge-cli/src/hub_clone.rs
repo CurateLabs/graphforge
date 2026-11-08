@@ -42,7 +42,7 @@ use crate::hub_http::{
 #[cfg(test)]
 use crate::hub_http::{fetch, parse_input};
 
-mod module_fetch;
+pub(crate) mod module_fetch;
 pub(crate) mod ontology_adoption;
 pub(crate) mod remote_read;
 pub(crate) mod repository_listing;

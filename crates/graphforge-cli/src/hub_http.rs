@@ -114,6 +114,15 @@ pub(crate) struct HttpResponse {
 }
 
 pub(crate) trait Transport {
+    /// Bind retained discovery and object grants only after exact item validation.
+    fn item_descriptor_verified(
+        &self,
+        _url: &Url,
+        _descriptor: &graphforge_discovery::ItemDescriptor,
+    ) -> Result<(), graphforge_api::GfError> {
+        Ok(())
+    }
+
     /// Rebind authentication only after the caller verified both old metadata
     /// move markers. This never authorizes an object or forwards a header.
     fn repository_moved(

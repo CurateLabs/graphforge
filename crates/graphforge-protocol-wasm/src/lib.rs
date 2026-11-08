@@ -103,6 +103,31 @@ pub fn has_item_id_shape(name: &str) -> bool {
 
 // ------------------------------------------------------------------ discovery
 
+/// Validate closed, bounded native catalog/account/management requests.
+#[wasm_bindgen(unchecked_return_type = "HubControlRequest")]
+pub fn validate_hub_control_request(
+    #[wasm_bindgen(unchecked_param_type = "JsonInput<HubControlRequest>")] request: &str,
+) -> Result<JsValue, JsValue> {
+    run(|| engine::validate_hub_control_request(request.as_bytes()))
+}
+
+/// Refuse response identity, family, scope and exact-selector mismatches.
+#[wasm_bindgen(unchecked_return_type = "HubControlResponse")]
+pub fn validate_hub_control_response(
+    #[wasm_bindgen(unchecked_param_type = "JsonInput<HubControlRequest>")] request: &str,
+    #[wasm_bindgen(unchecked_param_type = "JsonInput<HubControlResponse>")] response: &str,
+) -> Result<JsValue, JsValue> {
+    run(|| engine::validate_hub_control_response(request.as_bytes(), response.as_bytes()))
+}
+
+/// Compute a native review commitment from fresh authorized host facts.
+#[wasm_bindgen(unchecked_return_type = "HubManagementPlan")]
+pub fn prepare_hub_management_plan(
+    #[wasm_bindgen(unchecked_param_type = "JsonInput<HubManagementPlanInput>")] input: &str,
+) -> Result<JsValue, JsValue> {
+    run(|| engine::prepare_hub_management_plan(input.as_bytes()))
+}
+
 /// Derive canonical ID/tuple requirements without host-language admission rules.
 #[wasm_bindgen(unchecked_return_type = "ItemClaimRequirement[]")]
 pub fn item_admission_requirements(

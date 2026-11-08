@@ -122,6 +122,13 @@ function wrap(name, parameters) {
 const doc = (label) => ["json", label];
 const limits = ["optional", "limits"];
 
+export const validate_hub_control_request = wrap("validate_hub_control_request", [doc("request")]);
+export const validate_hub_control_response = wrap("validate_hub_control_response", [
+  doc("request"),
+  doc("response"),
+]);
+export const prepare_hub_management_plan = wrap("prepare_hub_management_plan", [doc("input")]);
+
 export const parse_item_id = wrap("parse_item_id", [["string", "reference"]]);
 export const has_item_id_shape = wrap("has_item_id_shape", [["string", "name"]]);
 export const assess_retained_manifest = wrap("assess_retained_manifest", [doc("manifest")]);

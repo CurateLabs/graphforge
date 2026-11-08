@@ -963,6 +963,12 @@ gf --project reader --json research branch query --branch-uuid "$BRANCH_UUID" \
   --query 'MATCH ()-[r]->() RETURN count(r)'
 ```
 
+Public reads work signed out. Private listing and exact module fetching reuse
+`gf auth login` on the native execution host; item-ID fetches authorize the
+exact descriptor and retained snapshots before verifying the package. See the
+[native catalog/account/control contract](../reference/hub-control/v1/README.md)
+for discovery, process invocation, privacy and management reconciliation.
+
 Fetch fully verifies the advertised module package and recomputes the exact
 module identity before writing the new output file. Clone independently verifies
 and imports the selected Version, preserving the ontology and its schema; both
