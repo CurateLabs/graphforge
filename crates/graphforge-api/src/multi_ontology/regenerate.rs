@@ -1,16 +1,17 @@
 //! Authorized identity rewriting, prepared privately and published once.
 use super::candidate::{bridge_id, cascade_bridge_identities, compile_candidate};
 use crate::{
-    CancellationToken, GfError, GraphForge, ItemIdRegeneration, ModuleMigrationRequest,
-    ModuleSelector, OntologyAuthorityExpectation, OperationId, UpdateResearchMetadataRequest,
-    WriteContext,
+    CancellationToken, GfError, GraphForge, ItemIdRegeneration, ItemIdRegenerationSelection,
+    ModuleMigrationRequest, ModuleSelector, OntologyAuthorityExpectation, OperationId,
+    UpdateResearchMetadataRequest, WriteContext,
     item_refusals::{RegenerationBinding, RegenerationGuard},
 };
 use graphforge_discovery::{ItemId, ItemKind};
 use graphforge_storage::{
     WorkspaceOntologyComposition,
     research_versions::{
-        RegisterResearchVersion, ResearchMutation, ResearchOperation, prepare_project_draft,
+        PreparedResearchContent, RegisterResearchVersion, ResearchMutation, ResearchOperation,
+        ResearchVersionRecord, prepare_branch_content, prepare_project_draft,
         read_research_registry,
     },
 };
@@ -53,7 +54,27 @@ impl GraphForge {
         operation_uuid: Uuid,
         cancellation: Option<&CancellationToken>,
     ) -> Result<ItemIdRegeneration, GfError> {
-        self.rewrite_item_id(id, operation_uuid, cancellation, false)
+        self.rewrite_item_id(id, operation_uuid, cancellation, false, None)
+    }
+
+    /// Replace a refused ID only at the expected native Branch and head.
+    /// The saved exact-ID refusal must identify that head. Selection and source
+    /// generation stay bound through atomic publication; a concurrent write
+    /// refuses rather than rebasing. Replays require the same selection, then
+    /// return the original immutable Version even after selection or content changes.
+    pub fn regenerate_item_id_at_selection(
+        &mut self,
+        id: &str,
+        operation_uuid: Uuid,
+        selection: ItemIdRegenerationSelection,
+        cancellation: Option<&CancellationToken>,
+    ) -> Result<ItemIdRegeneration, GfError> {
+        if selection.branch_uuid.is_nil() || selection.head_version_uuid.is_nil() {
+            return Err(invalid(
+                "ID regeneration expected Branch and head UUIDs must be non-nil",
+            ));
+        }
+        self.rewrite_item_id(id, operation_uuid, cancellation, false, Some(selection))
     }
 
     /// Explicitly fork every adopted version of a permanent ontology ID.
@@ -68,7 +89,7 @@ impl GraphForge {
         operation_uuid: Uuid,
         cancellation: Option<&CancellationToken>,
     ) -> Result<ItemIdRegeneration, GfError> {
-        self.rewrite_item_id(id, operation_uuid, cancellation, true)
+        self.rewrite_item_id(id, operation_uuid, cancellation, true, None)
     }
 
     #[allow(clippy::too_many_lines)] // authorization, native publication and reconciliation form one operation
@@ -78,6 +99,7 @@ impl GraphForge {
         operation_uuid: Uuid,
         cancellation: Option<&CancellationToken>,
         explicit_fork: bool,
+        expected_selection: Option<ItemIdRegenerationSelection>,
     ) -> Result<ItemIdRegeneration, GfError> {
         let id = ItemId::parse_reference(id)
             .map_err(|_| invalid("a permanent GraphForge item ID is required"))?;
@@ -93,11 +115,17 @@ impl GraphForge {
                 message: "historical views cannot regenerate IDs".into(),
             });
         }
-        let mut guard =
-            RegenerationGuard::begin(self, &id, operation_uuid, explicit_fork, |receipt| {
+        let mut guard = RegenerationGuard::begin(
+            self,
+            &id,
+            operation_uuid,
+            explicit_fork,
+            expected_selection,
+            |receipt| {
                 cancellation.map_or(Ok(()), CancellationToken::checkpoint)?;
-                self.prepare_regeneration_binding(&id, operation_uuid, receipt)
-            })?;
+                self.prepare_regeneration_binding(&id, operation_uuid, receipt, expected_selection)
+            },
+        )?;
         // Replay before reading current composition, Branch selection or source.
         if let Some(result) = guard.replay(self)? {
             return Ok(result);
@@ -144,27 +172,21 @@ impl GraphForge {
         )?;
         private.lifecycle_mode =
             graphforge_storage::filesystem_admission::ProjectLifecycleMode::Ephemeral;
-        let previous = private
-            .workspace_ontology_composition()?
-            .ok_or_else(|| invalid("item composition is missing"))?;
-        let candidate = private.regenerate_composition(
-            &previous,
-            &id,
-            &binding.replacement.id,
-            operation_uuid,
-        )?;
-        private.materialize_regeneration(
-            &previous,
-            &candidate,
-            &id,
-            &binding.replacement.id,
-            &token,
-        )?;
+        let (previous, candidate) = private.rewrite_private_item(&id, &binding, &token)?;
         let private_generation = private.generation_for_read()?;
         let mut prepared = draft.finish(
             crate::research_versions::complete_evidence(&private_generation)?,
             token.flag(),
         )?;
+        let prepared_workspace = if expected_selection.is_some() {
+            // CURRENT and Branch content evolve independently. Rewrite each with
+            // the same ID; only the exact refused Branch content becomes publishable.
+            let workspace = prepared;
+            prepared = self.prepare_regenerated_head(prior, &binding, &id, &token)?;
+            Some(workspace)
+        } else {
+            None
+        };
         prepared.version.context_uuid = binding.branch_uuid;
         prepared.version.content.source_version = prior.content.source_version;
         prepared
@@ -179,21 +201,26 @@ impl GraphForge {
             None,
             None,
         )?;
-        preserve_field_history(
-            self,
-            &private,
-            prior,
-            &previous,
-            &candidate,
-            &mut prepared,
-            &token,
-        )?;
+        if expected_selection.is_none() {
+            preserve_field_history(
+                self,
+                &private,
+                prior,
+                &previous,
+                &candidate,
+                &mut prepared,
+                &token,
+            )?;
+        }
         let operation = ResearchOperation {
             operation_uuid,
             expected_generation_uuid: binding.source_generation,
             mutation: ResearchMutation::RegenerateItemId {
                 intent_sha256: binding.digest()?,
                 version: Box::new(prepared.version.clone()),
+                workspace: prepared_workspace
+                    .as_ref()
+                    .map(|workspace| Box::new(workspace.version.clone())),
             },
         };
         guard.bind_request(&operation)?;
@@ -221,11 +248,70 @@ impl GraphForge {
         Ok(binding.replacement)
     }
 
+    fn rewrite_private_item(
+        &mut self,
+        id: &ItemId,
+        binding: &RegenerationBinding,
+        token: &CancellationToken,
+    ) -> Result<(WorkspaceOntologyComposition, RegeneratedComposition), GfError> {
+        let previous = self
+            .workspace_ontology_composition()?
+            .ok_or_else(|| invalid("item composition is missing"))?;
+        require_item(&previous, id)?;
+        let candidate = self.regenerate_composition(
+            &previous,
+            id,
+            &binding.replacement.id,
+            binding.operation_uuid,
+        )?;
+        self.materialize_regeneration(&previous, &candidate, id, &binding.replacement.id, token)?;
+        Ok((previous, candidate))
+    }
+
+    fn prepare_regenerated_head(
+        &self,
+        prior: &ResearchVersionRecord,
+        binding: &RegenerationBinding,
+        id: &ItemId,
+        token: &CancellationToken,
+    ) -> Result<PreparedResearchContent, GfError> {
+        let mut head = crate::research_versions::materialize_version_writable(
+            self,
+            prior,
+            self.resource_policy
+                .clone()
+                .with_private_query_budget(64 * 1024 * 1024),
+        )?;
+        let (previous, candidate) = head.rewrite_private_item(id, binding, token)?;
+        let generation = head.generation_for_read()?;
+        let mut version = prior.clone();
+        version.version_uuid = binding.replacement.version_uuid;
+        version.created_at = binding.created_at;
+        version.content.evidence = crate::research_versions::complete_evidence(&generation)?;
+        let mut prepared = prepare_branch_content(
+            self.resolved_generation.container_root(),
+            &generation,
+            version,
+            token.flag(),
+        )?;
+        preserve_field_history(
+            self,
+            &head,
+            prior,
+            &previous,
+            &candidate,
+            &mut prepared,
+            token,
+        )?;
+        Ok(prepared)
+    }
+
     fn prepare_regeneration_binding(
         &self,
         id: &ItemId,
         operation: Uuid,
         refusal: Option<&crate::ItemIdRefusalReceipt>,
+        expected_selection: Option<ItemIdRegenerationSelection>,
     ) -> Result<RegenerationBinding, GfError> {
         let source = graphforge_storage::resolve_project_generation(
             self.resolved_generation.container_root(),
@@ -250,6 +336,16 @@ impl GraphForge {
             .heads
             .get(&branch)
             .ok_or_else(|| invalid("selected Branch has no head"))?;
+        if let Some(selection) = expected_selection {
+            if selection.branch_uuid != branch
+                || selection.head_version_uuid != head
+                || refusal.map(|receipt| receipt.refused_version_uuid) != Some(head)
+            {
+                return Err(invalid(
+                    "ID regeneration expected Branch/head must match the selected Branch and exact-ID refused Version; publish the intended Branch again before recovery",
+                ));
+            }
+        }
         let composition = self
             .workspace_ontology_composition()?
             .ok_or_else(|| invalid("item composition is missing"))?;
@@ -272,6 +368,7 @@ impl GraphForge {
             source_generation: source.generation_uuid(),
             branch_uuid: branch,
             source_version: head,
+            expected_selection,
             created_at: (self.clock.lock().expect("clock lock poisoned"))()?,
             request_sha256: None,
         })

@@ -35,6 +35,16 @@ pub struct ItemIdRegeneration {
     pub version_uuid: Uuid,
 }
 
+/// Expected native selection for guarded publication-refusal recovery.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ItemIdRegenerationSelection {
+    /// Branch that must still be selected when preparation begins.
+    pub branch_uuid: Uuid,
+    /// Branch head that must match the exact-ID publication refusal.
+    pub head_version_uuid: Uuid,
+}
+
 /// Exact-ID local refusal used by native publication and future regeneration.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -239,6 +249,19 @@ fn validate_document(document: &Document) -> Result<(), GfError> {
             }
         } else if old.kind() != ItemKind::OntologyModule {
             return Err(invalid("explicit forks require a permanent ontology ID"));
+        }
+        if let Some(selection) = binding.expected_selection {
+            if selection.branch_uuid.is_nil()
+                || selection.head_version_uuid.is_nil()
+                || selection.branch_uuid != binding.branch_uuid
+                || selection.head_version_uuid != binding.source_version
+                || binding.refusal.as_ref().map(|r| r.refused_version_uuid)
+                    != Some(selection.head_version_uuid)
+            {
+                return Err(invalid(
+                    "local ID regeneration selection binding is invalid",
+                ));
+            }
         }
         if operation.is_nil()
             || *operation != binding.operation_uuid

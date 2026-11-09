@@ -187,6 +187,25 @@ Non-interactive stdin MUST require `--yes`; piped input MUST NOT confirm it.
 Prompts MUST go to stderr so JSON stdout remains the native
 `ItemIdRegeneration { id, version_uuid }` receipt, whose `id` is a bare ID.
 
+Automated recovery MUST pair `--expected-branch-uuid UUID` with
+`--expected-head-version-uuid UUID`. This invokes
+`GraphForge::regenerate_item_id_at_selection` with an
+`ItemIdRegenerationSelection`. Both UUIDs must be non-nil. In one native snapshot,
+Core requires the selected Branch, its head and the exact-ID refusal's
+`refused_version_uuid` to match. The native generation comparison protects the
+entire preparation through publication against an intervening switch or write.
+A reused operation UUID requires identical expectations, including their presence;
+matching replay returns the original receipt even after reopen or later work.
+
+Guarded recovery rewrites the exact refused Branch head and the independent
+CURRENT workspace separately, using the same replacement ID. It publishes both
+atomically, preserving their respective data and metadata. Workspace-only edits
+never enter the replacement Branch Version, and Branch-only edits never replace
+workspace data. Callers MUST publish the returned immutable `version_uuid`, not a
+mutable Branch ref. Unguarded manual regeneration retains its existing behavior
+of capturing CURRENT edits into the new Branch head. `fork-id` accepts neither
+selection option.
+
 Regeneration MUST require the local `id_taken` receipt stored by `gf publish`
 for that exact permanent GraphForge ID. A missing receipt MUST fail; an
 own-domain IRI MUST NOT be regenerated. If the receipt says `publish_as_owner`,
