@@ -46,7 +46,7 @@ fn adopt_bridge(graph: &mut GraphForge, document: BridgeDocument) -> BridgeSetId
     id
 }
 
-fn assert_history(
+pub(super) fn assert_history(
     graph: &GraphForge,
     prior: &graphforge_storage::research_versions::ResearchRegistry,
     branch: Uuid,
@@ -70,7 +70,7 @@ fn assert_history(
     );
 }
 
-fn assert_field_credit(
+pub(super) fn assert_field_credit(
     graph: &GraphForge,
     base: Uuid,
     branch: Uuid,

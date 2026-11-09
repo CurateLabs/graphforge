@@ -9,6 +9,7 @@ use graphforge_hub_publish::IdTakenItem;
 use graphforge_ontology::BridgeSetId;
 
 mod multi_version;
+mod selection;
 
 const OLD: &str = "ont_aaaaaaaaaaaaaaaa";
 const OTHER: &str = "ont_bbbbbbbbbbbbbbbb";
@@ -632,7 +633,8 @@ fn receipt_guards_cancellation_and_ordinary_migration_preserve_authority() {
                     expected_generation_uuid: generation,
                     mutation: ResearchMutation::RegenerateItemId {
                         intent_sha256: [0; 32],
-                        version: Box::new(prior)
+                        version: Box::new(prior),
+                        workspace: None,
                     }
                 },
                 &CancellationToken::new()
@@ -658,6 +660,12 @@ pub(super) fn before_publication(
         Some("cancel_before") => {
             token.cancel();
             token.checkpoint()?;
+        }
+        Some("switch_race") => {
+            branch(graph, "interloper");
+        }
+        Some("head_race") => {
+            selection::advance_head(graph, binding.branch_uuid);
         }
         Some("race") => {
             graph.execute("CREATE (:Thing {name:'Race winner'})")?;

@@ -16,6 +16,10 @@ pub(crate) struct RegenerationBinding {
     pub source_generation: Uuid,
     pub branch_uuid: Uuid,
     pub source_version: Uuid,
+    // Omission preserves legacy serialized bytes and authenticated digests.
+    // Older readers deny this field rather than downgrade a guarded operation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_selection: Option<ItemIdRegenerationSelection>,
     pub created_at: i64,
     // Persist the exact prepared native request before attempting publication.
     // It may change after an aborted private preparation, never after a commit.
@@ -188,6 +192,7 @@ impl RegenerationGuard {
         id: &ItemId,
         operation_uuid: Uuid,
         explicit_fork: bool,
+        expected_selection: Option<ItemIdRegenerationSelection>,
         prepare: impl FnOnce(Option<&ItemIdRefusalReceipt>) -> Result<RegenerationBinding, GfError>,
     ) -> Result<Self, GfError> {
         // Validate a first explicit fork before creating any private state.
@@ -208,7 +213,10 @@ impl RegenerationGuard {
         };
         let mut document = store.read_recovered(graph)?;
         if let Some(binding) = document.regenerations.get(&operation_uuid) {
-            if binding.old_id != id.as_str() || binding.refusal.is_none() != explicit_fork {
+            if binding.old_id != id.as_str()
+                || binding.refusal.is_none() != explicit_fork
+                || binding.expected_selection != expected_selection
+            {
                 return Err(conflict());
             }
             return Ok(Self {

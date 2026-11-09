@@ -329,3 +329,129 @@ fn terminal_requires_an_explicit_affirmative_before_native_mutation() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("[y/N]"));
     project.assert_regenerated(&output, &before);
 }
+
+fn guarded_command(project: &Project, operation: Uuid, branch: Uuid, head: Uuid) -> Command {
+    let mut command = project.command(OLD, operation, true);
+    command.args([
+        "--expected-branch-uuid",
+        &branch.to_string(),
+        "--expected-head-version-uuid",
+        &head.to_string(),
+    ]);
+    command
+}
+
+#[test]
+fn guarded_cli_returns_exact_version_and_binds_replay_selection() {
+    let project = Project::new(Some(false));
+    let before = project.snapshot();
+    let operation = Uuid::now_v7();
+    let output = guarded_command(&project, operation, project.branch, project.base)
+        .output()
+        .unwrap();
+    let result = project.assert_regenerated(&output, &before);
+    let after = project.snapshot();
+    let replay = guarded_command(&project, operation, project.branch, project.base)
+        .output()
+        .unwrap();
+    assert!(
+        replay.status.success(),
+        "{}",
+        String::from_utf8_lossy(&replay.stderr)
+    );
+    assert_eq!(
+        serde_json::from_slice::<ItemIdRegeneration>(&replay.stdout).unwrap(),
+        result
+    );
+    for (branch, head) in [
+        (Uuid::now_v7(), project.base),
+        (project.branch, Uuid::now_v7()),
+    ] {
+        assert!(
+            !guarded_command(&project, operation, branch, head)
+                .output()
+                .unwrap()
+                .status
+                .success()
+        );
+    }
+    assert!(
+        !project
+            .command(OLD, operation, true)
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    project.assert_unchanged(&after);
+}
+
+#[test]
+fn guarded_cli_refuses_wrong_selection_and_invalid_or_unpaired_options() {
+    let project = Project::new(Some(false));
+    let before = project.snapshot();
+    for (branch, head) in [
+        (Uuid::now_v7(), project.base),
+        (project.branch, Uuid::now_v7()),
+        (Uuid::nil(), project.base),
+    ] {
+        assert!(
+            !guarded_command(&project, Uuid::now_v7(), branch, head)
+                .output()
+                .unwrap()
+                .status
+                .success()
+        );
+        project.assert_unchanged(&before);
+    }
+    let branch = project.branch.to_string();
+    let head = project.base.to_string();
+    for args in [
+        vec!["--expected-branch-uuid", &branch],
+        vec!["--expected-head-version-uuid", &head],
+        vec![
+            "--expected-branch-uuid",
+            "bad",
+            "--expected-head-version-uuid",
+            &head,
+        ],
+        vec![
+            "--expected-branch-uuid",
+            &branch,
+            "--expected-head-version-uuid",
+            "bad",
+        ],
+    ] {
+        let output = project
+            .command(OLD, Uuid::now_v7(), true)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        project.assert_unchanged(&before);
+    }
+}
+
+#[test]
+fn fork_cli_does_not_accept_regeneration_selection_options() {
+    let output = Command::new(env!("CARGO_BIN_EXE_gf"))
+        .args([
+            "ontology",
+            "fork-id",
+            OLD,
+            "--operation-uuid",
+            &Uuid::now_v7().to_string(),
+            "--expected-branch-uuid",
+            &Uuid::now_v7().to_string(),
+            "--expected-head-version-uuid",
+            &Uuid::now_v7().to_string(),
+            "--yes",
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("unexpected argument '--expected-branch-uuid'")
+    );
+}

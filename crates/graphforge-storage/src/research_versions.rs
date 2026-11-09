@@ -421,6 +421,10 @@ pub enum ResearchMutation {
         intent_sha256: [u8; 32],
         /// Fully authenticated prepared content, retaining the Branch origin.
         version: Box<ResearchVersionRecord>,
+        /// Guarded recovery rewrites the independent CURRENT workspace separately.
+        /// Omission preserves legacy complete-workspace regeneration semantics.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        workspace: Option<Box<ResearchVersionRecord>>,
     },
     /// Register a separately identified selected graph/evidence closure.
     RegisterGraphProjection {

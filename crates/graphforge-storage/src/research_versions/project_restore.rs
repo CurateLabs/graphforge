@@ -18,10 +18,14 @@ pub(super) fn prepare(
             .versions
             .get(source_version)
             .ok_or_else(|| invalid("Project restore source is unavailable"))?,
-        ResearchMutation::AdoptBranchOntology { workspace, .. } => {
+        ResearchMutation::AdoptBranchOntology { workspace, .. }
+        | ResearchMutation::RegenerateItemId {
+            workspace: Some(workspace),
+            ..
+        } => {
             if workspace.content.source_version.is_some() {
                 return Err(invalid(
-                    "ontology adoption workspace must be complete CURRENT content",
+                    "prepared workspace must be complete CURRENT content",
                 ));
             }
             let snapshots = super::retained_content::inspect(root, workspace, None)?;

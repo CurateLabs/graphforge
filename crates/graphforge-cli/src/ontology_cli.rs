@@ -70,7 +70,7 @@ pub(crate) enum OntologyCommand {
     // Like module fetch, this is outside the four-surface multi-ontology contract.
     RegenerateId(RegenerateIdArgs),
     /// Fork an adopted permanent ontology ID without a publication refusal.
-    ForkId(RegenerateIdArgs),
+    ForkId(IdRewriteArgs),
     /// Manage independently identified ontology modules.
     Module {
         #[command(subcommand)]
@@ -95,6 +95,18 @@ pub(crate) enum OntologyCommand {
 
 #[derive(Args)]
 pub(crate) struct RegenerateIdArgs {
+    #[command(flatten)]
+    rewrite: IdRewriteArgs,
+    /// Require this selected Branch and the exact refused head before rewriting.
+    #[arg(long, requires = "expected_head_version_uuid")]
+    expected_branch_uuid: Option<String>,
+    /// Require this head and its exact-ID refusal; paired with expected Branch.
+    #[arg(long, requires = "expected_branch_uuid")]
+    expected_head_version_uuid: Option<String>,
+}
+
+#[derive(Args)]
+pub(crate) struct IdRewriteArgs {
     /// Permanent GraphForge ID (bare or URI); fork-id requires an ontology ID.
     id: String,
     /// Caller-owned operation identity; reuse it to replay the original result.
@@ -512,15 +524,31 @@ pub(crate) fn run_ontology(
             )
         }
         OntologyCommand::RegenerateId(args) => {
-            let operation_uuid = canonical_uuid(&args.operation_uuid)?;
-            if !args.yes {
+            let operation_uuid = canonical_uuid(&args.rewrite.operation_uuid)?;
+            let selection = args
+                .expected_branch_uuid
+                .as_deref()
+                .zip(args.expected_head_version_uuid.as_deref())
+                .map(|(branch, head)| {
+                    Ok::<_, graphforge_api::GfError>(graphforge_api::ItemIdRegenerationSelection {
+                        branch_uuid: canonical_uuid(branch)?,
+                        head_version_uuid: canonical_uuid(head)?,
+                    })
+                })
+                .transpose()?;
+            if !args.rewrite.yes {
                 confirm_regeneration()?;
             }
-            emit(
-                &graph.regenerate_item_id(&args.id, operation_uuid, None)?,
-                json_output,
-                output,
-            )
+            let receipt = match selection {
+                Some(selection) => graph.regenerate_item_id_at_selection(
+                    &args.rewrite.id,
+                    operation_uuid,
+                    selection,
+                    None,
+                )?,
+                None => graph.regenerate_item_id(&args.rewrite.id, operation_uuid, None)?,
+            };
+            emit(&receipt, json_output, output)
         }
         OntologyCommand::Module { command } => run_module(graph, command, json_output, output),
         OntologyCommand::Bridge { command } => run_bridge(graph, command, json_output, output),

@@ -413,6 +413,7 @@ fn pending_regeneration_authorization_is_not_evictable() {
         source_generation: Uuid::now_v7(),
         branch_uuid: Uuid::now_v7(),
         source_version: version,
+        expected_selection: None,
         created_at: 1,
         request_sha256: None,
     };

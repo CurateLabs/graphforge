@@ -288,7 +288,7 @@ pub use branches::{
     ResearchBranchView, RestoreResearchBranchRequest, SuppressResearchBranchAssertionRequest,
 };
 #[cfg(feature = "research")]
-pub use item_refusals::{ItemIdRefusalReceipt, ItemIdRegeneration};
+pub use item_refusals::{ItemIdRefusalReceipt, ItemIdRegeneration, ItemIdRegenerationSelection};
 #[cfg(feature = "research")]
 pub use research_local_state::{
     RecordResearchPublicationRequest, SelectResearchBranchRequest, SetResearchTagRequest,
