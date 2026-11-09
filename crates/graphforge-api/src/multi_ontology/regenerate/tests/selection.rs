@@ -326,3 +326,56 @@ fn guarded_publication_refuses_intervening_branch_switch_and_head_advance() {
         assert!(status.success(), "{phase}");
     }
 }
+
+#[test]
+fn guarded_recovery_remaps_existing_workspace_credit_after_a_manual_fork() {
+    let mut fixture = Fixture::new(false);
+    let first = fixture
+        .graph
+        .regenerate_item_id(OLD, Uuid::now_v7(), None)
+        .unwrap();
+    fixture
+        .graph
+        .execute("CREATE (:Thing {name:'Uncommitted current edit'})")
+        .unwrap();
+    let prior = crate::branches::baseline::read(&fixture.graph).unwrap();
+    assert!(!prior.is_empty());
+    refusal(&fixture.graph, &first.id, first.version_uuid, false);
+    let result = fixture
+        .graph
+        .regenerate_item_id_at_selection(
+            &first.id,
+            Uuid::now_v7(),
+            ItemIdRegenerationSelection {
+                branch_uuid: fixture.branch,
+                head_version_uuid: first.version_uuid,
+            },
+            None,
+        )
+        .unwrap();
+    let after = crate::branches::baseline::read(&fixture.graph).unwrap();
+    assert_eq!(
+        after.len(),
+        prior.len(),
+        "uncommitted edits must not acquire credit from the Branch Version"
+    );
+    let old_key =
+        crate::branches::context_fields::context_identity("ontology_module", &uri(&first.id));
+    let new_key =
+        crate::branches::context_fields::context_identity("ontology_module", &uri(&result.id));
+    let old = prior
+        .values()
+        .find(|row| row.key.0 == "ontology_module" && row.key.1 == old_key)
+        .unwrap();
+    let mut key = old.key.clone();
+    key.1 = new_key;
+    let new = after
+        .get(&key)
+        .expect("CURRENT credit must follow the rewritten ID");
+    assert!(!after.contains_key(&old.key));
+    assert_eq!(new.origin, old.origin);
+    assert_eq!(new.original, old.original);
+    assert_eq!(new.baseline, old.baseline);
+    assert_eq!(new.contribution, old.contribution);
+    assert_ne!(new.current, old.current);
+}

@@ -181,6 +181,15 @@ impl GraphForge {
         let prepared_workspace = if expected_selection.is_some() {
             // CURRENT and Branch content evolve independently. Rewrite each with
             // the same ID; only the exact refused Branch content becomes publishable.
+            preserve_field_history(
+                self,
+                &private,
+                None,
+                &previous,
+                &candidate,
+                &mut prepared,
+                &token,
+            )?;
             let workspace = prepared;
             prepared = self.prepare_regenerated_head(prior, &binding, &id, &token)?;
             Some(workspace)
@@ -205,7 +214,7 @@ impl GraphForge {
             preserve_field_history(
                 self,
                 &private,
-                prior,
+                Some(prior),
                 &previous,
                 &candidate,
                 &mut prepared,
@@ -297,7 +306,7 @@ impl GraphForge {
         preserve_field_history(
             self,
             &head,
-            prior,
+            Some(prior),
             &previous,
             &candidate,
             &mut prepared,
@@ -336,15 +345,14 @@ impl GraphForge {
             .heads
             .get(&branch)
             .ok_or_else(|| invalid("selected Branch has no head"))?;
-        if let Some(selection) = expected_selection {
-            if selection.branch_uuid != branch
+        if let Some(selection) = expected_selection
+            && (selection.branch_uuid != branch
                 || selection.head_version_uuid != head
-                || refusal.map(|receipt| receipt.refused_version_uuid) != Some(head)
-            {
-                return Err(invalid(
-                    "ID regeneration expected Branch/head must match the selected Branch and exact-ID refused Version; publish the intended Branch again before recovery",
-                ));
-            }
+                || refusal.map(|receipt| receipt.refused_version_uuid) != Some(head))
+        {
+            return Err(invalid(
+                "ID regeneration expected Branch/head must match the selected Branch and exact-ID refused Version; publish the intended Branch again before recovery",
+            ));
         }
         let composition = self
             .workspace_ontology_composition()?
@@ -601,16 +609,25 @@ fn require_item(composition: &WorkspaceOntologyComposition, id: &ItemId) -> Resu
 
 // Carry immutable field origins and contribution identities across context-key
 // changes. Updated current hashes describe the rewrite, without resetting credit.
+// Without a prior Version, remap only existing CURRENT credit. Unversioned
+// workspace edits receive new credit when captured into a Branch Version.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)] // remap context keys while preserving immutable field credit
 fn preserve_field_history(
     owner: &GraphForge,
     private: &GraphForge,
-    prior: &graphforge_storage::research_versions::ResearchVersionRecord,
+    prior: Option<&graphforge_storage::research_versions::ResearchVersionRecord>,
     previous: &WorkspaceOntologyComposition,
     candidate: &RegeneratedComposition,
     prepared: &mut graphforge_storage::research_versions::PreparedResearchContent,
     token: &CancellationToken,
 ) -> Result<(), GfError> {
+    let prior_graph = prior
+        .map(|prior| crate::research_versions::materialize_version(owner, prior))
+        .transpose()?;
+    let previous_rows = crate::branches::baseline::read(prior_graph.as_ref().unwrap_or(owner))?;
+    if prior.is_none() && previous_rows.is_empty() {
+        return Ok(());
+    }
     let mut remap = BTreeMap::new();
     let mut subjects = BTreeMap::new();
     let mut pair = |kind: &str, old: &str, new: &str| {
@@ -650,9 +667,8 @@ fn preserve_field_history(
         ),
     )?;
     let current = crate::branches::fields::read(&graph, token)?;
-    let prior_graph = crate::research_versions::materialize_version(owner, prior)?;
     let mut rows = BTreeMap::new();
-    for (_, mut row) in crate::branches::baseline::read(&prior_graph)? {
+    for (_, mut row) in previous_rows {
         if let Some(id) = remap.get(&(row.key.0.clone(), row.key.1)) {
             row.key.1 = *id;
         }
@@ -661,22 +677,24 @@ fn preserve_field_history(
             return Err(invalid("regeneration field identity collision"));
         }
     }
-    for (key, digest) in current {
-        rows.entry(key.clone())
-            .or_insert_with(|| crate::branches::baseline::Row {
-                key: key.clone(),
-                origin: prepared.version.version_uuid,
-                incorporated: None,
-                original: hex(&digest),
-                baseline: String::new(),
-                current: hex(&digest),
-                contribution: crate::branches::baseline::contribution(
-                    prepared.version.context_uuid,
-                    prepared.version.version_uuid,
-                    &key,
-                ),
-                role: "active".into(),
-            });
+    if prior.is_some() {
+        for (key, digest) in current {
+            rows.entry(key.clone())
+                .or_insert_with(|| crate::branches::baseline::Row {
+                    key: key.clone(),
+                    origin: prepared.version.version_uuid,
+                    incorporated: None,
+                    original: hex(&digest),
+                    baseline: String::new(),
+                    current: hex(&digest),
+                    contribution: crate::branches::baseline::contribution(
+                        prepared.version.context_uuid,
+                        prepared.version.version_uuid,
+                        &key,
+                    ),
+                    role: "active".into(),
+                });
+        }
     }
     crate::branches::baseline::install(
         owner.resolved_generation.container_root(),
