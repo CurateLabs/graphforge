@@ -192,11 +192,7 @@ Research history has a git-style command set that needs no JSON and no UUIDs. A
 Branch is named by its label, and that label is the ref on the Hub: `--ref` means
 the same thing in `gf clone`, `gf push` and `gf pull`.
 
-These shell examples select the standalone CLI from the
-[pinned source build](installation.md#build-from-source) through its absolute
-`GF_EVALUATION_CLI` path. Keep that source-build shell. Published rc.7 launchers
-can save a login session but cannot reuse it for publishing; newer console
-launchers require a build containing the [launcher repair](installation.md#native-cli-release-assets).
+These shell examples use the `gf` CLI from [Installation](installation.md).
 
 Run these local commands from an existing durable Project. The sample queries
 assume it contains `Item` nodes; use the labels and properties in your graph.
@@ -208,54 +204,59 @@ These examples use the `main` Branch. If continuing the earlier Hub research
 example, `main` is already selected: skip the `branch main` command.
 
 ```sh
-"$GF_EVALUATION_CLI" config user --name "Ada Lovelace" --email ada@example.org  # credited on every Version
-"$GF_EVALUATION_CLI" --project "$PWD" branch main                         # the first Branch of the Project
-"$GF_EVALUATION_CLI" --project "$PWD" commit -m "Raise scores" --query "MATCH (n:Item) SET n.score = 2"
-"$GF_EVALUATION_CLI" --project "$PWD" commit -m "Fix a typo" --query "MATCH (n:Item) SET n.name = 'Ada'"
-"$GF_EVALUATION_CLI" --project "$PWD" tag v1                              # a name for the head Version
-"$GF_EVALUATION_CLI" --project "$PWD" status                              # Branch, head, upstream, commits not yet published
-"$GF_EVALUATION_CLI" --project "$PWD" log                                 # history; add --all, -n 5, a tag, or --remote
+gf config user --name "Ada Lovelace" --email ada@example.org  # credited on every Version
+gf --project "$PWD" branch main                         # the first Branch of the Project
+gf --project "$PWD" commit -m "Raise scores" --query "MATCH (n:Item) SET n.score = 2"
+gf --project "$PWD" commit -m "Fix a typo" --query "MATCH (n:Item) SET n.name = 'Ada'"
+gf --project "$PWD" tag v1                              # a name for the head Version
+gf --project "$PWD" status                              # Branch, head, upstream, commits not yet published
+gf --project "$PWD" log                                 # history; add --all, -n 5, a tag, or --remote
 ```
 
 ### Choose a publishing target
 
-Publishing requires a separately verified write-capable server implementing
-`graphforge-discovery/1` and `graphforge-hub-publish/1`, an existing owner account
-and repository, and permission to publish there. Each collaborator signs in with
-`gf auth login`; the saved session obtains the repository-scoped publish credential.
-A recorded author name supplies credit, not authorization. For agents and CI, see
-the [scoped token path](agent-automation.md#provision-scoped-credentials-for-an-agent-or-ci).
+Publishing requires a Hub implementing `graphforge-discovery/1` and
+`graphforge-hub-publish/1`, such as [graphforge.sh](https://graphforge.sh), an
+owner account, and permission to publish to the repository. Each collaborator
+signs in with `gf auth login`; the saved session obtains the repository-scoped
+publish credential. A recorded author name supplies credit, not authorization.
+For agents and CI, see the
+[scoped token path](agent-automation.md#provision-scoped-credentials-for-an-agent-or-ci).
+On a headless host with no OS credential vault, `gf auth login` fails closed
+with `hub.auth_denied: OS credential vault unavailable`; use that token path
+or an unlocked Secret Service keyring.
 
 The collaboration tests use the native reference Hub at `https://hub.test`;
-that address is not a public service. No public write target is qualified by
-this guide or those reference-Hub tests. A public Hub's availability and
-publishing prerequisites must be verified separately. In the examples below,
-replace `https://hub.example` with your verified target; it is a placeholder,
-not an endpoint to try.
+that address is not a public service. Replace `owner/repository` below with a
+repository you may write. Names resolve on graphforge.sh; pass `--hub` or a full
+repository URL for another Hub.
 
 Sign in once, then push with the saved session:
 
 ```sh
-"$GF_EVALUATION_CLI" auth login --hub https://hub.example
-"$GF_EVALUATION_CLI" --project "$PWD" push https://hub.example/owner/repository --ref main
+gf auth login
+gf --project "$PWD" push owner/repository --ref main --public
 ```
+
+`--public` creates a public repository, or requires an existing one to be public;
+use `--private` for a private repository on a plan that allows one.
 
 In a separate collaborator shell, select the same CLI and start outside the
 original Project. Clone the published ref, then work inside the clone:
 
 ```sh
-"$GF_EVALUATION_CLI" clone https://hub.example/owner/repository collaborator --ref main
+gf clone owner/repository collaborator --ref main
 cd collaborator
-"$GF_EVALUATION_CLI" config user --name "Grace Hopper" --email grace@example.org
-"$GF_EVALUATION_CLI" --project "$PWD" commit -m "Revise scores" --query "MATCH (n:Item) SET n.score = 3"
-"$GF_EVALUATION_CLI" --project "$PWD" push                                # reuse the tracked repository and ref
+gf config user --name "Grace Hopper" --email grace@example.org
+gf --project "$PWD" commit -m "Revise scores" --query "MATCH (n:Item) SET n.score = 3"
+gf --project "$PWD" push                                # reuse the tracked repository and ref
 ```
 
 Back in the original Project, incorporate the collaborator's published change:
 
 ```sh
-"$GF_EVALUATION_CLI" --project "$PWD" pull
-"$GF_EVALUATION_CLI" --project "$PWD" log
+gf --project "$PWD" pull
+gf --project "$PWD" log
 ```
 
 Use `--tag v1` instead of `--ref main` to clone the tagged Version. Tags travel

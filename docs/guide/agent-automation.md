@@ -5,12 +5,9 @@ For a first graph and a prompt you can check, use the
 [Basic agent lesson](work-with-an-agent.md).
 
 Choose the [runtime for your task](installation.md#choose-a-runtime-for-your-task)
-before running commands. The Hub research and credential examples below use
-`GF_EVALUATION_CLI`, the absolute path to the standalone Rust executable from
-the [pinned source build](installation.md#build-from-source), and its matching
-Python environment. They do not use a registry rc.7 launcher or a moving
-`next` package. Building this source is a developer route; historical
-candidate qualification does not qualify your local build or a hosted write target.
+before running commands. The Hub research and credential examples below use the
+`gf` CLI installed with the Python package, the npm CLI package or a
+[native release archive](installation.md#native-cli-release-assets).
 
 ## Work in VS Code
 
@@ -30,17 +27,17 @@ Python route does not establish that any branded agent integration is qualified.
 
 ## Add repository guidance when useful
 
-For work in a Git repository on supported durable storage, the selected CLI
+For work in a Git repository on supported durable storage, `gf`
 can initialize the project and install repository-local skills:
 
 ```bash
-"$GF_EVALUATION_CLI" init
-"$GF_EVALUATION_CLI" skills status
+gf init
+gf skills status
 ```
 
 Initialization creates GraphForge repository definitions and manages data
 exclusions. It is optional for the in-memory quickstart. Existing projects can
-use `"$GF_EVALUATION_CLI" skills install`. See [repository integration](repository-integration.md)
+use `gf skills install`. See [repository integration](repository-integration.md)
 for managed files and updates.
 
 The installed skills teach repository setup, knowledge construction and the Hub
@@ -59,12 +56,12 @@ learning the collaboration features.
 
 ## Give an agent a Hub research task
 
-Use the selected standalone `"$GF_EVALUATION_CLI"` from the source-build shell.
+Use the installed `gf`.
 The Hub skill is installed in the **code repository** holding agent guidance;
 `--project` selects the separate downloaded data Project. On a fresh repository:
 
 ```bash
-"$GF_EVALUATION_CLI" --project-dir . --json skills install
+gf --project-dir . --json skills install
 ```
 
 The public CLI returns this receipt (a second install returns `changed: false`):
@@ -74,7 +71,7 @@ The public CLI returns this receipt (a second install returns `changed: false`):
 ```
 
 The guidance lives at `.agents/skills/graphforge-hub/SKILL.md`. Existing bundle
-version 1 installations can use `"$GF_EVALUATION_CLI" skills update`; edits are reported as a
+version 1 installations can use `gf skills update`; edits are reported as a
 conflict for review before replacement. Skills are instructions, not execution
 permissions or credentials.
 
@@ -86,20 +83,20 @@ Give the agent a bounded task such as:
 > committing. After the approved commit, show its Version and parents, then
 > inspect the newest ten Versions. Report the actual returned identifiers.
 > Before writing, show me the proposed Cypher mutation and credited author.
-> Do not push until I have supplied a verified publish-capable Hub and its
-> repository-scoped credential. Preserve JSON receipts and report any failure.
+> Do not push until I have named the destination repository and supplied
+> its repository-scoped credential. Preserve JSON receipts and report any failure.
 
 The implemented command names are:
 
 ```bash
-"$GF_EVALUATION_CLI" --json clone opendata/openalex openalex
-"$GF_EVALUATION_CLI" --json --project openalex status
-"$GF_EVALUATION_CLI" --json config user --name Research-agent
-"$GF_EVALUATION_CLI" --json --project openalex branch main
-"$GF_EVALUATION_CLI" --json --project openalex commit -m Review --file changes.cypher
-"$GF_EVALUATION_CLI" --json --project openalex log -n 10
-"$GF_EVALUATION_CLI" --json --project openalex tag reviewed
-"$GF_EVALUATION_CLI" --json --project openalex log reviewed -n 2
+gf --json clone opendata/openalex openalex
+gf --json --project openalex status
+gf --json config user --name Research-agent
+gf --json --project openalex branch main
+gf --json --project openalex commit -m Review --file changes.cypher
+gf --json --project openalex log -n 10
+gf --json --project openalex tag reviewed
+gf --json --project openalex log reviewed -n 2
 ```
 
 `config user` returns the credited identity, without any access credential:
@@ -118,26 +115,29 @@ the code repository's Git history is separate. A tag names one Version and
 cannot silently move. `gf branch` lists or creates Branches; `gf switch` selects
 one for subsequent operations.
 
-For collaboration, supply the verified Hub URL and use `gf push`, `gf pull` and
-`gf log --remote`. `--ref` names the research Branch's ref consistently across
-clone, push, pull and remote log. A conforming **write-capable** server must serve
-`graphforge-hub-publish/1`; public browse/clone availability alone does not prove
-that the production Hub offers publishing. Core collaboration tests exercise the
-reference Hub through the native test transport. That is not a production
-publishing result. See [portable projects](portable-projects.md) for exchanging
-work when no write target is qualified.
+For collaboration, use `gf push`, `gf pull` and `gf log --remote` against a
+repository on [graphforge.sh](https://graphforge.sh) or another Hub that serves
+`graphforge-hub-publish/1`. `--ref` names the research Branch's ref consistently
+across clone, push, pull and remote log. Publishing to graphforge.sh needs an
+account and repository permission; see
+[publish after local evaluation](portable-projects.md#publish-after-local-evaluation).
+[Portable projects](portable-projects.md) exchange work without a Hub.
 
 ## Provision scoped credentials for an agent or CI
 
 The explicit noninteractive path is an unexpired bearer token for exactly
 `publish:<owner>/<repository>`, injected from the CI/agent secret store. For
-example, provision `GF_AGENT_PUBLISH_TOKEN` for `publish:opendata/openalex` and
-run the following against the **placeholder** Hub URL, replaced by the verified
-target (select the local `main` Branch first):
+example, provision `GF_AGENT_PUBLISH_TOKEN` for `publish:OWNER/REPOSITORY`,
+replace `OWNER/REPOSITORY` with a repository the token may write, and select the
+local `main` Branch first:
 
 ```bash
-"$GF_EVALUATION_CLI" --json --project openalex push https://hub.example/opendata/openalex --ref main --token-env GF_AGENT_PUBLISH_TOKEN
+gf --json --project openalex push OWNER/REPOSITORY --public --ref main --token-env GF_AGENT_PUBLISH_TOKEN
 ```
+
+Without a terminal, `gf push` requires an explicit `--public` or `--private`,
+even when the repository already exists; a credential never supplies
+visibility. `--private` needs a plan.
 
 `--token-env` names an environment variable, never the secret value. With that
 flag omitted, push and publish use `GRAPHFORGE_HUB_PUBLISH_TOKEN`. An explicit
@@ -185,17 +185,19 @@ POST to the **same origin** at `/api/cli/repository-token`, with the saved acces
 bearer and the following request body for this example:
 
 ```json
-{"owner":"opendata","name":"openalex","capability":"publish"}
+{"owner":"OWNER","name":"REPOSITORY","capability":"publish"}
 ```
 
 The response must include `access_token`, `token_type: Bearer`, positive
 `expires_in`, `repository_id` and `origin`. A publish grant for another origin
 is refused. Rust uses the scoped token in memory; it never exports the vault
 session. Captured binding invocations require an explicit token and do not
-consult the vault or prompt. Newer PyPI/npm console launchers use native streams
-instead; that repair is separate from the pinned standalone CLI selected here.
-Do not initiate interactive login from an unattended agent. Saved-session login and private reads require their separately
-qualified Hub endpoints; the explicit-token path does not require either.
+consult the vault or prompt. The PyPI and npm `gf` launchers run the native
+CLI with its own streams, so they use the saved session like a native archive.
+Do not initiate interactive login from an unattended agent. On a headless host
+with no OS credential vault, `gf auth login` and `gf publish` fail closed with
+`hub.auth_denied: OS credential vault unavailable`; unlock a Secret Service
+keyring or use the explicit-token path above, which needs no vault.
 
 ## Interpret actual tool results
 

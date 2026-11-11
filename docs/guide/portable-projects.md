@@ -30,10 +30,10 @@ record actual packages and deployed revisions. The fixture is synthetic CC0-1.0
 content. It is a Project-only package: its default `main` ref is not a pre-existing
 research Branch or Version UUID.
 
-The first task below uses the pinned published Python package and ends after
-clone, durable reopen and a useful query. Optional research continuation uses
-the separate pinned source build. Production publish-back qualification remains
-separate; it requires an authorized destination and machine login.
+The first task below uses the published Python package and ends after clone,
+durable reopen and a useful query. Optional research continuation and
+publishing use the same installation; publishing also requires a Hub account
+and machine login.
 The [in-memory first graph](quickstart.md) and
 [local save/reopen tutorial](tutorial.md) remain available without a Hub.
 
@@ -48,18 +48,18 @@ Do not treat a displayed date as a research Version UUID.
 The public fixture is a **synthetic OpenAlex-themed GraphForge
 example**, dedicated under CC0-1.0 and maintained by GraphForge. It contains no
 real OpenAlex records and has no official OpenAlex or OurResearch affiliation.
-Its [source and native reopen tests](https://github.com/CurateLabs/graphforge/blob/v0.6.0-rc.7/tests/fixtures/hub/README.md)
+Its [source and native reopen tests](https://github.com/CurateLabs/graphforge/blob/v0.6.0/tests/fixtures/hub/README.md)
 describe two invented authors, three works and four authorship relationships.
 The production graph has five nodes and four edges. Its author-count query
 returns Ada Example: **2**, Basil Sample: **2**. It was produced by Core
-`0.6.0-rc.6`; rc.7 consumers retain the `GF_CORE_VERSION_MISMATCH` warning.
+`0.6.0-rc.6`; a v0.6.0 consumer reports the `GF_CORE_VERSION_MISMATCH` warning.
 Do not relabel the fixture as having been produced by the newer consumer.
 
 Use Python 3.10+ and the
 [supported native platform and durable filesystem](installation.md#status-and-limits).
 Follow [Python installation](installation.md#python) to activate an isolated
-environment and install `graphforge==0.6.0rc7`. This provides both `python` and
-the `graphforge` launcher used below. No Node installation, account or publish
+environment and install `graphforge`. This provides both `python` and the
+`gf` CLI used below. No Node installation, account or publish
 credential is needed for this public read task. Keep that environment active.
 Follow the [version warning](#data-from-another-core-version) when reading a
 fixture produced by another Core version.
@@ -70,8 +70,8 @@ From a working directory on supported durable storage, clone both accepted
 identity forms into separate new destinations:
 
 ```bash
-graphforge --json clone opendata/openalex openalex
-graphforge --json clone https://graphforge.sh/opendata/openalex openalex-copy
+gf --json clone opendata/openalex openalex
+gf --json clone https://graphforge.sh/opendata/openalex openalex-copy
 ```
 
 Stop if either clone fails; do not continue after a discovery failure.
@@ -111,19 +111,16 @@ source instructions and your saved directories. You can stop here. The
 
 ### Optional: continue locally with research history
 
-This next task needs the repaired engine. In a **separate shell**, follow the
-[pinned source build](installation.md#build-from-source), activate its Python
-environment and keep its absolute `GF_EVALUATION_CLI` selection. Installation
-ends in the parent evaluation directory outside Git. From there, create
-`research-evaluation` beside `graphforge-source`, then clone with the same engine:
+Keep the same Python environment. From the directory containing the earlier
+clones, create `research-evaluation` and clone into it:
 
 ```bash
 mkdir research-evaluation
 cd research-evaluation
-"$GF_EVALUATION_CLI" --json clone opendata/openalex research-openalex
+gf --json clone opendata/openalex research-openalex
 ```
 
-Keep this source-built Python environment for the remaining research steps.
+Run the remaining research steps from `research-evaluation`.
 A Project-only clone needs its first research Branch; this example creates `main`, changes one invented
 title and exports that exact retained Version. Use a fresh clone when repeating
 it. Credit identifies the researcher; it is not a login credential.
@@ -204,7 +201,7 @@ first-use evaluation ends here. See the
 
 Editor setup is a separate entry path. Use the [extension runtime guide](vscode-extension/install.md)
 and [advanced agent guide](agent-automation.md#work-in-vs-code) to select its
-compatible runtime. The Python/source-CLI instructions above do not install a
+compatible runtime. The Python/CLI instructions above do not install a
 Node module or VSIX. The [historical qualification record](https://github.com/CurateLabs/graphforge/issues/1209#issuecomment-6657797848)
 identifies the tested Cytoscape-based VSIX and renderer limitations; its expired
 CI download is not an installation route for this lesson. It does not qualify
@@ -225,65 +222,51 @@ visibly labeled demo instead.
 
 #### Publish after local evaluation
 
-Publishing requires an existing **owner account and repository**, permission
-to write there, and the exact repository scope
-`publish:OWNER/REPOSITORY`. The Hub must provide discovery and a conforming
-`graphforge-hub-publish/1` service. For the production fixture its advertised
-scope is `publish:opendata/openalex`; browsing or cloning it does not grant
-permission to publish there. The capability endpoint's availability alone
-does not establish successful authorization or publication.
+Publishing to [graphforge.sh](https://graphforge.sh) requires a Hub **owner
+account** and permission to write the destination repository. The CLI obtains
+the exact repository scope `publish:OWNER/REPOSITORY` for you. Browsing or
+cloning `opendata/openalex` does not grant permission to publish there; publish
+to a repository under your own account. Each account may store up to 128 MiB,
+and each uploaded object may be up to 64 MiB.
 
-This is an optional write workflow, after local evaluation. No production
-publish-back result is established by this guide. Use the **same pinned
-standalone source CLI** selected above; it supports human device approval and
-saved sessions. Registry rc.7 Python/npm launchers can save a login session,
-but publishing through them neither reuses it nor starts publish device flow.
-Captured binding calls require an explicitly provisioned scoped token; see
-[agent credential provisioning](agent-automation.md#provision-scoped-credentials-for-an-agent-or-ci).
-
-Newer development source fixes the PyPI/npm console launchers to stream device
-notices and reuse a saved session for `gf push` / `gf publish`; PyPI also installs
-`gf`. It also builds [native release archives](installation.md#native-cli-release-assets).
-Those changes need a containing release and are not part of registry rc.7 or
-the older pinned source. Keep the selected standalone CLI for this lesson.
-
-Only proceed after the target operator has supplied a verified write-capable
-Hub and approved your repository permission. The URL below is a **placeholder**,
-not an endpoint to try. Replace `hub.example` and `OWNER/REPOSITORY` consistently.
-Establish machine login separately from uploading:
+Sign in once. `gf auth login` opens a browser for approval (`--no-browser`
+prints a link to approve on another device) and saves the session in the OS
+credential vault:
 
 ```bash
-"$GF_EVALUATION_CLI" auth login --hub https://hub.example
-"$GF_EVALUATION_CLI" --json auth status --hub https://hub.example
+gf auth login
+gf --json auth status
 ```
 
-The standalone CLI stores the session in the supported OS credential vault.
 Login does not grant permission to arbitrary repositories. Never copy tokens
 into commands, notebooks, Project files or transcripts. An unattended agent
-cannot approve its own owner login.
+cannot approve its own owner login. Without a saved session, `gf publish` falls
+back to terminal device approval.
 
-With the intended local `main` Branch and destination confirmed, publish from
-the directory containing `research-openalex`:
+On a headless host with no OS credential vault, `gf auth login` and `gf publish`
+fail closed with `hub.auth_denied: OS credential vault unavailable`. There,
+unlock a Secret Service keyring or provision a repository-scoped token in
+`GRAPHFORGE_HUB_PUBLISH_TOKEN`; see
+[agent credential provisioning](agent-automation.md#provision-scoped-credentials-for-an-agent-or-ci).
+
+From the directory containing `research-openalex`, replace `OWNER/REPOSITORY`
+with your destination and publish the local `main` Branch. `--public` creates a
+public repository, or requires an existing one to be public:
 
 ```bash
-"$GF_EVALUATION_CLI" --project research-openalex publish https://hub.example/OWNER/REPOSITORY --ref main
-"$GF_EVALUATION_CLI" --json clone https://hub.example/OWNER/REPOSITORY published-copy
+gf --project research-openalex publish OWNER/REPOSITORY --public
+gf hub list OWNER/REPOSITORY
+gf --json clone OWNER/REPOSITORY published-copy
 ```
 
-This pinned source requires the explicit destination and `--ref main`. Use them
-again after a later commit. Remembered destinations and other newer syntax
-require a different selected CLI build; see the
+A successful Branch publish records the destination as the Branch's upstream,
+so a later `gf --project research-openalex publish` needs no arguments. See the
 [publish CLI reference](../reference/hub-publish/v1/README.md#gf-publish).
-
-Compare the publish receipt, discovered head and new clone's Version and
-producing Core identity, then reopen and query the continued result. This
-publish-back → discovery → clone proof belongs to release execution in
-[#1095](https://github.com/CurateLabs/graphforge/issues/1095), after candidate
-first-use work in #1209 closes. Record actual write scope and deployed revisions;
-successful local export/import does not establish production publishing.
-Full hosted catalog/publishing interfaces, private-repository/browser-login
-qualification and later seed collections are separate scopes. Report failures
-through [support](../community/support.md).
+`gf hub list` shows the published refs, Branches and Versions. Compare the
+publish receipt with the new clone's Version, then reopen and query the
+continued result. Private repositories and other Hubs use the same commands;
+pass `--hub` or a full repository URL for another Hub. Report failures through
+[support](../community/support.md).
 
 ## Copy the graph you just saved
 
@@ -683,7 +666,7 @@ npx --yes @curatelabs/graphforge-cli@0.6.0-rc.6 --help   # CLI
 ```
 
 Do not use a moving `--pre` or `@next` install to match a producing version.
-The clone/query lesson above deliberately uses the tested rc.7 consumer and
+The clone/query lesson above deliberately uses the current release and
 retains its rc.6 warning; do not change that lesson's runtime halfway through.
 Keep the original source data and construction code, so you can rebuild with
 the current version if the matching one is not available.

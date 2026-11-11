@@ -75,7 +75,7 @@ your package, open a terminal at its root, and activate the environment from
 
 ### Python
 
-Install the matching GraphForge release or candidate as described in
+Install GraphForge as described in
 [Installation](installation.md), then install the example libraries:
 
 ```bash
@@ -89,11 +89,11 @@ you need to reproduce a rendered artifact.
 
 ### Node.js
 
-From the repository root, explicitly install the current published candidate
-instead of the example manifest's historical engine and Arrow pins:
+From the repository root, explicitly install the published package instead of
+the example manifest's historical engine and Arrow pins:
 
 ```bash
-npm install --prefix examples/visualization --no-save --package-lock=false @curatelabs/graphforge@0.6.0-rc.7 apache-arrow@21.2.0
+npm install --prefix examples/visualization --no-save --package-lock=false @curatelabs/graphforge apache-arrow@21
 export GRAPHFORGE_NODE_PATH="$PWD/examples/visualization/node_modules/@curatelabs/graphforge/index.js"
 ```
 
@@ -101,8 +101,7 @@ The `export` line is for a POSIX shell; in another shell, set the same environme
 variable to that installed `index.js`'s absolute path. This explicitly selects
 the registry engine rather than a possibly unbuilt in-repository binding.
 For development, select the absolute path of your rebuilt binding instead.
-Use the exact selected version when qualifying another candidate. Keep the
-working directory at the repository root for all commands below.
+Keep the working directory at the repository root for all commands below.
 
 Node examples depend on `apache-arrow` for IPC decoding and load Plotly.js,
 Cytoscape.js, and Sigma.js in the generated HTML from public CDNs (no

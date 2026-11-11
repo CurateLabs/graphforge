@@ -70,25 +70,26 @@ Details: [installation status and limits](docs/guide/installation.md#status-and-
 **Python 3.10+**
 
 ```bash
-python -m pip install "graphforge==0.6.0rc7"
+python -m pip install graphforge
 ```
 
 **Node.js 20+**
 
 ```bash
-npm install @curatelabs/graphforge@0.6.0-rc.7 apache-arrow@21.2.0
+npm install @curatelabs/graphforge apache-arrow@21
+npm install --global @curatelabs/graphforge-cli   # optional: the gf CLI
 ```
 
-These first-use examples pin the published rc.7 candidate. The
+The Python package also installs the `gf` CLI. The
 [installation guide](docs/guide/installation.md#choose-a-runtime-for-your-task)
-maps tasks to exact runtimes; [releases](https://github.com/CurateLabs/graphforge/releases)
-lists public artifacts. Before v1.0.0 there is no backward-compatibility or
-migration guarantee.
+maps tasks to runtimes; the [v0.6.0 release](https://github.com/CurateLabs/graphforge/releases/tag/v0.6.0)
+also attaches native `gf` archives. Before v1.0.0 there is no
+backward-compatibility or migration guarantee.
 
 ## Start with the public Hub
 
-Browse the [GraphForge Data Hub](https://graphforge.sh/explore), install the
-selected candidate, clone a project, reopen it and ask a useful question.
+Browse the [GraphForge Data Hub](https://graphforge.sh/explore), install
+GraphForge, clone a project, reopen it and ask a useful question.
 The public `opendata/openalex` example contains invented authors and works under
 CC0-1.0. Its authorship query returns Ada Example: **2**, Basil Sample: **2**.
 CLI and integration clients use the
@@ -97,11 +98,9 @@ CLI and integration clients use the
 [Follow the Hub launch path](docs/guide/portable-projects.md#public-hub-launch-path)
 for the tested install route, version warning and local research/retention steps.
 
-Retained research with composed ontologies, and composition reimport, require
-repairs absent from registry rc.7; use the separate
-[pinned source build](docs/guide/installation.md#build-from-source) for those
-tasks. Publishing to a Hub is a separate operation requiring an authorized
-destination and machine authentication.
+Publishing your own research back to the Hub needs a graphforge.sh account:
+sign in with `gf auth login`, then `gf publish OWNER/REPOSITORY --public`.
+See [publish after local evaluation](docs/guide/portable-projects.md#publish-after-local-evaluation).
 
 ## Quick Start: an in-memory graph
 
@@ -216,10 +215,10 @@ offline install. Releases are cut by pushing a `v<version>` tag; see
 
 ## Roadmap
 
-| Version    | Focus                                                                                | Status        |
-| ---------- | ------------------------------------------------------------------------------------ | ------------- |
-| **v0.6.0** | Basic graph use plus optional inquiry, research, decision, and interchange workflows | Release scope |
-| v1.0       | Long-term API stability commitment                                                   | Future        |
+| Version    | Focus                                                                                | Status                                                                   |
+| ---------- | ------------------------------------------------------------------------------------ | ------------------------------------------------------------------------ |
+| **v0.6.0** | Basic graph use plus optional inquiry, research, decision, and interchange workflows | [Released](https://github.com/CurateLabs/graphforge/releases/tag/v0.6.0) |
+| v1.0       | Long-term API stability commitment                                                   | Future                                                                   |
 
 [The roadmap](docs/releases/roadmap.md) has delivery detail. Release notes are
 attached to each immutable [GitHub Release](https://github.com/CurateLabs/graphforge/releases).

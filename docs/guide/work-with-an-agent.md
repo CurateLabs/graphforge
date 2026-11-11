@@ -46,15 +46,15 @@ On Windows use `py -3 -m venv .venv`. Activate it with
 Python distribution's venv and pip support. Then run:
 
 ```bash
-python -m pip install "graphforge==0.6.0rc7"
+python -m pip install graphforge
 python -c "import sys, graphforge; print(sys.executable); print(graphforge.__version__)"
 ```
 
-This lesson installs the published `0.6.0rc7` Python package; the engine prints
-`0.6.0-rc.7`. Give the agent the printed interpreter path: a new shell may
-not keep the environment activation from the previous command.
-[Installation](installation.md#choose-a-runtime-for-your-task) separates this
-local lesson from research workflows requiring a repaired engine.
+This lesson installs the published `graphforge` Python package; the engine
+prints its version, such as `0.6.0`. Give the agent the printed interpreter
+path: a new shell may not keep the environment activation from the previous
+command. [Installation](installation.md#choose-a-runtime-for-your-task) lists
+the other runtimes.
 
 </details>
 
