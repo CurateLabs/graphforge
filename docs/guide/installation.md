@@ -3,40 +3,31 @@
 **Advanced · Assumes basic Python, database, and terminal skills.**
 For guided execution with a helper, start with the [Basic agent lesson](work-with-an-agent.md).
 
-These docs describe the v0.6.0 product line. The pinned **published** candidate
-is `0.6.0-rc.7` (PyPI spelling `0.6.0rc7`); final v0.6.0 is not yet published.
+These docs describe GraphForge v0.6.0, the current release.
 [GitHub releases](https://github.com/CurateLabs/graphforge/releases) lists public
 artifacts. Select the runtime for your task before installing.
 
 ## Choose a runtime for your task
 
-| Task                                                                                                       | Runtime                                                                                           | Executable                                                                                              |
-| ---------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
-| First graph, Basic mixed-methods project, inquiry records, local notebook, ordinary save/reopen            | Published Python `graphforge==0.6.0rc7`; [Python setup](#python)                                  | The activated environment's `python`; `graphforge` for CLI tasks                                        |
-| Public Hub browse → clone → reopen → query                                                                 | The same published Python package; [Hub lesson](portable-projects.md#public-hub-launch-path)      | The activated environment's `graphforge` and `python`                                                   |
-| Hosted notebook session storage | [Qualified hosted candidate](use-a-notebook.md#select-the-hosted-runtime) | The notebook kernel after installing the identified wheel |
-| Node application using ordinary graph queries                                                              | Published `@curatelabs/graphforge@0.6.0-rc.7`; [Node setup](#node-and-typescript)                 | Your Node process; the explicitly pinned npm CLI when needed                                            |
-| Retained research with composed ontologies, composition reimport, or the advanced Hub continuation example | [Pinned repaired source build](#build-from-source), separate from registry rc.7                   | Its activated Python environment and absolute `GF_EVALUATION_CLI` path                                  |
-| Human device approval or saved-session publishing                                                          | The same standalone source-built CLI, an authorized repository and a conforming write-capable Hub | `"$GF_EVALUATION_CLI"`; [publishing prerequisites](portable-projects.md#publish-after-local-evaluation) |
+| Task                                                                                            | Runtime                                                                                       | Executable                                                       |
+| ----------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- | ---------------------------------------------------------------- |
+| First graph, Basic mixed-methods project, inquiry records, local notebook, ordinary save/reopen | Python package `graphforge`; [Python setup](#python)                                          | The activated environment's `python`; `gf` for CLI tasks         |
+| Public Hub browse → clone → reopen → query, and research continuation                           | The same Python package; [Hub lesson](portable-projects.md#public-hub-launch-path)            | The activated environment's `gf` and `python`                    |
+| Hosted notebook session storage                                                                 | The same Python package in the notebook; [hosted notebooks](use-a-notebook.md#hosted-notebooks) | The notebook kernel                                              |
+| Node application using ordinary graph queries                                                   | `@curatelabs/graphforge`; [Node setup](#node-and-typescript)                                  | Your Node process; `@curatelabs/graphforge-cli` for the CLI      |
+| Publishing to graphforge.sh or another Hub                                                      | Any `gf` above, or a [native CLI archive](#native-cli-release-assets)                         | `gf`; [publishing prerequisites](portable-projects.md#publish-after-local-evaluation) |
 
-Published rc.7 predates the retained-query and composition-reimport repairs.
-The repaired source below still reports `0.6.0-rc.7`; **the source revision**
-distinguishes it from registry rc.7. A version string alone is insufficient.
-Keep these environments separate. The registry Python/npm launchers use a
-captured publish interface. They can save a login session, but cannot reuse
-it for publishing or initiate publish device approval. An explicitly provisioned
-scoped token is supported. The pinned standalone source CLI supports both
-saved-session publishing and publish device approval.
+The Python package, the npm CLI and the native archives all run the same Rust
+CLI. Each can save a login session with `gf auth login` and reuse it for
+`gf publish` and `gf push`, or fall back to terminal device approval.
 
-Use the exact versions below rather than `--pre`, `@next`, or an unversioned
-install: those can select different code. Instructions for newer development
-CLI syntax live in its reference and do not change the runtime selected here.
-
-The site maintains one current documentation set. Before v1.0.0, GraphForge
-does not guarantee backward compatibility, legacy APIs, or project migration.
-Keep original source data and reproducible construction code when changing
-versions. Production publish-back and final public-package verification remain
-separate release work; installing a candidate does not establish either result.
+These commands install the latest release. A future pre-release is available
+with `python -m pip install --pre graphforge` or
+`npm install @curatelabs/graphforge@next`; do not mix it into an environment
+used for a lesson. The site maintains one current documentation set. Before
+v1.0.0, GraphForge does not guarantee backward compatibility, legacy APIs, or
+project migration. Keep original source data and reproducible construction code
+when changing versions.
 
 ## Status and limits
 
@@ -68,7 +59,7 @@ Read this before you choose durable storage or build an integration. See also
   source build or `cargo install`.
 - **Crates.io builds lack two DataFusion fixes.** `cargo install graphforge-cli`
   and other crates.io builds compile against stock DataFusion 54.1. The Python
-  wheel and the Node packages (including their `gf` CLI) carry two fixes that
+  wheel, the Node packages and the native `gf` archives carry two fixes that
   crates.io builds do not: a hang when a query spills under memory pressure
   ([apache/datafusion#24883](https://github.com/apache/datafusion/issues/24883))
   and a planning error when a join's keys read fields of one struct
@@ -96,7 +87,7 @@ Activate it using the command for your shell (`source .venv/bin/activate` on
 POSIX shells; `.venv\Scripts\Activate.ps1` in PowerShell), then install:
 
 ```bash
-python -m pip install "graphforge==0.6.0rc7"
+python -m pip install graphforge
 ```
 
 Check which version you got:
@@ -105,7 +96,9 @@ Check which version you got:
 python -c "import graphforge; print(graphforge.__version__)"
 ```
 
-The engine prints `0.6.0-rc.7`, the canonical spelling of PyPI's `0.6.0rc7`.
+The engine prints the installed version, `0.6.0` for this release. The package
+also installs the `gf` CLI (and its `graphforge` alias); `gf --version` reports
+the same version.
 
 Native wheels include the Rust engine; pip installs PyArrow automatically as a
 runtime dependency. pandas and Polars are optional and are not needed for the
@@ -119,55 +112,47 @@ or [a notebook](use-a-notebook.md).
 Use Node.js 20 or newer and a platform with a matching native package:
 
 ```bash
-npm install @curatelabs/graphforge@0.6.0-rc.7 apache-arrow@21.2.0
+npm install @curatelabs/graphforge apache-arrow@21
 ```
 
 `npm ls @curatelabs/graphforge` shows which version you got. `apache-arrow`
 provides result decoding for the
 [Node integration example](integrate-graphforge.md#node-and-typescript).
+GraphForge declares it as an optional peer dependency with range `^21.2.0`;
+`@21` keeps npm from selecting a later major that the peer range rejects.
 
 The separate CLI package can be invoked without a global install:
 
 ```bash
-npx --yes @curatelabs/graphforge-cli@0.6.0-rc.7 --help
+npx --yes @curatelabs/graphforge-cli --help
 ```
 
-The Python package provides `graphforge`; the npm CLI provides both
-`graphforge` and `gf`. All launch the Rust CLI. Repository initialization and
+Install it with `npm install --global @curatelabs/graphforge-cli` to put `gf`
+on your path. The Python package and the npm CLI both provide `gf` and
+`graphforge`. All launch the Rust CLI. Repository initialization and
 project skills are optional next steps in [repository integration](repository-integration.md).
 
 ## Native CLI release assets
 
-The Publish workflow builds `gf` archives for macOS arm64/x86_64, Linux
-arm64/x86_64 (glibc 2.17+), and Windows x86_64, alongside the package artifacts.
-A release containing this support attaches `gf-<version>-<Rust target>.tar.gz`
-(or `.zip` for Windows) and a matching `.sha256` file to its GitHub Release.
-Check the archive against that checksum, extract it, and place `gf` (`gf.exe`
-on Windows) in your executable path. For example, on Linux x86_64:
+The [v0.6.0 GitHub Release](https://github.com/CurateLabs/graphforge/releases/tag/v0.6.0)
+attaches `gf` archives for macOS arm64/x86_64, Linux arm64/x86_64 (glibc 2.17+),
+and Windows x86_64: `gf-<version>-<Rust target>.tar.gz` (or `.zip` for Windows)
+with a matching `.sha256` file. Check the archive against that checksum, extract
+it, and place `gf` (`gf.exe` on Windows) in your executable path. For example,
+on Linux x86_64:
 
 ```bash
-sha256sum --check "gf-<version>-x86_64-unknown-linux-gnu.tar.gz.sha256"
-tar -xzf "gf-<version>-x86_64-unknown-linux-gnu.tar.gz"
+sha256sum --check "gf-0.6.0-x86_64-unknown-linux-gnu.tar.gz.sha256"
+tar -xzf "gf-0.6.0-x86_64-unknown-linux-gnu.tar.gz"
 ./gf --version
 ./gf auth login
 ```
 
-Replace `<version>` with the downloaded release version. Older releases,
-including rc.7, have no native assets. Until a containing release is published,
-use the [pinned standalone source CLI](#build-from-source) for the walkthrough.
-
-The [launcher repair on development source](https://github.com/CurateLabs/graphforge/commit/3f79e4c29a9e7d0c7003065b24a3675032344fee)
-also lets PyPI/npm console launchers inherit native streams and reuse saved
-sessions; PyPI adds `gf` alongside `graphforge`. These changes await a
-containing release. They are absent from registry rc.7 and the older pinned
-source used below, so keep using its standalone CLI in that walkthrough.
+For a later release, use the version in that release's asset names. The
+archives are built from the same source as the Python and npm packages and
+carry the same DataFusion fixes.
 
 ## Durable storage
-
-The warning-based policy below requires the
-[qualified hosted candidate](use-a-notebook.md#select-the-hosted-runtime) or a
-later build containing that feature. Published rc7 and this page's older pinned
-source revision retain refusal on unproven filesystems.
 
 Start with `GraphForge()` if you only need a temporary graph. It runs the full
 engine in memory and loses its state when closed or when the process exits.
@@ -209,54 +194,31 @@ and [agent environment notes](../development/agent-environment.md).
 
 ## Build from source
 
-Use this separate **developer environment** for the repaired research workflow.
+Build from source for an unsupported platform or to work on GraphForge itself.
 It requires Git, [uv](https://docs.astral.sh/uv/getting-started/installation/),
 Python 3.10+, the Rust toolchain pinned by the checkout's `rust-toolchain.toml`,
 and a native build toolchain. See [contributor setup](../development/contributing.md)
 for build prerequisites. Durable examples also require [supported storage](#durable-storage).
 
-The immutable source is
-[`aaf0448293915796cecf69bb8109c0b96c6a427d`](https://github.com/CurateLabs/graphforge/commit/aaf0448293915796cecf69bb8109c0b96c6a427d),
-which contains the retained-query and composition-reimport repairs. The
-[historical packed-candidate qualification](https://github.com/CurateLabs/graphforge/issues/1209#issuecomment-6657797848)
-identifies tested package bytes and platforms at this source. A local source
-build is a different installation route; that record does not qualify your build.
-This route uses Git source and does not require temporary Actions artifacts.
-
-In a POSIX shell, start in a new evaluation directory **outside any Git
-checkout**. These commands build in its `graphforge-source` child, then return
-to the parent so research data can live beside the source checkout:
+In a POSIX shell, build the release tag outside any other Git checkout:
 
 ```bash
-git clone --no-checkout https://github.com/CurateLabs/graphforge.git graphforge-source
+git clone --branch v0.6.0 https://github.com/CurateLabs/graphforge.git graphforge-source
 cd graphforge-source
-git checkout --detach aaf0448293915796cecf69bb8109c0b96c6a427d
 uv sync --locked --inexact
 export CARGO_TARGET_DIR="$PWD/target"
 uv run --no-sync maturin develop --release -m crates/graphforge-bindings-py/Cargo.toml
 cargo build --locked --release -p graphforge-cli --bin gf
 . .venv/bin/activate
-export GF_EVALUATION_CLI="$PWD/target/release/gf"
-git rev-parse HEAD
 python -c "import sys, graphforge; print(sys.executable); print(graphforge.__version__)"
-"$GF_EVALUATION_CLI" --version
-cd ..
+./target/release/gf --version
 ```
 
-The revision must be the full hash above; both version commands report rc.7.
-The final `cd ..` leaves you in the evaluation directory outside Git. Keep this
-shell and its environment for the advanced examples; `research-evaluation` will
-be a sibling of `graphforge-source`, not a directory inside it. In a new shell,
-start in that same parent directory, activate `graphforge-source/.venv`, and set
-`GF_EVALUATION_CLI` to the same absolute executable path. On Windows use the equivalent environment
-activation, `$env:GF_EVALUATION_CLI`, and `target/release/gf.exe`.
-
-The source-built Python binding and standalone CLI use the same checkout and
-its bundled DataFusion fixes. Do not replace the executable with `cargo install`
-from crates.io or a registry npm launcher mid-lesson. For Node development use
-the contributor build instructions at the same revision. Newer source syntax,
-such as remembered publish destinations, requires a separately selected build;
-it is not part of this pinned walkthrough.
+Both version commands report the checked-out version. Put `target/release/gf`
+(`target/release/gf.exe` on Windows) on your path to use it as `gf`. The
+source-built Python binding and CLI use the checkout's bundled DataFusion fixes;
+`cargo install` from crates.io does not (see [status and limits](#status-and-limits)).
+For Node development use the contributor build instructions.
 
 ## If setup fails
 

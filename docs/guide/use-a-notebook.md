@@ -6,9 +6,9 @@ or [Basic](overview.md#basic) for a guided first graph.
 
 Use a local Jupyter notebook to build a graph, run queries, and inspect tables.
 The first task is the same [basic citation graph](quickstart.md) used by scripts
-and agents. The local lesson uses the published `0.6.0rc7` Python package selected in
-[Installation](installation.md#choose-a-runtime-for-your-task). The
-[hosted example](#hosted-notebooks) selects its own qualified candidate below.
+and agents. The lesson uses the published `graphforge` Python package from
+[Installation](installation.md#choose-a-runtime-for-your-task), locally or in a
+[hosted notebook](#hosted-notebooks).
 
 ## Start a local notebook
 
@@ -28,12 +28,12 @@ the notebook tools and GraphForge:
 
 ```bash
 python -m pip install jupyterlab ipykernel
-python -m pip install "graphforge==0.6.0rc7"
+python -m pip install graphforge
 python -m ipykernel install --sys-prefix --name graphforge --display-name "Python (GraphForge)"
 jupyter lab
 ```
 
-Keep this package version for the lesson so a moving prerelease cannot change
+Keep this environment for the lesson; upgrading GraphForge mid-lesson changes
 the engine underneath your notebook.
 
 JupyterLab opens in your browser; if it does not, open the local URL printed
@@ -54,9 +54,8 @@ print(graphforge.__version__)
 
 Check that the executable is inside your `.venv` and the package version is
 the one you installed. If you already use another notebook environment, select
-its intended kernel and run `%pip install "graphforge==0.6.0rc7"` in a cell.
-This selects the lesson's exact package, replacing a different version if
-needed. Restart the kernel after changing the native package, then check it again.
+its intended kernel and run `%pip install --upgrade graphforge` in a cell.
+This installs the latest release, replacing a different version if needed. Restart the kernel after changing the native package, then check it again.
 
 ## Get your first graph answer
 
@@ -82,35 +81,18 @@ original input files needed to reproduce your work.
 
 ### Select the hosted runtime
 
-This example uses the `0.6.0rc8` Linux x86-64 wheel from commit
-`7f69f389767d583c464d4be1698377232d2191ad`, the candidate exercised by the
-[Colab qualification receipt](https://github.com/CurateLabs/graphforge/issues/2332#issuecomment-6711013172).
-Published rc7 and the older [pinned source build](installation.md#build-from-source)
-predate `FilesystemDurabilityWarning` and refuse Colab's overlay filesystem.
-
-Download `wheel-linux-x86_64` from the identified
-[Publish run](https://github.com/CurateLabs/graphforge/actions/runs/42386372101),
-extract the wheel, and upload it to `/content` in the notebook session. Run this
-cell to check its identity and install it into the notebook's Python environment:
+Install the published package into the notebook's Python environment:
 
 ```python
-import hashlib
-from pathlib import Path
-
-wheel = Path("/content/graphforge-0.6.0rc8-cp310-abi3-manylinux2014_x86_64.manylinux_2_17_x86_64.whl")
-expected = "404a46e98ea255cef9544e00372c7b9f229ea3116425d76ec035f62677b1c384"
-if hashlib.sha256(wheel.read_bytes()).hexdigest() != expected:
-    raise ValueError("The wheel does not match the qualified candidate")
-%pip install /content/graphforge-0.6.0rc8-cp310-abi3-manylinux2014_x86_64.manylinux_2_17_x86_64.whl
+%pip install graphforge
 ```
 
-Restart the kernel after installing the native package. Verify
-`graphforge.__version__` reports `0.6.0-rc.8` and that
+Restart the kernel after installing the native package. Verify that
+`graphforge.__version__` reports the release you installed and that
 `from graphforge import FilesystemDurabilityWarning` succeeds before continuing.
-Keep the full wheel checksum with the source revision; the version alone does
-not identify a development build. This candidate is a CI artifact, not a
-published registry release. Its managed Colab lifecycle was qualified; Kaggle
-execution remains unqualified.
+The managed Colab lifecycle was qualified with a `0.6.0-rc.8` build
+([receipt](https://github.com/CurateLabs/graphforge/issues/2332#issuecomment-6711013172));
+Kaggle execution remains unqualified.
 
 ### Open session storage
 

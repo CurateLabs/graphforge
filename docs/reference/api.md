@@ -4061,8 +4061,9 @@ See the [Python facade and typed results](../../crates/graphforge-bindings-py/py
 and [Node examples and declarations](../../crates/graphforge-bindings-node/README.md#typed-hub-and-research-workflow).
 `HubWorkflowError` preserves the native envelope and semantic error code; nested
 diagnostics remain available for more specific classification. Publish and
-collaborator pull examples require a separately verified write-capable Hub;
-production graphforge.sh supports public read/clone at launch.
+collaborator pull examples require a write-capable Hub. Production graphforge.sh
+supports public read/clone and publishing within its per-account limits:
+128 MiB per account and 64 MiB per object.
 
 ### Python workflow example
 
@@ -4072,10 +4073,9 @@ through `GraphForge.query_research_branch()` or `query_research_version()`.
 The metadata results are typed dictionaries with native UUIDs and field names.
 
 Clone/query works with public read-capable repositories. `push`/`publish` and
-collaborator `pull` require a separately verified, conforming write-capable Hub
-and its scoped publish credential. Production graphforge.sh is not a qualified
-hosted publishing target at launch. The native acceptance tests use ReferenceHub
-(Hub publish/1 and discovery/1); they do not prove hosted publishing.
+collaborator `pull` require a conforming write-capable Hub, such as production
+graphforge.sh, and a scoped publish credential. The native acceptance tests use
+ReferenceHub (Hub publish/1 and discovery/1).
 
 ```python
 from contextlib import closing
