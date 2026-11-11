@@ -132,8 +132,12 @@ replace `OWNER/REPOSITORY` with a repository the token may write, and select the
 local `main` Branch first:
 
 ```bash
-gf --json --project openalex push OWNER/REPOSITORY --ref main --token-env GF_AGENT_PUBLISH_TOKEN
+gf --json --project openalex push OWNER/REPOSITORY --public --ref main --token-env GF_AGENT_PUBLISH_TOKEN
 ```
+
+Without a terminal, `gf push` requires an explicit `--public` or `--private`,
+even when the repository already exists; a credential never supplies
+visibility. `--private` needs a plan.
 
 `--token-env` names an environment variable, never the secret value. With that
 flag omitted, push and publish use `GRAPHFORGE_HUB_PUBLISH_TOKEN`. An explicit
