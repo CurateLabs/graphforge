@@ -5,22 +5,22 @@
     "contract": "graphforge-portable-verify/1",
     "representation": "bundle",
     "source": "file",
-    "package_digest": "sha256:66d71455523e33f36f0475780b09733fe192b46c3fa0693a8113747a17cbacea",
+    "package_digest": "sha256:d92b10e4aa607b18e781cdca3e7a87aed702c55cf9c61e72de06b7273c89f023",
     "package_class": "complete",
-    "producing_core_version": "0.6.0-rc.8",
+    "producing_core_version": "0.6.0",
     "component_count": 9,
     "entry_count": 23,
-    "payload_bytes": 30581,
+    "payload_bytes": 30576,
     "bytes_by_kind": {
       "compatibility": 2227,
       "graph-data": 16601,
       "ontology": 732,
-      "package-control": 9706,
+      "package-control": 9701,
       "settings": 1315
     },
     "plausibility": {
       "graph_data_bytes": 16601,
-      "graph_data_ratio_ppm": 542853,
+      "graph_data_ratio_ppm": 542942,
       "parquet": {
         "files": 6,
         "files_with_footer": 6,
@@ -33,7 +33,7 @@
     "integrity": "verified",
     "compatibility": "supported",
     "authenticity": "unsigned",
-    "transport_digest": "sha256:562924cc0282d18ab63a68a9a06c6ac7535bff71aa9aede13531721e5db9653f",
+    "transport_digest": "sha256:423dad8fe81abeb6572fb0b99e9be7967ec2b08389cba25f68e42557d43df823",
     "ontology_composition": {
       "contract": "graphforge-ontology-composition/1",
       "activation_profile": {
@@ -79,28 +79,28 @@
     "contract": "graphforge-portable-verify/1",
     "representation": "bundle",
     "source": "file",
-    "package_digest": "sha256:66d71455523e33f36f0475780b09733fe192b46c3fa0693a8113747a17cbacea",
+    "package_digest": "sha256:d92b10e4aa607b18e781cdca3e7a87aed702c55cf9c61e72de06b7273c89f023",
     "package_class": "complete",
-    "producing_core_version": "0.6.0-rc.8",
+    "producing_core_version": "0.6.0",
     "component_count": 9,
     "entry_count": 23,
-    "payload_bytes": 30581,
+    "payload_bytes": 30576,
     "bytes_by_kind": {
       "compatibility": 2227,
       "graph-data": 16601,
       "ontology": 732,
-      "package-control": 9706,
+      "package-control": 9701,
       "settings": 1315
     },
     "plausibility": {
       "graph_data_bytes": 16601,
-      "graph_data_ratio_ppm": 542853,
+      "graph_data_ratio_ppm": 542942,
       "parquet": null
     },
     "integrity": "not_checked",
     "compatibility": "supported",
     "authenticity": "unsigned",
-    "transport_digest": "sha256:562924cc0282d18ab63a68a9a06c6ac7535bff71aa9aede13531721e5db9653f",
+    "transport_digest": "sha256:423dad8fe81abeb6572fb0b99e9be7967ec2b08389cba25f68e42557d43df823",
     "ontology_composition": {
       "contract": "graphforge-ontology-composition/1",
       "activation_profile": {
