@@ -70,9 +70,9 @@ release candidate is uploaded (#1095 owns that registry operation).
 ## Development version
 
 Keep `main` on the next release's development version between releases. For the
-v0.6.0 development cycle, use `python3 scripts/set_release_version.py 0.6.0-dev`
-and `make release-version-check`. This sets Cargo to `0.6.0-dev`, Python to
-`0.6.0.dev0`, and npm packages to `0.6.0-dev.0`.
+v0.7.0 development cycle, use `python3 scripts/set_release_version.py 0.7.0-dev`
+and `make release-version-check`. This sets Cargo to `0.7.0-dev`, Python to
+`0.7.0.dev0`, and npm packages to `0.7.0-dev.0`.
 
 Portable packages and the Hub fixture declare the exact Core version that
 produced them (`producing_core_version`), so changing the version, including
@@ -82,7 +82,7 @@ build (`tests/fixtures/hub/README.md`). A release candidate's fixture is never
 relabeled as the final version's data.
 
 Subsequent commits keep that development version until the release preparation
-change sets an explicit candidate such as `0.6.0-rc.1`. The development version
+change sets an explicit candidate such as `0.7.0-rc.1`. The development version
 does not identify a unique build; record the source commit when reporting local
 results. Do not create or push a release tag for a development version.
 After a final release, advance `main` to the next planned development version
