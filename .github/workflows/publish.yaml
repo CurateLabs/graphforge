@@ -599,7 +599,16 @@ jobs:
           else
             prerelease=()
             case "$RELEASE_VERSION" in *-*) prerelease=(--prerelease) ;; esac
-            gh release create "$TAG" --verify-tag --generate-notes "${prerelease[@]}"
+            notes=$(gh api "repos/$GITHUB_REPOSITORY/releases/generate-notes" -f tag_name="$TAG" --jq .body)
+            # GitHub refuses a release body over 125000 characters, and the
+            # pull request list of a release spanning hundreds of merges
+            # exceeds it (v0.6.0). Keep only the compare link then.
+            if [ "${#notes}" -gt 125000 ]; then
+              notes=$(printf '%s\n' "$notes" | grep '^\*\*Full Changelog\*\*')
+            fi
+            # A file, not an argument: Linux caps one argument at 131072 bytes.
+            printf '%s\n' "$notes" > "$RUNNER_TEMP/release-notes.md"
+            gh release create "$TAG" --verify-tag --notes-file "$RUNNER_TEMP/release-notes.md" "${prerelease[@]}"
           fi
           gh release upload "$TAG" dist-cli/* --clobber
 
