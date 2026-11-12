@@ -606,7 +606,9 @@ jobs:
             if [ "${#notes}" -gt 125000 ]; then
               notes=$(printf '%s\n' "$notes" | grep '^\*\*Full Changelog\*\*')
             fi
-            gh release create "$TAG" --verify-tag --notes "$notes" "${prerelease[@]}"
+            # A file, not an argument: Linux caps one argument at 131072 bytes.
+            printf '%s\n' "$notes" > "$RUNNER_TEMP/release-notes.md"
+            gh release create "$TAG" --verify-tag --notes-file "$RUNNER_TEMP/release-notes.md" "${prerelease[@]}"
           fi
           gh release upload "$TAG" dist-cli/* --clobber
 
