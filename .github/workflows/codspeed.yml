@@ -159,7 +159,7 @@ jobs:
       # the gate step's own log.
       - name: Record the ingest floor gate measurements
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ingest-floor-gate-${{ needs.nightly.outputs.sha }}
           path: ingest-floor-gate.json
@@ -197,7 +197,7 @@ jobs:
         run: /usr/bin/time -v cargo bench -p graphforge-storage --bench storage_kernels replay_merge_fingerprint -- --sample-count 10 2> replay-memory.txt
       - name: Record compaction peak resident memory
         run: /usr/bin/time -v cargo bench -p graphforge-storage --bench storage_io spill_compaction -- --sample-count 10 2> compaction-memory.txt
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: storage-memory-${{ github.sha }}-blacksmith-4vcpu-ubuntu-2404
           path: |
