@@ -20,11 +20,11 @@
     "node": ">=20"
   },
   "dependencies": {
-    "@pulumi/pulumi": "^3.268.0"
+    "@pulumi/pulumi": "^3.276.0"
   },
   "devDependencies": {
-    "@types/node": "26.6.5",
-    "prettier": "3.9.10",
+    "@types/node": "26.6.6",
+    "prettier": "3.10.1",
     "typescript": "5.9.3"
   },
   "overrides": {
