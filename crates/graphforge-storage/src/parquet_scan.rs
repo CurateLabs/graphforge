@@ -380,11 +380,11 @@ impl GraphForgeParquetExec {
     pub fn try_new(
         base_schema: SchemaRef,
         fragments: Vec<ParquetFragment>,
-        projection: Option<&Vec<usize>>,
+        projection: Option<&[usize]>,
         limit: Option<usize>,
         batch_size: usize,
     ) -> Result<Self, DataFusionError> {
-        let projection = projection.cloned();
+        let projection = projection.map(<[usize]>::to_vec);
         let schema = match projection.as_ref() {
             Some(indices) => Arc::new(base_schema.project(indices).map_err(|e| {
                 DataFusionError::ArrowError(Box::new(e), Some("parquet projection".into()))
@@ -469,6 +469,18 @@ impl ExecutionPlan for GraphForgeParquetExec {
 
     fn properties(&self) -> &Arc<PlanProperties> {
         &self.props
+    }
+
+    fn apply_expressions(
+        &self,
+        _f: &mut dyn FnMut(
+            &Arc<dyn datafusion::physical_expr::PhysicalExpr>,
+        ) -> Result<
+            datafusion::common::tree_node::TreeNodeRecursion,
+            DataFusionError,
+        >,
+    ) -> Result<datafusion::common::tree_node::TreeNodeRecursion, DataFusionError> {
+        Ok(datafusion::common::tree_node::TreeNodeRecursion::Continue)
     }
 
     fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
@@ -838,6 +850,18 @@ impl ExecutionPlan for OrderedPartitionStreamExec {
         &self.props
     }
 
+    fn apply_expressions(
+        &self,
+        _f: &mut dyn FnMut(
+            &Arc<dyn datafusion::physical_expr::PhysicalExpr>,
+        ) -> Result<
+            datafusion::common::tree_node::TreeNodeRecursion,
+            DataFusionError,
+        >,
+    ) -> Result<datafusion::common::tree_node::TreeNodeRecursion, DataFusionError> {
+        Ok(datafusion::common::tree_node::TreeNodeRecursion::Continue)
+    }
+
     fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
         vec![&self.input]
     }
@@ -909,7 +933,7 @@ impl ExecutionPlan for OrderedPartitionStreamExec {
 pub fn scan_fragments(
     base_schema: SchemaRef,
     fragments: Vec<ParquetFragment>,
-    projection: Option<&Vec<usize>>,
+    projection: Option<&[usize]>,
     limit: Option<usize>,
     batch_size: usize,
 ) -> Result<Arc<dyn ExecutionPlan>, DataFusionError> {

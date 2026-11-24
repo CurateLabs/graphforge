@@ -228,16 +228,12 @@ fn encode_part(layout: EnvelopeLayout, index: u64, payload: &[u8]) -> Result<Byt
         return Err(invalid("payload length disagrees with envelope layout"));
     }
     let schema = Arc::new(
-        Schema::new(vec![Field::new(PAYLOAD_FIELD, DataType::Binary, false)]).with_metadata(
-            [
-                (FORMAT_KEY.to_owned(), FORMAT_VERSION.to_owned()),
-                (LENGTH_KEY.to_owned(), layout.logical_length.to_string()),
-                (COUNT_KEY.to_owned(), layout.part_count.to_string()),
-                (INDEX_KEY.to_owned(), index.to_string()),
-            ]
-            .into_iter()
-            .collect(),
-        ),
+        Schema::new(vec![Field::new(PAYLOAD_FIELD, DataType::Binary, false)]).with_metadata([
+            (FORMAT_KEY.to_owned(), FORMAT_VERSION.to_owned()),
+            (LENGTH_KEY.to_owned(), layout.logical_length.to_string()),
+            (COUNT_KEY.to_owned(), layout.part_count.to_string()),
+            (INDEX_KEY.to_owned(), index.to_string()),
+        ]),
     );
     let batch = RecordBatch::try_new(
         Arc::clone(&schema),

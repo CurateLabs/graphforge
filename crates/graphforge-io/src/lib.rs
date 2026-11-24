@@ -544,7 +544,7 @@ mod tests {
                 Field::new("id", DataType::Int64, false),
                 Field::new("name", DataType::Utf8, false),
             ],
-            [("graphforge.ordering".to_owned(), "explicit".to_owned())].into(),
+            [("graphforge.ordering", "explicit")],
         ));
         let batches = vec![
             RecordBatch::try_new(

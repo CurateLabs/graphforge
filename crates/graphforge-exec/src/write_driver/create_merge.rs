@@ -311,8 +311,14 @@ fn resolve_merge_node_properties_by_row(
     for (name, expr) in &spec.computed_properties {
         let expr = env.bind_read_expression(bind_expr_params(expr.clone(), env.params)?)?;
         let (expr, eval_schema) = positional_eval_expr(expr, &frontier.df_schema)?;
-        let expr = create_physical_expr(&expr, &eval_schema, &ExecutionProps::new())
-            .map_err(GfError::from_plan_error)?;
+        let expr = create_physical_expr(
+            &expr,
+            &eval_schema,
+            &ExecutionProps::new(),
+            &datafusion::logical_expr::physical_planning_context::PhysicalPlanningContext::default(
+            ),
+        )
+        .map_err(GfError::from_plan_error)?;
         physical.push((name, expr));
     }
     let mut resolved_rows = Vec::with_capacity(frontier.num_rows());
@@ -734,8 +740,14 @@ fn resolve_merge_edge_properties_by_row(
     for (name, expr) in &spec.computed_properties {
         let expr = env.bind_read_expression(bind_expr_params(expr.clone(), env.params)?)?;
         let (expr, eval_schema) = positional_eval_expr(expr, &frontier.df_schema)?;
-        let expr = create_physical_expr(&expr, &eval_schema, &ExecutionProps::new())
-            .map_err(GfError::from_plan_error)?;
+        let expr = create_physical_expr(
+            &expr,
+            &eval_schema,
+            &ExecutionProps::new(),
+            &datafusion::logical_expr::physical_planning_context::PhysicalPlanningContext::default(
+            ),
+        )
+        .map_err(GfError::from_plan_error)?;
         physical.push((name, expr));
     }
     let mut resolved_rows = Vec::with_capacity(frontier.num_rows());

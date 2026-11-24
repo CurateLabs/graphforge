@@ -1162,7 +1162,7 @@ fn projected_overlay_decodes_only_selected_values_and_mandatory_keys() {
                 true,
                 Arc::clone(&schema),
                 crate::property_scan::PropertyScanOptions {
-                    projection: projection.as_ref(),
+                    projection: projection.as_deref(),
                     limit: None,
                     batch_size: 17,
                     footer_statistics: true,

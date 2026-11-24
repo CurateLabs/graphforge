@@ -78,7 +78,10 @@ fn exact_array(data: &ArrayData) -> ArrayRef {
         return make_array(data.clone());
     };
     let mut copy = MutableArrayData::with_capacities(vec![data], data.null_count() > 0, capacities);
-    copy.extend(0, 0, data.len());
+    if copy.try_extend(0, 0, data.len()).is_err() {
+        // As above: an array the copy cannot rebuild keeps its buffers.
+        return make_array(data.clone());
+    }
     make_array(copy.freeze())
 }
 

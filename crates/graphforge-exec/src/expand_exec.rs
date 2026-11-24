@@ -351,6 +351,23 @@ impl ExecutionPlan for VarLenExpandExec {
         &self.props
     }
 
+    /// The edge predicate is evaluated during execution.
+    fn apply_expressions(
+        &self,
+        f: &mut dyn FnMut(
+            &std::sync::Arc<dyn datafusion::physical_expr::PhysicalExpr>,
+        ) -> datafusion::common::Result<
+            datafusion::common::tree_node::TreeNodeRecursion,
+        >,
+    ) -> datafusion::common::Result<datafusion::common::tree_node::TreeNodeRecursion> {
+        datafusion::physical_plan::apply_expression_roots(
+            self.edge_filter
+                .iter()
+                .map(|predicate| predicate.predicate()),
+            f,
+        )
+    }
+
     fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
         vec![&self.input]
     }
@@ -515,6 +532,17 @@ impl ExecutionPlan for OntologyInferExec {
 
     fn properties(&self) -> &Arc<PlanProperties> {
         &self.props
+    }
+
+    fn apply_expressions(
+        &self,
+        _f: &mut dyn FnMut(
+            &std::sync::Arc<dyn datafusion::physical_expr::PhysicalExpr>,
+        ) -> datafusion::common::Result<
+            datafusion::common::tree_node::TreeNodeRecursion,
+        >,
+    ) -> datafusion::common::Result<datafusion::common::tree_node::TreeNodeRecursion> {
+        Ok(datafusion::common::tree_node::TreeNodeRecursion::Continue)
     }
 
     fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
@@ -1952,6 +1980,23 @@ impl ExecutionPlan for ExpandExec {
 
     fn properties(&self) -> &Arc<PlanProperties> {
         &self.props
+    }
+
+    /// The edge predicate is evaluated during execution.
+    fn apply_expressions(
+        &self,
+        f: &mut dyn FnMut(
+            &std::sync::Arc<dyn datafusion::physical_expr::PhysicalExpr>,
+        ) -> datafusion::common::Result<
+            datafusion::common::tree_node::TreeNodeRecursion,
+        >,
+    ) -> datafusion::common::Result<datafusion::common::tree_node::TreeNodeRecursion> {
+        datafusion::physical_plan::apply_expression_roots(
+            self.edge_predicate
+                .iter()
+                .map(|predicate| predicate.predicate()),
+            f,
+        )
     }
 
     fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {

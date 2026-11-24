@@ -302,6 +302,17 @@ impl ExecutionPlan for GraphCreateExec {
         &self.props
     }
 
+    fn apply_expressions(
+        &self,
+        _f: &mut dyn FnMut(
+            &std::sync::Arc<dyn datafusion::physical_expr::PhysicalExpr>,
+        ) -> datafusion::common::Result<
+            datafusion::common::tree_node::TreeNodeRecursion,
+        >,
+    ) -> datafusion::common::Result<datafusion::common::tree_node::TreeNodeRecursion> {
+        Ok(datafusion::common::tree_node::TreeNodeRecursion::Continue)
+    }
+
     fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
         vec![&self.input]
     }
@@ -494,7 +505,13 @@ pub(crate) fn eval_create_computed(
     let props = ExecutionProps::new();
     let mut out: CreateComputed = HashMap::new();
     let mut eval = |var: u32, name: &str, expr: &datafusion::logical_expr::Expr| {
-        let phys = create_physical_expr(expr, &cfg.in_df_schema, &props)?;
+        let phys = create_physical_expr(
+            expr,
+            &cfg.in_df_schema,
+            &props,
+            &datafusion::logical_expr::physical_planning_context::PhysicalPlanningContext::default(
+            ),
+        )?;
         let array = phys.evaluate(batch)?.into_array(batch.num_rows())?;
         out.entry(var).or_default().push((name.to_owned(), array));
         Ok::<(), DataFusionError>(())

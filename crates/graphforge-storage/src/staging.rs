@@ -1305,10 +1305,19 @@ mod tests {
         )
         .unwrap();
         let metadata = metadata.metadata();
-        let offsets = metadata.offset_index().expect("offset index is written");
+        assert!(
+            metadata
+                .page_index()
+                .is_some_and(|index| index.has_offset_indexes()),
+            "offset index is written"
+        );
         let mut rows = Vec::new();
-        for (group, group_offsets) in metadata.row_groups().iter().zip(offsets) {
-            let locations = group_offsets[0].page_locations();
+        for (index, group) in metadata.row_groups().iter().enumerate() {
+            let locations = metadata
+                .page_index_for_row_group(index)
+                .page_locations(0)
+                .expect("offset index is written")
+                .clone();
             for (index, location) in locations.iter().enumerate() {
                 let next = locations
                     .get(index + 1)

@@ -10,15 +10,23 @@ use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, SpillMetrics};
 use datafusion::physical_plan::spill::SpillManager;
 use futures::StreamExt;
 
-#[derive(Debug)]
 struct AggregateIpcPartition {
     schema: Arc<Schema>,
-    file: datafusion::execution::disk_manager::RefCountedTempFile,
+    file: std::sync::Arc<dyn datafusion::execution::SpillFile>,
     pressure: Arc<std::sync::Mutex<Option<datafusion::execution::memory_pool::MemoryReservation>>>,
     escaped: Arc<std::sync::Mutex<Option<ArrayRef>>>,
     original: Arc<std::sync::Mutex<Option<std::sync::Weak<dyn Array>>>>,
     body: Arc<std::sync::atomic::AtomicUsize>,
     retain_alias: bool,
+}
+
+impl std::fmt::Debug for AggregateIpcPartition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AggregateIpcPartition")
+            .field("schema", &self.schema)
+            .field("file", &self.file.path())
+            .finish_non_exhaustive()
+    }
 }
 
 impl datafusion::physical_plan::streaming::PartitionStream for AggregateIpcPartition {
@@ -107,7 +115,7 @@ fn aggregate_input_batch() -> Result<RecordBatch> {
 }
 
 async fn aggregate_input_case(
-    file: datafusion::execution::disk_manager::RefCountedTempFile,
+    file: std::sync::Arc<dyn datafusion::execution::SpillFile>,
     schema: Arc<Schema>,
     limit: usize,
     retain_alias: bool,
@@ -262,7 +270,10 @@ async fn spill_aggregate_input_last_use_releases_unused_body_before_state_admiss
         )?
         .unwrap();
     assert_eq!(pool.reserved(), 0);
-    let mut ordinary = StreamReader::try_new(std::fs::File::open(file.path())?, None)?;
+    let mut ordinary = StreamReader::try_new(
+        std::fs::File::open(file.path().expect("local spill file"))?,
+        None,
+    )?;
     assert_eq!(ordinary.next().unwrap()?, source);
     assert!(ordinary.next().is_none());
     drop(ordinary);

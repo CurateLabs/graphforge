@@ -16,7 +16,8 @@ const MIB: usize = 1024 * 1024;
 
 fn aggregate(pool: &Arc<dyn MemoryPool>, partition: usize) -> MemoryReservation {
     MemoryConsumer::new(format!(
-        "{AGGREGATE_CONSUMER_PREFIX}{partition}] (max(a.pad))"
+        "{}{partition}] (max(a.pad))",
+        AGGREGATE_CONSUMER_PREFIXES[0]
     ))
     .with_can_spill(true)
     .register(pool)
@@ -770,10 +771,8 @@ async fn datafusion_names_the_consumer_of_a_grouped_aggregate_as_the_pool_expect
         .unwrap();
     let names = spy.spilling.lock().unwrap().clone();
     assert!(
-        names
-            .iter()
-            .any(|name| name.starts_with(AGGREGATE_CONSUMER_PREFIX)),
-        "no spilling consumer named {AGGREGATE_CONSUMER_PREFIX}: {names:?}"
+        names.iter().any(|name| is_merging_aggregate_name(name)),
+        "no spilling consumer named {AGGREGATE_CONSUMER_PREFIXES:?}: {names:?}"
     );
 }
 
@@ -971,7 +970,7 @@ impl PassRecorder {
     fn record(&self, consumer: &MemoryConsumer, bytes: usize, registered: bool) {
         let name = consumer.name();
         if name.starts_with("ExternalSorterMerge")
-            || name.starts_with(AGGREGATE_CONSUMER_PREFIX)
+            || is_merging_aggregate_name(name)
             || name.starts_with("SpillReader")
             || name.starts_with("SpillWriter")
         {
@@ -1155,7 +1154,7 @@ fn assert_the_passes_ask_for_nothing_after_their_selection(run: &MergeRun) {
             !event.registered
                 && event.bytes > 0
                 && (event.consumer.starts_with("ExternalSorterMerge")
-                    || event.consumer.starts_with(AGGREGATE_CONSUMER_PREFIX))
+                    || is_merging_aggregate_name(&event.consumer))
                 && event.readers > 0
         })
         .collect::<Vec<_>>();
@@ -1321,9 +1320,7 @@ async fn a_spilled_aggregate_admits_its_minimum_pass_in_one_request() {
     let asked = run.before[last_spill..]
         .iter()
         .filter(|event| {
-            !event.registered
-                && event.bytes > 0
-                && event.consumer.starts_with(AGGREGATE_CONSUMER_PREFIX)
+            !event.registered && event.bytes > 0 && is_merging_aggregate_name(&event.consumer)
         })
         .collect::<Vec<_>>();
     // The first request is the state bound and the narrowest pass together,

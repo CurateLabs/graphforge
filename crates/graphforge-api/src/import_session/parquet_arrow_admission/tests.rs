@@ -148,15 +148,11 @@ fn hint_names_and_arbitrary_metadata_are_admitted() {
     let field_metadata = [
         ("custom-field-key".to_owned(), "field-value".repeat(256)),
         ("another-key".to_owned(), "x".repeat(512)),
-    ]
-    .into_iter()
-    .collect();
+    ];
     let schema_metadata = [
         ("custom-schema-key".to_owned(), "schema-value".repeat(512)),
         ("owner".to_owned(), "metadata-owner".to_owned()),
-    ]
-    .into_iter()
-    .collect();
+    ];
     let schema = Schema::new_with_metadata(
         vec![Field::new(long_name.clone(), DataType::Utf8, true).with_metadata(field_metadata)],
         schema_metadata,

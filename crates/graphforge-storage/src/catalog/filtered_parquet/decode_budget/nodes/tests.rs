@@ -9,6 +9,10 @@ use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryConsumer, Memor
 use parquet::arrow::ArrowWriter;
 use std::sync::{Arc, Mutex};
 
+#[path = "../../../../../tests/support/hostile_parquet.rs"]
+mod hostile;
+use hostile::{field, raw_thrift};
+
 fn node_batch(ids: &[u64], members: usize, legacy: bool) -> RecordBatch {
     let uuids = FixedSizeBinaryArray::try_from_iter(ids.iter().map(|id| {
         let mut uuid = [0u8; 16];
@@ -207,33 +211,16 @@ fn node_admission_refuses_a_real_unsupported_nested_physical_root() {
     );
 }
 
-#[allow(
-    deprecated,
-    reason = "hostile genuine-page controls mutate the raw Thrift allocation authority"
-)]
+/// Rewrite the first data page header in place; the hostile genuine-page
+/// controls mutate the raw Thrift allocation authority.
 fn rewrite_first_header(
     path: &std::path::Path,
     metadata: &parquet::file::metadata::ParquetMetaData,
-    mutate: impl FnOnce(&mut parquet::format::PageHeader),
+    mutate: impl FnOnce(&mut raw_thrift::Struct),
 ) {
-    use parquet::thrift::TSerializable;
     let mut bytes = std::fs::read(path).unwrap();
-    let start = metadata.row_group(0).column(0).data_page_offset() as usize;
-    let mut input = std::io::Cursor::new(&bytes[start..]);
-    let mut header = parquet::format::PageHeader::read_from_in_protocol(
-        &mut thrift::protocol::TCompactInputProtocol::new(&mut input),
-    )
-    .unwrap();
-    let length = input.position() as usize;
-    mutate(&mut header);
-    let mut encoded = Vec::new();
-    header
-        .write_to_out_protocol(&mut thrift::protocol::TCompactOutputProtocol::new(
-            &mut encoded,
-        ))
-        .unwrap();
-    assert_eq!(encoded.len(), length, "body offsets must remain unchanged");
-    bytes[start..start + length].copy_from_slice(&encoded);
+    let start = metadata.row_group(0).column(0).data_page_offset() as u64;
+    hostile::patch_header(&mut bytes, start, mutate);
     std::fs::write(path, bytes).unwrap();
 }
 
@@ -251,8 +238,9 @@ fn node_raw_admission_rejects_a_page_value_count_above_its_footer_before_decode(
     let metadata = builder.metadata().clone();
     validate_pages(&path, &metadata).unwrap();
     rewrite_first_header(&path, &metadata, |header| {
-        assert_eq!(header.data_page_header.as_ref().unwrap().num_values, 7);
-        header.data_page_header.as_mut().unwrap().num_values = 8;
+        let page = header.child_mut(field::DATA_PAGE_HEADER);
+        assert_eq!(page.i32(field::NUM_VALUES), 7);
+        page.set_i32(field::NUM_VALUES, 8);
     });
     let error = validate_pages(&path, &metadata).unwrap_err();
     assert!(
@@ -288,8 +276,9 @@ fn node_raw_admission_rejects_uncompressed_header_body_disagreement() {
     let metadata = builder.metadata().clone();
     validate_pages(&path, &metadata).unwrap();
     rewrite_first_header(&path, &metadata, |header| {
-        assert_eq!(header.compressed_page_size, header.uncompressed_page_size);
-        header.uncompressed_page_size -= 1;
+        let uncompressed = header.i32(field::UNCOMPRESSED_PAGE_SIZE);
+        assert_eq!(header.i32(field::COMPRESSED_PAGE_SIZE), uncompressed);
+        header.set_i32(field::UNCOMPRESSED_PAGE_SIZE, uncompressed - 1);
     });
     let error = validate_pages(&path, &metadata).unwrap_err();
     assert!(
@@ -444,31 +433,18 @@ fn replace_node_footer(path: &std::path::Path, rewrite: impl FnOnce(&[u8]) -> Ve
 }
 
 #[test]
-#[allow(
-    deprecated,
-    reason = "mutates a genuine raw footer's allocation authority"
-)]
 fn node_metadata_admission_rejects_schema_children_before_tree_allocation() {
-    use parquet::thrift::TSerializable;
     let dir = tempfile::TempDir::new().unwrap();
     let path = dir.path().join("schema-children.parquet");
     let source = node_batch(&[1, 2], 2, false);
     let files = node_file(&path, &source, 2);
     node_decode_admission_bytes(&files, &std::collections::HashSet::from([1]), |_| Ok(())).unwrap();
     replace_node_footer(&path, |footer| {
-        let mut metadata = parquet::format::FileMetaData::read_from_in_protocol(
-            &mut thrift::protocol::TCompactInputProtocol::new(footer),
-        )
-        .unwrap();
-        assert_eq!(metadata.schema[0].num_children, Some(6));
-        metadata.schema[0].num_children = Some(4096);
-        let mut encoded = Vec::new();
-        metadata
-            .write_to_out_protocol(&mut thrift::protocol::TCompactOutputProtocol::new(
-                &mut encoded,
-            ))
-            .unwrap();
-        encoded
+        let (mut metadata, _) = raw_thrift::Struct::read(footer);
+        let root = metadata.list_mut(field::SCHEMA)[0].as_struct_mut();
+        assert_eq!(root.i32(field::NUM_CHILDREN), 6);
+        root.set_i32(field::NUM_CHILDREN, 4096);
+        metadata.encode()
     });
     let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1024 * 1024));
     let reservation = MemoryConsumer::new("metadata tree control").register(&pool);
@@ -553,30 +529,22 @@ fn node_metadata_admission_rejects_declared_footer_collection_before_allocation(
 }
 
 #[test]
-#[allow(
-    deprecated,
-    reason = "encodes a genuine footer's valid empty metadata list"
-)]
 fn node_metadata_admission_accepts_a_zero_header_empty_key_value_list() {
-    use parquet::thrift::TSerializable;
     use std::io::Seek;
-    use thrift::protocol::{TCompactInputProtocol, TCompactOutputProtocol, TInputProtocol, TType};
+    use thrift::protocol::{TCompactInputProtocol, TInputProtocol, TType};
     let dir = tempfile::TempDir::new().unwrap();
     let path = dir.path().join("empty-metadata.parquet");
     let source = node_batch(&[1, 2], 2, false);
     let files = node_file(&path, &source, 2);
     replace_node_footer(&path, |footer| {
-        let mut metadata = parquet::format::FileMetaData::read_from_in_protocol(
-            &mut TCompactInputProtocol::new(footer),
-        )
-        .unwrap();
+        let (mut metadata, _) = raw_thrift::Struct::read(footer);
         // Preserve physical schema, real pages and every index location; this
         // deliberately removes the optional embedded Arrow schema as well.
-        metadata.key_value_metadata = Some(Vec::new());
-        let mut encoded = Vec::new();
-        metadata
-            .write_to_out_protocol(&mut TCompactOutputProtocol::new(&mut encoded))
-            .unwrap();
+        metadata.set(
+            field::KEY_VALUE_METADATA,
+            raw_thrift::Value::List(TType::Struct, Vec::new()),
+        );
+        let mut encoded = metadata.encode();
         let mut input = TCompactInputProtocol::new(std::io::Cursor::new(encoded.as_slice()));
         input.read_struct_begin().unwrap();
         let position = loop {

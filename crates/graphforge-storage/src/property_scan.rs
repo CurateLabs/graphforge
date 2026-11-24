@@ -30,7 +30,7 @@ use futures::stream;
 const MAX_HELD_BYTES: usize = 64 << 20;
 
 pub(crate) struct PropertyScanOptions<'a> {
-    pub(crate) projection: Option<&'a Vec<usize>>,
+    pub(crate) projection: Option<&'a [usize]>,
     pub(crate) limit: Option<usize>,
     pub(crate) batch_size: usize,
     /// Whether planning may admit the route for a footer row bound. A
@@ -160,7 +160,7 @@ impl PropertyOverlayExec {
         base_schema: SchemaRef,
         options: PropertyScanOptions<'_>,
     ) -> Result<Self, DataFusionError> {
-        let projection = options.projection.cloned();
+        let projection = options.projection.map(<[usize]>::to_vec);
         let schema = projection.as_ref().map_or_else(
             || Ok(Arc::clone(&base_schema)),
             |indices| {
@@ -291,9 +291,11 @@ impl PropertyOverlayExec {
             .filter_map(|filter| {
                 let dynamic = filter.downcast_ref::<DynamicFilterPhysicalExpr>()?;
                 let expression_id = dynamic.expression_id()?;
-                let original = dynamic.original_children();
-                let remapped = dynamic.remapped_children().unwrap_or(original);
-                if original.len() != 1 || remapped.len() != 1 {
+                // The scan-side key: remapped into this scan's schema, or the
+                // original key when no remapping happened. The producer's own
+                // (original) probe key is resolved from the join, by identity.
+                let remapped = dynamic.children();
+                if remapped.len() != 1 {
                     return None;
                 }
                 let source = remapped[0].downcast_ref::<Column>()?;
@@ -304,10 +306,7 @@ impl PropertyOverlayExec {
                 {
                     return None;
                 }
-                Some(PropertyUuidFilterCandidate {
-                    expression_id,
-                    original_probe_key: Arc::clone(&original[0]),
-                })
+                Some(PropertyUuidFilterCandidate { expression_id })
             })
             .collect()
     }
@@ -489,9 +488,10 @@ impl PropertyOverlayExec {
     }
 }
 
+/// A UUID join filter this scan consumes. `expression_id` is the identity of
+/// the producer's shared filter state, so it names exactly one producing join.
 pub(crate) struct PropertyUuidFilterCandidate {
     pub(crate) expression_id: u64,
-    pub(crate) original_probe_key: Arc<dyn PhysicalExpr>,
 }
 
 impl DisplayAs for PropertyOverlayExec {
@@ -517,6 +517,20 @@ impl ExecutionPlan for PropertyOverlayExec {
 
     fn properties(&self) -> &Arc<PlanProperties> {
         &self.props
+    }
+
+    /// The pushed-down UUID join filters are evaluated (and updated by their
+    /// producer) during execution; no other expression is owned here.
+    fn apply_expressions(
+        &self,
+        f: &mut dyn FnMut(
+            &Arc<dyn PhysicalExpr>,
+        ) -> Result<
+            datafusion::common::tree_node::TreeNodeRecursion,
+            DataFusionError,
+        >,
+    ) -> Result<datafusion::common::tree_node::TreeNodeRecursion, DataFusionError> {
+        datafusion::physical_plan::apply_expression_roots(&self.uuid_filters, f)
     }
 
     fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {

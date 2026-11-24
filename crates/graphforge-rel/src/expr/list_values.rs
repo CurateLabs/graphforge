@@ -777,13 +777,13 @@ fn invoke_tagged_list_element_plus(
         let end = usize::try_from(left_offsets[row + 1]).map_err(|_| {
             DataFusionError::Execution("cypher_list_plus: negative list offset".into())
         })?;
-        values.extend(0, start, end);
+        values.try_extend(0, start, end)?;
         output_len += end - start;
         if let Some((start, end)) = promoted_ranges[row] {
-            values.extend(2, start, end);
+            values.try_extend(2, start, end)?;
             output_len += end - start;
         } else {
-            values.extend(1, row, row + 1);
+            values.try_extend(1, row, row + 1)?;
             output_len += 1;
         }
         offsets.push(

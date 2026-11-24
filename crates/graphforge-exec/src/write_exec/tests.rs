@@ -48,8 +48,13 @@ fn set_and_remove_batch_contracts_route_rows_and_skip_null_identities() {
         rel_name_idx: None,
     };
     let logical_value = lit(42_i64);
-    let physical_value =
-        create_physical_expr(&logical_value, &df_schema, &ExecutionProps::new()).unwrap();
+    let physical_value = create_physical_expr(
+        &logical_value,
+        &df_schema,
+        &ExecutionProps::new(),
+        &datafusion::logical_expr::physical_planning_context::PhysicalPlanningContext::default(),
+    )
+    .unwrap();
     let type_map = HashMap::from([
         (
             graphforge_value::EntityTypeId::decode(7).unwrap(),

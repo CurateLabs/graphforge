@@ -201,7 +201,7 @@ fn field_json(field: &Field) -> Value {
     })
 }
 
-fn sorted_metadata(metadata: &std::collections::HashMap<String, String>) -> BTreeMap<&str, &str> {
+fn sorted_metadata(metadata: &arrow::datatypes::Metadata) -> BTreeMap<&str, &str> {
     metadata
         .iter()
         .map(|(key, value)| (key.as_str(), value.as_str()))

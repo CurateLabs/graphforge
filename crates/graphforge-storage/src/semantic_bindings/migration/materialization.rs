@@ -281,7 +281,7 @@ fn materialize_semantic_migration_selected(
                 crate::property_overlay::rename_live_schema_summary(&mut metadata, renames)?;
             }
             metadata.insert(
-                SEMANTIC_COMPOSITION_METADATA_KEY.into(),
+                SEMANTIC_COMPOSITION_METADATA_KEY,
                 plan.to_composition_fingerprint.clone(),
             );
             if let Some(route) = new_route {
@@ -290,12 +290,12 @@ fn materialize_semantic_migration_selected(
                 // route so a valid migrated file remains writable after reopen.
                 for key in ["graphforge.entity_type", "graphforge.rel_type"] {
                     if metadata.contains_key(key) {
-                        metadata.insert(key.into(), route.clone());
+                        metadata.insert(key, route.clone());
                     }
                 }
-                metadata.insert(SEMANTIC_ROUTE_METADATA_KEY.into(), route.clone());
+                metadata.insert(SEMANTIC_ROUTE_METADATA_KEY, route.clone());
                 if metadata.contains_key(crate::property_overlay::PROPERTY_OVERLAY_FORMAT_KEY) {
-                    metadata.insert(crate::property_overlay::PROPERTY_ROUTE_KEY.into(), route);
+                    metadata.insert(crate::property_overlay::PROPERTY_ROUTE_KEY, route);
                 }
             }
             let schema = std::sync::Arc::new(arrow::datatypes::Schema::new_with_metadata(

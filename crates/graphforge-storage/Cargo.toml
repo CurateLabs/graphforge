@@ -34,7 +34,7 @@ arrow-buffer = { workspace = true, features = ["pool"] }
 async-trait = "0.1"
 atomicwrites = "0.4.4"
 datafusion = { workspace = true }
-datafusion-catalog = "54"
+datafusion-catalog = "56.0.0"
 fs4 = "1.1"
 futures = { workspace = true }
 parquet = { workspace = true }
@@ -53,7 +53,7 @@ icu_casemap = { workspace = true }
 unicode-normalization = { workspace = true }
 uuid = { workspace = true }
 url = { workspace = true }
-zstd = { version = "=0.14.2", default-features = false }
+zstd = { version = "=0.14.5", default-features = false }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

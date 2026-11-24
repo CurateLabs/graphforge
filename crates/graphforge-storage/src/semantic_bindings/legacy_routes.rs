@@ -206,15 +206,15 @@ fn rewrite_legacy_route(
         return Err(corrupt("legacy migration column count exceeds limit"));
     }
     let mut metadata = builder.schema().metadata().clone();
-    metadata.insert(SEMANTIC_ROUTE_METADATA_KEY.into(), binding.route.clone());
+    metadata.insert(SEMANTIC_ROUTE_METADATA_KEY, binding.route.clone());
     if metadata.contains_key(crate::property_overlay::PROPERTY_OVERLAY_FORMAT_KEY) {
         metadata.insert(
-            crate::property_overlay::PROPERTY_ROUTE_KEY.into(),
+            crate::property_overlay::PROPERTY_ROUTE_KEY,
             binding.route.clone(),
         );
     }
     metadata.insert(
-        SEMANTIC_COMPOSITION_METADATA_KEY.into(),
+        SEMANTIC_COMPOSITION_METADATA_KEY,
         bindings.composition_fingerprint.clone(),
     );
     let schema = std::sync::Arc::new(arrow::datatypes::Schema::new_with_metadata(

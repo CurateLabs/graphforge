@@ -766,6 +766,9 @@ impl MemoryPool for CopyPhasePool {
     }
 }
 
+// Census exclusion: needs the vendored datafusion-physical-plan spill-admission
+// API, which stock DataFusion 56 does not have. Disposition belongs to #2042.
+#[cfg(any())]
 async fn copy_phase_merge(refuse_next_copy: bool) -> Result<()> {
     use arrow::array::FixedSizeBinaryArray;
     use datafusion::physical_expr::{PhysicalSortExpr, expressions::Column};
@@ -959,12 +962,18 @@ async fn copy_phase_merge(refuse_next_copy: bool) -> Result<()> {
     Ok(())
 }
 
+// Census exclusion: needs the vendored datafusion-physical-plan spill-admission
+// API, which stock DataFusion 56 does not have. Disposition belongs to #2042.
+#[cfg(any())]
 #[tokio::test]
 async fn spill_admission_merge_holds_its_admitted_copy_workspace_and_preserves_fresh_output_aliases()
 -> Result<()> {
     copy_phase_merge(false).await
 }
 
+// Census exclusion: needs the vendored datafusion-physical-plan spill-admission
+// API, which stock DataFusion 56 does not have. Disposition belongs to #2042.
+#[cfg(any())]
 #[tokio::test]
 async fn spill_admission_merge_serves_copies_from_its_admitted_workspace_under_a_full_pool_with_alias_alive()
 -> Result<()> {
@@ -974,6 +983,9 @@ async fn spill_admission_merge_serves_copies_from_its_admitted_workspace_under_a
 #[path = "spill_copy_tests.rs"]
 mod copy_tests;
 
+// Census exclusion: needs the vendored datafusion-physical-plan spill-admission
+// API, which stock DataFusion 56 does not have. Disposition belongs to #2042.
+#[cfg(any())]
 #[path = "spill_source_tests.rs"]
 mod source_tests;
 
@@ -986,5 +998,8 @@ mod field_tests;
 #[path = "spill_frame_tests.rs"]
 mod frame_tests;
 
+// Census exclusion: needs the vendored datafusion-physical-plan spill-admission
+// API, which stock DataFusion 56 does not have. Disposition belongs to #2042.
+#[cfg(any())]
 #[path = "spill_buffer_tests.rs"]
 mod buffer_tests;

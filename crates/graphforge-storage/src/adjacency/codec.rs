@@ -129,6 +129,13 @@ fn invalid() -> GfError {
     GfError::Storage("invalid or oversized current CSR shard encoding".into())
 }
 
+/// Which of the [`buffer_lengths`] are validity bitmaps. Every field of a
+/// shard declares zero nulls, so a writer may store each of these as an empty
+/// buffer instead of a materialized bitmap (Arrow 60's IPC writer always
+/// does; `FieldNode` in the IPC `Message.fbs` permits it). Shards written
+/// before Arrow 60 carry the full bitmap, which stays admitted.
+const VALIDITY_BUFFERS: [bool; 7] = [true, false, true, true, false, true, false];
+
 fn buffer_lengths(nodes: u64, edges: u64) -> Result<[u64; 7], GfError> {
     if nodes > DEFAULT_CSR_SHARD_NODES as u64 || edges > DEFAULT_CSR_SHARD_EDGES as u64 {
         return Err(invalid());
@@ -352,7 +359,7 @@ pub(super) fn preflight(bytes: &[u8], nodes: u64, edges: u64) -> Result<(), GfEr
         body_len,
     )?;
     let mut prior_end = 0;
-    for (buffer, expected) in buffers.iter().zip(lengths) {
+    for ((buffer, expected), validity) in buffers.iter().zip(lengths).zip(VALIDITY_BUFFERS) {
         let start = index(buffer.offset())?;
         let len = index(buffer.length())?;
         if start < prior_end {
@@ -360,7 +367,9 @@ pub(super) fn preflight(bytes: &[u8], nodes: u64, edges: u64) -> Result<(), GfEr
         }
         let encoded = slice(body, start, len)?;
         prior_end = start.checked_add(len).ok_or_else(invalid)?;
-        if expected == 0 && encoded.is_empty() {
+        // Field nodes were checked above to declare no nulls, so an empty
+        // validity bitmap is the all-valid one.
+        if encoded.is_empty() && (expected == 0 || validity) {
             continue;
         }
         let declared = i64::from_le_bytes(slice(encoded, 0, 8)?.try_into().map_err(storage_err)?);
@@ -493,6 +502,20 @@ mod tests {
     fn current_writer_passes_exact_predecode_admission() {
         let (_dir, path, bytes) = fixture();
         preflight(&bytes, 1, 128).unwrap();
+        // Arrow 60 stores the all-valid bitmaps of these null-free fields as
+        // empty buffers; only offsets and values carry bytes.
+        let trailer = bytes.len() - 10;
+        let len =
+            arrow::ipc::reader::read_footer_length(bytes[trailer..].try_into().unwrap()).unwrap();
+        let footer = arrow::ipc::root_as_footer(&bytes[trailer - len..trailer]).unwrap();
+        let block = footer.recordBatches().unwrap().get(0);
+        let start = usize::try_from(block.offset()).unwrap();
+        let end = start + usize::try_from(block.metaDataLength()).unwrap();
+        let message = arrow::ipc::root_as_message(&bytes[start + 8..end]).unwrap();
+        let buffers = message.header_as_record_batch().unwrap().buffers().unwrap();
+        for (buffer, validity) in buffers.iter().zip(VALIDITY_BUFFERS) {
+            assert_eq!(buffer.length() == 0, validity, "{buffer:?}");
+        }
         assert_eq!(
             read(
                 &path,

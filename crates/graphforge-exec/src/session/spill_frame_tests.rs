@@ -4,13 +4,12 @@ use arrow::array::{AsArray, Float64Array, Int64Array, UInt64Array};
 use arrow::buffer::{Buffer, NullBuffer, OffsetBuffer, ScalarBuffer};
 use arrow::ipc::{MessageHeader, MetadataVersion, reader::StreamReader};
 use datafusion::common::config::SpillCompression;
-use datafusion::execution::disk_manager::RefCountedTempFile;
 
 const READ_LIMIT: usize = 128 * 1024;
 const ROWS: usize = 512;
 
 struct FrameFile {
-    file: RefCountedTempFile,
+    file: std::sync::Arc<dyn datafusion::execution::SpillFile>,
     schema: Arc<Schema>,
     bytes: Vec<u8>,
     body: usize,
@@ -54,7 +53,7 @@ fn write_frame(batch: &RecordBatch, codec: SpillCompression) -> Result<FrameFile
     let file = manager
         .spill_record_batch_and_finish(std::slice::from_ref(batch), "checked flat IPC frame")?
         .unwrap();
-    let bytes = std::fs::read(file.path())?;
+    let bytes = std::fs::read(file.path().expect("local spill file"))?;
     let mut position = 0;
     loop {
         let mut len = i32::from_le_bytes(bytes[position..position + 4].try_into().unwrap());
@@ -155,7 +154,10 @@ async fn spill_admission_flat_frame_uses_one_full_aligned_body_and_preserves_esc
         (64 * 1024..80 * 1024).contains(&fixture.body),
         "the fixed128KiB pool must fit one complete body, not two"
     );
-    let mut ordinary = StreamReader::try_new(std::fs::File::open(fixture.file.path())?, None)?;
+    let mut ordinary = StreamReader::try_new(
+        std::fs::File::open(fixture.file.path().expect("local spill file"))?,
+        None,
+    )?;
     let oracle = ordinary.next().unwrap()?;
     assert_eq!(oracle, batch);
     let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(READ_LIMIT));
@@ -265,7 +267,7 @@ async fn spill_admission_flat_frame_unqualified_descriptors_keep_predecode_admis
     for (name, position, replacement) in cases {
         let mut bytes = fixture.bytes.clone();
         bytes[position..position + replacement.len()].copy_from_slice(&replacement);
-        std::fs::write(fixture.file.path(), bytes)?;
+        std::fs::write(fixture.file.path().expect("local spill file"), bytes)?;
         let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(READ_LIMIT));
         let manager = manager(Arc::clone(&pool), Arc::clone(&fixture.schema));
         let mut stream = manager.read_spill_as_stream_unbuffered(fixture.file.clone(), None)?;
@@ -280,7 +282,10 @@ async fn spill_admission_flat_frame_unqualified_descriptors_keep_predecode_admis
         drop(stream);
         assert_eq!(pool.reserved(), 0, "{name}");
     }
-    std::fs::write(fixture.file.path(), &fixture.bytes)?;
+    std::fs::write(
+        fixture.file.path().expect("local spill file"),
+        &fixture.bytes,
+    )?;
     Ok(())
 }
 
@@ -312,12 +317,20 @@ async fn spill_admission_flat_frame_compression_unknown_types_and_variadic_stay_
         (flat_batch(ROWS + 4), SpillCompression::Uncompressed, true),
     ] {
         let fixture = write_frame(&source, codec)?;
-        let mut ordinary = StreamReader::try_new(std::fs::File::open(fixture.file.path())?, None)?;
+        let mut ordinary = StreamReader::try_new(
+            std::fs::File::open(fixture.file.path().expect("local spill file"))?,
+            None,
+        )?;
         assert_eq!(ordinary.next().unwrap()?, source);
         if variadic {
-            std::fs::write(fixture.file.path(), with_variadic(&fixture))?;
-            let mut ordinary =
-                StreamReader::try_new(std::fs::File::open(fixture.file.path())?, None)?;
+            std::fs::write(
+                fixture.file.path().expect("local spill file"),
+                with_variadic(&fixture),
+            )?;
+            let mut ordinary = StreamReader::try_new(
+                std::fs::File::open(fixture.file.path().expect("local spill file"))?,
+                None,
+            )?;
             assert_eq!(ordinary.next().unwrap()?, source);
         }
         let schema = source.schema();
@@ -431,7 +444,10 @@ async fn spill_admission_flat_writer_admits_real_growth_and_rebased_null_spans()
         baseline,
         "temporary encoder authority releases after finish"
     );
-    let mut ordinary = StreamReader::try_new(std::fs::File::open(file.path())?, None)?;
+    let mut ordinary = StreamReader::try_new(
+        std::fs::File::open(file.path().expect("local spill file"))?,
+        None,
+    )?;
     for input in &inputs {
         let output = ordinary.next().unwrap()?;
         assert_eq!(&output, input);

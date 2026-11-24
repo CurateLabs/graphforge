@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use datafusion::common::Diagnostic;
 use datafusion::error::DataFusionError;
 use datafusion::execution::TaskContext;
-use datafusion::execution::context::{QueryPlanner, SessionState};
+use datafusion::execution::context::QueryPlanner;
 use datafusion::execution::session_state::SessionStateBuilder;
 use datafusion::logical_expr::LogicalPlan;
 use datafusion::logical_expr::{Volatility, col, create_udf};
@@ -141,7 +141,7 @@ impl QueryPlanner for BoundaryPlanner {
     async fn create_physical_plan(
         &self,
         _logical_plan: &LogicalPlan,
-        _session_state: &SessionState,
+        _session: &dyn datafusion::catalog::Session,
     ) -> Result<Arc<dyn ExecutionPlan>, DataFusionError> {
         match self {
             Self::Physical(physical) => Ok(Arc::clone(physical)),
@@ -263,6 +263,17 @@ impl ExecutionPlan for StreamStartFailure {
 
     fn properties(&self) -> &Arc<PlanProperties> {
         &self.properties
+    }
+
+    fn apply_expressions(
+        &self,
+        _f: &mut dyn FnMut(
+            &std::sync::Arc<dyn datafusion::physical_expr::PhysicalExpr>,
+        ) -> datafusion::common::Result<
+            datafusion::common::tree_node::TreeNodeRecursion,
+        >,
+    ) -> datafusion::common::Result<datafusion::common::tree_node::TreeNodeRecursion> {
+        Ok(datafusion::common::tree_node::TreeNodeRecursion::Continue)
     }
 
     fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {

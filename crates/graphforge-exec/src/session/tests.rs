@@ -212,7 +212,7 @@ async fn extension_planner_rejects_missing_write_inputs_and_declines_unknown_nod
 
     for node in nodes {
         let error = GraphForgeExtensionPlanner
-            .plan_extension(&physical_planner, node.as_ref(), &[], &[], &state)
+            .plan_extension(&physical_planner, node.as_ref(), &[], &[], &state, &datafusion::logical_expr::physical_planning_context::PhysicalPlanningContext::default())
             .await
             .unwrap_err();
         assert!(error.to_string().contains("requires one physical input"));
@@ -221,7 +221,7 @@ async fn extension_planner_rejects_missing_write_inputs_and_declines_unknown_nod
     let unknown = graphforge_plan::GraphMergeNode::new();
     assert!(
         GraphForgeExtensionPlanner
-            .plan_extension(&physical_planner, &unknown, &[], &[], &state)
+            .plan_extension(&physical_planner, &unknown, &[], &[], &state, &datafusion::logical_expr::physical_planning_context::PhysicalPlanningContext::default())
             .await
             .unwrap()
             .is_none()
@@ -281,7 +281,7 @@ async fn extension_planner_builds_scan_backed_expand_variants_and_optional_join(
                 &[],
                 std::slice::from_ref(&physical),
                 &unbound,
-            )
+             &datafusion::logical_expr::physical_planning_context::PhysicalPlanningContext::default(),)
             .await
             .unwrap_err();
         assert!(error.to_string().contains("GF_READ_RESOURCE_MISSING"));
@@ -294,6 +294,8 @@ async fn extension_planner_builds_scan_backed_expand_variants_and_optional_join(
             &[],
             std::slice::from_ref(&physical),
             &state,
+            &datafusion::logical_expr::physical_planning_context::PhysicalPlanningContext::default(
+            ),
         )
         .await
         .unwrap()
@@ -306,6 +308,8 @@ async fn extension_planner_builds_scan_backed_expand_variants_and_optional_join(
             &[],
             std::slice::from_ref(&physical),
             &state,
+            &datafusion::logical_expr::physical_planning_context::PhysicalPlanningContext::default(
+            ),
         )
         .await
         .unwrap()
@@ -318,6 +322,8 @@ async fn extension_planner_builds_scan_backed_expand_variants_and_optional_join(
             &[],
             &[physical.clone(), physical.clone()],
             &state,
+            &datafusion::logical_expr::physical_planning_context::PhysicalPlanningContext::default(
+            ),
         )
         .await
         .unwrap()
@@ -330,7 +336,7 @@ async fn extension_planner_builds_scan_backed_expand_variants_and_optional_join(
     ] {
         assert!(
             GraphForgeExtensionPlanner
-                .plan_extension(&planner, node, &[], &[], &state)
+                .plan_extension(&planner, node, &[], &[], &state, &datafusion::logical_expr::physical_planning_context::PhysicalPlanningContext::default())
                 .await
                 .unwrap_err()
                 .to_string()
@@ -339,7 +345,7 @@ async fn extension_planner_builds_scan_backed_expand_variants_and_optional_join(
     }
     assert!(
         GraphForgeExtensionPlanner
-            .plan_extension(&planner, &optional, &[], &[physical], &state)
+            .plan_extension(&planner, &optional, &[], &[physical], &state, &datafusion::logical_expr::physical_planning_context::PhysicalPlanningContext::default())
             .await
             .unwrap_err()
             .to_string()
@@ -403,7 +409,7 @@ async fn extension_planner_expands_each_input_partition() {
             (&var_len as &dyn UserDefinedLogicalNode, "VarLenExpandExec"),
         ] {
             let plan = GraphForgeExtensionPlanner
-                .plan_extension(&planner, node, &[], std::slice::from_ref(&input), &state)
+                .plan_extension(&planner, node, &[], std::slice::from_ref(&input), &state, &datafusion::logical_expr::physical_planning_context::PhysicalPlanningContext::default())
                 .await
                 .unwrap()
                 .unwrap();

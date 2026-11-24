@@ -174,9 +174,9 @@ fn typed_values(
     let mut output = MutableArrayData::new(data.iter().collect(), true, selected.len());
     for (row, index) in selected.iter().enumerate() {
         if let Some(index) = index {
-            output.extend(*index, row, row + 1);
+            output.try_extend(*index, row, row + 1)?;
         } else {
-            output.extend_nulls(1);
+            output.try_extend_nulls(1)?;
         }
     }
     Ok(make_array(output.freeze()))

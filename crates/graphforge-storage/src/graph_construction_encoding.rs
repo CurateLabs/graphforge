@@ -1855,24 +1855,20 @@ fn property_batch(
             .iter()
             .map(|index| input.schema().field(*index).clone()),
     );
-    let schema = Schema::new(fields).with_metadata(
-        [
-            (metadata_key.to_owned(), owner.to_owned()),
-            (
-                PROPERTY_OVERLAY_FORMAT_KEY.to_owned(),
-                PROPERTY_OVERLAY_FORMAT.to_owned(),
-            ),
-            (PROPERTY_ROUTE_KEY.to_owned(), route.to_owned()),
-            (
-                PROPERTY_KIND_KEY.to_owned(),
-                kind.metadata_value().to_owned(),
-            ),
-            (PROPERTY_GENERATION_KEY.to_owned(), generation.to_string()),
-            (PROPERTY_ORDINAL_KEY.to_owned(), ordinal.to_string()),
-        ]
-        .into_iter()
-        .collect(),
-    );
+    let schema = Schema::new(fields).with_metadata([
+        (metadata_key.to_owned(), owner.to_owned()),
+        (
+            PROPERTY_OVERLAY_FORMAT_KEY.to_owned(),
+            PROPERTY_OVERLAY_FORMAT.to_owned(),
+        ),
+        (PROPERTY_ROUTE_KEY.to_owned(), route.to_owned()),
+        (
+            PROPERTY_KIND_KEY.to_owned(),
+            kind.metadata_value().to_owned(),
+        ),
+        (PROPERTY_GENERATION_KEY.to_owned(), generation.to_string()),
+        (PROPERTY_ORDINAL_KEY.to_owned(), ordinal.to_string()),
+    ]);
     let mut columns = std::iter::once(input.column(0))
         .chain(field_indexes.iter().map(|index| input.column(*index)))
         .map(|array| take(array.as_ref(), &indexes, None).map_err(storage))

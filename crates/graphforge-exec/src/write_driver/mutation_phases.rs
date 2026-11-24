@@ -90,6 +90,8 @@ fn collect_delete_expr_targets(
             &env.bind_read_expression(bind_expr_params(df_expr, env.params)?)?,
             &frontier.df_schema,
             &ExecutionProps::new(),
+            &datafusion::logical_expr::physical_planning_context::PhysicalPlanningContext::default(
+            ),
         )
         .map_err(GfError::from_plan_error)?;
         for batch in &frontier.batches {
@@ -594,8 +596,14 @@ pub(super) fn run_set_phase_masked(
         };
         let df_expr = env.bind_read_expression(bind_expr_params(df_expr, env.params)?)?;
         let (df_expr, eval_schema) = positional_eval_expr(df_expr, &frontier.df_schema)?;
-        let phys = create_physical_expr(&df_expr, &eval_schema, &ExecutionProps::new())
-            .map_err(GfError::from_plan_error)?;
+        let phys = create_physical_expr(
+            &df_expr,
+            &eval_schema,
+            &ExecutionProps::new(),
+            &datafusion::logical_expr::physical_planning_context::PhysicalPlanningContext::default(
+            ),
+        )
+        .map_err(GfError::from_plan_error)?;
 
         let mut overlay = Vec::with_capacity(frontier.batches.len());
         let mut offset = 0usize;
@@ -782,8 +790,14 @@ pub(super) fn run_set_map_phase_with_input(
         };
         let df_expr = env.bind_read_expression(bind_expr_params(df_expr, env.params)?)?;
         let (df_expr, eval_schema) = positional_eval_expr(df_expr, &frontier.df_schema)?;
-        let phys = create_physical_expr(&df_expr, &eval_schema, &ExecutionProps::new())
-            .map_err(GfError::from_plan_error)?;
+        let phys = create_physical_expr(
+            &df_expr,
+            &eval_schema,
+            &ExecutionProps::new(),
+            &datafusion::logical_expr::physical_planning_context::PhysicalPlanningContext::default(
+            ),
+        )
+        .map_err(GfError::from_plan_error)?;
         let mut overlays: HashMap<String, Vec<ArrayRef>> = HashMap::new();
 
         for batch in &frontier.batches {

@@ -31,7 +31,7 @@ members = [
 # workspace test run never lint or test code we do not own. Cargo matches each
 # `exclude` entry as a literal path (a `vendor/*` glob is not recognised), so list
 # every vendored crate here.
-exclude = ["vendor/datafusion-physical-plan", "vendor/datafusion-optimizer", "vendor/arrow-row"]
+exclude = []
 
 [workspace.package]
 version = "0.7.0-dev"
@@ -67,12 +67,12 @@ tokio = { version = "1", features = ["full"] }
 futures = "0.3"
 
 # Arrow / DataFusion (verify release train compatibility at first use)
-arrow = { version = "=58.4.0", features = ["prettyprint"] }
-arrow-data = "=58.4.0"
-arrow-buffer = { version = "=58.4.0", features = ["pool"] }
-datafusion = "54"
-datafusion-datasource = "54"
-parquet = "=58.4.0"
+arrow = { version = "=60.2.0", features = ["prettyprint"] }
+arrow-data = "=60.2.0"
+arrow-buffer = { version = "=60.2.0", features = ["pool"] }
+datafusion = "56.0.0"
+datafusion-datasource = "56.0.0"
+parquet = "=60.2.0"
 thrift = "0.17"
 base64 = "=0.22.1"
 tantivy = { version = "=0.26.2", default-features = false, features = ["mmap", "lz4-compression"] }
@@ -84,7 +84,7 @@ logos = "0.16"
 # Python binding. Distribution-only extension mode is an opt-in feature of
 # graphforge-bindings-py. It must not enter the default workspace feature graph:
 # Cargo unification would suppress libpython linkage for Rust test executables.
-pyo3 = { version = "0.28" }
+pyo3 = { version = "0.29" }
 
 # Node binding
 napi = { version = "3", features = ["napi9", "async"] }
@@ -117,9 +117,6 @@ divan = { version = "5", package = "codspeed-divan-compat" }
 # vendor/datafusion-optimizer/GRAPHFORGE.md.
 [patch.crates-io]
 # Additive borrowed accessors, activated only by development test utilities.
-arrow-row = { path = "vendor/arrow-row" }
-datafusion-physical-plan = { path = "vendor/datafusion-physical-plan" }
-datafusion-optimizer = { path = "vendor/datafusion-optimizer" }
 
 # --------------------------------------------------------------
 # Workspace-wide lint policy

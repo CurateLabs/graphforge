@@ -21,7 +21,7 @@ graphforge-ontology = { version = "0.7.0-dev", path = "../graphforge-ontology" }
 graphforge-plan = { version = "0.7.0-dev", path = "../graphforge-plan" }
 datafusion = { workspace = true }
 arrow-data = { workspace = true }
-datafusion-functions-aggregate = "54"
+datafusion-functions-aggregate = "56.0.0"
 chrono = "0.4"
 chrono-tz = "0.10"
 thiserror = { workspace = true }

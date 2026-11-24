@@ -29,7 +29,12 @@ pub(super) fn plan_embedded(
             .build(),
     );
     let expr = simplifier.simplify(expr.clone())?;
-    datafusion::physical_expr::create_physical_expr(&expr, schema, &ExecutionProps::new())
+    datafusion::physical_expr::create_physical_expr(
+        &expr,
+        schema,
+        &ExecutionProps::new(),
+        &datafusion::logical_expr::physical_planning_context::PhysicalPlanningContext::default(),
+    )
 }
 
 /// Whether `expr`, an expression embedded in a list UDF, applies to elements of

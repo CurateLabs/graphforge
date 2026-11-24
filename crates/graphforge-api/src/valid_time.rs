@@ -268,10 +268,9 @@ impl GraphForge {
                 Field::new("policy_version", DataType::UInt32, false),
             ],
             [
-                ("graphforge.valid_time.policy".into(), "half-open/1".into()),
-                ("graphforge.base_snapshot_unchanged".into(), "true".into()),
-            ]
-            .into(),
+                ("graphforge.valid_time.policy", "half-open/1"),
+                ("graphforge.base_snapshot_unchanged", "true"),
+            ],
         ));
         let content = RecordBatch::try_new(
             Arc::clone(&schema),

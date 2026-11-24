@@ -3144,7 +3144,10 @@ mod tests {
             "graphforge-portable-preview/1",
             "graphforge-portable-verify/10",
         ] {
-            assert!(verify(contract).is_none(), "{contract} must not be admitted");
+            assert!(
+                verify(contract).is_none(),
+                "{contract} must not be admitted"
+            );
         }
     }
 

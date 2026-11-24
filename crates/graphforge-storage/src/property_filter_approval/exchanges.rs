@@ -112,7 +112,9 @@ pub(super) fn elide(
                         })
                     })
             }
-            Partitioning::UnknownPartitioning(_) => false,
+            // Range exchanges route by ordered bounds; eliding one is not
+            // proved safe here, so keep it.
+            Partitioning::UnknownPartitioning(_) | Partitioning::Range(_) => false,
         };
         // Repartition can erase heterogeneous input constants from its own
         // properties. Check the retained child before dropping the exchange.

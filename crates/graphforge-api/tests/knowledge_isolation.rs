@@ -1776,7 +1776,7 @@ fn normalize_query_schema(schema: &Schema) -> Schema {
         .iter()
         .filter(|(key, _)| !EPHEMERAL_QUERY_METADATA.contains(&key.as_str()))
         .map(|(key, value)| (key.clone(), value.clone()))
-        .collect();
+        .collect::<arrow::datatypes::Metadata>();
     Schema::new_with_metadata(schema.fields().clone(), metadata)
 }
 

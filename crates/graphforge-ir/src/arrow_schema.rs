@@ -19,11 +19,7 @@ pub fn uuid_field(name: &str) -> Field {
 /// legal user alias of the same name (#703).
 #[must_use]
 pub fn id_field(name: &str) -> Field {
-    Field::new(name, DataType::UInt64, false).with_metadata(
-        [(INTERNAL_SURROGATE_META_KEY.to_owned(), "true".to_owned())]
-            .into_iter()
-            .collect(),
-    )
+    Field::new(name, DataType::UInt64, false).with_metadata([(INTERNAL_SURROGATE_META_KEY, "true")])
 }
 
 /// True when `field` is an execution-internal surrogate identity column.
@@ -390,11 +386,8 @@ mod tests {
 
     #[test]
     fn canonical_list_element_keeps_name_nullability_and_metadata() {
-        let element = Field::new("element", DataType::Int16, false).with_metadata(
-            [("origin".to_owned(), "caller".to_owned())]
-                .into_iter()
-                .collect(),
-        );
+        let element =
+            Field::new("element", DataType::Int16, false).with_metadata([("origin", "caller")]);
         let canonical =
             canonical_property_data_type(&DataType::LargeList(Arc::new(element.clone())));
         assert_eq!(

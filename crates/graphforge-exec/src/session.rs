@@ -27,6 +27,7 @@ use crate::write_resource;
 use arrow::array::RecordBatch;
 use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
+use datafusion::catalog::Session;
 use datafusion::common::DFSchema;
 use datafusion::common::DataFusionError;
 use datafusion::common::ParamValues;
@@ -39,6 +40,7 @@ use datafusion::logical_expr::Extension;
 use datafusion::logical_expr::LogicalPlan;
 use datafusion::logical_expr::LogicalPlanBuilder;
 use datafusion::logical_expr::UserDefinedLogicalNode;
+use datafusion::logical_expr::physical_planning_context::PhysicalPlanningContext;
 use datafusion::logical_expr::simplify::SimplifyContext;
 use datafusion::optimizer::simplify_expressions::ExprSimplifier;
 use datafusion::physical_plan::ExecutionPlan;
@@ -140,6 +142,7 @@ fn plan_var_len_extension(
     planner: &dyn PhysicalPlanner,
     physical_inputs: &[Arc<dyn ExecutionPlan>],
     session_state: &SessionState,
+    planning_ctx: &PhysicalPlanningContext,
 ) -> Result<Arc<dyn ExecutionPlan>, DataFusionError> {
     let input = physical_inputs.first().cloned().ok_or_else(|| {
         DataFusionError::Internal("VarLenExpand requires one physical input".into())
@@ -171,7 +174,8 @@ fn plan_var_len_extension(
                 .build(),
         );
         let predicate = simplifier.simplify(filter.predicate().clone())?;
-        let predicate = planner.create_physical_expr(&predicate, &schema, session_state)?;
+        let predicate =
+            planner.create_physical_expr(&predicate, &schema, session_state, planning_ctx)?;
         expand = expand.with_edge_filter(predicate, filter.fields());
     }
     Ok(Arc::new(expand))
@@ -182,6 +186,7 @@ fn plan_expand_extension(
     planner: &dyn PhysicalPlanner,
     physical_inputs: &[Arc<dyn ExecutionPlan>],
     session_state: &SessionState,
+    planning_ctx: &PhysicalPlanningContext,
 ) -> Result<Arc<dyn ExecutionPlan>, DataFusionError> {
     let input = physical_inputs
         .first()
@@ -235,7 +240,8 @@ fn plan_expand_extension(
                 .build(),
         );
         let predicate = simplifier.simplify(predicate.clone())?;
-        let predicate = planner.create_physical_expr(&predicate, &schema, session_state)?;
+        let predicate =
+            planner.create_physical_expr(&predicate, &schema, session_state, planning_ctx)?;
         exec = exec.with_edge_predicate(predicate, &fields);
     }
     Ok(Arc::new(exec))
@@ -254,8 +260,10 @@ impl ExtensionPlanner for GraphForgeExtensionPlanner {
         node: &dyn UserDefinedLogicalNode,
         logical_inputs: &[&LogicalPlan],
         physical_inputs: &[Arc<dyn ExecutionPlan>],
-        session_state: &SessionState,
+        session: &dyn Session,
+        planning_ctx: &PhysicalPlanningContext,
     ) -> Result<Option<Arc<dyn ExecutionPlan>>, DataFusionError> {
+        let session_state = planning_session_state(session)?;
         if let Some(planned) =
             crate::fast_path::plan_extension(node, logical_inputs, physical_inputs, session_state)
         {
@@ -297,12 +305,24 @@ impl ExtensionPlanner for GraphForgeExtensionPlanner {
             )?)));
         }
         if let Some(expand) = node.as_any().downcast_ref::<graphforge_plan::ExpandNode>() {
-            return plan_expand_extension(expand, planner, physical_inputs, session_state)
-                .map(Some);
+            return plan_expand_extension(
+                expand,
+                planner,
+                physical_inputs,
+                session_state,
+                planning_ctx,
+            )
+            .map(Some);
         }
         if let Some(var_len) = node.as_any().downcast_ref::<VarLenExpandNode>() {
-            return plan_var_len_extension(var_len, planner, physical_inputs, session_state)
-                .map(Some);
+            return plan_var_len_extension(
+                var_len,
+                planner,
+                physical_inputs,
+                session_state,
+                planning_ctx,
+            )
+            .map(Some);
         }
         if let Some(opt) = node.as_any().downcast_ref::<OptionalMatchNode>() {
             // inputs() order is [outer, optional], so physical_inputs matches.
@@ -365,13 +385,26 @@ impl ExtensionPlanner for GraphForgeExtensionPlanner {
 #[derive(Debug, Default)]
 pub struct GraphForgeQueryPlanner;
 
+/// The [`SessionState`] a GraphForge planner was handed. DataFusion 56 passes
+/// planners a `&dyn Session`; GraphForge builds every session as a
+/// `SessionState` and reads its config extensions from it.
+fn planning_session_state(session: &dyn Session) -> Result<&SessionState, DataFusionError> {
+    session
+        .as_any()
+        .downcast_ref::<SessionState>()
+        .ok_or_else(|| {
+            DataFusionError::Plan("GraphForge planning requires a DataFusion SessionState".into())
+        })
+}
+
 #[async_trait]
 impl QueryPlanner for GraphForgeQueryPlanner {
     async fn create_physical_plan(
         &self,
         logical_plan: &LogicalPlan,
-        session_state: &SessionState,
+        session: &dyn Session,
     ) -> Result<Arc<dyn ExecutionPlan>, DataFusionError> {
+        let session_state = planning_session_state(session)?;
         let mut pinned_state = session_state.clone();
         if let Some(owner) = session_state
             .config()
@@ -1955,5 +1988,7 @@ mod spill_fifo_tests;
 #[cfg(test)]
 mod aggregate_input_tests;
 
-#[cfg(test)]
+// Census exclusion: needs the vendored datafusion-physical-plan spill-admission
+// API, which stock DataFusion 56 does not have. Disposition belongs to #2042.
+#[cfg(all(test, any()))]
 mod terminal_ownership_tests;

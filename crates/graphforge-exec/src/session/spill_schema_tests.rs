@@ -405,7 +405,7 @@ fn nested_frame_batch() -> Result<RecordBatch> {
 }
 
 struct NestedFrameFile {
-    file: datafusion::execution::disk_manager::RefCountedTempFile,
+    file: std::sync::Arc<dyn datafusion::execution::SpillFile>,
     bytes: Vec<u8>,
     body: usize,
     buffers: usize,
@@ -426,7 +426,7 @@ fn write_nested_frame(batch: &RecordBatch) -> Result<NestedFrameFile> {
         )?
         .unwrap();
     assert_eq!(pool.reserved(), 0);
-    let bytes = std::fs::read(file.path())?;
+    let bytes = std::fs::read(file.path().expect("local spill file"))?;
     let mut position = 0;
     loop {
         let mut len = i32::from_le_bytes(bytes[position..position + 4].try_into().unwrap());
@@ -594,7 +594,10 @@ async fn spill_admission_nested_frame_uses_one_aligned_body_and_preserves_escape
     // headers/schema/reader/ledger fees fit 512KiB; two bodies cannot fit.
     assert!((352 * 1024..400 * 1024).contains(&fixture.body));
     assert!(2 * fixture.body > NESTED_FRAME_LIMIT);
-    let mut ordinary = StreamReader::try_new(std::fs::File::open(fixture.file.path())?, None)?;
+    let mut ordinary = StreamReader::try_new(
+        std::fs::File::open(fixture.file.path().expect("local spill file"))?,
+        None,
+    )?;
     let oracle = ordinary.next().unwrap()?;
     assert_eq!(oracle, expected);
     assert_nested_frame_raw_children(&oracle, &expected);
@@ -701,7 +704,7 @@ async fn spill_admission_nested_frame_invalid_descriptors_keep_full_predecode_bo
     for (name, offset, replacement) in cases {
         let mut bytes = fixture.bytes.clone();
         bytes[offset..offset + replacement.len()].copy_from_slice(&replacement);
-        std::fs::write(fixture.file.path(), bytes)?;
+        std::fs::write(fixture.file.path().expect("local spill file"), bytes)?;
         let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(NESTED_FRAME_LIMIT));
         let reader = manager(Arc::clone(&pool), nested_frame_batch()?.schema());
         let mut stream = reader.read_spill_as_stream_unbuffered(fixture.file.clone(), None)?;
@@ -721,6 +724,9 @@ async fn spill_admission_nested_frame_invalid_descriptors_keep_full_predecode_bo
         drop(stream);
         assert_eq!(pool.reserved(), 0, "{name}");
     }
-    std::fs::write(fixture.file.path(), fixture.bytes)?;
+    std::fs::write(
+        fixture.file.path().expect("local spill file"),
+        fixture.bytes,
+    )?;
     Ok(())
 }

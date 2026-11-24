@@ -13,7 +13,7 @@ use datafusion::error::DataFusionError;
 use datafusion::physical_expr::Partitioning;
 use datafusion::physical_expr::PhysicalExpr;
 use datafusion::physical_expr::equivalence::AcrossPartitions;
-use datafusion::physical_expr::expressions::Column;
+use datafusion::physical_expr::expressions::{Column, DynamicFilterPhysicalExpr};
 use datafusion::physical_optimizer::PhysicalOptimizerRule;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::physical_plan::ExecutionPlanProperties;
@@ -260,14 +260,12 @@ impl PhysicalOptimizerRule for PropertyFilterApprovalRule {
                 return Ok(Transformed::no(node));
             }
 
-            let Some(dynamic_filter) = join.dynamic_filter_expr() else {
-                return Ok(Transformed::no(node));
-            };
-            let Some(expression_id) = dynamic_filter.expression_id() else {
+            let Some((expression_id, original_probe_key)) = produced_uuid_filter(join) else {
                 return Ok(Transformed::no(node));
             };
 
-            let candidate = find_matching_candidate(join.right(), expression_id, join)?;
+            let candidate =
+                find_matching_candidate(join.right(), expression_id, original_probe_key)?;
             let Some(candidate) = candidate else {
                 return Ok(Transformed::no(node));
             };
@@ -303,12 +301,8 @@ impl PhysicalOptimizerRule for PropertyFilterApprovalRule {
             }
 
             let nomination = UuidBuildKeyNomination::new();
-            let replacement_right = attach_nomination(
-                Arc::clone(join.right()),
-                expression_id,
-                &candidate.original_probe_key,
-                &nomination,
-            )?;
+            let replacement_right =
+                attach_nomination(Arc::clone(join.right()), expression_id, &nomination)?;
             let coalesced_left: Arc<dyn ExecutionPlan> =
                 Arc::new(CoalescePartitionsExec::new(Arc::clone(join.left())));
             let tapped_left: Arc<dyn ExecutionPlan> = Arc::new(UuidBuildKeyTapExec::new(
@@ -564,31 +558,45 @@ struct MatchingCandidate {
     original_probe_key: Arc<dyn PhysicalExpr>,
 }
 
+/// The single-key dynamic filter `join` produces, as its identity and its
+/// original probe key. A producer's filter is never remapped: its children are
+/// the probe-side join keys it was built over.
+fn produced_uuid_filter(join: &HashJoinExec) -> Option<(u64, Arc<dyn PhysicalExpr>)> {
+    let produced = ExecutionPlan::dynamic_expressions_produced(join);
+    let [filter] = produced.as_slice() else {
+        return None;
+    };
+    let dynamic = filter.downcast_ref::<DynamicFilterPhysicalExpr>()?;
+    let expression_id = dynamic.expression_id()?;
+    let children = dynamic.children();
+    let [original] = children.as_slice() else {
+        return None;
+    };
+    join.on()
+        .iter()
+        .any(|(_, probe)| probe.dyn_eq(original.as_ref()))
+        .then(|| (expression_id, Arc::clone(original)))
+}
+
 fn find_matching_candidate(
     right: &Arc<dyn ExecutionPlan>,
     expression_id: u64,
-    join: &HashJoinExec,
+    original_probe_key: Arc<dyn PhysicalExpr>,
 ) -> Result<Option<MatchingCandidate>, DataFusionError> {
-    let mut match_candidate = None;
+    let mut matched = false;
     right.apply(|node| {
-        if let Some(scan) = node.downcast_ref::<PropertyOverlayExec>() {
-            for candidate in scan.uuid_filter_candidates() {
-                if candidate.expression_id == expression_id
-                    && join
-                        .on()
-                        .iter()
-                        .any(|(_, probe)| probe.dyn_eq(candidate.original_probe_key.as_ref()))
-                {
-                    match_candidate = Some(MatchingCandidate {
-                        original_probe_key: candidate.original_probe_key,
-                    });
-                    break;
-                }
-            }
+        if let Some(scan) = node.downcast_ref::<PropertyOverlayExec>()
+            && scan
+                .uuid_filter_candidates()
+                .iter()
+                .any(|candidate| candidate.expression_id == expression_id)
+        {
+            matched = true;
+            return Ok(datafusion::common::tree_node::TreeNodeRecursion::Stop);
         }
         Ok(datafusion::common::tree_node::TreeNodeRecursion::Continue)
     })?;
-    Ok(match_candidate)
+    Ok(matched.then_some(MatchingCandidate { original_probe_key }))
 }
 
 /// An existing single-partition LEFT enrichment join can safely nominate
@@ -708,7 +716,6 @@ fn collect_left_probe_scan(right: &Arc<dyn ExecutionPlan>) -> Option<(&PropertyO
 fn attach_nomination(
     right: Arc<dyn ExecutionPlan>,
     expression_id: u64,
-    original_probe_key: &Arc<dyn PhysicalExpr>,
     nomination: &Arc<UuidBuildKeyNomination>,
 ) -> Result<Arc<dyn ExecutionPlan>, DataFusionError> {
     right
@@ -716,12 +723,12 @@ fn attach_nomination(
             let Some(scan) = node.downcast_ref::<PropertyOverlayExec>() else {
                 return Ok(Transformed::no(node));
             };
-            let matches = scan.uuid_filter_candidates().iter().any(|candidate| {
-                candidate.expression_id == expression_id
-                    && candidate
-                        .original_probe_key
-                        .dyn_eq(original_probe_key.as_ref())
-            });
+            // The identity names one producer, whose single original probe
+            // key the caller has already matched against the join.
+            let matches = scan
+                .uuid_filter_candidates()
+                .iter()
+                .any(|candidate| candidate.expression_id == expression_id);
             if !matches {
                 return Ok(Transformed::no(node));
             }

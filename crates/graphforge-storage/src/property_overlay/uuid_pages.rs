@@ -100,8 +100,7 @@ fn load_page_index(
         .with_page_index_policy(PageIndexPolicy::Optional);
     reader.read_page_indexes(source).ok()?;
     let metadata = reader.finish().ok()?;
-    metadata.column_index()?;
-    metadata.offset_index()?;
+    metadata.page_index()?.is_complete().then_some(())?;
     ArrowReaderMetadata::try_new(Arc::new(metadata), ArrowReaderOptions::new()).ok()
 }
 
@@ -114,19 +113,19 @@ fn plan_pages(
     groups: &[usize],
     wanted: &dyn UuidMembership,
 ) -> Option<PagePlan> {
-    let columns = metadata.column_index()?;
-    let offsets = metadata.offset_index()?;
+    let page_indexes = metadata.page_index()?;
     let mut candidates = Vec::new();
     let mut pages = 0_u64;
     let mut group_start = 0_usize;
     let mut prior_max: Option<[u8; 16]> = None;
     for &group in groups {
         let rows = usize::try_from(metadata.row_groups().get(group)?.num_rows()).ok()?;
-        let ColumnIndexMetaData::FIXED_LEN_BYTE_ARRAY(index) = columns.get(group)?.get(leaf)?
+        let ColumnIndexMetaData::FIXED_LEN_BYTE_ARRAY(index) =
+            page_indexes.column_index(group, leaf)?
         else {
             return None;
         };
-        let locations = offsets.get(group)?.get(leaf)?.page_locations();
+        let locations = page_indexes.offset_index(group, leaf)?.page_locations();
         if locations.is_empty() || usize::try_from(index.num_pages()).ok()? != locations.len() {
             return None;
         }

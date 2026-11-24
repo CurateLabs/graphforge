@@ -1008,7 +1008,9 @@ impl PhysicalOptimizerRule for FixedHopDemandRule {
             demand.cancel();
         }
         let mut filter_ordinal = 0;
-        let initial_batch_goal = terminal.batch_goal.min(config.execution.batch_size);
+        let initial_batch_goal = terminal
+            .batch_goal
+            .min(usize::from(config.execution.batch_size));
         let rewritten = rewrite_bounded(
             plan,
             initial_batch_goal,
@@ -1145,6 +1147,17 @@ impl ExecutionPlan for RssProbeExec {
 
     fn properties(&self) -> &Arc<PlanProperties> {
         &self.props
+    }
+
+    fn apply_expressions(
+        &self,
+        _f: &mut dyn FnMut(
+            &std::sync::Arc<dyn datafusion::physical_expr::PhysicalExpr>,
+        ) -> datafusion::common::Result<
+            datafusion::common::tree_node::TreeNodeRecursion,
+        >,
+    ) -> datafusion::common::Result<datafusion::common::tree_node::TreeNodeRecursion> {
+        Ok(datafusion::common::tree_node::TreeNodeRecursion::Continue)
     }
 
     fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
@@ -1786,6 +1799,17 @@ impl ExecutionPlan for ProbeExec {
         &self.props
     }
 
+    fn apply_expressions(
+        &self,
+        _f: &mut dyn FnMut(
+            &std::sync::Arc<dyn datafusion::physical_expr::PhysicalExpr>,
+        ) -> datafusion::common::Result<
+            datafusion::common::tree_node::TreeNodeRecursion,
+        >,
+    ) -> datafusion::common::Result<datafusion::common::tree_node::TreeNodeRecursion> {
+        Ok(datafusion::common::tree_node::TreeNodeRecursion::Continue)
+    }
+
     fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
         vec![&self.input]
     }
@@ -1900,6 +1924,17 @@ impl ExecutionPlan for DemandGuardExec {
 
     fn properties(&self) -> &Arc<PlanProperties> {
         &self.props
+    }
+
+    fn apply_expressions(
+        &self,
+        _f: &mut dyn FnMut(
+            &std::sync::Arc<dyn datafusion::physical_expr::PhysicalExpr>,
+        ) -> datafusion::common::Result<
+            datafusion::common::tree_node::TreeNodeRecursion,
+        >,
+    ) -> datafusion::common::Result<datafusion::common::tree_node::TreeNodeRecursion> {
+        Ok(datafusion::common::tree_node::TreeNodeRecursion::Continue)
     }
 
     fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {

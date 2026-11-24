@@ -206,7 +206,7 @@ fn fixture_window_prerequisites(batch: &RecordBatch) -> Result<()> {
             "FIFO reference frame prerequisites",
         )?
         .unwrap();
-    let mut input = std::fs::File::open(file.path())?;
+    let mut input = std::fs::File::open(file.path().expect("local spill file"))?;
     let mut schemas = 0;
     let mut records = 0;
     loop {
@@ -287,7 +287,8 @@ async fn fifo_execution(limit: usize, rotate: bool) -> Result<Vec<(i64, String)>
         .build_arc()?;
     let mut config = SessionConfig::new().with_batch_size(ROWS);
     if rotate {
-        config.options_mut().execution.max_spill_file_size_bytes = 1;
+        config.options_mut().execution.max_spill_file_size_bytes =
+            datafusion::common::config::ConfigNonZeroUsize::try_new(1).unwrap();
     }
     let context = SessionContext::new_with_config_rt(config, env);
     let (sent, ready) = oneshot::channel();

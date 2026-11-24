@@ -474,7 +474,13 @@ pub(super) fn const_eval_scalar(df: &DfExpr) -> Option<datafusion::scalar::Scala
         return Some(scalar.clone());
     }
     let schema = datafusion::common::DFSchema::empty();
-    let phys = create_physical_expr(df, &schema, &ExecutionProps::new()).ok()?;
+    let phys = create_physical_expr(
+        df,
+        &schema,
+        &ExecutionProps::new(),
+        &datafusion::logical_expr::physical_planning_context::PhysicalPlanningContext::default(),
+    )
+    .ok()?;
     let batch = RecordBatch::try_new_with_options(
         std::sync::Arc::new(Schema::empty()),
         vec![],

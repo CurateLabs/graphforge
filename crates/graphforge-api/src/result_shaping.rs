@@ -190,16 +190,10 @@ mod tests {
         use arrow::datatypes::{DataType, Field, Schema};
         use graphforge_storage::{INTERNAL_SURROGATE_META_KEY, is_internal_surrogate_field};
 
-        let marked_node = Field::new("node_id", DataType::UInt64, false).with_metadata(
-            [(INTERNAL_SURROGATE_META_KEY.to_owned(), "true".to_owned())]
-                .into_iter()
-                .collect(),
-        );
-        let marked_edge = Field::new("edge_id", DataType::UInt64, false).with_metadata(
-            [(INTERNAL_SURROGATE_META_KEY.to_owned(), "true".to_owned())]
-                .into_iter()
-                .collect(),
-        );
+        let marked_node = Field::new("node_id", DataType::UInt64, false)
+            .with_metadata([(INTERNAL_SURROGATE_META_KEY, "true")]);
+        let marked_edge = Field::new("edge_id", DataType::UInt64, false)
+            .with_metadata([(INTERNAL_SURROGATE_META_KEY, "true")]);
         assert!(is_internal_surrogate_field(&marked_node));
         assert!(is_internal_surrogate_field(&marked_edge));
 
@@ -256,11 +250,8 @@ mod tests {
         use arrow::datatypes::{DataType, Field, Schema};
         use graphforge_storage::INTERNAL_SURROGATE_META_KEY;
 
-        let marked = Field::new("node_id", DataType::UInt64, false).with_metadata(
-            [(INTERNAL_SURROGATE_META_KEY.to_owned(), "true".to_owned())]
-                .into_iter()
-                .collect(),
-        );
+        let marked = Field::new("node_id", DataType::UInt64, false)
+            .with_metadata([(INTERNAL_SURROGATE_META_KEY, "true")]);
         let source_schema = Arc::new(Schema::new(vec![marked]));
         let batch = arrow::record_batch::RecordBatch::try_new(
             source_schema.clone(),

@@ -107,7 +107,7 @@ fn encode_field(writer: &mut CanonicalWriter, field: &Field) -> Result<(), Canon
 
 fn encode_metadata(
     writer: &mut CanonicalWriter,
-    metadata: &std::collections::HashMap<String, String>,
+    metadata: &arrow::datatypes::Metadata,
 ) -> Result<(), CanonicalArrowError> {
     let mut ordered = BTreeMap::new();
     for (key, value) in metadata {

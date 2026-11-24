@@ -497,7 +497,14 @@ async fn wave11_physical_graph_execs_reject_missing_children_and_invalid_partiti
     ] {
         one_child.push(
             extension
-                .plan_extension(&planner, node, &[], std::slice::from_ref(&physical), &state)
+                .plan_extension(
+                    &planner,
+                    node,
+                    &[],
+                    std::slice::from_ref(&physical),
+                    &state,
+                    &datafusion::logical_expr::physical_planning_context::PhysicalPlanningContext::default(),
+                )
                 .await
                 .unwrap()
                 .unwrap(),
@@ -510,6 +517,8 @@ async fn wave11_physical_graph_execs_reject_missing_children_and_invalid_partiti
             &[],
             &[physical.clone(), physical],
             &state,
+            &datafusion::logical_expr::physical_planning_context::PhysicalPlanningContext::default(
+            ),
         )
         .await
         .unwrap()
