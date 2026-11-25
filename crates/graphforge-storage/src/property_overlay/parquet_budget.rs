@@ -6,10 +6,11 @@ use super::{
     PROPERTY_ORDINAL_KEY, PROPERTY_OVERLAY_FORMAT, PROPERTY_OVERLAY_FORMAT_KEY, PROPERTY_ROUTE_KEY,
     PROPERTY_TOMBSTONE_FIELD, ParquetRecordBatchReaderBuilder, PropertyFile, PropertyFragmentId,
     PropertyFragmentLayout, PropertyOverlayLimits, PropertyOverlayMetrics, PropertyRead,
-    PropertyRouteKind, Read, RecordBatch, TSerializable, corrupt, io_error, parquet_error,
+    PropertyRouteKind, Read, RecordBatch, corrupt, io_error, parquet_error,
 };
 
 use crate::parquet_encoding_profile::page_encodings_are_funded;
+use crate::parquet_page_header::{PageEncoding, PageHeader, PageType};
 
 #[derive(Debug, Default)]
 struct ReadCounterState {
@@ -92,7 +93,6 @@ struct HeaderRead<'a> {
     file: &'a dyn PropertyRead,
     position: u64,
     remaining: usize,
-    consumed: Arc<AtomicU64>,
     counts: ReadCounts,
 }
 
@@ -109,7 +109,6 @@ impl Read for HeaderRead<'_> {
         self.remaining -= read;
         if read != 0 {
             let read = u64::try_from(read).unwrap_or(u64::MAX);
-            self.consumed.fetch_add(read, Ordering::Relaxed);
             if self.file.physical() {
                 self.counts.record(read);
             }
@@ -364,10 +363,6 @@ pub(super) fn validate_fragment_schema(
 }
 
 #[allow(
-    deprecated,
-    reason = "Parquet 58 exposes raw compact-Thrift page type and sizes only here"
-)]
-#[allow(
     clippy::too_many_lines,
     reason = "raw page parsing and aggregate pre-decode admission form one proof"
 )]
@@ -447,10 +442,6 @@ pub(crate) fn replay_parquet_reader_reservation(
 }
 
 #[allow(
-    deprecated,
-    reason = "Parquet 58 raw page sizes are exposed through compact Thrift headers"
-)]
-#[allow(
     clippy::too_many_arguments,
     clippy::too_many_lines,
     reason = "one authenticated page scan computes legacy and replay resource envelopes"
@@ -520,23 +511,16 @@ pub(super) fn parquet_resource_admission(
             let mut position = start;
             let mut uncompressed_pages = 0_u64;
             while position < end {
-                let consumed = Arc::new(AtomicU64::new(0));
-                let transport = HeaderRead {
+                let mut transport = HeaderRead {
                     file,
                     position,
                     remaining: MAX_PAGE_HEADER_BYTES,
-                    consumed: Arc::clone(&consumed),
                     counts: counts.clone(),
                 };
-                let mut protocol = thrift::protocol::TCompactInputProtocol::new(transport);
-                #[allow(deprecated, reason = "Parquet 58 exposes raw page headers only here")]
-                let header = parquet::format::PageHeader::read_from_in_protocol(&mut protocol)
+                let (header, header_bytes) = PageHeader::read(&mut transport)
                     .map_err(|_| corrupt("property page header is malformed or oversized"))?;
-                let header_bytes = consumed.load(Ordering::Relaxed);
-                #[allow(deprecated, reason = "Parquet 58 page admission requires raw sizes")]
                 let compressed_page = u64::try_from(header.compressed_page_size)
                     .map_err(|_| corrupt("property page has negative compressed size"))?;
-                #[allow(deprecated, reason = "Parquet 58 page admission requires raw sizes")]
                 let uncompressed_page = u64::try_from(header.uncompressed_page_size)
                     .map_err(|_| corrupt("property page has negative uncompressed size"))?;
                 if selected && uncompressed_page > max_page_bytes {
@@ -550,10 +534,9 @@ pub(super) fn parquet_resource_admission(
                 if selected {
                     let no_decompression = column.compression()
                         == parquet::basic::Compression::UNCOMPRESSED
-                        || (header.type_ == parquet::format::PageType::DATA_PAGE_V2
+                        || (header.type_ == PageType::DATA_PAGE_V2
                             && header
-                                .data_page_header_v2
-                                .as_ref()
+                                .data_page_v2
                                 .is_some_and(|page| page.is_compressed == Some(false)));
                     // Parquet returns the body directly on these paths and
                     // does not compare its length with uncompressed_page_size.
@@ -574,13 +557,12 @@ pub(super) fn parquet_resource_admission(
                     if !page_encodings_are_funded(&header, column.column_descr().physical_type()) {
                         return Err(unfunded_encoding());
                     }
-                    if header.type_ == parquet::format::PageType::DICTIONARY_PAGE {
+                    if header.type_ == PageType::DICTIONARY_PAGE {
                         if column.column_descr().physical_type() == parquet::basic::Type::BYTE_ARRAY
                         {
-                            let dictionary =
-                                header.dictionary_page_header.as_ref().ok_or_else(|| {
-                                    corrupt("property dictionary page lacks its header")
-                                })?;
+                            let dictionary = header.dictionary_page.ok_or_else(|| {
+                                corrupt("property dictionary page lacks its header")
+                            })?;
                             let values = u64::try_from(dictionary.num_values).map_err(|_| {
                                 corrupt("property dictionary page has negative value count")
                             })?;
@@ -603,21 +585,16 @@ pub(super) fn parquet_resource_admission(
                         data_exposure = data_exposure.max(uncompressed_page);
                         compressed_data = compressed_data.max(compressed_page);
                         let encoding = match header.type_ {
-                            parquet::format::PageType::DATA_PAGE => {
-                                header.data_page_header.as_ref().map(|page| page.encoding)
-                            }
-                            parquet::format::PageType::DATA_PAGE_V2 => header
-                                .data_page_header_v2
-                                .as_ref()
-                                .map(|page| page.encoding),
+                            PageType::DATA_PAGE => header.data_page.map(|page| page.encoding),
+                            PageType::DATA_PAGE_V2 => header.data_page_v2.map(|page| page.encoding),
                             _ => None,
                         };
                         plain_byte_pages &= matches!(
                             encoding,
                             Some(
-                                parquet::format::Encoding::PLAIN
-                                    | parquet::format::Encoding::RLE_DICTIONARY
-                                    | parquet::format::Encoding::PLAIN_DICTIONARY
+                                PageEncoding::PLAIN
+                                    | PageEncoding::RLE_DICTIONARY
+                                    | PageEncoding::PLAIN_DICTIONARY
                             )
                         );
                     }

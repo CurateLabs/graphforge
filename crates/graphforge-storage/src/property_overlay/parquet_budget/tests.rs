@@ -6,6 +6,10 @@ use parquet::arrow::ArrowWriter;
 use std::collections::{BTreeSet, HashMap};
 use tempfile::TempDir;
 
+#[path = "../../../tests/support/hostile_parquet.rs"]
+mod hostile;
+use hostile::{field, raw_thrift};
+
 #[test]
 fn flat_plain_bytes_release_transition_page_admission_only_while_idle() {
     use arrow::array::{ListBuilder, StringBuilder};
@@ -270,12 +274,8 @@ fn retained_reader_rejects_wide_projected_pages_before_arrow_allocation() {
 }
 
 #[test]
-#[allow(
-    deprecated,
-    reason = "hostile raw PageHeader regression for Parquet 58"
-)]
 fn retained_reader_rejects_footer_small_page_header_large_before_decode() {
-    use std::io::{Cursor, Seek, SeekFrom};
+    use std::io::{Seek, SeekFrom};
 
     let dir = TempDir::new().unwrap();
     let route_dir = dir.path().join("properties/Person");
@@ -324,18 +324,15 @@ fn retained_reader_rejects_footer_small_page_header_large_before_decode() {
     let mut raw = vec![0_u8; 64 * 1024];
     let read = file.read(&mut raw).unwrap();
     raw.truncate(read);
-    let mut cursor = Cursor::new(raw.as_slice());
-    let mut protocol = thrift::protocol::TCompactInputProtocol::new(&mut cursor);
-    let original = parquet::format::PageHeader::read_from_in_protocol(&mut protocol).unwrap();
-    drop(protocol);
-    let header_len = usize::try_from(cursor.position()).unwrap();
+    let (original, header_len) = raw_thrift::Struct::read(raw.as_slice());
     let mut hostile = original.clone();
     let mut encoded = Vec::new();
     for candidate in (footer_uncompressed + 1)..=(footer_uncompressed + 4096) {
-        hostile.uncompressed_page_size = i32::try_from(candidate).unwrap();
-        encoded.clear();
-        let mut output = thrift::protocol::TCompactOutputProtocol::new(&mut encoded);
-        hostile.write_to_out_protocol(&mut output).unwrap();
+        hostile.set_i32(
+            field::UNCOMPRESSED_PAGE_SIZE,
+            i32::try_from(candidate).unwrap(),
+        );
+        encoded = hostile.encode();
         if encoded.len() == header_len {
             break;
         }
@@ -364,14 +361,10 @@ fn retained_reader_rejects_footer_small_page_header_large_before_decode() {
 }
 
 #[test]
-#[allow(
-    deprecated,
-    reason = "hostile raw dictionary PageHeader regression for Parquet 58"
-)]
 fn admitted_reader_rejects_oversized_dictionary_count_before_offset_allocation() {
     use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryPool};
     use std::cell::Cell;
-    use std::io::{Cursor, Seek, SeekFrom, Write};
+    use std::io::{Seek, SeekFrom, Write};
 
     const ROWS: usize = 128;
     let root = TempDir::new().unwrap();
@@ -468,19 +461,16 @@ fn admitted_reader_rejects_oversized_dictionary_count_before_offset_allocation()
     let mut raw = vec![0; 64 * 1024];
     let read = file.read(&mut raw).unwrap();
     raw.truncate(read);
-    let mut cursor = Cursor::new(raw.as_slice());
-    let mut protocol = thrift::protocol::TCompactInputProtocol::new(&mut cursor);
-    let mut header = parquet::format::PageHeader::read_from_in_protocol(&mut protocol).unwrap();
-    drop(protocol);
-    let header_len = usize::try_from(cursor.position()).unwrap();
-    let dictionary = header.dictionary_page_header.as_mut().unwrap();
-    assert_eq!(dictionary.num_values, i32::try_from(ROWS).unwrap());
-    dictionary.num_values = 1024;
-    assert!(dictionary.num_values * 4 > header.uncompressed_page_size);
-    let mut encoded = Vec::new();
-    let mut output = thrift::protocol::TCompactOutputProtocol::new(&mut encoded);
-    header.write_to_out_protocol(&mut output).unwrap();
-    drop(output);
+    let (mut header, header_len) = raw_thrift::Struct::read(raw.as_slice());
+    let uncompressed = header.i32(field::UNCOMPRESSED_PAGE_SIZE);
+    let dictionary = header.child_mut(field::DICTIONARY_PAGE_HEADER);
+    assert_eq!(
+        dictionary.i32(field::NUM_VALUES),
+        i32::try_from(ROWS).unwrap()
+    );
+    dictionary.set_i32(field::NUM_VALUES, 1024);
+    assert!(1024 * 4 > uncompressed);
+    let encoded = header.encode();
     assert_eq!(
         encoded.len(),
         header_len,
@@ -537,14 +527,10 @@ fn admitted_reader_rejects_oversized_dictionary_count_before_offset_allocation()
 }
 
 #[test]
-#[allow(
-    deprecated,
-    reason = "hostile raw PageHeader regression for Parquet 58"
-)]
 fn page_audit_rejects_size_mismatch_when_parquet_skips_decompression() {
     use parquet::basic::{Compression, Encoding};
     use parquet::file::properties::WriterVersion;
-    use std::io::{Cursor, Seek, SeekFrom, Write};
+    use std::io::{Seek, SeekFrom, Write};
 
     for (compression, version) in [
         (Compression::UNCOMPRESSED, WriterVersion::PARQUET_1_0),
@@ -597,24 +583,20 @@ fn page_audit_rejects_size_mismatch_when_parquet_skips_decompression() {
         raw_file.seek(SeekFrom::Start(offset)).unwrap();
         let mut raw = Vec::new();
         raw_file.read_to_end(&mut raw).unwrap();
-        let mut cursor = Cursor::new(raw);
-        let mut protocol = thrift::protocol::TCompactInputProtocol::new(&mut cursor);
-        let mut header = parquet::format::PageHeader::read_from_in_protocol(&mut protocol).unwrap();
-        drop(protocol);
-        let header_len = usize::try_from(cursor.position()).unwrap();
+        let (mut header, header_len) = raw_thrift::Struct::read(raw.as_slice());
         if version == WriterVersion::PARQUET_2_0 {
-            assert_eq!(header.type_, parquet::format::PageType::DATA_PAGE_V2);
+            assert_eq!(header.i32(field::PAGE_TYPE), field::DATA_PAGE_V2);
             assert_eq!(
-                header.data_page_header_v2.as_ref().unwrap().is_compressed,
+                header
+                    .child(field::DATA_PAGE_HEADER_V2)
+                    .bool(field::V2_IS_COMPRESSED),
                 Some(false)
             );
         }
-        assert_eq!(header.compressed_page_size, header.uncompressed_page_size);
-        header.uncompressed_page_size -= 1;
-        let mut encoded = Vec::new();
-        let mut output = thrift::protocol::TCompactOutputProtocol::new(&mut encoded);
-        header.write_to_out_protocol(&mut output).unwrap();
-        drop(output);
+        let uncompressed = header.i32(field::UNCOMPRESSED_PAGE_SIZE);
+        assert_eq!(header.i32(field::COMPRESSED_PAGE_SIZE), uncompressed);
+        header.set_i32(field::UNCOMPRESSED_PAGE_SIZE, uncompressed - 1);
+        let encoded = header.encode();
         assert_eq!(encoded.len(), header_len);
         raw_file.seek(SeekFrom::Start(offset)).unwrap();
         raw_file.write_all(&encoded).unwrap();

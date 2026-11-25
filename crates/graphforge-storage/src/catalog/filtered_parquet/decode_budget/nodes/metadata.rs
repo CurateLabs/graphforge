@@ -224,10 +224,6 @@ fn schema_node_bytes() -> usize {
         + 4 * std::mem::size_of::<usize>())
 }
 
-#[allow(
-    deprecated,
-    reason = "the bound includes the actual intermediate schema element type"
-)]
 fn object_bytes() -> usize {
     // Each observed wire struct/list slot can own one of these pinned types.
     // The largest pinned type covers any wire object; four copies include
@@ -235,7 +231,25 @@ fn object_bytes() -> usize {
     4 * struct_slot_bytes()
 }
 
-#[allow(deprecated, reason = "includes the actual intermediate schema element")]
+/// The field types of Parquet's crate-private footer `SchemaElement<'a>`
+/// (`file/metadata/thrift/mod.rs`, the same in Parquet 58 and 60), which
+/// borrows its name from the footer.
+/// Its size stands for the intermediate element the decoder builds per schema
+/// node; recheck it against that struct when Parquet is updated.
+#[allow(dead_code, reason = "measured for its layout only")]
+struct FooterSchemaElement {
+    physical_type: Option<parquet::basic::Type>,
+    type_length: Option<i32>,
+    repetition: Option<parquet::basic::Repetition>,
+    name: &'static str,
+    num_children: Option<i32>,
+    converted_type: Option<parquet::basic::ConvertedType>,
+    scale: Option<i32>,
+    precision: Option<i32>,
+    field_id: Option<i32>,
+    logical_type: Option<parquet::basic::LogicalType>,
+}
+
 fn struct_slot_bytes() -> usize {
     [
         std::mem::size_of::<parquet::file::metadata::ColumnChunkMetaData>(),
@@ -243,7 +257,7 @@ fn struct_slot_bytes() -> usize {
         std::mem::size_of::<parquet::file::metadata::FileMetaData>(),
         std::mem::size_of::<parquet::schema::types::ColumnDescriptor>(),
         std::mem::size_of::<parquet::schema::types::SchemaDescriptor>(),
-        std::mem::size_of::<parquet::format::SchemaElement>(),
+        std::mem::size_of::<FooterSchemaElement>(),
         schema_node_bytes(),
     ]
     .into_iter()

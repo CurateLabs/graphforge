@@ -1,7 +1,3 @@
-#![allow(
-    deprecated,
-    reason = "Parquet 58 page headers are parquet::format types"
-)]
 use std::sync::Arc;
 
 use arrow::array::{ArrayRef, BooleanArray, Float64Array, Int64Array, StringArray};
@@ -16,7 +12,8 @@ use super::*;
 #[path = "../../tests/support/hostile_parquet.rs"]
 mod hostile;
 use hostile::{
-    data_page_offset, declaring, metadata, patch_header, properties, string_file, strings, write,
+    data_page_offset, declaring, field, metadata, patch_header, properties, string_file, strings,
+    write,
 };
 
 fn admit(file: Vec<u8>) -> Result<(), PageAdmissionError> {
@@ -136,8 +133,10 @@ fn dictionary_page_encodings_are_checked() {
     )
     .unwrap();
     patch_header(&mut file, column_offset, |header| {
-        header.dictionary_page_header.as_mut().unwrap().encoding =
-            parquet::format::Encoding::DELTA_LENGTH_BYTE_ARRAY;
+        header.child_mut(field::DICTIONARY_PAGE_HEADER).set_i32(
+            field::ENCODING,
+            from_footer(Encoding::DELTA_LENGTH_BYTE_ARRAY).0,
+        );
     });
     assert_eq!(admit(file), Err(PageAdmissionError::Unfunded));
 }
@@ -154,12 +153,14 @@ fn version_1_level_encodings_are_checked() {
         assert_eq!(admit(file.clone()), Ok(()), "unmodified nullable file");
         let offset = data_page_offset(&file);
         patch_header(&mut file, offset, |header| {
-            let page = header.data_page_header.as_mut().unwrap();
-            if definition {
-                page.definition_level_encoding = parquet::format::Encoding::DELTA_BINARY_PACKED;
+            let level = if definition {
+                field::DEFINITION_LEVEL_ENCODING
             } else {
-                page.repetition_level_encoding = parquet::format::Encoding::DELTA_BINARY_PACKED;
-            }
+                field::REPETITION_LEVEL_ENCODING
+            };
+            header
+                .child_mut(field::DATA_PAGE_HEADER)
+                .set_i32(level, PageEncoding::DELTA_BINARY_PACKED.0);
         });
         assert_eq!(
             admit(file),
