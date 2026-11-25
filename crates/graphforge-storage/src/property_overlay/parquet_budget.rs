@@ -536,7 +536,7 @@ pub(super) fn parquet_resource_admission(
                         == parquet::basic::Compression::UNCOMPRESSED
                         || (header.type_ == PageType::DATA_PAGE_V2
                             && header
-                                .data_page_header_v2
+                                .data_page_v2
                                 .is_some_and(|page| page.is_compressed == Some(false)));
                     // Parquet returns the body directly on these paths and
                     // does not compare its length with uncompressed_page_size.
@@ -560,7 +560,7 @@ pub(super) fn parquet_resource_admission(
                     if header.type_ == PageType::DICTIONARY_PAGE {
                         if column.column_descr().physical_type() == parquet::basic::Type::BYTE_ARRAY
                         {
-                            let dictionary = header.dictionary_page_header.ok_or_else(|| {
+                            let dictionary = header.dictionary_page.ok_or_else(|| {
                                 corrupt("property dictionary page lacks its header")
                             })?;
                             let values = u64::try_from(dictionary.num_values).map_err(|_| {
@@ -585,12 +585,8 @@ pub(super) fn parquet_resource_admission(
                         data_exposure = data_exposure.max(uncompressed_page);
                         compressed_data = compressed_data.max(compressed_page);
                         let encoding = match header.type_ {
-                            PageType::DATA_PAGE => {
-                                header.data_page_header.map(|page| page.encoding)
-                            }
-                            PageType::DATA_PAGE_V2 => {
-                                header.data_page_header_v2.map(|page| page.encoding)
-                            }
+                            PageType::DATA_PAGE => header.data_page.map(|page| page.encoding),
+                            PageType::DATA_PAGE_V2 => header.data_page_v2.map(|page| page.encoding),
                             _ => None,
                         };
                         plain_byte_pages &= matches!(

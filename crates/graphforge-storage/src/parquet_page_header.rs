@@ -1,9 +1,11 @@
 //! Bounded, allocation-free decoding of Parquet page headers.
 //!
 //! Page admission reads each page header before Parquet decodes the page, to
-//! refuse unfunded encodings and to admit page sizes. Parquet 60 no longer
-//! exposes its Thrift page-header types, so this module decodes the Thrift
-//! compact protocol itself, keeping only the fields admission reads.
+//! refuse unfunded encodings and to admit page sizes. Parquet's generated
+//! Thrift page-header types are deprecated (and gone from Parquet 60), and
+//! their decoder allocates a binary field's wire-declared length before any
+//! byte bound applies, so this module decodes the Thrift compact protocol
+//! itself, keeping only the fields admission reads.
 //!
 //! Decoding never allocates. Every byte comes from the caller's reader, which
 //! bounds the header size; binary fields (page statistics) are consumed in
@@ -70,9 +72,9 @@ pub(crate) struct PageHeader {
     pub(crate) type_: PageType,
     pub(crate) uncompressed_page_size: i32,
     pub(crate) compressed_page_size: i32,
-    pub(crate) data_page_header: Option<DataPageHeader>,
-    pub(crate) dictionary_page_header: Option<DictionaryPageHeader>,
-    pub(crate) data_page_header_v2: Option<DataPageHeaderV2>,
+    pub(crate) data_page: Option<DataPageHeader>,
+    pub(crate) dictionary_page: Option<DictionaryPageHeader>,
+    pub(crate) data_page_v2: Option<DataPageHeaderV2>,
 }
 
 /// Why a page header could not be decoded.
@@ -138,11 +140,19 @@ impl<R: Read> Decoder<'_, R> {
         Ok(byte[0])
     }
 
+    /// Decode an unsigned LEB128 varint of at most `max_bytes` bytes. A value
+    /// with more bytes, or bits beyond 64, is malformed.
     fn varint(&mut self, max_bytes: u32) -> Result<u64, HeaderError> {
+        debug_assert!(max_bytes <= 10, "a u64 varint spans at most ten bytes");
         let mut value = 0_u64;
         for index in 0..max_bytes {
             let byte = self.byte()?;
-            value |= u64::from(byte & 0x7f) << (7 * index);
+            let payload = u64::from(byte & 0x7f);
+            let shift = 7 * index;
+            if (payload << shift) >> shift != payload {
+                return Err(HeaderError::Malformed);
+            }
+            value |= payload << shift;
             if byte & 0x80 == 0 {
                 return Ok(value);
             }
@@ -152,7 +162,8 @@ impl<R: Read> Decoder<'_, R> {
 
     fn zigzag(&mut self, max_bytes: u32) -> Result<i64, HeaderError> {
         let raw = self.varint(max_bytes)?;
-        Ok(((raw >> 1) as i64) ^ -((raw & 1) as i64))
+        // `raw >> 1` is below 2^63 and `raw & 1` is 0 or 1: neither wraps.
+        Ok((raw >> 1).cast_signed() ^ -(raw & 1).cast_signed())
     }
 
     fn i32(&mut self) -> Result<i32, HeaderError> {
@@ -293,15 +304,15 @@ impl<R: Read> Decoder<'_, R> {
                 3 => compressed = Some(self.expect_i32(&field)?),
                 5 => {
                     Self::expect_struct(&field)?;
-                    data = Some(self.data_page_header()?);
+                    data = Some(self.data_page()?);
                 }
                 7 => {
                     Self::expect_struct(&field)?;
-                    dictionary = Some(self.dictionary_page_header()?);
+                    dictionary = Some(self.dictionary_page()?);
                 }
                 8 => {
                     Self::expect_struct(&field)?;
-                    data_v2 = Some(self.data_page_header_v2()?);
+                    data_v2 = Some(self.data_page_v2()?);
                 }
                 _ => self.skip(field.kind, 1)?,
             }
@@ -310,13 +321,13 @@ impl<R: Read> Decoder<'_, R> {
             type_: type_.ok_or(HeaderError::Malformed)?,
             uncompressed_page_size: uncompressed.ok_or(HeaderError::Malformed)?,
             compressed_page_size: compressed.ok_or(HeaderError::Malformed)?,
-            data_page_header: data,
-            dictionary_page_header: dictionary,
-            data_page_header_v2: data_v2,
+            data_page: data,
+            dictionary_page: dictionary,
+            data_page_v2: data_v2,
         })
     }
 
-    fn data_page_header(&mut self) -> Result<DataPageHeader, HeaderError> {
+    fn data_page(&mut self) -> Result<DataPageHeader, HeaderError> {
         let (mut values, mut encoding, mut definition, mut repetition) = (None, None, None, None);
         let mut last = 0;
         while let Some(field) = self.field(&mut last)? {
@@ -336,7 +347,7 @@ impl<R: Read> Decoder<'_, R> {
         })
     }
 
-    fn dictionary_page_header(&mut self) -> Result<DictionaryPageHeader, HeaderError> {
+    fn dictionary_page(&mut self) -> Result<DictionaryPageHeader, HeaderError> {
         let (mut values, mut encoding) = (None, None);
         let mut last = 0;
         while let Some(field) = self.field(&mut last)? {
@@ -352,7 +363,7 @@ impl<R: Read> Decoder<'_, R> {
         })
     }
 
-    fn data_page_header_v2(&mut self) -> Result<DataPageHeaderV2, HeaderError> {
+    fn data_page_v2(&mut self) -> Result<DataPageHeaderV2, HeaderError> {
         let (mut values, mut nulls, mut rows, mut encoding) = (None, None, None, None);
         let (mut definition, mut repetition, mut is_compressed) = (None, None, None);
         let mut last = 0;

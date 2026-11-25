@@ -3,7 +3,7 @@
 //! binary because the production crate forbids unsafe code.
 
 use arrow::datatypes::{DataType, Field, Schema};
-use arrow::ipc::convert::{IpcSchemaEncoder, fb_to_schema};
+use arrow::ipc::convert::{IpcSchemaEncoder, try_fb_to_schema};
 use arrow::ipc::root_as_schema;
 use graphforge_api::CancellationToken;
 use graphforge_core::GfError;
@@ -124,7 +124,7 @@ fn measure(schema: arrow::ipc::Schema<'_>) -> (arrow::datatypes::Schema, Track) 
             ..Track::default()
         })
     });
-    let converted = fb_to_schema(schema);
+    let converted = try_fb_to_schema(schema).expect("a valid IPC schema");
     let result = TRACK.with(|state| {
         let track = state.get();
         state.set(Track::default());

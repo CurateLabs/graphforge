@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use arrow::datatypes::{DataType, Field, Schema, TimeUnit, UnionFields, UnionMode};
-use arrow::ipc::convert::{IpcSchemaEncoder, fb_to_schema};
+use arrow::ipc::convert::{IpcSchemaEncoder, try_fb_to_schema};
 use arrow::ipc::root_as_schema;
 use graphforge_core::{GfError, ProjectErrorCode};
 
@@ -64,7 +64,7 @@ fn ordinary_nested_schema_matches_native_conversion_and_admits() {
     let bytes = encoded(&expected);
     let borrowed = root_as_schema(&bytes).unwrap();
     let envelope = preflight(borrowed, u64::MAX, None).unwrap();
-    let actual = fb_to_schema(root_as_schema(&bytes).unwrap());
+    let actual = try_fb_to_schema(root_as_schema(&bytes).unwrap()).unwrap();
 
     assert_eq!(actual, expected);
     assert_eq!(envelope.field_occurrences, 4);
@@ -101,7 +101,10 @@ fn empty_schema_metadata_and_timezone_accounting_are_exact() {
     let envelope = preflight(root_as_schema(&bytes).unwrap(), u64::MAX, None).unwrap();
     assert_eq!(envelope.timezone_copy_bytes, 0);
     assert_eq!(envelope.field_name_copy_bytes, 4);
-    assert_eq!(fb_to_schema(root_as_schema(&bytes).unwrap()), schema);
+    assert_eq!(
+        try_fb_to_schema(root_as_schema(&bytes).unwrap()).unwrap(),
+        schema
+    );
 }
 
 #[test]
@@ -130,7 +133,10 @@ fn dictionary_and_union_occurrences_match_native_conversion() {
     let bytes = encoded_with_dictionaries(&schema);
     let envelope = preflight(root_as_schema(&bytes).unwrap(), u64::MAX, None).unwrap();
     assert_eq!(envelope.field_occurrences, 4);
-    assert_eq!(fb_to_schema(root_as_schema(&bytes).unwrap()), schema);
+    assert_eq!(
+        try_fb_to_schema(root_as_schema(&bytes).unwrap()).unwrap(),
+        schema
+    );
 }
 
 #[test]

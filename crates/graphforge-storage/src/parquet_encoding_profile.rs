@@ -115,15 +115,15 @@ pub(crate) fn declared_encoding_is_funded(encoding: FooterEncoding, physical: Ty
 pub(crate) fn page_encodings_are_funded(header: &PageHeader, physical: Type) -> bool {
     match header.type_ {
         PageType::DICTIONARY_PAGE => header
-            .dictionary_page_header
+            .dictionary_page
             .is_none_or(|page| value_encoding_is_funded(page.encoding, physical)),
-        PageType::DATA_PAGE => header.data_page_header.is_none_or(|page| {
+        PageType::DATA_PAGE => header.data_page.is_none_or(|page| {
             value_encoding_is_funded(page.encoding, physical)
                 && level_encoding_is_funded(page.definition_level_encoding)
                 && level_encoding_is_funded(page.repetition_level_encoding)
         }),
         PageType::DATA_PAGE_V2 => header
-            .data_page_header_v2
+            .data_page_v2
             .is_none_or(|page| value_encoding_is_funded(page.encoding, physical)),
         _ => true,
     }

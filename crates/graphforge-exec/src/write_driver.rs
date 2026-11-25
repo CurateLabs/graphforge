@@ -53,6 +53,7 @@ use arrow::datatypes::SchemaRef;
 use arrow::datatypes::UInt32Type;
 use datafusion::common::Column;
 use datafusion::common::DFSchema;
+use datafusion::physical_plan::{ChildrenPropertiesMode, ReplaceChildrenOptions};
 
 use datafusion::logical_expr::Expr as DfExpr;
 
@@ -1659,8 +1660,11 @@ fn replace_empty_input(
         .into_iter()
         .map(|child| replace_empty_input(Arc::clone(child), Arc::clone(&input)))
         .collect::<Result<Vec<_>, _>>()?;
-    plan.with_new_children(children)
-        .map_err(GfError::from_plan_error)
+    plan.replace_children(
+        children,
+        ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
+    )
+    .map_err(GfError::from_plan_error)
 }
 
 fn positional_eval_expr(expr: DfExpr, schema: &DFSchema) -> Result<(DfExpr, DFSchema), GfError> {

@@ -148,13 +148,16 @@ pub(crate) fn bind(
                 // Bind the provider's query-facing schema in this execution
                 // clone. Property providers strip storage observation counts
                 // before exposing schemas or scan plans.
-                *scan = datafusion::logical_expr::TableScan::try_new(
+                *scan = datafusion::logical_expr::TableScanBuilder::new(
                     scan.table_name.clone(),
                     provider_as_source(provider),
-                    scan.projection.clone(),
-                    scan.filters.clone(),
-                    scan.fetch,
-                )?;
+                )
+                .with_projection(scan.projection.clone())
+                .with_filters(scan.filters.clone())
+                .with_fetch(scan.fetch)
+                .with_skip(scan.skip)
+                .with_statistics_requests((*scan.statistics_requests).clone())
+                .build()?;
             }
             node.map_expressions(|expr| {
                 match &hydration {

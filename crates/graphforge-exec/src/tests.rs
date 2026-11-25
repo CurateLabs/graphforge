@@ -23,6 +23,7 @@ use datafusion::logical_expr::UserDefinedLogicalNode;
 use datafusion::logical_expr::lit;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::physical_plan::empty::EmptyExec;
+use datafusion::physical_plan::{ChildrenPropertiesMode, ReplaceChildrenOptions};
 use datafusion::physical_planner::DefaultPhysicalPlanner;
 use datafusion::physical_planner::ExtensionPlanner;
 use datafusion::prelude::SessionContext;
@@ -359,7 +360,13 @@ fn write_execs_expose_stable_plan_contracts_and_reject_invalid_shape() {
                 .to_string()
                 .contains(expected_name)
         );
-        let missing_child = plan.clone().with_new_children(vec![]).unwrap_err();
+        let missing_child = plan
+            .clone()
+            .replace_children(
+                vec![],
+                ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
+            )
+            .unwrap_err();
         assert!(missing_child.to_string().contains("needs one child"));
         let invalid_partition = match plan.execute(1, SessionContext::new().task_ctx()) {
             Ok(_) => panic!("{expected_name} accepted invalid partition 1"),
@@ -534,7 +541,10 @@ async fn wave11_physical_graph_execs_reject_missing_children_and_invalid_partiti
         );
         assert!(
             plan.clone()
-                .with_new_children(vec![])
+                .replace_children(
+                    vec![],
+                    ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute)
+                )
                 .unwrap_err()
                 .to_string()
                 .contains("needs one child")
@@ -561,7 +571,10 @@ async fn wave11_physical_graph_execs_reject_missing_children_and_invalid_partiti
     assert!(
         optional
             .clone()
-            .with_new_children(vec![])
+            .replace_children(
+                vec![],
+                ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute)
+            )
             .unwrap_err()
             .to_string()
             .contains("needs two children")

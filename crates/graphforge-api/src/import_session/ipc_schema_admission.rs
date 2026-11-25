@@ -1,6 +1,6 @@
 //! Borrowed semantic validation and native allocation-request accounting for
 //! Arrow IPC schemas. This component models `arrow-ipc` 58.4's
-//! `convert::fb_to_schema` path; it does not construct an Arrow `Schema`.
+//! `convert::try_fb_to_schema` path; it does not construct an Arrow `Schema`.
 
 use std::alloc::Layout;
 use std::mem::size_of;
@@ -217,7 +217,7 @@ pub(super) fn preflight(
     requests.envelope.metadata_occurrences = metadata_occurrences;
     requests.envelope.metadata_copy_bytes = metadata_bytes;
 
-    // fb_to_schema moves Vec<Field> through a temporary Vec<FieldRef> into
+    // try_fb_to_schema moves Vec<Field> through a temporary Vec<FieldRef> into
     // Fields' Arc slice. The Vec<Field> push-growth was counted above.
     vector_exact::<Arc<arrow::datatypes::Field>>(&mut requests, field_count)?;
     arc_slice::<Arc<arrow::datatypes::Field>>(&mut requests, field_count)?;

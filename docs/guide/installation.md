@@ -57,15 +57,6 @@ Read this before you choose durable storage or build an integration. See also
   (`GraphForge()`) run the full engine without a filesystem warning.
 - **Prerequisites.** Python 3.10+ or Node.js 20+; a Rust toolchain only for a
   source build or `cargo install`.
-- **Crates.io builds lack two DataFusion fixes.** `cargo install graphforge-cli`
-  and other crates.io builds compile against stock DataFusion 54.1. The Python
-  wheel, the Node packages and the native `gf` archives carry two fixes that
-  crates.io builds do not: a hang when a query spills under memory pressure
-  ([apache/datafusion#24883](https://github.com/apache/datafusion/issues/24883))
-  and a planning error when a join's keys read fields of one struct
-  ([#2084](https://github.com/CurateLabs/graphforge/issues/2084)). Prefer the
-  wheel or npm package unless you need the Rust crates. Do not expect
-  workspace and registry builds to behave identically.
 - **Measured scale is workload-specific.** No universal size or latency promise
   exists. The 1,000,000 edges/s ingest target is **not met**. See
   [claims and evidence](../reference/scale-limits.md#claims-and-their-evidence).
@@ -149,8 +140,7 @@ tar -xzf "gf-0.6.0-x86_64-unknown-linux-gnu.tar.gz"
 ```
 
 For a later release, use the version in that release's asset names. The
-archives are built from the same source as the Python and npm packages and
-carry the same DataFusion fixes.
+archives are built from the same source as the Python and npm packages.
 
 ## Durable storage
 
@@ -215,10 +205,8 @@ python -c "import sys, graphforge; print(sys.executable); print(graphforge.__ver
 ```
 
 Both version commands report the checked-out version. Put `target/release/gf`
-(`target/release/gf.exe` on Windows) on your path to use it as `gf`. The
-source-built Python binding and CLI use the checkout's bundled DataFusion fixes;
-`cargo install` from crates.io does not (see [status and limits](#status-and-limits)).
-For Node development use the contributor build instructions.
+(`target/release/gf.exe` on Windows) on your path to use it as `gf`. For Node
+development use the contributor build instructions.
 
 ## If setup fails
 

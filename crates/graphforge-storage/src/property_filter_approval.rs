@@ -21,6 +21,7 @@ use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion::physical_plan::joins::HashJoinExec;
 use datafusion::physical_plan::joins::PartitionMode;
 use datafusion::physical_plan::repartition::RepartitionExec;
+use datafusion::physical_plan::{ChildrenPropertiesMode, ReplaceChildrenOptions};
 
 use crate::property_join_nomination::{
     NominationLimits, UuidBuildKeyNomination, UuidBuildKeyTapExec,
@@ -674,7 +675,10 @@ fn nominate_existing_collect_left_inner(
     // The exchange keeps its partitioning, so the join's output properties
     // are the ones it had.
     let nominated_right = if exchanged {
-        Arc::clone(join.right()).with_new_children(vec![nominated_scan])?
+        Arc::clone(join.right()).replace_children(
+            vec![nominated_scan],
+            ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
+        )?
     } else {
         nominated_scan
     };

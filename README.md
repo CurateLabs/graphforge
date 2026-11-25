@@ -55,8 +55,6 @@ and none of them is required to begin.
 - **Durable projects** need ext4, xfs, or btrfs on Linux (`GF_UNSUPPORTED_FILESYSTEM`
   otherwise). In-memory projects (`GraphForge()`) run the full engine anywhere
   a native package exists.
-- **Crates.io builds** lack two DataFusion fixes that the Python wheel and Node
-  packages carry. Prefer those packages unless you need the Rust crates.
 - **Measured scale:** one run reached 1,073,741,824 live edges on a documented
   host; the 1,000,000 edges/s ingest target is not met. Every number, its
   workload, host, command, and limits are in

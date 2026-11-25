@@ -3,7 +3,7 @@
 //!
 //! The Parquet converter first copies footer key/value metadata, decodes an
 //! optional base64 Arrow IPC schema hint, converts that hint with
-//! `fb_to_schema`, then builds Arrow fields and the `ParquetField` level tree.
+//! `try_fb_to_schema`, then builds Arrow fields and the `ParquetField` level tree.
 //! This module performs the hint conversion only for measurement, after
 //! charging its decoded bytes, and bounds the subsequent Parquet conversion
 //! from the already-validated schema topology. It never constructs an owned

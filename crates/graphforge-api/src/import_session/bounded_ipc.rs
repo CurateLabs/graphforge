@@ -358,7 +358,7 @@ pub(super) fn ipc_plan_with_budget(path: &Path, budget: u64) -> Result<IpcPlan, 
         schema_facts.peak_request_bytes,
         "the converted Arrow IPC schema",
     )?;
-    let schema = arrow::ipc::convert::fb_to_schema(ipc_schema);
+    let schema = arrow::ipc::convert::try_fb_to_schema(ipc_schema).map_err(storage)?;
     let schema_bytes = schema_owned_bytes(&schema);
     workspace.release(
         schema_facts

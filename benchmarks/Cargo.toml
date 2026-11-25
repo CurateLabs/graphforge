@@ -23,9 +23,6 @@ serde_json = "1"
 arrow = "=60.2.0"
 parquet = { version = "=60.2.0", features = ["arrow"] }
 
-# This standalone workspace must use the same engine patches as the product.
-[patch.crates-io]
-
 # The GDC query driver hashes its own executable into every evidence document.
 # Unoptimized, SHA-256 over a debug binary takes over 30 s per run in the tests.
 [profile.dev.package.sha2]

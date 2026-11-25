@@ -26,12 +26,6 @@ members = [
   "crates/graphforge-bindings-node",
   "crates/graphforge-cli",
 ]
-# Vendored third-party crates are path dependencies through [patch.crates-io]
-# below. Excluding them keeps them from becoming members, so fmt, clippy and the
-# workspace test run never lint or test code we do not own. Cargo matches each
-# `exclude` entry as a literal path (a `vendor/*` glob is not recognised), so list
-# every vendored crate here.
-exclude = []
 
 [workspace.package]
 version = "0.7.0-dev"
@@ -101,22 +95,6 @@ cucumber = "0.21"
 # Benchmarking. The CodSpeed compatibility layer is a drop-in for `divan`; it
 # is renamed so benchmark sources stay plain divan code (see docs/development).
 divan = { version = "5", package = "codspeed-divan-compat" }
-
-# DataFusion 54.1.0 carries a deadlock in the spill pool that backs
-# RepartitionExec (apache/datafusion#24883). The fix, apache/datafusion#24891,
-# is on upstream main only and in no release. Builds from this repository use a
-# vendored copy of datafusion-physical-plan 54.1.0 with that one change applied;
-# see vendor/datafusion-physical-plan/GRAPHFORGE.md, including the condition for
-# deleting it. Crates published to crates.io do not carry [patch] sections.
-#
-# datafusion-optimizer 54.1.0 leaves a Join with a stale cached schema when the
-# leaf-expression push-down rewrites one of its inputs, which makes
-# optimize_projections fail (apache/datafusion#22895, fixed upstream by #22903 in
-# 55.0.0 only). Builds from this repository use a vendored copy of
-# datafusion-optimizer 54.1.0 with that one change applied; see
-# vendor/datafusion-optimizer/GRAPHFORGE.md.
-[patch.crates-io]
-# Additive borrowed accessors, activated only by development test utilities.
 
 # --------------------------------------------------------------
 # Workspace-wide lint policy

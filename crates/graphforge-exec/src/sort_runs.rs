@@ -33,6 +33,7 @@ use datafusion::execution::TaskContext;
 use datafusion::execution::memory_pool::{MemoryConsumer, MemoryReservation};
 use datafusion::physical_optimizer::PhysicalOptimizerRule;
 use datafusion::physical_plan::sorts::sort::SortExec;
+use datafusion::physical_plan::{ChildrenPropertiesMode, ReplaceChildrenOptions};
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties, RecordBatchStream,
     SendableRecordBatchStream,
@@ -87,7 +88,10 @@ impl PhysicalOptimizerRule for SortRunCoalesceRule {
             }
             let coalesced: Arc<dyn ExecutionPlan> =
                 Arc::new(SortRunCoalesceExec::new(input, self.run_bytes));
-            Ok(Transformed::yes(node.with_new_children(vec![coalesced])?))
+            Ok(Transformed::yes(node.replace_children(
+                vec![coalesced],
+                ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
+            )?))
         })
         .map(|transformed| transformed.data)
     }

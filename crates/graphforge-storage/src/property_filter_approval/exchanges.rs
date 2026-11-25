@@ -12,6 +12,7 @@ use datafusion::physical_expr::{Partitioning, PhysicalExpr, ScalarFunctionExpr};
 use datafusion::physical_plan::filter::FilterExec;
 use datafusion::physical_plan::projection::ProjectionExec;
 use datafusion::physical_plan::repartition::RepartitionExec;
+use datafusion::physical_plan::{ChildrenPropertiesMode, ReplaceChildrenOptions};
 use datafusion::physical_plan::{ExecutionPlan, ExecutionPlanProperties};
 
 #[cfg(test)]
@@ -153,7 +154,10 @@ pub(super) fn elide(
     if Arc::ptr_eq(&child, &replacement) {
         return Ok(input);
     }
-    let rebuilt = Arc::clone(&input).with_new_children(vec![replacement])?;
+    let rebuilt = Arc::clone(&input).replace_children(
+        vec![replacement],
+        ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
+    )?;
     if rebuilt.schema().as_ref() != input.schema().as_ref() {
         return Ok(input);
     }

@@ -247,6 +247,52 @@ fn plan_expand_extension(
     Ok(Arc::new(exec))
 }
 
+/// Plans GraphForge's write nodes (CREATE, DELETE, SET, REMOVE), each over its
+/// one physical input and its session's write resource; `None` for any other
+/// node.
+fn plan_write_extension(
+    node: &dyn UserDefinedLogicalNode,
+    physical_inputs: &[Arc<dyn ExecutionPlan>],
+    session_state: &SessionState,
+) -> Result<Option<Arc<dyn ExecutionPlan>>, DataFusionError> {
+    if let Some(create) = node.as_any().downcast_ref::<GraphCreateNode>() {
+        let input = physical_inputs.first().cloned().ok_or_else(|| {
+            DataFusionError::Internal("GraphCreate requires one physical input".into())
+        })?;
+        let resource = write_resource::required(session_state, create.write_contract.as_ref())?;
+        resource.validate_composition(create.semantic_composition_fingerprint.as_deref())?;
+        return Ok(Some(Arc::new(GraphCreateExec::new(
+            create, input, &resource,
+        )?)));
+    }
+    if let Some(delete) = node.as_any().downcast_ref::<GraphDeleteNode>() {
+        let input = physical_inputs.first().cloned().ok_or_else(|| {
+            DataFusionError::Internal("GraphDelete requires one physical input".into())
+        })?;
+        let resource = write_resource::required(session_state, delete.write_contract.as_ref())?;
+        return Ok(Some(Arc::new(GraphDeleteExec::new(
+            delete, input, &resource,
+        )?)));
+    }
+    if let Some(set) = node.as_any().downcast_ref::<GraphSetNode>() {
+        let input = physical_inputs.first().cloned().ok_or_else(|| {
+            DataFusionError::Internal("GraphSet requires one physical input".into())
+        })?;
+        let resource = write_resource::required(session_state, set.write_contract.as_ref())?;
+        return Ok(Some(Arc::new(GraphSetExec::new(set, input, &resource)?)));
+    }
+    if let Some(remove) = node.as_any().downcast_ref::<GraphRemoveNode>() {
+        let input = physical_inputs.first().cloned().ok_or_else(|| {
+            DataFusionError::Internal("GraphRemove requires one physical input".into())
+        })?;
+        let resource = write_resource::required(session_state, remove.write_contract.as_ref())?;
+        return Ok(Some(Arc::new(GraphRemoveExec::new(
+            remove, input, &resource,
+        )?)));
+    }
+    Ok(None)
+}
+
 /// Plans GraphForge's custom logical [`Extension`](LogicalPlan::Extension)
 /// nodes into physical [`ExecutionPlan`]s.
 #[derive(Debug, Default)]
@@ -269,40 +315,8 @@ impl ExtensionPlanner for GraphForgeExtensionPlanner {
         {
             return planned.map(Some);
         }
-        if let Some(create) = node.as_any().downcast_ref::<GraphCreateNode>() {
-            let input = physical_inputs.first().cloned().ok_or_else(|| {
-                DataFusionError::Internal("GraphCreate requires one physical input".into())
-            })?;
-            let resource = write_resource::required(session_state, create.write_contract.as_ref())?;
-            resource.validate_composition(create.semantic_composition_fingerprint.as_deref())?;
-            return Ok(Some(Arc::new(GraphCreateExec::new(
-                create, input, &resource,
-            )?)));
-        }
-        if let Some(delete) = node.as_any().downcast_ref::<GraphDeleteNode>() {
-            let input = physical_inputs.first().cloned().ok_or_else(|| {
-                DataFusionError::Internal("GraphDelete requires one physical input".into())
-            })?;
-            let resource = write_resource::required(session_state, delete.write_contract.as_ref())?;
-            return Ok(Some(Arc::new(GraphDeleteExec::new(
-                delete, input, &resource,
-            )?)));
-        }
-        if let Some(set) = node.as_any().downcast_ref::<GraphSetNode>() {
-            let input = physical_inputs.first().cloned().ok_or_else(|| {
-                DataFusionError::Internal("GraphSet requires one physical input".into())
-            })?;
-            let resource = write_resource::required(session_state, set.write_contract.as_ref())?;
-            return Ok(Some(Arc::new(GraphSetExec::new(set, input, &resource)?)));
-        }
-        if let Some(remove) = node.as_any().downcast_ref::<GraphRemoveNode>() {
-            let input = physical_inputs.first().cloned().ok_or_else(|| {
-                DataFusionError::Internal("GraphRemove requires one physical input".into())
-            })?;
-            let resource = write_resource::required(session_state, remove.write_contract.as_ref())?;
-            return Ok(Some(Arc::new(GraphRemoveExec::new(
-                remove, input, &resource,
-            )?)));
+        if let Some(planned) = plan_write_extension(node, physical_inputs, session_state)? {
+            return Ok(Some(planned));
         }
         if let Some(expand) = node.as_any().downcast_ref::<graphforge_plan::ExpandNode>() {
             return plan_expand_extension(
@@ -1979,25 +1993,9 @@ mod query_memory_tests;
 
 #[cfg(test)]
 mod spill_pool_regression_tests;
-#[cfg(test)]
-mod spill_writer_tests;
-
-#[cfg(test)]
-mod spill_admission_tests;
 
 #[cfg(test)]
 mod spill_schema_tests;
 
 #[cfg(test)]
-mod copy_phase_tests;
-
-#[cfg(test)]
-mod spill_fifo_tests;
-
-#[cfg(test)]
-mod aggregate_input_tests;
-
-// Census exclusion: needs the vendored datafusion-physical-plan spill-admission
-// API, which stock DataFusion 56 does not have. Disposition belongs to #2042.
-#[cfg(all(test, any()))]
-mod terminal_ownership_tests;
+mod spill_outcome_tests;

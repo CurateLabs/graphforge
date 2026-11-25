@@ -73,7 +73,7 @@ fn decodes_every_header_parquet_writes() {
                         other => panic!("unexpected page type {other:?}"),
                     };
                     assert_eq!(header.type_, expected_type);
-                    if let Some(v1) = header.data_page_header {
+                    if let Some(v1) = header.data_page {
                         assert_eq!(v1.definition_level_encoding, PageEncoding::RLE);
                         assert_eq!(v1.repetition_level_encoding, PageEncoding::RLE);
                     }
@@ -90,19 +90,19 @@ fn decodes_every_header_parquet_writes() {
 
 fn value_encoding(header: &PageHeader) -> PageEncoding {
     header
-        .data_page_header
+        .data_page
         .map(|page| page.encoding)
-        .or(header.dictionary_page_header.map(|page| page.encoding))
-        .or(header.data_page_header_v2.map(|page| page.encoding))
+        .or(header.dictionary_page.map(|page| page.encoding))
+        .or(header.data_page_v2.map(|page| page.encoding))
         .unwrap()
 }
 
 fn value_count(header: &PageHeader) -> i32 {
     header
-        .data_page_header
+        .data_page
         .map(|page| page.num_values)
-        .or(header.dictionary_page_header.map(|page| page.num_values))
-        .or(header.data_page_header_v2.map(|page| page.num_values))
+        .or(header.dictionary_page.map(|page| page.num_values))
+        .or(header.data_page_v2.map(|page| page.num_values))
         .unwrap()
 }
 
@@ -166,7 +166,7 @@ fn skips_statistics_and_unknown_fields() {
     });
     let (header, consumed) = PageHeader::read(&mut bytes.as_slice()).unwrap();
     assert_eq!(consumed as usize, bytes.len());
-    let data = header.data_page_header.unwrap();
+    let data = header.data_page.unwrap();
     assert_eq!((data.num_values, data.encoding), (10, PageEncoding::PLAIN));
     assert_eq!(data.definition_level_encoding, PageEncoding::RLE);
 }

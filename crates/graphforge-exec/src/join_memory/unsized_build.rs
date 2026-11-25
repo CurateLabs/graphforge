@@ -135,7 +135,7 @@ fn hashed(
     partitions: usize,
 ) -> Result<Arc<dyn ExecutionPlan>> {
     let properties = input.properties();
-    let required = Distribution::HashPartitioned(keys.to_vec());
+    let required = Distribution::KeyPartitioned(keys.to_vec());
     let partitioning = properties.output_partitioning();
     if partitioning.partition_count() == partitions
         && partitioning

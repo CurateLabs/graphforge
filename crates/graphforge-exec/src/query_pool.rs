@@ -525,9 +525,5 @@ impl Display for QueryMemoryPool {
     }
 }
 
-// Census exclusion: needs the vendored datafusion-physical-plan spill-admission
-// API, which stock DataFusion 56 does not have. Disposition belongs to #2042.
-#[cfg(all(test, any()))]
-mod merge_pass_tests;
 #[cfg(test)]
 mod tests;

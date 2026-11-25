@@ -7158,7 +7158,7 @@ fn property_layout_bloom_assessment() {
                     "bloom" => {
                         properties = properties
                             .set_column_bloom_filter_enabled(ColumnPath::from("payload0"), true)
-                            .set_column_bloom_filter_ndv(ColumnPath::from("payload0"), 1024)
+                            .set_column_bloom_filter_max_ndv(ColumnPath::from("payload0"), 1024)
                             .set_column_bloom_filter_fpp(ColumnPath::from("payload0"), 0.01)
                     }
                     _ => {}

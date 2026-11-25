@@ -124,7 +124,7 @@ fn failure(
 
 enum IncrementalWriter {
     Parquet(Box<ArrowWriter<File>>),
-    ArrowIpc(StreamWriter<File>),
+    ArrowIpc(Box<StreamWriter<File>>),
 }
 
 fn create_writer(
@@ -151,6 +151,7 @@ fn create_writer(
                 .map_err(|error| error.to_string())
         }
         ResultSinkFormat::ArrowIpc => StreamWriter::try_new(file, schema.as_ref())
+            .map(Box::new)
             .map(IncrementalWriter::ArrowIpc)
             .map_err(|error| error.to_string()),
     }
