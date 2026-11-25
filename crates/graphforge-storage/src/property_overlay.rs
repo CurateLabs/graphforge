@@ -81,7 +81,6 @@ use graphforge_ir::IrLiteral;
 use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder};
 use parquet::errors::ParquetError;
 use parquet::file::reader::{ChunkReader, Length};
-use parquet::thrift::TSerializable;
 #[cfg(test)]
 use sha2::Digest;
 

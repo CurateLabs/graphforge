@@ -545,6 +545,7 @@ pub use runtime_entity_labels::{
 };
 
 mod parquet_encoding_profile;
+mod parquet_page_header;
 pub mod parquet_scan;
 
 /// Shared encoding defaults for published project Parquet payloads.

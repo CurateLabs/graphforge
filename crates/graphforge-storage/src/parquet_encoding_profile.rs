@@ -21,26 +21,15 @@
 //!   [`declared_encoding_is_funded`] as a cheap secondary check on footers of
 //!   already-admitted project files.
 //!
-//! This module depends only on the `parquet` and `thrift` crates.
-
-use std::io::Cursor;
+//! This module depends only on the `parquet` crate and
+//! [`crate::parquet_page_header`].
 
 use parquet::basic::{Encoding as FooterEncoding, Type};
 use parquet::file::metadata::{ParquetMetaData, ParquetMetaDataReader};
 use parquet::file::reader::ChunkReader;
-use parquet::thrift::TSerializable;
 
-/// Thrift wire encoding, as carried by page headers.
-#[allow(
-    deprecated,
-    reason = "Parquet 58 exposes raw page headers only through parquet::format"
-)]
-pub(crate) type PageEncoding = parquet::format::Encoding;
-#[allow(
-    deprecated,
-    reason = "Parquet 58 exposes raw page headers only through parquet::format"
-)]
-pub(crate) type PageHeader = parquet::format::PageHeader;
+use crate::parquet_page_header::PageType;
+pub(crate) use crate::parquet_page_header::{PageEncoding, PageHeader};
 
 /// Largest footer a page walk will buffer. The decoders read the same bytes.
 const MAX_FOOTER_BYTES: u64 = 64 * 1024 * 1024;
@@ -90,17 +79,12 @@ fn parquet_read_failure(
 }
 
 /// Convert a footer-declared encoding to its page-header form.
-#[allow(
-    deprecated,
-    reason = "Parquet 58 exposes raw page headers only through parquet::format"
-)]
 pub(crate) fn from_footer(encoding: FooterEncoding) -> PageEncoding {
     // `basic::Encoding` discriminants are the Thrift wire values.
-    parquet::format::Encoding(encoding as i32)
+    PageEncoding(encoding as i32)
 }
 
 /// Whether a data (or dictionary) page may use `encoding` for its values.
-#[allow(deprecated, reason = "Parquet 58 page encodings are format::Encoding")]
 pub(crate) fn value_encoding_is_funded(encoding: PageEncoding, physical: Type) -> bool {
     match encoding {
         PageEncoding::PLAIN | PageEncoding::PLAIN_DICTIONARY | PageEncoding::RLE_DICTIONARY => true,
@@ -115,7 +99,6 @@ pub(crate) fn value_encoding_is_funded(encoding: PageEncoding, physical: Type) -
 }
 
 /// Whether definition or repetition levels may use `encoding`.
-#[allow(deprecated, reason = "Parquet 58 page encodings are format::Encoding")]
 pub(crate) fn level_encoding_is_funded(encoding: PageEncoding) -> bool {
     matches!(encoding, PageEncoding::RLE | PageEncoding::BIT_PACKED)
 }
@@ -130,23 +113,18 @@ pub(crate) fn declared_encoding_is_funded(encoding: FooterEncoding, physical: Ty
 /// Whether every encoding one page header declares is funded: the dictionary
 /// page's, the data page's value encoding, and, for version 1 pages, both
 /// level encodings. Version 2 pages fix their levels to RLE.
-#[allow(deprecated, reason = "Parquet 58 page headers are format::PageHeader")]
 pub(crate) fn page_encodings_are_funded(header: &PageHeader, physical: Type) -> bool {
     match header.type_ {
-        parquet::format::PageType::DICTIONARY_PAGE => header
-            .dictionary_page_header
-            .as_ref()
+        PageType::DICTIONARY_PAGE => header
+            .dictionary_page
             .is_none_or(|page| value_encoding_is_funded(page.encoding, physical)),
-        parquet::format::PageType::DATA_PAGE => {
-            header.data_page_header.as_ref().is_none_or(|page| {
-                value_encoding_is_funded(page.encoding, physical)
-                    && level_encoding_is_funded(page.definition_level_encoding)
-                    && level_encoding_is_funded(page.repetition_level_encoding)
-            })
-        }
-        parquet::format::PageType::DATA_PAGE_V2 => header
-            .data_page_header_v2
-            .as_ref()
+        PageType::DATA_PAGE => header.data_page.is_none_or(|page| {
+            value_encoding_is_funded(page.encoding, physical)
+                && level_encoding_is_funded(page.definition_level_encoding)
+                && level_encoding_is_funded(page.repetition_level_encoding)
+        }),
+        PageType::DATA_PAGE_V2 => header
+            .data_page_v2
             .is_none_or(|page| value_encoding_is_funded(page.encoding, physical)),
         _ => true,
     }
@@ -203,7 +181,6 @@ pub(crate) fn admit_pages<R: ChunkReader>(source: &R) -> Result<ParquetShape, Pa
 
 /// [`admit_pages`] for a footer the caller already decoded. `pages_end` is the
 /// offset where the footer begins; every column chunk must end at or before it.
-#[allow(deprecated, reason = "Parquet 58 page headers are format::PageHeader")]
 pub(crate) fn admit_pages_with_metadata<R: ChunkReader>(
     metadata: &ParquetMetaData,
     source: &R,
@@ -265,11 +242,9 @@ fn read_header<R: ChunkReader>(
         let bytes = source
             .get_bytes(position, window)
             .map_err(|error| parquet_read_failure(&error, "page header is unreadable"))?;
-        let mut cursor = Cursor::new(bytes.as_ref());
-        let mut protocol = thrift::protocol::TCompactInputProtocol::new(&mut cursor);
-        if let Ok(header) = PageHeader::read_from_in_protocol(&mut protocol) {
-            drop(protocol);
-            let consumed = cursor.position();
+        // The window bounds the header; a header that does not fit it reads
+        // short and is retried with the larger window.
+        if let Ok((header, consumed)) = PageHeader::read(&mut bytes.as_ref()) {
             if consumed == 0 {
                 break;
             }
