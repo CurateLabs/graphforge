@@ -487,8 +487,9 @@ impl Default for SessionResourceConfig {
 /// manager as the resources say (#1595). Spill goes only to the configured
 /// directory under its cap; disabled means no disk manager at all, not
 /// DataFusion's default of the OS temporary directory, which is unbounded and
-/// RAM-backed on some hosts.
-fn session_runtime(
+/// RAM-backed on some hosts. Spill files are validated as they are read back
+/// ([`crate::validated_spill`]).
+pub(crate) fn session_runtime(
     resources: &SessionResourceConfig,
 ) -> Result<
     (
@@ -513,10 +514,20 @@ fn session_runtime(
     if let (true, Some(dir)) = (resources.spill_enabled, &resources.spill_directory) {
         std::fs::create_dir_all(dir)
             .map_err(|error| GfError::Storage(format!("query spill directory: {error}")))?;
-        runtime_builder = runtime_builder.with_temp_file_path(dir.clone());
+        let mut files = datafusion::execution::disk_manager::DiskManagerBuilder::default()
+            .with_mode(
+                datafusion::execution::disk_manager::DiskManagerMode::Directories(vec![
+                    dir.clone(),
+                ]),
+            );
         if let Some(max) = resources.spill_max_bytes {
-            runtime_builder = runtime_builder.with_max_temp_directory_size(max);
+            files = files.with_max_temp_directory_size(max);
         }
+        // DataFusion decodes spill files without Arrow validation, so every
+        // frame is validated before it reaches that decoder (#2354).
+        let validated = crate::validated_spill::validated_disk_manager(files)
+            .map_err(|error| GfError::Storage(format!("query spill directory: {error}")))?;
+        runtime_builder = runtime_builder.with_disk_manager_builder(validated);
     } else {
         runtime_builder = runtime_builder.with_disk_manager_builder(
             datafusion::execution::disk_manager::DiskManagerBuilder::default()

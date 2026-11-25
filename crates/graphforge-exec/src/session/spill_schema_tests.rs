@@ -118,7 +118,6 @@ fn nested_frame_batch() -> Result<RecordBatch> {
 }
 
 struct NestedFrameFile {
-    file: std::sync::Arc<dyn datafusion::execution::SpillFile>,
     bytes: Vec<u8>,
     body: usize,
     buffers: usize,
@@ -165,7 +164,6 @@ fn write_nested_frame(batch: &RecordBatch) -> Result<NestedFrameFile> {
                 + (record.nodes().unwrap().get(0) as *const arrow::ipc::FieldNode as usize
                     - metadata.as_ptr() as usize);
             return Ok(NestedFrameFile {
-                file,
                 bytes,
                 body,
                 buffers,
@@ -178,9 +176,18 @@ fn write_nested_frame(batch: &RecordBatch) -> Result<NestedFrameFile> {
 }
 
 #[tokio::test]
-async fn spill_admission_nested_frame_invalid_descriptors_keep_full_predecode_bound() -> Result<()>
-{
+async fn a_nested_frame_with_invalid_descriptors_is_refused_before_decode() -> Result<()> {
+    // DataFusion decodes spill frames without Arrow validation; GraphForge's
+    // validated spill files refuse each corrupt descriptor with a typed error
+    // before that decoder, holding no pool memory (#2354).
     let fixture = write_nested_frame(&nested_frame_batch()?)?;
+    let dir = tempfile::tempdir()?;
+    let files = datafusion::execution::disk_manager::DiskManagerBuilder::default().with_mode(
+        datafusion::execution::disk_manager::DiskManagerMode::Directories(vec![
+            dir.path().to_path_buf(),
+        ]),
+    );
+    let validated = crate::validated_spill::validated_disk_manager(files)?;
     // DFS node order: UUID, UInt64, UInt32, List, UInt32 child, Struct,
     // Int64, timestamp, UTF8. Buffer order follows those same decoder branches.
     // List offsets are descriptor7, child data9, timestamp data14.
@@ -224,29 +231,41 @@ async fn spill_admission_nested_frame_invalid_descriptors_keep_full_predecode_bo
     for (name, offset, replacement) in cases {
         let mut bytes = fixture.bytes.clone();
         bytes[offset..offset + replacement.len()].copy_from_slice(&replacement);
-        std::fs::write(fixture.file.path().expect("local spill file"), bytes)?;
         let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(NESTED_FRAME_LIMIT));
-        let reader = manager(Arc::clone(&pool), nested_frame_batch()?.schema());
-        let mut stream = reader.read_spill_as_stream_unbuffered(fixture.file.clone(), None)?;
-        let error = stream
-            .next()
-            .await
-            .unwrap()
-            .expect_err("unqualified nested frame keeps complete predecode bound");
+        let runtime = RuntimeEnvBuilder::new()
+            .with_memory_pool(Arc::clone(&pool))
+            .with_disk_manager_builder(validated.clone())
+            .build_arc()?;
+        let reader = SpillManager::new(
+            runtime,
+            SpillMetrics::new(&ExecutionPlanMetricsSet::new(), 0),
+            nested_frame_batch()?.schema(),
+        );
+        let file = reader
+            .spill_record_batch_and_finish(&[nested_frame_batch()?], "corrupt nested frame")?
+            .unwrap();
+        let path = file.path().expect("local spill file");
+        assert_eq!(
+            std::fs::read(path)?,
+            fixture.bytes,
+            "{name}: same frame layout"
+        );
+        std::fs::write(path, &bytes)?;
+        let mut stream = reader.read_spill_as_stream_unbuffered(file, None)?;
+        let Err(error) = stream.next().await.unwrap() else {
+            panic!("{name}: a corrupt nested frame decoded");
+        };
         assert!(
-            matches!(error.find_root(), DataFusionError::ResourcesExhausted(_)),
+            matches!(
+                error.find_root(),
+                DataFusionError::External(inner)
+                    if inner.is::<crate::validated_spill::CorruptSpillFile>()
+            ),
             "{name}: {error}"
         );
-        assert!(
-            error.to_string().contains("SpillReaderDecode"),
-            "{name}: {error}"
-        );
+        assert!(stream.next().await.is_none(), "{name}");
         drop(stream);
         assert_eq!(pool.reserved(), 0, "{name}");
     }
-    std::fs::write(
-        fixture.file.path().expect("local spill file"),
-        fixture.bytes,
-    )?;
     Ok(())
 }

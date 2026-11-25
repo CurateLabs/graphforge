@@ -154,6 +154,19 @@ Record observed RSS and workload results on the issue or PR, not in this page.
 | `enabled` with an absolute `directory` | that directory, at most `max_bytes` (DataFusion's 100 GiB default when unset) per query | same |
 | `enabled: false` | no spill | no spill |
 
+Spill files are validated as they are read back (`graphforge_exec`'s
+`validated_spill`). DataFusion decodes spilled IPC frames with Arrow
+validation off, so each frame is first checked (buffers inside the body at
+8-byte offsets, node lengths and null counts) and decoded by Arrow's
+validating decoder; only frames that pass reach DataFusion, byte for byte.
+Corrupt bytes fail the query with a corrupt-spill-file error instead of
+producing invalid arrays. No allocation is sized from an unvalidated length:
+the reader holds the current frame's bytes actually read from the file plus
+one contiguous copy while that frame is validated (and, for a compressed frame,
+its decompressed buffers, which Arrow grows only as data arrives). Like
+DataFusion's own read buffers, these are not charged to the query pool; a
+corrupt frame is refused with the pool at the reservation it had before.
+
 "No spill" is enforced: DataFusion's disk manager is disabled, so a query over
 its budget fails with a resource error rather than writing to the operating
 system's temporary directory, which is unbounded and RAM-backed on some hosts.

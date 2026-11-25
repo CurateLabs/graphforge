@@ -2741,6 +2741,7 @@ dependencies = [
  "arrow",
  "arrow-buffer",
  "async-trait",
+ "bytes",
  "codspeed-divan-compat",
  "datafusion",
  "datafusion-datasource",
