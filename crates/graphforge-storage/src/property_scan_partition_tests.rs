@@ -12,6 +12,7 @@ use arrow::datatypes::{DataType, Field, Schema};
 use datafusion::datasource::memory::MemorySourceConfig;
 use datafusion::execution::TaskContext;
 use datafusion::physical_plan::ExecutionPlan;
+use datafusion::physical_plan::statistics::{StatisticsArgs, StatisticsContext};
 use futures::StreamExt;
 use parquet::arrow::ArrowWriter;
 use parquet::file::properties::WriterProperties;
@@ -539,15 +540,30 @@ async fn partition_statistics_split_the_planned_rows() {
     let (route, _) = layered();
     let inventory = route.inventory();
     let split = route.scan(&inventory, 4);
-    let total = split.partition_statistics(None).unwrap().num_rows;
-    let share = split.partition_statistics(Some(1)).unwrap().num_rows;
-    let beyond = split.partition_statistics(Some(4)).unwrap().num_rows;
+    let total = StatisticsContext::new()
+        .compute(&*split, &StatisticsArgs::new().with_partition(None))
+        .unwrap()
+        .num_rows;
+    let share = StatisticsContext::new()
+        .compute(&*split, &StatisticsArgs::new().with_partition(Some(1)))
+        .unwrap()
+        .num_rows;
+    let beyond = split
+        .statistics_from_inputs(&[], &StatisticsArgs::new().with_partition(Some(4)))
+        .unwrap()
+        .num_rows;
     let total = *total.get_value().unwrap();
     let share = *share.get_value().unwrap();
     assert_eq!(share, total.div_ceil(4));
     assert!(
         beyond.get_value().is_none(),
         "no such partition has no estimate"
+    );
+    assert!(
+        StatisticsContext::new()
+            .compute(&*split, &StatisticsArgs::new().with_partition(Some(4)))
+            .is_err(),
+        "the statistics walk refuses a partition the plan does not have"
     );
 }
 

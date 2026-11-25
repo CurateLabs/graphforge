@@ -730,11 +730,24 @@ impl datafusion::physical_plan::ExecutionPlan for HydrationExec {
     fn metrics(&self) -> Option<datafusion::physical_plan::metrics::MetricsSet> {
         Some(self.resource.metrics.clone_inner())
     }
-    fn partition_statistics(
+    /// Hydration passes its input through unchanged, so its statistics are
+    /// the input's at the same partition.
+    fn child_stats_requests(
         &self,
         partition: Option<usize>,
+    ) -> Vec<datafusion::physical_plan::statistics::ChildStats> {
+        vec![datafusion::physical_plan::statistics::ChildStats::At(
+            partition,
+        )]
+    }
+    fn statistics_from_inputs(
+        &self,
+        input_stats: &[Arc<datafusion::common::Statistics>],
+        _args: &datafusion::physical_plan::statistics::StatisticsArgs,
     ) -> Result<Arc<datafusion::common::Statistics>> {
-        self.input.partition_statistics(partition)
+        input_stats.first().cloned().ok_or_else(|| {
+            DataFusionError::Internal("path hydration expects one input's statistics".into())
+        })
     }
 }
 pub(crate) fn wrap(

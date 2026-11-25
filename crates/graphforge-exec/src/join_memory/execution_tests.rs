@@ -120,7 +120,11 @@ impl ExecutionPlan for SortedUuidFrontier {
         self.input.execute(partition, context)
     }
 
-    fn partition_statistics(&self, _: Option<usize>) -> Result<Arc<Statistics>> {
+    fn statistics_from_inputs(
+        &self,
+        _: &[Arc<Statistics>],
+        _: &datafusion::physical_plan::statistics::StatisticsArgs,
+    ) -> Result<Arc<Statistics>> {
         Ok(Arc::new(Statistics::new_unknown(&self.schema())))
     }
 }
@@ -154,7 +158,13 @@ async fn nominated_enrichment(
         )
         .unwrap(),
     );
-    assert!(estimated_bytes(join.children()[0]).is_none());
+    assert!(
+        estimated_bytes(
+            join.children()[0],
+            &datafusion::physical_plan::statistics::StatisticsContext::new()
+        )
+        .is_none()
+    );
     PropertyFilterApprovalRule
         .optimize(join, &ConfigOptions::default())
         .unwrap()

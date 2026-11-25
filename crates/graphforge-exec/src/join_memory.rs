@@ -43,10 +43,13 @@ use datafusion::common::tree_node::{Transformed, TreeNode};
 use datafusion::physical_expr::PhysicalExpr;
 use datafusion::physical_expr::expressions::Column;
 use datafusion::physical_optimizer::PhysicalOptimizerRule;
-use datafusion::physical_optimizer::optimizer::PhysicalOptimizer;
+use datafusion::physical_optimizer::optimizer::{
+    ConfigOnlyContext, PhysicalOptimizer, PhysicalOptimizerContext, with_statistics_context,
+};
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::physical_plan::joins::{HashJoinExec, SortMergeJoinExec};
 use datafusion::physical_plan::projection::ProjectionExec;
+use datafusion::physical_plan::statistics::{StatisticsArgs, StatisticsContext};
 
 pub(crate) use unsized_build::UnsizedBuildJoinRule;
 
@@ -77,13 +80,13 @@ impl HashJoinMemoryRule {
     }
 
     /// How `join` is planned, from the sizes its two inputs are estimated at.
-    fn place(&self, join: &HashJoinExec) -> Placement {
+    fn place(&self, join: &HashJoinExec, statistics: &StatisticsContext) -> Placement {
         let limit = self.build_limit();
         let fits = |side: &Arc<dyn ExecutionPlan>| {
-            estimated_bytes(side).is_some_and(|bytes| bytes <= limit)
+            estimated_bytes(side, statistics).is_some_and(|bytes| bytes <= limit)
         };
         if fits(join.left())
-            || (estimated_bytes(join.left()).is_none()
+            || (estimated_bytes(join.left(), statistics).is_none()
                 && graphforge_storage::PropertyFilterApprovalRule::prunes_probe_scan_to_build_keys(
                     join,
                     crate::traversal_destination::is_frontier_endpoint_uuid,
@@ -113,8 +116,12 @@ enum Placement {
 
 /// Bytes a plan's output is estimated to occupy, from the statistics it
 /// publishes. `None` when it publishes neither a size nor a row count.
-fn estimated_bytes(plan: &Arc<dyn ExecutionPlan>) -> Option<usize> {
-    let statistics = plan.partition_statistics(None).ok()?;
+///
+/// The statistics come from `statistics`, the walk the optimizer shares
+/// between its rules: DataFusion's operators publish their statistics only
+/// through that walk, from those of their inputs.
+fn estimated_bytes(plan: &Arc<dyn ExecutionPlan>, statistics: &StatisticsContext) -> Option<usize> {
+    let statistics = statistics.compute_arc(plan, &StatisticsArgs::new()).ok()?;
     if let Some(bytes) = statistics.total_byte_size.get_value() {
         return Some(*bytes);
     }
@@ -207,13 +214,39 @@ impl PhysicalOptimizerRule for HashJoinMemoryRule {
     fn optimize(
         &self,
         plan: Arc<dyn ExecutionPlan>,
-        _config: &ConfigOptions,
+        config: &ConfigOptions,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        self.optimize_with_context(plan, &ConfigOnlyContext::new(config))
+    }
+
+    fn optimize_with_context(
+        &self,
+        plan: Arc<dyn ExecutionPlan>,
+        context: &dyn PhysicalOptimizerContext,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        with_statistics_context(context, |statistics| self.place_joins(plan, statistics))
+    }
+
+    fn name(&self) -> &'static str {
+        "graphforge_hash_join_memory"
+    }
+
+    fn schema_check(&self) -> bool {
+        true
+    }
+}
+
+impl HashJoinMemoryRule {
+    fn place_joins(
+        &self,
+        plan: Arc<dyn ExecutionPlan>,
+        statistics: &StatisticsContext,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         plan.transform_up(|node| {
             let Some(join) = node.downcast_ref::<HashJoinExec>() else {
                 return Ok(Transformed::no(node));
             };
-            match self.place(join) {
+            match self.place(join, statistics) {
                 Placement::Keep => return Ok(Transformed::no(node)),
                 Placement::Swap => {
                     return join
@@ -226,14 +259,6 @@ impl PhysicalOptimizerRule for HashJoinMemoryRule {
                 .map(Transformed::yes)
         })
         .map(|transformed| transformed.data)
-    }
-
-    fn name(&self) -> &'static str {
-        "graphforge_hash_join_memory"
-    }
-
-    fn schema_check(&self) -> bool {
-        true
     }
 }
 

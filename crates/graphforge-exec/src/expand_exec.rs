@@ -33,6 +33,8 @@ use datafusion::physical_plan::SendableRecordBatchStream;
 use datafusion::physical_plan::execution_plan::Boundedness;
 use datafusion::physical_plan::execution_plan::EmissionType;
 use datafusion::physical_plan::metrics::MetricsSet;
+use datafusion::physical_plan::statistics::ChildStats;
+use datafusion::physical_plan::statistics::StatisticsArgs;
 use datafusion::physical_plan::stream::RecordBatchReceiverStream;
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use edge_filter::PhysicalEdgeFilter;
@@ -409,14 +411,28 @@ impl ExecutionPlan for VarLenExpandExec {
         Some(self.metrics.snapshot())
     }
 
-    fn partition_statistics(
+    /// The estimate scales the input's whole-plan row count, whichever
+    /// partition is asked for (see [`crate::expand_statistics::Scope`]).
+    fn child_stats_requests(&self, _partition: Option<usize>) -> Vec<ChildStats> {
+        vec![ChildStats::At(None)]
+    }
+
+    fn statistics_from_inputs(
         &self,
-        partition: Option<usize>,
+        input_stats: &[Arc<datafusion::common::Statistics>],
+        args: &StatisticsArgs,
     ) -> Result<Arc<datafusion::common::Statistics>, DataFusionError> {
-        crate::expand_statistics::variable_length(
-            &self.input,
+        let [input] = input_stats else {
+            return Err(DataFusionError::Internal(format!(
+                "{} expects the statistics of one input, got {}",
+                self.name(),
+                input_stats.len()
+            )));
+        };
+        Ok(crate::expand_statistics::variable_length(
+            input,
             crate::expand_statistics::Scope {
-                partition,
+                partition: args.partition(),
                 output_partitions: self.props.output_partitioning().partition_count(),
             },
             self.provider.as_ref(),
@@ -428,7 +444,7 @@ impl ExecutionPlan for VarLenExpandExec {
                 expansion: self.expansion,
             },
             &self.schema,
-        )
+        ))
     }
 
     fn execute(
@@ -2085,14 +2101,28 @@ impl ExecutionPlan for ExpandExec {
         self.fetch
     }
 
-    fn partition_statistics(
+    /// The estimate scales the input's whole-plan row count, whichever
+    /// partition is asked for (see [`crate::expand_statistics::Scope`]).
+    fn child_stats_requests(&self, _partition: Option<usize>) -> Vec<ChildStats> {
+        vec![ChildStats::At(None)]
+    }
+
+    fn statistics_from_inputs(
         &self,
-        partition: Option<usize>,
+        input_stats: &[Arc<datafusion::common::Statistics>],
+        args: &StatisticsArgs,
     ) -> Result<Arc<datafusion::common::Statistics>, DataFusionError> {
-        crate::expand_statistics::single_hop(
-            &self.input,
+        let [input] = input_stats else {
+            return Err(DataFusionError::Internal(format!(
+                "{} expects the statistics of one input, got {}",
+                self.name(),
+                input_stats.len()
+            )));
+        };
+        Ok(crate::expand_statistics::single_hop(
+            input,
             crate::expand_statistics::Scope {
-                partition,
+                partition: args.partition(),
                 output_partitions: self.props.output_partitioning().partition_count(),
             },
             self.provider.as_ref(),
@@ -2100,7 +2130,7 @@ impl ExecutionPlan for ExpandExec {
             self.direction,
             self.fetch,
             &self.schema,
-        )
+        ))
     }
 
     fn benefits_from_input_partitioning(&self) -> Vec<bool> {

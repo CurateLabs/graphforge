@@ -14,6 +14,7 @@ use arrow::datatypes::Field;
 use arrow::datatypes::Schema;
 use datafusion::datasource::TableProvider;
 use datafusion::error::DataFusionError;
+use datafusion::physical_plan::statistics::{StatisticsArgs, StatisticsContext};
 use datafusion::prelude::SessionContext;
 use datafusion_catalog::Session;
 use parquet::arrow::ArrowWriter;
@@ -212,7 +213,10 @@ async fn property_sql_and_direct_reads_share_newest_overlay_authority() {
         .await
         .unwrap();
     assert_eq!(
-        full_plan.partition_statistics(None).unwrap().num_rows,
+        StatisticsContext::new()
+            .compute(&*full_plan, &StatisticsArgs::new().with_partition(None))
+            .unwrap()
+            .num_rows,
         datafusion::common::stats::Precision::Inexact(2),
         "all immutable generations contribute a physical upper bound"
     );
@@ -225,7 +229,10 @@ async fn property_sql_and_direct_reads_share_newest_overlay_authority() {
         datafusion::physical_plan::execution_plan::SchedulingType::Cooperative
     );
     assert_eq!(
-        plan.partition_statistics(None).unwrap().num_rows,
+        StatisticsContext::new()
+            .compute(&*plan, &StatisticsArgs::new().with_partition(None))
+            .unwrap()
+            .num_rows,
         datafusion::common::stats::Precision::Inexact(1),
         "two physical snapshots are a non-exact upper bound capped by LIMIT"
     );

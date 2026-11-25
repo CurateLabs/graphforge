@@ -19,6 +19,7 @@ use datafusion::physical_plan::filter_pushdown::{
 use datafusion::physical_plan::metrics::{
     Count, ExecutionPlanMetricsSet, Gauge, MetricBuilder, MetricsSet,
 };
+use datafusion::physical_plan::statistics::StatisticsArgs;
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, PlanProperties,
@@ -549,11 +550,12 @@ impl ExecutionPlan for PropertyOverlayExec {
         Ok(self)
     }
 
-    fn partition_statistics(
+    fn statistics_from_inputs(
         &self,
-        partition: Option<usize>,
+        _input_stats: &[Arc<Statistics>],
+        args: &StatisticsArgs,
     ) -> Result<Arc<Statistics>, DataFusionError> {
-        let rows = match partition {
+        let rows = match args.partition() {
             None => self.planned_rows,
             // The cuts balance rows by footer statistics, not exactly, so a
             // partition's share is an estimate of the route's rows.

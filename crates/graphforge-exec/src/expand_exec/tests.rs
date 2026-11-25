@@ -3,6 +3,7 @@ use super::*;
 use arrow::array::StringArray;
 use arrow::datatypes::DataType;
 use arrow::datatypes::Field;
+use datafusion::physical_plan::statistics::{StatisticsArgs, StatisticsContext};
 use std::sync::Arc;
 
 #[test]
@@ -147,7 +148,9 @@ fn a_partitioned_single_hop_expansion_estimates_its_even_share_of_the_whole_plan
             .map(|field| field.data_type().primitive_width().unwrap_or(64))
             .sum();
         let whole = SEEDS * DEGREE * row_width;
-        let statistics = exec.partition_statistics(None).unwrap();
+        let statistics = StatisticsContext::new()
+            .compute(&exec, &StatisticsArgs::new().with_partition(None))
+            .unwrap();
         assert_eq!(statistics.num_rows, Precision::Absent);
         assert_eq!(
             statistics.total_byte_size,
@@ -156,7 +159,12 @@ fn a_partitioned_single_hop_expansion_estimates_its_even_share_of_the_whole_plan
         );
         let mut shares = 0;
         for partition in 0..partitions {
-            let statistics = exec.partition_statistics(Some(partition)).unwrap();
+            let statistics = StatisticsContext::new()
+                .compute(
+                    &exec,
+                    &StatisticsArgs::new().with_partition(Some(partition)),
+                )
+                .unwrap();
             assert_eq!(statistics.num_rows, Precision::Absent);
             let share = statistics.total_byte_size;
             assert_eq!(

@@ -24,6 +24,14 @@
 //! scan reads the matching nodes' rows instead of every node of the graph. The
 //! anchor is a hint of the same kind, so a scan that cannot use it reads
 //! every row and the filter decides, exactly as before.
+//!
+//! DataFusion may have done part of this work first: its outer-join
+//! elimination looks through column projections (since DataFusion 56), so the
+//! null-rejecting equality has often already turned the left join into an
+//! inner one and been pushed onto the property scan, which keeps it as a
+//! filter directly above itself. An inner join whose property side is that
+//! filter anchors its node scan the same way (#2355): a node whose property
+//! row fails the equality has no row to join.
 
 use std::sync::Arc;
 
@@ -233,6 +241,43 @@ fn anchored_left(join: &Join, right: &LogicalPlan) -> Result<Option<LogicalPlan>
     anchor_node_scan(&join.left, left_key, &anchor)
 }
 
+/// `join` with its node scan anchored, when `join` is an inner join whose
+/// property side is a filter that enforces the equality the property scan
+/// under it carries, or `None` when there is nothing to change.
+///
+/// The filter must sit directly on the scan and hold the anchor's equality as
+/// one of its conjuncts: then no row reaches the join from a node the
+/// equality does not select, so an anchored node scan omits only rows the
+/// inner join would drop.
+fn anchored_inner_join(join: &Join) -> Result<Option<LogicalPlan>> {
+    if join.join_type != JoinType::Inner {
+        return Ok(None);
+    }
+    let LogicalPlan::Filter(filter) = join.right.as_ref() else {
+        return Ok(None);
+    };
+    let Some(anchor) = anchor_of(&filter.input) else {
+        return Ok(None);
+    };
+    if !split_conjunction(&filter.predicate).contains(&&anchor.equality) {
+        return Ok(None);
+    }
+    let Some(left) = anchored_left(join, &filter.input)? else {
+        return Ok(None);
+    };
+    Join::try_new(
+        Arc::new(left),
+        Arc::clone(&join.right),
+        join.on.clone(),
+        join.filter.clone(),
+        join.join_type,
+        join.join_constraint,
+        join.null_equality,
+        join.null_aware,
+    )
+    .map(|joined| Some(LogicalPlan::Join(joined)))
+}
+
 fn anchor_node_scan(
     plan: &LogicalPlan,
     key: &Column,
@@ -304,6 +349,12 @@ impl OptimizerRule for StoredEqualityHints {
         plan: LogicalPlan,
         _: &dyn OptimizerConfig,
     ) -> Result<Transformed<LogicalPlan>> {
+        if let LogicalPlan::Join(join) = &plan {
+            return Ok(match anchored_inner_join(join)? {
+                Some(anchored) => Transformed::yes(anchored),
+                None => Transformed::no(plan),
+            });
+        }
         let LogicalPlan::Filter(filter) = &plan else {
             return Ok(Transformed::no(plan));
         };

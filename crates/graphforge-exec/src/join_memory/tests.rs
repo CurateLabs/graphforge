@@ -133,7 +133,11 @@ impl ExecutionPlan for SizedExec {
         ))
     }
 
-    fn partition_statistics(&self, _: Option<usize>) -> Result<Arc<Statistics>, DataFusionError> {
+    fn statistics_from_inputs(
+        &self,
+        _: &[Arc<Statistics>],
+        _: &datafusion::physical_plan::statistics::StatisticsArgs,
+    ) -> Result<Arc<Statistics>, DataFusionError> {
         Ok(Arc::clone(&self.statistics))
     }
 }

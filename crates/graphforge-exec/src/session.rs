@@ -927,6 +927,15 @@ impl ExecutionSession {
             .options_mut()
             .execution
             .use_row_number_estimates_to_optimize_partitioning = true;
+        // A hash join collects its build side into one batch only while that
+        // side is estimated at no more than 1 MiB; a larger build stays
+        // partitioned, so no partition concatenates it whole and a LEFT
+        // enrichment keeps the partitioned shape its frontier pruning needs.
+        // DataFusion 56 defaults to 4 MiB (#2355).
+        config
+            .options_mut()
+            .optimizer
+            .hash_join_single_partition_threshold = 1024 * 1024;
 
         let memory_budget = usize::try_from(resources.memory_budget_bytes).unwrap_or(usize::MAX);
         size_sort_merge_reservation(&mut config, memory_budget, resources.target_partitions);

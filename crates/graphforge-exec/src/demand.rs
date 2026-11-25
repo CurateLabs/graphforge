@@ -29,6 +29,7 @@ use datafusion::physical_plan::limit::{GlobalLimitExec, LocalLimitExec};
 use datafusion::physical_plan::projection::ProjectionExec;
 use datafusion::physical_plan::repartition::RepartitionExec;
 use datafusion::physical_plan::sorts::sort::SortExec;
+use datafusion::physical_plan::statistics::{StatisticsArgs, StatisticsContext};
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, ExecutionPlanProperties, Partitioning,
     PlanProperties, RecordBatchStream, SendableRecordBatchStream,
@@ -505,9 +506,11 @@ pub(crate) fn record_plan_completion(
                 input_row_statistics: plan
                     .children()
                     .iter()
-                    .map(|child| match child.partition_statistics(None) {
-                        Ok(stats) => format!("{:?}", stats.num_rows),
-                        Err(_) => "unavailable: statistics error".into(),
+                    .map(|child| {
+                        match StatisticsContext::new().compute_arc(child, &StatisticsArgs::new()) {
+                            Ok(stats) => format!("{:?}", stats.num_rows),
+                            Err(_) => "unavailable: statistics error".into(),
+                        }
                     })
                     .collect(),
                 build_input_rows: metric(&metrics, "build_input_rows"),
