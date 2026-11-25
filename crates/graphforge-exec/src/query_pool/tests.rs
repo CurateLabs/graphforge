@@ -50,10 +50,9 @@ fn reader(pool: &Arc<dyn MemoryPool>) -> MemoryReservation {
 }
 
 /// The consumer of a sort's merge of its spills: its reserve, then its pass.
+/// DataFusion 56 registers it as a consumer that cannot spill.
 fn sort_merge(pool: &Arc<dyn MemoryPool>, partition: usize) -> MemoryReservation {
-    MemoryConsumer::new(format!("{SORT_MERGE_CONSUMER_PREFIX}{partition}]"))
-        .with_can_spill(true)
-        .register(pool)
+    MemoryConsumer::new(format!("{SORT_MERGE_CONSUMER_PREFIX}{partition}]")).register(pool)
 }
 
 fn is_refused(result: Result<()>) -> bool {
@@ -149,8 +148,8 @@ fn a_first_state_is_served_before_the_readers_floor_is() {
 
 /// The readers' floor is a spiller's floor within an eighth of the pool,
 /// never below half a MiB, whatever the number of spillers. In a 16 MiB pool
-/// with no aggregate in the spiller map, the sort's merge reservation (a
-/// consumer that can spill, but not a sort by name) asks 2 MiB with 10.4 MiB
+/// with no aggregate in the spiller map, the sort's merge reservation (told by
+/// its name, not a sort's buffer) asks 2 MiB with 10.4 MiB
 /// held by others: CI run 39486593196 refused it with the floor at half the
 /// pool, a quarter of the pool refused it too, and main serves it. It is
 /// admitted, and refused only within the readers' floor, 2 MiB here, which a
@@ -161,9 +160,7 @@ fn the_readers_floor_is_an_eighth_of_a_small_pool_whatever_the_spillers() {
     let pool = query_pool(16 * MIB);
     let others = reader(&pool);
     others.try_grow(10 * MIB + 400 * 1024).unwrap();
-    let merge = MemoryConsumer::new("ExternalSorterMerge[0]")
-        .with_can_spill(true)
-        .register(&pool);
+    let merge = MemoryConsumer::new("ExternalSorterMerge[0]").register(&pool);
     merge.try_grow(2 * MIB).unwrap();
     merge.try_grow(14 * MIB - pool.reserved()).unwrap();
     assert!(is_refused(merge.try_grow(1)));
@@ -527,13 +524,18 @@ fn a_sort_is_kept_short_of_the_memory_a_consumer_that_cannot_spill_may_take() {
     assert_eq!(pool.reserved(), 64 * MIB);
     assert!(is_refused(path_state.try_grow(1)));
 
-    // The merge reservation of a sort cannot spill and is not held back: the
-    // headroom is for exactly such a consumer.
+    // The merge reservation of a sort is not held back by the sorts'
+    // headroom: within the readers' floor (8 MiB here) it is served at the
+    // limit of the pool. DataFusion 56 registers it as a consumer that cannot
+    // spill; it is told by its name.
     first.shrink(10 * MIB);
     second.shrink(6 * MIB);
     let merge = MemoryConsumer::new("ExternalSorterMerge[0]").register(&pool);
-    merge.try_grow(10 * MIB).unwrap();
-    assert_eq!(pool.reserved(), 58 * MIB);
+    merge.try_grow(8 * MIB).unwrap();
+    assert_eq!(pool.reserved(), 56 * MIB);
+    // Past the readers' floor its selection backs off before the readers'
+    // floor of the pool, as a consumer that can spill does (#2353).
+    assert!(is_refused(merge.try_grow(MIB)));
 }
 
 /// The headroom is a sort's alone: an exchange and an aggregate that has not

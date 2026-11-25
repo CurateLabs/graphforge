@@ -218,6 +218,8 @@ impl ExecutionPlan for SortRunCoalesceExec {
             run_bytes: self.run_bytes,
             buffered: Vec::new(),
             buffered_bytes: 0,
+            buffered_rows: 0,
+            batch_size: context.session_config().batch_size(),
             pending: None,
             reservation,
         }))
@@ -230,6 +232,9 @@ struct SortRunCoalesceStream {
     run_bytes: usize,
     buffered: Vec<RecordBatch>,
     buffered_bytes: usize,
+    buffered_rows: usize,
+    /// Rows in one merge chunk: the session's output batch size.
+    batch_size: usize,
     // Slices share the source allocation. Keep and charge that allocation until
     // the last compact window has been emitted; never give those slices to a sort.
     pending: Option<(RecordBatch, usize)>,
@@ -242,8 +247,26 @@ impl SortRunCoalesceStream {
         self.pending = None;
         self.buffered.clear();
         self.buffered_bytes = 0;
+        self.buffered_rows = 0;
         self.reservation.free();
         Poll::Ready(Some(Err(error)))
+    }
+
+    /// Whether the buffered run is closed before a batch of `size` bytes
+    /// joins it, because the batch would carry the run past its target.
+    ///
+    /// The sort reserves twice every run it is handed, so a run that
+    /// overshoots its target by nearly a whole input batch (input batches just
+    /// below the target made runs of nearly twice it) takes nearly twice the
+    /// pool share [`sort_run_bytes`] sized it for. A run is closed early only
+    /// once it is already a run worth sorting: at least half its target, and
+    /// longer than one merge chunk (`batch_size` rows), so that its
+    /// reservation still covers the chunk the merge holds and its row keys.
+    fn closes_run_before(&self, size: usize) -> bool {
+        !self.buffered.is_empty()
+            && self.buffered_rows > self.batch_size
+            && self.buffered_bytes >= self.run_bytes / 2
+            && self.buffered_bytes.saturating_add(size) > self.run_bytes
     }
 
     fn flush(&mut self) -> Result<RecordBatch> {
@@ -266,6 +289,7 @@ impl SortRunCoalesceStream {
         self.buffered.clear();
         self.reservation.shrink(self.buffered_bytes + copied);
         self.buffered_bytes = 0;
+        self.buffered_rows = 0;
         run
     }
 
@@ -628,7 +652,21 @@ impl Stream for SortRunCoalesceStream {
                         }
                         continue;
                     }
+                    if self.closes_run_before(size) {
+                        // The run is long enough; adding this batch would
+                        // carry it past its target, and the sort reserves
+                        // twice whatever run it is handed.
+                        let run = self.flush();
+                        self.buffered_bytes = size;
+                        self.buffered_rows = batch.num_rows();
+                        self.buffered.push(batch);
+                        return match run {
+                            Ok(run) => Poll::Ready(Some(Ok(run))),
+                            Err(error) => self.fail(error),
+                        };
+                    }
                     self.buffered_bytes += size;
+                    self.buffered_rows += batch.num_rows();
                     self.buffered.push(batch);
                     if self.buffered_bytes >= self.run_bytes {
                         return match self.flush() {

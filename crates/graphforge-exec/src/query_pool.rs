@@ -198,6 +198,16 @@ const READERS_FLOOR_MINIMUM_BYTES: usize = 512 * 1024;
 /// The consumer a sort registers for the merge of its spills: it holds the
 /// reserve the sort keeps for that merge (`sort_spill_reservation_bytes`),
 /// which the merge's readers draw on first, and the merge pass's selection.
+///
+/// DataFusion 56 registers it as a consumer that cannot spill, but the
+/// selection it makes grows a stream at a time and stops at the first
+/// refusal, as a consumer that can spill backs off. Served as a consumer that
+/// cannot spill, at the limit of the pool, a sort's final pass took all but
+/// 2 MiB of a 48 MiB pool and the other sort of a sort-merge join was then
+/// refused its next run (#2353). The pool therefore tells it by its name and
+/// treats it as a consumer that can spill: past the readers' floor its
+/// selection sees the floors, and what it holds does not count as the memory
+/// of a consumer that cannot spill in the sorts' headroom.
 const SORT_MERGE_CONSUMER_PREFIX: &str = "ExternalSorterMerge[";
 
 /// A greedy memory pool of `pool_size` bytes with the floors and the grant
@@ -264,7 +274,7 @@ impl QueryMemoryPool {
     /// Adds `additional` to the reserved total and raises the high-water mark.
     fn reserve(&self, state: &mut State, reservation: &MemoryReservation, additional: usize) {
         state.reserved += additional;
-        if !reservation.consumer().can_spill() {
+        if !Self::backs_off(reservation.consumer()) {
             state.non_spilling_reserved += additional;
         }
         self.peak.fetch_max(state.reserved, Ordering::Relaxed);
@@ -287,7 +297,14 @@ impl QueryMemoryPool {
     }
 
     fn is_sort_merge(consumer: &MemoryConsumer) -> bool {
-        consumer.can_spill() && consumer.name().starts_with(SORT_MERGE_CONSUMER_PREFIX)
+        consumer.name().starts_with(SORT_MERGE_CONSUMER_PREFIX)
+    }
+
+    /// Whether a refusal makes `consumer` spill or back off rather than fail
+    /// its query: a consumer that can spill, or a sort's merge (see
+    /// [`SORT_MERGE_CONSUMER_PREFIX`]).
+    fn backs_off(consumer: &MemoryConsumer) -> bool {
+        consumer.can_spill() || Self::is_sort_merge(consumer)
     }
 
     /// Keep buffered sorts short of the producer share. An empty reservation
@@ -376,7 +393,7 @@ impl MemoryPool for QueryMemoryPool {
     fn shrink(&self, reservation: &MemoryReservation, shrink: usize) {
         let mut state = self.locked();
         state.reserved = state.reserved.saturating_sub(shrink);
-        if !reservation.consumer().can_spill() {
+        if !Self::backs_off(reservation.consumer()) {
             state.non_spilling_reserved = state.non_spilling_reserved.saturating_sub(shrink);
         }
         let id = reservation.consumer().id();
@@ -450,7 +467,7 @@ impl MemoryPool for QueryMemoryPool {
         // the loans do not count against: they are bytes the pool stopped
         // counting and took back, and they are repaid within a spill.
         let (reserved, others) =
-            if reservation.consumer().can_spill() && !first_state && !readers_reserve {
+            if Self::backs_off(reservation.consumer()) && !first_state && !readers_reserve {
                 (
                     state.reserved,
                     self.unfilled_floors_except(&state, id)
