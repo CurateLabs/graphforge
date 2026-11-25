@@ -277,9 +277,15 @@ fn a_group_too_large_for_the_pool_fails_typed_with_bounded_resident_growth() {
     let message = error.to_string();
     assert!(message.contains("Resources exhausted"), "{message}");
     let primary = message.lines().next().expect("execution error diagnostic");
+    // DataFusion 56 names an aggregate's reservation by its stream kind
+    // (`ClusteredSingleAggregateStream[0]`, `FinalHashAggregateStream[0]`,
+    // ...), not by its aggregate functions.
+    let refused = primary
+        .split_once("allocation failed for ")
+        .and_then(|(_, consumer)| consumer.split_once('['))
+        .map(|(name, _)| name);
     assert!(
-        primary.contains("allocation failed for GroupedHashAggregateStream")
-            && primary.contains("cypher_collect"),
+        refused.is_some_and(|name| name.ends_with("AggregateStream")),
         "the aggregate itself must exhaust its reservation, not merely appear among other consumers: {message}"
     );
     assert!(
