@@ -2721,3 +2721,77 @@ async fn real_single_hop_properties_keep_query_authority_on_both_routes_and_stre
         }
     }
 }
+
+/// A single-hop input batch finished with fewer rows than its buffers hold
+/// (as a coalescer finishes one) is held as a copy of its rows, charged at the
+/// copy's size; a batch whose rows fill its buffers is held as it came (#2353).
+#[test]
+fn a_sparse_single_hop_input_is_held_at_the_size_of_its_rows() {
+    use arrow::array::{FixedSizeBinaryBuilder, UInt64Builder};
+    use datafusion::execution::runtime_env::RuntimeEnvBuilder;
+    use datafusion::prelude::{SessionConfig, SessionContext};
+    let dir = tempfile::TempDir::new().unwrap();
+    let ids = labelled_ring(dir.path(), 4);
+    let (provider, resource, _inventory) = open_ring_provider(dir.path());
+    let pool = ConsumerPool::new(16 * 1024 * 1024);
+    let execution = RuntimeEnvBuilder::new()
+        .with_memory_pool(pool.clone())
+        .build_arc()
+        .unwrap();
+    let context = SessionContext::new_with_config_rt(SessionConfig::new(), execution);
+    let exec = ring_expand_exec(&provider, &resource, &ids[..1]);
+    let cfg = exec.single_hop_config(&context.task_ctx(), 0);
+    let empty = RecordBatch::new_empty(cfg.out_schema.clone());
+    let schema = Arc::new(arrow::datatypes::Schema::new(vec![
+        Field::new("node_id", DataType::UInt64, false),
+        Field::new("node_uuid", DataType::FixedSizeBinary(16), false),
+    ]));
+    let batch = |rows: usize, capacity: usize| {
+        let mut node_ids = UInt64Builder::with_capacity(capacity);
+        let mut uuids = FixedSizeBinaryBuilder::with_capacity(capacity, 16);
+        for row in 0..rows {
+            node_ids.append_value(ids[row % ids.len()]);
+            uuids
+                .append_value([u8::try_from(row % 256).unwrap(); 16])
+                .unwrap();
+        }
+        RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![Arc::new(node_ids.finish()), Arc::new(uuids.finish())],
+        )
+        .unwrap()
+    };
+
+    let sparse = batch(1, 8_192);
+    let sparse_bytes = sparse.get_array_memory_size();
+    assert!(sparse_bytes > 8_192 * 24, "{sparse_bytes}");
+    cfg.account(Some(&sparse), &empty).unwrap();
+    let held = cfg.compact_held_input(sparse.clone()).unwrap();
+    assert_eq!(held, sparse, "the copy holds the same rows");
+    let held_bytes = held.get_array_memory_size();
+    assert!(
+        held_bytes * 16 < sparse_bytes,
+        "{held_bytes} of {sparse_bytes}"
+    );
+    assert_eq!(
+        pool.now("ExpandExec"),
+        held_bytes + empty.get_array_memory_size()
+    );
+    assert!(
+        pool.peak("ExpandExec") >= sparse_bytes + held_bytes,
+        "the copy is charged beside the batch it copies"
+    );
+
+    let dense = batch(8_192, 8_192);
+    cfg.account(Some(&dense), &empty).unwrap();
+    let held = cfg.compact_held_input(dense.clone()).unwrap();
+    for (held, dense) in held.columns().iter().zip(dense.columns()) {
+        assert!(held.to_data().ptr_eq(&dense.to_data()), "held as it came");
+    }
+    assert_eq!(
+        pool.now("ExpandExec"),
+        dense.get_array_memory_size() + empty.get_array_memory_size()
+    );
+    drop(cfg);
+    assert_eq!(pool.leaked(), 0);
+}

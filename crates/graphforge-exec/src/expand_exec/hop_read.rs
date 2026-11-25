@@ -927,6 +927,56 @@ impl SingleHopConfig {
             .map_err(|_| DataFusionError::Internal("ExpandExec reservation poisoned".into()))?
             .try_resize(bytes)
     }
+
+    /// The charged input batch `held`, copied into buffers of its own length
+    /// when it holds more than twice the bytes its rows use, and charged again.
+    ///
+    /// The hop holds its input batch until every path from it is emitted, so a
+    /// seed with many edges holds it through all of their reads. A batch that
+    /// a coalescer finished with a few rows keeps the coalescer's buffers,
+    /// sized for a whole batch: DataFusion 56's filter and join outputs keep a
+    /// `batch_size` buffer per primitive column, and Arrow 60 does the same
+    /// for `FixedSizeBinary` columns (128 KiB for a UUID column). One seed's
+    /// input of one row then held 481 KiB through 50,000 edge reads (#2353).
+    /// The copy is charged before it is allocated.
+    pub(super) fn compact_held_input(
+        &self,
+        held: RecordBatch,
+    ) -> Result<RecordBatch, DataFusionError> {
+        if held.num_rows() == 0 {
+            return Ok(held);
+        }
+        let charged = held.get_array_memory_size();
+        let used = held.columns().iter().try_fold(0usize, |bytes, column| {
+            Ok::<_, DataFusionError>(
+                bytes.saturating_add(column.to_data().get_slice_memory_size()?),
+            )
+        })?;
+        if used.saturating_mul(2) >= charged {
+            return Ok(held);
+        }
+        let rows = u32::try_from(held.num_rows()).map_err(|_| {
+            DataFusionError::Internal("ExpandExec input batch exceeds u32 rows".into())
+        })?;
+        // The indices and the copy, each buffer rounded to its allocation.
+        let copy = used
+            .saturating_add(held.num_rows().saturating_mul(4))
+            .saturating_add(held.num_columns().saturating_add(1).saturating_mul(512));
+        self.reservation
+            .lock()
+            .map_err(|_| DataFusionError::Internal("ExpandExec reservation poisoned".into()))?
+            .try_resize(charged.saturating_add(copy))?;
+        let compact = arrow::compute::take_record_batch(
+            &held,
+            &arrow::array::UInt32Array::from_iter_values(0..rows),
+        )?;
+        drop(held);
+        self.account(
+            Some(&compact),
+            &RecordBatch::new_empty(self.out_schema.clone()),
+        )?;
+        Ok(compact)
+    }
 }
 
 /// Count concrete claim calls without materializing ArrayData or buffer lists.

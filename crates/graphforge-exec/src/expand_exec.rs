@@ -2236,6 +2236,7 @@ impl ExecutionPlan for ExpandExec {
                         Some(&input_batch),
                         &RecordBatch::new_empty(cfg.out_schema.clone()),
                     )?;
+                    let input_batch = cfg.compact_held_input(input_batch)?;
                     pending = Some((input_batch, SingleHopPosition::default()));
                 }
             },
