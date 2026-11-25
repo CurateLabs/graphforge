@@ -190,8 +190,11 @@ pub(super) fn snappy(input: &[u8], output: &mut [u8]) -> Result<(), GfError> {
     Ok(())
 }
 
-/// Fixed modern one-shot DCtx envelope from pinned zstd 1.5.7:
-/// tables, history pointers and maximum literal scratch total <165,070 bytes.
+/// Fixed modern one-shot DCtx envelope from pinned zstd 1.6.0:
+/// tables, history pointers and maximum literal scratch total <165,078 bytes
+/// (1.5.7's <165,070 plus the one `size_t` 1.6.0 adds to `ZSTD_DCtx`,
+/// `traceDictSize`; the measured `ZSTD_sizeof_DCtx` is 95,984 bytes, 1.5.7's
+/// 95,976). Both checks below hold the live context to this envelope.
 /// No stream, dictionary or legacy decoder is initialized on this route.
 pub(super) const ZSTD_WORKSPACE: usize = 256 << 10;
 

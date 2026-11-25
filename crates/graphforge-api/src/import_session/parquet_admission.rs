@@ -83,6 +83,8 @@ pub(super) struct SourceScan {
     /// the predecode admission threshold; `u64::MAX` means none.
     first_oversized_row: Vec<u64>,
     flat_leaf_count: u64,
+    /// One boundary offset per offset-bearing node: what a batch or piece
+    /// holds past one offset per value.
     offset_boundary_bytes: u64,
     /// Arrow's MutableBuffer allocation floor for the visible output arrays.
     /// Wide schemas with tiny batches can be dominated by one 64-byte buffer
@@ -509,7 +511,13 @@ impl SourceScan {
     fn sum_batch(&self, batch: u64, apportion: bool) -> u64 {
         let first = batch * self.batch_rows;
         let last = ((batch + 1) * self.batch_rows).min(self.rows);
-        let mut bytes = self.value_bytes[usize::try_from(batch).unwrap_or(usize::MAX)];
+        // Every offset-bearing node of a batch holds one boundary offset past
+        // its rows, and Arrow's slice accounting counts it: arrow-data 60
+        // `get_slice_memory_size` sizes Utf8, Binary, List and Map offsets
+        // (and their large forms) as `len + 1`. The per-row sizes count one
+        // offset per value, so the terminal one is added once per batch.
+        let mut bytes = self.value_bytes[usize::try_from(batch).unwrap_or(usize::MAX)]
+            .saturating_add(self.offset_boundary_bytes);
         for (_, low, high, group) in self.overlapping(first, last) {
             for leaf in &group.leaves {
                 if needs_values(leaf) {

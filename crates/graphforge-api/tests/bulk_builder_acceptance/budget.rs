@@ -35,9 +35,19 @@ fn field(report: &Value, name: &str) -> u64 {
 /// What one frame adds to its payload: a 16-byte header, the IPC schema message
 /// (field names, and the overlay metadata of a projection) and 8-byte buffer
 /// padding. Measured at 1.14 to 1.40 KiB for these schemas, in sizes of 17 to
-/// 254 frames; a frame is never lighter than `FRAME_MINIMUM`.
+/// 254 frames, while Arrow's writer still materialized an all-valid bitmap for
+/// every column without nulls (`arrow-ipc` 58.4). `arrow-ipc` 60.2 writes a
+/// 0-length validity buffer for such a column instead (`write_array_data`).
+/// Run and projection frames have three null-free columns (the identity, the
+/// label or tombstone, and the numeric property) beside the string column the
+/// payload's validity bit counts, whose leading values and trailing nulls keep
+/// its bitmap. A frame of `r <= BATCH_ROWS` rows therefore sheds three bitmaps
+/// of `ceil(r / 8)` bytes padded to the 64-byte IPC alignment, at most
+/// `BATCH_ROWS / 8` = 128 bytes each since 128 is a multiple of 64: at most
+/// 384 bytes of the measured overhead. A frame is never lighter than
+/// `FRAME_MINIMUM`, and never heavier than the measured `FRAME_OVERHEAD`.
 const FRAME_OVERHEAD: u64 = 1536;
-const FRAME_MINIMUM: u64 = 1024;
+const FRAME_MINIMUM: u64 = 1024 - 3 * BATCH_ROWS as u64 / 8;
 
 /// `bytes` is `payload` plus the framing of `frames` frames.
 fn framed(bytes: u64, payload: u64, frames: u64, name: &str) {

@@ -3,7 +3,7 @@
 //! Lifecycle owners keep their durability, streaming, row-group and dictionary
 //! choices. Private construction streams and external query exports are not
 //! permanent project payloads. Resource envelopes here target the pinned
-//! Parquet 58 / Zstd 1.5.7 implementation, not process RSS or allocator overhead.
+//! Parquet 60 / Zstd 1.6.0 implementation, not process RSS or allocator overhead.
 
 use arrow::datatypes::Schema;
 use graphforge_core::{GfError, ProjectErrorCode};
@@ -100,8 +100,10 @@ pub(crate) fn physical_columns(schema: &Schema) -> Result<usize, GfError> {
         .map_err(|error| GfError::Storage(error.to_string()))
 }
 
-/// One encoder's native CCtx plus Parquet's dormant DCtx. Fast strategy, no
-/// trained dictionary, no workers, and the maximum source within this row group.
+/// One encoder's native CCtx plus Parquet's dormant DCtx (which Parquet 60's
+/// `ZSTDCodec` no longer creates on a writer, so it is charged conservatively).
+/// Fast strategy, no trained dictionary, no workers, and the maximum source
+/// within this row group.
 /// Fixed space includes the pinned structs, block states, scratch, alignment
 /// and default ASAN arena redzones. Runtime sizing regression pins this claim.
 pub(crate) fn zstd_encoder_workspace(maximum_source: usize) -> usize {
@@ -111,6 +113,11 @@ pub(crate) fn zstd_encoder_workspace(maximum_source: usize) -> usize {
 }
 
 /// Active DCtx plus the codec's dormant CCtx, independently of page buffers.
+/// Measured for Zstd 1.6.0 by `replay_zstd_context_memory_assessment`: a DCtx
+/// is 95,984 bytes and an empty level-1 CCtx 5,288 (1.5.7: 95,976 and 5,280;
+/// 1.6.0 adds `traceDictSize` to the DCtx), 101,272 of the 106,496 here.
+/// Parquet 60's `ZSTDCodec` creates each context on first use, so a reader
+/// never builds the dormant CCtx and the sum stays an upper bound.
 pub(crate) const ZSTD_DECODER_WORKSPACE: usize = 104 * 1024;
 const ZSTD_DORMANT_CODEC_WORKSPACE: usize = 104 * 1024;
 

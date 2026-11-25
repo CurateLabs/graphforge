@@ -2,10 +2,10 @@
 //!
 //! Footer-only planning trusts the lengths it can see. A compressed IPC
 //! buffer states an expanded length in an eight-byte prefix, and Arrow's own
-//! LZ4 path expands with `read_to_end` before checking it, so a prefix that
-//! lies *downward* passes every plan-time bound and then allocates without
-//! one. This module therefore plans the whole file from its footer once
-//! ([`ipc_plan`]), and a task reads each block through
+//! decode sizes its output from that prefix and checks the frame against it
+//! only while expanding, so the prefix must be made exact before the plan's
+//! bounds can rely on it. This module therefore plans the whole file from its
+//! footer once ([`ipc_plan`]), and a task reads each block through
 //! [`CheckedIpcReader`]: the block is read once into an owned buffer,
 //! re-checked against the plan, the file and the admitted workspace, every
 //! compressed buffer is expanded here in fixed-size chunks that stop at the
@@ -15,11 +15,15 @@
 //!
 //! What the LZ4 frames themselves hold is not a constant, but it is also
 //! bounded by what the consumers initialize: Arrow's compressed decode
-//! (`arrow-ipc` 58.4 `compression.rs`) constructs a fresh `FrameDecoder`
-//! per buffer and issues one `read_to_end`, and this module's verifier
-//! reads until the first zero - both stop there, so only the FIRST
-//! initialized frame is ever decoded and no later frame, malformed
-//! suffix, skippable magic or legacy tail is interpreted. A frame header
+//! (`arrow-ipc` 60.2 `compression.rs` `decompress_lz4`) constructs a fresh
+//! `FrameDecoder` per buffer, reads at most the stated length through
+//! `take(..).read_to_end`, and then probes one more byte; this module's
+//! verifier reads until the first zero and refuses unless the first frame
+//! expands to exactly the stated length. On verified bytes Arrow's reads
+//! therefore end inside the first frame, and its probe reads that frame's
+//! end mark and returns zero, so only the FIRST initialized frame is ever
+//! decoded and no later frame, malformed suffix, skippable magic or legacy
+//! tail is interpreted. A frame header
 //! declares its block size (up to 8 MiB for the legacy format) and linked
 //! frames keep a window and a doubled output buffer. Planning and the
 //! reader both derive each buffer's exact geometry from that first header
@@ -51,13 +55,13 @@ use super::{limit, storage};
 /// buffer is ever built here.
 const VERIFY_CHUNK_BYTES: usize = 8 * 1024;
 
-/// The lz4 frame format's 64 KiB linked-block window (`lz4_flex` 0.13.1
+/// The lz4 frame format's 64 KiB linked-block window (`lz4_flex` 0.14.2
 /// `block::WINDOW_SIZE`): a linked block may reference this many bytes
 /// behind it, so a linked frame's decoder keeps the window beside its
 /// output.
 const LZ4_WINDOW_BYTES: u64 = 64 * 1024;
 
-/// The block sizes a standard frame header may declare (`lz4_flex` 0.13.1
+/// The block sizes a standard frame header may declare (`lz4_flex` 0.14.2
 /// `frame::header::BlockSize`, codes 4-7).
 const LZ4_BLOCK_SIZES: [u64; 4] = [64 * 1024, 256 * 1024, 1024 * 1024, 4 * 1024 * 1024];
 
@@ -74,7 +78,7 @@ const LZ4_SKIPPABLE_RANGE: std::ops::RangeInclusive<u32> = 0x184D_2A50..=0x184D_
 /// What expanding one compressed IPC buffer holds: the frame decoder's
 /// reserved `src`/`dst` capacities for the first frame its consumer
 /// initializes. A fresh decoder starts with empty vectors, so the pinned
-/// `read_frame_info` (`lz4_flex` 0.13.1 `frame/decompress.rs`) reserves
+/// `read_frame_info` (`lz4_flex` 0.14.2 `frame/decompress.rs`) reserves
 /// exactly these - no resize transient and no retained-previous-frame
 /// envelope, and a later frame is never initialized by these consumers.
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
@@ -175,7 +179,7 @@ impl FrameBytes for FileFrameBytes<'_> {
 
 /// Derive what a compressed buffer's consumer allocates from the first
 /// frame's header alone - at most 19 bytes, never a payload byte - the way
-/// the pinned decoder's `read_frame_info` (`lz4_flex` 0.13.1
+/// the pinned decoder's `read_frame_info` (`lz4_flex` 0.14.2
 /// `frame/decompress.rs`) and `FrameInfo::read` (`frame/header.rs`) read
 /// it: an empty stream and any magic followed by nothing end as zero; a
 /// partial magic or header is an error; legacy magic alone initializes 8

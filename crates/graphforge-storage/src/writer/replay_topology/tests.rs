@@ -225,7 +225,7 @@ fn replay_node_authority_charge_tracks_owned_entries() {
 fn replay_zstd_context_memory_assessment() {
     assert_eq!(
         zstd::zstd_safe::version_string(),
-        "1.5.7",
+        "1.6.0",
         "review the codec memory bound when upgrading Zstd"
     );
     let decompressor = zstd::zstd_safe::DCtx::create();

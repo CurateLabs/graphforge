@@ -469,14 +469,21 @@ row, page, byte and explicit reservation ceilings provide repeatable regressions
 
 The old estimate omitted native codecs, physical nested leaves, decoder page
 buffers and retained page indexes. Pinned Parquet 58/Zstd 1.5.7 source inspection
-and safe context-size measurements establish separate reservations for schemas,
+and safe context-size measurements established separate reservations for schemas,
 writer structures, completed metadata/indexes, active encoded chunks and native
 contexts. Decoder admission inspects authenticated raw page headers before
 allocating the decoder, includes compressed and decompressed buffers, and bounds
 returned values across pages and row-group boundaries. Variable/repeated leaves
 conservatively reserve the contributing row groups; this can refuse small reads
 from very large groups. These are allocation-component/logical estimates, not a
-process-RSS or allocator-fragmentation guarantee.
+process-RSS or allocator-fragmentation guarantee. The native context envelopes
+are re-measured on every Zstd upgrade by
+`cargo nextest run -p graphforge-storage -E 'test(replay_zstd_context_memory_assessment)' --no-capture`,
+which pins the library version, asserts each context against its envelope and
+prints a `REPLAY_ZSTD_MEMORY` record. The envelopes hold for Parquet 60.2 and
+Zstd 1.6.0, whose DCtx and empty CCtx are each eight bytes larger than 1.5.7's;
+Parquet 60's codec creates each context on first use, so the dormant context
+the envelopes still charge is never built.
 
 Dictionaries remain disabled for replay. Below both page thresholds, no page is
 compressed during writes; row-group close consumes leaf writers sequentially.

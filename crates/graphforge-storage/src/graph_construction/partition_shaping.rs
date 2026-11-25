@@ -2102,7 +2102,9 @@ impl<'a> RowRangePartitioner<'a> {
 /// This is exactly `column.slice(row, 1).to_data().get_slice_memory_size()`
 /// (arrow-data's per-buffer accounting for a one-row slice: fixed-width
 /// buffers contribute their width, a variable-width buffer contributes the
-/// value's bytes plus one offset, a present null buffer contributes one byte)
+/// value's bytes plus both of its boundary offsets - arrow-data 60 counts
+/// `len + 1` offsets for Utf8, LargeUtf8, Binary and LargeBinary - and a
+/// present null buffer contributes one byte)
 /// computed without materialising a one-row `ArrayData` per row per column.
 /// That materialisation was four heap allocations per row per column: 52M of
 /// the 104M allocations `validate` made at S18, measured with heaptrack. Any
@@ -2156,19 +2158,19 @@ impl<'a> RowBytes<'a> {
             },
             DataType::Boolean => Self::Constant(1),
             DataType::Utf8 => match any.downcast_ref::<StringArray>() {
-                Some(array) => Self::Utf8(array, 4),
+                Some(array) => Self::Utf8(array, 8),
                 None => Self::Exact(column),
             },
             DataType::LargeUtf8 => match any.downcast_ref::<LargeStringArray>() {
-                Some(array) => Self::LargeUtf8(array, 8),
+                Some(array) => Self::LargeUtf8(array, 16),
                 None => Self::Exact(column),
             },
             DataType::Binary => match any.downcast_ref::<BinaryArray>() {
-                Some(array) => Self::Binary(array, 4),
+                Some(array) => Self::Binary(array, 8),
                 None => Self::Exact(column),
             },
             DataType::LargeBinary => match any.downcast_ref::<LargeBinaryArray>() {
-                Some(array) => Self::LargeBinary(array, 8),
+                Some(array) => Self::LargeBinary(array, 16),
                 None => Self::Exact(column),
             },
             primitive @ (DataType::Int8
