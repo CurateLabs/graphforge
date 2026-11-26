@@ -6,9 +6,7 @@ use datafusion::execution::TaskContext;
 use datafusion::logical_expr::Operator;
 use datafusion::physical_expr::equivalence::ConstExpr;
 use datafusion::physical_expr::expressions::CastExpr;
-use datafusion::physical_optimizer::{
-    PhysicalOptimizerRule, sanity_checker::check_plan_tree_sanity,
-};
+use datafusion::physical_optimizer::sanity_checker::check_plan_tree_sanity;
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion::physical_plan::filter::FilterExecBuilder;
 use datafusion::physical_plan::test::TestMemoryExec;
