@@ -21,6 +21,9 @@ use crate::CancellationToken;
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(super) struct SchemaTopologyFacts {
     pub(super) nodes: u64,
+    /// Nodes whose converted Arrow field carries metadata (a field id or an
+    /// extension type).
+    pub(super) metadata_nodes: u64,
     pub(super) physical_leaves: u64,
     pub(super) name_bytes: u64,
     pub(super) group_child_slots: u64,
@@ -178,6 +181,9 @@ fn preflight_topology(
         }
         let element = schema_element(&mut cursor, &mut parser_facts, u64::MAX, index == 0)?;
         add(&mut result.nodes, 1)?;
+        if element.arrow_field_metadata {
+            add(&mut result.metadata_nodes, 1)?;
+        }
         add(
             &mut result.name_bytes,
             u64::try_from(element.name_len).map_err(|_| overflow())?,

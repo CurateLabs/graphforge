@@ -1,5 +1,5 @@
 //! Borrowed semantic validation and native allocation-request accounting for
-//! Arrow IPC schemas. This component models `arrow-ipc` 58.4's
+//! Arrow IPC schemas. This component models `arrow-ipc` 60.2's
 //! `convert::try_fb_to_schema` path; it does not construct an Arrow `Schema`.
 
 use std::alloc::Layout;
@@ -170,7 +170,7 @@ macro_rules! metadata_occurrences {
                 }
             }
         }
-        add_hash_map::<String, String>(
+        add_metadata_map(
             $requests,
             usize::try_from(occurrences).map_err(|_| overflow())?,
         )?;
@@ -214,8 +214,12 @@ pub(super) fn preflight(
 
     let (metadata_occurrences, metadata_bytes) =
         metadata_occurrences!(&mut requests, schema.custom_metadata(), cancellation)?;
-    requests.envelope.metadata_occurrences = metadata_occurrences;
-    requests.envelope.metadata_copy_bytes = metadata_bytes;
+    // Field metadata was added while walking the fields; keep it.
+    add(
+        &mut requests.envelope.metadata_occurrences,
+        metadata_occurrences,
+    )?;
+    add(&mut requests.envelope.metadata_copy_bytes, metadata_bytes)?;
 
     // try_fb_to_schema moves Vec<Field> through a temporary Vec<FieldRef> into
     // Fields' Arc slice. The Vec<Field> push-growth was counted above.
@@ -497,21 +501,23 @@ fn walk_field(
     Ok(())
 }
 
-fn add_hash_map<K, V>(requests: &mut Requests, entries: usize) -> Result<(), GfError> {
+/// `try_fb_to_schema` builds each metadata `HashMap` by insertion, then
+/// `with_metadata` / `Schema::new_with_metadata` convert it into Arrow 60's
+/// `BTreeMap`-backed `Metadata`; only the tree survives.
+fn add_metadata_map(requests: &mut Requests, entries: usize) -> Result<(), GfError> {
     if entries == 0 {
         return Ok(());
     }
-    let (retained, peak) = hash_map_layouts::<K, V>(entries)?;
+    let (_, hash_map_peak) = hash_map_layouts::<String, String>(entries)?;
     add_request(
         requests,
-        Request {
-            retained_bytes: retained,
-            peak_bytes: peak,
-        },
+        parquet_alloc::string_metadata_map(entries, hash_map_peak)?,
     )
 }
 
-fn hash_map_layouts<K, V>(entries: usize) -> Result<(u64, u64), GfError> {
+/// Retained and peak request bytes of a std `HashMap<K, V>` grown by
+/// insertion to `entries`.
+pub(super) fn hash_map_layouts<K, V>(entries: usize) -> Result<(u64, u64), GfError> {
     let mut buckets = capacity_to_buckets(1)?;
     let first = table_layout::<K, V>(buckets)?;
     let mut retained = u64::try_from(first).map_err(|_| overflow())?;

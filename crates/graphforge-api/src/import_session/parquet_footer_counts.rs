@@ -1,5 +1,5 @@
 //! Allocation-free accounting for the allocating lists and copied payloads
-//! in parquet 58.4's default footer metadata reader.
+//! in parquet 60.2's default footer metadata reader.
 //!
 //! This accounts the footer's native metadata vectors and copied primitive
 //! payloads only. It does not include the expanded `Type` tree, schema
@@ -309,14 +309,20 @@ pub(super) fn schema_element(
     let mut children = None;
     let mut repetition = None;
     let mut selected_crs_len = None;
+    let mut field_id = false;
+    let mut extension_logical_type = false;
     while let Some((id, kind)) = field(cursor, &mut previous)? {
         match id {
             1 => {
                 physical_type_id = Some(cursor.read_i32()?);
                 physical_type = true;
             }
-            2 | 6 | 7 | 8 | 9 => {
+            2 | 6 | 7 | 8 => {
                 let _ = cursor.read_i32()?;
+            }
+            9 => {
+                let _ = cursor.read_i32()?;
+                field_id = true;
             }
             3 => repetition = Some(cursor.read_i32()?),
             4 => {
@@ -329,7 +335,11 @@ pub(super) fn schema_element(
                 }
                 children = Some(usize::try_from(value).map_err(|_| malformed())?);
             }
-            10 => selected_crs_len = logical_type(cursor, facts, budget)?,
+            10 => {
+                let selected = logical_type(cursor, facts, budget)?;
+                selected_crs_len = selected.crs_len;
+                extension_logical_type = selected.arrow_extension;
+            }
             _ => skip(cursor, kind)?,
         }
     }
@@ -355,6 +365,7 @@ pub(super) fn schema_element(
         repetition,
         children,
         crs_len: selected_crs_len,
+        arrow_field_metadata: field_id || extension_logical_type,
     })
 }
 
@@ -370,6 +381,16 @@ pub(super) struct SchemaElementScalarFacts {
     pub(super) repetition: Option<i32>,
     pub(super) children: Option<usize>,
     pub(super) crs_len: Option<usize>,
+    /// Whether parquet 60.2 gives the converted Arrow field metadata: a field
+    /// id (`PARQUET:field_id`) or a logical type it maps to an Arrow
+    /// extension type (JSON, UUID, VARIANT, GEOMETRY, GEOGRAPHY, FILE).
+    pub(super) arrow_field_metadata: bool,
+}
+
+/// The final logical-type variant's facts.
+struct SelectedLogicalType {
+    crs_len: Option<usize>,
+    arrow_extension: bool,
 }
 
 fn read_utf8_payload_borrowed(cursor: &mut CompactSlice<'_>) -> Result<usize, GfError> {
@@ -380,12 +401,16 @@ fn logical_type(
     cursor: &mut CompactSlice<'_>,
     facts: &mut FooterCountFacts,
     budget: u64,
-) -> Result<Option<usize>, GfError> {
+) -> Result<SelectedLogicalType, GfError> {
     let mut previous = 0;
     let mut variants = 0usize;
     let mut selected_crs_len = None;
+    let mut arrow_extension = false;
     while let Some((id, kind)) = field(cursor, &mut previous)? {
         variants = variants.checked_add(1).ok_or_else(allocation_limit)?;
+        // parquet 60.2 `try_add_extension_type`: JSON (12), UUID (14),
+        // VARIANT (16), GEOMETRY (17), GEOGRAPHY (18) and FILE (19).
+        arrow_extension = matches!(id, 12 | 14 | 16..=19);
         match id {
             1..=4 | 6 | 11..=15 => {
                 empty_struct(cursor)?;
@@ -414,7 +439,10 @@ fn logical_type(
     if variants > 1 {
         return Err(malformed());
     }
-    Ok(selected_crs_len)
+    Ok(SelectedLogicalType {
+        crs_len: selected_crs_len,
+        arrow_extension,
+    })
 }
 
 fn empty_struct(cursor: &mut CompactSlice<'_>) -> Result<(), GfError> {
@@ -922,7 +950,7 @@ fn column_orders_list(
     Ok(count)
 }
 
-/// Count allocations requested by the default parquet 58.4 footer reader.
+/// Count allocations requested by the default parquet 60.2 footer reader.
 /// The CompactSlice borrows the owned footer and all facts stay in scalars.
 pub(super) fn preflight(
     footer: &[u8],
