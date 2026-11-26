@@ -275,20 +275,26 @@ fn duplicate_known_key_value_fields_are_accounted_as_coexisting_requests() {
 }
 
 #[test]
-fn skipped_boolean_list_is_constant_time_and_does_not_add_allocations() {
+fn skipped_boolean_list_consumes_its_bytes_and_does_not_add_allocations() {
+    // parquet 60.2 skips one byte per unknown boolean list element.
     let mut wire = empty_footer();
     wire.pop();
     wire.push(0xd9); // unknown field 17, list
-    wire.push(0xf1); // huge bool list, zero-byte elements
-    wire.push(0xff);
-    wire.push(0xff);
-    wire.push(0xff);
-    wire.push(0xff);
-    wire.push(0x07);
+    wire.push(0x31); // three bool elements
+    wire.extend_from_slice(&[0x01, 0x00, 0x02]);
     wire.push(0);
     let facts = preflight(&wire, 1 << 20, None).unwrap();
     let baseline = preflight(&empty_footer(), 1 << 20, None).unwrap();
     assert_eq!(facts, baseline);
+
+    // A declared count the footer cannot hold is refused, as natively.
+    let mut wire = empty_footer();
+    wire.pop();
+    wire.push(0xd9); // unknown field 17, list
+    wire.push(0xf1); // i32::MAX bool elements
+    wire.extend_from_slice(&[0xff, 0xff, 0xff, 0xff, 0x07]);
+    wire.push(0);
+    assert_storage_error(preflight(&wire, 1 << 20, None).unwrap_err());
 }
 
 #[test]
@@ -341,3 +347,4 @@ fn checked_scalar_totals_refuse_overflow() {
     facts.account_vector(usize::MAX, u64::MAX).unwrap();
     assert_resource_limit(facts.account_vector(1, u64::MAX).unwrap_err());
 }
+
