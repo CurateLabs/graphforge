@@ -23,7 +23,7 @@ graphforge-cli = { version = "0.7.0-dev", path = "../graphforge-cli" }
 # in the synchronous RecordBatchReader adapter (execute_stream, #587).
 futures = { workspace = true }
 # `pyarrow` enables arrow's C Data Interface bridge (arrow-pyarrow, pinned to the
-# same pyo3 0.28) for zero-copy RecordBatch → pyarrow.Table transfer.
+# same pyo3 0.29) for zero-copy RecordBatch → pyarrow.Table transfer.
 arrow = { workspace = true, features = ["pyarrow"] }
 # algorithm publication recipes are versioned JSON values owned by the Rust facade.
 serde.workspace = true
