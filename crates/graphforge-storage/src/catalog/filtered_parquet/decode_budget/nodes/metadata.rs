@@ -231,8 +231,9 @@ fn object_bytes() -> usize {
     4 * struct_slot_bytes()
 }
 
-/// The field types of Parquet 60's crate-private footer `SchemaElement<'a>`
-/// (`file/metadata/thrift/mod.rs`), which borrows its name from the footer.
+/// The field types of Parquet's crate-private footer `SchemaElement<'a>`
+/// (`file/metadata/thrift/mod.rs`, the same in Parquet 58 and 60), which
+/// borrows its name from the footer.
 /// Its size stands for the intermediate element the decoder builds per schema
 /// node; recheck it against that struct when Parquet is updated.
 #[allow(dead_code, reason = "measured for its layout only")]

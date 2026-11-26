@@ -21,7 +21,8 @@
 //!   [`declared_encoding_is_funded`] as a cheap secondary check on footers of
 //!   already-admitted project files.
 //!
-//! This module depends only on the `parquet` and `thrift` crates.
+//! This module depends only on the `parquet` crate and
+//! [`crate::parquet_page_header`].
 
 use parquet::basic::{Encoding as FooterEncoding, Type};
 use parquet::file::metadata::{ParquetMetaData, ParquetMetaDataReader};

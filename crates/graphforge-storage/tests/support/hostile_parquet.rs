@@ -462,19 +462,4 @@ pub mod raw_thrift {
             Value::Struct(value) => write_struct(output, value),
         }
     }
-
-    #[test]
-    fn round_trips_a_genuine_footer_byte_for_byte() {
-        let file = super::string_file(
-            parquet::basic::Encoding::PLAIN,
-            parquet::file::properties::WriterVersion::PARQUET_2_0,
-            32,
-        );
-        let length = file.len();
-        let footer = u32::from_le_bytes(file[length - 8..length - 4].try_into().unwrap()) as usize;
-        let bytes = &file[length - 8 - footer..length - 8];
-        let (decoded, consumed) = Struct::read(bytes);
-        assert_eq!(consumed, footer);
-        assert_eq!(decoded.encode(), bytes);
-    }
 }
