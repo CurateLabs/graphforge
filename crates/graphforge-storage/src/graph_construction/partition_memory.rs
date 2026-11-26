@@ -48,8 +48,9 @@ fn array_reservation(data: &ArrayData, floor: u64) -> Result<(u64, u64), GfError
                 } else {
                     4
                 };
-                // Slice memory includes selected values, but not the terminal
-                // offset. Additional capacity covers generic byte preallocation.
+                // Slice memory includes the selected values and, since
+                // arrow-data 60, all `len + 1` offsets. The additional offsets
+                // and byte per row cover generic byte preallocation.
                 add(
                     data.get_slice_memory_size().map_err(storage)? as u64,
                     add(mul(add(n, 1)?, width)?, n)?,

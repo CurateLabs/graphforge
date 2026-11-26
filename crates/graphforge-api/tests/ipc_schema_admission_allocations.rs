@@ -1,9 +1,9 @@
-//! Measures the actual pinned Arrow 58.4 native conversion against the
+//! Measures the actual pinned Arrow 60.2 native conversion against the
 //! source-derived IPC schema admission envelope. This is a separate test
 //! binary because the production crate forbids unsafe code.
 
 use arrow::datatypes::{DataType, Field, Schema};
-use arrow::ipc::convert::{IpcSchemaEncoder, fb_to_schema};
+use arrow::ipc::convert::{IpcSchemaEncoder, try_fb_to_schema};
 use arrow::ipc::root_as_schema;
 use graphforge_api::CancellationToken;
 use graphforge_core::GfError;
@@ -124,7 +124,7 @@ fn measure(schema: arrow::ipc::Schema<'_>) -> (arrow::datatypes::Schema, Track) 
             ..Track::default()
         })
     });
-    let converted = fb_to_schema(schema);
+    let converted = try_fb_to_schema(schema).expect("a valid IPC schema");
     let result = TRACK.with(|state| {
         let track = state.get();
         state.set(Track::default());
@@ -158,6 +158,48 @@ fn native_conversion_peak_is_below_preflight_envelope() {
         "native request peak {} exceeded admitted envelope {}",
         measured.peak,
         envelope.peak_request_bytes
+    );
+}
+
+/// Arrow 60 converts every metadata `HashMap` into a `BTreeMap`-backed
+/// `Metadata`: the entries are collected into a `Vec`, stable-sorted (with
+/// heap scratch past 85 entries), bulk-built into tree nodes, and wrapped in
+/// an `Arc`. Large schema-level and per-field maps exercise every stage.
+#[test]
+fn metadata_tree_conversion_peak_and_retention_are_below_preflight_envelope() {
+    let entries = |count: usize, prefix: &str| {
+        (0..count)
+            .map(|index| (format!("{prefix}-key-{index:04}"), format!("value-{index}")))
+            .collect::<std::collections::HashMap<_, _>>()
+    };
+    let fields = (0..7)
+        .map(|index| {
+            Field::new(format!("field-{index}"), DataType::Utf8, true)
+                .with_metadata(entries(40 + index * 17, &format!("field-{index}")))
+        })
+        .collect::<Vec<_>>();
+    let schema = Schema::new_with_metadata(fields, entries(300, "schema"));
+    let bytes = encoded(&schema);
+    let envelope =
+        ipc_schema_admission::preflight(root_as_schema(&bytes).unwrap(), u64::MAX, None).unwrap();
+    assert_eq!(
+        envelope.metadata_occurrences,
+        300 + (0..7).map(|index| 40 + index * 17).sum::<u64>()
+    );
+    let (converted, measured) = measure(root_as_schema(&bytes).unwrap());
+
+    assert_eq!(converted, schema);
+    assert!(
+        measured.peak as u64 <= envelope.peak_request_bytes,
+        "native request peak {} exceeded admitted envelope {}",
+        measured.peak,
+        envelope.peak_request_bytes
+    );
+    assert!(
+        measured.live as u64 <= envelope.retained_request_bytes,
+        "native retained requests {} exceeded the retained envelope {}",
+        measured.live,
+        envelope.retained_request_bytes
     );
 }
 

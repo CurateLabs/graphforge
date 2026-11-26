@@ -60,7 +60,7 @@ fn skewed_keys(partitions: usize, hot_percent: i64) -> Vec<i64> {
         let mut hashes = vec![0_u64; candidates.len()];
         create_hashes(
             [&candidates],
-            &REPARTITION_RANDOM_STATE.random_state(),
+            REPARTITION_RANDOM_STATE.random_state(),
             &mut hashes,
         )
         .expect("hash candidate keys");
@@ -150,6 +150,17 @@ impl ExecutionPlan for YieldingExec {
         &self.properties
     }
 
+    fn apply_expressions(
+        &self,
+        _f: &mut dyn FnMut(
+            &std::sync::Arc<dyn datafusion::physical_expr::PhysicalExpr>,
+        ) -> datafusion::common::Result<
+            datafusion::common::tree_node::TreeNodeRecursion,
+        >,
+    ) -> datafusion::common::Result<datafusion::common::tree_node::TreeNodeRecursion> {
+        Ok(datafusion::common::tree_node::TreeNodeRecursion::Continue)
+    }
+
     fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
         vec![&self.input]
     }
@@ -222,6 +233,18 @@ async fn run_plan(
     Ok((rows, plan))
 }
 
+/// Regular files under `directory`, at any depth: the spill files a query
+/// left behind (the runtime keeps its own temporary directory there).
+fn spill_files(directory: &std::path::Path) -> usize {
+    std::fs::read_dir(directory)
+        .unwrap()
+        .map(|entry| {
+            let path = entry.unwrap().path();
+            if path.is_dir() { spill_files(&path) } else { 1 }
+        })
+        .sum()
+}
+
 fn plan_text(plan: &Arc<dyn ExecutionPlan>) -> String {
     displayable(plan.as_ref()).indent(false).to_string()
 }
@@ -263,6 +286,11 @@ async fn a_join_whose_build_side_exceeds_the_budget_spills_and_matches_the_large
     assert!(
         spills(&small_plan, "SortExec") > 0,
         "the sorts feeding the join exceed the budget, so they must have spilled:\n{small_text}"
+    );
+    assert_eq!(
+        spill_files(spill.path()),
+        0,
+        "a finished join leaves no spill file behind"
     );
 
     let (large, _large_dir) = session(2048 * MIB, 1, &spill);

@@ -3,11 +3,11 @@
 //! DataFusion 54.1.0's `RepartitionExec` could deadlock when its spill pool held
 //! two open files: the reader waited on a drained file whose writer had moved on,
 //! while the batch it was owed sat in a newer file, and nothing woke it
-//! (apache/datafusion#24883). The workspace resolves `datafusion-physical-plan`
-//! from `vendor/datafusion-physical-plan`, which carries the upstream fix
+//! (apache/datafusion#24883). DataFusion 56 carries the upstream fix
 //! (apache/datafusion#24891). This runs the upstream reproduction through the
 //! session's own query memory pool and fails, instead of hanging, if the
-//! exchange stops delivering.
+//! exchange stops delivering. Each finished run must also release every
+//! reservation and spill file the exchange held.
 
 use super::*;
 use graphforge_ir::RuntimeCatalog;
@@ -53,6 +53,22 @@ fn session(spill: &TempDir) -> (ExecutionSession, TempDir) {
     )
     .unwrap();
     (session, dir)
+}
+
+/// The files under `dir`, at any depth: the disk manager spills into a
+/// directory of its own beneath the configured one.
+fn files_under(dir: &std::path::Path) -> usize {
+    std::fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| {
+            let entry = entry.unwrap();
+            if entry.file_type().unwrap().is_dir() {
+                files_under(&entry.path())
+            } else {
+                1
+            }
+        })
+        .sum()
 }
 
 /// Spill operations performed by every `RepartitionExec` of `plan`.
@@ -132,6 +148,18 @@ async fn a_hash_exchange_spilling_under_a_tight_pool_delivers_every_group() {
             .collect::<Vec<_>>();
         assert_eq!(rows, expected, "run {run}: every group counts every trace");
         exchange_spills_seen += exchange_spills(&plan);
+        drop(batches);
+        drop(plan);
+        assert_eq!(
+            session.ctx.runtime_env().memory_pool.reserved(),
+            0,
+            "run {run}: a finished query leaves nothing reserved"
+        );
+        assert_eq!(
+            files_under(spill.path()),
+            0,
+            "run {run}: a finished query leaves no spill file"
+        );
     }
     assert!(
         exchange_spills_seen > 0,

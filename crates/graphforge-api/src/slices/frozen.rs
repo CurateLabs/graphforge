@@ -17,7 +17,6 @@ use graphforge_storage::research_versions::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
-use std::collections::HashMap;
 use std::io::Cursor;
 use std::sync::Arc;
 const CONTEXT: &str = "graphforge.slice.frozen_context";
@@ -137,7 +136,7 @@ impl GraphForge {
         )?;
         let mut metadata = result.schema.metadata().clone();
         metadata.insert(
-            CONTEXT.into(),
+            CONTEXT,
             serde_json::to_string(&context).map_err(|_| invalid("invalid frozen context"))?,
         );
         result.schema = Arc::new(Schema::new_with_metadata(
@@ -208,7 +207,7 @@ fn frozen_request(context: &Context) -> SliceRequest {
         limits: context.limits.clone(),
     }
 }
-fn schema(metadata: HashMap<String, String>) -> Schema {
+fn schema(metadata: arrow::datatypes::Metadata) -> Schema {
     Schema::new_with_metadata(
         vec![
             Field::new("role", DataType::Utf8, false),
@@ -260,8 +259,8 @@ fn batch(selection: &Selection, context: &Context) -> Result<RecordBatch, GfErro
             labels.append(true);
         }
     }
-    let metadata = HashMap::from([(
-        CONTEXT.into(),
+    let metadata = arrow::datatypes::Metadata::from([(
+        CONTEXT.to_owned(),
         serde_json::to_string(context).map_err(|_| invalid("invalid frozen context"))?,
     )]);
     let arrays: Vec<ArrayRef> = vec![
@@ -303,7 +302,7 @@ fn capsule(
         return Err(limit());
     }
     let mut metadata = batch.schema().metadata().clone();
-    metadata.insert(DIGEST.into(), digest_hex(&bytes));
+    metadata.insert(DIGEST, digest_hex(&bytes));
     let schema = Arc::new(schema(metadata));
     let batch = RecordBatch::try_new(schema.clone(), batch.columns().to_vec())
         .map_err(|_| invalid("invalid Slice capsule"))?;
@@ -328,7 +327,7 @@ pub(super) fn decode(
     let mut reader = StreamReader::try_new(Cursor::new(ipc), None)
         .map_err(|_| invalid("invalid frozen Slice IPC"))?;
     let schema = reader.schema();
-    if schema.fields() != self::schema(HashMap::new()).fields() {
+    if schema.fields() != self::schema(arrow::datatypes::Metadata::new()).fields() {
         return Err(invalid("invalid frozen Slice schema"));
     }
     let context: Context = serde_json::from_str(

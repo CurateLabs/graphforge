@@ -126,8 +126,9 @@ fn node_bytes(
                     if values > i32::MAX as usize {
                         return Err(refused());
                     }
-                    // parquet 58.4 ListArrayReader constructs offsets from
-                    // leaf length, then copies initialized parent offsets.
+                    // parquet 60.2 ListArrayReader sizes offsets and validity
+                    // by the batch's definition levels (at most the leaf
+                    // length) and copies the offsets into one Buffer.
                     // Primitive values can grow to twice their length and
                     // retain the initial batch-sized allocation. Four bitmaps
                     // and per-batch aligned headers remain conservative.
@@ -185,7 +186,7 @@ fn node_bytes(
     ))
 }
 
-/// Raw header counts and byte sizes are allocation authorities in Parquet 58.4.
+/// Raw header counts and byte sizes are allocation authorities in Parquet 60.2.
 /// Authentication fixes the file identity; it does not prove their agreement
 /// with the footer. Inspect headers with bounded transport before decoder use.
 #[allow(clippy::too_many_lines)]

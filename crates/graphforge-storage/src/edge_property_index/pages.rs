@@ -605,8 +605,8 @@ impl<'a> PackHandles<'a> {
         {
             return Err(validation("blob schema is malformed"));
         }
-        // A schema message has no body. StreamDecoder may only process that
-        // body on the next nonempty decode, so schema() can still be None here.
+        // A schema message has no body; arrow-ipc 60's StreamDecoder installs
+        // the schema in this same decode, before any page is read.
         let mut arrays = Vec::with_capacity(wanted.len());
         let mut retained = query_mul(wanted.len(), std::mem::size_of::<ArrayRef>())?;
         let mut next = 0;
@@ -621,10 +621,12 @@ impl<'a> PackHandles<'a> {
             )?;
             next = end;
         }
-        if self.is_admitted() {
+        if self.is_admitted() && !arrays.is_empty() {
             // Every page shares the decoder's nested schema allocations. Their
             // original construction grant stayed live across all page scopes;
-            // transfer its retained type owner once, without pool growth.
+            // transfer its retained type owner once, without pool growth. With
+            // no page returned nothing keeps the decoder's schema, which is
+            // dropped below with the decoder.
             if let Some(schema) = decoder.schema() {
                 for field in schema.fields() {
                     retained = query_add(retained, query_mul(field.data_type().size(), 4)?)?;

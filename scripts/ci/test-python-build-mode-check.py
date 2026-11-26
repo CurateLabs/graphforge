@@ -28,7 +28,8 @@ def metadata(*, extension: bool = False) -> dict:
             "nodes": [
                 {
                     "id": name,
-                    "features": ["abi3-py310"] + (["extension-module"] if extension else []),
+                    "features": (["abi3-py310"] if name in CHECK.ABI3_CRATES else [])
+                    + (["extension-module"] if extension else []),
                 }
                 for name in CHECK.PYO3_CRATES
             ]
@@ -56,10 +57,14 @@ class BuildModeTests(unittest.TestCase):
     def test_packaging_must_enable_extension_and_keep_abi3(self) -> None:
         with self.assertRaisesRegex(ValueError, "extension packaging"):
             CHECK.validate_metadata(metadata(), extension=True)
-        graph = metadata(extension=True)
-        graph["resolve"]["nodes"][0]["features"].remove("abi3-py310")
-        with self.assertRaisesRegex(ValueError, "ABI3"):
-            CHECK.validate_metadata(graph, extension=True)
+        for name in CHECK.ABI3_CRATES:
+            with self.subTest(crate=name):
+                graph = metadata(extension=True)
+                next(node for node in graph["resolve"]["nodes"] if node["id"] == name)[
+                    "features"
+                ].remove("abi3-py310")
+                with self.assertRaisesRegex(ValueError, "ABI3"):
+                    CHECK.validate_metadata(graph, extension=True)
 
     def test_missing_resolved_crates_fail_closed(self) -> None:
         graph = metadata()

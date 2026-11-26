@@ -2507,7 +2507,7 @@ fn encode_live_schema_summary(counts: BTreeMap<String, u64>) -> Result<String, G
 }
 
 pub(crate) fn rename_live_schema_summary(
-    metadata: &mut HashMap<String, String>,
+    metadata: &mut arrow::datatypes::Metadata,
     renames: &BTreeMap<String, String>,
 ) -> Result<(), GfError> {
     let Some(encoded) = metadata.get(PROPERTY_LIVE_SCHEMA_KEY).cloned() else {
@@ -2515,7 +2515,7 @@ pub(crate) fn rename_live_schema_summary(
     };
     let schema = arrow::datatypes::Schema::new_with_metadata(
         Vec::<arrow::datatypes::Field>::new(),
-        HashMap::from([(PROPERTY_LIVE_SCHEMA_KEY.to_owned(), encoded)]),
+        [(PROPERTY_LIVE_SCHEMA_KEY, encoded)],
     );
     let summary = decode_live_schema_summary(&schema)?
         .ok_or_else(|| corrupt("property live schema summary disappeared"))?;

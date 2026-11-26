@@ -29,6 +29,7 @@ use datafusion::physical_plan::PlanProperties;
 use datafusion::physical_plan::RecordBatchStream;
 use datafusion::physical_plan::SendableRecordBatchStream;
 use datafusion::physical_plan::metrics::MetricsSet;
+use datafusion::physical_plan::statistics::{ChildStats, StatisticsArgs};
 use futures::Stream;
 use tokio::sync::watch;
 
@@ -441,6 +442,18 @@ impl ExecutionPlan for UuidBuildKeyTapExec {
         self.input.properties()
     }
 
+    fn apply_expressions(
+        &self,
+        _f: &mut dyn FnMut(
+            &Arc<dyn datafusion::physical_expr::PhysicalExpr>,
+        ) -> Result<
+            datafusion::common::tree_node::TreeNodeRecursion,
+            DataFusionError,
+        >,
+    ) -> Result<datafusion::common::tree_node::TreeNodeRecursion, DataFusionError> {
+        Ok(datafusion::common::tree_node::TreeNodeRecursion::Continue)
+    }
+
     fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
         vec![&self.input]
     }
@@ -480,11 +493,18 @@ impl ExecutionPlan for UuidBuildKeyTapExec {
     /// The tap passes every row of its input through unchanged, so its
     /// statistics are the input's. Left to the default they are unknown, which
     /// hides the build side's size from every join and traversal above it.
-    fn partition_statistics(
+    fn child_stats_requests(&self, partition: Option<usize>) -> Vec<ChildStats> {
+        vec![ChildStats::At(partition)]
+    }
+
+    fn statistics_from_inputs(
         &self,
-        partition: Option<usize>,
+        input_stats: &[Arc<Statistics>],
+        _args: &StatisticsArgs,
     ) -> Result<Arc<Statistics>, DataFusionError> {
-        self.input.partition_statistics(partition)
+        input_stats.first().cloned().ok_or_else(|| {
+            DataFusionError::Internal("UuidBuildKeyTapExec expects one input's statistics".into())
+        })
     }
 
     fn execute(
@@ -908,6 +928,7 @@ mod tap_statistics_tests {
     use datafusion::physical_plan::ExecutionPlan;
 
     use super::{UuidBuildKeyNomination, UuidBuildKeyTapExec};
+    use datafusion::physical_plan::statistics::{StatisticsArgs, StatisticsContext};
 
     /// A two-partition input of 20 and 30 rows, each an exact count.
     fn input() -> Arc<dyn ExecutionPlan> {
@@ -935,18 +956,31 @@ mod tap_statistics_tests {
         let tap = UuidBuildKeyTapExec::new(Arc::clone(&input), 0, UuidBuildKeyNomination::new());
 
         assert_eq!(
-            tap.partition_statistics(None).unwrap().num_rows,
+            StatisticsContext::new()
+                .compute(&tap, &StatisticsArgs::new().with_partition(None))
+                .unwrap()
+                .num_rows,
             Precision::Exact(50)
         );
         for partition in [0, 1] {
             assert_eq!(
-                tap.partition_statistics(Some(partition)).unwrap(),
-                input.partition_statistics(Some(partition)).unwrap(),
+                StatisticsContext::new()
+                    .compute(&tap, &StatisticsArgs::new().with_partition(Some(partition)))
+                    .unwrap(),
+                StatisticsContext::new()
+                    .compute(
+                        &*input,
+                        &StatisticsArgs::new().with_partition(Some(partition))
+                    )
+                    .unwrap(),
                 "partition {partition}"
             );
         }
         assert_eq!(
-            tap.partition_statistics(Some(0)).unwrap().num_rows,
+            StatisticsContext::new()
+                .compute(&tap, &StatisticsArgs::new().with_partition(Some(0)))
+                .unwrap()
+                .num_rows,
             Precision::Exact(20)
         );
     }

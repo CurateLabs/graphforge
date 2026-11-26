@@ -81,14 +81,16 @@ fn a_compressed_buffer_that_advertises_a_huge_expansion_is_refused_when_planned(
             "{}",
             honest.decoding_bytes
         );
-        // The 4 MiB values buffer makes Arrow's writer declare a 4 MiB
-        // independent frame, and the LZ4 plan's codec context is its
-        // exact scanned geometry plus the persistent chunk. A ZSTD
-        // buffer runs no frame decoder, so it admits none.
+        // Arrow's writer declares 256 KiB independent blocks for every
+        // buffer (`arrow-ipc` 60.2 `Lz4Compressor::new` pins
+        // `BlockSize::Max256KB`), so the 4 MiB values buffer's frame
+        // initializes a 256 KiB `src` and `dst`, and the LZ4 plan's codec
+        // context is that exact scanned geometry plus the persistent chunk.
+        // A ZSTD buffer runs no frame decoder, so it admits none.
         if compression == arrow::ipc::CompressionType::LZ4_FRAME {
             assert_eq!(
                 honest.codec_context,
-                2 * (4 << 20) + super::VERIFY_CHUNK_BYTES as u64
+                2 * (256 << 10) + super::VERIFY_CHUNK_BYTES as u64
             );
         } else {
             assert_eq!(honest.codec_context, 0);
@@ -845,11 +847,13 @@ fn two_lz4_dictionaries_and_a_batch_decode_within_the_exact_planned_budget() {
 
     let plan = ipc_plan(&path).unwrap();
     assert_eq!(plan.dictionaries.len(), 2, "two dictionary messages");
-    // The codec context covers one ordinary 64 KiB independent frame:
-    // every compressed buffer here is smaller than a block.
+    // The codec context covers one independent frame of the 256 KiB blocks
+    // Arrow's writer declares for every buffer (`arrow-ipc` 60.2
+    // `Lz4Compressor::new`): every compressed buffer here is smaller than a
+    // block, and the decoder still reserves the declared block size.
     assert_eq!(
         plan.codec_context,
-        2 * 64 * 1024 + super::VERIFY_CHUNK_BYTES as u64
+        2 * 256 * 1024 + super::VERIFY_CHUNK_BYTES as u64
     );
 
     super::super::bulk_source::TEST_BUDGET.with(|budget| budget.set(Some(plan.decoding_bytes)));

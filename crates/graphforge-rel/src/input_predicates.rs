@@ -425,7 +425,7 @@ mod tests {
                 Some(TableReference::bare("var_0")),
                 Arc::new(Field::new("score", DataType::Int64, true)),
             )],
-            Default::default(),
+            datafusion::arrow::datatypes::Metadata::new(),
         )
         .unwrap();
         let input = LogicalPlan::EmptyRelation(EmptyRelation {
@@ -546,7 +546,7 @@ mod tests {
                 Some(TableReference::bare("var_0")),
                 Arc::new(Field::new("score", DataType::Int64, true)),
             )],
-            Default::default(),
+            datafusion::arrow::datatypes::Metadata::new(),
         )
         .unwrap();
         let input = LogicalPlan::EmptyRelation(EmptyRelation {
@@ -681,7 +681,7 @@ mod tests {
                     Arc::new(Field::new("score", DataType::Int64, true)),
                 ),
             ],
-            Default::default(),
+            datafusion::arrow::datatypes::Metadata::new(),
         )
         .unwrap()
     }
@@ -830,9 +830,11 @@ mod tests {
                 Arc::new(Field::new("edge_id", DataType::UInt64, false)),
             )
         };
-        let schema =
-            DFSchema::new_with_metadata(vec![edge("var_1"), edge("var_3")], Default::default())
-                .unwrap();
+        let schema = DFSchema::new_with_metadata(
+            vec![edge("var_1"), edge("var_3")],
+            datafusion::arrow::datatypes::Metadata::new(),
+        )
+        .unwrap();
         let disjoint = crate::expr::relationship_disjoint(
             Expr::Column(Column::new(Some(TableReference::bare("var_1")), "edge_id")),
             Expr::Column(Column::new(Some(TableReference::bare("var_3")), "edge_id")),
@@ -851,7 +853,7 @@ mod tests {
                     )
                 })
                 .collect(),
-            Default::default(),
+            datafusion::arrow::datatypes::Metadata::new(),
         )
         .unwrap()
     }

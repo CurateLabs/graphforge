@@ -1216,13 +1216,17 @@ mod lifecycle_budget {
             let keys = (0..records)
                 .map(|index| u128::from(index + 1).to_be_bytes())
                 .collect::<Vec<_>>();
-            let mut sampler = IdentitySampler::new(16, records).unwrap();
+            let mut sampler = IdentitySampler::new(REQUESTED_PARTITIONS, records).unwrap();
             let positions = sampler.positions().collect::<Vec<_>>();
             for position in positions {
                 sampler.admit(keys[usize::try_from(position).unwrap()]).unwrap();
             }
-            let plan = sampler.into_plan(16).unwrap();
-            assert!(plan.partitions() > 1, "{}", plan.partitions());
+            let plan = sampler.into_plan(REQUESTED_PARTITIONS).unwrap();
+            assert_eq!(
+                plan.partitions(),
+                usize::try_from(REQUESTED_PARTITIONS).unwrap(),
+                "chunks={chunks}"
+            );
             let mut partitioner = FixedRangePartitioner::<16>::new(
                 &session.root,
                 PartitionFamily::Identities,

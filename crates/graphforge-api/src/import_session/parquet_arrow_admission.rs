@@ -1,9 +1,9 @@
 //! Preflight the Arrow schema and ParquetField allocations made by
-//! `ArrowReaderMetadata::try_new` (parquet 58.4).
+//! `ArrowReaderMetadata::try_new` (parquet 60.2).
 //!
 //! The Parquet converter first copies footer key/value metadata, decodes an
 //! optional base64 Arrow IPC schema hint, converts that hint with
-//! `fb_to_schema`, then builds Arrow fields and the `ParquetField` level tree.
+//! `try_fb_to_schema`, then builds Arrow fields and the `ParquetField` level tree.
 //! This module performs the hint conversion only for measurement, after
 //! charging its decoded bytes, and bounds the subsequent Parquet conversion
 //! from the already-validated schema topology. It never constructs an owned
@@ -25,7 +25,7 @@ use parquet::schema::types::Type;
 use crate::CancellationToken;
 
 use super::inventory_budget::InventoryBudget;
-use super::ipc_schema_admission::IpcSchemaEnvelope;
+use super::ipc_schema_admission::{IpcSchemaEnvelope, hash_map_layouts};
 use super::parquet_alloc;
 use super::parquet_schema_envelope::SchemaTopologyFacts;
 use super::{cancelled, limit, storage};
@@ -33,7 +33,7 @@ use super::{cancelled, limit, storage};
 const ARROW_SCHEMA_KEY: &str = "ARROW:schema";
 const BASE64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
-// Mirrors parquet 58.4's private `ParquetFieldType` and `ParquetField` layout
+// Mirrors parquet 60.2's private `ParquetFieldType` and `ParquetField` layout
 // from arrow/schema/complex.rs. Keeping the pinned fields and enum variants
 // here lets `size_of` compute the inline request instead of guessing a fixed
 // number of bytes. The recursive edge is behind Vec, as in the upstream type.
@@ -134,7 +134,7 @@ fn estimate_inferred_requests(
 
     let mut bytes = 0_u64;
     // Arrow Field Arc allocations and the ParquetField tree nodes. The local
-    // layout mirror above is field-for-field identical to parquet 58.4's
+    // layout mirror above is field-for-field identical to parquet 60.2's
     // private type, so this includes enum padding/alignment from this target.
     let per_parquet_field = size_of::<ParquetFieldRequest>();
     add(
@@ -161,7 +161,11 @@ fn estimate_inferred_requests(
 
     // Names are copied into Arrow Fields; repeated-list wrappers add a small
     // synthetic name. Field IDs and extension annotations add bounded
-    // per-element metadata strings/maps.
+    // per-element metadata strings. Each element with either also gets a
+    // metadata map: parquet 60.2 builds a one-entry `HashMap` for a field id
+    // (`complex.rs`, `set_metadata`) that Arrow 60 converts into a
+    // `BTreeMap`-backed `Metadata`, and an extension type inserts at most two
+    // more entries into the same map.
     let copied_names = topology
         .name_bytes
         .checked_mul(2)
@@ -171,6 +175,15 @@ fn estimate_inferred_requests(
     add(
         &mut bytes,
         topology.nodes.checked_mul(256).ok_or_else(overflow)?,
+    )?;
+    let (_, field_id_map_peak) = hash_map_layouts::<String, String>(1)?;
+    let field_metadata_map = parquet_alloc::string_metadata_map(3, field_id_map_peak)?.peak_bytes;
+    add(
+        &mut bytes,
+        topology
+            .metadata_nodes
+            .checked_mul(field_metadata_map)
+            .ok_or_else(overflow)?,
     )?;
     // Geospatial extension conversion copies the CRS into Arrow field
     // metadata. The topology facts already counted source CRS bytes for
@@ -376,6 +389,9 @@ pub(super) fn preflight(
     let metadata_map_bytes = key_value_bytes
         .checked_add(key_value_count.checked_mul(256).ok_or_else(overflow)?)
         .ok_or_else(overflow)?;
+    // `Schema::new_with_metadata` then converts that map, merged with the
+    // hint schema's metadata, into Arrow 60's `BTreeMap`-backed `Metadata`.
+    // Every stage of that conversion is charged as retained.
     let (hint_decoded_bytes, hint_facts) = match hint {
         Some(encoded) => {
             let (decoded, facts) = hint_schema_bytes(
@@ -399,8 +415,18 @@ pub(super) fn preflight(
     let hint_peak = hint_facts.map_or(0, |facts| facts.peak_request_bytes);
     let hint_retained = hint_facts.map_or(0, |facts| facts.retained_request_bytes);
 
+    let merged_entries = key_value_count
+        .checked_add(hint_facts.map_or(0, |facts| facts.metadata_occurrences))
+        .ok_or_else(overflow)?;
+    let schema_metadata_tree = parquet_alloc::string_metadata_map(
+        usize::try_from(merged_entries).map_err(|_| overflow())?,
+        0,
+    )?
+    .peak_bytes;
+
     let mut retained = metadata_map_bytes;
     add(&mut retained, inferred)?;
+    add(&mut retained, schema_metadata_tree)?;
     // The converted hint stays live while the Parquet schema converter uses
     // its fields and metadata as hints, but is dropped before the final
     // ArrowReaderMetadata is returned.

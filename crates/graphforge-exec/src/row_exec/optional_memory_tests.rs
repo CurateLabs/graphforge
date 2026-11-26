@@ -5,6 +5,7 @@ use datafusion::execution::memory_pool::MemoryPool;
 use datafusion::execution::runtime_env::RuntimeEnvBuilder;
 use datafusion::logical_expr::LogicalPlanBuilder;
 use datafusion::logical_expr::logical_plan::LogicalTableSource;
+use datafusion::physical_plan::{ChildrenPropertiesMode, ReplaceChildrenOptions};
 use datafusion::prelude::{SessionConfig, SessionContext};
 use std::sync::atomic::Ordering;
 
@@ -774,7 +775,12 @@ async fn optional_tiny_windows_charge_full_pair_bitmap_aliases_in_nested_null_ou
         Some(SeedRows::new(vec![outer])),
     ));
     let inner = plan.children()[1].clone();
-    let plan = plan.with_new_children(vec![outer, inner]).unwrap();
+    let plan = plan
+        .replace_children(
+            vec![outer, inner],
+            ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
+        )
+        .unwrap();
     let (context, pool) = context(16 * MIB);
     let context = SessionContext::new_with_config_rt(
         SessionConfig::new().with_batch_size(2),

@@ -684,10 +684,7 @@ fn schema_header_bytes(schema: &arrow::datatypes::Schema) -> u64 {
     }
     let metadata = schema.metadata();
     bytes = bytes
-        .saturating_add(
-            (metadata.capacity() as u64)
-                .saturating_mul(std::mem::size_of::<(String, String)>() as u64),
-        )
+        .saturating_add(metadata_container_bytes(metadata))
         .saturating_add(metadata.iter().fold(0_u64, |total, (key, value)| {
             total
                 .saturating_add(key.len() as u64)
@@ -696,14 +693,35 @@ fn schema_header_bytes(schema: &arrow::datatypes::Schema) -> u64 {
     bytes
 }
 
+/// Upper bound on the heap an Arrow [`Metadata`](arrow::datatypes::Metadata)
+/// map holds besides its key and value strings.
+///
+/// Arrow 60 stores metadata as `Option<Arc<BTreeMap<String, String>>>`, and the
+/// empty map does not allocate. A B-tree node holds at most eleven entries and
+/// at least one, so no map has more nodes than entries; each node is charged
+/// as an internal node (eleven key and value slots, twelve child edges and its
+/// header), the larger of the two node kinds. The `Arc` allocation adds its two
+/// reference counts and the map's own root, height and length words.
+fn metadata_container_bytes(metadata: &arrow::datatypes::Metadata) -> u64 {
+    const NODE_SLOTS: u64 = 11;
+    let word = std::mem::size_of::<usize>() as u64;
+    if metadata.is_empty() {
+        return 0;
+    }
+    let slot = std::mem::size_of::<(String, String)>() as u64;
+    let node = (NODE_SLOTS * slot)
+        .saturating_add((NODE_SLOTS + 1) * word)
+        .saturating_add(2 * word);
+    (2 * word)
+        .saturating_add(std::mem::size_of::<std::collections::BTreeMap<String, String>>() as u64)
+        .saturating_add((metadata.len() as u64).saturating_mul(node))
+}
+
 fn field_header_bytes(field: &arrow::datatypes::Field) -> u64 {
     let mut bytes = (std::mem::size_of::<arrow::datatypes::Field>() + field.name().len()) as u64;
     let metadata = field.metadata();
     bytes = bytes
-        .saturating_add(
-            (metadata.capacity() as u64)
-                .saturating_mul(std::mem::size_of::<(String, String)>() as u64),
-        )
+        .saturating_add(metadata_container_bytes(metadata))
         .saturating_add(metadata.iter().fold(0_u64, |total, (key, value)| {
             total
                 .saturating_add(key.len() as u64)

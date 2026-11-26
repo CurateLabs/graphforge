@@ -15,19 +15,13 @@ resolver = "2"
 edition = "2024"
 license = "Apache-2.0"
 publish = false
-rust-version = "1.85"
+rust-version = "1.95"
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-arrow = "=58.4.0"
-parquet = { version = "=58.4.0", features = ["arrow"] }
-
-# This standalone workspace must use the same engine patches as the product.
-[patch.crates-io]
-arrow-row = { path = "../vendor/arrow-row" }
-datafusion-physical-plan = { path = "../vendor/datafusion-physical-plan" }
-datafusion-optimizer = { path = "../vendor/datafusion-optimizer" }
+arrow = "=60.2.0"
+parquet = { version = "=60.2.0", features = ["arrow"] }
 
 # The GDC query driver hashes its own executable into every evidence document.
 # Unoptimized, SHA-256 over a debug binary takes over 30 s per run in the tests.

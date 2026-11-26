@@ -1071,7 +1071,7 @@ pub fn evaluate_path_nodes(
     };
     let fields = element_fields;
     let mut children: Vec<ArrayRef> = vec![uuid_child];
-    let batch_size = args.config_options.execution.batch_size.max(1);
+    let batch_size = usize::from(args.config_options.execution.batch_size);
     children.extend(hydrate(&flat, batch_size)?);
 
     let struct_arr = StructArray::try_new(fields.clone(), children, None)

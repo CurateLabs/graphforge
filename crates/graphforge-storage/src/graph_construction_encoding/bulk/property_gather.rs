@@ -100,11 +100,11 @@ fn gather_list_column(
             end += 1;
             continue;
         }
-        output.extend(source, start, end);
+        output.try_extend(source, start, end)?;
         source = next_source;
         start = row;
         end = row + 1;
     }
-    output.extend(source, start, end);
+    output.try_extend(source, start, end)?;
     Ok(make_array(output.freeze()))
 }

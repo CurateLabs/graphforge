@@ -596,3 +596,129 @@ fn an_anchor_is_set_once_and_never_by_an_unsupported_equality() {
     assert!(!transformed);
     assert_eq!(node_anchor(&after, "n"), None);
 }
+
+/// `left <inner join> Filter(filter, p)` on `left_alias.node_uuid`, the shape
+/// DataFusion's own outer-join elimination and filter pushdown leave.
+fn inner_joined(
+    left: LogicalPlan,
+    left_alias: &str,
+    filter: Expr,
+    pushed: Vec<Expr>,
+) -> LogicalPlan {
+    let LogicalPlan::TableScan(mut scan) = property_scan("p") else {
+        panic!("a property scan");
+    };
+    scan.filters = pushed;
+    let props = LogicalPlanBuilder::from(LogicalPlan::TableScan(scan))
+        .filter(filter)
+        .unwrap()
+        .build()
+        .unwrap();
+    LogicalPlanBuilder::from(left)
+        .join(props, JoinType::Inner, uuid_key(left_alias), None)
+        .unwrap()
+        .build()
+        .unwrap()
+}
+
+#[test]
+fn an_inner_join_on_the_filtered_property_side_anchors_the_node_scan() {
+    let equality = col("p.ident").eq(lit(7_i64));
+    for filter in [
+        equality.clone(),
+        equality.clone().and(col("p.name").eq(lit("ada"))),
+    ] {
+        let (after, transformed) = rewritten(inner_joined(
+            label_filter(node_scan("n")),
+            "n",
+            filter.clone(),
+            vec![equality.clone()],
+        ));
+        assert!(transformed, "{filter}");
+        assert_eq!(
+            node_anchor(&after, "n"),
+            entity_anchor(equality.clone()),
+            "{filter}"
+        );
+        assert_eq!(join_types(&after), vec![JoinType::Inner]);
+        // The filter still decides which property rows survive.
+        let LogicalPlan::Join(join) = &after else {
+            panic!("a join");
+        };
+        let LogicalPlan::Filter(kept) = join.right.as_ref() else {
+            panic!("the property filter stays");
+        };
+        assert_eq!(kept.predicate, filter);
+        // Anchored once.
+        let (_, again) = rewritten(after.clone());
+        assert!(!again);
+    }
+}
+
+#[test]
+fn an_inner_join_anchors_only_by_an_equality_its_filter_enforces() {
+    let equality = col("p.ident").eq(lit(7_i64));
+    // The scan carries the equality but the filter above it does not: nothing
+    // proves the joined rows satisfy it.
+    let unenforced = inner_joined(
+        node_scan("n"),
+        "n",
+        col("p.name").eq(lit("ada")),
+        vec![equality.clone()],
+    );
+    // The filter enforces an equality the scan cannot use.
+    let unpushed = inner_joined(node_scan("n"), "n", equality.clone(), vec![]);
+    for plan in [unenforced, unpushed] {
+        let (after, transformed) = rewritten(plan);
+        assert!(!transformed);
+        assert_eq!(node_anchor(&after, "n"), None);
+    }
+    // A left join keeps the node rows the filter would reject: no anchor.
+    let LogicalPlan::Join(mut left) = inner_joined(
+        node_scan("n"),
+        "n",
+        equality.clone(),
+        vec![equality.clone()],
+    ) else {
+        panic!("a join");
+    };
+    left.join_type = JoinType::Left;
+    let (after, transformed) = rewritten(LogicalPlan::Join(left));
+    assert!(!transformed);
+    assert_eq!(node_anchor(&after, "n"), None);
+}
+
+/// Through DataFusion's whole logical optimizer, an equality on a projected
+/// property column anchors the node scan whichever rule removes the left
+/// join: DataFusion's outer-join elimination, or this rule.
+#[test]
+fn the_full_logical_optimizer_anchors_the_node_scan() {
+    use datafusion::optimizer::Optimizer;
+    for projected in [true, false] {
+        let predicate = if projected {
+            col("n.ident").eq(lit(7_i64))
+        } else {
+            col("p.ident").eq(lit(7_i64))
+        };
+        let before = plan(
+            GraphReadTable::Properties("Entity".into()),
+            JoinType::Left,
+            projected,
+            predicate,
+        );
+        let after = Optimizer::with_rules(crate::input_predicates::optimizer_rules())
+            .optimize(before, &OptimizerContext::new(), |_, _| {})
+            .unwrap();
+        assert_eq!(
+            node_anchor(&after, "n"),
+            entity_anchor(col("p.ident").eq(lit(7_i64))),
+            "projected={projected}\n{}",
+            after.display_indent()
+        );
+        assert_eq!(
+            join_types(&after),
+            vec![JoinType::Inner],
+            "projected={projected}"
+        );
+    }
+}

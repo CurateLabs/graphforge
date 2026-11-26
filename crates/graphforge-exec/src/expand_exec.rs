@@ -33,6 +33,8 @@ use datafusion::physical_plan::SendableRecordBatchStream;
 use datafusion::physical_plan::execution_plan::Boundedness;
 use datafusion::physical_plan::execution_plan::EmissionType;
 use datafusion::physical_plan::metrics::MetricsSet;
+use datafusion::physical_plan::statistics::ChildStats;
+use datafusion::physical_plan::statistics::StatisticsArgs;
 use datafusion::physical_plan::stream::RecordBatchReceiverStream;
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use edge_filter::PhysicalEdgeFilter;
@@ -351,6 +353,23 @@ impl ExecutionPlan for VarLenExpandExec {
         &self.props
     }
 
+    /// The edge predicate is evaluated during execution.
+    fn apply_expressions(
+        &self,
+        f: &mut dyn FnMut(
+            &std::sync::Arc<dyn datafusion::physical_expr::PhysicalExpr>,
+        ) -> datafusion::common::Result<
+            datafusion::common::tree_node::TreeNodeRecursion,
+        >,
+    ) -> datafusion::common::Result<datafusion::common::tree_node::TreeNodeRecursion> {
+        datafusion::physical_plan::apply_expression_roots(
+            self.edge_filter
+                .iter()
+                .map(|predicate| predicate.predicate()),
+            f,
+        )
+    }
+
     fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
         vec![&self.input]
     }
@@ -392,14 +411,28 @@ impl ExecutionPlan for VarLenExpandExec {
         Some(self.metrics.snapshot())
     }
 
-    fn partition_statistics(
+    /// The estimate scales the input's whole-plan row count, whichever
+    /// partition is asked for (see [`crate::expand_statistics::Scope`]).
+    fn child_stats_requests(&self, _partition: Option<usize>) -> Vec<ChildStats> {
+        vec![ChildStats::At(None)]
+    }
+
+    fn statistics_from_inputs(
         &self,
-        partition: Option<usize>,
+        input_stats: &[Arc<datafusion::common::Statistics>],
+        args: &StatisticsArgs,
     ) -> Result<Arc<datafusion::common::Statistics>, DataFusionError> {
-        crate::expand_statistics::variable_length(
-            &self.input,
+        let [input] = input_stats else {
+            return Err(DataFusionError::Internal(format!(
+                "{} expects the statistics of one input, got {}",
+                self.name(),
+                input_stats.len()
+            )));
+        };
+        Ok(crate::expand_statistics::variable_length(
+            input,
             crate::expand_statistics::Scope {
-                partition,
+                partition: args.partition(),
                 output_partitions: self.props.output_partitioning().partition_count(),
             },
             self.provider.as_ref(),
@@ -411,7 +444,7 @@ impl ExecutionPlan for VarLenExpandExec {
                 expansion: self.expansion,
             },
             &self.schema,
-        )
+        ))
     }
 
     fn execute(
@@ -459,93 +492,6 @@ impl ExecutionPlan for VarLenExpandExec {
                 .map_err(to_df_err)
         });
         Ok(builder.build())
-    }
-}
-
-/// Pass-through physical node for [`OntologyInferNode`](graphforge_plan::OntologyInferNode)
-/// (#605). VarLenExpand already computes the transitive/symmetric closure, so this
-/// simply delegates to its single input. It exists so (a) the extension planner has
-/// a handler (an unhandled extension node panics at plan time), and (b) the physical
-/// plan + `explain()` surface the inference `rule_id`. The provenance event itself is
-/// recorded once per rule by the execution session (see `record_inference_provenance`).
-pub struct OntologyInferExec {
-    input: Arc<dyn ExecutionPlan>,
-    rule_id: String,
-    confidence_model: String,
-    schema: SchemaRef,
-    props: Arc<PlanProperties>,
-}
-
-impl OntologyInferExec {
-    /// Build the pass-through from its logical counterpart + planned input.
-    #[must_use]
-    pub fn new(node: &graphforge_plan::OntologyInferNode, input: Arc<dyn ExecutionPlan>) -> Self {
-        let schema: SchemaRef = Arc::new(node.schema().as_arrow().clone());
-        let props = partitioned_properties(&schema, &input);
-        Self {
-            input,
-            rule_id: node.rule_id.clone(),
-            confidence_model: node.confidence_model.clone(),
-            schema,
-            props,
-        }
-    }
-}
-
-impl fmt::Debug for OntologyInferExec {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "OntologyInferExec {{ rule_id: {} }}", self.rule_id)
-    }
-}
-
-impl DisplayAs for OntologyInferExec {
-    fn fmt_as(&self, _t: DisplayFormatType, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "OntologyInferExec: rule_id={}, confidence_model={}",
-            self.rule_id, self.confidence_model
-        )
-    }
-}
-
-impl ExecutionPlan for OntologyInferExec {
-    fn name(&self) -> &str {
-        "OntologyInferExec"
-    }
-
-    fn properties(&self) -> &Arc<PlanProperties> {
-        &self.props
-    }
-
-    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
-        vec![&self.input]
-    }
-
-    fn with_new_children(
-        self: Arc<Self>,
-        children: Vec<Arc<dyn ExecutionPlan>>,
-    ) -> Result<Arc<dyn ExecutionPlan>, DataFusionError> {
-        let input = children
-            .into_iter()
-            .next()
-            .ok_or_else(|| DataFusionError::Internal("OntologyInferExec needs one child".into()))?;
-        let props = partitioned_properties(&self.schema, &input);
-        Ok(Arc::new(Self {
-            input,
-            rule_id: self.rule_id.clone(),
-            confidence_model: self.confidence_model.clone(),
-            schema: self.schema.clone(),
-            props,
-        }))
-    }
-
-    fn execute(
-        &self,
-        partition: usize,
-        context: Arc<TaskContext>,
-    ) -> Result<SendableRecordBatchStream, DataFusionError> {
-        // Pass-through: the wrapped input already produced the closure rows.
-        self.input.execute(partition, context)
     }
 }
 
@@ -1954,6 +1900,23 @@ impl ExecutionPlan for ExpandExec {
         &self.props
     }
 
+    /// The edge predicate is evaluated during execution.
+    fn apply_expressions(
+        &self,
+        f: &mut dyn FnMut(
+            &std::sync::Arc<dyn datafusion::physical_expr::PhysicalExpr>,
+        ) -> datafusion::common::Result<
+            datafusion::common::tree_node::TreeNodeRecursion,
+        >,
+    ) -> datafusion::common::Result<datafusion::common::tree_node::TreeNodeRecursion> {
+        datafusion::physical_plan::apply_expression_roots(
+            self.edge_predicate
+                .iter()
+                .map(|predicate| predicate.predicate()),
+            f,
+        )
+    }
+
     fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
         vec![&self.input]
     }
@@ -2040,14 +2003,28 @@ impl ExecutionPlan for ExpandExec {
         self.fetch
     }
 
-    fn partition_statistics(
+    /// The estimate scales the input's whole-plan row count, whichever
+    /// partition is asked for (see [`crate::expand_statistics::Scope`]).
+    fn child_stats_requests(&self, _partition: Option<usize>) -> Vec<ChildStats> {
+        vec![ChildStats::At(None)]
+    }
+
+    fn statistics_from_inputs(
         &self,
-        partition: Option<usize>,
+        input_stats: &[Arc<datafusion::common::Statistics>],
+        args: &StatisticsArgs,
     ) -> Result<Arc<datafusion::common::Statistics>, DataFusionError> {
-        crate::expand_statistics::single_hop(
-            &self.input,
+        let [input] = input_stats else {
+            return Err(DataFusionError::Internal(format!(
+                "{} expects the statistics of one input, got {}",
+                self.name(),
+                input_stats.len()
+            )));
+        };
+        Ok(crate::expand_statistics::single_hop(
+            input,
             crate::expand_statistics::Scope {
-                partition,
+                partition: args.partition(),
                 output_partitions: self.props.output_partitioning().partition_count(),
             },
             self.provider.as_ref(),
@@ -2055,7 +2032,7 @@ impl ExecutionPlan for ExpandExec {
             self.direction,
             self.fetch,
             &self.schema,
-        )
+        ))
     }
 
     fn benefits_from_input_partitioning(&self) -> Vec<bool> {
@@ -2161,6 +2138,7 @@ impl ExecutionPlan for ExpandExec {
                         Some(&input_batch),
                         &RecordBatch::new_empty(cfg.out_schema.clone()),
                     )?;
+                    let input_batch = cfg.compact_held_input(input_batch)?;
                     pending = Some((input_batch, SingleHopPosition::default()));
                 }
             },
@@ -2977,9 +2955,11 @@ mod edge_predicate;
 mod edge_properties;
 mod hop_read;
 mod input_columns;
+mod ontology_infer;
 use hop_read::{
     HOP_READ_CONSUMER, HopReadCharge, batches_bytes, concat_precharged, expand_single_hop_chunk,
 };
+pub use ontology_infer::OntologyInferExec;
 pub(crate) mod metrics;
 mod ordinal_identity;
 mod reachability;

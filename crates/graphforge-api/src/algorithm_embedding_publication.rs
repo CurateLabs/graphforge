@@ -341,7 +341,7 @@ fn validate_canonical_algorithm_schema(
     if metadata.len() != expected_metadata.len()
         || expected_metadata
             .iter()
-            .any(|(key, value)| metadata.get(*key).map(String::as_str) != Some(value.as_str()))
+            .any(|(key, value)| metadata.get(key).map(String::as_str) != Some(value.as_str()))
     {
         return Err(validation(
             "algorithm embedding result has non-canonical algorithm metadata",

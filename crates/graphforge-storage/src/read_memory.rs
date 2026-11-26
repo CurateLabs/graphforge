@@ -333,11 +333,11 @@ pub fn visit_buffers(
         },
         DataType::Utf8View => {
             visit(array.as_string_view().views().inner())?;
-            for buffer in array.as_string_view().data_buffers() { visit(buffer)?; }
+            for buffer in array.as_string_view().data_buffers().iter() { visit(buffer)?; }
         },
         DataType::BinaryView => {
             visit(array.as_binary_view().views().inner())?;
-            for buffer in array.as_binary_view().data_buffers() { visit(buffer)?; }
+            for buffer in array.as_binary_view().data_buffers().iter() { visit(buffer)?; }
         },
         DataType::List(_) => {
             visit(array.as_list::<i32>().offsets().inner().inner())?;

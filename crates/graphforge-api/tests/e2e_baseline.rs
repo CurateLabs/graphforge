@@ -5851,7 +5851,7 @@ fn variable_length_relationship_properties_match_exactly_through_fragments_and_i
             // Every execution intentionally creates its own request identity.
             let query_id = combined.schema().metadata()["graphforge.query_id"].clone();
             assert_ne!(metadata["graphforge.query_id"], query_id);
-            metadata.insert("graphforge.query_id".into(), query_id);
+            metadata.insert("graphforge.query_id", query_id);
             let expected = arrow::record_batch::RecordBatch::try_new(
                 std::sync::Arc::new(expected.schema().as_ref().clone().with_metadata(metadata)),
                 expected.columns().to_vec(),

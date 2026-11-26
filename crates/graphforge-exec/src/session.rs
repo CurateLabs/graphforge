@@ -27,6 +27,7 @@ use crate::write_resource;
 use arrow::array::RecordBatch;
 use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
+use datafusion::catalog::Session;
 use datafusion::common::DFSchema;
 use datafusion::common::DataFusionError;
 use datafusion::common::ParamValues;
@@ -39,6 +40,7 @@ use datafusion::logical_expr::Extension;
 use datafusion::logical_expr::LogicalPlan;
 use datafusion::logical_expr::LogicalPlanBuilder;
 use datafusion::logical_expr::UserDefinedLogicalNode;
+use datafusion::logical_expr::physical_planning_context::PhysicalPlanningContext;
 use datafusion::logical_expr::simplify::SimplifyContext;
 use datafusion::optimizer::simplify_expressions::ExprSimplifier;
 use datafusion::physical_plan::ExecutionPlan;
@@ -140,6 +142,7 @@ fn plan_var_len_extension(
     planner: &dyn PhysicalPlanner,
     physical_inputs: &[Arc<dyn ExecutionPlan>],
     session_state: &SessionState,
+    planning_ctx: &PhysicalPlanningContext,
 ) -> Result<Arc<dyn ExecutionPlan>, DataFusionError> {
     let input = physical_inputs.first().cloned().ok_or_else(|| {
         DataFusionError::Internal("VarLenExpand requires one physical input".into())
@@ -171,7 +174,8 @@ fn plan_var_len_extension(
                 .build(),
         );
         let predicate = simplifier.simplify(filter.predicate().clone())?;
-        let predicate = planner.create_physical_expr(&predicate, &schema, session_state)?;
+        let predicate =
+            planner.create_physical_expr(&predicate, &schema, session_state, planning_ctx)?;
         expand = expand.with_edge_filter(predicate, filter.fields());
     }
     Ok(Arc::new(expand))
@@ -182,6 +186,7 @@ fn plan_expand_extension(
     planner: &dyn PhysicalPlanner,
     physical_inputs: &[Arc<dyn ExecutionPlan>],
     session_state: &SessionState,
+    planning_ctx: &PhysicalPlanningContext,
 ) -> Result<Arc<dyn ExecutionPlan>, DataFusionError> {
     let input = physical_inputs
         .first()
@@ -235,10 +240,57 @@ fn plan_expand_extension(
                 .build(),
         );
         let predicate = simplifier.simplify(predicate.clone())?;
-        let predicate = planner.create_physical_expr(&predicate, &schema, session_state)?;
+        let predicate =
+            planner.create_physical_expr(&predicate, &schema, session_state, planning_ctx)?;
         exec = exec.with_edge_predicate(predicate, &fields);
     }
     Ok(Arc::new(exec))
+}
+
+/// Plans GraphForge's write nodes (CREATE, DELETE, SET, REMOVE), each over its
+/// one physical input and its session's write resource; `None` for any other
+/// node.
+fn plan_write_extension(
+    node: &dyn UserDefinedLogicalNode,
+    physical_inputs: &[Arc<dyn ExecutionPlan>],
+    session_state: &SessionState,
+) -> Result<Option<Arc<dyn ExecutionPlan>>, DataFusionError> {
+    if let Some(create) = node.as_any().downcast_ref::<GraphCreateNode>() {
+        let input = physical_inputs.first().cloned().ok_or_else(|| {
+            DataFusionError::Internal("GraphCreate requires one physical input".into())
+        })?;
+        let resource = write_resource::required(session_state, create.write_contract.as_ref())?;
+        resource.validate_composition(create.semantic_composition_fingerprint.as_deref())?;
+        return Ok(Some(Arc::new(GraphCreateExec::new(
+            create, input, &resource,
+        )?)));
+    }
+    if let Some(delete) = node.as_any().downcast_ref::<GraphDeleteNode>() {
+        let input = physical_inputs.first().cloned().ok_or_else(|| {
+            DataFusionError::Internal("GraphDelete requires one physical input".into())
+        })?;
+        let resource = write_resource::required(session_state, delete.write_contract.as_ref())?;
+        return Ok(Some(Arc::new(GraphDeleteExec::new(
+            delete, input, &resource,
+        )?)));
+    }
+    if let Some(set) = node.as_any().downcast_ref::<GraphSetNode>() {
+        let input = physical_inputs.first().cloned().ok_or_else(|| {
+            DataFusionError::Internal("GraphSet requires one physical input".into())
+        })?;
+        let resource = write_resource::required(session_state, set.write_contract.as_ref())?;
+        return Ok(Some(Arc::new(GraphSetExec::new(set, input, &resource)?)));
+    }
+    if let Some(remove) = node.as_any().downcast_ref::<GraphRemoveNode>() {
+        let input = physical_inputs.first().cloned().ok_or_else(|| {
+            DataFusionError::Internal("GraphRemove requires one physical input".into())
+        })?;
+        let resource = write_resource::required(session_state, remove.write_contract.as_ref())?;
+        return Ok(Some(Arc::new(GraphRemoveExec::new(
+            remove, input, &resource,
+        )?)));
+    }
+    Ok(None)
 }
 
 /// Plans GraphForge's custom logical [`Extension`](LogicalPlan::Extension)
@@ -254,55 +306,37 @@ impl ExtensionPlanner for GraphForgeExtensionPlanner {
         node: &dyn UserDefinedLogicalNode,
         logical_inputs: &[&LogicalPlan],
         physical_inputs: &[Arc<dyn ExecutionPlan>],
-        session_state: &SessionState,
+        session: &dyn Session,
+        planning_ctx: &PhysicalPlanningContext,
     ) -> Result<Option<Arc<dyn ExecutionPlan>>, DataFusionError> {
+        let session_state = planning_session_state(session)?;
         if let Some(planned) =
             crate::fast_path::plan_extension(node, logical_inputs, physical_inputs, session_state)
         {
             return planned.map(Some);
         }
-        if let Some(create) = node.as_any().downcast_ref::<GraphCreateNode>() {
-            let input = physical_inputs.first().cloned().ok_or_else(|| {
-                DataFusionError::Internal("GraphCreate requires one physical input".into())
-            })?;
-            let resource = write_resource::required(session_state, create.write_contract.as_ref())?;
-            resource.validate_composition(create.semantic_composition_fingerprint.as_deref())?;
-            return Ok(Some(Arc::new(GraphCreateExec::new(
-                create, input, &resource,
-            )?)));
-        }
-        if let Some(delete) = node.as_any().downcast_ref::<GraphDeleteNode>() {
-            let input = physical_inputs.first().cloned().ok_or_else(|| {
-                DataFusionError::Internal("GraphDelete requires one physical input".into())
-            })?;
-            let resource = write_resource::required(session_state, delete.write_contract.as_ref())?;
-            return Ok(Some(Arc::new(GraphDeleteExec::new(
-                delete, input, &resource,
-            )?)));
-        }
-        if let Some(set) = node.as_any().downcast_ref::<GraphSetNode>() {
-            let input = physical_inputs.first().cloned().ok_or_else(|| {
-                DataFusionError::Internal("GraphSet requires one physical input".into())
-            })?;
-            let resource = write_resource::required(session_state, set.write_contract.as_ref())?;
-            return Ok(Some(Arc::new(GraphSetExec::new(set, input, &resource)?)));
-        }
-        if let Some(remove) = node.as_any().downcast_ref::<GraphRemoveNode>() {
-            let input = physical_inputs.first().cloned().ok_or_else(|| {
-                DataFusionError::Internal("GraphRemove requires one physical input".into())
-            })?;
-            let resource = write_resource::required(session_state, remove.write_contract.as_ref())?;
-            return Ok(Some(Arc::new(GraphRemoveExec::new(
-                remove, input, &resource,
-            )?)));
+        if let Some(planned) = plan_write_extension(node, physical_inputs, session_state)? {
+            return Ok(Some(planned));
         }
         if let Some(expand) = node.as_any().downcast_ref::<graphforge_plan::ExpandNode>() {
-            return plan_expand_extension(expand, planner, physical_inputs, session_state)
-                .map(Some);
+            return plan_expand_extension(
+                expand,
+                planner,
+                physical_inputs,
+                session_state,
+                planning_ctx,
+            )
+            .map(Some);
         }
         if let Some(var_len) = node.as_any().downcast_ref::<VarLenExpandNode>() {
-            return plan_var_len_extension(var_len, planner, physical_inputs, session_state)
-                .map(Some);
+            return plan_var_len_extension(
+                var_len,
+                planner,
+                physical_inputs,
+                session_state,
+                planning_ctx,
+            )
+            .map(Some);
         }
         if let Some(opt) = node.as_any().downcast_ref::<OptionalMatchNode>() {
             // inputs() order is [outer, optional], so physical_inputs matches.
@@ -332,6 +366,12 @@ impl ExtensionPlanner for GraphForgeExtensionPlanner {
             return Ok(Some(Arc::new(AnchoredExpansionExec::try_new(
                 anchored, input, expansion,
             )?)));
+        }
+        if let Some(frontier) = node
+            .as_any()
+            .downcast_ref::<crate::write_driver::FrontierSourceNode>()
+        {
+            return frontier.plan().map(Some);
         }
         if let Some(seed) = node
             .as_any()
@@ -365,13 +405,26 @@ impl ExtensionPlanner for GraphForgeExtensionPlanner {
 #[derive(Debug, Default)]
 pub struct GraphForgeQueryPlanner;
 
+/// The [`SessionState`] a GraphForge planner was handed. DataFusion 56 passes
+/// planners a `&dyn Session`; GraphForge builds every session as a
+/// `SessionState` and reads its config extensions from it.
+fn planning_session_state(session: &dyn Session) -> Result<&SessionState, DataFusionError> {
+    session
+        .as_any()
+        .downcast_ref::<SessionState>()
+        .ok_or_else(|| {
+            DataFusionError::Plan("GraphForge planning requires a DataFusion SessionState".into())
+        })
+}
+
 #[async_trait]
 impl QueryPlanner for GraphForgeQueryPlanner {
     async fn create_physical_plan(
         &self,
         logical_plan: &LogicalPlan,
-        session_state: &SessionState,
+        session: &dyn Session,
     ) -> Result<Arc<dyn ExecutionPlan>, DataFusionError> {
+        let session_state = planning_session_state(session)?;
         let mut pinned_state = session_state.clone();
         if let Some(owner) = session_state
             .config()
@@ -440,8 +493,9 @@ impl Default for SessionResourceConfig {
 /// manager as the resources say (#1595). Spill goes only to the configured
 /// directory under its cap; disabled means no disk manager at all, not
 /// DataFusion's default of the OS temporary directory, which is unbounded and
-/// RAM-backed on some hosts.
-fn session_runtime(
+/// RAM-backed on some hosts. Spill files are validated as they are read back
+/// ([`crate::validated_spill`]).
+pub(crate) fn session_runtime(
     resources: &SessionResourceConfig,
 ) -> Result<
     (
@@ -466,10 +520,20 @@ fn session_runtime(
     if let (true, Some(dir)) = (resources.spill_enabled, &resources.spill_directory) {
         std::fs::create_dir_all(dir)
             .map_err(|error| GfError::Storage(format!("query spill directory: {error}")))?;
-        runtime_builder = runtime_builder.with_temp_file_path(dir.clone());
+        let mut files = datafusion::execution::disk_manager::DiskManagerBuilder::default()
+            .with_mode(
+                datafusion::execution::disk_manager::DiskManagerMode::Directories(vec![
+                    dir.clone(),
+                ]),
+            );
         if let Some(max) = resources.spill_max_bytes {
-            runtime_builder = runtime_builder.with_max_temp_directory_size(max);
+            files = files.with_max_temp_directory_size(max);
         }
+        // DataFusion decodes spill files without Arrow validation, so every
+        // frame is validated before it reaches that decoder (#2354).
+        let validated = crate::validated_spill::validated_disk_manager(files)
+            .map_err(|error| GfError::Storage(format!("query spill directory: {error}")))?;
+        runtime_builder = runtime_builder.with_disk_manager_builder(validated);
     } else {
         runtime_builder = runtime_builder.with_disk_manager_builder(
             datafusion::execution::disk_manager::DiskManagerBuilder::default()
@@ -894,6 +958,15 @@ impl ExecutionSession {
             .options_mut()
             .execution
             .use_row_number_estimates_to_optimize_partitioning = true;
+        // A hash join collects its build side into one batch only while that
+        // side is estimated at no more than 1 MiB; a larger build stays
+        // partitioned, so no partition concatenates it whole and a LEFT
+        // enrichment keeps the partitioned shape its frontier pruning needs.
+        // DataFusion 56 defaults to 4 MiB (#2355).
+        config
+            .options_mut()
+            .optimizer
+            .hash_join_single_partition_threshold = 1024 * 1024;
 
         let memory_budget = usize::try_from(resources.memory_budget_bytes).unwrap_or(usize::MAX);
         size_sort_merge_reservation(&mut config, memory_budget, resources.target_partitions);
@@ -1937,23 +2010,9 @@ mod query_memory_tests;
 
 #[cfg(test)]
 mod spill_pool_regression_tests;
-#[cfg(test)]
-mod spill_writer_tests;
-
-#[cfg(test)]
-mod spill_admission_tests;
 
 #[cfg(test)]
 mod spill_schema_tests;
 
 #[cfg(test)]
-mod copy_phase_tests;
-
-#[cfg(test)]
-mod spill_fifo_tests;
-
-#[cfg(test)]
-mod aggregate_input_tests;
-
-#[cfg(test)]
-mod terminal_ownership_tests;
+mod spill_outcome_tests;

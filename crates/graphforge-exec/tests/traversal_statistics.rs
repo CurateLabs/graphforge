@@ -17,6 +17,7 @@ use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use datafusion::common::stats::Precision;
 use datafusion::physical_plan::ExecutionPlan;
+use datafusion::physical_plan::statistics::{StatisticsArgs, StatisticsContext};
 use datafusion::prelude::SessionContext;
 use tempfile::TempDir;
 
@@ -154,7 +155,9 @@ fn row_width(exec: &VarLenExpandExec) -> usize {
 /// The bytes `exec` is estimated to emit for `partition` (`None` is the whole
 /// plan). The row count is never published for an estimate.
 fn estimated_bytes(exec: &VarLenExpandExec, partition: Option<usize>) -> Precision<usize> {
-    let statistics = exec.partition_statistics(partition).unwrap();
+    let statistics = StatisticsContext::new()
+        .compute(exec, &StatisticsArgs::new().with_partition(partition))
+        .unwrap();
     assert_eq!(statistics.num_rows, Precision::Absent);
     statistics.total_byte_size
 }
@@ -253,7 +256,9 @@ async fn a_traversal_without_a_persisted_index_publishes_no_estimate() {
         &node(Direction::Out, 1, Some(2)),
         frontier(&ids).await,
     );
-    let statistics = exec.partition_statistics(None).unwrap();
+    let statistics = StatisticsContext::new()
+        .compute(&exec, &StatisticsArgs::new().with_partition(None))
+        .unwrap();
     assert_eq!(statistics.num_rows, Precision::Absent);
     assert_eq!(statistics.total_byte_size, Precision::Absent);
 }
@@ -276,7 +281,9 @@ async fn an_empty_frontier_is_estimated_to_emit_nothing() {
         input,
     );
     // An empty input is a fact, not an estimate: both counts are exact zeros.
-    let statistics = exec.partition_statistics(None).unwrap();
+    let statistics = StatisticsContext::new()
+        .compute(&exec, &StatisticsArgs::new().with_partition(None))
+        .unwrap();
     assert_eq!(statistics.num_rows, Precision::Exact(0));
     assert_eq!(statistics.total_byte_size, Precision::Exact(0));
 }
@@ -394,7 +401,7 @@ async fn an_estimated_input_larger_than_the_node_extent_is_not_believed() {
         );
         assert!(
             matches!(
-                credible.partition_statistics(None).unwrap().total_byte_size,
+                StatisticsContext::new().compute(&credible, &StatisticsArgs::new().with_partition(None)).unwrap().total_byte_size,
                 Precision::Inexact(bytes) if bytes > 0
             ),
             "{name}: {extent} estimated seeds"
@@ -409,7 +416,9 @@ async fn an_estimated_input_larger_than_the_node_extent_is_not_believed() {
             &node,
             frontier_with_rows(Precision::Inexact(extent + 1)),
         );
-        let statistics = doubted.partition_statistics(None).unwrap();
+        let statistics = StatisticsContext::new()
+            .compute(&doubted, &StatisticsArgs::new().with_partition(None))
+            .unwrap();
         assert_eq!(statistics.num_rows, Precision::Absent, "{name}");
         assert_eq!(statistics.total_byte_size, Precision::Absent, "{name}");
 
@@ -422,7 +431,7 @@ async fn an_estimated_input_larger_than_the_node_extent_is_not_believed() {
         );
         assert!(
             matches!(
-                exact.partition_statistics(None).unwrap().total_byte_size,
+                StatisticsContext::new().compute(&exact, &StatisticsArgs::new().with_partition(None)).unwrap().total_byte_size,
                 Precision::Inexact(bytes) if bytes > 0
             ),
             "{name}: {} exact seeds",

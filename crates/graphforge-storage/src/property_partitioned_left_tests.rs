@@ -1,7 +1,7 @@
 use super::*;
 use crate::SelectedEndpointPropertyFilterApprovalRule;
 use datafusion::physical_expr::Partitioning;
-use datafusion::physical_optimizer::sanity_checker::SanityCheckPlan;
+use datafusion::physical_optimizer::sanity_checker::check_plan_tree_sanity;
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion::physical_plan::limit::GlobalLimitExec;
 
@@ -157,9 +157,7 @@ fn assert_tapped_partitioned_join_over(
     assert_eq!(scan.fresh_nomination_uuid_column(), None);
     assert_eq!(scan.fresh_selected_endpoint_uuid_column(), None);
 
-    SanityCheckPlan::new()
-        .optimize(Arc::clone(optimized), &ConfigOptions::default())
-        .unwrap();
+    check_plan_tree_sanity(optimized, &ConfigOptions::default().optimizer).unwrap();
 }
 
 #[test]
@@ -170,9 +168,7 @@ fn partitioned_left_enrichment_nominates_a_frontier_with_no_bound() {
         // join. The tap collects its keys instead of concatenating its rows,
         // so the width of those rows no longer decides whether to nominate.
         let original = enrichment(property_scan(None, None), partitions);
-        SanityCheckPlan::new()
-            .optimize(original.clone(), &config)
-            .unwrap();
+        check_plan_tree_sanity(&original, &config.optimizer).unwrap();
         let optimized = PropertyFilterApprovalRule
             .optimize(original.clone(), &config)
             .unwrap();
@@ -192,9 +188,7 @@ fn partitioned_left_enrichment_nominates_an_anchored_frontier() {
     let config = ConfigOptions::default();
     for partitions in [1, 2, 4] {
         let original = anchored_enrichment(property_scan(None, None), partitions);
-        SanityCheckPlan::new()
-            .optimize(original.clone(), &config)
-            .unwrap();
+        check_plan_tree_sanity(&original, &config.optimizer).unwrap();
         let optimized = PropertyFilterApprovalRule
             .optimize(original.clone(), &config)
             .unwrap();
@@ -416,9 +410,7 @@ fn a_partitioned_scan_behind_a_merge_still_takes_the_frontiers_nomination() {
         )
         .unwrap(),
     );
-    SanityCheckPlan::new()
-        .optimize(original.clone(), &config)
-        .unwrap();
+    check_plan_tree_sanity(&original, &config.optimizer).unwrap();
 
     let optimized = SelectedEndpointPropertyFilterApprovalRule::new(|_, index| index == 0)
         .optimize(original.clone(), &config)
@@ -457,9 +449,7 @@ fn a_partitioned_scan_behind_a_merge_still_takes_the_frontiers_nomination() {
         4
     );
     assert_eq!(nominated.fresh_selected_endpoint_uuid_column(), None);
-    SanityCheckPlan::new()
-        .optimize(Arc::clone(&optimized), &config)
-        .unwrap();
+    check_plan_tree_sanity(&optimized, &config.optimizer).unwrap();
 }
 
 #[test]
@@ -565,9 +555,7 @@ fn collect_left_enrichment_nominates_a_scan_behind_a_round_robin_exchange() {
             round_robin(Arc::new(scan), partitions),
             vec![0, 1, 2],
         );
-        SanityCheckPlan::new()
-            .optimize(original.clone(), &config)
-            .unwrap();
+        check_plan_tree_sanity(&original, &config.optimizer).unwrap();
 
         let optimized = PropertyFilterApprovalRule
             .optimize(original.clone(), &config)
@@ -596,9 +584,7 @@ fn collect_left_enrichment_nominates_a_scan_behind_a_round_robin_exchange() {
             .unwrap();
         assert!(nominated.nomination_uuid_column().is_some());
         assert_eq!(nominated.fresh_nomination_uuid_column(), None);
-        SanityCheckPlan::new()
-            .optimize(optimized.clone(), &config)
-            .unwrap();
+        check_plan_tree_sanity(&optimized, &config.optimizer).unwrap();
 
         // The tap and nomination are installed once.
         let repeated = PropertyFilterApprovalRule
@@ -748,7 +734,7 @@ fn identity_only_enrichment_keeps_its_partitioned_join_without_a_uuid_set() {
             .optimize(original.clone(), &config)
             .unwrap();
         assert!(Arc::ptr_eq(&original, &optimized));
-        SanityCheckPlan::new().optimize(optimized, &config).unwrap();
+        check_plan_tree_sanity(&optimized, &config.optimizer).unwrap();
     }
 }
 

@@ -33,6 +33,9 @@ use datafusion::common::tree_node::{Transformed, TreeNode};
 use datafusion::error::DataFusionError;
 use datafusion::physical_expr::{Distribution, LexOrdering, PhysicalExpr, PhysicalSortExpr};
 use datafusion::physical_optimizer::PhysicalOptimizerRule;
+use datafusion::physical_optimizer::optimizer::{
+    ConfigOnlyContext, PhysicalOptimizerContext, with_statistics_context,
+};
 use datafusion::physical_plan::joins::{HashJoinExec, PartitionMode};
 use datafusion::physical_plan::repartition::RepartitionExec;
 use datafusion::physical_plan::sorts::sort::SortExec;
@@ -132,7 +135,7 @@ fn hashed(
     partitions: usize,
 ) -> Result<Arc<dyn ExecutionPlan>> {
     let properties = input.properties();
-    let required = Distribution::HashPartitioned(keys.to_vec());
+    let required = Distribution::KeyPartitioned(keys.to_vec());
     let partitioning = properties.output_partitioning();
     if partitioning.partition_count() == partitions
         && partitioning
@@ -157,18 +160,30 @@ impl PhysicalOptimizerRule for UnsizedBuildJoinRule {
     fn optimize(
         &self,
         plan: Arc<dyn ExecutionPlan>,
-        _config: &ConfigOptions,
+        config: &ConfigOptions,
     ) -> Result<Arc<dyn ExecutionPlan>> {
-        plan.transform_up(|node| {
-            let Some(join) = node.downcast_ref::<HashJoinExec>() else {
-                return Ok(Transformed::no(node));
-            };
-            if *join.join_type() != JoinType::Left || estimated_bytes(join.left()).is_some() {
-                return Ok(Transformed::no(node));
-            }
-            self.sort_merge(join).map(Transformed::yes)
+        self.optimize_with_context(plan, &ConfigOnlyContext::new(config))
+    }
+
+    fn optimize_with_context(
+        &self,
+        plan: Arc<dyn ExecutionPlan>,
+        context: &dyn PhysicalOptimizerContext,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        with_statistics_context(context, |statistics| {
+            plan.transform_up(|node| {
+                let Some(join) = node.downcast_ref::<HashJoinExec>() else {
+                    return Ok(Transformed::no(node));
+                };
+                if *join.join_type() != JoinType::Left
+                    || estimated_bytes(join.left(), statistics).is_some()
+                {
+                    return Ok(Transformed::no(node));
+                }
+                self.sort_merge(join).map(Transformed::yes)
+            })
+            .map(|transformed| transformed.data)
         })
-        .map(|transformed| transformed.data)
     }
 
     fn name(&self) -> &'static str {

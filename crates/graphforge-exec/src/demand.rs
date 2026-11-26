@@ -29,6 +29,8 @@ use datafusion::physical_plan::limit::{GlobalLimitExec, LocalLimitExec};
 use datafusion::physical_plan::projection::ProjectionExec;
 use datafusion::physical_plan::repartition::RepartitionExec;
 use datafusion::physical_plan::sorts::sort::SortExec;
+use datafusion::physical_plan::statistics::{StatisticsArgs, StatisticsContext};
+use datafusion::physical_plan::{ChildrenPropertiesMode, ReplaceChildrenOptions};
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, ExecutionPlanProperties, Partitioning,
     PlanProperties, RecordBatchStream, SendableRecordBatchStream,
@@ -505,9 +507,11 @@ pub(crate) fn record_plan_completion(
                 input_row_statistics: plan
                     .children()
                     .iter()
-                    .map(|child| match child.partition_statistics(None) {
-                        Ok(stats) => format!("{:?}", stats.num_rows),
-                        Err(_) => "unavailable: statistics error".into(),
+                    .map(|child| {
+                        match StatisticsContext::new().compute_arc(child, &StatisticsArgs::new()) {
+                            Ok(stats) => format!("{:?}", stats.num_rows),
+                            Err(_) => "unavailable: statistics error".into(),
+                        }
                     })
                     .collect(),
                 build_input_rows: metric(&metrics, "build_input_rows"),
@@ -1008,7 +1012,9 @@ impl PhysicalOptimizerRule for FixedHopDemandRule {
             demand.cancel();
         }
         let mut filter_ordinal = 0;
-        let initial_batch_goal = terminal.batch_goal.min(config.execution.batch_size);
+        let initial_batch_goal = terminal
+            .batch_goal
+            .min(usize::from(config.execution.batch_size));
         let rewritten = rewrite_bounded(
             plan,
             initial_batch_goal,
@@ -1049,7 +1055,10 @@ fn instrument_operator_rss(
     let rebuilt = if rewritten.is_empty() {
         plan
     } else {
-        plan.with_new_children(rewritten)?
+        plan.replace_children(
+            rewritten,
+            ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
+        )?
     };
     let operator = if rebuilt.downcast_ref::<ExpandExec>().is_some() {
         Some("expand")
@@ -1145,6 +1154,17 @@ impl ExecutionPlan for RssProbeExec {
 
     fn properties(&self) -> &Arc<PlanProperties> {
         &self.props
+    }
+
+    fn apply_expressions(
+        &self,
+        _f: &mut dyn FnMut(
+            &std::sync::Arc<dyn datafusion::physical_expr::PhysicalExpr>,
+        ) -> datafusion::common::Result<
+            datafusion::common::tree_node::TreeNodeRecursion,
+        >,
+    ) -> datafusion::common::Result<datafusion::common::tree_node::TreeNodeRecursion> {
+        Ok(datafusion::common::tree_node::TreeNodeRecursion::Continue)
     }
 
     fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
@@ -1302,7 +1322,10 @@ fn rewrite_var_len_materialization(
 ) -> Result<Arc<dyn ExecutionPlan>> {
     let child_required = var_len.input_demand(required);
     let child = rewrite_materialization(Arc::clone(plan.children()[0]), &child_required)?;
-    let rebuilt = Arc::clone(plan).with_new_children(vec![child])?;
+    let rebuilt = Arc::clone(plan).replace_children(
+        vec![child],
+        ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
+    )?;
     let var_len = rebuilt.downcast_ref::<VarLenExpandExec>().ok_or_else(|| {
         DataFusionError::Internal("VarLenExpandExec rewrite changed physical type".into())
     })?;
@@ -1319,7 +1342,10 @@ fn rewrite_unwind_materialization(
 ) -> Result<Arc<dyn ExecutionPlan>> {
     let child_required = unwind.input_demand(required)?;
     let child = rewrite_materialization(Arc::clone(plan.children()[0]), &child_required)?;
-    let rebuilt = Arc::clone(plan).with_new_children(vec![child])?;
+    let rebuilt = Arc::clone(plan).replace_children(
+        vec![child],
+        ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
+    )?;
     let unwind = rebuilt.downcast_ref::<UnwindExec>().ok_or_else(|| {
         DataFusionError::Internal("UnwindExec rewrite changed physical type".into())
     })?;
@@ -1356,7 +1382,10 @@ fn rewrite_aggregate_materialization(
         child_required = (0..aggregate.input().schema().fields().len()).collect();
     }
     let child = rewrite_materialization(Arc::clone(aggregate.input()), &child_required)?;
-    Arc::clone(plan).with_new_children(vec![child])
+    Arc::clone(plan).replace_children(
+        vec![child],
+        ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
+    )
 }
 
 /// Propagate exact physical output demand through operators whose column
@@ -1374,7 +1403,10 @@ fn rewrite_materialization(
             }
         }
         let child = rewrite_materialization(Arc::clone(projection.input()), &child_required)?;
-        return plan.with_new_children(vec![child]);
+        return plan.replace_children(
+            vec![child],
+            ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
+        );
     }
 
     if let Some(unwind) = plan.downcast_ref::<UnwindExec>() {
@@ -1412,7 +1444,10 @@ fn rewrite_materialization(
             .collect::<BTreeSet<_>>();
         input_required.insert(expand.src_col_idx);
         let child = rewrite_materialization(Arc::clone(&expand.input), &input_required)?;
-        let rebuilt = plan.with_new_children(vec![child])?;
+        let rebuilt = plan.replace_children(
+            vec![child],
+            ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
+        )?;
         let expand = rebuilt.downcast_ref::<ExpandExec>().ok_or_else(|| {
             DataFusionError::Internal("ExpandExec rewrite changed physical type".into())
         })?;
@@ -1446,7 +1481,10 @@ fn rewrite_materialization(
         return if rewritten.is_empty() {
             Ok(plan)
         } else {
-            plan.with_new_children(rewritten)
+            plan.replace_children(
+                rewritten,
+                ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
+            )
         };
     }
     let child = children[0];
@@ -1456,7 +1494,10 @@ fn rewrite_materialization(
         (0..child.schema().fields().len()).collect()
     };
     let child = rewrite_materialization(Arc::clone(child), &next)?;
-    plan.with_new_children(vec![child])
+    plan.replace_children(
+        vec![child],
+        ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
+    )
 }
 
 /// Demand through a correlated sub-plan and the seed leaf that feeds it.
@@ -1488,7 +1529,10 @@ fn rewrite_correlated_materialization(
     left_required.extend(correlated_seed_demand(&right, seed));
     let left = rewrite_materialization(Arc::clone(children[0]), &left_required)?;
     Arc::clone(plan)
-        .with_new_children(vec![left, right])
+        .replace_children(
+            vec![left, right],
+            ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
+        )
         .map(Some)
 }
 
@@ -1522,7 +1566,10 @@ fn rewrite_join_materialization(
     let left = rewrite_materialization(Arc::clone(children[0]), &left_required)?;
     let right = rewrite_materialization(Arc::clone(children[1]), &right_required)?;
     Arc::clone(plan)
-        .with_new_children(vec![left, right])
+        .replace_children(
+            vec![left, right],
+            ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
+        )
         .map(Some)
 }
 
@@ -1683,7 +1730,10 @@ fn rewrite_bounded(
         } else {
             child
         };
-        let rebuilt = Arc::clone(&plan).with_new_children(vec![child])?;
+        let rebuilt = Arc::clone(&plan).replace_children(
+            vec![child],
+            ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
+        )?;
         return if capture_enabled() {
             Ok(Arc::new(ProbeExec::new(
                 rebuilt, ordinal, uniqueness, false,
@@ -1706,7 +1756,10 @@ fn rewrite_bounded(
     let rebuilt = if rewritten_children.is_empty() {
         plan
     } else {
-        plan.with_new_children(rewritten_children)?
+        plan.replace_children(
+            rewritten_children,
+            ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
+        )?
     };
     if let Some(expand) = rebuilt.downcast_ref::<ExpandExec>() {
         // A demanded hop is one pull stream: the demand, the soft batch goal
@@ -1717,7 +1770,10 @@ fn rewrite_bounded(
         let rebuilt = if expand.input.output_partitioning().partition_count() > 1 {
             let single: Arc<dyn ExecutionPlan> =
                 Arc::new(CoalescePartitionsExec::new(Arc::clone(&expand.input)));
-            Arc::clone(&rebuilt).with_new_children(vec![single])?
+            Arc::clone(&rebuilt).replace_children(
+                vec![single],
+                ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
+            )?
         } else {
             rebuilt
         };
@@ -1784,6 +1840,17 @@ impl ExecutionPlan for ProbeExec {
 
     fn properties(&self) -> &Arc<PlanProperties> {
         &self.props
+    }
+
+    fn apply_expressions(
+        &self,
+        _f: &mut dyn FnMut(
+            &std::sync::Arc<dyn datafusion::physical_expr::PhysicalExpr>,
+        ) -> datafusion::common::Result<
+            datafusion::common::tree_node::TreeNodeRecursion,
+        >,
+    ) -> datafusion::common::Result<datafusion::common::tree_node::TreeNodeRecursion> {
+        Ok(datafusion::common::tree_node::TreeNodeRecursion::Continue)
     }
 
     fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
@@ -1900,6 +1967,17 @@ impl ExecutionPlan for DemandGuardExec {
 
     fn properties(&self) -> &Arc<PlanProperties> {
         &self.props
+    }
+
+    fn apply_expressions(
+        &self,
+        _f: &mut dyn FnMut(
+            &std::sync::Arc<dyn datafusion::physical_expr::PhysicalExpr>,
+        ) -> datafusion::common::Result<
+            datafusion::common::tree_node::TreeNodeRecursion,
+        >,
+    ) -> datafusion::common::Result<datafusion::common::tree_node::TreeNodeRecursion> {
+        Ok(datafusion::common::tree_node::TreeNodeRecursion::Continue)
     }
 
     fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
@@ -2567,14 +2645,20 @@ mod tests {
 
         let probe = Arc::new(ProbeExec::new(Arc::clone(&child), 4, true, false));
         let probe_error = Arc::clone(&probe)
-            .with_new_children(vec![])
+            .replace_children(
+                vec![],
+                ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
+            )
             .expect_err("probe requires one child");
         assert!(matches!(
             probe_error,
             DataFusionError::Internal(message) if message == "DemandProbeExec needs one child"
         ));
         let replaced_probe = probe
-            .with_new_children(vec![Arc::clone(&replacement)])
+            .replace_children(
+                vec![Arc::clone(&replacement)],
+                ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
+            )
             .expect("replace probe child");
         assert!(Arc::ptr_eq(replaced_probe.children()[0], &replacement));
 
@@ -2585,14 +2669,20 @@ mod tests {
             0,
         ));
         let guard_error = Arc::clone(&guard)
-            .with_new_children(vec![])
+            .replace_children(
+                vec![],
+                ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
+            )
             .expect_err("guard requires one child");
         assert!(matches!(
             guard_error,
             DataFusionError::Internal(message) if message == "DemandGuardExec needs one child"
         ));
         let replaced_guard = guard
-            .with_new_children(vec![replacement])
+            .replace_children(
+                vec![replacement],
+                ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
+            )
             .expect("replace guard child");
         assert_eq!(replaced_guard.name(), "DemandGuardExec");
 

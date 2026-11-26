@@ -695,28 +695,22 @@ fn stage_retired_edge_property_owners(
             && let Some(summary) = &final_summary
         {
             metadata.insert(
-                crate::property_overlay::PROPERTY_LIVE_SCHEMA_KEY.into(),
+                crate::property_overlay::PROPERTY_LIVE_SCHEMA_KEY,
                 summary.clone(),
             );
         }
         metadata.insert(
-            crate::property_overlay::PROPERTY_OVERLAY_FORMAT_KEY.into(),
-            crate::property_overlay::PROPERTY_OVERLAY_FORMAT.into(),
+            crate::property_overlay::PROPERTY_OVERLAY_FORMAT_KEY,
+            crate::property_overlay::PROPERTY_OVERLAY_FORMAT,
         );
+        metadata.insert(crate::property_overlay::PROPERTY_ROUTE_KEY, "_exploratory");
+        metadata.insert(crate::property_overlay::PROPERTY_KIND_KEY, "edge");
         metadata.insert(
-            crate::property_overlay::PROPERTY_ROUTE_KEY.into(),
-            "_exploratory".into(),
-        );
-        metadata.insert(
-            crate::property_overlay::PROPERTY_KIND_KEY.into(),
-            "edge".into(),
-        );
-        metadata.insert(
-            crate::property_overlay::PROPERTY_GENERATION_KEY.into(),
+            crate::property_overlay::PROPERTY_GENERATION_KEY,
             fragment.id.generation.to_string(),
         );
         metadata.insert(
-            crate::property_overlay::PROPERTY_ORDINAL_KEY.into(),
+            crate::property_overlay::PROPERTY_ORDINAL_KEY,
             fragment.id.ordinal.to_string(),
         );
         let add_tombstone = fragment_schema

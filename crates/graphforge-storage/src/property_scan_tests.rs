@@ -264,7 +264,7 @@ async fn scan_batches_carry_the_schema_the_scan_advertises() {
         let context = SessionContext::new();
         let state = context.state();
         let all_columns = (0..table.schema().fields().len()).collect::<Vec<_>>();
-        for projection in [None, Some(&all_columns)] {
+        for projection in [None, Some(all_columns.as_slice())] {
             let plan = table.scan(&state, projection, &[], None).await.unwrap();
             let schema = plan.schema();
             let batches = datafusion::physical_plan::collect(plan, context.task_ctx())
@@ -487,7 +487,10 @@ async fn limited_inner_and_right_semi_scans_preserve_their_prefix_under_uuid_hin
             join_type,
         ));
         let pushed_join = pushed.downcast_ref::<HashJoinExec>().unwrap();
-        assert!(pushed_join.dynamic_filter_expr().is_some());
+        assert_eq!(
+            ExecutionPlan::dynamic_expressions_produced(pushed_join).len(),
+            1
+        );
         let pushed_scan = pushed_join
             .right()
             .downcast_ref::<super::PropertyOverlayExec>()
@@ -661,7 +664,7 @@ fn duplicate_property_fragment(root: &std::path::Path) -> AuthenticatedPropertyI
     };
     let reader = crate::catalog::admitted_parquet(&route.join(first.file_name())).unwrap();
     let mut metadata = reader.schema().metadata().clone();
-    metadata.insert(PROPERTY_ORDINAL_KEY.into(), "1".into());
+    metadata.insert(PROPERTY_ORDINAL_KEY, "1");
     let schema = Arc::new(reader.schema().as_ref().clone().with_metadata(metadata));
     let mut writer = ArrowWriter::try_new(
         File::create(route.join(second.file_name())).unwrap(),

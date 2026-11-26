@@ -80,7 +80,8 @@ fn uniform_dictionary_entries_still_validate_every_index() {
     let file = write_batch(&batch);
     let metadata = metadata(&file);
     let good = scan(&file, &metadata, 8).unwrap();
-    assert_eq!(good.batch_bytes(0), 8 * (3 + 4) + 1);
+    // Eight values and their offsets, the terminal offset, one validity byte.
+    assert_eq!(good.batch_bytes(0), 8 * (3 + 4) + 4 + 1);
 
     let column = metadata.row_group(0).column(0);
     let chunk_start = column
@@ -174,8 +175,9 @@ fn flat_dictionary_validity_is_packed_across_row_groups_and_batch_boundaries() {
         assert_eq!(metadata.num_row_groups(), 2);
         let sized = scan(&file, &metadata, 5).unwrap();
         // The second window contains rows 5..8: with alternating nulls,
-        // only row 6 contributes a three-byte value.
-        let expected = if nullable { [30, 16] } else { [36, 22] };
+        // only row 6 contributes a three-byte value. Each window holds one
+        // offset per row plus the boundary offset Arrow counts past them.
+        let expected = if nullable { [34, 20] } else { [40, 26] };
         assert_eq!(sized.batch_bytes(0), expected[0]);
         assert_eq!(sized.batch_bytes(1), expected[1]);
         assert_eq!(sized.decoded_bytes(), expected.into_iter().sum::<u64>());
@@ -204,7 +206,7 @@ fn flat_dictionary_validity_is_packed_across_row_groups_and_batch_boundaries() {
                 values.to_data().get_slice_memory_size().unwrap() as u64
             })
             .collect::<Vec<_>>();
-        assert_eq!(actual_sizes, if nullable { [30, 16] } else { [35, 21] });
+        assert_eq!(actual_sizes, if nullable { [34, 20] } else { [39, 25] });
     }
 }
 

@@ -582,7 +582,7 @@ fn partitioned_equality_join(
 
 #[test]
 fn a_partitioned_equality_anchor_uses_one_build_and_restores_hash_distribution() {
-    use datafusion::physical_optimizer::sanity_checker::SanityCheckPlan;
+    use datafusion::physical_optimizer::sanity_checker::check_plan_tree_sanity;
     let equality = PropertyEquality {
         column: "ident".into(),
         value: EqualityValue::Int(7),
@@ -615,8 +615,7 @@ fn a_partitioned_equality_anchor_uses_one_build_and_restores_hash_distribution()
             )
             .is_some()
     );
-    SanityCheckPlan::new()
-        .optimize(rewritten, &ConfigOptions::default())
+    check_plan_tree_sanity(&rewritten, &ConfigOptions::default().optimizer)
         .expect("final rewrite meets distribution requirements");
 }
 
@@ -723,7 +722,7 @@ fn equality_anchor_retains_the_real_filtered_round_robin_build_pipeline() {
     use datafusion::common::ScalarValue;
     use datafusion::logical_expr::Operator;
     use datafusion::physical_expr::expressions::{BinaryExpr, Literal};
-    use datafusion::physical_optimizer::sanity_checker::SanityCheckPlan;
+    use datafusion::physical_optimizer::sanity_checker::check_plan_tree_sanity;
     use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
 
     for round_robin in [false, true] {
@@ -771,8 +770,7 @@ fn equality_anchor_retains_the_real_filtered_round_robin_build_pipeline() {
                 prior.input()
             };
             assert!(Arc::ptr_eq(retained.input(), prior_scan));
-            SanityCheckPlan::new()
-                .optimize(rewritten, &ConfigOptions::default())
+            check_plan_tree_sanity(&rewritten, &ConfigOptions::default().optimizer)
                 .expect("residual filter and parent distribution remain valid");
         }
     }

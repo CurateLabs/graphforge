@@ -19,6 +19,7 @@ use datafusion::error::DataFusionError;
 use datafusion::execution::TaskContext;
 use datafusion::physical_expr::EquivalenceProperties;
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType, SchedulingType};
+use datafusion::physical_plan::statistics::{ChildStats, StatisticsArgs};
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, ExecutionPlanProperties, Partitioning,
@@ -380,11 +381,11 @@ impl GraphForgeParquetExec {
     pub fn try_new(
         base_schema: SchemaRef,
         fragments: Vec<ParquetFragment>,
-        projection: Option<&Vec<usize>>,
+        projection: Option<&[usize]>,
         limit: Option<usize>,
         batch_size: usize,
     ) -> Result<Self, DataFusionError> {
-        let projection = projection.cloned();
+        let projection = projection.map(<[usize]>::to_vec);
         let schema = match projection.as_ref() {
             Some(indices) => Arc::new(base_schema.project(indices).map_err(|e| {
                 DataFusionError::ArrowError(Box::new(e), Some("parquet projection".into()))
@@ -471,6 +472,18 @@ impl ExecutionPlan for GraphForgeParquetExec {
         &self.props
     }
 
+    fn apply_expressions(
+        &self,
+        _f: &mut dyn FnMut(
+            &Arc<dyn datafusion::physical_expr::PhysicalExpr>,
+        ) -> Result<
+            datafusion::common::tree_node::TreeNodeRecursion,
+            DataFusionError,
+        >,
+    ) -> Result<datafusion::common::tree_node::TreeNodeRecursion, DataFusionError> {
+        Ok(datafusion::common::tree_node::TreeNodeRecursion::Continue)
+    }
+
     fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
         vec![]
     }
@@ -496,10 +509,12 @@ impl ExecutionPlan for GraphForgeParquetExec {
         Some(Arc::new(cloned))
     }
 
-    fn partition_statistics(
+    fn statistics_from_inputs(
         &self,
-        partition: Option<usize>,
+        _input_stats: &[Arc<Statistics>],
+        args: &StatisticsArgs,
     ) -> Result<Arc<Statistics>, DataFusionError> {
+        let partition = args.partition();
         let column_statistics = self
             .schema
             .fields()
@@ -838,6 +853,18 @@ impl ExecutionPlan for OrderedPartitionStreamExec {
         &self.props
     }
 
+    fn apply_expressions(
+        &self,
+        _f: &mut dyn FnMut(
+            &Arc<dyn datafusion::physical_expr::PhysicalExpr>,
+        ) -> Result<
+            datafusion::common::tree_node::TreeNodeRecursion,
+            DataFusionError,
+        >,
+    ) -> Result<datafusion::common::tree_node::TreeNodeRecursion, DataFusionError> {
+        Ok(datafusion::common::tree_node::TreeNodeRecursion::Continue)
+    }
+
     fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
         vec![&self.input]
     }
@@ -871,13 +898,24 @@ impl ExecutionPlan for OrderedPartitionStreamExec {
     /// the child's whole input. Without this the default reports nothing and
     /// every estimate above a node-table scan is lost, including the build-side
     /// size the hash-join memory rule reads.
-    fn partition_statistics(
-        &self,
-        partition: Option<usize>,
-    ) -> Result<Arc<Statistics>, DataFusionError> {
+    fn child_stats_requests(&self, partition: Option<usize>) -> Vec<ChildStats> {
         match partition {
-            None | Some(0) => self.input.partition_statistics(None),
-            Some(_) => Ok(Arc::new(Statistics::new_unknown(&self.schema()))),
+            None | Some(0) => vec![ChildStats::At(None)],
+            Some(_) => vec![ChildStats::Skip],
+        }
+    }
+
+    fn statistics_from_inputs(
+        &self,
+        input_stats: &[Arc<Statistics>],
+        args: &StatisticsArgs,
+    ) -> Result<Arc<Statistics>, DataFusionError> {
+        match (args.partition(), input_stats) {
+            (None | Some(0), [input]) => Ok(Arc::clone(input)),
+            (None | Some(0), _) => Err(DataFusionError::Internal(
+                "OrderedPartitionStreamExec expects one input's statistics".into(),
+            )),
+            (Some(_), _) => Ok(Arc::new(Statistics::new_unknown(&self.schema()))),
         }
     }
 
@@ -909,7 +947,7 @@ impl ExecutionPlan for OrderedPartitionStreamExec {
 pub fn scan_fragments(
     base_schema: SchemaRef,
     fragments: Vec<ParquetFragment>,
-    projection: Option<&Vec<usize>>,
+    projection: Option<&[usize]>,
     limit: Option<usize>,
     batch_size: usize,
 ) -> Result<Arc<dyn ExecutionPlan>, DataFusionError> {
@@ -924,6 +962,7 @@ mod tests {
     use arrow::array::UInt64Array;
     use arrow::datatypes::{DataType, Field, Schema};
     use datafusion::physical_plan::collect;
+    use datafusion::physical_plan::statistics::{StatisticsArgs, StatisticsContext};
     use datafusion::prelude::SessionContext;
     use parquet::arrow::ArrowWriter;
     use parquet::file::properties::WriterProperties;
@@ -1165,13 +1204,19 @@ mod tests {
             GraphForgeParquetExec::try_new(edge_schema(), vec![exact.clone()], None, None, 8)
                 .unwrap();
         assert_eq!(
-            plan.partition_statistics(None).unwrap().num_rows,
+            StatisticsContext::new()
+                .compute(&plan, &StatisticsArgs::new().with_partition(None))
+                .unwrap()
+                .num_rows,
             Precision::Exact(2)
         );
         let plan = GraphForgeParquetExec::try_new(edge_schema(), vec![named, exact], None, None, 8)
             .unwrap();
         assert_eq!(
-            plan.partition_statistics(None).unwrap().num_rows,
+            StatisticsContext::new()
+                .compute(&plan, &StatisticsArgs::new().with_partition(None))
+                .unwrap()
+                .num_rows,
             Precision::Inexact(6)
         );
     }
@@ -1197,7 +1242,10 @@ mod tests {
             GraphForgeParquetExec::try_new(edge_schema(), fragments.clone(), None, None, 8)
                 .unwrap();
         assert_eq!(
-            unlimited.partition_statistics(None).unwrap().num_rows,
+            StatisticsContext::new()
+                .compute(&unlimited, &StatisticsArgs::new().with_partition(None))
+                .unwrap()
+                .num_rows,
             Precision::Exact(16)
         );
 
@@ -1206,13 +1254,19 @@ mod tests {
                 .unwrap();
         // min(5, 4) + min(2, 4) + min(9, 4)
         assert_eq!(
-            limited.partition_statistics(None).unwrap().num_rows,
+            StatisticsContext::new()
+                .compute(&limited, &StatisticsArgs::new().with_partition(None))
+                .unwrap()
+                .num_rows,
             Precision::Exact(10)
         );
         for (partition, rows) in [4usize, 2, 4].into_iter().enumerate() {
             assert_eq!(
-                limited
-                    .partition_statistics(Some(partition))
+                StatisticsContext::new()
+                    .compute(
+                        &limited,
+                        &StatisticsArgs::new().with_partition(Some(partition))
+                    )
                     .unwrap()
                     .num_rows,
                 Precision::Exact(rows)
@@ -1224,16 +1278,35 @@ mod tests {
             .into_ordered_plan();
         assert_eq!(ordered.name(), "OrderedPartitionStreamExec");
         assert_eq!(
-            ordered.partition_statistics(None).unwrap().num_rows,
+            StatisticsContext::new()
+                .compute(&*ordered, &StatisticsArgs::new().with_partition(None))
+                .unwrap()
+                .num_rows,
             Precision::Exact(10)
         );
         assert_eq!(
-            ordered.partition_statistics(Some(0)).unwrap().num_rows,
+            StatisticsContext::new()
+                .compute(&*ordered, &StatisticsArgs::new().with_partition(Some(0)))
+                .unwrap()
+                .num_rows,
             Precision::Exact(10)
         );
+        // The merge has one output partition: the node publishes nothing for
+        // any other, and the statistics walk refuses to ask for one.
         assert_eq!(
-            ordered.partition_statistics(Some(1)).unwrap().num_rows,
+            ordered
+                .statistics_from_inputs(
+                    &[Arc::new(Statistics::new_unknown(&ordered.schema()))],
+                    &StatisticsArgs::new().with_partition(Some(1))
+                )
+                .unwrap()
+                .num_rows,
             Precision::Absent
+        );
+        assert!(
+            StatisticsContext::new()
+                .compute(&*ordered, &StatisticsArgs::new().with_partition(Some(1)))
+                .is_err()
         );
     }
 

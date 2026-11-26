@@ -644,9 +644,8 @@ pub(crate) fn stage_promoted_properties(
         match kind {
             crate::PropertyRouteKind::Node => "graphforge.entity_type",
             crate::PropertyRouteKind::Edge => "graphforge.rel_type",
-        }
-        .into(),
-        stem.into(),
+        },
+        stem,
     );
     let source_schema = source_schema.clone().with_metadata(source_metadata);
     let mut schemas = vec![&source_schema];
@@ -661,7 +660,7 @@ pub(crate) fn stage_promoted_properties(
             .get(crate::property_overlay::PROPERTY_LIVE_SCHEMA_KEY)
     }) {
         metadata.insert(
-            crate::property_overlay::PROPERTY_LIVE_SCHEMA_KEY.into(),
+            crate::property_overlay::PROPERTY_LIVE_SCHEMA_KEY,
             summary.clone(),
         );
     }
@@ -1231,14 +1230,11 @@ fn property_snapshot_fragment_schema(
         Field::new(PROPERTY_TOMBSTONE_FIELD, DataType::Boolean, false),
     );
     let mut metadata = base.metadata().clone();
-    metadata.insert(
-        PROPERTY_OVERLAY_FORMAT_KEY.into(),
-        PROPERTY_OVERLAY_FORMAT.into(),
-    );
-    metadata.insert(PROPERTY_ROUTE_KEY.into(), route.to_owned());
-    metadata.insert(PROPERTY_KIND_KEY.into(), kind.metadata_value().into());
-    metadata.insert(PROPERTY_GENERATION_KEY.into(), generation.to_string());
-    metadata.insert(PROPERTY_ORDINAL_KEY.into(), ordinal.to_string());
+    metadata.insert(PROPERTY_OVERLAY_FORMAT_KEY, PROPERTY_OVERLAY_FORMAT);
+    metadata.insert(PROPERTY_ROUTE_KEY, route.to_owned());
+    metadata.insert(PROPERTY_KIND_KEY, kind.metadata_value());
+    metadata.insert(PROPERTY_GENERATION_KEY, generation.to_string());
+    metadata.insert(PROPERTY_ORDINAL_KEY, ordinal.to_string());
     Arc::new(Schema::new_with_metadata(fields, metadata))
 }
 

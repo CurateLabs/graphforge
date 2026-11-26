@@ -193,14 +193,10 @@ fn plain_parquet_remains_recognizable_without_a_wrapper() {
 
 #[test]
 fn oversized_schema_footer_is_segmented_without_changing_the_logical_schema() {
-    let field = Field::new("value", DataType::Int64, false).with_metadata(
-        [(
-            "description".to_owned(),
-            "s".repeat(MAX_PROPERTY_OBJECT_BYTES + 1),
-        )]
-        .into_iter()
-        .collect(),
-    );
+    let field = Field::new("value", DataType::Int64, false).with_metadata([(
+        "description".to_owned(),
+        "s".repeat(MAX_PROPERTY_OBJECT_BYTES + 1),
+    )]);
     let batch = RecordBatch::try_new(
         Arc::new(Schema::new(vec![field])),
         vec![Arc::new(Int64Array::from(vec![42])) as ArrayRef],
@@ -234,18 +230,9 @@ fn oversized_schema_footer_is_segmented_without_changing_the_logical_schema() {
 #[test]
 fn ordinary_parquet_reader_recovers_large_values_and_schema_from_segmented_source() {
     let value = payload(2 * PROPERTY_OBJECT_PAYLOAD_BYTES + 57);
-    let field = Field::new("large_value", DataType::Binary, false).with_metadata(
-        [("unit".to_owned(), "opaque".to_owned())]
-            .into_iter()
-            .collect(),
-    );
-    let schema = Arc::new(
-        Schema::new(vec![field]).with_metadata(
-            [("custom".to_owned(), "preserved".to_owned())]
-                .into_iter()
-                .collect(),
-        ),
-    );
+    let field = Field::new("large_value", DataType::Binary, false)
+        .with_metadata([("unit".to_owned(), "opaque".to_owned())]);
+    let schema = Arc::new(Schema::new(vec![field]).with_metadata([("custom", "preserved")]));
     let batch = RecordBatch::try_new(
         schema,
         vec![Arc::new(BinaryArray::from_vec(vec![value.as_slice()])) as ArrayRef],
@@ -331,11 +318,7 @@ fn swapped_missing_and_foreign_parts_are_refused_on_touch() {
 
 #[test]
 fn invalid_versions_layouts_and_overflowing_ranges_are_refused() {
-    let schema = Schema::empty().with_metadata(
-        [(FORMAT_KEY.to_owned(), "2".to_owned())]
-            .into_iter()
-            .collect(),
-    );
+    let schema = Schema::empty().with_metadata([(FORMAT_KEY.to_owned(), "2".to_owned())]);
     assert!(inspect_schema(&schema).is_err());
     let bad = EnvelopeLayout {
         logical_length: u64::MAX,
@@ -356,16 +339,12 @@ mod hostile;
 /// An envelope part whose payload column is written with `encoding`.
 fn envelope_with_encoding(encoding: parquet::basic::Encoding, payload: &[u8]) -> Vec<u8> {
     let schema = Arc::new(
-        Schema::new(vec![Field::new(PAYLOAD_FIELD, DataType::Binary, false)]).with_metadata(
-            [
-                (FORMAT_KEY.to_owned(), FORMAT_VERSION.to_owned()),
-                (LENGTH_KEY.to_owned(), payload.len().to_string()),
-                (COUNT_KEY.to_owned(), "1".to_owned()),
-                (INDEX_KEY.to_owned(), "0".to_owned()),
-            ]
-            .into_iter()
-            .collect(),
-        ),
+        Schema::new(vec![Field::new(PAYLOAD_FIELD, DataType::Binary, false)]).with_metadata([
+            (FORMAT_KEY.to_owned(), FORMAT_VERSION.to_owned()),
+            (LENGTH_KEY.to_owned(), payload.len().to_string()),
+            (COUNT_KEY.to_owned(), "1".to_owned()),
+            (INDEX_KEY.to_owned(), "0".to_owned()),
+        ]),
     );
     let batch = RecordBatch::try_new(
         Arc::clone(&schema),

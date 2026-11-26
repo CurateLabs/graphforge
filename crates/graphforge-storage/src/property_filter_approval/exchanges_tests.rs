@@ -6,7 +6,7 @@ use datafusion::execution::TaskContext;
 use datafusion::logical_expr::Operator;
 use datafusion::physical_expr::equivalence::ConstExpr;
 use datafusion::physical_expr::expressions::CastExpr;
-use datafusion::physical_optimizer::{PhysicalOptimizerRule, sanity_checker::SanityCheckPlan};
+use datafusion::physical_optimizer::sanity_checker::check_plan_tree_sanity;
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion::physical_plan::filter::FilterExecBuilder;
 use datafusion::physical_plan::test::TestMemoryExec;
@@ -108,9 +108,7 @@ async fn exchanges_preserve_duplicate_columns_embedded_projection_and_filtered_m
     assert!(Arc::ptr_eq(retained.input(), &projection));
     assert_eq!(retained.input().children().len(), 1);
     assert!(Arc::ptr_eq(retained.input().children()[0], &leaf));
-    SanityCheckPlan::new()
-        .optimize(rewritten.clone(), &ConfigOptions::default())
-        .unwrap();
+    check_plan_tree_sanity(&rewritten, &ConfigOptions::default().optimizer).unwrap();
     let before = rows(original).await;
     assert_eq!(
         before,
@@ -285,6 +283,18 @@ impl ExecutionPlan for HeterogeneousInput {
     fn properties(&self) -> &Arc<PlanProperties> {
         &self.properties
     }
+    fn apply_expressions(
+        &self,
+        _f: &mut dyn FnMut(
+            &Arc<dyn datafusion::physical_expr::PhysicalExpr>,
+        ) -> Result<
+            datafusion::common::tree_node::TreeNodeRecursion,
+            DataFusionError,
+        >,
+    ) -> Result<datafusion::common::tree_node::TreeNodeRecursion, DataFusionError> {
+        Ok(datafusion::common::tree_node::TreeNodeRecursion::Continue)
+    }
+
     fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
         vec![&self.input]
     }

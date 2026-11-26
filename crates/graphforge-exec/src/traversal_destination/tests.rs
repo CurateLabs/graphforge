@@ -69,6 +69,7 @@ async fn plan(nodes: &[&dyn UserDefinedLogicalNode], bounded: bool) -> Vec<Arc<d
                     &[],
                     std::slice::from_ref(&physical),
                     &state,
+                    &datafusion::logical_expr::physical_planning_context::PhysicalPlanningContext::default(),
                 )
                 .await
                 .unwrap()

@@ -10,6 +10,7 @@ use datafusion::physical_expr::expressions::{Column, UnKnownColumn};
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion::physical_plan::joins::{HashJoinExec, PartitionMode};
 use datafusion::physical_plan::repartition::RepartitionExec;
+use datafusion::physical_plan::{ChildrenPropertiesMode, ReplaceChildrenOptions};
 use datafusion::physical_plan::{ExecutionPlan, ExecutionPlanProperties};
 
 use crate::property_join_nomination::UuidBuildKeyTapExec;
@@ -95,8 +96,10 @@ pub(super) fn nominate_partitioned_left_selected(
         tapped,
         Partitioning::Hash(vec![build_key], partitions),
     )?);
-    let probe = Arc::clone(join.right())
-        .with_new_children(vec![Arc::new(scan.with_uuid_nomination(nomination))])?;
+    let probe = Arc::clone(join.right()).replace_children(
+        vec![Arc::new(scan.with_uuid_nomination(nomination))],
+        ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
+    )?;
     let rebuilt = join
         .builder()
         .with_new_children(vec![build, probe])?

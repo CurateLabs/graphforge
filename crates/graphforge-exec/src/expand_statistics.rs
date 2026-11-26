@@ -24,7 +24,6 @@ use std::sync::Arc;
 use arrow::datatypes::SchemaRef;
 use datafusion::common::Statistics;
 use datafusion::common::stats::Precision;
-use datafusion::physical_plan::ExecutionPlan;
 use graphforge_ir::Direction;
 use graphforge_plan::VarLenMode;
 
@@ -189,17 +188,18 @@ fn capped(rows: Precision<usize>, fetch: Option<usize>) -> Precision<usize> {
     }
 }
 
-/// Statistics of a one-hop expansion of `input` over `relation`.
+/// Statistics of a one-hop expansion over `relation` of an input whose
+/// whole-plan statistics are `input`.
 pub(crate) fn single_hop(
-    input: &Arc<dyn ExecutionPlan>,
+    input: &Statistics,
     scope: Scope,
     provider: &dyn AdjacencyProvider,
     relation: &str,
     direction: Direction,
     fetch: Option<usize>,
     schema: &SchemaRef,
-) -> datafusion::common::Result<Arc<Statistics>> {
-    let input_rows = input.partition_statistics(None)?.num_rows;
+) -> Arc<Statistics> {
+    let input_rows = input.num_rows;
     let rows = match relation_degree(provider, relation, direction) {
         Some(degree) => scaled(
             credible_seed_rows(input_rows, degree.nodes),
@@ -207,7 +207,7 @@ pub(crate) fn single_hop(
         ),
         None => Precision::Absent,
     };
-    Ok(scope.of(statistics(schema, capped(rows, fetch))))
+    scope.of(statistics(schema, capped(rows, fetch)))
 }
 
 /// What a variable-length expansion walks and emits, as planning knows it.
@@ -221,7 +221,8 @@ pub(crate) struct VarLenShape {
     pub(crate) expansion: VarLenMode,
 }
 
-/// Statistics of a variable-length expansion of `input` over `relation`.
+/// Statistics of a variable-length expansion over `relation` of an input whose
+/// whole-plan statistics are `input`.
 ///
 /// A seed reaches at most the sum of `degree^hops` trails for the hop counts it
 /// walks. The figure is capped at the relation's adjacency entry count, which
@@ -232,15 +233,15 @@ pub(crate) struct VarLenShape {
 /// destination emits only the paths that reach it, estimated as one per input
 /// row.
 pub(crate) fn variable_length(
-    input: &Arc<dyn ExecutionPlan>,
+    input: &Statistics,
     scope: Scope,
     provider: &dyn AdjacencyProvider,
     relation: &str,
     direction: Direction,
     shape: VarLenShape,
     schema: &SchemaRef,
-) -> datafusion::common::Result<Arc<Statistics>> {
-    let input_rows = input.partition_statistics(None)?.num_rows;
+) -> Arc<Statistics> {
+    let input_rows = input.num_rows;
     let rows = match relation_degree(provider, relation, direction) {
         Some(degree) if shape.destination_bound => {
             scaled(credible_seed_rows(input_rows, degree.nodes), 1)
@@ -268,7 +269,7 @@ pub(crate) fn variable_length(
         }
         None => Precision::Absent,
     };
-    Ok(scope.of(statistics(schema, rows)))
+    scope.of(statistics(schema, rows))
 }
 
 #[cfg(test)]

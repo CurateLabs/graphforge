@@ -477,14 +477,11 @@ fn open_replay_property_fragment(
     };
     let component = crate::route_component::component(route);
     let mut metadata = logical_schema.metadata().clone();
-    metadata.insert(
-        PROPERTY_OVERLAY_FORMAT_KEY.into(),
-        PROPERTY_OVERLAY_FORMAT.into(),
-    );
-    metadata.insert(PROPERTY_ROUTE_KEY.into(), route.to_owned());
-    metadata.insert(PROPERTY_KIND_KEY.into(), kind.metadata_value().into());
-    metadata.insert(PROPERTY_GENERATION_KEY.into(), generation.to_string());
-    metadata.insert(PROPERTY_ORDINAL_KEY.into(), ordinal.to_string());
+    metadata.insert(PROPERTY_OVERLAY_FORMAT_KEY, PROPERTY_OVERLAY_FORMAT);
+    metadata.insert(PROPERTY_ROUTE_KEY, route.to_owned());
+    metadata.insert(PROPERTY_KIND_KEY, kind.metadata_value());
+    metadata.insert(PROPERTY_GENERATION_KEY, generation.to_string());
+    metadata.insert(PROPERTY_ORDINAL_KEY, ordinal.to_string());
     let mut fields = logical_schema
         .fields()
         .iter()

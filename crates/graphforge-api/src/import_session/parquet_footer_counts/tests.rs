@@ -1,5 +1,5 @@
 use super::super::parquet_compact::CompactSlice;
-use super::{FooterCountFacts, payload, preflight, sorting_column};
+use super::{FooterCountFacts, payload, preflight, schema_element, sorting_column};
 use crate::CancellationToken;
 use graphforge_core::{ApiErrorCode, GfError, ProjectErrorCode};
 
@@ -275,20 +275,26 @@ fn duplicate_known_key_value_fields_are_accounted_as_coexisting_requests() {
 }
 
 #[test]
-fn skipped_boolean_list_is_constant_time_and_does_not_add_allocations() {
+fn skipped_boolean_list_consumes_its_bytes_and_does_not_add_allocations() {
+    // parquet 60.2 skips one byte per unknown boolean list element.
     let mut wire = empty_footer();
     wire.pop();
     wire.push(0xd9); // unknown field 17, list
-    wire.push(0xf1); // huge bool list, zero-byte elements
-    wire.push(0xff);
-    wire.push(0xff);
-    wire.push(0xff);
-    wire.push(0xff);
-    wire.push(0x07);
+    wire.push(0x31); // three bool elements
+    wire.extend_from_slice(&[0x01, 0x00, 0x02]);
     wire.push(0);
     let facts = preflight(&wire, 1 << 20, None).unwrap();
     let baseline = preflight(&empty_footer(), 1 << 20, None).unwrap();
     assert_eq!(facts, baseline);
+
+    // A declared count the footer cannot hold is refused, as natively.
+    let mut wire = empty_footer();
+    wire.pop();
+    wire.push(0xd9); // unknown field 17, list
+    wire.push(0xf1); // i32::MAX bool elements
+    wire.extend_from_slice(&[0xff, 0xff, 0xff, 0xff, 0x07]);
+    wire.push(0);
+    assert_storage_error(preflight(&wire, 1 << 20, None).unwrap_err());
 }
 
 #[test]
@@ -340,4 +346,36 @@ fn checked_scalar_totals_refuse_overflow() {
     let mut facts = FooterCountFacts::default();
     facts.account_vector(usize::MAX, u64::MAX).unwrap();
     assert_resource_limit(facts.account_vector(1, u64::MAX).unwrap_err());
+}
+
+/// parquet 60.2 gives a converted Arrow field metadata for a field id and for
+/// the logical types it maps to Arrow extension types; the topology charges
+/// a metadata tree for exactly those elements.
+#[test]
+fn schema_elements_report_arrow_field_metadata() {
+    let element = |extra: &[u8]| {
+        let mut wire = Wire::default();
+        wire.byte(0x48); // name, field 4
+        wire.text(b"column");
+        wire.0.extend_from_slice(extra);
+        wire.byte(0); // SchemaElement STOP
+        let mut cursor = CompactSlice::new(&wire.0, None);
+        schema_element(
+            &mut cursor,
+            &mut FooterCountFacts::default(),
+            u64::MAX,
+            false,
+        )
+        .unwrap()
+        .arrow_field_metadata
+    };
+    assert!(!element(&[]));
+    // field_id, field 9: delta 5 from the name, i32 7.
+    assert!(element(&[0x55, 0x0e]));
+    // logical_type, field 10 (delta 6), holding the STRING (1) variant.
+    assert!(!element(&[0x6c, 0x1c, 0x00, 0x00]));
+    // JSON (12), UUID (14) and FILE (19) map to Arrow extension types.
+    assert!(element(&[0x6c, 0xcc, 0x00, 0x00]));
+    assert!(element(&[0x6c, 0xec, 0x00, 0x00]));
+    assert!(element(&[0x6c, 0x0c, 0x26, 0x00, 0x00]));
 }

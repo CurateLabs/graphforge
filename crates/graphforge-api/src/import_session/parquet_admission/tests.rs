@@ -281,8 +281,8 @@ fn source_scan_projects_visible_leaves_across_an_omitted_map_gap() {
             .collect::<Vec<_>>(),
         [0, 2],
     );
-    assert_eq!(scan.batch_bytes(0), 182);
-    assert_eq!(scan.batch_bytes(1), 182);
+    assert_eq!(scan.batch_bytes(0), 186);
+    assert_eq!(scan.batch_bytes(1), 186);
 
     let reader = ParquetRecordBatchReaderBuilder::try_new(file.reopen().unwrap())
         .unwrap()
@@ -307,7 +307,7 @@ fn source_scan_projects_visible_leaves_across_an_omitted_map_gap() {
             .downcast_ref::<StringArray>()
             .unwrap();
         assert_eq!(arrow_bytes(before), 16);
-        assert_eq!(arrow_bytes(after), 164);
+        assert_eq!(arrow_bytes(after), 168);
         assert!(after.nulls().is_none());
         for row in 0..batch.num_rows() {
             decoded_rows.push((before.value(row), after.value(row).to_owned()));
@@ -321,10 +321,11 @@ fn source_scan_projects_visible_leaves_across_an_omitted_map_gap() {
     assert_eq!(decoded_rows.len(), 4);
     assert_eq!(decoded_rows[0], (10, format!("visible-value-{:064}", 0)));
     assert_eq!(decoded_rows[3], (13, format!("visible-value-{:064}", 3)));
-    // Slice-memory sizing counts two logical offsets, excluding the terminal
-    // offset, and the native reader drops the all-valid null buffer.
-    assert_eq!(decoded_bytes, 360);
-    assert_eq!(scan.decoded_bytes(), 364);
+    // Slice-memory sizing counts both rows' offsets and the terminal one
+    // (arrow-data 60 sizes Utf8 offsets as `len + 1`), and the native reader
+    // drops the all-valid null buffer the scan still counts.
+    assert_eq!(decoded_bytes, 368);
+    assert_eq!(scan.decoded_bytes(), 372);
 }
 
 /// Every batch's stated size covers what the reader decodes, and exceeds it by

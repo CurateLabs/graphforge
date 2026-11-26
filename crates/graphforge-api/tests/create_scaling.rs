@@ -101,3 +101,21 @@ fn later_create_property_expression_keeps_its_input_binding() {
         2
     );
 }
+
+/// A write segment carries its input rows into the next segment even when
+/// `WITH *` names no variable: two matched rows each create a node, and the
+/// second MATCH then sees four nodes for each of the two carried rows
+/// (openCypher TCK Create3 `[3] MATCH-CREATE-WITH-CREATE`). DataFusion 56
+/// drops a cross join with a one-row, zero-column input, so the carried rows
+/// must reach the plan as rows, not as a placeholder (#2042).
+#[test]
+fn rows_without_named_variables_carry_across_a_write_segment() {
+    let forge = GraphForge::new(None).expect("in-memory forge");
+    forge.execute("CREATE (), ()").expect("seed nodes");
+    let result = forge
+        .execute("MATCH () CREATE () WITH * MATCH () CREATE ()")
+        .expect("segmented CREATE executes");
+    let effects = result.side_effects.expect("write side effects");
+    assert_eq!(effects.nodes_created, 10);
+    assert_eq!(scalar_count(&forge, "MATCH (n) RETURN count(n)"), 12);
+}

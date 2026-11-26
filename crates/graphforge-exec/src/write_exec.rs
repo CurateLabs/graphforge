@@ -158,6 +158,17 @@ impl ExecutionPlan for GraphDeleteExec {
         &self.props
     }
 
+    fn apply_expressions(
+        &self,
+        _f: &mut dyn FnMut(
+            &std::sync::Arc<dyn datafusion::physical_expr::PhysicalExpr>,
+        ) -> datafusion::common::Result<
+            datafusion::common::tree_node::TreeNodeRecursion,
+        >,
+    ) -> datafusion::common::Result<datafusion::common::tree_node::TreeNodeRecursion> {
+        Ok(datafusion::common::tree_node::TreeNodeRecursion::Continue)
+    }
+
     fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
         vec![&self.input]
     }
@@ -818,6 +829,17 @@ impl ExecutionPlan for GraphSetExec {
         &self.props
     }
 
+    fn apply_expressions(
+        &self,
+        _f: &mut dyn FnMut(
+            &std::sync::Arc<dyn datafusion::physical_expr::PhysicalExpr>,
+        ) -> datafusion::common::Result<
+            datafusion::common::tree_node::TreeNodeRecursion,
+        >,
+    ) -> datafusion::common::Result<datafusion::common::tree_node::TreeNodeRecursion> {
+        Ok(datafusion::common::tree_node::TreeNodeRecursion::Continue)
+    }
+
     fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
         vec![&self.input]
     }
@@ -872,7 +894,7 @@ impl ExecutionPlan for GraphSetExec {
             // Pre-build one physical value expr per target (UnwindExec pattern).
             let phys_values = targets
                 .iter()
-                .map(|(_, expr)| create_physical_expr(expr, &df_schema, &ExecutionProps::new()))
+                .map(|(_, expr)| create_physical_expr(expr, &df_schema, &ExecutionProps::new(), &datafusion::logical_expr::physical_planning_context::PhysicalPlanningContext::default()))
                 .collect::<Result<Vec<_>, _>>()?;
 
             let mut acc = SetAccumulator::default();
@@ -971,6 +993,17 @@ impl ExecutionPlan for GraphRemoveExec {
 
     fn properties(&self) -> &Arc<PlanProperties> {
         &self.props
+    }
+
+    fn apply_expressions(
+        &self,
+        _f: &mut dyn FnMut(
+            &std::sync::Arc<dyn datafusion::physical_expr::PhysicalExpr>,
+        ) -> datafusion::common::Result<
+            datafusion::common::tree_node::TreeNodeRecursion,
+        >,
+    ) -> datafusion::common::Result<datafusion::common::tree_node::TreeNodeRecursion> {
+        Ok(datafusion::common::tree_node::TreeNodeRecursion::Continue)
     }
 
     fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {

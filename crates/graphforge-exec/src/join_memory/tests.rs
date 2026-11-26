@@ -101,6 +101,17 @@ impl ExecutionPlan for SizedExec {
         &self.properties
     }
 
+    fn apply_expressions(
+        &self,
+        _f: &mut dyn FnMut(
+            &std::sync::Arc<dyn datafusion::physical_expr::PhysicalExpr>,
+        ) -> datafusion::common::Result<
+            datafusion::common::tree_node::TreeNodeRecursion,
+        >,
+    ) -> datafusion::common::Result<datafusion::common::tree_node::TreeNodeRecursion> {
+        Ok(datafusion::common::tree_node::TreeNodeRecursion::Continue)
+    }
+
     fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
         vec![]
     }
@@ -122,7 +133,11 @@ impl ExecutionPlan for SizedExec {
         ))
     }
 
-    fn partition_statistics(&self, _: Option<usize>) -> Result<Arc<Statistics>, DataFusionError> {
+    fn statistics_from_inputs(
+        &self,
+        _: &[Arc<Statistics>],
+        _: &datafusion::physical_plan::statistics::StatisticsArgs,
+    ) -> Result<Arc<Statistics>, DataFusionError> {
         Ok(Arc::clone(&self.statistics))
     }
 }

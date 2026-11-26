@@ -234,11 +234,7 @@ fn split_stamps_dense_ordinals_and_preserves_row_order() {
         DataType::FixedSizeBinary(16),
         false,
     )])
-    .with_metadata(
-        [(PROPERTY_ORDINAL_KEY.to_owned(), "9".to_owned())]
-            .into_iter()
-            .collect(),
-    );
+    .with_metadata([(PROPERTY_ORDINAL_KEY.to_owned(), "9".to_owned())]);
     let batch = RecordBatch::try_new(
         Arc::new(schema),
         vec![Arc::new(FixedSizeBinaryArray::try_from_iter(uuids.iter()).unwrap()) as ArrayRef],

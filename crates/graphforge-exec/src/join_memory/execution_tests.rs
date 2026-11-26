@@ -9,6 +9,7 @@ use datafusion::datasource::TableProvider;
 use datafusion::datasource::memory::MemorySourceConfig;
 use datafusion::physical_expr::equivalence::{AcrossPartitions, ConstExpr};
 use datafusion::physical_plan::collect;
+use datafusion::physical_plan::{ChildrenPropertiesMode, ReplaceChildrenOptions};
 use datafusion::prelude::{SessionConfig, SessionContext};
 use graphforge_storage::PropertyFilterApprovalRule;
 use graphforge_storage::catalog::PropertyTable;
@@ -89,6 +90,17 @@ impl ExecutionPlan for SortedUuidFrontier {
         &self.properties
     }
 
+    fn apply_expressions(
+        &self,
+        _f: &mut dyn FnMut(
+            &std::sync::Arc<dyn datafusion::physical_expr::PhysicalExpr>,
+        ) -> datafusion::common::Result<
+            datafusion::common::tree_node::TreeNodeRecursion,
+        >,
+    ) -> datafusion::common::Result<datafusion::common::tree_node::TreeNodeRecursion> {
+        Ok(datafusion::common::tree_node::TreeNodeRecursion::Continue)
+    }
+
     fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
         vec![]
     }
@@ -109,7 +121,11 @@ impl ExecutionPlan for SortedUuidFrontier {
         self.input.execute(partition, context)
     }
 
-    fn partition_statistics(&self, _: Option<usize>) -> Result<Arc<Statistics>> {
+    fn statistics_from_inputs(
+        &self,
+        _: &[Arc<Statistics>],
+        _: &datafusion::physical_plan::statistics::StatisticsArgs,
+    ) -> Result<Arc<Statistics>> {
         Ok(Arc::new(Statistics::new_unknown(&self.schema())))
     }
 }
@@ -143,7 +159,13 @@ async fn nominated_enrichment(
         )
         .unwrap(),
     );
-    assert!(estimated_bytes(join.children()[0]).is_none());
+    assert!(
+        estimated_bytes(
+            join.children()[0],
+            &datafusion::physical_plan::statistics::StatisticsContext::new()
+        )
+        .is_none()
+    );
     PropertyFilterApprovalRule
         .optimize(join, &ConfigOptions::default())
         .unwrap()
@@ -223,7 +245,10 @@ async fn assert_frontier_drains(known_constant: bool) {
     );
     assert!(coalesced.output_ordering().is_none());
     let rebuilt_coalescer = Arc::clone(&coalesced)
-        .with_new_children(vec![Arc::clone(coalesced.children()[0])])
+        .replace_children(
+            vec![Arc::clone(coalesced.children()[0])],
+            ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
+        )
         .unwrap();
     assert!(rebuilt_coalescer.output_ordering().is_none());
     assert!(
@@ -233,12 +258,23 @@ async fn assert_frontier_drains(known_constant: bool) {
             .unwrap()
     );
     let rebuilt_left = left_sort
-        .with_new_children(vec![rebuilt_coalescer])
+        .replace_children(
+            vec![rebuilt_coalescer],
+            ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
+        )
         .unwrap();
     let rebuilt_join = Arc::clone(&full_join)
-        .with_new_children(vec![rebuilt_left, Arc::clone(full_join.children()[1])])
+        .replace_children(
+            vec![rebuilt_left, Arc::clone(full_join.children()[1])],
+            ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
+        )
         .unwrap();
-    let placed = placed.with_new_children(vec![rebuilt_join]).unwrap();
+    let placed = placed
+        .replace_children(
+            vec![rebuilt_join],
+            ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
+        )
+        .unwrap();
     let batches = tokio::time::timeout(Duration::from_secs(5), collect(placed, context.task_ctx()))
         .await
         .expect("the left input must drain before the nominated probe can read")

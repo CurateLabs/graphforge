@@ -2,7 +2,7 @@
 //!
 //! Fixtures encode literal native-compatible compact protocol bytes with a
 //! small test-only writer. Assertions pin `GfError` variants (not messages),
-//! consumption offsets, and the sentinel bytes a folded skip must leave
+//! consumption offsets, and the sentinel bytes a skip must leave
 //! untouched.
 
 use super::{CompactSlice, Kind};
@@ -208,17 +208,33 @@ fn extended_list_counts_above_i32_max_are_malformed() {
 }
 
 #[test]
-fn unknown_bool_lists_fold_without_touching_the_sentinel() {
+fn unknown_bool_lists_skip_one_byte_per_element() {
+    // parquet 60.2 `skip_bool_list` consumes one unvalidated byte per
+    // element; a cursor that consumed none would read the elements as the
+    // next field headers.
+    for tag in [1, 2] {
+        let wire = Wire::new()
+            .list(tag, 2)
+            .byte(0x01)
+            .byte(0x7F)
+            .byte(0xAA)
+            .zigzag(7);
+        let mut skipper = cursor_of(&wire);
+        skipper.skip(Kind::List).unwrap();
+        assert_eq!(skipper.remaining(), [0xAA_u8, 0x0E].as_slice());
+    }
+
+    // A declared count the remaining bytes cannot hold is refused before any
+    // element byte is consumed.
     let i32_max = usize::try_from(i64::from(i32::MAX)).expect("fits usize");
     let wire = Wire::new().list(1, i32_max).byte(0xAA).zigzag(7);
     let mut cursor = cursor_of(&wire);
     let list = cursor.read_list().unwrap();
     assert_eq!(list.element, Kind::BoolTrue);
     assert_eq!(list.count, i32_max);
-
     let mut skipper = cursor_of(&wire);
-    skipper.skip(Kind::List).unwrap();
-    assert_eq!(skipper.remaining(), [0xAA_u8, 0x0E].as_slice());
+    assert_malformed(skipper.skip(Kind::List).unwrap_err());
+    assert_eq!(skipper.position(), 6); // the list header only
 }
 
 #[test]
@@ -433,16 +449,15 @@ fn skip_depth_matches_the_native_64_level_limit() {
 }
 
 #[test]
-fn a_boolean_list_child_at_depth_zero_is_refused_before_its_fold() {
+fn a_boolean_list_child_at_depth_zero_is_refused_before_its_bytes() {
     // 62 nested struct headers put the innermost struct at depth 2, so its
-    // boolean list sits at depth 1 and native would call its zero-byte
-    // elements at depth 0. The constant-time fold must not bypass that
-    // refusal.
+    // boolean list sits at depth 1 and native `skip_bool_list` refuses a
+    // non-empty list at depth 0 before it skips any element byte.
     let mut refused = Wire::new();
     for _ in 0..62 {
         refused = refused.field(Kind::Struct, 1, 0);
     }
-    let mut refused = refused.field(Kind::List, 1, 0).list(1, 2);
+    let mut refused = refused.field(Kind::List, 1, 0).list(1, 2).byte(1).byte(0);
     for _ in 0..63 {
         refused = refused.stop();
     }
@@ -450,13 +465,13 @@ fn a_boolean_list_child_at_depth_zero_is_refused_before_its_fold() {
     assert_malformed(cursor.skip(Kind::Struct).unwrap_err());
     assert_eq!(cursor.position(), 64); // the headers and the list header only
 
-    // One nesting level shallower the same list folds in constant time, so
-    // the refusal is the depth rule, not the fold itself.
+    // One nesting level shallower the same list skips its two element
+    // bytes, so the refusal is the depth rule, not the list itself.
     let mut folded = Wire::new();
     for _ in 0..61 {
         folded = folded.field(Kind::Struct, 1, 0);
     }
-    let mut folded = folded.field(Kind::List, 1, 0).list(1, 2);
+    let mut folded = folded.field(Kind::List, 1, 0).list(1, 2).byte(1).byte(0);
     for _ in 0..62 {
         folded = folded.stop();
     }

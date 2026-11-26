@@ -538,6 +538,7 @@ mod query_pool;
 mod session;
 mod sort_runs;
 mod traversal_destination;
+mod validated_spill;
 pub use session::{
     AdjacencyProviderExt, ExecutionSession, GraphForgeQueryPlanner, SessionResourceConfig,
 };

@@ -167,6 +167,8 @@ fn stream_from_results(
         run_bytes: RUN_BYTES,
         buffered: Vec::new(),
         buffered_bytes: 0,
+        buffered_rows: 0,
+        batch_size: 8192,
         pending: None,
         reservation: MemoryConsumer::new("SortRunCoalesce[0]")
             .register(&(Arc::clone(pool) as Arc<dyn MemoryPool>)),
@@ -784,4 +786,66 @@ fn dictionary_key_overflow_also_admits_merge_workspace() {
         + 256 * size_of::<i8>();
     assert!(compact_charge(&batch) >= simultaneous);
     assert_physical_copy_bound(&batch);
+}
+
+fn int64_batch(start: i64, rows: usize) -> RecordBatch {
+    let values = Int64Array::from_iter_values(start..start + rows as i64);
+    RecordBatch::try_new(
+        Arc::new(Schema::new(vec![Field::new("v", DataType::Int64, false)])),
+        vec![Arc::new(values) as ArrayRef],
+    )
+    .unwrap()
+}
+
+/// The runs of `batches` coalesced with `batch_size` rows per merge chunk,
+/// checking that every row is emitted once, in order, and every charge is
+/// released.
+async fn runs_of(batches: Vec<RecordBatch>, batch_size: usize) -> Vec<RecordBatch> {
+    let schema = batches[0].schema();
+    let expected = concat_batches(&schema, &batches).unwrap();
+    let pool = Arc::new(QueryMemoryPool::new(POOL_BYTES));
+    let mut stream = stream_from_results(schema, batches.into_iter().map(Ok).collect(), &pool);
+    stream.batch_size = batch_size;
+    let mut runs = Vec::new();
+    while let Some(run) = stream.next().await {
+        runs.push(run.unwrap());
+    }
+    assert_eq!(concat_batches(&runs[0].schema(), &runs).unwrap(), expected);
+    drop(stream);
+    assert_eq!(pool.reserved(), 0);
+    runs
+}
+
+/// Batches just below the run target, each longer than a merge chunk, become
+/// one run each instead of runs of nearly twice the target: the sort reserves
+/// twice every run it is handed (#2353).
+#[tokio::test]
+async fn batches_just_below_the_run_target_are_not_coalesced_past_it() {
+    let rows = 7_000;
+    let batch = int64_batch(0, rows);
+    let size = batch.get_array_memory_size();
+    assert!(size < RUN_BYTES && 2 * size > RUN_BYTES, "{size}");
+    let batches = (0..4)
+        .map(|index| int64_batch(index * rows as i64, rows))
+        .collect::<Vec<_>>();
+    let runs = runs_of(batches, 1_024).await;
+    assert_eq!(runs.len(), 4);
+    for run in &runs {
+        assert_eq!(run.num_rows(), rows);
+        assert!(run.get_array_memory_size() <= RUN_BYTES);
+    }
+}
+
+/// A batch no longer than one merge chunk is still coalesced with the next,
+/// even past the target: a run of a single chunk would leave the merge
+/// holding the whole run beside its row keys.
+#[tokio::test]
+async fn a_run_of_one_merge_chunk_still_takes_the_next_batch() {
+    let rows = 7_000;
+    let batches = (0..4)
+        .map(|index| int64_batch(index * rows as i64, rows))
+        .collect::<Vec<_>>();
+    let runs = runs_of(batches, 8_192).await;
+    assert_eq!(runs.len(), 2);
+    assert!(runs.iter().all(|run| run.num_rows() == 2 * rows));
 }

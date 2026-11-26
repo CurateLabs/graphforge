@@ -1525,10 +1525,10 @@ mod tests {
                 .collect::<Vec<_>>();
             match invalid {
                 "route" => {
-                    metadata.insert(SEMANTIC_ROUTE_METADATA_KEY.into(), "s-unlisted".into());
+                    metadata.insert(SEMANTIC_ROUTE_METADATA_KEY, "s-unlisted");
                 }
                 "composition" => {
-                    metadata.insert(SEMANTIC_COMPOSITION_METADATA_KEY.into(), "0".repeat(64));
+                    metadata.insert(SEMANTIC_COMPOSITION_METADATA_KEY, "0".repeat(64));
                 }
                 "join" => {
                     let index = fields

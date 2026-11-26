@@ -375,9 +375,7 @@ fn dense_node_layout(
         return None;
     }
     let row_groups = metadata.row_groups();
-    let column_indexes = metadata.column_index()?;
-    let offset_indexes = metadata.offset_index()?;
-    if column_indexes.len() != row_groups.len() || offset_indexes.len() != row_groups.len() {
+    if !metadata.page_index()?.is_complete() {
         return None;
     }
 
@@ -414,8 +412,7 @@ fn dense_node_groups(
     use parquet::file::statistics::Statistics;
 
     let row_groups = metadata.row_groups();
-    let column_indexes = metadata.column_index()?;
-    let offset_indexes = metadata.offset_index()?;
+    let page_indexes = metadata.page_index()?;
     let mut group_rows = Vec::with_capacity(row_groups.len());
     let mut group_pages = Vec::with_capacity(row_groups.len());
     let mut file_row_offset = 0usize;
@@ -442,16 +439,15 @@ fn dense_node_groups(
             return None;
         }
 
-        let page_index = column_indexes.get(group_idx)?.get(key_leaf)?;
+        let page_index = page_indexes.column_index(group_idx, key_leaf)?;
         if page_index.get_boundary_order() != Some(BoundaryOrder::ASCENDING) {
             return None;
         }
         let ColumnIndexMetaData::INT64(page_stats) = page_index else {
             return None;
         };
-        let locations = offset_indexes
-            .get(group_idx)?
-            .get(key_leaf)?
+        let locations = page_indexes
+            .offset_index(group_idx, key_leaf)?
             .page_locations();
         if locations.is_empty()
             || usize::try_from(page_stats.num_pages()).ok()? != locations.len()

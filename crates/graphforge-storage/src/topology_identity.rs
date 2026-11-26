@@ -20,8 +20,8 @@ use parquet::arrow::ProjectionMask;
 use parquet::arrow::arrow_reader::{
     ArrowReaderMetadata, ArrowReaderOptions, ParquetRecordBatchReaderBuilder, RowSelection,
 };
+use parquet::file::metadata::page_index::{PageIndexBuilder, PageIndexProvider};
 use parquet::file::metadata::{PageIndexPolicy, ParquetMetaData};
-use parquet::file::page_index::offset_index::OffsetIndexMetaData;
 use rayon::prelude::*;
 use std::collections::HashMap;
 use std::ops::Range;
@@ -216,14 +216,13 @@ fn page_bounds(
     use parquet::file::page_index::column_index::ColumnIndexMetaData;
 
     let ColumnIndexMetaData::FIXED_LEN_BYTE_ARRAY(index) =
-        metadata.column_index()?.get(group)?.get(leaf)?
+        metadata.page_index()?.column_index(group, leaf)?
     else {
         return None;
     };
     let locations = metadata
-        .offset_index()?
-        .get(group)?
-        .get(leaf)?
+        .page_index()?
+        .offset_index(group, leaf)?
         .page_locations();
     if locations.is_empty() || usize::try_from(index.num_pages()).ok()? != locations.len() {
         return None;
@@ -256,12 +255,12 @@ fn chunk_pages(
     leaves: &[usize],
     rows: usize,
 ) -> Option<Vec<ChunkPages>> {
-    let offsets = metadata.offset_index()?.get(group)?;
+    let offsets = metadata.page_index_for_row_group(group);
     let row_group = metadata.row_group(group);
     leaves
         .iter()
         .map(|leaf| {
-            let locations = offsets.get(*leaf)?.page_locations();
+            let locations = offsets.offset_index(*leaf)?.page_locations();
             let first = locations.first()?;
             let dictionary_bytes = row_group
                 .column(*leaf)
@@ -302,31 +301,28 @@ fn chunk_pages(
 /// of the row groups and columns it decodes.
 fn retained_metadata(metadata: Arc<ParquetMetaData>, leaves: &[usize]) -> ParquetMetaData {
     let mut builder = Arc::unwrap_or_clone(metadata).into_builder();
-    let offsets = builder.take_offset_index().map(|groups| {
-        groups
-            .into_iter()
-            .map(|columns| {
-                columns
-                    .into_iter()
-                    .enumerate()
-                    .map(|(leaf, index)| {
-                        if leaves.contains(&leaf) {
-                            index
-                        } else {
-                            OffsetIndexMetaData {
-                                page_locations: Vec::new(),
-                                unencoded_byte_array_data_bytes: None,
-                            }
-                        }
-                    })
-                    .collect()
-            })
-            .collect()
+    let page_index = builder.take_page_index().and_then(|index| {
+        let groups = builder.row_groups().len();
+        let columns = builder
+            .row_groups()
+            .first()
+            .map_or(0, parquet::file::metadata::RowGroupMetaData::num_columns);
+        // Parquet's builder stores only the entries put into it, so the column
+        // index and every undecoded column's offset index are simply absent.
+        let mut retained = PageIndexBuilder::try_new(groups, columns).ok()?;
+        for group in 0..groups {
+            for &leaf in leaves {
+                if let Some(offsets) = index.offset_index(group, leaf) {
+                    retained
+                        .try_put_offset_index(offsets.clone(), group, leaf)
+                        .ok()?;
+                }
+            }
+        }
+        let retained = retained.try_build().ok()?;
+        Some(Arc::new(retained) as Arc<dyn PageIndexProvider>)
     });
-    builder
-        .set_column_index(None)
-        .set_offset_index(offsets)
-        .build()
+    builder.set_page_index(page_index).build()
 }
 
 fn load_fragment(

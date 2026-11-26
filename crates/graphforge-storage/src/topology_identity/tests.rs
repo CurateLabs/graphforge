@@ -321,21 +321,25 @@ fn a_cached_footer_keeps_the_page_layout_of_the_decoded_columns_only() {
     let path = write_fragment_with_payload(dir.path());
     let fragment = load_fragment(&path, "node_uuid", Some("node_id")).unwrap();
     let metadata = fragment.metadata.metadata();
+    let page_index = metadata.page_index().expect("the page index was read");
     assert!(
-        metadata.column_index().is_none(),
+        !page_index.has_column_indexes(),
         "the column index is read once, for the page bounds"
     );
-    let offsets = metadata.offset_index().expect("the page index was read");
-    assert_eq!(offsets.len() as u64, GROUPS);
+    assert_eq!(metadata.num_row_groups() as u64, GROUPS);
     let pages = (PAGES / GROUPS) as usize;
-    for group in offsets {
-        assert_eq!(group[0].page_locations().len(), pages, "node_uuid");
-        assert_eq!(group[1].page_locations().len(), pages, "node_id");
-        assert!(
-            group[2].page_locations().is_empty(),
-            "payload is not decoded"
-        );
+    for group in 0..metadata.num_row_groups() {
+        let offsets = metadata.page_index_for_row_group(group);
+        assert_eq!(offsets.page_locations(0).unwrap().len(), pages, "node_uuid");
+        assert_eq!(offsets.page_locations(1).unwrap().len(), pages, "node_id");
+        assert!(offsets.offset_index(2).is_none(), "payload is not decoded");
     }
+    assert!(
+        page_index
+            .offset_index(metadata.num_row_groups(), 0)
+            .is_none(),
+        "no row group beyond the file is retained"
+    );
     // What is kept is what a page-selective decode needs.
     let probe = probe_over(vec![fragment], Vec::new());
     let (surrogates, metrics) = probe

@@ -47,11 +47,11 @@ brotli-decompressor = "6.0.1"
 crc32fast = "1"
 miniz_oxide = { version = "=0.8.9", default-features = false, features = ["with-alloc"] }
 snap = "1.1"
-zstd-safe = { version = "=8.1.0", default-features = false, features = ["std"] }
+zstd-safe = { version = "=8.4.0", default-features = false, features = ["std"] }
 datafusion = { workspace = true }
 futures = { workspace = true }
 # The bounded LZ4 frame verifier uses the version pinned by arrow-ipc.
-lz4_flex = { version = "0.13.1", default-features = false, features = ["std", "frame"] }
+lz4_flex = { version = "0.14.2", default-features = false, features = ["std", "frame"] }
 parquet = { workspace = true, features = ["experimental"] }
 serde_json = { workspace = true }
 serde = { workspace = true }

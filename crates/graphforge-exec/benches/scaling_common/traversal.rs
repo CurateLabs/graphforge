@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use arrow::array::{Array, UInt64Array};
+use arrow::array::UInt64Array;
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use datafusion::physical_plan::{ExecutionPlan, collect};

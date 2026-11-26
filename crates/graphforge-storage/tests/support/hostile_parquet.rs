@@ -138,7 +138,7 @@ pub fn single_page_delta_length(rows: usize) -> Vec<u8> {
 
 /// Rewrite the delta count embedded in the sole `DELTA_LENGTH_BYTE_ARRAY` page of
 /// [`single_page_delta_length`] to `count`, keeping every length and the footer.
-/// `parquet` 58.4 allocates a vector of `count` lengths before reading any.
+/// `parquet` 60.2 allocates a vector of `count` lengths before reading any.
 pub fn inflate_embedded_count(file: &mut [u8], count: u64) {
     assert!((1 << 21..1 << 28).contains(&count));
     let offset = usize::try_from(data_page_offset(file)).unwrap();

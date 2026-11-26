@@ -604,14 +604,9 @@ fn build_batch(
         Arc::new(Schema::new_with_metadata(
             SNAPSHOT_SCHEMA.fields().to_vec(),
             [
-                ("graphforge.snapshot_policy".into(), POLICY.into()),
-                (
-                    "graphforge.snapshot_fingerprint".into(),
-                    encode_hex(fingerprint),
-                ),
-            ]
-            .into_iter()
-            .collect(),
+                ("graphforge.snapshot_policy", POLICY.to_owned()),
+                ("graphforge.snapshot_fingerprint", encode_hex(fingerprint)),
+            ],
         ))
     } else {
         Arc::clone(&SNAPSHOT_SCHEMA)

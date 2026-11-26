@@ -1,13 +1,13 @@
 //! Allocation-free compact-protocol cursor over an already-owned Parquet
 //! footer (#1918).
 //!
-//! The grammar mirrors the pinned parquet 58.4 borrowing decoder
+//! The grammar mirrors the pinned parquet 60.2 borrowing decoder
 //! (`ThriftSliceInputProtocol` and the compact field, list, boolean, and skip
 //! rules it implements) and adds the guards the native decoder does not have:
 //! checked varint and integer widths, list-capacity admission before a caller
-//! allocates, cooperative cancellation at entry and at every bounded field and
-//! element cadence, and a constant-time fold for skipped boolean lists whose
-//! zero-byte elements the native decoder still loops over one by one.
+//! allocates, and cooperative cancellation at entry and at every bounded field
+//! and element cadence. A skipped boolean list consumes one unvalidated byte
+//! per element, as the native `skip_bool_list` does.
 //!
 //! The cursor borrows the footer bytes; it never allocates proportionally to
 //! declared counts, depths, or body bytes, and it never demands that the input
@@ -26,9 +26,9 @@
 //! capacity against the caller's admitted budget and the bytes that remain.
 //! It does not validate element grammar and does not claim a complete footer
 //! or metadata envelope — callers must still walk every actual element and
-//! account their owned allocations for the whole phase separately. It must not
-//! be used for unknown boolean lists: native skips their elements without
-//! reading any bytes, so [`CompactSlice::skip`] folds those lists instead.
+//! account their owned allocations for the whole phase separately. Unknown
+//! boolean lists allocate nothing natively, so they go through
+//! [`CompactSlice::skip`], which consumes their one-byte elements in one step.
 //!
 //! Documented divergences, all reachable only from hostile writers: the
 //! value-reading [`CompactSlice::read_vlq`] caps the varint at the 10 bytes a
@@ -40,14 +40,21 @@
 //! `integer_width` refusal here and silently different bits natively; and
 //! list counts above `i32::MAX` are rejected where the native decoder's
 //! wrapping shifts could smuggle a small count out of a huge overlong
-//! encoding.
+//! encoding. The decoder is also stricter than native in three
+//! refusal-only ways: it cannot skip `Set`, `Map`, or the compact `Uuid` tag
+//! (13), which parquet 60.2 skips; a skipped struct's field-id delta must not
+//! overflow `i16`, where native skips with a last id of 0; and
+//! [`CompactSlice::read_list`] returns the element tag unchecked, where the
+//! native `read_thrift_vec` refuses a non-empty list whose tag differs from
+//! the consumer's (`validate_list_type`). Each divergence only refuses a
+//! footer native might decode, or leaves a refusal to native.
 
 use graphforge_core::GfError;
 
 use super::{cancelled, limit, storage};
 use crate::CancellationToken;
 
-/// Native default skip depth (pinned parquet 58.4 `DEFAULT_SKIP_DEPTH`).
+/// Native default skip depth (pinned parquet 60.2 `DEFAULT_SKIP_DEPTH`).
 const SKIP_DEPTH: i8 = 64;
 
 /// Element cadence at which skipping re-checks cancellation.
@@ -108,7 +115,7 @@ fn capacity_overflow() -> GfError {
 }
 
 /// Compact wire discriminant for struct fields and list elements (pinned
-/// parquet 58.4 `FieldType`).
+/// parquet 60.2 `FieldType`).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum Kind {
     Stop = 0,
@@ -209,14 +216,18 @@ pub(super) struct CompactSlice<'a> {
 fn minimum_body_bytes(kind: Kind) -> Option<u64> {
     match kind {
         Kind::Double => Some(8),
-        Kind::Byte
+        // A boolean list element is one byte; a boolean struct field rides
+        // in its header and never reaches a list body.
+        Kind::BoolTrue
+        | Kind::BoolFalse
+        | Kind::Byte
         | Kind::I16
         | Kind::I32
         | Kind::I64
         | Kind::Binary
         | Kind::List
         | Kind::Struct => Some(1),
-        Kind::BoolTrue | Kind::BoolFalse | Kind::Stop => Some(0),
+        Kind::Stop => Some(0),
         Kind::Set | Kind::Map => None,
     }
 }
@@ -406,9 +417,9 @@ impl<'a> CompactSlice<'a> {
     /// tags) normalize to [`Kind::BoolTrue`], an all-zero header byte is an
     /// empty list of [`Kind::Byte`], and a nibble-encoded count of 15 reads a
     /// varint that must fit `i32`, all matching the native decoder. The
-    /// advertised element kind is returned unchecked: the native
-    /// `read_thrift_vec` dispatches on the expected consumer type and
-    /// validates nothing about the tag beyond the header itself.
+    /// advertised element kind is returned unchecked; the native
+    /// `read_thrift_vec` additionally refuses a non-empty list whose tag is
+    /// not the consumer's, which callers leave to the native decoder.
     pub(super) fn read_list(&mut self) -> Result<List, GfError> {
         self.cancelled()?;
         let header = self.read_byte()?;
@@ -498,17 +509,15 @@ impl<'a> CompactSlice<'a> {
                     return Err(depth_exceeded());
                 }
                 let element = list.element;
-                if element == Kind::BoolTrue {
-                    // Skipped boolean elements carry no payload bytes: fold
-                    // the declared count in constant time instead of looping
-                    // over it, and leave the body untouched.
-                    self.cancelled()?;
-                    return Ok(());
-                }
                 let count = u64::try_from(list.count).map_err(|_| unexpected_end())?;
                 let needed = count.checked_mul(minimum).ok_or_else(unexpected_end)?;
                 if needed > self.remaining.len() as u64 {
                     return Err(unexpected_end());
+                }
+                if element == Kind::BoolTrue {
+                    // Native `skip_bool_list` skips one unvalidated byte per
+                    // element in a single step; so does this.
+                    return self.take(list.count);
                 }
                 for index in 0..list.count {
                     if index % SKIP_CANCEL_CADENCE == 0 {
@@ -535,14 +544,13 @@ impl<'a> CompactSlice<'a> {
     ///
     /// This does not validate element grammar and does not claim a complete
     /// footer or metadata envelope: callers must walk every actual element and
-    /// account their owned allocations for the whole phase separately. It must
-    /// not be used for unknown boolean lists — native skips their zero-byte
-    /// elements without reading them, so [`CompactSlice::skip`] folds those
-    /// lists instead.
+    /// account their owned allocations for the whole phase separately. Unknown
+    /// boolean lists allocate nothing natively and go through
+    /// [`CompactSlice::skip`] instead.
     ///
-    /// The advertised element kind is returned unchecked, matching the native
-    /// `read_thrift_vec`: it dispatches on the expected consumer type and
-    /// checks nothing about the element tag beyond the list header.
+    /// The advertised element kind is returned unchecked; the native
+    /// `read_thrift_vec` additionally refuses a non-empty list whose tag is
+    /// not the consumer's (`validate_list_type`).
     pub(super) fn allocating_list(
         &mut self,
         element_width: usize,

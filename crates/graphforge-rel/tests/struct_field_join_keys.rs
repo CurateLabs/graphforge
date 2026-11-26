@@ -8,8 +8,8 @@
 //! `optimize_projections` splits the upper join's required columns at the wrong
 //! offset and prunes a column the query reads (#2084).
 //!
-//! The vendored `datafusion-optimizer` refreshes the parent schema after a child
-//! is rewritten (see `vendor/datafusion-optimizer/GRAPHFORGE.md`). These tests
+//! DataFusion's optimizer refreshes the parent schema after a child is
+//! rewritten (apache/datafusion#22903, in DataFusion 55 and later). These tests
 //! check both halves of that contract on plans with the lowerer's shapes: the
 //! optimization succeeds with the right output columns, and no node of the plan
 //! keeps a schema that differs from the one its own inputs produce.

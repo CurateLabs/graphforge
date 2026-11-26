@@ -94,7 +94,7 @@ fn footer_rows_are_reported_by_kind_alike_from_every_form_and_source() {
 /// A file whose footer is large: many row groups, each with its own metadata.
 fn wide_footer() -> Vec<u8> {
     let properties = parquet::file::properties::WriterProperties::builder()
-        .set_max_row_group_size(4)
+        .set_max_row_group_row_count(Some(4))
         .build();
     hostile::write(hostile::strings(2_000), false, properties)
 }

@@ -1,9 +1,10 @@
-//! Extra workspace of the pinned Arrow 58.4 interleave kernels.
+//! Extra workspace of the pinned Arrow 60.2 interleave kernels.
 //!
 //! Callers separately admit stored payloads and final output slots. Every
 //! selected source row occurs at most once, so complete source child lengths
 //! bound the recursive index vectors without multiplying payload by hit count.
 
+use std::alloc::Layout;
 use std::mem::size_of;
 
 use arrow::array::{Array, ArrayData, ArrayRef, AsArray, MutableArrayData};
@@ -25,6 +26,13 @@ pub(super) fn workspace(array: &dyn Array) -> Result<usize, GfError> {
     let extra = match array.data_type() {
         DataType::List(_) => list_workspace(array.as_list::<i32>().values().as_ref())?,
         DataType::LargeList(_) => list_workspace(array.as_list::<i64>().values().as_ref())?,
+        // Arrow 60.2 `interleave_fixed_size_list` collects one (source, child
+        // row) pair per selected child element for a non-primitive child
+        // (`interleave_list_like_child`), exactly as a list does; a primitive
+        // child needs less.
+        DataType::FixedSizeList(_, _) => {
+            list_workspace(array.as_fixed_size_list().values().as_ref())?
+        }
         DataType::Struct(_) => array
             .as_struct()
             .columns()
@@ -34,12 +42,11 @@ pub(super) fn workspace(array: &dyn Array) -> Result<usize, GfError> {
             })?,
         DataType::Utf8View => view_workspace(array.as_string_view().data_buffers().len())?,
         DataType::BinaryView => view_workspace(array.as_binary_view().data_buffers().len())?,
-        // FixedSizeList uses interleave_fallback, whose MutableArrayData
-        // propagates initial capacities even into empty nested children.
-        DataType::FixedSizeList(_, _)
-        | DataType::Null
-        | DataType::Boolean
-        | DataType::FixedSizeBinary(_) => {
+        // Null and FixedSizeBinary use interleave_fallback, whose
+        // MutableArrayData propagates initial capacities even into empty
+        // nested children. Boolean has its own kernel in Arrow 60.2, which
+        // allocates no more than the fallback model.
+        DataType::Null | DataType::Boolean | DataType::FixedSizeBinary(_) => {
             return fallback_workspace(array, array.len());
         }
         DataType::Utf8 | DataType::LargeUtf8 | DataType::Binary | DataType::LargeBinary => 0,
@@ -58,14 +65,49 @@ fn list_workspace(values: &dyn Array) -> Result<usize, GfError> {
     )
 }
 
+/// Keys per std B-tree node (`alloc::collections::btree::node::CAPACITY`,
+/// Rust 1.96); every node but the root holds at least `MIN_LEN` of them.
+const BTREE_CAPACITY: usize = 11;
+const BTREE_MIN_LEN: usize = 5;
+
+/// An upper bound on one std B-tree internal node of `(K, V)` entries: the
+/// leaf header, `CAPACITY` keys and values, and `CAPACITY + 1` edges, laid out
+/// in declaration order. Rust may reorder the private fields only to remove
+/// padding, so the declared-order layout is never smaller.
+fn btree_node_bytes<K, V>() -> Result<usize, GfError> {
+    let mut layout = Layout::new::<usize>();
+    for part in [
+        Layout::new::<u16>(),
+        Layout::new::<u16>(),
+        Layout::array::<K>(BTREE_CAPACITY).map_err(|_| query_size_error())?,
+        Layout::array::<V>(BTREE_CAPACITY).map_err(|_| query_size_error())?,
+        Layout::array::<usize>(BTREE_CAPACITY + 1).map_err(|_| query_size_error())?,
+    ] {
+        layout = layout.extend(part).map_err(|_| query_size_error())?.0;
+    }
+    Ok(layout.pad_to_align().size())
+}
+
 fn view_workspace(buffers: usize) -> Result<usize, GfError> {
-    // interleave_views maps EVERY source buffer, including unused/empty ones.
-    // The output Buffer Vec can grow to twice its length with old/new overlap;
-    // Vec -> Arc<[Buffer]> conversion also overlaps its final allocation.
-    query_mul(
+    // interleave_views maps EVERY source buffer, including unused/empty ones,
+    // to a `u32` new index. The output Buffer Vec can grow to twice its
+    // length with old/new overlap; Vec -> Arc<[Buffer]> conversion also
+    // overlaps its final allocation. Arrow 60.2 also keys every emitted
+    // buffer by identity in a `BTreeMap<(*const u8, usize), u32>`
+    // (`seen_buffers`) for the whole kernel; insertion leaves every non-root
+    // node at least `MIN_LEN` full, so `buffers / MIN_LEN + 1` nodes bound it.
+    let slots = query_mul(
         buffers,
-        query_add(size_of::<Option<u32>>(), query_mul(4, size_of::<Buffer>())?)?,
-    )
+        query_add(size_of::<u32>(), query_mul(4, size_of::<Buffer>())?)?,
+    )?;
+    if buffers == 0 {
+        return Ok(slots);
+    }
+    let seen = query_mul(
+        buffers / BTREE_MIN_LEN + 1,
+        btree_node_bytes::<(*const u8, usize), u32>()?,
+    )?;
+    query_add(slots, seen)
 }
 
 fn metadata(array: &dyn Array) -> Result<usize, GfError> {
@@ -210,14 +252,36 @@ mod tests {
         let small = make(0);
         let large = make(1024);
         assert_eq!(large.get_buffer_memory_size(), 0);
+        let seen_nodes =
+            (1024 / BTREE_MIN_LEN + 1) * btree_node_bytes::<(*const u8, usize), u32>().unwrap();
         assert_eq!(
             workspace(&large).unwrap() - workspace(&small).unwrap(),
-            1024 * (size_of::<Option<u32>>() + 4 * size_of::<Buffer>())
+            1024 * (size_of::<u32>() + 4 * size_of::<Buffer>()) + seen_nodes
         );
     }
 
     #[test]
-    fn fixed_list_fallback_admits_initial_capacity_beneath_empty_lists() {
+    fn fixed_list_workspace_tracks_child_indices_of_a_non_primitive_child() {
+        use arrow::array::FixedSizeListArray;
+        // Arrow 60.2 collects one (source, child row) pair per child element
+        // of a FixedSizeList whose child is not primitive, here Boolean,
+        // whose own payload is under one byte per element.
+        let make = |rows: usize| {
+            FixedSizeListArray::new(
+                Arc::new(Field::new("item", DataType::Boolean, true)),
+                4,
+                Arc::new(BooleanArray::from(vec![true; rows * 4])),
+                None,
+            )
+        };
+        let small = make(2);
+        let large = make(2_048);
+        let growth = workspace(&large).unwrap() - workspace(&small).unwrap();
+        assert!(growth >= (2_048 - 2) * 4 * size_of::<(usize, usize)>());
+    }
+
+    #[test]
+    fn fixed_list_child_indices_cover_the_native_kernel_beneath_nested_lists() {
         use arrow::array::FixedSizeListArray;
         let make = |rows| {
             let lists: ArrayRef = Arc::new(ListArray::new(
@@ -235,8 +299,10 @@ mod tests {
         };
         let small = make(1);
         let large = make(65_536);
-        // The leaf has zero values, but fallback preallocates Int64 slots
-        // according to its inherited parent capacity.
-        assert!(workspace(&large).unwrap() - workspace(&small).unwrap() >= 65_535 * 8);
+        // Every list row is one child element, so one index pair each.
+        assert!(
+            workspace(&large).unwrap() - workspace(&small).unwrap()
+                >= 65_535 * size_of::<(usize, usize)>()
+        );
     }
 }

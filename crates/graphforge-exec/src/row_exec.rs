@@ -178,6 +178,17 @@ impl ExecutionPlan for OptionalMatchExec {
         &self.props
     }
 
+    fn apply_expressions(
+        &self,
+        _f: &mut dyn FnMut(
+            &std::sync::Arc<dyn datafusion::physical_expr::PhysicalExpr>,
+        ) -> datafusion::common::Result<
+            datafusion::common::tree_node::TreeNodeRecursion,
+        >,
+    ) -> datafusion::common::Result<datafusion::common::tree_node::TreeNodeRecursion> {
+        Ok(datafusion::common::tree_node::TreeNodeRecursion::Continue)
+    }
+
     fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
         vec![
             &self.outer,
@@ -487,6 +498,17 @@ impl ExecutionPlan for CorrelatedSeedExec {
         &self.props
     }
 
+    fn apply_expressions(
+        &self,
+        _f: &mut dyn FnMut(
+            &std::sync::Arc<dyn datafusion::physical_expr::PhysicalExpr>,
+        ) -> datafusion::common::Result<
+            datafusion::common::tree_node::TreeNodeRecursion,
+        >,
+    ) -> datafusion::common::Result<datafusion::common::tree_node::TreeNodeRecursion> {
+        Ok(datafusion::common::tree_node::TreeNodeRecursion::Continue)
+    }
+
     fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
         vec![]
     }
@@ -681,6 +703,8 @@ impl UnwindExec {
             &self.list_expr,
             &self.input_dfschema,
             &ExecutionProps::new(),
+            &datafusion::logical_expr::physical_planning_context::PhysicalPlanningContext::default(
+            ),
         )?;
         demand.extend(
             datafusion::physical_expr::utils::collect_columns(&list)
@@ -746,6 +770,17 @@ impl ExecutionPlan for UnwindExec {
 
     fn properties(&self) -> &Arc<PlanProperties> {
         &self.props
+    }
+
+    fn apply_expressions(
+        &self,
+        _f: &mut dyn FnMut(
+            &std::sync::Arc<dyn datafusion::physical_expr::PhysicalExpr>,
+        ) -> datafusion::common::Result<
+            datafusion::common::tree_node::TreeNodeRecursion,
+        >,
+    ) -> datafusion::common::Result<datafusion::common::tree_node::TreeNodeRecursion> {
+        Ok(datafusion::common::tree_node::TreeNodeRecursion::Continue)
     }
 
     fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
@@ -837,8 +872,13 @@ fn unwind_explode(
     // physical Arrow schema (unqualified field names) cannot resolve (#599/#28).
     // `create_physical_expr` resolves them to column indices, which align with the
     // physical batch (same column order).
-    let phys = create_physical_expr(&cfg.list_expr, &cfg.input_dfschema, &ExecutionProps::new())
-        .map_err(|e| exec_err(e.to_string()))?;
+    let phys = create_physical_expr(
+        &cfg.list_expr,
+        &cfg.input_dfschema,
+        &ExecutionProps::new(),
+        &datafusion::logical_expr::physical_planning_context::PhysicalPlanningContext::default(),
+    )
+    .map_err(|e| exec_err(e.to_string()))?;
     let list_values = phys
         .evaluate(&input)
         .and_then(|cv| cv.into_array(input.num_rows()))

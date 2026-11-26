@@ -1250,10 +1250,7 @@ pub(crate) fn with_next_token(
 ) -> Result<RecordBatch, GfError> {
     let mut metadata = batch.schema().metadata().clone();
     if let Some(next) = next {
-        metadata.insert(
-            "graphforge.next_page_token".into(),
-            next.as_str().to_owned(),
-        );
+        metadata.insert("graphforge.next_page_token", next.as_str());
     }
     let schema = Arc::new(Schema::new_with_metadata(
         batch.schema().fields().to_vec(),

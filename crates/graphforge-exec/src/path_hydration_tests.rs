@@ -217,7 +217,8 @@ fn invoke_udf(
     use datafusion::config::ConfigOptions;
     let n = seed.len();
     let mut config = ConfigOptions::default();
-    config.execution.batch_size = batch_size.max(1);
+    config.execution.batch_size =
+        datafusion::common::config::ConfigNonZeroUsize::try_new(batch_size.max(1)).unwrap();
     let args = ScalarFunctionArgs {
         args: vec![
             ColumnarValue::Array(Arc::clone(&seed)),
@@ -972,6 +973,8 @@ fn nested_quantifier_propagates_actual_hydration_reservation_error() {
             &rewritten,
             &DFSchema::empty(),
             &ExecutionProps::new(),
+            &datafusion::logical_expr::physical_planning_context::PhysicalPlanningContext::default(
+            ),
         )
         .unwrap();
         let batch = arrow::record_batch::RecordBatch::try_new_with_options(
