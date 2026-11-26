@@ -435,17 +435,35 @@ fn frontier_append_on_empty_frontier_is_fine() {
 }
 
 #[test]
-fn terminal_input_materializes_an_empty_batch_when_frontier_has_none() {
+fn frontier_source_materializes_an_empty_batch_when_frontier_has_none() {
+    use datafusion::logical_expr::{EmptyRelation, LogicalPlan};
     let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Int64, false)]));
     let frontier = Frontier {
         df_schema: DFSchema::try_from(schema.as_ref().clone()).unwrap(),
         batches: vec![],
     };
-
-    let (input_schema, batches) = terminal_input(&frontier);
-    assert_eq!(input_schema, schema);
-    assert_eq!(batches.len(), 1);
-    assert_eq!(batches[0].num_rows(), 0);
+    let slot = LogicalPlan::EmptyRelation(EmptyRelation {
+        produce_one_row: true,
+        schema: Arc::new(frontier.df_schema.clone()),
+    });
+    let LogicalPlan::Extension(extension) =
+        frontier_source::bind_frontier(&slot, &frontier).unwrap()
+    else {
+        panic!("the frontier slot is bound to its rows");
+    };
+    let source = extension
+        .node
+        .as_any()
+        .downcast_ref::<FrontierSourceNode>()
+        .unwrap();
+    let plan = source.plan().unwrap();
+    assert_eq!(plan.schema(), schema);
+    let batches = futures::executor::block_on(datafusion::physical_plan::collect(
+        plan,
+        Arc::new(datafusion::execution::TaskContext::default()),
+    ))
+    .unwrap();
+    assert_eq!(batches.iter().map(RecordBatch::num_rows).sum::<usize>(), 0);
 }
 
 #[test]

@@ -367,6 +367,12 @@ impl ExtensionPlanner for GraphForgeExtensionPlanner {
                 anchored, input, expansion,
             )?)));
         }
+        if let Some(frontier) = node
+            .as_any()
+            .downcast_ref::<crate::write_driver::FrontierSourceNode>()
+        {
+            return frontier.plan().map(Some);
+        }
         if let Some(seed) = node
             .as_any()
             .downcast_ref::<graphforge_plan::CorrelatedSeedNode>()

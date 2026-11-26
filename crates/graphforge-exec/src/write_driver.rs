@@ -19,6 +19,8 @@
 //! state fully intact.
 
 mod create_merge;
+mod frontier_source;
+pub(crate) use frontier_source::FrontierSourceNode;
 mod mutation_phases;
 
 use create_merge::MatchedMergeEdge;
@@ -53,15 +55,10 @@ use arrow::datatypes::SchemaRef;
 use arrow::datatypes::UInt32Type;
 use datafusion::common::Column;
 use datafusion::common::DFSchema;
-use datafusion::physical_plan::{ChildrenPropertiesMode, ReplaceChildrenOptions};
 
 use datafusion::logical_expr::Expr as DfExpr;
 
-use datafusion::physical_plan::ExecutionPlan;
-use datafusion::physical_plan::empty::EmptyExec;
-use datafusion::physical_plan::placeholder_row::PlaceholderRowExec;
 use datafusion::scalar::ScalarValue;
-use datafusion_datasource::memory::MemorySourceConfig;
 
 use graphforge_core::GfError;
 use graphforge_core::OntologyMode;
@@ -1568,15 +1565,12 @@ pub(crate) async fn run_terminal_suffix(
     if let Some(batch) = terminal_global_count(logical, frontier)? {
         return Ok((batch.schema(), vec![batch], 1));
     }
+    let logical = frontier_source::bind_frontier(logical, frontier)?;
     let physical = session
         .state()
-        .create_physical_plan(logical)
+        .create_physical_plan(&logical)
         .await
         .map_err(GfError::from_plan_error)?;
-    let (input_schema, input_batches) = terminal_input(frontier);
-    let input = MemorySourceConfig::try_new_from_batches(input_schema, input_batches)
-        .map_err(GfError::from_plan_error)?;
-    let physical = replace_empty_input(physical, input)?;
     let schema = physical.schema();
     let mut batches = crate::path_hydration::collect_guarded(physical, session.task_ctx())
         .await
@@ -1637,34 +1631,6 @@ fn terminal_global_count(
     RecordBatch::try_new(schema, counts)
         .map(Some)
         .map_err(GfError::from_execution_error)
-}
-
-fn terminal_input(frontier: &Frontier) -> (SchemaRef, Vec<RecordBatch>) {
-    if let Some(first) = frontier.batches.first() {
-        (first.schema(), frontier.batches.clone())
-    } else {
-        let schema = Arc::clone(frontier.df_schema.inner());
-        (Arc::clone(&schema), vec![RecordBatch::new_empty(schema)])
-    }
-}
-
-fn replace_empty_input(
-    plan: Arc<dyn ExecutionPlan>,
-    input: Arc<dyn ExecutionPlan>,
-) -> Result<Arc<dyn ExecutionPlan>, GfError> {
-    if plan.is::<EmptyExec>() || plan.is::<PlaceholderRowExec>() {
-        return Ok(input);
-    }
-    let children = plan
-        .children()
-        .into_iter()
-        .map(|child| replace_empty_input(Arc::clone(child), Arc::clone(&input)))
-        .collect::<Result<Vec<_>, _>>()?;
-    plan.replace_children(
-        children,
-        ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
-    )
-    .map_err(GfError::from_plan_error)
 }
 
 fn positional_eval_expr(expr: DfExpr, schema: &DFSchema) -> Result<(DfExpr, DFSchema), GfError> {
