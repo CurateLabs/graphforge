@@ -108,7 +108,7 @@ impl<'a> Scan<'a> {
     }
     fn element_type(byte: u8) -> Result<TType, DataFusionError> {
         Ok(match byte {
-            // Parquet 58.4 accepts both historical compact Bool tags;
+            // Parquet 60.2 accepts both historical compact Bool tags;
             // thrift 0.17's collection decoder accepts only tag 1.
             1 | 2 => TType::Bool,
             3 => TType::I08,

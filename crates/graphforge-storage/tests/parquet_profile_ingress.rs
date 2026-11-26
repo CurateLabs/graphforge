@@ -1,7 +1,7 @@
 //! A correctly hashed package carrying a Parquet page outside the funded
 //! encoding profile is refused at every ingress, before any decode.
 //!
-//! Parquet 58.4's `DELTA_LENGTH_BYTE_ARRAY` decoder resizes a vector from the
+//! Parquet 60.2's `DELTA_LENGTH_BYTE_ARRAY` decoder resizes a vector from the
 //! delta count embedded in the page before it reads any length, so the control
 //! below shows the hostile bytes really do allocate hundreds of MiB when
 //! decoded, while verification and import allocate nothing of the kind.

@@ -981,7 +981,7 @@ impl SingleHopConfig {
 
 /// Count concrete claim calls without materializing ArrayData or buffer lists.
 /// In particular ByteView has a variable number of payload buffers. Pinned
-/// Arrow 58.4's concrete claim overrides visit these borrowed buffers directly.
+/// Arrow 60.2's concrete claim overrides visit these borrowed buffers directly.
 fn claim_slots(array: &dyn arrow::array::Array) -> Result<usize, GfError> {
     use arrow::array::AsArray;
     use arrow::datatypes::DataType;

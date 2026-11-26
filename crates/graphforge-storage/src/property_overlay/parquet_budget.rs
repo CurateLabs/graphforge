@@ -695,7 +695,7 @@ pub(super) fn parquet_resource_admission(
                             corrupt("Parquet row-group column count disagrees with schema")
                         })?;
                     *column_max = (*column_max).max(memory);
-                    // Parquet 58's flat ByteArrayColumnValueDecoder replaces
+                    // Parquet 60's flat ByteArrayColumnValueDecoder replaces
                     // its single PLAIN/dictionary decoder on set_data. Level
                     // decoders borrow slices of that same current page. The
                     // old/new page and ZSTD's temporary output overlap during

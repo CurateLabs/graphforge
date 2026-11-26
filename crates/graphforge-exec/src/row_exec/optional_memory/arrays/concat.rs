@@ -1,4 +1,4 @@
-//! Preallocated Arrow 58.4 concat buffers, separate from retained source capacity.
+//! Preallocated Arrow 60.2 concat buffers, separate from retained source capacity.
 use arrow::array::{Array, ArrayRef, AsArray};
 use arrow::datatypes::DataType;
 use datafusion::common::Result;
@@ -43,9 +43,10 @@ pub(in crate::row_exec::optional_memory) fn bytes(arrays: &[ArrayRef]) -> Result
                 rows,
                 usize::try_from(*width).map_err(|_| refused("negative list width"))?,
             )?;
-            // Its admitted child type is flat. The fallback's capacities use
-            // parent_rows*width or get_capacity over these complete children
-            // (bytes fields), so both stored initial capacities are covered.
+            // Its admitted child type is flat. Arrow 60.2 concatenates the
+            // children directly (`concat_fixed_size_list`); charging them
+            // with parent_rows*width or get_capacity over these complete
+            // children (bytes fields) still covers that request.
             let children: Vec<_> = arrays
                 .iter()
                 .map(|array| array.as_fixed_size_list().values().clone())

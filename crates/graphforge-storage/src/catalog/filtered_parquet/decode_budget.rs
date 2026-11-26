@@ -275,7 +275,7 @@ fn construction_bytes(
     if !has_data_encoding {
         return whole();
     }
-    // parquet 58.4 RecordReader creates no levels for required flat columns;
+    // parquet 60.2 RecordReader creates no levels for required flat columns;
     // nullable flat levels and fixed output advance within the reader batch.
     // Complete pages/dictionaries and retained output are charged separately.
     if descriptor.max_def_level() == 0 {

@@ -1,6 +1,6 @@
 //! The Parquet encodings whose decoder allocation the admission budgets fund.
 //!
-//! Parquet 58.4's `DELTA_LENGTH_BYTE_ARRAY` decoder allocates a vector from an
+//! Parquet 60.2's `DELTA_LENGTH_BYTE_ARRAY` decoder allocates a vector from an
 //! embedded delta count before it checks the decoded payload lengths, and
 //! `DELTA_BYTE_ARRAY` builds on it. Neither is bounded by outer page or footer
 //! sizes, so a page that uses one is refused before any decode instead of being

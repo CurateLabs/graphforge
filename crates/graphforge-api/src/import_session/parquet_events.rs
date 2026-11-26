@@ -266,7 +266,7 @@ impl<'a> PageEvents<'a> {
                 "Parquet V2 declared null count disagrees with definition levels",
             ));
         }
-        // The pinned parquet 58.4 reader treats V2 num_rows as the number of
+        // The pinned parquet 60.2 reader treats V2 num_rows as the number of
         // repetition-zero events on that page. A V2 page must therefore begin
         // at a row boundary; V1 pages may continue an earlier row.
         if self.expected > 0 && self.max_repetition > 0 && self.first_repetition != Some(0) {
