@@ -29,7 +29,7 @@ use crate::{
 /// File stored inside one immutable vector publication.
 pub const VECTOR_DATA_FILE: &str = "vectors.parquet";
 /// Persisted Arrow/Parquet backend contract.
-pub const VECTOR_BACKEND_VERSION: &str = "arrow-parquet-58";
+pub const VECTOR_BACKEND_VERSION: &str = "arrow-parquet-60";
 /// Cosine, validation, and ordering contract.
 pub const VECTOR_CONTRACT_VERSION: &str = "graphforge_vector_v1";
 
