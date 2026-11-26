@@ -29,6 +29,33 @@ rerun starts from the registered sources. Properties 2 and 3, publication
 atomicity and the preservation of the prior `CURRENT` are unchanged. See
 [ADR 0058](0058-initial-builds-run-on-a-bulk-builder.md).
 
+## Implementation update: v0.7.0 changes published bytes across versions (#2042, #2358)
+
+Byte stability is a property *within* one GraphForge version. It is not a
+promise across versions. v0.7.0 moves the engine to stock DataFusion 56 and
+Arrow/Parquet 60.2, and Arrow 60 writes different Parquet shard and IPC bytes
+than Arrow 58.4 did for identical logical input. Every published artifact
+written through Arrow changes: topology and CSR shards, property fragments,
+portable bundles and the Hub fixture's source tree and package.
+
+**No compatibility (maintainer decision, 2026-11-25).** v0.7.0 does not reopen
+v0.6.x projects, and v0.6.x readers do not open v0.7.0 projects. There are no
+shims, dual-format readers or migration paths; data from v0.6.x is re-imported
+through the current construction or import surface. This applies the pre-v1
+rule in [project format compatibility](../book/architecture/project-format-compatibility.md).
+Content digests still name the bytes they claim to name, so a v0.6.x artifact
+and its v0.7.0 counterpart carry different digests; nothing treats them as the
+same object.
+
+The three properties above are unchanged within v0.7.0. Two runs of v0.7.0 on
+identical logical input publish identical bytes. The construction determinism
+suite (`construction_determinism_tests.rs`), the bulk-builder kill-and-rerun
+acceptance tests and the Hub fixture generator check this. The generator
+rebuilds its source twice and compares every byte. The checked-in Hub fixture
+and the corpora derived from it were regenerated from the v0.7.0 writer. Their
+old digests were the v0.6.x writer's output, not a contract, so no test or
+corpus keeps them.
+
 ## Implementation update: deterministic bulk catalog observations (#1416)
 
 Bulk input carries no observation time. Newly shaped catalogs use the greatest

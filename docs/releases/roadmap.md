@@ -30,6 +30,8 @@ research model to use GraphForge.
 
 Draft release-note and announcement copy is in
 [v0.6.0 notes (draft)](v0.6.0-notes-draft.md); it is not published.
+The v0.7.0 engine upgrade and its on-disk format break are recorded in
+[v0.7.0 notes (draft)](v0.7.0-notes-draft.md).
 
 [M13](https://github.com/CurateLabs/graphforge/milestone/13) owns coordinated
 release readiness and publication across Rust, Python, Node, CLI, skills, and
