@@ -13,6 +13,10 @@ from typing import Any
 import tomllib
 
 PYO3_CRATES = {"pyo3", "pyo3-ffi", "pyo3-build-config"}
+# The crates that carry the stable-ABI features. Since PyO3 0.29 (PyO3 #5807)
+# `pyo3-build-config` has no `abi3*` features; the ABI reaches it from the
+# `pyo3-ffi` build script, so the contract is checked where it is declared.
+ABI3_CRATES = {"pyo3", "pyo3-ffi"}
 EXTENSION_ENV = "PYO3_BUILD_EXTENSION_MODULE"
 
 
@@ -36,7 +40,7 @@ def validate_metadata(metadata: dict[str, Any], *, extension: bool) -> None:
         if ("extension-module" in features) != extension:
             mode = "extension packaging" if extension else "ordinary Rust tests"
             raise ValueError(f"{name}: incorrect extension-module feature for {mode}")
-        if "abi3-py310" not in features:
+        if name in ABI3_CRATES and "abi3-py310" not in features:
             raise ValueError(f"{name}: Python 3.10+ ABI3 contract is missing")
     if found != PYO3_CRATES:
         raise ValueError(f"missing resolved PyO3 crates: {sorted(PYO3_CRATES - found)}")
