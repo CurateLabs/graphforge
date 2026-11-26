@@ -96,7 +96,23 @@ functions.
   The registered-source decoding and normalization boundary is described below
   (#1918). The budget is
   three fifths of the process's cgroup-aware memory headroom, or the bytes in
-  `GF_BULK_BUILD_MEMORY_BUDGET_BYTES`. Routing is a function of the footers and
+  `GF_BULK_BUILD_MEMORY_BUDGET_BYTES`. The headroom is the smaller of
+  `MemAvailable` and, at every cgroup level from the process's own (found
+  from `/proc/self/cgroup`) to the root, on v2 and on the v1 `memory`
+  controller, the level's limit minus its usage that is not reclaimable page
+  cache; with nothing readable the budget is a fixed 4 GiB. Usage includes the
+  page cache charged to the level, so without that correction the budget
+  shrank with whatever the host had cached (#2360). Reclaimable cache is the
+  per-cgroup analogue of `MemAvailable`'s page-cache term, read from the
+  level's hierarchical `memory.stat`: both file LRU lists (`active_file` and
+  `inactive_file`, v1 `total_*`) less dirty, writeback and mapped pages.
+  Both lists, because the active/inactive split is an ageing heuristic (with
+  the multi-generational LRU, just the youngest generations) and a warm cache
+  is nearly all active, so `inactive_file` alone leaves a cache-filled cgroup
+  without headroom. Not all of `file`, because it includes shmem, which only
+  swap can reclaim, and the subtracted pages need I/O or would fault straight
+  back in. A missing or partial `memory.stat` reclaims nothing. The budget is a
+  function of those readings alone. Routing is a function of the footers and
   the budget, never of the data, and the bytes are the same on every route.
 - The staged path remains for appends only. When the identity tables, labels,
   endpoint index and degree arrays (a conservative 56 bytes per node alongside
