@@ -1960,6 +1960,7 @@ dependencies = [
  "arrow",
  "arrow-buffer",
  "async-trait",
+ "bytes",
  "datafusion",
  "datafusion-datasource",
  "futures",
