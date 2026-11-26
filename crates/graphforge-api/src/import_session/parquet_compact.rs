@@ -216,16 +216,17 @@ pub(super) struct CompactSlice<'a> {
 fn minimum_body_bytes(kind: Kind) -> Option<u64> {
     match kind {
         Kind::Double => Some(8),
-        Kind::Byte
+        // A boolean list element is one byte; a boolean struct field rides
+        // in its header and never reaches a list body.
+        Kind::BoolTrue
+        | Kind::BoolFalse
+        | Kind::Byte
         | Kind::I16
         | Kind::I32
         | Kind::I64
         | Kind::Binary
         | Kind::List
         | Kind::Struct => Some(1),
-        // A boolean list element is one byte; a boolean struct field rides
-        // in its header and never reaches a list body.
-        Kind::BoolTrue | Kind::BoolFalse => Some(1),
         Kind::Stop => Some(0),
         Kind::Set | Kind::Map => None,
     }
