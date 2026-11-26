@@ -958,18 +958,23 @@ impl SingleHopConfig {
         let rows = u32::try_from(held.num_rows()).map_err(|_| {
             DataFusionError::Internal("ExpandExec input batch exceeds u32 rows".into())
         })?;
-        // The indices and the copy, each buffer rounded to its allocation.
-        let copy = used
-            .saturating_add(held.num_rows().saturating_mul(4))
-            .saturating_add(held.num_columns().saturating_add(1).saturating_mul(512));
+        // The indices plus each column's pinned take envelope: the output
+        // buffers and the kernels' temporary workspace, such as the one
+        // `(start, end)` source range per row Arrow 60's `take_bytes` holds
+        // for a nullable string column while the source is still alive.
+        let indices = arrow::array::UInt32Array::from_iter_values(0..rows);
+        let copy = held.columns().iter().try_fold(
+            arrow::array::Array::get_array_memory_size(&indices),
+            |bytes, column| {
+                crate::row_exec::hop_take_bytes(column.as_ref(), &indices)
+                    .map(|column| bytes.saturating_add(column))
+            },
+        )?;
         self.reservation
             .lock()
             .map_err(|_| DataFusionError::Internal("ExpandExec reservation poisoned".into()))?
             .try_resize(charged.saturating_add(copy))?;
-        let compact = arrow::compute::take_record_batch(
-            &held,
-            &arrow::array::UInt32Array::from_iter_values(0..rows),
-        )?;
+        let compact = arrow::compute::take_record_batch(&held, &indices)?;
         drop(held);
         self.account(
             Some(&compact),

@@ -2795,3 +2795,66 @@ fn a_sparse_single_hop_input_is_held_at_the_size_of_its_rows() {
     drop(cfg);
     assert_eq!(pool.leaked(), 0);
 }
+
+/// Copying a nullable string column, Arrow 60's `take_bytes` holds one
+/// `(start, end)` source range per row beside the source and the copy; the
+/// compaction charges that workspace before it copies.
+#[test]
+fn a_sparse_single_hop_input_with_nullable_strings_charges_the_copy_workspace() {
+    use arrow::array::{StringBuilder, UInt64Builder};
+    use datafusion::execution::runtime_env::RuntimeEnvBuilder;
+    use datafusion::prelude::{SessionConfig, SessionContext};
+    let dir = tempfile::TempDir::new().unwrap();
+    let ids = labelled_ring(dir.path(), 4);
+    let (provider, resource, _inventory) = open_ring_provider(dir.path());
+    let pool = ConsumerPool::new(16 * 1024 * 1024);
+    let execution = RuntimeEnvBuilder::new()
+        .with_memory_pool(pool.clone())
+        .build_arc()
+        .unwrap();
+    let context = SessionContext::new_with_config_rt(SessionConfig::new(), execution);
+    let exec = ring_expand_exec(&provider, &resource, &ids[..1]);
+    let cfg = exec.single_hop_config(&context.task_ctx(), 0);
+    let empty = RecordBatch::new_empty(cfg.out_schema.clone());
+    let schema = Arc::new(arrow::datatypes::Schema::new(vec![
+        Field::new("node_id", DataType::UInt64, false),
+        Field::new("name", DataType::Utf8, true),
+    ]));
+    let rows = 4_096;
+    let mut node_ids = UInt64Builder::with_capacity(65_536);
+    let mut names = StringBuilder::with_capacity(65_536, 65_536 * 4);
+    for row in 0..rows {
+        node_ids.append_value(ids[row % ids.len()]);
+        if row % 16 == 0 {
+            names.append_null();
+        } else {
+            names.append_value(format!("n{}", row % 7));
+        }
+    }
+    let sparse = RecordBatch::try_new(
+        schema,
+        vec![Arc::new(node_ids.finish()), Arc::new(names.finish())],
+    )
+    .unwrap();
+    let sparse_bytes = sparse.get_array_memory_size();
+    cfg.account(Some(&sparse), &empty).unwrap();
+    let held = cfg.compact_held_input(sparse.clone()).unwrap();
+    assert_eq!(held, sparse, "the copy holds the same rows");
+    let held_bytes = held.get_array_memory_size();
+    assert!(
+        held_bytes * 2 < sparse_bytes,
+        "{held_bytes} of {sparse_bytes}"
+    );
+    let source_ranges = rows * std::mem::size_of::<(usize, usize)>();
+    assert!(
+        pool.peak("ExpandExec") >= sparse_bytes + held_bytes + source_ranges,
+        "the copy's source ranges are charged beside the source and the copy: peak {}, source {sparse_bytes}, copy {held_bytes}, ranges {source_ranges}",
+        pool.peak("ExpandExec")
+    );
+    assert_eq!(
+        pool.now("ExpandExec"),
+        held_bytes + empty.get_array_memory_size()
+    );
+    drop(cfg);
+    assert_eq!(pool.leaked(), 0);
+}
