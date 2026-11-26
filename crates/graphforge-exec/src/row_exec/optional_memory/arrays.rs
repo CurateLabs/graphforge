@@ -3,8 +3,10 @@
 //! Only canonical graph arrays enter these kernels. Dictionary/view/run/union
 //! kernels have different retained children and scratch; refuse them before
 //! construction rather than treating them as primitive slots. FixedSizeList
-//! collection children also refuse: its concat fallback propagates an initial
-//! capacity through nested children independently of their stored lengths.
+//! collection children also refuse. Arrow 60.2 concatenates FixedSizeList
+//! children directly (`concat_fixed_size_list`), so that refusal is now only
+//! conservative; it was required while the MutableArrayData fallback
+//! propagated an initial capacity through nested children.
 
 use arrow::array::{Array, AsArray};
 use arrow::datatypes::DataType;
@@ -12,7 +14,7 @@ use datafusion::common::Result;
 
 use super::{add, mul, refused};
 
-// Arrow 58.4 canonical nodes have at most three data/validity buffers. Their
+// Arrow 60.2 canonical nodes have at most three data/validity buffers. Their
 // growing old/new buffers and FixedSizeList's index scratch need at most eight
 // 64-byte alignment tails. Four ArrayData-sized headers cover the concrete
 // array wrapper, ArrayData, mutable builder and temporary sliced wrapper; child
@@ -119,10 +121,15 @@ fn selected_values(array: &dyn Array, indices: &arrow::array::UInt32Array) -> Re
         add(bytes, length)
     })?;
     offset_limit(payload, offset)?;
-    // take_bytes (Arrow 58.4) computes all offsets first, then allocates
-    // Vec::with_capacity(exact_payload). Neither values nor offsets grow.
+    // take_bytes (Arrow 60.2) computes all offsets first, then reserves the
+    // exact payload once; neither values nor offsets grow. With output nulls
+    // it also holds one (start, end) source range per valid row beside them
+    // (`source_ranges`); every row is charged one, nulls or not.
     add(
-        add(mul(add(indices.len(), 1)?, offset)?, payload)?,
+        add(
+            add(mul(add(indices.len(), 1)?, offset)?, payload)?,
+            mul(indices.len(), std::mem::size_of::<(usize, usize)>())?,
+        )?,
         add(indices.len().div_ceil(8), NODE_BYTES)?,
     )
 }
@@ -431,3 +438,44 @@ pub(super) fn scalar(array: &dyn Array) -> Result<usize> {
 
 mod concat;
 pub(super) use concat::bytes as concat;
+
+#[cfg(test)]
+mod tests {
+    use arrow::array::{Array, StringArray, UInt32Array};
+
+    /// Arrow 60.2 `take_bytes` with output nulls holds the exact payload, the
+    /// `indices + 1` offsets, and one `(usize, usize)` source range per valid
+    /// output row at once. The envelope must cover all three.
+    #[test]
+    fn nullable_bytes_take_charges_its_source_ranges() {
+        let rows = 4_096_usize;
+        let source = StringArray::from_iter(
+            (0..rows).map(|row| (row % 3 != 0).then(|| format!("value-{row}"))),
+        );
+        let indices = UInt32Array::from_iter(
+            (0..u32::try_from(rows).unwrap()).map(|row| (row % 5 != 0).then_some(row)),
+        );
+        let output = arrow::compute::take(&source, &indices, None).unwrap();
+        let output = output.as_any().downcast_ref::<StringArray>().unwrap();
+        assert!(
+            output.null_count() > 0,
+            "the nullable kernel path is exercised"
+        );
+        let valid_rows = output.len() - output.null_count();
+        let payload = output.value_data().len();
+        let native_peak = payload
+            + (rows + 1) * std::mem::size_of::<i32>()
+            + valid_rows * std::mem::size_of::<(usize, usize)>();
+        let charged = super::selected(&source, &indices).unwrap();
+        assert!(
+            charged >= native_peak,
+            "charged {charged} below the native take_bytes peak {native_peak}"
+        );
+        // Without the source ranges the envelope falls below that peak, so
+        // this fixture distinguishes the Arrow 60.2 kernel from 58.4's.
+        assert!(
+            charged - rows * std::mem::size_of::<(usize, usize)>() < native_peak,
+            "fixture must make the source ranges load-bearing"
+        );
+    }
+}
